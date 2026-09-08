@@ -22,6 +22,7 @@ use transport::{CallbackState, bridge_completion, parse_response};
 const MAXIMUM_REQUEST_BYTES: usize = 1_048_576;
 
 const NATIVE_BRIDGE_OPERATION_BUDGET_MILLISECONDS: u64 = 30_000;
+const NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS: u64 = 300_000;
 const NATIVE_BRIDGE_CLEANUP_GRACE_MILLISECONDS: u64 = 20_000;
 const NATIVE_BRIDGE_OUTER_WATCHDOG_MILLISECONDS: u64 = 55_000;
 
@@ -216,6 +217,7 @@ impl NativeFrameworkBridge {
     }
 
     fn invoke(&self, command: NativeBridgeCommand) -> NativeBridgeFuture<'_, NativeBridgeResult> {
+        let authorization = matches!(command, NativeBridgeCommand::AuthorizeSystemProxy);
         let request = NativeRequestEnvelope::new(command);
         let request_id = request.request_id;
         Box::pin(async move {
@@ -225,7 +227,21 @@ impl NativeFrameworkBridge {
                     "native request serialization failed",
                 )
             })?;
-            self.invoke_bytes(request_id, request_bytes).await
+            if authorization {
+                self.invoke_bytes_with_timing(
+                    request_id,
+                    request_bytes,
+                    InvocationTiming {
+                        operation_budget: Duration::from_millis(
+                            NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS,
+                        ),
+                        cleanup_grace: NATIVE_BRIDGE_CLEANUP_GRACE,
+                    },
+                )
+                .await
+            } else {
+                self.invoke_bytes(request_id, request_bytes).await
+            }
         })
     }
 
@@ -330,6 +346,21 @@ impl NativeFrameworkBridge {
 }
 
 impl NativeBridge for NativeFrameworkBridge {
+    fn authorize_system_proxy(&self) -> NativeBridgeFuture<'_, ()> {
+        Box::pin(async move {
+            match self
+                .invoke(NativeBridgeCommand::AuthorizeSystemProxy)
+                .await?
+            {
+                NativeBridgeResult::Acknowledged => Ok(()),
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "native authorization returned the wrong result kind",
+                )),
+            }
+        })
+    }
+
     fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus> {
         Box::pin(async move {
             match self.invoke(NativeBridgeCommand::QueryStatus).await? {
@@ -862,6 +893,8 @@ mod tests {
     fn c_header_and_rust_watchdog_constants_match() {
         let header = include_str!("../../../native/macos/Headers/CFWNativeBridge.h");
         assert!(header.contains("CFW_NATIVE_BRIDGE_OPERATION_BUDGET_MILLISECONDS 30000u"));
+        assert!(header.contains("CFW_NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS 300000u"));
+        assert_eq!(NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS, 300_000);
         assert!(header.contains("CFW_NATIVE_BRIDGE_CLEANUP_GRACE_MILLISECONDS 20000u"));
         assert!(header.contains("CFW_NATIVE_BRIDGE_OUTER_WATCHDOG_MILLISECONDS 55000u"));
         assert!(

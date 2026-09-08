@@ -9,6 +9,7 @@ import Testing
 @testable import CFWSharedProtocol
 
 private actor RecordingProxyAgent: ProxyAgentTransporting {
+  func authorizeSystemProxy() async throws {}
   private let observedSnapshot: EngineSnapshot
   private let rejectsValidation: Bool
   private(set) var startCalls = 0

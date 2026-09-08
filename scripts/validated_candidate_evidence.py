@@ -12,7 +12,7 @@ from typing import NoReturn, Sequence
 
 
 RETIRED_MESSAGE = (
-    "validated-candidate evidence is retired; use the single frozen GA 40048 "
+    "validated-candidate evidence is retired; use the single frozen GA 40049 "
     "prepackage, ga-acceptance, and publication stages"
 )
 

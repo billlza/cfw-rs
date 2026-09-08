@@ -1314,6 +1314,7 @@ impl NativeServiceMaintenanceResult {
 #[serde(tag = "opcode", content = "payload", rename_all = "snake_case")]
 pub enum NativeBridgeCommand {
     QueryStatus,
+    AuthorizeSystemProxy,
     MaintainCurrentServices {
         action: NativeServiceMaintenanceAction,
     },
@@ -1353,6 +1354,7 @@ impl fmt::Debug for NativeBridgeCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::QueryStatus => formatter.write_str("QueryStatus"),
+            Self::AuthorizeSystemProxy => formatter.write_str("AuthorizeSystemProxy"),
             Self::MaintainCurrentServices { action } => formatter
                 .debug_struct("MaintainCurrentServices")
                 .field("action", action)
@@ -1741,6 +1743,22 @@ mod tests {
         assert_eq!(
             conflict.failure.expect("endpoint failure").code,
             BackendErrorKind::ControllerEndpointInUse
+        );
+    }
+
+    #[test]
+    fn system_proxy_authorization_has_no_configuration_payload() {
+        let command = NativeBridgeCommand::AuthorizeSystemProxy;
+        assert_eq!(
+            serde_json::to_value(&command).expect("authorization wire command"),
+            serde_json::json!({"opcode": "authorize_system_proxy"})
+        );
+        assert_eq!(
+            serde_json::from_value::<NativeBridgeCommand>(serde_json::json!({
+                "opcode": "authorize_system_proxy"
+            }))
+            .expect("authorization command decoding"),
+            command
         );
     }
 

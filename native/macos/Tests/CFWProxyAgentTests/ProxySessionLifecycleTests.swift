@@ -73,7 +73,8 @@ private final class ValidationOnlyProxyOwner: ProxySystemProxyOwning, @unchecked
   let owner = ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle)
   let service = ProxyAgentService(
     lifecycle: owner,
-    configurationChecker: SecretEchoConfigurationChecker(secret: "unused")
+    configurationChecker: SecretEchoConfigurationChecker(secret: "unused"),
+    preferences: SCPreferencesSystemProxyPreferences()
   )
   let configurationDescriptor = try descriptor()
   let operation = try OperationContext(
@@ -133,7 +134,8 @@ extension ProxySessionLifecycle {
   let secret = "credential-that-must-never-leave-agent"
   let service = ProxyAgentService(
     lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
-    configurationChecker: SecretEchoConfigurationChecker(secret: secret)
+    configurationChecker: SecretEchoConfigurationChecker(secret: secret),
+    preferences: SCPreferencesSystemProxyPreferences()
   )
   let request = RequestEnvelope(
     command: try NativeCommand(
@@ -339,6 +341,10 @@ private final class MemoryLifecycleJournalDataStore: JournalDataStoring, @unchec
 }
 
 private final class FakeSystemProxyPreferences: SystemProxyPreferences, @unchecked Sendable {
+  private let authorizationFailure: SystemProxyPreferencesError?
+  func requireAuthorization() throws {
+    if let authorizationFailure { throw authorizationFailure }
+  }
   private let lock = NSLock()
   private var values: [SystemProxyField: ProxyPreferenceValue]
   private var prepareCountValue = 0
@@ -350,10 +356,12 @@ private final class FakeSystemProxyPreferences: SystemProxyPreferences, @uncheck
 
   init(
     values: [SystemProxyField: ProxyPreferenceValue] = [:],
-    prepareFailure: SystemProxyPreferencesError? = nil
+    prepareFailure: SystemProxyPreferencesError? = nil,
+    authorizationFailure: SystemProxyPreferencesError? = nil
   ) {
     self.values = values
     self.prepareFailure = prepareFailure
+    self.authorizationFailure = authorizationFailure
   }
 
   var prepareCount: Int {
@@ -610,6 +618,20 @@ private func recoveryLifecycle(
 
 @Suite(.serialized)
 struct ProxySessionLifecycleTests {
+  @Test func ungrantedAuthorizationStartsNoEngineAndWritesNoPreferences() throws {
+    let preferences = FakeSystemProxyPreferences(
+      authorizationFailure: .authorizationDenied(-60007))
+    let fixture = makeFixture(preferences: preferences)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor()) { start.record($0) }
+    #expect(start.wait())
+    #expect(start.values == [.failure(.authorizationRequired)])
+    #expect(fixture.engine.startCount == 0)
+    #expect(preferences.prepareCount == 0)
+    #expect(preferences.applyCount == 0)
+    #expect(fixture.journalStore.journal == nil)
+  }
+
   @Test func existingProxyFailurePreservesTheCauseAndMakesNoPreferenceWrite() throws {
     let preferences = FakeSystemProxyPreferences(
       values: [.httpEnabled: .integer(1), .httpPort: .integer(7_890)],

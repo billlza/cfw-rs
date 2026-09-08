@@ -457,7 +457,8 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       throw failure(.globalAuthorityIdentityRejected, current.operation)
     }
     guard liveConsoleUID != current.operation.ownerUID else { return revision }
-    if state == .stopping { return revision }
+    // A repeated revocation must retain quarantine until an explicit Off proof.
+    if state == .stopping || state == .quarantined { return revision }
     guard state == .preparing || state == .starting || state == .active else {
       throw failure(.staleOperation, current.operation)
     }
@@ -485,7 +486,9 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
   public mutating func revokeForLiveness() throws -> UInt64 {
     guard pendingMutation == nil else { throw AuthorityDomainError(code: .busy) }
     guard let current = lease else { return revision }
-    if state == .stopping { return revision }
+    // A late disconnect after cleanup timed out does not create a new lease or
+    // clear quarantine. It is an already-enforced revocation, not a fatal error.
+    if state == .stopping || state == .quarantined { return revision }
     guard state == .preparing || state == .starting || state == .active else {
       throw failure(.staleOperation, current.operation)
     }

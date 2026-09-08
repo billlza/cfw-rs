@@ -1,5 +1,13 @@
 import Foundation
 
+public enum SystemProxyAuthorizationFailure: Int, Sendable {
+  case denied = 1
+  case pending = 2
+  case internalFailure = 3
+
+  public static let domain = "com.bill.clashformac.system-proxy-authorization"
+}
+
 @objc public protocol CFWGlobalAuthorityXPCProtocol {
   func handshake(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func prepareStart(
@@ -26,6 +34,10 @@ import Foundation
 }
 
 @objc public protocol CFWProxyAgentXPCProtocol {
+  /// Requests only the macOS network-preferences right. It starts no engine,
+  /// acquires no Authority lease, and carries no credential material over XPC.
+  func authorizeSystemProxy(withReply reply: @escaping (NSError?) -> Void)
+
   /// Executes one versioned command envelope. A malformed envelope is returned
   /// as an NSError because it cannot be safely correlated to a trusted request
   /// identifier. Domain failures use a typed ResponseEnvelope instead.

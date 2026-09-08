@@ -255,9 +255,15 @@ actor NativeBridgeCoordinator {
 
   func execute(_ command: NativeBridgeCommand) async throws -> NativeBridgeResult {
     try Task.checkCancellation()
-    let operationLease: any NativeHostOperationLeaseHolding
+    // Authorization owns no network state. Do not keep the machine's mutation
+    // lease while macOS waits for the user; the later start acquires it normally.
+    let operationLease: (any NativeHostOperationLeaseHolding)?
     do {
-      operationLease = try hostOperationLease.acquire()
+      if case .authorizeSystemProxy = command {
+        operationLease = nil
+      } else {
+        operationLease = try hostOperationLease.acquire()
+      }
     } catch CrossProcessEngineLeaseError.alreadyHeld {
       throw NativeBridgeExecutionError.failure(
         .busy,
@@ -269,11 +275,19 @@ actor NativeBridgeCoordinator {
         "The crash-safe Host operation lease could not be acquired."
       )
     }
-    defer { operationLease.release() }
+    defer { operationLease?.release() }
 
     switch command {
     case .queryStatus:
       return .status(try await queryExternalStatus())
+    case .authorizeSystemProxy:
+      do {
+        try await proxy.authorizeSystemProxy()
+        try Task.checkCancellation()
+        return .acknowledged
+      } catch {
+        throw Self.map(error)
+      }
     case .maintainCurrentServices(let action):
       return .serviceMaintenance(try await maintainCurrentServices(action))
     case .startSystemProxy(let request):

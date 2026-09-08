@@ -47,6 +47,13 @@ private final class AuthorizationOperationRecorder: @unchecked Sendable {
   private var createCountValue = 0
   private var createPreferencesCountValue = 0
   private var freeFlagsValue: [AuthorizationFlags] = []
+  private var interactionFlagsValue: [Bool] = []
+
+  var interactionFlags: [Bool] { lock.withLock { interactionFlagsValue } }
+
+  func recordRights(interactionAllowed: Bool) {
+    lock.withLock { interactionFlagsValue.append(interactionAllowed) }
+  }
 
   var createCount: Int {
     lock.withLock { createCountValue }
@@ -78,7 +85,8 @@ private func testingAuthorizationOperations(
   creationStatus: OSStatus = errAuthorizationSuccess,
   returnsReference: Bool = true,
   createsPreferences: Bool = true,
-  releaseStatus: OSStatus = errAuthorizationSuccess
+  releaseStatus: OSStatus = errAuthorizationSuccess,
+  rightsStatus: OSStatus = errAuthorizationSuccess
 ) -> SCPreferencesAuthorizationOperations {
   SCPreferencesAuthorizationOperations(
     createAuthorization: {
@@ -92,6 +100,10 @@ private func testingAuthorizationOperations(
       var reference: AuthorizationRef?
       let status = AuthorizationCreate(nil, nil, [], &reference)
       return (status, reference)
+    },
+    copyRights: { _, interactionAllowed in
+      recorder.recordRights(interactionAllowed: interactionAllowed)
+      return rightsStatus
     },
     createPreferences: { _ in
       recorder.recordCreatePreferences()
@@ -220,22 +232,28 @@ private func appliedEffectiveProxies() -> [String: Any] {
   ]
 }
 
-@Test func authorizedPreferencesTransactionDestroysRightsAfterSuccess() throws {
+@Test func authorizationIsRetainedAcrossTransactionsWithoutRevokingSharedRights() throws {
   let recorder = AuthorizationOperationRecorder()
   let subject = SCPreferencesSystemProxyPreferences(
     operations: testingOperations(),
     authorizationOperations: testingAuthorizationOperations(recorder: recorder)
   )
 
+  try subject.authorizeForStart()
   let value = try subject.withAuthorizedPreferences { _ in 42 }
+  let repeated = try subject.withAuthorizedPreferences { _ in 43 }
 
   #expect(value == 42)
+  #expect(repeated == 43)
   #expect(recorder.createCount == 1)
-  #expect(recorder.createPreferencesCount == 1)
-  #expect(recorder.freeFlags == [[.destroyRights]])
+  #expect(recorder.createPreferencesCount == 2)
+  #expect(recorder.interactionFlags == [true])
+  #expect(recorder.freeFlags.isEmpty)
+  try subject.releaseAuthorization()
+  #expect(recorder.freeFlags == [[]])
 }
 
-@Test func authorizedPreferencesTransactionDestroysRightsAfterOperationFailure() {
+@Test func operationFailureKeepsAuthorizationAvailableForCleanup() throws {
   let recorder = AuthorizationOperationRecorder()
   let subject = SCPreferencesSystemProxyPreferences(
     operations: testingOperations(),
@@ -247,7 +265,9 @@ private func appliedEffectiveProxies() -> [String: Any] {
       throw SystemProxyPreferencesError.applyFailed(611)
     }
   }
-  #expect(recorder.freeFlags == [[.destroyRights]])
+  #expect(recorder.freeFlags.isEmpty)
+  try subject.releaseAuthorization()
+  #expect(recorder.freeFlags == [[]])
 }
 
 @Test func authorizationCreationFailuresAreTypedAndDoNotCreatePreferences() {
@@ -285,7 +305,7 @@ private func appliedEffectiveProxies() -> [String: Any] {
   #expect(recorder.freeFlags.isEmpty)
 }
 
-@Test func unavailablePreferencesReleaseAuthorizationBeforeFailing() {
+@Test func unavailablePreferencesKeepTheirOriginalErrorAndCanReleaseAuthorization() throws {
   let recorder = AuthorizationOperationRecorder()
   let subject = SCPreferencesSystemProxyPreferences(
     operations: testingOperations(),
@@ -298,10 +318,11 @@ private func appliedEffectiveProxies() -> [String: Any] {
   #expect(throws: SystemProxyPreferencesError.preferencesUnavailable) {
     try subject.withAuthorizedPreferences { _ in () }
   }
-  #expect(recorder.freeFlags == [[.destroyRights]])
+  try subject.releaseAuthorization()
+  #expect(recorder.freeFlags == [[]])
 }
 
-@Test func authorizationReleaseFailurePreservesOriginalErrorContext() {
+@Test func operationAndAuthorizationReleaseFailuresRemainDistinct() {
   let recorder = AuthorizationOperationRecorder()
   let releaseFailure: OSStatus = errAuthorizationInternal
   let subject = SCPreferencesSystemProxyPreferences(
@@ -312,22 +333,40 @@ private func appliedEffectiveProxies() -> [String: Any] {
     )
   )
 
-  do {
+  #expect(throws: SystemProxyPreferencesError.applyFailed(612)) {
     try subject.withAuthorizedPreferences { _ in
       throw SystemProxyPreferencesError.applyFailed(612)
     }
-    Issue.record("Expected authorization release failure")
-  } catch let error as SystemProxyPreferencesError {
-    guard case .authorizationReleaseFailed(let code, let originalError) = error else {
-      Issue.record("Expected typed authorization release failure, got \(error)")
-      return
-    }
-    #expect(code == releaseFailure)
-    #expect(originalError?.contains("applyFailed(612)") == true)
-  } catch {
-    Issue.record("Expected SystemProxyPreferencesError, got \(error)")
   }
-  #expect(recorder.freeFlags == [[.destroyRights]])
+  #expect(
+    throws: SystemProxyPreferencesError.authorizationReleaseFailed(
+      code: releaseFailure, originalError: nil)
+  ) {
+    try subject.releaseAuthorization()
+  }
+  #expect(recorder.freeFlags == [[]])
+}
+
+@Test func readOnlyPreferencesNeedNoGrantButWritesFailWithoutPrompting() throws {
+  let recorder = AuthorizationOperationRecorder()
+  let preferencesRecorder = PreferencesOperationRecorder(applyResults: [])
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(recorder: preferencesRecorder),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed))
+  #expect(
+    throws: SystemProxyPreferencesError.authorizationDenied(
+      errAuthorizationInteractionNotAllowed)
+  ) {
+    try subject.withAuthorizedPreferences { preferences in
+      _ = try subject.publishRestoration(preferences, changed: true, conflicts: [])
+    }
+  }
+  #expect(recorder.interactionFlags == [false])
+  #expect(recorder.createPreferencesCount == 1)
+  #expect(preferencesRecorder.commitCount == 0)
+  #expect(preferencesRecorder.applyCount == 0)
+  try subject.releaseAuthorization()
 }
 
 @Test func restoreRetriesApplyAfterCommitSucceededButApplyFailed() throws {
@@ -336,7 +375,9 @@ private func appliedEffectiveProxies() -> [String: Any] {
     SCPreferencesCreate(nil, "CFW restore publication test" as CFString, nil)
   )
   let subject = SCPreferencesSystemProxyPreferences(
-    operations: testingOperations(recorder: recorder)
+    operations: testingOperations(recorder: recorder),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: AuthorizationOperationRecorder())
   )
   let journal = try proxyJournal(originalProxyEnabled: false)
   let service = try #require(journal.services.first)

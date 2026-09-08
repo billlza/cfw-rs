@@ -229,7 +229,16 @@ extension NativeBridgeCoordinator {
         return .failure(.timeout, error.localizedDescription)
       case .transportCapacityExceeded:
         return .failure(.busy, error.localizedDescription)
+      case .authorizationDenied:
+        return .failure(.permissionDenied, error.localizedDescription)
+      case .authorizationPending:
+        return .failure(.busy, error.localizedDescription)
+      case .authorizationFailed:
+        return .failure(.unavailable, error.localizedDescription)
       case .agentFailure(let failure):
+        if failure.code == "system-proxy-authorization-required" {
+          return .failure(.permissionDenied, failure.message)
+        }
         if failure.code == "existing-system-proxy" {
           return .failure(
             .existingSystemProxy, NativeBridgeErrorCode.existingSystemProxy.stableMessage)

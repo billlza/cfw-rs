@@ -170,6 +170,7 @@ private final class NativeBridgeABIExecutor: @unchecked Sendable {
 
 enum NativeBridgeABITiming {
   static let operationBudgetMilliseconds = 30_000
+  static let authorizationBudgetMilliseconds = 300_000
   static let operationBudget: Duration = .milliseconds(operationBudgetMilliseconds)
 }
 
@@ -261,6 +262,7 @@ final class NativeBridgeABIRequestRegistry: @unchecked Sendable {
   func submit(
     requestID: UUID,
     admittedAt: ContinuousClock.Instant = .now,
+    authorizationRequest: Bool = false,
     cancellationResponse: Data,
     completion: @escaping @Sendable (Data) -> Void,
     operation: @escaping @Sendable () async -> Data
@@ -279,7 +281,10 @@ final class NativeBridgeABIRequestRegistry: @unchecked Sendable {
     }
     request.install(task: task)
 
-    let deadline = admittedAt.advanced(by: operationBudget)
+    let budget: Duration =
+      authorizationRequest
+      ? .milliseconds(NativeBridgeABITiming.authorizationBudgetMilliseconds) : operationBudget
+    let deadline = admittedAt.advanced(by: budget)
     let watchdog = Task { [sleep, request] in
       do {
         let remaining = ContinuousClock.now.duration(to: deadline)
@@ -396,6 +401,7 @@ public func cfwNativeBridgeExecuteV1(
   let accepted = NativeBridgeABIRequestRegistry.shared.submit(
     requestID: envelope.requestID,
     admittedAt: admittedAt,
+    authorizationRequest: envelope.command == .authorizeSystemProxy,
     cancellationResponse: NativeBridgeABIExecutor.shared.cancellationResponse(
       requestID: envelope.requestID),
     completion: { data in completion.invoke(with: data) },

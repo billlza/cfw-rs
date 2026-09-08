@@ -95,7 +95,7 @@ INSTALLED_40019_ACTIONS: Final = install.BoundInstallProfile(
     install.GA_INSTALL_PROFILE, install.INSTALLED_40019_PREDECESSOR
 ).service_actions
 CURRENT_PREDECESSOR_ACTIONS: Final = install.BoundInstallProfile(
-    install.GA_INSTALL_PROFILE, install.INSTALLED_40047_PREDECESSOR
+    install.GA_INSTALL_PROFILE, install.INSTALLED_40048_PREDECESSOR
 ).service_actions
 if INSTALLED_40019_ACTIONS != (
     "prepare",
@@ -129,6 +129,7 @@ if (
         "40045": install.INSTALLED_40045_PREDECESSOR,
         "40046": install.INSTALLED_40046_PREDECESSOR,
         "40047": install.INSTALLED_40047_PREDECESSOR,
+        "40048": install.INSTALLED_40048_PREDECESSOR,
     }
 ):
     raise RuntimeError("service maintenance profile differs from active GA identity")

@@ -1,3 +1,4 @@
+import CFWSharedProtocol
 import Foundation
 import Testing
 
@@ -36,6 +37,16 @@ private func exportedCancelStatus(_ requestID: String) -> Int32 {
 
 @Suite(.serialized)
 struct NativeBridgeABIRequestRegistryTests {
+  @Test func authorizationCommandCannotCarryRuntimeOrCredentialMaterial() throws {
+    let valid = Data(#"{"opcode":"authorize_system_proxy"}"#.utf8)
+    #expect(
+      try JSONDecoder().decode(NativeBridgeCommand.self, from: valid) == .authorizeSystemProxy)
+    let invalid = Data(#"{"opcode":"authorize_system_proxy","payload":{}}"#.utf8)
+    #expect(throws: NativeBridgeProtocolError.invalidCommand) {
+      _ = try JSONDecoder().decode(NativeBridgeCommand.self, from: invalid)
+    }
+  }
+
   @Test
   func swiftWatchdogBudgetMatchesReviewedCABIHeader() throws {
     let nativeRoot = URL(fileURLWithPath: #filePath)
@@ -46,8 +57,11 @@ struct NativeBridgeABIRequestRegistryTests {
       contentsOf: nativeRoot.appendingPathComponent("Headers/CFWNativeBridge.h"),
       encoding: .utf8)
     #expect(NativeBridgeABITiming.operationBudgetMilliseconds == 30_000)
+    #expect(NativeBridgeABITiming.authorizationBudgetMilliseconds == 300_000)
     #expect(
       header.contains("#define CFW_NATIVE_BRIDGE_OPERATION_BUDGET_MILLISECONDS 30000u"))
+    #expect(
+      header.contains("#define CFW_NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS 300000u"))
   }
 
   @Test

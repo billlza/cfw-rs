@@ -22,15 +22,62 @@ private final class ProxyXPCReply: @unchecked Sendable {
 }
 
 final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Sendable {
+  private static let authorizationLogger = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-authorization")
   private let lifecycle: any ProxySystemProxyOwning
   private let configurationChecker: any LibboxConfigurationChecking
+  private let preferences: SCPreferencesSystemProxyPreferences
+  private let authorizationQueue = DispatchQueue(
+    label: "com.bill.clashformac.proxy-authorization")
+  private let authorizationLock = NSLock()
+  private var authorizationPending = false
 
   init(
     lifecycle: any ProxySystemProxyOwning,
-    configurationChecker: any LibboxConfigurationChecking
+    configurationChecker: any LibboxConfigurationChecking,
+    preferences: SCPreferencesSystemProxyPreferences
   ) {
     self.lifecycle = lifecycle
     self.configurationChecker = configurationChecker
+    self.preferences = preferences
+  }
+
+  func authorizeSystemProxy(withReply reply: @escaping (NSError?) -> Void) {
+    let response = ProxyXPCReply { _, error in reply(error) }
+    let admitted = authorizationLock.withLock {
+      guard !authorizationPending else { return false }
+      authorizationPending = true
+      return true
+    }
+    guard admitted else {
+      response.finish(
+        data: nil,
+        error: NSError(
+          domain: SystemProxyAuthorizationFailure.domain,
+          code: SystemProxyAuthorizationFailure.pending.rawValue))
+      return
+    }
+    authorizationQueue.async { [self] in
+      defer { authorizationLock.withLock { authorizationPending = false } }
+      do {
+        try preferences.authorizeForStart()
+        response.finish(data: nil, error: nil)
+      } catch SystemProxyPreferencesError.authorizationDenied {
+        response.finish(
+          data: nil,
+          error: NSError(
+            domain: SystemProxyAuthorizationFailure.domain,
+            code: SystemProxyAuthorizationFailure.denied.rawValue))
+      } catch {
+        Self.authorizationLogger.error(
+          "Network authorization request failed: \(String(describing: error), privacy: .public)")
+        response.finish(
+          data: nil,
+          error: NSError(
+            domain: SystemProxyAuthorizationFailure.domain,
+            code: SystemProxyAuthorizationFailure.internalFailure.rawValue))
+      }
+    }
   }
 
   func execute(

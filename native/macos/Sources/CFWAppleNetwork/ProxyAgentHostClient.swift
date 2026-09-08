@@ -18,6 +18,9 @@ public enum ProxyAgentHostError: Error, Equatable, Sendable {
   case transportUnavailable(String)
   case transportTimedOut
   case transportCapacityExceeded
+  case authorizationDenied
+  case authorizationPending
+  case authorizationFailed
   case malformedResponse
   case responseMismatch
   case agentFailure(EngineFailure)
@@ -38,6 +41,12 @@ extension ProxyAgentHostError: LocalizedError {
       "ProxyAgent did not reply before the bounded timeout."
     case .transportCapacityExceeded:
       "ProxyAgent request capacity is exhausted."
+    case .authorizationDenied:
+      "macOS network authorization was not granted."
+    case .authorizationPending:
+      "A macOS network authorization dialog is already pending."
+    case .authorizationFailed:
+      "macOS network authorization could not be requested."
     case .malformedResponse:
       "ProxyAgent returned a malformed response."
     case .responseMismatch:
@@ -128,6 +137,7 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
 }
 
 public protocol ProxyAgentTransporting: Sendable {
+  func authorizeSystemProxy() async throws
   func registrationStatus() async -> ProxyAgentRegistrationStatus
   func ensureRegistered() async throws
   func start(
@@ -422,6 +432,57 @@ public actor AuthenticatedProxyAgentTransport:
 
   public func registrationStatus() -> ProxyAgentRegistrationStatus {
     serviceController.registrationStatus()
+  }
+
+  public func authorizeSystemProxy() async throws {
+    try serviceController.ensureRegistered()
+    let token = try outstandingRequests.reserve()
+    defer { outstandingRequests.release(token) }
+    let reference = try connectedSession()
+    defer { reference.lifecycle.release(token: token) }
+    do {
+      let _: Void = try await awaitBoundedCallback(
+        deadline: CallbackDeadlineScheduler(timeout: .seconds(290)),
+        timeoutError: ProxyAgentHostError.transportTimedOut
+      ) { finish in
+        guard
+          reference.lifecycle.register(
+            token: token,
+            onRetire: {
+              finish(.failure(ProxyAgentHostError.transportUnavailable("connection-retired")))
+            })
+        else { return }
+        guard
+          let proxy = reference.connection.remoteObjectProxyWithErrorHandler({ _ in
+            finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+          }) as? CFWProxyAgentXPCProtocol
+        else {
+          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-interface")))
+          return
+        }
+        proxy.authorizeSystemProxy { error in
+          reference.lifecycle.release(token: token)
+          if let error {
+            guard error.domain == SystemProxyAuthorizationFailure.domain,
+              let failure = SystemProxyAuthorizationFailure(rawValue: error.code)
+            else {
+              finish(.failure(ProxyAgentHostError.malformedResponse))
+              return
+            }
+            switch failure {
+            case .denied: finish(.failure(ProxyAgentHostError.authorizationDenied))
+            case .pending: finish(.failure(ProxyAgentHostError.authorizationPending))
+            case .internalFailure: finish(.failure(ProxyAgentHostError.authorizationFailed))
+            }
+          } else {
+            finish(.success(()))
+          }
+        }
+      }
+    } catch {
+      if Self.shouldRetireConnection(after: error) { retireConnection(reference) }
+      throw error
+    }
   }
 
   public func ensureRegistered() throws {
@@ -771,7 +832,8 @@ public actor AuthenticatedProxyAgentTransport:
     case .transportTimedOut, .transportUnavailable, .malformedResponse, .responseMismatch:
       return true
     case .registrationRequiresApproval, .registrationUnavailable,
-      .registrationFailed, .transportCapacityExceeded, .agentFailure:
+      .registrationFailed, .transportCapacityExceeded, .authorizationDenied,
+      .authorizationPending, .authorizationFailed, .agentFailure:
       return false
     }
   }

@@ -55,6 +55,26 @@ register without claiming Off, then the registered ProxyAgent supplies the
 observations needed for normal reconciliation. An active lease still rejects
 the operation. Neither change waives a real networking failure.
 
+## Installed 40048 follow-up and 40049 corrections
+
+40048 completed installation and service recovery. A System Proxy test with
+CFW processes absent still failed: macOS authorization blocked the running
+Agent, the start RPC expired, and a delayed disconnect crashed the Authority
+after cleanup had entered quarantine. No OS proxy activation was observed.
+
+40049 requests authorization before the engine coordinator starts a generation.
+The user interaction has a separate five-minute bound and no runtime/Authority
+lease; runtime heartbeats and stop barriers retain their existing deadlines.
+The Agent keeps its authorization reference and makes later rights checks
+noninteractive. Read-only recovery remains possible without a new write grant.
+Repeated revocation leaves quarantine intact until genuine cleanup is proven.
+
+This follows the public Authorization Services distinction between requesting
+rights and checking them without interaction; releasing one reference does not
+revoke shared authorizations used by other processes.
+[Apple authorization flags](https://developer.apple.com/documentation/security/authorizationflags)
+describe the interaction and shared-right revocation options.
+
 ## Functionality comparison
 
 ### Corrections prepared for build 40047

@@ -11,6 +11,11 @@
   retain the original settings and restore only fields still owned by CFM.
 - Reconcile a restarted background authority after registering the observer
   needed to prove the engine Off. Registration alone no longer claims Off.
+- Complete macOS network authorization before starting System Proxy. Keep
+  authorization waiting outside runtime deadlines, retain the Agent's own
+  authorization reference, and prohibit interactive authorization during writes.
+- Treat repeated revocation after quarantine as an unchanged blocked state;
+  a late owner disconnect cannot crash the Authority or manufacture Off.
 - Preserve supported Clash select groups and ordered process, domain, IP, port,
   network and GEOIP rules; reject unsupported policy instead of dropping it.
 - Apply Global/Direct modes to actual routing, and resolve configured process

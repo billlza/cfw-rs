@@ -89,6 +89,7 @@ private actor RecordingSystemProxyStartPreparer: SystemProxyStartPreparing {
 }
 
 private actor StartableProxyAgent: ProxyAgentTransporting {
+  func authorizeSystemProxy() async throws {}
   private let descriptor: ConfigurationDescriptor
   private let registrationError: ProxyAgentHostError?
   private let blocksSnapshot: Bool
@@ -191,6 +192,7 @@ private enum FailedStartRetryFault: CaseIterable, Equatable, Sendable {
 }
 
 private actor FailedStartProxyAgent: ProxyAgentTransporting {
+  func authorizeSystemProxy() async throws {}
   private let descriptor: ConfigurationDescriptor
   private let failure = EngineFailure(
     code: "mixed-endpoint-in-use",

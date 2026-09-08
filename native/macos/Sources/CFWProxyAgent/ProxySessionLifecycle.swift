@@ -18,6 +18,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case startupCancelled
   case staleStopRequest
   case recoveryBlocked(String)
+  case authorizationRequired
   case engineLease(String)
   case configuration(String)
   case engineCreation(String)
@@ -40,6 +41,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
     case .startupCancelled: code = "proxy-startup-cancelled"
     case .staleStopRequest: code = "stale-stop-request"
     case .recoveryBlocked: code = "proxy-recovery-blocked"
+    case .authorizationRequired: code = "system-proxy-authorization-required"
     case .engineLease: code = "proxy-engine-lease-failed"
     case .configuration: code = "proxy-configuration-failed"
     case .engineCreation: code = "proxy-engine-creation-failed"
@@ -74,6 +76,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy stop does not match the active generation."
     case .recoveryBlocked:
       "System Proxy recovery is blocked until owned settings can be restored safely."
+    case .authorizationRequired:
+      "Approve macOS network authorization before starting System Proxy."
     case .engineLease:
       "The machine-wide engine lease operation failed."
     case .configuration:
@@ -283,6 +287,17 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     lastStoppedConfiguration = nil
     lastFailedConfiguration = nil
 
+    do {
+      try dependencies.preferences.requireAuthorization()
+    } catch SystemProxyPreferencesError.authorizationDenied {
+      failStartWithoutOwnedSession(
+        .authorizationRequired, configuration: descriptor, completion: completion)
+      return
+    } catch {
+      failStartWithoutOwnedSession(
+        .preferences(error.localizedDescription), configuration: descriptor, completion: completion)
+      return
+    }
     let prepared: PreparedProxyOwnership
     do {
       prepared = try dependencies.prepareOwnership(descriptor)

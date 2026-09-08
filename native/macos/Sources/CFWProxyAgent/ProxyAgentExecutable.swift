@@ -94,7 +94,8 @@ public enum ProxyAgentExecutable {
     )
     let service = ProxyAgentService(
       lifecycle: owner,
-      configurationChecker: SourceBuiltLibboxConfigurationChecker()
+      configurationChecker: SourceBuiltLibboxConfigurationChecker(),
+      preferences: preferences
     )
 
     let delegate = ProxyAgentListenerDelegate(

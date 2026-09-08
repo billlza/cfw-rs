@@ -262,6 +262,7 @@ private final class FakeJournalStore: ProxyOwnershipJournalStoring, @unchecked S
 }
 
 private final class FakeSystemProxyPreferences: SystemProxyPreferences, @unchecked Sendable {
+  func requireAuthorization() throws {}
   private let lock = NSLock()
   private let orderLog: OrderLog
   private var values: [SystemProxyField: ProxyPreferenceValue] = [:]

@@ -233,6 +233,10 @@ private func prepareForRecovering(
   clock.set(13_000)
   #expect(try supervisor.evaluate() == .quarantinedForUnprovenCleanup)
   #expect(fixture.core.authorityState == .quarantined)
+  let quarantinedRevision = fixture.core.currentRevision
+  #expect(try supervisor.forceStop(.connectionLoss) == .none)
+  #expect(fixture.core.authorityState == .quarantined)
+  #expect(fixture.core.currentRevision == quarantinedRevision)
 }
 
 @Test func repeatedStopDeliveryCannotExtendTheOriginalQuarantineDeadline() throws {

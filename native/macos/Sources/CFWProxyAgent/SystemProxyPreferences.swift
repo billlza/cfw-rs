@@ -7,6 +7,8 @@ import SystemConfiguration
 enum SystemProxyPreferencesError: Error, Equatable, Sendable {
   case authorizationCreationFailed(OSStatus)
   case authorizationReferenceUnavailable
+  case authorizationDenied(OSStatus)
+  case authorizationRequestFailed(OSStatus)
   case authorizationReleaseFailed(code: OSStatus, originalError: String?)
   case preferencesUnavailable
   case preferencesLockFailed(Int32)
@@ -34,6 +36,10 @@ extension SystemProxyPreferencesError: LocalizedError {
       return "Creating the System Configuration authorization session failed with status \(status)."
     case .authorizationReferenceUnavailable:
       return "Authorization Services returned success without an authorization reference."
+    case .authorizationDenied(let status):
+      return "System proxy authorization was not granted (status \(status))."
+    case .authorizationRequestFailed(let status):
+      return "System proxy authorization request failed (status \(status))."
     case .authorizationReleaseFailed(let status, let originalError):
       let context = originalError.map { " Original error: \($0)" } ?? ""
       return
@@ -79,6 +85,7 @@ extension SystemProxyPreferencesError: LocalizedError {
 }
 
 protocol SystemProxyPreferences: Sendable {
+  func requireAuthorization() throws
   func prepareOwnership(
     configuration: ConfigurationDescriptor,
     endpoint: MixedListenerEndpoint
@@ -131,10 +138,11 @@ struct SCPreferencesOperations: @unchecked Sendable {
 /// Authorization Services is the public privilege boundary used by
 /// `SCPreferencesCreateWithAuthorization`. The ProxyAgent is a per-user
 /// `SMAppService.agent`, not the root Global Authority daemon, so each
-/// preferences transaction owns a distinct authorization reference and
-/// destroys any acquired rights when the transaction ends.
+/// authorization is obtained before engine startup and retained by this Agent.
+/// Transactions must never open an authorization dialog while owning a runtime.
 struct SCPreferencesAuthorizationOperations: @unchecked Sendable {
   let createAuthorization: () -> (status: OSStatus, reference: AuthorizationRef?)
+  let copyRights: (AuthorizationRef, Bool) -> OSStatus
   let createPreferences: (AuthorizationRef) -> SCPreferences?
   let freeAuthorization: (AuthorizationRef, AuthorizationFlags) -> OSStatus
 
@@ -143,6 +151,17 @@ struct SCPreferencesAuthorizationOperations: @unchecked Sendable {
       var reference: AuthorizationRef?
       let status = AuthorizationCreate(nil, nil, [], &reference)
       return (status, reference)
+    },
+    copyRights: { authorization, interactionAllowed in
+      "system.services.systemconfiguration.network".withCString { name in
+        var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
+        return withUnsafeMutablePointer(to: &item) { item in
+          var rights = AuthorizationRights(count: 1, items: item)
+          var flags: AuthorizationFlags = [.extendRights]
+          if interactionAllowed { flags.insert(.interactionAllowed) }
+          return AuthorizationCopyRights(authorization, &rights, nil, flags, nil)
+        }
+      }
     },
     createPreferences: { authorization in
       SCPreferencesCreateWithAuthorization(
@@ -171,15 +190,21 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   }
 
   private let operations: SCPreferencesOperations
-  private let authorizationOperations: SCPreferencesAuthorizationOperations
+  private let authorization: SystemProxyAuthorizationSession
 
   init(
     operations: SCPreferencesOperations = .live,
     authorizationOperations: SCPreferencesAuthorizationOperations = .live
   ) {
     self.operations = operations
-    self.authorizationOperations = authorizationOperations
+    authorization = SystemProxyAuthorizationSession(operations: authorizationOperations)
   }
+
+  func authorizeForStart() throws { try authorization.authorize() }
+
+  func requireAuthorization() throws { try authorization.verify() }
+
+  func releaseAuthorization() throws { try authorization.close() }
 
   func prepareOwnership(
     configuration: ConfigurationDescriptor,
@@ -364,11 +389,14 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
         }
       }
 
-      let didPublish = try publishRestoration(
-        preferences,
-        changed: changed,
-        conflicts: conflicts
-      )
+      let alreadyRestored =
+        try !changed && conflicts.isEmpty
+        && firstEffectiveMismatch(restoredValues(journal)) == nil
+      let didPublish =
+        try alreadyRestored
+        ? false
+        : publishRestoration(
+          preferences, changed: changed, conflicts: conflicts)
       if didPublish {
         operations.synchronize(preferences)
         let verificationRecords = try loadServiceRecords(
@@ -478,56 +506,9 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   func withAuthorizedPreferences<T>(
     _ operation: (SCPreferences) throws -> T
   ) throws -> T {
-    let creation = authorizationOperations.createAuthorization()
-    guard creation.status == errAuthorizationSuccess else {
-      throw SystemProxyPreferencesError.authorizationCreationFailed(creation.status)
-    }
-    guard let authorization = creation.reference else {
-      throw SystemProxyPreferencesError.authorizationReferenceUnavailable
-    }
-    guard let preferences = authorizationOperations.createPreferences(authorization) else {
-      let originalError = SystemProxyPreferencesError.preferencesUnavailable
-      let releaseStatus = authorizationOperations.freeAuthorization(
-        authorization,
-        [.destroyRights]
-      )
-      guard releaseStatus == errAuthorizationSuccess else {
-        throw SystemProxyPreferencesError.authorizationReleaseFailed(
-          code: releaseStatus,
-          originalError: String(describing: originalError)
-        )
-      }
-      throw originalError
-    }
-
-    operations.synchronize(preferences)
-    let operationResult: Result<T, Error>
-    do {
-      operationResult = .success(try operation(preferences))
-    } catch {
-      operationResult = .failure(error)
-    }
-    let releaseStatus = authorizationOperations.freeAuthorization(
-      authorization,
-      [.destroyRights]
-    )
-    switch operationResult {
-    case .success(let result):
-      guard releaseStatus == errAuthorizationSuccess else {
-        throw SystemProxyPreferencesError.authorizationReleaseFailed(
-          code: releaseStatus,
-          originalError: nil
-        )
-      }
-      return result
-    case .failure(let originalError):
-      guard releaseStatus == errAuthorizationSuccess else {
-        throw SystemProxyPreferencesError.authorizationReleaseFailed(
-          code: releaseStatus,
-          originalError: String(describing: originalError)
-        )
-      }
-      throw originalError
+    try authorization.withPreferences { preferences in
+      operations.synchronize(preferences)
+      return try operation(preferences)
     }
   }
 
@@ -605,6 +586,7 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   }
 
   private func commitAndApply(_ preferences: SCPreferences) throws {
+    try authorization.verify()
     guard operations.commitChanges(preferences) else {
       throw SystemProxyPreferencesError.commitFailed(operations.errorCode())
     }
@@ -628,6 +610,7 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   }
 
   private func applyWithoutCommit(_ preferences: SCPreferences) throws {
+    try authorization.verify()
     guard operations.applyChanges(preferences) else {
       throw SystemProxyPreferencesError.applyFailed(operations.errorCode())
     }
@@ -643,15 +626,19 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   }
 
   func verifyEffectiveRestoredValues(_ journal: ProxyOwnershipJournal) throws {
+    try verifyEffectiveValues(restoredValues(journal))
+  }
+
+  private func restoredValues(_ journal: ProxyOwnershipJournal) throws
+    -> [(SystemProxyField, ProxyPreferenceValue?)]
+  {
     guard let primaryServiceID = operations.primaryServiceID() else {
       throw SystemProxyPreferencesError.effectiveProxyStateUnavailable
     }
     guard let service = journal.services.first(where: { $0.serviceID == primaryServiceID }) else {
       throw SystemProxyPreferencesError.effectiveProxyStateUnavailable
     }
-    try verifyEffectiveValues(
-      service.fields.map { ($0.field, $0.originalValue) }
-    )
+    return service.fields.map { ($0.field, $0.originalValue) }
   }
 
   func observeEffectiveAppliedValues(
@@ -674,6 +661,14 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   private func verifyEffectiveValues(
     _ expectedValues: [(SystemProxyField, ProxyPreferenceValue?)]
   ) throws {
+    if let field = try firstEffectiveMismatch(expectedValues) {
+      throw SystemProxyPreferencesError.effectiveVerificationFailed(field: field)
+    }
+  }
+
+  private func firstEffectiveMismatch(
+    _ expectedValues: [(SystemProxyField, ProxyPreferenceValue?)]
+  ) throws -> SystemProxyField? {
     guard let effectiveProxies = operations.effectiveProxies() else {
       throw SystemProxyPreferencesError.effectiveProxyStateUnavailable
     }
@@ -695,10 +690,9 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
         } else {
           actualValue == expectedValue
         }
-      guard matches else {
-        throw SystemProxyPreferencesError.effectiveVerificationFailed(field: field)
-      }
+      if !matches { return field }
     }
+    return nil
   }
 
   private static func isEffectivelyEnabled(_ value: ProxyPreferenceValue?) -> Bool {

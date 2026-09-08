@@ -136,6 +136,7 @@ pub struct ManagedEngine {
     capabilities: EngineCapabilities,
     unavailable_reason: Option<String>,
     pub(crate) preflight_backend: Arc<dyn CutoverPreflightBackend>,
+    authorization_bridge: Arc<dyn cfw_apple_network::NativeBridge>,
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
     endpoints: Arc<RwLock<EngineEndpointBinding>>,
@@ -350,6 +351,7 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
         .map_err(|error| format!("engine settings are unusable: {error}"))?;
     let native_available = bridge.is_available();
     let native_failure = bridge.unavailable_reason().map(ToOwned::to_owned);
+    let authorization_bridge = Arc::new(bridge.clone());
     let concrete_backend = Arc::new(AppleNetworkBackend::new(bridge));
     let engine_backend: Arc<dyn EngineBackend> = concrete_backend.clone();
     let preflight_backend: Arc<dyn CutoverPreflightBackend> = concrete_backend;
@@ -392,6 +394,7 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
         },
         unavailable_reason: lineage_failure.or(native_failure),
         preflight_backend,
+        authorization_bridge,
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
         endpoints: Arc::new(RwLock::new(EngineEndpointBinding {
@@ -481,7 +484,22 @@ pub(crate) async fn apply_admitted_engine_mode(
         .map_err(|error| error.to_string())?;
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
+    let authorization = engine.authorization_bridge.clone();
     let completion = mode_lease.run_to_completion(async move {
+        // The macOS dialog has its own bounded user-interaction budget. No
+        // engine generation, Authority lease, listener or proxy is started until
+        // it succeeds; the coordinator retains its normal runtime deadlines.
+        if mode == EngineMode::SystemProxy {
+            authorization
+                .authorize_system_proxy()
+                .await
+                .map_err(|error| {
+                    format!(
+                        "System Proxy authorization failed: {:?}: {}",
+                        error.code, error.message
+                    )
+                })?;
+        }
         set_mode_with_endpoint_rebind(
             &coordinator,
             &endpoints,

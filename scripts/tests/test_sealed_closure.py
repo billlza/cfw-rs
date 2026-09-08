@@ -40,7 +40,7 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # only form of this assertion that still fails when a pin drifts.
 # This revision includes x/crypto v0.56.0 and its required Go 1.26.0 minimum.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "b4f0f760fbc5d4faad51e575077824eb5b815d723a33bf6e165c2a1c98052eaf"
+    "888e52565dcde4961ee6f35d4f23669df68205ff9448a16b55ed87cd1d5cb0df"
 )
 
 

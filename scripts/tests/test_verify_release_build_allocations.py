@@ -729,7 +729,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
         self.assertIsInstance(records, list)
         records.append(
             {
-                "build": "40050",
+                "build": "40051",
                 "role": "ga",
                 "status": (
                     "retired_after_candidate_freeze_before_canonical_signing_output"

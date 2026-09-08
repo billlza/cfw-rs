@@ -2374,7 +2374,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # projection still injects experimental.clash_api, which makes box.New fail
         # on every engine start.
         fixture = Fixture()
-        reduced = "with_quic,with_utls,badlinkname,tfogo_checklinkname0,grpcnotrace"
+        reduced = BUILD_TAGS.replace("with_clash_api,", "", 1)
         fixture.env["LIBBOX_BUILD_TAGS"] = reduced
         fixture.manifest["libboxBuildTags"]["value"] = reduced
         self._assert_fails(fixture, "required tag 'with_clash_api'")
@@ -2420,7 +2420,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         replaced = BUILD_TAGS.replace("with_quic", "with_fake", 1)
         fixture.env["LIBBOX_BUILD_TAGS"] = replaced
         fixture.manifest["libboxBuildTags"]["value"] = replaced
-        fixture.manifest["libboxBuildTags"]["required"][0]["tag"] = "with_fake"
+        entry = next(
+            entry for entry in fixture.manifest["libboxBuildTags"]["required"]
+            if entry["tag"] == "with_quic"
+        )
+        entry["tag"] = "with_fake"
         self._assert_fails(fixture, "differ from release policy")
 
     def test_source_binding_without_required_tag_fails(self) -> None:
@@ -2428,7 +2432,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # removing the tag from both the pin and the required table still fails
         # because the tracked source still needs it.
         fixture = Fixture()
-        reduced = "with_quic,with_utls,badlinkname,tfogo_checklinkname0,grpcnotrace"
+        reduced = BUILD_TAGS.replace("with_clash_api,", "", 1)
         fixture.env["LIBBOX_BUILD_TAGS"] = reduced
         fixture.manifest["libboxBuildTags"]["value"] = reduced
         fixture.manifest["libboxBuildTags"]["required"] = [

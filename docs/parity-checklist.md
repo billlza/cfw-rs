@@ -2,6 +2,9 @@
 
 This checklist tracks the rewritten product contract. Checked source or unit
 test items do not imply a signed physical-device release.
+They also do not establish CFW feature parity: the
+[CFW compatibility audit](cfw-compatibility-audit.md) records missing workflows,
+restricted controls and the installed runtime defect separately.
 
 ## Implemented in source
 

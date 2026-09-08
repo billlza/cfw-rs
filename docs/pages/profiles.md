@@ -13,7 +13,9 @@ Local JSON/YAML/text files and pasted node links use this same conversion
 boundary, not a JSON-only import path. Source input is at most 512 KiB and
 must be valid UTF-8; the converted profile retains its independent size limit.
 Everything outside the node list (rules, groups, listeners, DNS) is owned by
-the app's projection and is not carried over.
+the app's projection and is not carried over. The import page states this
+limit before import; accepting a Clash YAML file does not mean its routing
+behavior was preserved.
 
 The safe schema is intentionally closed:
 
@@ -82,6 +84,17 @@ reference-only JSON retains the explicit manual-provisioning workflow; remote
 reference-only subscriptions must still confirm the existing vault audience.
 The file picker and drag-drop accept `.json`, `.yaml`, `.yml`, and `.txt`.
 Excel is not a profile format: use its node link or accompanying YAML/JSON.
+
+Profile cards show the stored display name, source type (`local file` or
+`subscription`), and time since the document was saved in this application.
+The green marker identifies the selected profile. Source type is derived from
+the existing envelope during the repository snapshot; it does not require
+opening each profile, expose a subscription URL, or change the storage schema.
+Document byte size is available in profile details and is not presented as
+traffic or subscription quota. CFW keeps its display names in a separate
+`profiles/list.yml` index: importing an individual YAML file supplies its file
+name, so its CFW display name must be supplied explicitly or changed in profile
+Settings. The time shown is not the age recorded by CFW.
 
 Application-managed storage is also bounded and fail closed: each complete
 profile envelope is at most 384 KiB, the repository contains at most 4,096

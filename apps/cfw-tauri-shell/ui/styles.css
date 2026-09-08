@@ -1596,30 +1596,22 @@ dd {
   margin: 0;
   overflow: hidden;
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.profile-card-main p,
-.profile-usage {
+.profile-card-main p {
   overflow: hidden;
   color: #7c7c7c;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .profile-card-main p {
   margin: 4px 0 0;
-}
-
-.profile-usage {
-  display: flex;
-  gap: 10px;
-  margin-top: 3px;
-  font-size: 11px;
 }
 
 .profile-progress {

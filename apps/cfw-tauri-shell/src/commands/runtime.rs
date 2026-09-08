@@ -234,7 +234,7 @@ fn present_geoip_status(path: &Path, file_name: &str) -> Option<GeoIpDatabaseSta
 #[cfg(test)]
 mod tests {
     use cfw_application::EngineControllerAccess;
-    use cfw_profiles::{ProfileRecord, ValidatedSingBoxProfile};
+    use cfw_profiles::{ProfileRecord, ProfileSourceKind, ValidatedSingBoxProfile};
 
     use super::*;
 
@@ -249,6 +249,7 @@ mod tests {
                 bytes: profile.as_json().len(),
                 digest: profile.digest().to_owned(),
                 created_epoch_secs: 7,
+                source_kind: ProfileSourceKind::Local,
             },
             source_url: None,
             profile,

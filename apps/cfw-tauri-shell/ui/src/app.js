@@ -105,8 +105,6 @@ const REASONS = Object.freeze({
   geoip: "No GeoIP database can be downloaded: the accepted profile subset contains no rule set or GeoIP matcher, so this engine consumes no GeoIP database.",
   restoreDns: "This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS.",
   engineNotOff: "Profile changes require the engine to be Off. Turn System Proxy and TUN Mode off first.",
-  quota: "Subscription quota headers are not retained by this build.",
-  listSource: "A profile list never carries the subscription URL, because it can bear an access token. Open the profile to see it.",
 });
 
 
@@ -1376,14 +1374,6 @@ function groupRailLabel(name) {
   return (cjk || withoutFlags || value).slice(0, 6);
 }
 
-function hostFromUrl(value) {
-  try {
-    return new URL(value).host;
-  } catch (_error) {
-    return value || "local file";
-  }
-}
-
 /// CFW profile context-menu items, in the 0.3.5 order and chrome.
 ///
 /// `remoteOnly` items need the profile's subscription URL, which a profile list
@@ -2523,6 +2513,7 @@ function renderProfiles() {
         <input class="profile-file-hidden" data-profile-file type="file" accept="${PROFILE_SOURCE_ACCEPT}" aria-label="Local JSON, YAML, or node-link profile" ${blocked} />
       </section>
 
+      <p class="profile-note">Clash YAML imports proxy nodes only. Proxy groups, routing rules, and DNS settings are not imported.</p>
       ${mutationReason ? `<p class="profile-note">${escapeHtml(mutationReason)}</p>` : ""}
 
       <section class="cfw-profile-list">
@@ -2532,16 +2523,11 @@ function renderProfiles() {
             <button data-action="reload-dashboard">Reload profile repository</button>
           </div>
         ` : state.profiles.length ? state.profiles.map((profile) => `
-          <article class="cfw-profile-card ${profile.active ? "active" : ""}" data-profile-card="${escapeHtml(profile.id)}">
+          <article class="cfw-profile-card ${profile.active ? "active" : ""}" data-profile-card="${escapeHtml(profile.id)}" ${profile.active ? 'aria-current="true"' : ""}>
             <i></i>
             <div class="profile-card-main">
               <h3>${escapeHtml(profile.name)}</h3>
-              <p>${escapeHtml(profile.active ? "active" : "stored")} (${escapeHtml(profile.updated)})</p>
-              <div class="profile-usage">
-                <span>${escapeHtml(profile.traffic)}</span>
-                <span title="${escapeHtml(REASONS.quota)}">quota not reported</span>
-                <span title="${escapeHtml(profile.sourceUrl === undefined ? REASONS.listSource : profile.sourceUrl ?? "imported from a local document")}">${escapeHtml(profileSourceLabel(profile))}</span>
-              </div>
+              <p title="Time since this profile was saved in Clash for Mac">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
             </div>
             <div class="profile-card-primary">
               <button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="Open this profile">‹›</button>
@@ -2559,11 +2545,12 @@ function renderProfiles() {
   `;
 }
 
-/// A profile list never carries the subscription URL, so the card says so
-/// instead of claiming the profile is local.
 function profileSourceLabel(profile) {
-  if (profile.sourceUrl === undefined) return "source not listed";
-  return profile.sourceUrl ? hostFromUrl(profile.sourceUrl) : "local file";
+  switch (profile.sourceKind) {
+    case "local": return "local file";
+    case "subscription": return "subscription";
+    default: throw new TypeError("profile snapshot has an invalid source kind");
+  }
 }
 
 function renderProfileInspector() {
@@ -5135,6 +5122,11 @@ async function loadProfilesSnapshot() {
   try {
     const profiles = await invoke("profiles_snapshot");
     if (!Array.isArray(profiles)) throw new TypeError("profile snapshot is not an array");
+    for (const profile of profiles) {
+      if (profile.source_kind !== "local" && profile.source_kind !== "subscription") {
+        throw new TypeError("profile snapshot has an invalid source kind");
+      }
+    }
     const known = new Map(state.profiles.map((profile) => [profile.id, profile]));
     state.profiles = profiles.map((profile) => ({
       id: profile.id,
@@ -5143,7 +5135,7 @@ async function loadProfilesSnapshot() {
         ? formatRelativeUpdated(profile.updated_epoch_secs)
         : "unknown",
       updatedEpochSecs: profile.updated_epoch_secs ?? null,
-      traffic: formatBytes(profile.bytes ?? 0),
+      sourceKind: profile.source_kind,
       active: Boolean(profile.active),
       // A profile list carries no subscription URL, because it can bear an
       // access token. `undefined` means "not published in a list"; it is

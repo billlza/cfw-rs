@@ -273,6 +273,7 @@ const responses = {
     active: true,
     bytes: 2048,
     updated_epoch_secs: Math.floor(Date.now() / 1000) - 300,
+    source_kind: "local",
   }],
   controller_snapshot: {
     config: { "mixed-port": 7890, "allow-lan": false, mode: "rule", "log-level": "info", ipv6: true },
@@ -703,7 +704,7 @@ test("runtime configuration preview is offline and depends only on repository-ba
       bytes: 2048,
       updatedEpochSecs: null,
       updated: "now",
-      traffic: "2 KB",
+      sourceKind: "local",
     }];
     state.profilesUnavailableReason = null;
     await setEngine(OFF_ENGINE);
@@ -2295,6 +2296,52 @@ test("the credential dialog asks for missing values only while the engine is Off
   state.credentialSetup = null;
 });
 
+test("profile cards show source type on first load without fetching URLs or inventing quota", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  try {
+    responses.profiles_snapshot = [
+      { ...originalProfiles[0], name: "本地-示例-09.18", source_kind: "local" },
+      { ...originalProfiles[0], id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Remote", source_kind: "subscription", active: false },
+    ];
+    state.profiles = [];
+    const before = invocationDetails.length;
+    await reloadButton.click();
+    const html = await renderPage("profiles");
+    assert.match(html, /本地-示例-09\.18/u);
+    assert.match(html, /local file \(/u);
+    assert.match(html, /subscription \(/u);
+    assert.match(html, /aria-current="true"/u);
+    assert.match(html, /Clash YAML imports proxy nodes only/u);
+    assert.match(html, /Proxy groups, routing rules, and DNS settings are not imported/u);
+    assert.doesNotMatch(html, /source not listed|quota not reported|profile-usage|2 KB/u);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => command === "profile_text"), false);
+    state.profiles[0].sourceUrl = "https://private.example/?token=private-test-value";
+    const afterDetails = await renderPage("profiles");
+    assert.match(afterDetails, /local file \(/u, "cached URL metadata does not determine the card's source type");
+    assert.doesNotMatch(afterDetails, /private\.example|private-test-value/u);
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    state.profiles = [];
+    await reloadButton.click();
+  }
+});
+
+test("missing or unknown profile source metadata is surfaced as a repository error", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  try {
+    for (const sourceKind of [undefined, "unsupported"]) {
+      responses.profiles_snapshot = [{ ...originalProfiles[0], source_kind: sourceKind }];
+      await reloadButton.click();
+      const html = await renderPage("profiles");
+      assert.match(html, /profile snapshot has an invalid source kind/u);
+      assert.doesNotMatch(html, /data-profile-card=/u);
+    }
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    await reloadButton.click();
+  }
+});
+
 test("profile mutations are offered only while the engine is Off", async () => {
   await setEngine(OFF_ENGINE);
   const off = await renderPage("profiles");
@@ -2313,7 +2360,7 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
   const originalSetup = state.credentialSetup;
   const originalDialog = state.glassDialog;
   const link = "socks://synthetic-user:synthetic-secret@proxy.example.com:29177";
-  const importedRecord = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "SOCKS5", bytes: 400, active: false, updated_epoch_secs: 1 };
+  const importedRecord = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "SOCKS5", bytes: 400, active: false, updated_epoch_secs: 1, source_kind: "local" };
   const references = [
     { id: "11111111-1111-4111-8111-111111111111", kind: "socks5_username" },
     { id: "22222222-2222-4222-8222-222222222222", kind: "socks5_password" },

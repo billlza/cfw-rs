@@ -53,6 +53,24 @@ pub struct ProfileRecord {
     pub bytes: usize,
     pub digest: String,
     pub created_epoch_secs: u64,
+    pub source_kind: ProfileSourceKind,
+}
+
+/// Source information safe to include in a list without exposing a subscription URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSourceKind {
+    Local,
+    Subscription,
+}
+
+impl ProfileSourceKind {
+    fn from_source_url(source_url: Option<&str>) -> Self {
+        match source_url {
+            Some(_) => Self::Subscription,
+            None => Self::Local,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +514,7 @@ impl ProfileRepository {
                 bytes: profile.as_json().len(),
                 digest: profile.digest().to_string(),
                 created_epoch_secs: timestamp,
+                source_kind: ProfileSourceKind::from_source_url(source_url),
             },
             profile: profile.clone(),
             source_url: source_url.map(ToOwned::to_owned),
@@ -618,6 +637,7 @@ impl ProfileRepository {
         directory.write_replace_atomic(&profile_file_name(id), &bytes)?;
         let mut record = current.record;
         record.name = name;
+        record.source_kind = ProfileSourceKind::from_source_url(source_url);
         Ok(record)
     }
 
@@ -1098,6 +1118,7 @@ impl ProfileRepository {
 
     fn decode(&self, id: &str, file: File) -> Result<StoredProfile, ProfileError> {
         let decoded = decode(id, file)?;
+        let source_kind = ProfileSourceKind::from_source_url(decoded.source_url.as_deref());
         Ok(StoredProfile {
             source_url: decoded.source_url,
             record: ProfileRecord {
@@ -1106,6 +1127,7 @@ impl ProfileRepository {
                 bytes: decoded.profile.as_json().len(),
                 digest: decoded.digest,
                 created_epoch_secs: decoded.created_epoch_secs,
+                source_kind,
             },
             profile: decoded.profile,
         })
@@ -1128,6 +1150,12 @@ fn validate_stored_profile(stored: &StoredProfile) -> Result<(), ProfileError> {
         && normalize_source_url(source_url)? != source_url
     {
         return Err(ProfileError::InvalidSourceUrl);
+    }
+    if stored.record.source_kind != ProfileSourceKind::from_source_url(stored.source_url.as_deref())
+    {
+        return Err(ProfileError::SourceKindMismatch {
+            id: stored.record.id.clone(),
+        });
     }
     Ok(())
 }
@@ -1203,7 +1231,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ProfileRepository, SelectedProfileReplaceIntent, StoredProfile,
+        ProfileRepository, ProfileSourceKind, SelectedProfileReplaceIntent, StoredProfile,
         ensure_credential_reference_capacity, ensure_repository_bytes, sha256_hex,
         stored_envelope_digest,
     };
@@ -1276,6 +1304,96 @@ mod tests {
             .expect("load selected")
             .expect("selected original");
         (root, repository, original)
+    }
+
+    #[test]
+    fn profile_lists_derive_source_kind_without_disclosing_subscription_urls() {
+        let (root, repository) = repository("source-kind");
+        let local = repository
+            .import(Some("本地-示例-09.18"), &profile("local"))
+            .expect("local import");
+        let subscription = repository
+            .import_with_source(
+                Some("Subscription"),
+                &profile("remote"),
+                Some("https://subscription.example/profile?token=private-test-value"),
+            )
+            .expect("subscription import");
+        repository.select(&local.id).expect("select local");
+        let snapshot = repository
+            .snapshot()
+            .expect("list without loading profiles individually");
+        let local_record = snapshot
+            .profiles
+            .iter()
+            .find(|record| record.id == local.id)
+            .expect("local record");
+        let remote_record = snapshot
+            .profiles
+            .iter()
+            .find(|record| record.id == subscription.id)
+            .expect("subscription record");
+        assert_eq!(local_record.source_kind, ProfileSourceKind::Local);
+        assert_eq!(local_record.name, "本地-示例-09.18");
+        assert_eq!(remote_record.source_kind, ProfileSourceKind::Subscription);
+        assert_eq!(
+            snapshot.selected_profile_id.as_deref(),
+            Some(local.id.as_str())
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize list");
+        assert!(!json.contains("subscription.example"));
+        assert!(!json.contains("private-test-value"));
+        assert!(!json.contains("source_url"));
+        for id in [&local.id, &subscription.id] {
+            let stored: serde_json::Value = serde_json::from_slice(
+                &fs::read(root.join("profiles").join(profile_file_name(id)))
+                    .expect("read envelope"),
+            )
+            .expect("parse envelope");
+            assert_eq!(stored["schema_version"], 1);
+            assert!(
+                stored.get("source_kind").is_none(),
+                "source kind is derived, not persisted"
+            );
+        }
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+
+    #[test]
+    fn source_kind_tracks_metadata_changes_and_rollback() {
+        let (root, repository, original) = selected_fixture("source-kind-update");
+        let record = repository
+            .update_metadata(
+                &original.record.id,
+                Some("Renamed"),
+                Some("https://subscription.example/profile"),
+            )
+            .expect("bind subscription");
+        assert_eq!(record.source_kind, ProfileSourceKind::Subscription);
+        assert_eq!(
+            record.created_epoch_secs,
+            original.record.created_epoch_secs
+        );
+        let rebound = repository
+            .load_selected()
+            .expect("load selection")
+            .expect("selected");
+        assert_eq!(rebound.record, record);
+        assert_eq!(rebound.profile, original.profile);
+        repository
+            .restore(&original)
+            .expect("restore local metadata");
+        assert_eq!(
+            repository.load_selected().expect("load restored"),
+            Some(original.clone())
+        );
+        let mut inconsistent = original;
+        inconsistent.record.source_kind = ProfileSourceKind::Subscription;
+        assert!(matches!(
+            repository.restore(&inconsistent),
+            Err(ProfileError::SourceKindMismatch { .. })
+        ));
+        fs::remove_dir_all(root).expect("remove test repository");
     }
 
     #[test]

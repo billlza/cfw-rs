@@ -12,6 +12,7 @@ use cfw_engine_api::{
 };
 use cfw_profiles::{
     ProfileCredentialSnapshot, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
+    ProfileSourceKind,
 };
 use cfw_singbox_config::{CredentialRef, CredentialSecret};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,7 @@ pub(crate) struct UiProfileRecord {
     active: bool,
     bytes: usize,
     updated_epoch_secs: u64,
+    source_kind: ProfileSourceKind,
 }
 
 impl UiProfileRecord {
@@ -37,6 +39,7 @@ impl UiProfileRecord {
             active,
             bytes: record.bytes,
             updated_epoch_secs: record.created_epoch_secs,
+            source_kind: record.source_kind,
         }
     }
 }
@@ -574,6 +577,7 @@ mod tests {
             bytes: 128,
             digest: "01".repeat(32),
             created_epoch_secs: 42,
+            source_kind: ProfileSourceKind::Subscription,
         };
 
         let value = serde_json::to_value(UiProfileRecord::from_record(record, true))
@@ -586,6 +590,7 @@ mod tests {
                 "bytes".to_string(),
                 "id".to_string(),
                 "name".to_string(),
+                "source_kind".to_string(),
                 "updated_epoch_secs".to_string(),
             ])
         );
@@ -593,6 +598,7 @@ mod tests {
         assert!(!value.to_string().contains("path"));
         assert!(!value.to_string().contains("url"));
         assert_eq!(value["active"], true);
+        assert_eq!(value["source_kind"], "subscription");
     }
 
     #[test]
@@ -607,6 +613,7 @@ mod tests {
                     bytes: 10,
                     digest: "01".repeat(32),
                     created_epoch_secs: 1,
+                    source_kind: ProfileSourceKind::Local,
                 },
                 ProfileRecord {
                     id: other_id,
@@ -614,6 +621,7 @@ mod tests {
                     bytes: 11,
                     digest: "02".repeat(32),
                     created_epoch_secs: 2,
+                    source_kind: ProfileSourceKind::Subscription,
                 },
             ],
             selected_profile_id: Some(selected_id),

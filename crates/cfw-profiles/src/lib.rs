@@ -18,7 +18,7 @@ pub use repository::{
     ExactProfileImportOutcome, LockedCredentialProfileMutation, LockedProfileCredentialSnapshot,
     LockedSelectedProfile, ProfileCredentialCatalogEntry, ProfileCredentialSnapshot,
     ProfileImportResult, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
-    StoredProfile,
+    ProfileSourceKind, StoredProfile,
 };
 
 use cfw_singbox_config::{ConfigError, MAX_PROFILE_BYTES};
@@ -66,6 +66,8 @@ pub enum ProfileError {
         "subscription URL must be a bounded https URL of at most {MAX_SOURCE_URL_BYTES} bytes without whitespace"
     )]
     InvalidSourceUrl,
+    #[error("profile source kind does not match its subscription metadata: {id}")]
+    SourceKindMismatch { id: String },
     #[error("profile repository path contains a NUL byte")]
     InvalidRepositoryPath,
     #[error("profile repository is not an effective-user-owned real directory")]

@@ -265,8 +265,10 @@ impl ManagedEngine {
             .reserve_maintenance()
             .map_err(|error| error.to_string())?;
         let coordinator = self.coordinator.clone();
+        let authorization = self.authorization_bridge.clone();
         let (result, maintenance) = maintenance
             .run_to_completion(async move {
+                authorize_proxy_transition(authorization.as_ref(), true).await?;
                 coordinator
                     .shutdown()
                     .await
@@ -486,20 +488,10 @@ pub(crate) async fn apply_admitted_engine_mode(
     let endpoints = engine.endpoints.clone();
     let authorization = engine.authorization_bridge.clone();
     let completion = mode_lease.run_to_completion(async move {
-        // The macOS dialog has its own bounded user-interaction budget. No
-        // engine generation, Authority lease, listener or proxy is started until
-        // it succeeds; the coordinator retains its normal runtime deadlines.
-        if mode == EngineMode::SystemProxy {
-            authorization
-                .authorize_system_proxy()
-                .await
-                .map_err(|error| {
-                    format!(
-                        "System Proxy authorization failed: {:?}: {}",
-                        error.code, error.message
-                    )
-                })?;
-        }
+        // Authorization precedes the runtime transition, including restoration
+        // after a long session. The existing runtime stays active while macOS
+        // waits; no cleanup deadline or new engine generation has begun.
+        authorize_proxy_transition(authorization.as_ref(), mode != EngineMode::SystemProxy).await?;
         set_mode_with_endpoint_rebind(
             &coordinator,
             &endpoints,
@@ -519,6 +511,21 @@ pub(crate) async fn apply_admitted_engine_mode(
     drop(mode_lease);
     result?;
     engine.status_payload(retirement)
+}
+
+async fn authorize_proxy_transition(
+    authorization: &dyn cfw_apple_network::NativeBridge,
+    restoration_only: bool,
+) -> Result<(), String> {
+    authorization
+        .authorize_system_proxy(restoration_only)
+        .await
+        .map_err(|error| {
+            format!(
+                "System Proxy authorization failed: {:?}: {}",
+                error.code, error.message
+            )
+        })
 }
 
 async fn set_mode_with_endpoint_rebind(

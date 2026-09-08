@@ -4,8 +4,8 @@ import Security
 import SystemConfiguration
 
 /// One process-owned authorization reference, scoped to network preferences.
-/// User interaction happens only in the explicit authorization RPC, before an
-/// Authority lease or data plane exists. Every later transaction checks rights
+/// User interaction happens only in the explicit authorization RPC, before a
+/// runtime transition begins. Every later transaction checks rights
 /// without interaction, so cleanup cannot block on an authentication dialog.
 final class SystemProxyAuthorizationSession: @unchecked Sendable {
   private static let logger = Logger(

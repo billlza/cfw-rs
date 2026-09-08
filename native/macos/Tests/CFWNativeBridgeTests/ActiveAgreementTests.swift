@@ -97,7 +97,11 @@ private struct StubLease: NativeEngineLeaseInspecting {
 
 private actor StubProxyAgent: ProxyAgentTransporting, Installed40019ProxySnapshotting {
   var authorizationCount = 0
-  func authorizeSystemProxy() async throws { authorizationCount += 1 }
+  var authorizationRestorationOnly: [Bool] = []
+  func authorizeSystemProxy(restorationOnly: Bool) async throws {
+    authorizationCount += 1
+    authorizationRestorationOnly.append(restorationOnly)
+  }
   let observed: EngineSnapshot
   init(_ observed: EngineSnapshot) { self.observed = observed }
   func registrationStatus() -> ProxyAgentRegistrationStatus { .notRegistered }
@@ -515,7 +519,9 @@ private func statusErrorCode(
     credentialVault: StubCredentialVault(),
     hostOperationLease: BusyNativeHostOperationLease())
   #expect(try await subject.execute(.authorizeSystemProxy) == .acknowledged)
-  #expect(await proxy.authorizationCount == 1)
+  #expect(try await subject.execute(.authorizeSystemProxyRestoration) == .acknowledged)
+  #expect(await proxy.authorizationCount == 2)
+  #expect(await proxy.authorizationRestorationOnly == [false, true])
 }
 
 private func maintenanceErrorCode(

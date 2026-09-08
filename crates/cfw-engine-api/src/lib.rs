@@ -1315,6 +1315,7 @@ impl NativeServiceMaintenanceResult {
 pub enum NativeBridgeCommand {
     QueryStatus,
     AuthorizeSystemProxy,
+    AuthorizeSystemProxyRestoration,
     MaintainCurrentServices {
         action: NativeServiceMaintenanceAction,
     },
@@ -1355,6 +1356,9 @@ impl fmt::Debug for NativeBridgeCommand {
         match self {
             Self::QueryStatus => formatter.write_str("QueryStatus"),
             Self::AuthorizeSystemProxy => formatter.write_str("AuthorizeSystemProxy"),
+            Self::AuthorizeSystemProxyRestoration => {
+                formatter.write_str("AuthorizeSystemProxyRestoration")
+            }
             Self::MaintainCurrentServices { action } => formatter
                 .debug_struct("MaintainCurrentServices")
                 .field("action", action)
@@ -1748,18 +1752,27 @@ mod tests {
 
     #[test]
     fn system_proxy_authorization_has_no_configuration_payload() {
-        let command = NativeBridgeCommand::AuthorizeSystemProxy;
-        assert_eq!(
-            serde_json::to_value(&command).expect("authorization wire command"),
-            serde_json::json!({"opcode": "authorize_system_proxy"})
-        );
-        assert_eq!(
-            serde_json::from_value::<NativeBridgeCommand>(serde_json::json!({
-                "opcode": "authorize_system_proxy"
-            }))
-            .expect("authorization command decoding"),
-            command
-        );
+        for (command, opcode) in [
+            (
+                NativeBridgeCommand::AuthorizeSystemProxy,
+                "authorize_system_proxy",
+            ),
+            (
+                NativeBridgeCommand::AuthorizeSystemProxyRestoration,
+                "authorize_system_proxy_restoration",
+            ),
+        ] {
+            let wire = serde_json::json!({"opcode": opcode});
+            assert_eq!(
+                serde_json::to_value(&command).expect("authorization wire command"),
+                wire
+            );
+            assert_eq!(
+                serde_json::from_value::<NativeBridgeCommand>(wire)
+                    .expect("authorization command decoding"),
+                command
+            );
+        }
     }
 
     #[test]

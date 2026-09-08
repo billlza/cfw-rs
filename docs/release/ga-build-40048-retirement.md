@@ -14,7 +14,9 @@ disconnect as a fatal stale operation. System Proxy never became effective.
 
 40049 requests authorization before submitting an engine mode change. That
 bounded user-interaction request acquires no Authority or Host mutation lease
-and starts no listener. Runtime transactions check rights without interaction,
+and starts no listener. Stop, mode switch and shutdown renew the grant when a
+System Proxy restoration journal exists, before entering runtime cleanup.
+Runtime transactions check rights without interaction,
 retain the Agent's own authorization reference, and never destroy unrelated
 shared credentials. Lock acquisition is also checked before entering SCHelper;
 it must not open an implicit authorization dialog during process recovery.

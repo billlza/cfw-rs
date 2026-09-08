@@ -259,7 +259,7 @@ actor NativeBridgeCoordinator {
     // lease while macOS waits for the user; the later start acquires it normally.
     let operationLease: (any NativeHostOperationLeaseHolding)?
     do {
-      if case .authorizeSystemProxy = command {
+      if command == .authorizeSystemProxy || command == .authorizeSystemProxyRestoration {
         operationLease = nil
       } else {
         operationLease = try hostOperationLease.acquire()
@@ -280,9 +280,10 @@ actor NativeBridgeCoordinator {
     switch command {
     case .queryStatus:
       return .status(try await queryExternalStatus())
-    case .authorizeSystemProxy:
+    case .authorizeSystemProxy, .authorizeSystemProxyRestoration:
       do {
-        try await proxy.authorizeSystemProxy()
+        try await proxy.authorizeSystemProxy(
+          restorationOnly: command == .authorizeSystemProxyRestoration)
         try Task.checkCancellation()
         return .acknowledged
       } catch {

@@ -62,9 +62,12 @@ CFW processes absent still failed: macOS authorization blocked the running
 Agent, the start RPC expired, and a delayed disconnect crashed the Authority
 after cleanup had entered quarantine. No OS proxy activation was observed.
 
-40049 requests authorization before the engine coordinator starts a generation.
-The user interaction has a separate five-minute bound and no runtime/Authority
-lease; runtime heartbeats and stop barriers retain their existing deadlines.
+40049 requests authorization before the engine coordinator starts a generation
+or begins restoring an existing System Proxy session, including application
+shutdown. The user interaction has a separate five-minute bound and acquires
+no additional runtime/Authority lease; an existing connection remains running
+while the user responds. Runtime heartbeats and stop barriers retain their
+existing deadlines.
 The Agent keeps its authorization reference and makes later rights checks
 noninteractive. Read-only recovery remains possible without a new write grant.
 Repeated revocation leaves quarantine intact until genuine cleanup is proven.
@@ -74,6 +77,14 @@ rights and checking them without interaction; releasing one reference does not
 revoke shared authorizations used by other processes.
 [Apple authorization flags](https://developer.apple.com/documentation/security/authorizationflags)
 describe the interaction and shared-right revocation options.
+
+The local network authorization rule delegates to
+`authenticate-admin-nonshared` with a 30-second credential timeout. Retaining an
+AuthorizationRef does not make that grant permanent. A later stop or switch can
+therefore require macOS authorization again. Restoration authorization is
+skipped when no ownership journal exists, so TUN-only operation does not acquire
+an unrelated network-preferences grant. Unattended cleanup after credentials
+expire remains an explicit recovery failure, not a successful Off state.
 
 ## Functionality comparison
 

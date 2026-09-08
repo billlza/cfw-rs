@@ -202,7 +202,7 @@ impl NativeBridgeError {
 /// stale stop requests must fail instead of terminating a newer runtime.
 pub trait NativeBridge: Send + Sync + 'static {
     /// Request macOS network authorization without starting an engine or lease.
-    fn authorize_system_proxy(&self) -> NativeBridgeFuture<'_, ()>;
+    fn authorize_system_proxy(&self, restoration_only: bool) -> NativeBridgeFuture<'_, ()>;
     /// Queries ProxyAgent and Packet Tunnel status as one mutually-exclusive
     /// observation. Simultaneous owners or unverified native state are errors.
     fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus>;
@@ -343,7 +343,7 @@ impl MissingNativeBridge {
 }
 
 impl NativeBridge for MissingNativeBridge {
-    fn authorize_system_proxy(&self) -> NativeBridgeFuture<'_, ()> {
+    fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
         Self::unavailable()
     }
 
@@ -406,7 +406,7 @@ mod tests {
     }
 
     impl NativeBridge for RecordingBridge {
-        fn authorize_system_proxy(&self) -> NativeBridgeFuture<'_, ()> {
+        fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
             Box::pin(async { Ok(()) })
         }
 

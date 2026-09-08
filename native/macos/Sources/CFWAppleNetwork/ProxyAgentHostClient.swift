@@ -137,7 +137,7 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
 }
 
 public protocol ProxyAgentTransporting: Sendable {
-  func authorizeSystemProxy() async throws
+  func authorizeSystemProxy(restorationOnly: Bool) async throws
   func registrationStatus() async -> ProxyAgentRegistrationStatus
   func ensureRegistered() async throws
   func start(
@@ -434,7 +434,7 @@ public actor AuthenticatedProxyAgentTransport:
     serviceController.registrationStatus()
   }
 
-  public func authorizeSystemProxy() async throws {
+  public func authorizeSystemProxy(restorationOnly: Bool) async throws {
     try serviceController.ensureRegistered()
     let token = try outstandingRequests.reserve()
     defer { outstandingRequests.release(token) }
@@ -460,7 +460,7 @@ public actor AuthenticatedProxyAgentTransport:
           finish(.failure(ProxyAgentHostError.transportUnavailable("remote-interface")))
           return
         }
-        proxy.authorizeSystemProxy { error in
+        proxy.authorizeSystemProxy(restorationOnly: restorationOnly) { error in
           reference.lifecycle.release(token: token)
           if let error {
             guard error.domain == SystemProxyAuthorizationFailure.domain,

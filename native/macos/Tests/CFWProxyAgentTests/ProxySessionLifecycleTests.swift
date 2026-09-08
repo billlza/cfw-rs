@@ -74,7 +74,8 @@ private final class ValidationOnlyProxyOwner: ProxySystemProxyOwning, @unchecked
   let service = ProxyAgentService(
     lifecycle: owner,
     configurationChecker: SecretEchoConfigurationChecker(secret: "unused"),
-    preferences: SCPreferencesSystemProxyPreferences()
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
   )
   let configurationDescriptor = try descriptor()
   let operation = try OperationContext(
@@ -135,7 +136,8 @@ extension ProxySessionLifecycle {
   let service = ProxyAgentService(
     lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
     configurationChecker: SecretEchoConfigurationChecker(secret: secret),
-    preferences: SCPreferencesSystemProxyPreferences()
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
   )
   let request = RequestEnvelope(
     command: try NativeCommand(

@@ -217,7 +217,11 @@ impl NativeFrameworkBridge {
     }
 
     fn invoke(&self, command: NativeBridgeCommand) -> NativeBridgeFuture<'_, NativeBridgeResult> {
-        let authorization = matches!(command, NativeBridgeCommand::AuthorizeSystemProxy);
+        let authorization = matches!(
+            command,
+            NativeBridgeCommand::AuthorizeSystemProxy
+                | NativeBridgeCommand::AuthorizeSystemProxyRestoration
+        );
         let request = NativeRequestEnvelope::new(command);
         let request_id = request.request_id;
         Box::pin(async move {
@@ -346,10 +350,14 @@ impl NativeFrameworkBridge {
 }
 
 impl NativeBridge for NativeFrameworkBridge {
-    fn authorize_system_proxy(&self) -> NativeBridgeFuture<'_, ()> {
+    fn authorize_system_proxy(&self, restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
         Box::pin(async move {
             match self
-                .invoke(NativeBridgeCommand::AuthorizeSystemProxy)
+                .invoke(if restoration_only {
+                    NativeBridgeCommand::AuthorizeSystemProxyRestoration
+                } else {
+                    NativeBridgeCommand::AuthorizeSystemProxy
+                })
                 .await?
             {
                 NativeBridgeResult::Acknowledged => Ok(()),

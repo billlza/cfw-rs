@@ -1,3 +1,5 @@
+import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 import Security
@@ -78,6 +80,69 @@ private final class AuthorizationOperationRecorder: @unchecked Sendable {
   func recordFree(flags: AuthorizationFlags) {
     lock.withLock { freeFlagsValue.append(flags) }
   }
+}
+
+private struct AuthorizationOnlyOwner: ProxySystemProxyOwning {
+  func start(
+    configuration: SensitiveDataBuffer, descriptor: ConfigurationDescriptor,
+    authorization: ProxyOwnerAuthorization,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not start an engine")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  func stop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not stop an engine")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  func snapshot(completionHandler: @escaping @Sendable (EngineSnapshot) -> Void) {
+    Issue.record("Authorization must not query the engine queue")
+    completionHandler(.off)
+  }
+}
+
+private struct AuthorizationJournalStore: ProxyOwnershipJournalStoring {
+  let journal: ProxyOwnershipJournal?
+  func load() throws -> ProxyOwnershipJournal? { journal }
+  func save(_ journal: ProxyOwnershipJournal) throws {
+    throw ProxyOwnershipJournalError.invalidJournal
+  }
+  func remove() throws { throw ProxyOwnershipJournalError.invalidJournal }
+}
+
+@Test(arguments: [true, false], [true, false])
+func restorationAuthorizationRequiresAPendingJournalWithoutChangingRuntime(
+  restorationOnly: Bool, hasJournal: Bool
+) async throws {
+  let recorder = AuthorizationOperationRecorder()
+  let preferences = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder, rightsStatus: errAuthorizationDenied))
+  let journal = hasJournal ? try proxyJournal(originalProxyEnabled: false) : nil
+  let service = ProxyAgentService(
+    lifecycle: AuthorizationOnlyOwner(),
+    configurationChecker: SourceBuiltLibboxConfigurationChecker(),
+    preferences: preferences, journalStore: AuthorizationJournalStore(journal: journal))
+
+  let error = await withCheckedContinuation { continuation in
+    service.authorizeSystemProxy(restorationOnly: restorationOnly) {
+      continuation.resume(returning: $0)
+    }
+  }
+
+  if restorationOnly && !hasJournal {
+    #expect(error == nil)
+    #expect(recorder.interactionFlags.isEmpty)
+  } else {
+    #expect(error?.domain == SystemProxyAuthorizationFailure.domain)
+    #expect(error?.code == SystemProxyAuthorizationFailure.denied.rawValue)
+    #expect(recorder.interactionFlags == [true])
+  }
+  #expect(recorder.createPreferencesCount == 0)
 }
 
 private func testingAuthorizationOperations(

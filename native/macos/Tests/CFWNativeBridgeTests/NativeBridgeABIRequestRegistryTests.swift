@@ -38,12 +38,16 @@ private func exportedCancelStatus(_ requestID: String) -> Int32 {
 @Suite(.serialized)
 struct NativeBridgeABIRequestRegistryTests {
   @Test func authorizationCommandCannotCarryRuntimeOrCredentialMaterial() throws {
-    let valid = Data(#"{"opcode":"authorize_system_proxy"}"#.utf8)
-    #expect(
-      try JSONDecoder().decode(NativeBridgeCommand.self, from: valid) == .authorizeSystemProxy)
-    let invalid = Data(#"{"opcode":"authorize_system_proxy","payload":{}}"#.utf8)
-    #expect(throws: NativeBridgeProtocolError.invalidCommand) {
-      _ = try JSONDecoder().decode(NativeBridgeCommand.self, from: invalid)
+    for (opcode, command) in [
+      ("authorize_system_proxy", NativeBridgeCommand.authorizeSystemProxy),
+      ("authorize_system_proxy_restoration", .authorizeSystemProxyRestoration),
+    ] {
+      let valid = try JSONSerialization.data(withJSONObject: ["opcode": opcode])
+      #expect(try JSONDecoder().decode(NativeBridgeCommand.self, from: valid) == command)
+      let invalid = try JSONSerialization.data(withJSONObject: ["opcode": opcode, "payload": [:]])
+      #expect(throws: NativeBridgeProtocolError.invalidCommand) {
+        _ = try JSONDecoder().decode(NativeBridgeCommand.self, from: invalid)
+      }
     }
   }
 

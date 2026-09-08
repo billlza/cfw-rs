@@ -27,6 +27,7 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
   private let lifecycle: any ProxySystemProxyOwning
   private let configurationChecker: any LibboxConfigurationChecking
   private let preferences: SCPreferencesSystemProxyPreferences
+  private let journalStore: any ProxyOwnershipJournalStoring
   private let authorizationQueue = DispatchQueue(
     label: "com.bill.clashformac.proxy-authorization")
   private let authorizationLock = NSLock()
@@ -35,14 +36,16 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
   init(
     lifecycle: any ProxySystemProxyOwning,
     configurationChecker: any LibboxConfigurationChecking,
-    preferences: SCPreferencesSystemProxyPreferences
+    preferences: SCPreferencesSystemProxyPreferences,
+    journalStore: any ProxyOwnershipJournalStoring
   ) {
     self.lifecycle = lifecycle
     self.configurationChecker = configurationChecker
     self.preferences = preferences
+    self.journalStore = journalStore
   }
 
-  func authorizeSystemProxy(withReply reply: @escaping (NSError?) -> Void) {
+  func authorizeSystemProxy(restorationOnly: Bool, withReply reply: @escaping (NSError?) -> Void) {
     let response = ProxyXPCReply { _, error in reply(error) }
     let admitted = authorizationLock.withLock {
       guard !authorizationPending else { return false }
@@ -60,7 +63,10 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
     authorizationQueue.async { [self] in
       defer { authorizationLock.withLock { authorizationPending = false } }
       do {
-        try preferences.authorizeForStart()
+        let needsAuthorization = try !restorationOnly || journalStore.load() != nil
+        if needsAuthorization {
+          try preferences.authorizeForStart()
+        }
         response.finish(data: nil, error: nil)
       } catch SystemProxyPreferencesError.authorizationDenied {
         response.finish(

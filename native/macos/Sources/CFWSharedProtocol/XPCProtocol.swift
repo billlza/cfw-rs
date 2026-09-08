@@ -36,7 +36,7 @@ public enum SystemProxyAuthorizationFailure: Int, Sendable {
 @objc public protocol CFWProxyAgentXPCProtocol {
   /// Requests only the macOS network-preferences right. It starts no engine,
   /// acquires no Authority lease, and carries no credential material over XPC.
-  func authorizeSystemProxy(withReply reply: @escaping (NSError?) -> Void)
+  func authorizeSystemProxy(restorationOnly: Bool, withReply reply: @escaping (NSError?) -> Void)
 
   /// Executes one versioned command envelope. A malformed envelope is returned
   /// as an NSError because it cannot be safely correlated to a trusted request

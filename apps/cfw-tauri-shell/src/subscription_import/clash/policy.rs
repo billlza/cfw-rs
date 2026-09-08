@@ -9,6 +9,16 @@ use super::{MAX_OUTBOUNDS, OutboundCollector, ProxyFields, YamlValue};
 struct Group {
     tag: String,
     members: Vec<String>,
+    algorithm: GroupAlgorithm,
+}
+
+enum GroupAlgorithm {
+    Select,
+    UrlTest {
+        url: String,
+        interval_seconds: u32,
+        tolerance_ms: u16,
+    },
 }
 
 pub(super) fn import_policy(
@@ -48,11 +58,39 @@ pub(super) fn import_policy(
                     "proxy-groups[{index}] has a duplicate or reserved name"
                 ));
             }
-            if fields.require_string("type")? != "select" {
-                return Err(format!(
-                    "proxy-groups[{index}] uses an unsupported group algorithm; no partial profile was saved"
-                ));
-            }
+            let algorithm = match fields.require_string("type")?.as_str() {
+                "select" => GroupAlgorithm::Select,
+                "url-test" => {
+                    let url = fields.require_string("url")?;
+                    let interval_seconds = fields
+                        .require_string("interval")?
+                        .parse::<u32>()
+                        .map_err(|_| {
+                            format!("proxy-groups[{index}] interval must be an integer")
+                        })?;
+                    let tolerance_ms = fields
+                        .take_string("tolerance")?
+                        .map(|value| value.parse::<u16>())
+                        .transpose()
+                        .map_err(|_| format!("proxy-groups[{index}] tolerance must be an integer"))?
+                        .unwrap_or(0);
+                    if fields.take_bool("lazy")? == Some(false) {
+                        return Err(format!(
+                            "proxy-groups[{index}] requires continuous idle probing, which the runtime does not support"
+                        ));
+                    }
+                    GroupAlgorithm::UrlTest {
+                        url,
+                        interval_seconds,
+                        tolerance_ms,
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "proxy-groups[{index}] uses an unsupported group algorithm; no partial profile was saved"
+                    ));
+                }
+            };
             let members = fields
                 .take_string_list("proxies")?
                 .ok_or_else(|| format!("proxy-groups[{index}] has no proxies list"))?;
@@ -67,7 +105,11 @@ pub(super) fn import_policy(
             fields.reject_leftovers()?;
             let tag = collector.unique_tag(name.clone())?;
             names.insert(name, tag.clone());
-            groups.push(Group { tag, members });
+            groups.push(Group {
+                tag,
+                members,
+                algorithm,
+            });
         }
     }
     for group in groups {
@@ -76,10 +118,35 @@ pub(super) fn import_policy(
             .iter()
             .map(|name| resolve_target(name, collector, &mut names))
             .collect::<Result<Vec<_>, _>>()?;
-        collector
-            .outbounds
-            .push(json!({"type": "selector", "tag": group.tag, "outbounds": members}));
+        let outbound = match group.algorithm {
+            GroupAlgorithm::Select => {
+                json!({"type": "selector", "tag": group.tag, "outbounds": members})
+            }
+            GroupAlgorithm::UrlTest {
+                url,
+                interval_seconds,
+                tolerance_ms,
+            } => json!({
+                "type": "urltest", "tag": group.tag, "outbounds": members,
+                "url": url, "interval_seconds": interval_seconds, "tolerance_ms": tolerance_ms,
+                "idle_timeout_seconds": interval_seconds.max(1800),
+            }),
+        };
+        collector.outbounds.push(outbound);
     }
+    collector.detours = collector
+        .detours
+        .iter()
+        .map(|(source, target)| {
+            let source = names
+                .get(source)
+                .ok_or("Clash detour source is undeclared")?;
+            let target = names
+                .get(target)
+                .ok_or("Clash dialer-proxy target is undeclared")?;
+            Ok((source.clone(), target.clone()))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
     if let Some(value) = root.take("rules") {
         let YamlValue::Sequence(entries) = value else {
             return Err("Clash rules must be a sequence".into());

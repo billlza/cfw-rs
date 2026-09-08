@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -116,6 +117,10 @@ impl CredentialBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKind {
+    #[serde(rename = "wireguard_private_key")]
+    WireGuardPrivateKey,
+    #[serde(rename = "wireguard_pre_shared_key")]
+    WireGuardPreSharedKey,
     Socks5Username,
     Socks5Password,
     ShadowsocksPassword,
@@ -191,6 +196,10 @@ pub struct InvalidCredentialRef;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialTarget {
+    #[serde(rename = "wireguard_private_key")]
+    WireGuardPrivateKey,
+    #[serde(rename = "wireguard_pre_shared_key")]
+    WireGuardPreSharedKey,
     Socks5Username,
     Socks5Password,
     ShadowsocksPassword,
@@ -208,6 +217,8 @@ pub enum CredentialTarget {
 impl CredentialTarget {
     pub fn credential_kind(self) -> CredentialKind {
         match self {
+            Self::WireGuardPrivateKey => CredentialKind::WireGuardPrivateKey,
+            Self::WireGuardPreSharedKey => CredentialKind::WireGuardPreSharedKey,
             Self::Socks5Username => CredentialKind::Socks5Username,
             Self::Socks5Password => CredentialKind::Socks5Password,
             Self::ShadowsocksPassword => CredentialKind::ShadowsocksPassword,
@@ -224,6 +235,8 @@ impl CredentialTarget {
 
     fn pointer_suffix(self) -> &'static str {
         match self {
+            Self::WireGuardPrivateKey => "private_key",
+            Self::WireGuardPreSharedKey => "peers/0/pre_shared_key",
             Self::Socks5Username => "username",
             Self::Socks5Password
             | Self::ShadowsocksPassword
@@ -235,13 +248,32 @@ impl CredentialTarget {
             Self::Hysteria2ObfsPassword => "obfs/password",
         }
     }
+
+    fn container(self) -> &'static str {
+        match self {
+            Self::WireGuardPrivateKey | Self::WireGuardPreSharedKey => "endpoints",
+            Self::Socks5Username
+            | Self::Socks5Password
+            | Self::ShadowsocksPassword
+            | Self::VmessUuid
+            | Self::VlessUuid
+            | Self::TrojanPassword
+            | Self::Hysteria2Password
+            | Self::Hysteria2ObfsPassword
+            | Self::AnyTlsPassword
+            | Self::TuicUuid
+            | Self::TuicPassword => "outbounds",
+        }
+    }
 }
 
 /// Closed credential-injection instruction consumed by the native vault.
 ///
 /// `json_pointer` is serialized for cross-language verification, but is always
 /// derived from `target` and `outbound_index`; deserialization rejects any
-/// disagreement or unknown field.
+/// disagreement or unknown field. The existing wire field `outbound_index`
+/// indexes the target's container: WireGuard targets use `endpoints`, while
+/// all other targets use `outbounds`. No caller-controlled container is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialSlot {
@@ -265,7 +297,11 @@ impl CredentialSlot {
         if reference.kind() != target.credential_kind() {
             return Err(CredentialSlotError::KindMismatch);
         }
-        let json_pointer = format!("/outbounds/{outbound_index}/{}", target.pointer_suffix());
+        let json_pointer = format!(
+            "/{}/{outbound_index}/{}",
+            target.container(),
+            target.pointer_suffix()
+        );
         Ok(Self {
             reference,
             target,
@@ -396,6 +432,13 @@ impl<'a> CredentialSecret<'a> {
     pub fn validate_for_kind(&self, kind: CredentialKind) -> Result<(), InvalidCredentialSecret> {
         if matches!(
             kind,
+            CredentialKind::WireGuardPrivateKey | CredentialKind::WireGuardPreSharedKey
+        ) && !valid_wireguard_key(self.0)
+        {
+            return Err(InvalidCredentialSecret);
+        }
+        if matches!(
+            kind,
             CredentialKind::Socks5Username | CredentialKind::Socks5Password
         ) && self.0.len() > MAX_SOCKS5_CREDENTIAL_SECRET_BYTES
         {
@@ -412,6 +455,13 @@ impl<'a> CredentialSecret<'a> {
         }
         Ok(())
     }
+}
+
+pub(crate) fn valid_wireguard_key(value: &str) -> bool {
+    value.len() == 44
+        && STANDARD.decode(value).is_ok_and(|key| {
+            key.len() == 32 && key.iter().any(|byte| *byte != 0) && STANDARD.encode(&key) == value
+        })
 }
 
 impl fmt::Debug for CredentialSecret<'_> {

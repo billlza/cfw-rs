@@ -220,11 +220,20 @@ gomobile bind \
   ./experimental/libbox
 ```
 
-The recorded tags match the pinned upstream builder:
+The recorded tags enable the pinned upstream transports, including the
+WireGuard userspace stack:
 
 ```text
-with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,grpcnotrace
+with_quic,with_utls,with_clash_api,with_wireguard,with_gvisor,badlinkname,tfogo_checklinkname0,grpcnotrace
 ```
+
+WireGuard uses the userspace stack (`system=false`); NetworkExtension remains
+the only owner of system tunnel interfaces. The security dependency patch also
+repairs the pinned URL-test group's concurrent interface assignments using an
+immutable atomic selection snapshot, and preserves an explicitly configured
+zero tolerance. The patch is checked against the upstream commit and complete
+patched source. `scripts/test_advanced_protocols.sh` exercises these paths with
+real local protocol peers and the race detector.
 
 `with_low_memory` is the upstream non-macOS-only tag and is not applied to the
 macOS slice.

@@ -18,12 +18,23 @@ const ANYTLS = { id: "6e2f5a7c-8d91-4b3a-9c52-0a1b2c3d4e5f", kind: "anytls_passw
 const TUIC_UUID = { id: "7f3a6b8d-9e12-4c4b-ad63-1b2c3d4e5f60", kind: "tuic_uuid" };
 const TUIC_PASSWORD = { id: "8a4b7c9e-0f23-4d5c-be74-2c3d4e5f6071", kind: "tuic_password" };
 
+test("WireGuard provisioning validates canonical nonzero keys before IPC", () => {
+  for (const kind of ["wireguard_private_key", "wireguard_pre_shared_key"]) {
+    const references = [{ id: FIRST.id, kind }];
+    const key = btoa(String.fromCharCode(...new Array(32).fill(1)));
+    assert.equal(credentialProvisionBatch(references, [key])[0].secret, key);
+    for (const invalid of ["bad", btoa(String.fromCharCode(...new Array(32).fill(0))), key.slice(0, -1)]) {
+      assert.throws(() => credentialProvisionBatch(references, [invalid]), /WireGuard/u);
+    }
+  }
+});
+
 test("credential references must be immutable UUIDs of a known kind", () => {
   assert.deepEqual(
     normalizeCredentialReferences([FIRST, SECOND, ANYTLS, TUIC_UUID, TUIC_PASSWORD]),
     [FIRST, SECOND, ANYTLS, TUIC_UUID, TUIC_PASSWORD],
   );
-  assert.deepEqual(CREDENTIAL_KINDS.slice(-3), ["anytls_password", "tuic_uuid", "tuic_password"]);
+  assert.deepEqual(CREDENTIAL_KINDS.slice(-5), ["anytls_password", "tuic_uuid", "tuic_password", "wireguard_private_key", "wireguard_pre_shared_key"]);
   assert.deepEqual(normalizeCredentialReferences([]), []);
   for (const rejected of [
     [{ id: "not-a-uuid", kind: "trojan_password" }],
@@ -120,6 +131,8 @@ test("credential kinds are labelled for a person, not for a schema", () => {
   assert.equal(credentialLabel("anytls_password"), "AnyTLS Password");
   assert.equal(credentialLabel("tuic_uuid"), "TUIC UUID");
   assert.equal(credentialLabel("tuic_password"), "TUIC Password");
+  assert.equal(credentialLabel("wireguard_private_key"), "WireGuard Private Key");
+  assert.equal(credentialLabel("wireguard_pre_shared_key"), "WireGuard Pre-shared Key");
 });
 
 test("SOCKS5 credentials preserve text and enforce 255-byte authentication fields", () => {

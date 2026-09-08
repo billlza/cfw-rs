@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 
 use crate::profile::{
-    MAX_OUTBOUNDS, OutboundTls, ProfileDocument, ProfileOutbound, V2RayPacketEncoding,
-    V2RayTransport, VlessFlow,
+    MAX_OUTBOUNDS, OutboundTls, ProfileDocument, ProfileOutbound, TlsCurve, TlsMinimumVersion,
+    V2RayPacketEncoding, V2RayTransport, VlessFlow,
 };
 use crate::{ConfigError, CredentialKind, CredentialRef};
 
@@ -59,6 +62,10 @@ impl ProfileDocument {
             ));
         }
         self.validate_routing(&tags)?;
+        if let Some(dns) = &self.dns {
+            dns.validate()?;
+        }
+        crate::dns_policy::validate_hosts(&self.hosts)?;
         Ok(())
     }
 }
@@ -68,6 +75,87 @@ impl ProfileOutbound {
         validate_tag(self.tag(), &format!("{path}.tag"))?;
         match self {
             Self::Direct { .. } | Self::Block { .. } => Ok(()),
+            Self::WireGuard {
+                server,
+                server_port,
+                local_addresses,
+                private_key_credential_ref,
+                peer_public_key,
+                peer_allowed_ips,
+                pre_shared_key_credential_ref,
+                mtu,
+                persistent_keepalive_seconds,
+                ..
+            } => {
+                if peer_allowed_ips.is_empty()
+                    || peer_allowed_ips.len() > 2
+                    || peer_allowed_ips
+                        .iter()
+                        .any(|prefix| !matches!(prefix.as_str(), "0.0.0.0/0" | "::/0"))
+                    || peer_allowed_ips.iter().collect::<BTreeSet<_>>().len()
+                        != peer_allowed_ips.len()
+                {
+                    return Err(unsupported_shape(
+                        path,
+                        "WireGuard peer requires unique IPv4 and/or IPv6 default routes",
+                    ));
+                }
+                validate_remote_endpoint(server, *server_port, path)?;
+                validate_reference_kind_at(
+                    private_key_credential_ref,
+                    CredentialKind::WireGuardPrivateKey,
+                    path,
+                    "private_key_credential_ref",
+                )?;
+                if let Some(reference) = pre_shared_key_credential_ref {
+                    validate_reference_kind_at(
+                        reference,
+                        CredentialKind::WireGuardPreSharedKey,
+                        path,
+                        "pre_shared_key_credential_ref",
+                    )?;
+                }
+                if !crate::credentials::valid_wireguard_key(peer_public_key)
+                    || !(1280..=9000).contains(mtu)
+                    || *persistent_keepalive_seconds > 3600
+                {
+                    return Err(unsupported_shape(
+                        path,
+                        "WireGuard requires a 32-byte peer key, MTU 1280..=9000 and keepalive 0..=3600 seconds",
+                    ));
+                }
+                if local_addresses.is_empty() || local_addresses.len() > 2 {
+                    return Err(unsupported_shape(
+                        path,
+                        "WireGuard requires one IPv4 and/or one IPv6 address",
+                    ));
+                }
+                let mut families = BTreeSet::new();
+                for address in local_addresses {
+                    let (host, prefix) = address.split_once('/').ok_or_else(|| {
+                        unsupported_shape(path, "WireGuard address requires an IP prefix")
+                    })?;
+                    let host = host.parse::<IpAddr>().map_err(|_| {
+                        unsupported_shape(path, "WireGuard address must be numeric")
+                    })?;
+                    let prefix = prefix
+                        .parse::<u8>()
+                        .map_err(|_| unsupported_shape(path, "WireGuard prefix is invalid"))?;
+                    if host.is_unspecified()
+                        || host.is_multicast()
+                        || host.is_loopback()
+                        || prefix > if host.is_ipv4() { 32 } else { 128 }
+                        || !families.insert(host.is_ipv4())
+                        || format!("{host}/{prefix}") != *address
+                    {
+                        return Err(unsupported_shape(
+                            path,
+                            "WireGuard address is invalid, duplicated by family or noncanonical",
+                        ));
+                    }
+                }
+                Ok(())
+            }
             Self::Selector {
                 outbounds, default, ..
             } => {
@@ -79,6 +167,51 @@ impl ProfileOutbound {
                     return Err(unsupported_shape(
                         path,
                         "selector requires unique members and a default from its members",
+                    ));
+                }
+                Ok(())
+            }
+            Self::UrlTest {
+                outbounds,
+                url,
+                interval_seconds,
+                tolerance_ms,
+                idle_timeout_seconds,
+                ..
+            } => {
+                if outbounds.is_empty()
+                    || outbounds.len() > MAX_OUTBOUNDS
+                    || outbounds.iter().collect::<BTreeSet<_>>().len() != outbounds.len()
+                {
+                    return Err(unsupported_shape(
+                        path,
+                        "automatic group requires unique members",
+                    ));
+                }
+                let parsed = url::Url::parse(url)
+                    .map_err(|_| unsupported_shape(path, "invalid health-check URL"))?;
+                if url.len() > MAX_PATH_BYTES
+                    || url.chars().any(char::is_whitespace)
+                    || !matches!(parsed.scheme(), "http" | "https")
+                    || parsed.host_str().is_none()
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                    || parsed.port() == Some(0)
+                {
+                    return Err(unsupported_shape(
+                        path,
+                        "health-check URL must be bounded HTTP(S) without credentials or a fragment",
+                    ));
+                }
+                if !(30..=86_400).contains(interval_seconds)
+                    || *tolerance_ms > 10_000
+                    || *idle_timeout_seconds < *interval_seconds
+                    || *idle_timeout_seconds > 604_800
+                {
+                    return Err(unsupported_shape(
+                        path,
+                        "automatic group interval must be 30..=86400 seconds, tolerance at most 10000 ms, and idle timeout between interval and 604800 seconds",
                     ));
                 }
                 Ok(())
@@ -307,7 +440,7 @@ fn validate_remote_endpoint(server: &str, port: u16, path: &str) -> Result<(), C
     validate_server_name(server, &format!("{path}.server"))
 }
 
-fn validate_server_name(server: &str, path: &str) -> Result<(), ConfigError> {
+pub(crate) fn validate_server_name(server: &str, path: &str) -> Result<(), ConfigError> {
     if server.is_empty()
         || server.len() > MAX_SERVER_BYTES
         || server.trim() != server
@@ -345,7 +478,7 @@ fn validate_server_name(server: &str, path: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn remote_endpoint_ip_is_unusable(address: IpAddr) -> bool {
+pub(crate) fn remote_endpoint_ip_is_unusable(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
             let octets = address.octets();
@@ -404,7 +537,7 @@ fn validate_quic_tls(tls: &OutboundTls, path: &str) -> Result<(), ConfigError> {
 }
 
 impl OutboundTls {
-    fn validate(&self, path: &str) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self, path: &str) -> Result<(), ConfigError> {
         validate_server_name(&self.server_name, &format!("{path}.tls.server_name"))?;
         if self.alpn.len() > MAX_ALPN_ENTRIES
             || self.alpn.iter().any(|alpn| {
@@ -418,12 +551,74 @@ impl OutboundTls {
                 "ALPN list is oversized or contains an invalid token",
             ));
         }
-        if !self.enabled && (!self.alpn.is_empty() || self.utls.is_some() || self.reality.is_some())
+        if !self.enabled
+            && (!self.alpn.is_empty()
+                || self.utls.is_some()
+                || self.reality.is_some()
+                || self.ech.is_some()
+                || !self.curve_preferences.is_empty()
+                || self.min_version == TlsMinimumVersion::Tls13)
         {
             return Err(unsupported_shape(
                 format!("{path}.tls.enabled"),
-                "ALPN, uTLS, and Reality require enabled TLS",
+                "TLS options require enabled TLS",
             ));
+        }
+        if self.curve_preferences.len() > 5
+            || self.curve_preferences.iter().collect::<BTreeSet<_>>().len()
+                != self.curve_preferences.len()
+        {
+            return Err(unsupported_shape(
+                path,
+                "TLS curves must be unique and supported",
+            ));
+        }
+        if !self.curve_preferences.is_empty() && (self.utls.is_some() || self.reality.is_some()) {
+            return Err(unsupported_shape(
+                path,
+                "explicit key-exchange curves require standard TLS; this runtime's uTLS and Reality adapters do not apply them",
+            ));
+        }
+        if self.curve_preferences == [TlsCurve::X25519MLKEM768]
+            && self.min_version != TlsMinimumVersion::Tls13
+        {
+            return Err(unsupported_shape(
+                path,
+                "requiring X25519MLKEM768 also requires TLS 1.3 to prevent a classical TLS 1.2 downgrade",
+            ));
+        }
+        if let Some(ech) = &self.ech {
+            if !ech.enabled
+                || self.reality.is_some()
+                || self.min_version != TlsMinimumVersion::Tls13
+            {
+                return Err(unsupported_shape(
+                    path,
+                    "ECH must be enabled with TLS 1.3 and cannot be combined with Reality",
+                ));
+            }
+            let pem = ech.config.join("\n");
+            let payload = pem
+                .strip_prefix("-----BEGIN ECH CONFIGS-----\n")
+                .and_then(|value| {
+                    value
+                        .trim_end_matches('\n')
+                        .strip_suffix("\n-----END ECH CONFIGS-----")
+                })
+                .ok_or_else(|| {
+                    unsupported_shape(path, "ECH requires an inline ECH CONFIGS PEM block")
+                })?;
+            if pem.len() > 16_384 || ech.config.len() > 256 {
+                return Err(unsupported_shape(path, "ECH config exceeds its size bound"));
+            }
+            let bytes = STANDARD
+                .decode(payload.replace('\n', ""))
+                .map_err(|_| unsupported_shape(path, "ECH config contains invalid base64"))?;
+            if bytes.len() < 6
+                || usize::from(u16::from_be_bytes([bytes[0], bytes[1]])) != bytes.len() - 2
+            {
+                return Err(unsupported_shape(path, "ECHConfigList length is invalid"));
+            }
         }
         if self.utls.as_ref().is_some_and(|utls| !utls.enabled) {
             return Err(unsupported_shape(

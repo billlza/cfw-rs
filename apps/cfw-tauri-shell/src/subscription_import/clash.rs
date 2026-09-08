@@ -14,7 +14,7 @@
 //!   destination, trust, or framing), or fails the import with the key name.
 //! - Requests this app refuses to honour fail closed instead of being
 //!   silently dropped: `skip-cert-verify: true`, Shadowsocks plugins,
-//!   `udp-over-tcp`, `smux`, proxy chaining via `dialer-proxy`, TLS
+//!   `udp-over-tcp`, `smux`, TLS
 //!   certificate pinning via `fingerprint`, and every proxy type outside the
 //!   closed schema. Hysteria2 port hopping accepts only canonical
 //!   canonical non-overlapping port sets and one fixed 1..=3600 second hop
@@ -27,6 +27,7 @@
 //!   applies number resolution to them) and leave this module only as
 //!   credential-vault entries, never inside the stored profile.
 
+mod dns;
 mod policy;
 
 use cfw_singbox_config::{CredentialKind, MAX_OUTBOUNDS};
@@ -102,6 +103,7 @@ pub(super) fn import_clash_document(
         collector.outbounds.push(outbound);
     }
     policy::import_policy(&mut root, &mut collector, names)?;
+    dns::import_dns(&mut root, &mut collector)?;
     collector.into_subscription()
 }
 
@@ -113,6 +115,7 @@ fn convert_proxy(
     let name = fields.require_string("name")?;
     let source_name = name.clone();
     enforce_common_guards(&mut fields)?;
+    let detour = fields.take_string("dialer-proxy")?;
     let outbound = match kind.as_str() {
         "socks5" => convert_socks5(collector, &mut fields, name)?,
         "ss" => convert_shadowsocks(collector, &mut fields, name)?,
@@ -122,6 +125,7 @@ fn convert_proxy(
         "hysteria2" => convert_hysteria2(collector, &mut fields, name)?,
         "anytls" => convert_anytls(collector, &mut fields, name)?,
         "tuic" => convert_tuic(collector, &mut fields, name)?,
+        "wireguard" => convert_wireguard(collector, &mut fields, name)?,
         other => {
             return Err(format!(
                 "{} has a proxy type outside the supported set (socks5, ss, vmess, vless, trojan, hysteria2, anytls, tuic): {}",
@@ -131,6 +135,9 @@ fn convert_proxy(
         }
     };
     fields.reject_leftovers()?;
+    if let Some(detour) = detour {
+        collector.detours.insert(source_name.clone(), detour);
+    }
     Ok((source_name, outbound))
 }
 
@@ -167,6 +174,49 @@ fn convert_socks5(
     )
 }
 
+fn convert_wireguard(
+    collector: &mut OutboundCollector,
+    fields: &mut ProxyFields,
+    name: String,
+) -> Result<Value, String> {
+    let server = fields.require_string("server")?;
+    let server_port = fields.require_port()?;
+    let mut addresses = Vec::new();
+    for (field, prefix) in [("ip", 32), ("ipv6", 128)] {
+        if let Some(value) = fields.take_string(field)? {
+            addresses.push(if value.contains('/') {
+                value
+            } else {
+                format!("{value}/{prefix}")
+            });
+        }
+    }
+    super::wireguard::convert(
+        collector,
+        super::wireguard::WireGuardNode {
+            name,
+            server,
+            server_port,
+            local_addresses: addresses,
+            private_key: fields.require_string("private-key")?,
+            public_key: fields.require_string("public-key")?,
+            pre_shared_key: fields.take_string("pre-shared-key")?,
+            mtu: fields
+                .take_string("mtu")?
+                .map(|value| value.parse::<u16>())
+                .transpose()
+                .map_err(|_| "WireGuard MTU is invalid")?
+                .unwrap_or(1420),
+            keepalive: fields
+                .take_string("persistent-keepalive")?
+                .map(|value| value.parse::<u16>())
+                .transpose()
+                .map_err(|_| "WireGuard keepalive is invalid")?
+                .unwrap_or(0),
+        },
+    )
+}
+
 /// Fails closed on requests the closed schema cannot honour, independent of
 /// the proxy type.
 fn enforce_common_guards(fields: &mut ProxyFields) -> Result<(), String> {
@@ -177,7 +227,6 @@ fn enforce_common_guards(fields: &mut ProxyFields) -> Result<(), String> {
         ));
     }
     for (key, reason) in [
-        ("dialer-proxy", "proxy chaining"),
         ("smux", "stream multiplexing"),
         ("fingerprint", "TLS certificate pinning"),
     ] {

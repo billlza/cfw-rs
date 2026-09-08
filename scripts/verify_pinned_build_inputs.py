@@ -165,7 +165,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "944008d03d364fba5e24c3c487c20330c5fc7ff9be15d02031484a90cfd45e8c"
+    "4c7b345936c2c7b080d0a6090a98b10ee74eea9c84699f9ceb4319bfae35ab6d"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -274,6 +274,8 @@ REQUIRED_ENGINE_START_PATH_BINDINGS = frozenset(
 )
 REQUIRED_LIBBOX_BUILD_TAGS = frozenset(
     {
+        "with_wireguard",
+        "with_gvisor",
         "with_quic",
         "with_utls",
         "with_clash_api",

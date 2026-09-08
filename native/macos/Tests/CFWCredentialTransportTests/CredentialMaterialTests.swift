@@ -3,6 +3,56 @@ import CFWSharedProtocol
 import Foundation
 import Testing
 
+@Test func wireguardKeysInjectIntoOnlyTheDeclaredUserspaceEndpoint() throws {
+  let privateKey = CredentialReference(
+    id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!, kind: .wireguardPrivateKey)
+  let sharedKey = CredentialReference(
+    id: UUID(uuidString: "22222222-2222-4222-8222-222222222222")!, kind: .wireguardPreSharedKey)
+  let slots = [
+    try CredentialSlot(
+      reference: privateKey, target: .wireguardPrivateKey, outboundIndex: 0,
+      jsonPointer: "/endpoints/0/private_key"),
+    try CredentialSlot(
+      reference: sharedKey, target: .wireguardPreSharedKey, outboundIndex: 0,
+      jsonPointer: "/endpoints/0/peers/0/pre_shared_key"),
+  ]
+  let first = Data(repeating: 1, count: 32).base64EncodedString()
+  let second = Data(repeating: 2, count: 32).base64EncodedString()
+  var material = try CredentialMaterial(entries: [
+    CredentialMaterialEntry(reference: privateKey, secret: Data(first.utf8)),
+    CredentialMaterialEntry(reference: sharedKey, secret: Data(second.utf8)),
+  ])
+  defer { material.erase() }
+  let template = Data(
+    #"{"outbounds":[{"type":"direct","tag":"direct"}],"endpoints":[{"type":"wireguard","system":false,"private_key":"","peers":[{"pre_shared_key":""}]}]}"#
+      .utf8)
+  let injected = try CredentialInjector.inject(template: template, slots: slots, material: material)
+  let root = try #require(JSONSerialization.jsonObject(with: injected) as? [String: Any])
+  let endpoints = try #require(root["endpoints"] as? [[String: Any]])
+  #expect(endpoints[0]["private_key"] as? String == first)
+  let peers = try #require(endpoints[0]["peers"] as? [[String: Any]])
+  #expect(peers[0]["pre_shared_key"] as? String == second)
+  #expect((root["outbounds"] as? [[String: Any]])?.first?["type"] as? String == "direct")
+  #expect(throws: NativeBridgeProtocolError.invalidCredentialSlot) {
+    try CredentialSlot(
+      reference: privateKey, target: .wireguardPrivateKey, outboundIndex: 0,
+      jsonPointer: "/outbounds/0/private_key")
+  }
+  for invalid in [
+    "invalid", Data(repeating: 0, count: 32).base64EncodedString(),
+    Data(repeating: 1, count: 31).base64EncodedString(),
+  ] {
+    #expect(throws: CredentialMaterialError.invalidSecret) {
+      try CredentialMaterialEntry(reference: privateKey, secret: Data(invalid.utf8))
+    }
+  }
+  #expect(throws: CredentialMaterialError.nonEmptyPlaceholder("/endpoints/0/private_key")) {
+    try CredentialInjector.inject(
+      template: Data(#"{"endpoints":[{"type":"unknown","private_key":""}]}"#.utf8), slots: slots,
+      material: material)
+  }
+}
+
 @Test func emptyCredentialMaterialRoundTrips() throws {
   var decoded = try EphemeralCredentialCodec.decode(
     EphemeralCredentialCodec.encode(.empty)

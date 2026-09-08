@@ -255,7 +255,7 @@ BUILD_NATIVE = (
     "libbox_verify_xcframework_artifact\n"
 )
 BUILD_TAGS = (
-    "with_quic,with_utls,with_clash_api,badlinkname,"
+    "with_quic,with_utls,with_clash_api,with_wireguard,with_gvisor,badlinkname,"
     "tfogo_checklinkname0,grpcnotrace"
 )
 CONTROLLER_RELATIVE_PATH = "crates/cfw-singbox-config/src/controller.rs"
@@ -962,6 +962,8 @@ class Fixture:
                 "pinKey": "LIBBOX_BUILD_TAGS",
                 "value": BUILD_TAGS,
                 "required": [
+                    {"tag": "with_wireguard", "reason": "WireGuard endpoints"},
+                    {"tag": "with_gvisor", "reason": "userspace WireGuard"},
                     {"tag": "with_quic", "reason": "QUIC outbounds"},
                     {"tag": "with_utls", "reason": "uTLS fingerprints"},
                     {"tag": "with_clash_api", "reason": "engine start path needs the server"},

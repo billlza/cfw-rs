@@ -5,6 +5,7 @@
 
 mod controller;
 mod credentials;
+mod dns_policy;
 mod error;
 mod profile;
 mod profile_projection;

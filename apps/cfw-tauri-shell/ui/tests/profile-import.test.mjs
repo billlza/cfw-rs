@@ -20,7 +20,7 @@ test("subscription URLs and node links use distinct native import boundaries", (
 });
 
 test("file picker and drag-drop admit supported profile source extensions", () => {
-  for (const extension of ["json", "yaml", "yml", "txt"]) {
+  for (const extension of ["json", "yaml", "yml", "conf", "txt"]) {
     assert.ok(PROFILE_SOURCE_ACCEPT.split(",").includes(`.${extension}`));
     assert.equal(isProfileSourcePath(`/private/source.${extension.toUpperCase()}`), true);
   }

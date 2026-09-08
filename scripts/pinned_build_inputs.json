@@ -384,7 +384,7 @@
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "ddf459a154945b48ab74407910380e2af0e2d9aeda823fcd340c8725b1808324"
+      "sha256": "4c971719dd82ce41e7c629e2e9f6f88f4cb93a298f0a7a34f5bdc0abf6b4deb7"
     },
     {
       "name": "sing-box raw packet tun patch",
@@ -406,7 +406,7 @@
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "b4f0f760fbc5d4faad51e575077824eb5b815d723a33bf6e165c2a1c98052eaf",
+  "combinedDiffSha256": "888e52565dcde4961ee6f35d4f23669df68205ff9448a16b55ed87cd1d5cb0df",
   "sourceContract": {
     "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
     "patchedDiffSha256": "6f40e24c33074682bcf14af20132fb05b1b05c75a09f21b085e011bd84445d82",
@@ -438,8 +438,16 @@
   ],
   "libboxBuildTags": {
     "pinKey": "LIBBOX_BUILD_TAGS",
-    "value": "with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,grpcnotrace",
+    "value": "with_quic,with_utls,with_clash_api,with_wireguard,with_gvisor,badlinkname,tfogo_checklinkname0,grpcnotrace",
     "required": [
+      {
+        "tag": "with_wireguard",
+        "reason": "WireGuard endpoint construction requires the real protocol implementation."
+      },
+      {
+        "tag": "with_gvisor",
+        "reason": "WireGuard uses a userspace stack with system=false so NetworkExtension remains the only owner of system tunnel interfaces."
+      },
       {
         "tag": "with_quic",
         "reason": "QUIC-based outbounds (Hysteria2, TUIC, and QUIC transports) are product features."

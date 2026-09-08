@@ -12,7 +12,7 @@ pub const MAX_PROFILE_BYTES: usize = 384 * 1024;
 pub const MAX_ENGINE_CONFIG_BYTES: usize = 384 * 1024;
 pub const MAX_PROFILE_NODES: usize = 100_000;
 
-const ALLOWED_PROFILE_KEYS: &[&str] = &["outbounds", "route"];
+const ALLOWED_PROFILE_KEYS: &[&str] = &["outbounds", "route", "detours", "dns", "hosts"];
 
 const FORBIDDEN_PROFILE_KEYS: &[&str] = &[
     "inbounds",
@@ -214,13 +214,20 @@ fn reject_forbidden_keys(
                 });
             }
             for (key, child) in map {
-                if CREDENTIAL_KEYS.contains(&key.as_str()) {
+                let policy_tag = matches!(path, "$.detours" | "$.hosts");
+                if CREDENTIAL_KEYS.contains(&key.as_str()) && !policy_tag {
                     return Err(ConfigError::CredentialRequiresKeychain {
                         path: path.to_string(),
                         key: key.clone(),
                     });
                 }
-                if is_forbidden_profile_key(key) {
+                let group_probe_url = key == "url"
+                    && map.get("type").and_then(Value::as_str) == Some("urltest")
+                    && path
+                        .strip_prefix("$.outbounds[")
+                        .and_then(|index| index.strip_suffix(']'))
+                        .is_some_and(|index| index.parse::<usize>().is_ok());
+                if is_forbidden_profile_key(key) && !group_probe_url && !policy_tag {
                     return Err(ConfigError::ForbiddenKey {
                         path: path.to_string(),
                         key: key.clone(),

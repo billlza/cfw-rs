@@ -114,6 +114,8 @@ public struct CredentialAudience: Codable, Equatable, Hashable, Sendable {
 }
 
 public enum CredentialKind: String, Codable, CaseIterable, Sendable {
+  case wireguardPrivateKey = "wireguard_private_key"
+  case wireguardPreSharedKey = "wireguard_pre_shared_key"
   case socks5Username = "socks5_username"
   case socks5Password = "socks5_password"
   case shadowsocksPassword = "shadowsocks_password"
@@ -130,6 +132,10 @@ public enum CredentialKind: String, Codable, CaseIterable, Sendable {
 extension CredentialKind {
   public func admitsSecretSyntax(_ value: String) -> Bool {
     switch self {
+    case .wireguardPrivateKey, .wireguardPreSharedKey:
+      guard value.utf8.count == 44, let key = Data(base64Encoded: value) else { return false }
+      return key.count == 32 && key.contains(where: { $0 != 0 })
+        && key.base64EncodedString() == value
     case .socks5Username, .socks5Password:
       return (1...255).contains(value.utf8.count)
     case .vmessUUID, .vlessUUID, .tuicUUID:
@@ -143,6 +149,8 @@ extension CredentialKind {
 }
 
 public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
+  case wireguardPrivateKey = "wireguard_private_key"
+  case wireguardPreSharedKey = "wireguard_pre_shared_key"
   case socks5Username = "socks5_username"
   case socks5Password = "socks5_password"
   case shadowsocksPassword = "shadowsocks_password"
@@ -157,6 +165,8 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
 
   fileprivate var credentialKind: CredentialKind {
     switch self {
+    case .wireguardPrivateKey: .wireguardPrivateKey
+    case .wireguardPreSharedKey: .wireguardPreSharedKey
     case .socks5Username: .socks5Username
     case .socks5Password: .socks5Password
     case .shadowsocksPassword: .shadowsocksPassword
@@ -173,6 +183,8 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
 
   fileprivate var pointerSuffix: String {
     switch self {
+    case .wireguardPrivateKey: "private_key"
+    case .wireguardPreSharedKey: "peers/0/pre_shared_key"
     case .socks5Username:
       "username"
     case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
@@ -182,6 +194,16 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
       "uuid"
     case .hysteria2ObfsPassword:
       "obfs/password"
+    }
+  }
+
+  public var configurationContainer: String {
+    switch self {
+    case .wireguardPrivateKey, .wireguardPreSharedKey: "endpoints"
+    case .socks5Username, .socks5Password, .shadowsocksPassword,
+      .vmessUUID, .vlessUUID, .trojanPassword, .hysteria2Password,
+      .hysteria2ObfsPassword, .anytlsPassword, .tuicUUID, .tuicPassword:
+      "outbounds"
     }
   }
 }
@@ -308,7 +330,7 @@ public struct CredentialSlot: Codable, Equatable, Sendable {
   ) throws {
     guard Int(outboundIndex) < NativeBridgeProtocolConstants.maximumCredentialOutbounds,
       reference.kind == target.credentialKind,
-      jsonPointer == "/outbounds/\(outboundIndex)/\(target.pointerSuffix)"
+      jsonPointer == "/\(target.configurationContainer)/\(outboundIndex)/\(target.pointerSuffix)"
     else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }
@@ -470,7 +492,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
       {
         throw NativeBridgeProtocolError.conflictingCredentialKind
       }
-      guard let outbounds = root["outbounds"] as? [Any],
+      guard let outbounds = root[slot.target.configurationContainer] as? [Any],
         Int(slot.outboundIndex) < outbounds.count,
         let outbound = outbounds[Int(slot.outboundIndex)] as? [String: Any],
         Self.placeholder(in: outbound, target: slot.target) == ""
@@ -485,6 +507,16 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     target: CredentialTarget
   ) -> String? {
     switch target {
+    case .wireguardPrivateKey:
+      outbound["type"] as? String == "wireguard" ? outbound["private_key"] as? String : nil
+    case .wireguardPreSharedKey:
+      if outbound["type"] as? String == "wireguard",
+        let peers = outbound["peers"] as? [[String: Any]], peers.count == 1
+      {
+        peers[0]["pre_shared_key"] as? String
+      } else {
+        nil
+      }
     case .socks5Username:
       outbound["username"] as? String
     case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,

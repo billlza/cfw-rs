@@ -81,6 +81,11 @@ async fn saved_choices_require_controller_readback_or_the_new_runtime_is_stopped
                         Err(error) => panic!("accept: {error}"),
                     }
                 };
+                // Darwin inherits the listener's nonblocking flag. The HTTP
+                // stream uses bounded blocking reads after the bounded accept.
+                socket
+                    .set_nonblocking(false)
+                    .expect("blocking request stream");
                 socket
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .expect("read deadline");

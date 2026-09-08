@@ -128,8 +128,12 @@ queries limited to configured names/paths; it requires no additional privilege.
 These component checks still do not prove installed SystemConfiguration or TUN
 behavior. Installation and OS readback must complete before that claim.
 
-Automatic url-test/fallback groups, providers, arbitrary source DNS settings,
-LAN exposure and a standalone core while both switches are Off remain gaps.
+Build 40050 source adds automatic url-test groups, validated multihop detours,
+single-peer WireGuard and typed DNS transports. See the
+[September 9 capability audit](vpn-capability-audit-0.4.0.md) and
+[profile guide](profiles-modern-networking.md) for tested behavior and limits.
+Fallback groups, providers, arbitrary Clash DNS policies, LAN exposure and a
+standalone core while both switches are Off remain gaps.
 Unsupported policy imports fail explicitly before profile commit.
 
 | Capability | Installed CFW UI/code | CFM 40046 baseline | Assessment |
@@ -141,7 +145,7 @@ Unsupported policy imports fail explicitly before profile commit.
 | Routing groups | Configured groups and choices; group editor | Imported groups disappear; a simple selector may be synthesized | Original group behavior and default selection are not preserved |
 | Routing rules / GEOIP | YAML rules, rule editor and GeoIP database | Profile schema accepts only `route.final`; legacy GeoIP file is displayed but not consumed | A Rules page does not restore the missing rule model |
 | Proxy/rule providers | Provider controls in the proxy view | Provider management explicitly unsupported | Sidebar entry is not implemented parity |
-| DNS configuration | Nameservers, fallback, fake-IP filter, nameserver policy and DNS IPv6 | App-owned resolver projection; source DNS and hosts are not imported | Major configuration loss |
+| DNS configuration | Nameservers, fallback, fake-IP filter, nameserver policy and DNS IPv6 | Typed numeric resolvers, exact hosts, bootstrap pair, DNS IPv6 and blacklist fake-IP import added for 40050 | Fallback filters, nameserver policies and system hosts remain incomplete |
 | TUN configuration | Stack, interface, auto-detection, DNS hijack and routing options | Fixed Packet Tunnel projection and network plan | Native integration replaces the mechanism but omits user controls |
 | Local port / bind address | Editable port and bind; optional randomized ports | Bounded internal port selection, fixed loopback bind | Useful customization removed |
 | Allow LAN | User-controlled | Always unavailable | Restriction needs an explicit exposure policy, not a parity claim |

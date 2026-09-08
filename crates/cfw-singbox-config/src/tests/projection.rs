@@ -85,7 +85,10 @@ fn projections_have_exactly_one_application_owned_inbound() {
     for (index, server) in servers[2..].iter().enumerate() {
         assert_eq!(server["type"], "https");
         assert_eq!(server["tag"], format!("cfw-authenticated-dns-{index}"));
-        assert_eq!(server["detour"], "direct");
+        assert!(
+            server.get("detour").is_none(),
+            "explicit DIRECT uses the normal dialer"
+        );
         assert_eq!(server["path"], "/dns-query");
         assert_eq!(server["tls"]["enabled"], true);
         assert!(server["tls"]["server_name"].is_string());
@@ -551,7 +554,10 @@ fn release_dns_evidence_is_a_closed_udp53_tunnel_projection() {
         assert_eq!(servers[0]["server"], address);
         assert_eq!(servers[0]["server_port"], 53);
         assert_eq!(servers[0]["tag"], tag);
-        assert_eq!(servers[0]["detour"], "direct");
+        assert!(
+            servers[0].get("detour").is_none(),
+            "explicit DIRECT uses the normal dialer"
+        );
         assert!(servers[0].get("path").is_none());
         assert!(servers[0].get("tls").is_none());
         assert_eq!(config["dns"]["rules"][0]["server"], tag);

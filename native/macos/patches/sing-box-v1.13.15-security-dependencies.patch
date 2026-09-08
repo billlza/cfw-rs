@@ -161,3 +161,173 @@ index 14fe3832265a4d86c9c2cfe68ae297e1fb6361f4..f6d2d7d90da180091e7451e6a24fafbf
 +google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478/go.mod h1:4Hqkh8ycfw05ld/3BWL7rJOSfebL2Q+DVDeRgYgxUU8=
 +google.golang.org/grpc v1.82.1 h1:NnAxzGRA0677vCa4BUkOAnO5+FfQqVl9iUXeD0IqcGE=
 +google.golang.org/grpc v1.82.1/go.mod h1:yzTZ1TB1Z3SG+LIYaI+WiE8D5+PZ3ArnrSp8zF3+/ZA=
+diff --git a/option/group.go b/option/group.go
+index 02b3a5ecb9d956084946c53cf31e5dddb7520572..5d13232bb27da1267a85d3d92cd6788efe2501c3 100644
+--- a/option/group.go
++++ b/option/group.go
+@@ -15 +15 @@ type URLTestOutboundOptions struct {
+-	Tolerance                 uint16             `json:"tolerance,omitempty"`
++	Tolerance                 *uint16            `json:"tolerance,omitempty"`
+diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
+index 730040f7b9076a169c6a9ab6d1e3b56af6d7afe3..d652697aff0345149f1d82d2c018dcb4df975771 100644
+--- a/protocol/group/urltest.go
++++ b/protocol/group/urltest.go
+@@ -49,0 +50,4 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
++	tolerance := uint16(50)
++	if options.Tolerance != nil {
++		tolerance = *options.Tolerance
++	}
+@@ -59 +63 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+-		tolerance:                    options.Tolerance,
++		tolerance:                    tolerance,
+@@ -98,4 +102,8 @@ func (s *URLTest) Now() string {
+-	if s.group.selectedOutboundTCP != nil {
+-		return s.group.selectedOutboundTCP.Tag()
+-	} else if s.group.selectedOutboundUDP != nil {
+-		return s.group.selectedOutboundUDP.Tag()
++	selection := s.group.selection.Load()
++	if selection == nil {
++		return ""
++	}
++	if selection.tcp != nil {
++		return selection.tcp.Tag()
++	} else if selection.udp != nil {
++		return selection.udp.Tag()
+@@ -123 +131 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
+-		outbound = s.group.selectedOutboundTCP
++		outbound = s.group.selected(N.NetworkTCP)
+@@ -125 +133 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
+-		outbound = s.group.selectedOutboundUDP
++		outbound = s.group.selected(N.NetworkUDP)
+@@ -146 +154 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
+-	outbound := s.group.selectedOutboundUDP
++	outbound := s.group.selected(N.NetworkUDP)
+@@ -174 +182 @@ func (s *URLTest) NewDirectRouteConnection(metadata adapter.InboundContext, rout
+-	selected := s.group.selectedOutboundTCP
++	selected := s.group.selected(N.NetworkTCP)
+@@ -200,2 +208 @@ type URLTestGroup struct {
+-	selectedOutboundTCP          adapter.Outbound
+-	selectedOutboundUDP          adapter.Outbound
++	selection                    atomic.Pointer[urlTestSelection]
+@@ -215,3 +221,0 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
+-	if tolerance == 0 {
+-		tolerance = 50
+-	}
+@@ -257,0 +262,2 @@ func (g *URLTestGroup) Touch() {
++	g.access.Lock()
++	defer g.access.Unlock()
+@@ -261,2 +266,0 @@ func (g *URLTestGroup) Touch() {
+-	g.access.Lock()
+-	defer g.access.Unlock()
+@@ -275,0 +280 @@ func (g *URLTestGroup) Close() error {
++	g.started = false
+@@ -290,14 +295,4 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+-	switch network {
+-	case N.NetworkTCP:
+-		if g.selectedOutboundTCP != nil {
+-			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundTCP)); history != nil {
+-				minOutbound = g.selectedOutboundTCP
+-				minDelay = history.Delay
+-			}
+-		}
+-	case N.NetworkUDP:
+-		if g.selectedOutboundUDP != nil {
+-			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP)); history != nil {
+-				minOutbound = g.selectedOutboundUDP
+-				minDelay = history.Delay
+-			}
++	if selected := g.selected(network); selected != nil {
++		if history := g.history.LoadURLTestHistory(RealTag(selected)); history != nil {
++			minOutbound = selected
++			minDelay = history.Delay
+@@ -413,0 +409,22 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
++// Publish TCP and UDP choices together. Interface values contain two words
++// and must never be read concurrently with unsynchronized assignment.
++type urlTestSelection struct {
++	tcp adapter.Outbound
++	udp adapter.Outbound
++}
++
++func (g *URLTestGroup) selected(network string) adapter.Outbound {
++	selection := g.selection.Load()
++	if selection == nil {
++		return nil
++	}
++	switch network {
++	case N.NetworkUDP:
++		return selection.udp
++	case N.NetworkTCP:
++		return selection.tcp
++	default:
++		return nil
++	}
++}
++
+@@ -414,0 +432,4 @@ func (g *URLTestGroup) performUpdateCheck() {
++	var next urlTestSelection
++	if previous := g.selection.Load(); previous != nil {
++		next = *previous
++	}
+@@ -416,5 +437,3 @@ func (g *URLTestGroup) performUpdateCheck() {
+-	if outbound, exists := g.Select(N.NetworkTCP); outbound != nil && (g.selectedOutboundTCP == nil || (exists && outbound != g.selectedOutboundTCP)) {
+-		if g.selectedOutboundTCP != nil {
+-			updated = true
+-		}
+-		g.selectedOutboundTCP = outbound
++	if outbound, exists := g.Select(N.NetworkTCP); outbound != nil && (next.tcp == nil || (exists && outbound != next.tcp)) {
++		updated = updated || next.tcp != nil
++		next.tcp = outbound
+@@ -422,5 +441,3 @@ func (g *URLTestGroup) performUpdateCheck() {
+-	if outbound, exists := g.Select(N.NetworkUDP); outbound != nil && (g.selectedOutboundUDP == nil || (exists && outbound != g.selectedOutboundUDP)) {
+-		if g.selectedOutboundUDP != nil {
+-			updated = true
+-		}
+-		g.selectedOutboundUDP = outbound
++	if outbound, exists := g.Select(N.NetworkUDP); outbound != nil && (next.udp == nil || (exists && outbound != next.udp)) {
++		updated = updated || next.udp != nil
++		next.udp = outbound
+@@ -427,0 +445 @@ func (g *URLTestGroup) performUpdateCheck() {
++	g.selection.Store(&next)
+diff --git a/protocol/group/urltest_policy_test.go b/protocol/group/urltest_policy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9104c46f17783b883553b5bb273b5de343a237a8
+--- /dev/null
++++ b/protocol/group/urltest_policy_test.go
+@@ -0,0 +1,37 @@
++package group
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/sagernet/sing-box/option"
++	"testing"
++	"time"
++)
++
++func TestURLTestPreservesExplicitZeroTolerance(t *testing.T) {
++	for _, test := range []struct {
++		input    string
++		expected uint16
++	}{
++		{input: "{\"outbounds\":[\"node\"]}", expected: 50},
++		{input: "{\"outbounds\":[\"node\"],\"tolerance\":0}", expected: 0},
++		{input: "{\"outbounds\":[\"node\"],\"tolerance\":150}", expected: 150},
++	} {
++		var options option.URLTestOutboundOptions
++		if err := json.Unmarshal([]byte(test.input), &options); err != nil {
++			t.Fatal(err)
++		}
++		outbound, err := NewURLTest(context.Background(), nil, nil, "auto", options)
++		if err != nil {
++			t.Fatal(err)
++		}
++		settings := outbound.(*URLTest)
++		group, err := NewURLTestGroup(context.Background(), nil, nil, nil, "https://example.com", time.Minute, settings.tolerance, 2*time.Minute, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if group.tolerance != test.expected {
++			t.Fatalf("tolerance=%d, want %d", group.tolerance, test.expected)
++		}
++	}
++}

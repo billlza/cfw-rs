@@ -14,14 +14,14 @@ export function savedProfilePolicy(profile) {
     }
     return [outbound.tag, { name: outbound.tag, kind: outbound.type, udp: outbound.network !== "tcp", delay: null }];
   }));
-  const groups = document.outbounds.filter(({ type }) => type === "selector").map((outbound) => {
+  const groups = document.outbounds.filter(({ type }) => type === "selector" || type === "urltest").map((outbound) => {
     if (!Array.isArray(outbound.outbounds) || outbound.outbounds.length === 0) {
-      throw new TypeError("saved selector has no members");
+      throw new TypeError("saved group has no members");
     }
     return {
       name: outbound.tag,
-      type: "Selector",
-      now: profile.proxy_selections?.[outbound.tag] ?? outbound.default ?? outbound.outbounds[0],
+      type: outbound.type === "urltest" ? "URLTest" : "Selector",
+      now: outbound.type === "urltest" ? null : profile.proxy_selections?.[outbound.tag] ?? outbound.default ?? outbound.outbounds[0],
       options: outbound.outbounds.map((name) => {
         const node = nodes.get(name);
         if (!node) throw new TypeError("saved selector member is missing");

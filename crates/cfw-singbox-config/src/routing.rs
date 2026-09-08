@@ -48,20 +48,35 @@ fn invalid(path: impl Into<String>, reason: &str) -> ConfigError {
 
 impl ProfileDocument {
     pub(crate) fn validate_routing(&self, tags: &BTreeSet<&str>) -> Result<(), ConfigError> {
+        for (source, target) in &self.detours {
+            if !self
+                .outbounds
+                .iter()
+                .any(|outbound| outbound.tag() == source && outbound.is_remote())
+                || !self.outbounds.iter().any(|outbound| {
+                    outbound.tag() == target
+                        && (outbound.is_remote() || outbound.group_members().is_some())
+                })
+            {
+                return Err(invalid(
+                    "$.detours",
+                    "a detour must connect a declared remote outbound to a remote outbound or group",
+                ));
+            }
+        }
         let mut completed = BTreeSet::new();
         for outbound in &self.outbounds {
-            if let ProfileOutbound::Selector { tag, outbounds, .. } = outbound {
-                if outbounds
+            if let Some(outbounds) = outbound.group_members()
+                && outbounds
                     .iter()
                     .any(|member| !tags.contains(member.as_str()))
-                {
-                    return Err(invalid(
-                        "$.outbounds",
-                        "selector member must name a declared outbound",
-                    ));
-                }
-                self.validate_selector_path(tag, &mut BTreeSet::new(), &mut completed)?;
+            {
+                return Err(invalid(
+                    "$.outbounds",
+                    "group member must name a declared outbound",
+                ));
             }
+            self.validate_group_path(outbound.tag(), &mut BTreeSet::new(), &mut completed)?;
         }
         if let Some(route) = &self.route {
             if route.rules.len() > MAX_RULES {
@@ -74,7 +89,7 @@ impl ProfileDocument {
         Ok(())
     }
 
-    fn validate_selector_path<'a>(
+    fn validate_group_path<'a>(
         &'a self,
         tag: &'a str,
         visiting: &mut BTreeSet<&'a str>,
@@ -84,14 +99,20 @@ impl ProfileDocument {
             return Ok(());
         }
         if !visiting.insert(tag) {
-            return Err(invalid("$.outbounds", "selector references form a cycle"));
+            return Err(invalid("$.outbounds", "group references form a cycle"));
         }
-        if let Some(ProfileOutbound::Selector { outbounds, .. }) =
-            self.outbounds.iter().find(|item| item.tag() == tag)
+        if let Some(outbounds) = self
+            .outbounds
+            .iter()
+            .find(|item| item.tag() == tag)
+            .and_then(ProfileOutbound::group_members)
         {
             for member in outbounds {
-                self.validate_selector_path(member, visiting, completed)?;
+                self.validate_group_path(member, visiting, completed)?;
             }
+        }
+        if let Some(detour) = self.detours.get(tag) {
+            self.validate_group_path(detour, visiting, completed)?;
         }
         visiting.remove(tag);
         completed.insert(tag);
@@ -99,20 +120,33 @@ impl ProfileDocument {
     }
 
     pub(crate) fn selected_route_is_remote(&self) -> bool {
-        let mut tag = self.effective_final_outbound_tag();
-        // The validated selector graph is acyclic and bounded by MAX_OUTBOUNDS.
-        for _ in 0..self.outbounds.len() {
-            match self.outbounds.iter().find(|outbound| outbound.tag() == tag) {
-                Some(ProfileOutbound::Selector {
-                    outbounds, default, ..
-                }) => {
-                    tag = default.as_deref().unwrap_or(&outbounds[0]);
-                }
-                Some(outbound) => return outbound.is_remote(),
-                None => unreachable!("validated route target must exist"),
-            }
+        self.route_is_remote(
+            self.effective_final_outbound_tag(),
+            &mut std::collections::BTreeMap::new(),
+        )
+    }
+
+    fn route_is_remote<'a>(
+        &'a self,
+        tag: &'a str,
+        completed: &mut std::collections::BTreeMap<&'a str, bool>,
+    ) -> bool {
+        if let Some(result) = completed.get(tag) {
+            return *result;
         }
-        unreachable!("validated selectors cannot contain a cycle")
+        // The validated group graph is acyclic. Memoization bounds shared subgroups.
+        let result = match self.outbounds.iter().find(|outbound| outbound.tag() == tag) {
+            Some(ProfileOutbound::Selector {
+                outbounds, default, ..
+            }) => self.route_is_remote(default.as_deref().unwrap_or(&outbounds[0]), completed),
+            Some(ProfileOutbound::UrlTest { outbounds, .. }) => outbounds
+                .iter()
+                .all(|member| self.route_is_remote(member, completed)),
+            Some(outbound) => outbound.is_remote(),
+            None => unreachable!("validated route target must exist"),
+        };
+        completed.insert(tag, result);
+        result
     }
 
     pub(crate) fn project_rules(&self, download_outbound: &str) -> (Vec<Value>, Vec<Value>) {

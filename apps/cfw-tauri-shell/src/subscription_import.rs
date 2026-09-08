@@ -15,6 +15,7 @@ mod clash;
 mod sing_box;
 mod sip008;
 mod socks5;
+mod wireguard;
 mod yaml;
 
 /// Source-only rules, groups, and comments can exceed the closed profile limit.
@@ -72,6 +73,9 @@ pub(crate) struct ImportedSubscription {
 struct OutboundCollector {
     outbounds: Vec<Value>,
     route: Option<Value>,
+    detours: BTreeMap<String, String>,
+    dns: Option<Value>,
+    hosts: BTreeMap<String, Vec<String>>,
     credentials: Vec<ImportedCredential>,
     used_tags: BTreeSet<String>,
     credential_namespace: Option<Uuid>,
@@ -236,6 +240,9 @@ fn import_subscription_document_with_collector(
         ));
     }
     let body = strip_document_bom(body);
+    if body.lines().any(|line| line.trim() == "[Interface]") {
+        return wireguard::import_document(body, collector);
+    }
     if let Ok(profile) = ValidatedSingBoxProfile::parse(body) {
         return Ok(ImportedSubscription {
             profile,
@@ -1069,6 +1076,15 @@ impl OutboundCollector {
         if let Some(route) = self.route {
             document["route"] = route;
         }
+        if !self.detours.is_empty() {
+            document["detours"] = json!(self.detours);
+        }
+        if let Some(dns) = self.dns {
+            document["dns"] = dns;
+        }
+        if !self.hosts.is_empty() {
+            document["hosts"] = json!(self.hosts);
+        }
         let profile_json = serde_json::to_string(&document)
             .map_err(|error| format!("failed to encode imported subscription profile: {error}"))?;
         let profile =
@@ -1097,6 +1113,8 @@ fn deterministic_credential_uuid(namespace: &Uuid, index: usize, kind: Credentia
 
 fn credential_kind_discriminant(kind: CredentialKind) -> u8 {
     match kind {
+        CredentialKind::WireGuardPrivateKey => 12,
+        CredentialKind::WireGuardPreSharedKey => 13,
         CredentialKind::ShadowsocksPassword => 1,
         CredentialKind::VmessUuid => 2,
         CredentialKind::VlessUuid => 3,
@@ -3360,6 +3378,7 @@ proxies:
 mixed-port: 7890
 dns:
   enable: true
+  nameserver: [https://1.1.1.1/dns-query]
 proxies:
   - name: "SS Tokyo"
     type: ss
@@ -3459,6 +3478,8 @@ rules:
         assert_eq!(outbounds[7]["tag"], "PROXY");
         assert_eq!(outbounds[7]["outbounds"], json!(["SS Tokyo", "VMess Edge"]));
         assert_eq!(profile["route"]["final"], "PROXY");
+
+        assert_eq!(profile["dns"]["servers"][0]["type"], "https");
 
         assert_eq!(outbounds[0]["type"], "shadowsocks");
         assert_eq!(outbounds[0]["tag"], "SS Tokyo");
@@ -3610,6 +3631,50 @@ rules:
                 "invalid policy cannot become nodes-only import"
             );
         }
+    }
+
+    #[test]
+    fn clash_automatic_groups_and_detours_keep_their_source_semantics() {
+        let source = "proxies:\n  - {name: Entry, type: socks5, server: entry.example.com, port: 1080}\n  - {name: Exit, type: socks5, server: exit.example.com, port: 1080, dialer-proxy: Entry}\nproxy-groups:\n  - {name: Auto, type: url-test, proxies: [Exit, Entry], url: 'https://www.gstatic.com/generate_204', interval: 300, tolerance: 150}\nrules:\n  - MATCH,Auto\n";
+        let imported = import_subscription_document(source).expect("automatic and multihop");
+        let profile: Value = serde_json::from_str(imported.profile.as_json()).expect("profile");
+        assert_eq!(profile["outbounds"][2]["type"], "urltest");
+        assert_eq!(profile["outbounds"][2]["tolerance_ms"], 150);
+        assert_eq!(profile["outbounds"][2]["interval_seconds"], 300);
+        assert_eq!(profile["detours"]["Exit"], "Entry");
+        for bad in [
+            source.replace("interval: 300", "interval: 0"),
+            source.replace("dialer-proxy: Entry", "dialer-proxy: Auto"),
+            source.replace("type: url-test", "type: fallback"),
+        ] {
+            assert!(import_subscription_document(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn clash_wireguard_import_keeps_keys_only_in_the_vault_batch() {
+        let key = STANDARD.encode([1u8; 32]);
+        let source = format!(
+            "proxies:\n  - {{name: VPN, type: wireguard, server: edge.example.com, port: 51820, ip: 10.1.0.2, private-key: '{key}', public-key: '{key}', pre-shared-key: '{key}'}}\n"
+        );
+        let imported = import_subscription_document(&source).expect("WireGuard import");
+        assert_eq!(imported.credentials.len(), 2);
+        assert_eq!(
+            imported.credentials[0].reference.kind(),
+            CredentialKind::WireGuardPrivateKey
+        );
+        assert_eq!(
+            imported.credentials[1].reference.kind(),
+            CredentialKind::WireGuardPreSharedKey
+        );
+        let profile: Value = serde_json::from_str(imported.profile.as_json()).expect("profile");
+        assert_eq!(
+            profile["outbounds"][0]["local_addresses"],
+            json!(["10.1.0.2/32"])
+        );
+        assert!(profile["outbounds"][0].get("private-key").is_none());
+        assert!(profile["outbounds"][0].get("private_key").is_none());
+        assert!(profile["outbounds"][0].get("pre_shared_key").is_none());
     }
 
     #[test]

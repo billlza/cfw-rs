@@ -81,9 +81,9 @@ fn engine_managed_remote_resources_are_rejected() {
     ));
 
     let health_check = ValidatedSingBoxProfile::parse(
-        r#"{"outbounds":[{"type":"urltest","tag":"automatic","url":"https://example.com"}]}"#,
+        r#"{"outbounds":[{"type":"selector","tag":"automatic","url":"https://example.com"}]}"#,
     )
-    .expect_err("profiles must not schedule URL-based probes");
+    .expect_err("URL probes are admitted only in the typed automatic group");
     assert!(matches!(
         health_check,
         ConfigError::ForbiddenKey { key, .. } if key == "url"
@@ -212,8 +212,8 @@ fn anytls_and_tuic_require_exact_credential_shapes_and_closed_tuic_options() {
 }
 
 #[test]
-fn profile_tls_cannot_override_the_product_version_policy() {
-    for field in [r#""min_version":"1.2""#, r#""max_version":"1.3""#] {
+fn profile_tls_cannot_lower_the_product_version_policy() {
+    for field in [r#""min_version":"1.1""#, r#""max_version":"1.2""#] {
         let input = format!(
             r#"{{"outbounds":[{{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}},"tls":{{"enabled":true,"server_name":"anytls.example.com",{field}}}}}]}}"#
         );

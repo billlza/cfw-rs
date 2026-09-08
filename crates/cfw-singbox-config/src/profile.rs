@@ -14,6 +14,12 @@ pub(crate) struct ProfileDocument {
     pub(crate) outbounds: Vec<ProfileOutbound>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) route: Option<ProfileRoute>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) detours: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dns: Option<crate::dns_policy::ProfileDns>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) hosts: std::collections::BTreeMap<String, Vec<std::net::IpAddr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +46,30 @@ pub(crate) enum ProfileOutbound {
         outbounds: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<String>,
+    },
+    #[serde(rename = "urltest")]
+    UrlTest {
+        tag: String,
+        outbounds: Vec<String>,
+        url: String,
+        interval_seconds: u32,
+        tolerance_ms: u16,
+        idle_timeout_seconds: u32,
+    },
+    #[serde(rename = "wireguard")]
+    WireGuard {
+        tag: String,
+        server: String,
+        server_port: u16,
+        local_addresses: Vec<String>,
+        private_key_credential_ref: CredentialRef,
+        peer_public_key: String,
+        #[serde(default = "default_wireguard_allowed_ips")]
+        peer_allowed_ips: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pre_shared_key_credential_ref: Option<CredentialRef>,
+        mtu: u16,
+        persistent_keepalive_seconds: u16,
     },
     Socks5 {
         tag: String,
@@ -259,6 +289,44 @@ pub(crate) struct OutboundTls {
     pub(crate) utls: Option<UtlsOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reality: Option<RealityOptions>,
+    #[serde(default, skip_serializing_if = "TlsMinimumVersion::is_default")]
+    pub(crate) min_version: TlsMinimumVersion,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) curve_preferences: Vec<TlsCurve>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ech: Option<EchOptions>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum TlsMinimumVersion {
+    #[default]
+    #[serde(rename = "1.2")]
+    Tls12,
+    #[serde(rename = "1.3")]
+    Tls13,
+}
+
+impl TlsMinimumVersion {
+    fn is_default(&self) -> bool {
+        *self == Self::Tls12
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum TlsCurve {
+    P256,
+    P384,
+    P521,
+    X25519,
+    X25519MLKEM768,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EchOptions {
+    pub(crate) enabled: bool,
+    /// Public ECHConfigList in PEM form. No filesystem or bootstrap DNS lookup.
+    pub(crate) config: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +463,10 @@ fn default_websocket_path() -> String {
     "/".to_owned()
 }
 
+fn default_wireguard_allowed_ips() -> Vec<String> {
+    vec!["0.0.0.0/0".into(), "::/0".into()]
+}
+
 impl ProfileDocument {
     pub(crate) fn effective_final_outbound_tag(&self) -> &str {
         self.route
@@ -423,10 +495,28 @@ impl ProfileDocument {
 }
 
 impl ProfileOutbound {
+    pub(crate) fn server(&self) -> Option<&str> {
+        match self {
+            Self::Direct { .. }
+            | Self::Block { .. }
+            | Self::Selector { .. }
+            | Self::UrlTest { .. } => None,
+            Self::WireGuard { server, .. }
+            | Self::Socks5 { server, .. }
+            | Self::Shadowsocks { server, .. }
+            | Self::Vmess { server, .. }
+            | Self::Vless { server, .. }
+            | Self::Trojan { server, .. }
+            | Self::Hysteria2 { server, .. }
+            | Self::AnyTls { server, .. }
+            | Self::Tuic { server, .. } => Some(server),
+        }
+    }
+
     pub(crate) fn is_remote(&self) -> bool {
         !matches!(
             self,
-            Self::Direct { .. } | Self::Block { .. } | Self::Selector { .. }
+            Self::Direct { .. } | Self::Block { .. } | Self::Selector { .. } | Self::UrlTest { .. }
         )
     }
 
@@ -435,6 +525,8 @@ impl ProfileOutbound {
             Self::Direct { tag }
             | Self::Block { tag }
             | Self::Selector { tag, .. }
+            | Self::UrlTest { tag, .. }
+            | Self::WireGuard { tag, .. }
             | Self::Socks5 { tag, .. }
             | Self::Shadowsocks { tag, .. }
             | Self::Vmess { tag, .. }
@@ -448,7 +540,17 @@ impl ProfileOutbound {
 
     pub(crate) fn credential_refs(&self) -> Vec<&CredentialRef> {
         match self {
-            Self::Direct { .. } | Self::Block { .. } | Self::Selector { .. } => Vec::new(),
+            Self::WireGuard {
+                private_key_credential_ref,
+                pre_shared_key_credential_ref,
+                ..
+            } => std::iter::once(private_key_credential_ref)
+                .chain(pre_shared_key_credential_ref.iter())
+                .collect(),
+            Self::Direct { .. }
+            | Self::Block { .. }
+            | Self::Selector { .. }
+            | Self::UrlTest { .. } => Vec::new(),
             Self::Socks5 { authentication, .. } => match authentication {
                 Some(authentication) => vec![
                     &authentication.username_credential_ref,
@@ -477,6 +579,13 @@ impl ProfileOutbound {
                 password_credential_ref,
                 ..
             } => vec![uuid_credential_ref, password_credential_ref],
+        }
+    }
+
+    pub(crate) fn group_members(&self) -> Option<&[String]> {
+        match self {
+            Self::Selector { outbounds, .. } | Self::UrlTest { outbounds, .. } => Some(outbounds),
+            _ => None,
         }
     }
 }

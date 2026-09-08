@@ -199,9 +199,20 @@ struct SourceTls {
     #[serde(default)]
     min_version: String,
     #[serde(default)]
+    curve_preferences: Vec<String>,
+    #[serde(default)]
+    ech: Option<SourceEch>,
+    #[serde(default)]
     utls: Option<SourceUtls>,
     #[serde(default)]
     reality: Option<SourceReality>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceEch {
+    enabled: bool,
+    config: StringList,
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,9 +683,7 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
     if tls.disable_sni {
         return Err("sing-box outbound disables SNI, which is unsupported".into());
     }
-    if !tls.min_version.is_empty()
-        && tls.min_version != cfw_singbox_config::MINIMUM_REMOTE_TLS_VERSION
-    {
+    if !matches!(tls.min_version.as_str(), "" | "1.2" | "1.3") {
         return Err("sing-box TLS min_version cannot be represented exactly".into());
     }
     let utls = match tls.utls {
@@ -700,7 +709,7 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
         })),
         Some(_) => return Err("disabled sing-box Reality contains active options".into()),
     };
-    Ok(tls_json(build_tls_parts(
+    let mut value = tls_json(build_tls_parts(
         true,
         if tls.server_name.is_empty() {
             server.to_owned()
@@ -710,7 +719,17 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
         tls.alpn.into_vec(),
         utls,
         reality,
-    )))
+    ));
+    if !tls.min_version.is_empty() {
+        value["min_version"] = json!(tls.min_version);
+    }
+    if !tls.curve_preferences.is_empty() {
+        value["curve_preferences"] = json!(tls.curve_preferences);
+    }
+    if let Some(ech) = tls.ech {
+        value["ech"] = json!({"enabled": ech.enabled, "config": ech.config.into_vec()});
+    }
+    Ok(value)
 }
 
 impl SourceTls {
@@ -722,6 +741,8 @@ impl SourceTls {
             || !self.min_version.is_empty()
             || self.utls.is_some()
             || self.reality.is_some()
+            || !self.curve_preferences.is_empty()
+            || self.ech.is_some()
     }
 }
 

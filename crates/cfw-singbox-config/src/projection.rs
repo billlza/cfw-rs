@@ -209,8 +209,14 @@ impl ValidatedSingBoxProfile {
         if self.release_packet_evidence_case.is_some() && mode != ProjectionMode::Tunnel {
             return Err(ConfigError::InvalidReleasePacketEvidenceMode);
         }
+        let bootstrap_servers = self
+            .document
+            .dns
+            .as_ref()
+            .and_then(|dns| dns.bootstrap_servers.as_ref())
+            .unwrap_or(&settings.bootstrap_dns_servers);
         if self.dns_projection == DnsProjection::Ordinary {
-            validate_bootstrap_dns_servers(settings)?;
+            validate_bootstrap_dns_servers(bootstrap_servers, settings.enable_ipv6)?;
         }
         let direct_ipv4_hosts = self
             .release_packet_evidence_case
@@ -234,68 +240,106 @@ impl ValidatedSingBoxProfile {
         // to loopback and to this run's secret.
         root.insert("experimental".into(), clash_api.experimental_value());
         root.insert("outbounds".into(), Value::Array(outbounds));
+        if !runtime_outbounds.endpoints.is_empty() {
+            root.insert(
+                "endpoints".into(),
+                Value::Array(runtime_outbounds.endpoints),
+            );
+        }
 
-        let (dns_servers, dns_rule_server, default_domain_resolver) = match self.dns_projection {
-            DnsProjection::Ordinary => {
-                validate_authenticated_dns_servers(settings)?;
-                let mut servers = settings
-                    .bootstrap_dns_servers
-                    .iter()
-                    .enumerate()
-                    .map(|(index, address)| {
-                        json!({
-                            "type": "udp",
-                            "tag": format!("cfw-bootstrap-dns-{index}"),
-                            "server": address.to_string(),
-                            "server_port": 53
+        let (mut dns_servers, dns_rule_server, dns_final_server, default_domain_resolver) =
+            match self.dns_projection {
+                DnsProjection::Ordinary => {
+                    let mut servers = bootstrap_servers
+                        .iter()
+                        .enumerate()
+                        .map(|(index, address)| {
+                            json!({
+                                "type": "udp",
+                                "tag": format!("cfw-bootstrap-dns-{index}"),
+                                "server": address.to_string(),
+                                "server_port": 53
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>();
-                servers.extend(settings.authenticated_dns_servers.iter().enumerate().map(
-                    |(index, address)| {
-                        json!({
-                            "type": "https",
-                            "tag": format!("cfw-authenticated-dns-{index}"),
-                            "server": address.address.to_string(),
-                            "server_port": 443,
-                            "path": "/dns-query",
-                            "detour": selected_outbound.as_str(),
-                            "connect_timeout": "5s",
-                            "tls": {
-                                "enabled": true,
-                                "server_name": address.server_name.as_str(),
-                                "min_version": MINIMUM_REMOTE_TLS_VERSION
+                        .collect::<Vec<_>>();
+                    if let Some(dns) = &self.document.dns {
+                        let tags = ["cfw-profile-dns-0", "cfw-profile-dns-1"];
+                        for (index, server) in dns.servers.iter().enumerate() {
+                            if server.address().is_ipv6() && !settings.enable_ipv6 {
+                                return Err(ConfigError::UnsupportedPolicyShape {
+                                    path: "$.dns".into(),
+                                    reason: "IPv6 resolver requires IPv6 to be enabled".into(),
+                                });
                             }
-                        })
-                    },
-                ));
-                (
-                    servers,
-                    AUTHENTICATED_DNS_PRIMARY_TAG,
-                    json!({
-                        "server": AUTHENTICATED_DNS_PRIMARY_TAG,
-                        "fallback_server": AUTHENTICATED_DNS_SECONDARY_TAG,
-                    }),
-                )
-            }
-            DnsProjection::ReleaseEvidence(case) => {
-                if mode != ProjectionMode::Tunnel || !settings.enable_ipv6 {
-                    return Err(ConfigError::InvalidReleaseDnsEvidenceMode);
+                            servers.push(server.project(tags[index], &selected_outbound)?);
+                        }
+                        let last = tags[dns.servers.len() - 1];
+                        let resolver = if dns.servers.len() == 1 {
+                            json!({"server": tags[0]})
+                        } else {
+                            json!({"server": tags[0], "fallback_server": last})
+                        };
+                        (servers, tags[0], last, resolver)
+                    } else {
+                        validate_authenticated_dns_servers(settings)?;
+                        servers.extend(settings.authenticated_dns_servers.iter().enumerate().map(
+                            |(index, address)| {
+                                json!({
+                                    "type": "https",
+                                    "tag": format!("cfw-authenticated-dns-{index}"),
+                                    "server": address.address.to_string(),
+                                    "server_port": 443,
+                                    "path": "/dns-query",
+                                    "detour": selected_outbound.as_str(),
+                                    "connect_timeout": "5s",
+                                    "tls": {
+                                        "enabled": true,
+                                        "server_name": address.server_name.as_str(),
+                                        "min_version": MINIMUM_REMOTE_TLS_VERSION
+                                    }
+                                })
+                            },
+                        ));
+                        (
+                            servers,
+                            AUTHENTICATED_DNS_PRIMARY_TAG,
+                            AUTHENTICATED_DNS_SECONDARY_TAG,
+                            json!({
+                                "server": AUTHENTICATED_DNS_PRIMARY_TAG,
+                                "fallback_server": AUTHENTICATED_DNS_SECONDARY_TAG,
+                            }),
+                        )
+                    }
                 }
-                let endpoint = case.endpoint();
-                (
-                    vec![json!({
-                        "type": "udp",
-                        "tag": endpoint.tag,
-                        "server": endpoint.address.to_string(),
-                        "server_port": endpoint.port,
-                        "detour": selected_outbound.as_str(),
-                    })],
-                    endpoint.tag,
-                    json!({ "server": endpoint.tag }),
-                )
+                DnsProjection::ReleaseEvidence(case) => {
+                    if mode != ProjectionMode::Tunnel || !settings.enable_ipv6 {
+                        return Err(ConfigError::InvalidReleaseDnsEvidenceMode);
+                    }
+                    let endpoint = case.endpoint();
+                    (
+                        vec![json!({
+                            "type": "udp",
+                            "tag": endpoint.tag,
+                            "server": endpoint.address.to_string(),
+                            "server_port": endpoint.port,
+                            "detour": selected_outbound.as_str(),
+                        })],
+                        endpoint.tag,
+                        endpoint.tag,
+                        json!({ "server": endpoint.tag }),
+                    )
+                }
+            };
+        // The pinned runtime rejects an explicit detour to an empty DIRECT
+        // outbound. Its ordinary dialer already implements that exact policy.
+        // This is selected DIRECT behavior, never a fallback after proxy failure.
+        if self.document.outbounds.iter().any(|outbound| {
+            matches!(outbound, crate::profile::ProfileOutbound::Direct { tag } if tag == &selected_outbound)
+        }) {
+            for server in &mut dns_servers {
+                server.as_object_mut().expect("DNS projection is an object").remove("detour");
             }
-        };
+        }
 
         let inbound = match mode {
             ProjectionMode::SystemProxy => {
@@ -350,21 +394,30 @@ impl ValidatedSingBoxProfile {
             "dns".into(),
             json!({
                 "servers": dns_servers,
-                "rules": [{
+                "rules": if self.dns_projection == DnsProjection::Ordinary && self.document.dns.as_ref().is_some_and(|dns| dns.servers.len() == 1) { Vec::<Value>::new() } else { vec![json!({
                     // The pinned source patch retries both rejected responses
                     // and bounded transport errors against the final server.
                     // Upstream 1.13 alone does not.
                     "ip_accept_any": true,
                     "action": "route",
                     "server": dns_rule_server
-                }],
-                "final": match self.dns_projection {
-                    DnsProjection::Ordinary => AUTHENTICATED_DNS_SECONDARY_TAG,
-                    DnsProjection::ReleaseEvidence(case) => case.endpoint().tag,
-                },
+                })] },
+                "final": dns_final_server,
                 "strategy": if settings.enable_ipv6 { "prefer_ipv4" } else { "ipv4_only" }
             }),
         );
+        let fake_ip = self.dns_projection == DnsProjection::Ordinary
+            && crate::dns_policy::augment_dns(
+                &self.document,
+                root.get_mut("dns").expect("app-owned DNS settings"),
+                mode.has_tunnel(),
+                settings.enable_ipv6
+                    && self
+                        .document
+                        .dns
+                        .as_ref()
+                        .is_none_or(|dns| dns.ipv6 != Some(false)),
+            );
 
         let mut route = Map::new();
         if let Some(final_tag) = self
@@ -392,11 +445,18 @@ impl ValidatedSingBoxProfile {
         if !rules.is_empty() {
             route.insert("rules".into(), Value::Array(rules));
         }
-        if !rule_sets.is_empty() {
+        let needs_routing_cache = !rule_sets.is_empty();
+        if needs_routing_cache {
             route.insert("rule_set".into(), Value::Array(rule_sets));
-            root.get_mut("experimental")
-                .expect("app-owned experimental settings")["cache_file"] =
+        }
+        if needs_routing_cache || fake_ip {
+            let mut cache =
                 json!({"enabled": true, "path": "routing-cache.db", "cache_id": profile_id});
+            if fake_ip {
+                cache["store_fakeip"] = json!(true);
+            }
+            root.get_mut("experimental")
+                .expect("app-owned experimental settings")["cache_file"] = cache;
         }
         if !route.is_empty() {
             root.insert("route".into(), Value::Object(route));
@@ -450,19 +510,18 @@ impl ValidatedSingBoxProfile {
     }
 }
 
-fn validate_bootstrap_dns_servers(settings: &EngineSettings) -> Result<(), ConfigError> {
-    let unique = settings
-        .bootstrap_dns_servers
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    if unique.len() != settings.bootstrap_dns_servers.len() {
+fn validate_bootstrap_dns_servers(
+    servers: &[IpAddr; 2],
+    enable_ipv6: bool,
+) -> Result<(), ConfigError> {
+    let unique = servers.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != servers.len() {
         return Err(ConfigError::InvalidBootstrapDnsServers(
             "the two numeric endpoints must be distinct".to_owned(),
         ));
     }
-    for address in settings.bootstrap_dns_servers {
-        if !settings.enable_ipv6 && address.is_ipv6() {
+    for &address in servers {
+        if !enable_ipv6 && address.is_ipv6() {
             return Err(ConfigError::InvalidBootstrapDnsServers(format!(
                 "IPv6 endpoint {address} is unavailable while IPv6 is disabled"
             )));

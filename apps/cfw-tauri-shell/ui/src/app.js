@@ -2525,10 +2525,10 @@ function renderProfiles() {
         <button class="cfw-big-button" data-action="import-profile" ${blocked}>Import Link</button>
         <button class="cfw-big-button" data-action="update-all-profiles" ${blocked}>Update All</button>
         <button class="cfw-big-button" data-action="import-profile-file" ${blocked}>Import File</button>
-        <input class="profile-file-hidden" data-profile-file type="file" accept="${PROFILE_SOURCE_ACCEPT}" aria-label="Local JSON, YAML, or node-link profile" ${blocked} />
+        <input class="profile-file-hidden" data-profile-file type="file" accept="${PROFILE_SOURCE_ACCEPT}" aria-label="Local JSON, YAML, WireGuard, or node-link profile" ${blocked} />
       </section>
 
-      <p class="profile-note">Clash YAML imports nodes, selector groups, and supported routing rules. Unsupported rules are reported before saving. DNS and listener settings are managed by the app.</p>
+      <p class="profile-note">Clash YAML imports nodes, groups, supported routing rules, DNS, and hosts. Unsupported policies are reported before saving.</p>
       ${mutationReason ? `<p class="profile-note">${escapeHtml(mutationReason)}</p>` : ""}
 
       <section class="cfw-profile-list">

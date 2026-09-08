@@ -2313,8 +2313,8 @@ test("profile cards show source type on first load without fetching URLs or inve
     assert.match(html, /local file \(/u);
     assert.match(html, /subscription \(/u);
     assert.match(html, /aria-current="true"/u);
-    assert.match(html, /Clash YAML imports nodes, selector groups, and supported routing rules/u);
-    assert.match(html, /Unsupported rules are reported before saving/u);
+    assert.match(html, /Clash YAML imports nodes, groups, supported routing rules, DNS, and hosts/u);
+    assert.match(html, /Unsupported policies are reported before saving/u);
     assert.doesNotMatch(html, /source not listed|quota not reported|profile-usage|2 KB/u);
     assert.equal(invocationDetails.slice(before).some(({ command }) => command === "profile_text"), false);
     state.profiles[0].sourceUrl = "https://private.example/?token=private-test-value";
@@ -2388,7 +2388,7 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
     await setEngine(OFF_ENGINE);
     const html = await renderPage("profiles");
     assert.match(html, /HTTPS subscription or node link/u);
-    assert.match(html, /accept="\.json,\.yaml,\.yml,\.txt,/u);
+    assert.match(html, /accept="\.json,\.yaml,\.yml,\.conf,\.txt,/u);
     input.value = link;
     let before = invocationDetails.length;
     await appModule.handleAction("import-profile");

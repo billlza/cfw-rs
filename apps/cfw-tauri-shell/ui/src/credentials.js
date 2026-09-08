@@ -23,6 +23,8 @@ export const CREDENTIAL_KINDS = Object.freeze([
   "anytls_password",
   "tuic_uuid",
   "tuic_password",
+  "wireguard_private_key",
+  "wireguard_pre_shared_key",
 ]);
 
 const KINDS = new Set(CREDENTIAL_KINDS);
@@ -32,6 +34,8 @@ const CREDENTIAL_LABELS = Object.freeze({
   anytls_password: "AnyTLS Password",
   tuic_uuid: "TUIC UUID",
   tuic_password: "TUIC Password",
+  wireguard_private_key: "WireGuard Private Key",
+  wireguard_pre_shared_key: "WireGuard Pre-shared Key",
 });
 
 function isRecord(value) {
@@ -122,6 +126,15 @@ export function credentialProvisionBatch(requirements, secrets) {
     }
     if ((reference.kind === "socks5_username" || reference.kind === "socks5_password") && bytes > 255) {
       throw new TypeError(`${credentialLabel(reference.kind)} is larger than 255 UTF-8 bytes`);
+    }
+    if (reference.kind === "wireguard_private_key" || reference.kind === "wireguard_pre_shared_key") {
+      if (!/^[A-Za-z0-9+/]{43}=$/u.test(secret)) {
+        throw new TypeError("WireGuard key must contain 32 bytes in canonical base64");
+      }
+      const decoded = atob(secret);
+      if (btoa(decoded) !== secret || [...decoded].every((character) => character.charCodeAt(0) === 0)) {
+        throw new TypeError("WireGuard key must be a nonzero canonical base64 value");
+      }
     }
     if (/[\u0000-\u001f\u007f-\u009f]/u.test(secret)) {
       throw new TypeError(`${credentialLabel(reference.kind)} contains control characters`);

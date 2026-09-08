@@ -1,14 +1,14 @@
 // Local source admission only. Parsing and credential extraction remain in
 // the native import boundary; source text never enters the renderer store.
 export const MAX_PROFILE_SOURCE_BYTES = 512 * 1024;
-export const PROFILE_SOURCE_ACCEPT = ".json,.yaml,.yml,.txt,application/json,text/yaml,text/plain";
+export const PROFILE_SOURCE_ACCEPT = ".json,.yaml,.yml,.conf,.txt,application/json,text/yaml,text/plain";
 
 export function isSubscriptionSource(source) {
   return /^https?:\/\//iu.test(source);
 }
 
 export function isProfileSourcePath(path) {
-  return /\.(?:json|yaml|yml|txt)$/iu.test(path);
+  return /\.(?:json|yaml|yml|conf|txt)$/iu.test(path);
 }
 
 export async function readProfileSourceFile(file) {
@@ -27,6 +27,6 @@ export async function readProfileSourceFile(file) {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
     if (!(error instanceof TypeError)) throw error;
-    throw new Error("Profile source must be UTF-8 JSON, YAML, or node-link text.");
+    throw new Error("Profile source must be UTF-8 JSON, YAML, WireGuard, or node-link text.");
   }
 }

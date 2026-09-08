@@ -223,12 +223,10 @@ public enum CredentialInjector {
       }
     }
 
-    guard var outbounds = root["outbounds"] as? [Any] else {
-      throw CredentialMaterialError.invalidConfiguration
-    }
     for slot in slots {
       let index = Int(slot.outboundIndex)
-      guard index < outbounds.count,
+      let container = slot.target.configurationContainer
+      guard var outbounds = root[container] as? [Any], index < outbounds.count,
         var outbound = outbounds[index] as? [String: Any],
         let entry = supplied[slot.reference.id],
         let secret = String(data: entry.exposedSecret(), encoding: .utf8)
@@ -236,6 +234,21 @@ public enum CredentialInjector {
         throw CredentialMaterialError.invalidConfiguration
       }
       switch slot.target {
+      case .wireguardPrivateKey:
+        guard outbound["type"] as? String == "wireguard", outbound["private_key"] as? String == ""
+        else {
+          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+        }
+        outbound["private_key"] = secret
+      case .wireguardPreSharedKey:
+        guard outbound["type"] as? String == "wireguard",
+          var peers = outbound["peers"] as? [[String: Any]], peers.count == 1,
+          peers[0]["pre_shared_key"] as? String == ""
+        else {
+          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+        }
+        peers[0]["pre_shared_key"] = secret
+        outbound["peers"] = peers
       case .socks5Username:
         guard outbound["username"] as? String == "" else {
           throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
@@ -262,8 +275,8 @@ public enum CredentialInjector {
         outbound["obfs"] = obfs
       }
       outbounds[index] = outbound
+      root[container] = outbounds
     }
-    root["outbounds"] = outbounds
     let filled = try JSONSerialization.data(
       withJSONObject: root,
       options: [.sortedKeys, .withoutEscapingSlashes]

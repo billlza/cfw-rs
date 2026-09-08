@@ -56,6 +56,9 @@ pub(crate) async fn transition(
             profile.project(profile_id, ProjectionMode::SystemProxy, settings)?
         }
         EngineMode::Tunnel => profile.project(profile_id, ProjectionMode::Tunnel, settings)?,
+        EngineMode::TunnelSystemProxy => {
+            profile.project(profile_id, ProjectionMode::TunnelSystemProxy, settings)?
+        }
         EngineMode::Off => unreachable!("off returned before projection"),
     };
 
@@ -63,7 +66,10 @@ pub(crate) async fn transition(
         EngineState::ProxyActive { runtime } if target == EngineMode::SystemProxy => {
             runtime.config_digest == projected.digest() && runtime.ready
         }
-        EngineState::TunnelActive { runtime } if target == EngineMode::Tunnel => {
+        EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime }
+            if target == state.snapshot.state.active_mode() =>
+        {
             runtime.config_digest == projected.digest() && runtime.ready
         }
         _ => false,
@@ -144,7 +150,7 @@ pub(crate) async fn transition(
             }
             state.snapshot.state = EngineState::ProxyActive { runtime };
         }
-        EngineMode::Tunnel => {
+        EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
             state.native_lease = Some(NativeLease {
                 kind: NativeLeaseKind::TunnelInstallation,
                 context: context.clone(),
@@ -225,11 +231,26 @@ pub(crate) async fn transition(
                 )
                 .await;
             }
-            state.snapshot.state = EngineState::TunnelActive { runtime };
+            state.snapshot.state = if target == EngineMode::TunnelSystemProxy {
+                EngineState::TunnelSystemProxyActive { runtime }
+            } else {
+                EngineState::TunnelActive { runtime }
+            };
         }
         EngineMode::Off => unreachable!("off returned before native start"),
     }
 
+    if let Err(error) = crate::controller::restore_proxy_selections(profile, settings).await {
+        return fail_identity(
+            backend,
+            state,
+            snapshots,
+            error,
+            operation_timeout,
+            status_query_timeout,
+        )
+        .await;
+    }
     publish(state, snapshots);
     Ok(state.snapshot.clone())
 }
@@ -332,9 +353,13 @@ async fn fail_backend(
             BackendErrorKind::MixedEndpointInUse | BackendErrorKind::ControllerEndpointInUse
         ) | (
             EngineOperation::StartTunnel,
-            BackendErrorKind::ControllerEndpointInUse
+            BackendErrorKind::MixedEndpointInUse | BackendErrorKind::ControllerEndpointInUse
         )
-    );
+    ) && (source.kind != BackendErrorKind::MixedEndpointInUse
+        || matches!(
+            target,
+            EngineMode::SystemProxy | EngineMode::TunnelSystemProxy
+        ));
     let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
         Ok(()) => {
             let start_error = source.clone();

@@ -65,6 +65,19 @@ private func packetTunnelConfiguration(controllerPort: UInt16 = 9091) -> Data {
   }
 }
 
+@Test func tunnelRuntimeAttestsItsOptionalMixedListener() throws {
+  let receipt = try LibboxRuntimeStartReceipt.parse(
+    configuration: systemProxyConfiguration(), role: .packetTunnel
+  )
+  #expect(receipt.mixedListener?.port == 7891)
+  #expect(receipt.controllerListener.port == 9091)
+  #expect(throws: LibboxRuntimeError.invalidRuntimeEndpoints) {
+    try LibboxRuntimeStartReceipt.parse(
+      configuration: systemProxyConfiguration(mixedPort: 9091), role: .packetTunnel
+    )
+  }
+}
+
 @Test func startReceiptRejectsAForeignListener() {
   let configuration = Data(
     """

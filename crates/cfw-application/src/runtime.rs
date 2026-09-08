@@ -101,8 +101,9 @@ pub(crate) async fn reconcile_active_runtime(
             EngineOwner::ProxyAgent,
             runtime.clone(),
         ),
-        EngineState::TunnelActive { runtime } => (
-            EngineMode::Tunnel,
+        EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime } => (
+            state.snapshot.state.active_mode(),
             EngineOwner::PacketTunnelSystemExtension,
             runtime.clone(),
         ),
@@ -127,7 +128,10 @@ pub(crate) async fn reconcile_active_runtime(
 
     let observed_runtime = match (&observation, expected_mode) {
         (NativeEngineStatus::SystemProxy { runtime }, EngineMode::SystemProxy)
-        | (NativeEngineStatus::Tunnel { runtime }, EngineMode::Tunnel) => runtime,
+        | (
+            NativeEngineStatus::Tunnel { runtime },
+            EngineMode::Tunnel | EngineMode::TunnelSystemProxy,
+        ) => runtime,
         _ => {
             let error = EngineCoordinatorError::ActiveRuntimeStatusMismatch {
                 expected_mode,

@@ -25,15 +25,15 @@ PREVIOUS = install.AppIdentity(
 # speak the same vocabulary the production path selects.
 BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40046", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40047", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
 )
-# The installed 40045 with its real frozen tree identity: the production
+# The installed 40046 with its real frozen tree identity: the production
 # predecessor of this build, which selects the current service vocabulary.
 INSTALLED_PREVIOUS = install.AppIdentity(
-    "0.4.0", "40045", install.INSTALLED_40045_PREDECESSOR.tree_sha256
+    "0.4.0", "40046", install.INSTALLED_40046_PREDECESSOR.tree_sha256
 )
 GA_ENVIRONMENT = {
     "architecture": "arm64",
@@ -172,7 +172,7 @@ class ServiceEventStoreTests(unittest.TestCase):
         paths = service.ServicePaths.production()
 
         self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
-        self.assertEqual(paths.install_paths.profile.build_number, "40046")
+        self.assertEqual(paths.install_paths.profile.build_number, "40047")
         # The predecessor is observed and bound, never declared on the profile.
         self.assertFalse(hasattr(paths.install_paths.profile, "previous_build_number"))
         self.assertEqual(
@@ -183,6 +183,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                 "40043": install.INSTALLED_40043_PREDECESSOR,
                 "40044": install.INSTALLED_40044_PREDECESSOR,
                 "40045": install.INSTALLED_40045_PREDECESSOR,
+                "40046": install.INSTALLED_40046_PREDECESSOR,
             },
         )
         self.assertEqual(
@@ -1516,7 +1517,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             (CANDIDATE, install.AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40019", "f" * 64), "predecessor_identity_mismatch"),
             # The GA build itself is never a predecessor.
-            (CANDIDATE, install.AppIdentity("0.4.0", "40046", "a" * 64), "predecessor_unsupported"),
+            (CANDIDATE, install.AppIdentity("0.4.0", "40047", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40043", "a" * 64), "predecessor_identity_mismatch"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40044", "a" * 64), "predecessor_identity_mismatch"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40045", "a" * 64), "predecessor_identity_mismatch"),

@@ -165,7 +165,19 @@ impl ControllerClient {
             headers.insert(AUTHORIZATION, value);
         }
 
+        // reqwest's workspace TLS feature requires a provider even for HTTP.
+        // Configure this client explicitly instead of depending on host-global
+        // initialization. Controller URLs are HTTP and redirects are refused;
+        // an empty trust store also gives this client no external TLS authority.
+        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| ControllerError::InvalidEndpoint(error.to_string()))?
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
         let http = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls)
             .default_headers(headers)
             // The controller is an application-owned loopback endpoint. System
             // or environment proxies could create a routing loop and disclose

@@ -2,6 +2,21 @@
 
 ## 0.4.0 - Unreleased
 
+### Network operation and imported policy
+
+- Require the production libbox adapter at compilation so a signed application
+  cannot silently omit its real runtime. Failed starts no longer paint active switches.
+- Allow System Proxy and TUN independently or together using one engine owner.
+- Preserve supported Clash select groups and ordered process, domain, IP, port,
+  network and GEOIP rules; reject unsupported policy instead of dropping it.
+- Apply Global/Direct modes to actual routing, and resolve configured process
+  matchers with bounded public macOS process/socket queries.
+- Show saved nodes and rules while the engine is Off. Store node choices as
+  separate profile-envelope preferences without invalidating vault credentials.
+  Older envelopes remain byte-compatible when no choices have been saved; a
+  rollback to an older binary requires restoring the pre-upgrade profile backup.
+  Replacing an imported document starts with that document's default choices.
+
 ### Safety and migration
 
 - Retire the privileged helper, external Clash-compatible cores, remote core
@@ -139,8 +154,10 @@
   legacy setup from normal startup, together with actual foreign System Proxy
   conflict handling, changes the application and requires successor 40046.
   Build 40045 retains its frozen app, source/legal evidence and installation
-  journals without GA acceptance or publication. Build 40046 is the only active
-  GA; source and CI retries before freeze do not consume additional builds.
+  journals without GA acceptance or publication. Build 40046 completed packages
+  and installation, then exposed the missing compiled native runtime. The
+  runtime and profile-display repairs require build 40047; all 40046 evidence
+  remains preserved. Source and CI retries before freeze do not consume builds.
 - Let a confirmed fresh installation proceed without an old proxy port that
   never existed. Preparation and recovery recheck that legacy settings,
   managed files, privileged services and network state remain absent. Upgrade

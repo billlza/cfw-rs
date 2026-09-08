@@ -93,7 +93,11 @@ pub(crate) fn current_platform_design() -> PlatformDesign {
 fn engine_state_is_ready(state: &EngineState, mode: EngineMode) -> bool {
     match (state, mode) {
         (EngineState::ProxyActive { runtime }, EngineMode::SystemProxy)
-        | (EngineState::TunnelActive { runtime }, EngineMode::Tunnel) => runtime.ready,
+        | (EngineState::TunnelActive { runtime }, EngineMode::Tunnel)
+        | (
+            EngineState::TunnelSystemProxyActive { runtime },
+            EngineMode::SystemProxy | EngineMode::Tunnel | EngineMode::TunnelSystemProxy,
+        ) => runtime.ready,
         _ => false,
     }
 }
@@ -113,9 +117,12 @@ pub(crate) fn system_proxy_state(engine: State<'_, ManagedEngine>) -> SystemProx
 #[tauri::command]
 pub(crate) fn tun_runtime_state(engine: State<'_, ManagedEngine>) -> TunRuntimeState {
     let snapshot = engine.coordinator.snapshot();
-    let tunnel_running = matches!(snapshot.state, EngineState::TunnelActive { .. });
+    let tunnel_running = matches!(
+        snapshot.state,
+        EngineState::TunnelActive { .. } | EngineState::TunnelSystemProxyActive { .. }
+    );
     TunRuntimeState {
-        tun_mode: snapshot.desired_mode == EngineMode::Tunnel,
+        tun_mode: snapshot.desired_mode.tunnel_enabled(),
         service_mode: tunnel_authority_state(&snapshot.state).to_owned(),
         want_core: snapshot.desired_mode != EngineMode::Off,
         managed_core_pid: None,
@@ -134,10 +141,10 @@ fn tunnel_authority_state(state: &EngineState) -> &'static str {
         EngineState::TunnelInstalling { .. } => "Installing",
         EngineState::AwaitingApproval { .. } => "RequiresApproval",
         EngineState::TunnelStarting { .. } => "Starting",
-        EngineState::TunnelActive { .. } => "Enabled",
+        EngineState::TunnelActive { .. } | EngineState::TunnelSystemProxyActive { .. } => "Enabled",
         EngineState::TunnelStopping { .. } => "Stopping",
         EngineState::Failed {
-            target: EngineMode::Tunnel,
+            target: EngineMode::Tunnel | EngineMode::TunnelSystemProxy,
             ..
         } => "Failed",
         _ => "NotRegistered",
@@ -443,7 +450,7 @@ mod tests {
                 EngineMode::SystemProxy,
                 true,
             ),
-            Some(EngineMode::SystemProxy)
+            Some(EngineMode::TunnelSystemProxy)
         );
         assert_eq!(
             switch_transition(
@@ -520,6 +527,34 @@ mod tests {
             None,
             "an in-flight mode must not allocate a concurrent generation"
         );
+    }
+
+    #[test]
+    fn combined_switches_preserve_the_other_enabled_integration() {
+        let combined = snapshot(
+            EngineMode::TunnelSystemProxy,
+            EngineState::TunnelSystemProxyActive {
+                runtime: runtime(true),
+            },
+        );
+        assert_eq!(
+            switch_transition(&combined, EngineMode::SystemProxy, false),
+            Some(EngineMode::Tunnel)
+        );
+        assert_eq!(
+            switch_transition(&combined, EngineMode::Tunnel, false),
+            Some(EngineMode::SystemProxy)
+        );
+        assert_eq!(
+            switch_transition(&combined, EngineMode::SystemProxy, true),
+            None
+        );
+        assert_eq!(switch_transition(&combined, EngineMode::Tunnel, true), None);
+        assert!(engine_state_is_ready(
+            &combined.state,
+            EngineMode::SystemProxy
+        ));
+        assert!(engine_state_is_ready(&combined.state, EngineMode::Tunnel));
     }
 
     #[test]

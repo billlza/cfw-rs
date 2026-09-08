@@ -167,7 +167,7 @@ impl CutoverJournal {
         if self.schema_version != SCHEMA_VERSION
             || !canonical_uuid(&self.operation_id)
             || !canonical_uuid(&self.profile_id)
-            || self.target == EngineMode::Off
+            || !matches!(self.target, EngineMode::SystemProxy | EngineMode::Tunnel)
             || !canonical_uuid(&self.context.installation_id)
             || self.context.config_epoch == 0
             || self.context.generation == 0
@@ -882,6 +882,7 @@ mod tests {
                 bypass_private_networks: true,
                 direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1500,
+                system_proxy_port: None,
             }),
         };
         CutoverPreflightRequest::new(EngineMode::Tunnel, proxy, tunnel).expect("request")

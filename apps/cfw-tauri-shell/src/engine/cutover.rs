@@ -339,6 +339,7 @@ mod tests {
                 bypass_private_networks: true,
                 direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1500,
+                system_proxy_port: None,
             }),
         };
         CutoverPreflightRequest::new(EngineMode::Tunnel, proxy, tunnel).expect("request")

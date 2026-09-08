@@ -183,6 +183,9 @@ export const state = {
   credentialSetup: null,
   credentialGcPreview: null,
   proxyGroups: [],
+  savedProfilePolicy: null,
+  savedProfilePolicyError: null,
+  savedProxySelectionBusy: false,
   logs: [],
   connections: [],
   providers: [],
@@ -209,6 +212,7 @@ export const primaryNavIds = new Set(PAGES.map((page) => page.id));
 export const MAX_LOG_ROWS = 200;
 export const MAX_CONNECTION_ROWS = 500;
 export const runtime = {
+  savedProfilePolicyEpoch: 0,
   renderFrame: null,
   connectionsPatchFrame: null,
   logStreamFrame: null,

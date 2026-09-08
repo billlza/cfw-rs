@@ -178,6 +178,7 @@ fn configuration_of(
             bypass_private_networks: false,
             direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
             mtu: choices.mtu as u16,
+            system_proxy_port: None,
         })
     } else {
         None

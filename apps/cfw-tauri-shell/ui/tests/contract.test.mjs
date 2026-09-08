@@ -205,7 +205,11 @@ test("direct controller mutations are guarded by verified engine activity", () =
   ]);
 
   for (const [command, maximumDistance] of guardedCommands) {
-    const invocation = app.indexOf(`invoke("${command}"`);
+    // select_proxy has a separate saved-profile path while Off; the final
+    // invocation is the live controller mutation and still requires its guard.
+    const invocation = command === "select_proxy"
+      ? app.lastIndexOf(`invoke("${command}"`)
+      : app.indexOf(`invoke("${command}"`);
     assert.notEqual(invocation, -1, `${command} must remain in the renderer contract`);
     const guard = app.lastIndexOf("controllerActionAllowed(", invocation);
     assert.ok(

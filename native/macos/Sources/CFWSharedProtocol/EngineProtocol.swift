@@ -180,14 +180,17 @@ public struct TunnelNetworkOptions: Codable, Equatable, Sendable {
   public let bypassPrivateNetworks: Bool
   public let directIPv4Hosts: [String]
   public let mtu: UInt16
+  public let systemProxyPort: UInt16?
 
   public init(
     ipv6Enabled: Bool,
     bypassPrivateNetworks: Bool = true,
     directIPv4Hosts: [String] = [],
-    mtu: UInt16 = 1_500
+    mtu: UInt16 = 1_500,
+    systemProxyPort: UInt16? = nil
   ) throws {
     guard mtu >= Self.minimumMTU, mtu <= Self.maximumMTU,
+      systemProxyPort != 0,
       directIPv4Hosts.isEmpty
         || directIPv4Hosts == [Self.releasePacketTransportIPv4]
     else {
@@ -197,6 +200,7 @@ public struct TunnelNetworkOptions: Codable, Equatable, Sendable {
     self.bypassPrivateNetworks = bypassPrivateNetworks
     self.directIPv4Hosts = directIPv4Hosts
     self.mtu = mtu
+    self.systemProxyPort = systemProxyPort
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -204,6 +208,7 @@ public struct TunnelNetworkOptions: Codable, Equatable, Sendable {
     case bypassPrivateNetworks = "bypass_private_networks"
     case directIPv4Hosts = "direct_ipv4_hosts"
     case mtu
+    case systemProxyPort = "system_proxy_port"
   }
 
   public init(from decoder: Decoder) throws {
@@ -212,7 +217,8 @@ public struct TunnelNetworkOptions: Codable, Equatable, Sendable {
       ipv6Enabled: container.decode(Bool.self, forKey: .ipv6Enabled),
       bypassPrivateNetworks: container.decode(Bool.self, forKey: .bypassPrivateNetworks),
       directIPv4Hosts: container.decode([String].self, forKey: .directIPv4Hosts),
-      mtu: container.decode(UInt16.self, forKey: .mtu)
+      mtu: container.decode(UInt16.self, forKey: .mtu),
+      systemProxyPort: container.decodeIfPresent(UInt16.self, forKey: .systemProxyPort)
     )
   }
 
@@ -222,6 +228,7 @@ public struct TunnelNetworkOptions: Codable, Equatable, Sendable {
     try container.encode(bypassPrivateNetworks, forKey: .bypassPrivateNetworks)
     try container.encode(directIPv4Hosts, forKey: .directIPv4Hosts)
     try container.encode(mtu, forKey: .mtu)
+    try container.encodeIfPresent(systemProxyPort, forKey: .systemProxyPort)
   }
 }
 

@@ -90,6 +90,7 @@ pub(crate) struct UiProfileText {
     id: String,
     name: String,
     body: String,
+    proxy_selections: std::collections::BTreeMap<String, String>,
     active: bool,
     source_url: Option<String>,
     bytes: usize,
@@ -299,6 +300,7 @@ pub(crate) fn read_profile_text(
         updated_epoch_secs: stored.record.created_epoch_secs,
         source_url: stored.source_url,
         body: stored.profile.as_json().to_owned(),
+        proxy_selections: stored.profile.proxy_selections().clone(),
     })
 }
 
@@ -1691,6 +1693,7 @@ mod tests {
             id: "34db18b6-9903-4e9f-8854-15648e19e4f3".into(),
             name: "Work".into(),
             body: PROFILE_JSON.to_owned(),
+            proxy_selections: std::collections::BTreeMap::new(),
             active: true,
             source_url: Some("https://example.com/sub?token=t".into()),
             bytes: PROFILE_JSON.len(),
@@ -1711,6 +1714,7 @@ mod tests {
                 "bytes",
                 "id",
                 "name",
+                "proxy_selections",
                 "source_url",
                 "updated_epoch_secs",
             ]

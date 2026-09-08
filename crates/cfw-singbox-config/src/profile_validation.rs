@@ -58,6 +58,7 @@ impl ProfileDocument {
                 "final must reference a declared outbound tag",
             ));
         }
+        self.validate_routing(&tags)?;
         Ok(())
     }
 }
@@ -67,6 +68,21 @@ impl ProfileOutbound {
         validate_tag(self.tag(), &format!("{path}.tag"))?;
         match self {
             Self::Direct { .. } | Self::Block { .. } => Ok(()),
+            Self::Selector {
+                outbounds, default, ..
+            } => {
+                if outbounds.is_empty()
+                    || outbounds.len() > MAX_OUTBOUNDS
+                    || outbounds.iter().collect::<BTreeSet<_>>().len() != outbounds.len()
+                    || default.as_ref().is_some_and(|tag| !outbounds.contains(tag))
+                {
+                    return Err(unsupported_shape(
+                        path,
+                        "selector requires unique members and a default from its members",
+                    ));
+                }
+                Ok(())
+            }
             Self::Socks5 {
                 server,
                 server_port,

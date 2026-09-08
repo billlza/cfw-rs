@@ -61,12 +61,16 @@ pub(crate) fn start_request(
         credential_slots: projected.credential_slots().to_vec(),
         tunnel_options: match projected.mode() {
             ProjectionMode::SystemProxy => None,
-            ProjectionMode::Tunnel => Some(TunnelNetworkOptions {
-                ipv6_enabled: settings.enable_ipv6,
-                bypass_private_networks: settings.bypass_private_networks,
-                direct_ipv4_hosts: projected.direct_ipv4_hosts(),
-                mtu: settings.tunnel_mtu,
-            }),
+            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => {
+                Some(TunnelNetworkOptions {
+                    ipv6_enabled: settings.enable_ipv6,
+                    bypass_private_networks: settings.bypass_private_networks,
+                    direct_ipv4_hosts: projected.direct_ipv4_hosts(),
+                    mtu: settings.tunnel_mtu,
+                    system_proxy_port: (projected.mode() == ProjectionMode::TunnelSystemProxy)
+                        .then_some(settings.mixed_port),
+                })
+            }
         },
     }
 }

@@ -2190,7 +2190,7 @@ test("the General page shows the projected inbound and every refused control's r
     "the projected mixed inbound is bound to loopback",
     "pins the engine log level to info",
     "Mixin is unavailable",
-    "No GeoIP database can be downloaded",
+    "Country rules use sing-box rule sets",
   ]) {
     assert.ok(html.includes(needle), `General page is missing the reason: ${needle}`);
   }
@@ -2313,8 +2313,8 @@ test("profile cards show source type on first load without fetching URLs or inve
     assert.match(html, /local file \(/u);
     assert.match(html, /subscription \(/u);
     assert.match(html, /aria-current="true"/u);
-    assert.match(html, /Clash YAML imports proxy nodes only/u);
-    assert.match(html, /Proxy groups, routing rules, and DNS settings are not imported/u);
+    assert.match(html, /Clash YAML imports nodes, selector groups, and supported routing rules/u);
+    assert.match(html, /Unsupported rules are reported before saving/u);
     assert.doesNotMatch(html, /source not listed|quota not reported|profile-usage|2 KB/u);
     assert.equal(invocationDetails.slice(before).some(({ command }) => command === "profile_text"), false);
     state.profiles[0].sourceUrl = "https://private.example/?token=private-test-value";

@@ -118,7 +118,8 @@ fn product_state(snapshot: &EngineSnapshot, ipv6_enabled: bool) -> ProductStateO
         EngineState::TunnelInstalling { .. } => ("tunnel_installing", None, false),
         EngineState::AwaitingApproval { .. } => ("awaiting_approval", None, false),
         EngineState::TunnelStarting { .. } => ("tunnel_starting", None, false),
-        EngineState::TunnelActive { runtime } => {
+        EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime } => {
             ("tunnel_active", Some(runtime.owner), runtime.ready)
         }
         EngineState::TunnelStopping { .. } => ("tunnel_stopping", None, false),

@@ -104,11 +104,12 @@ fn projections_have_exactly_one_application_owned_inbound() {
             "fallback_server": "cfw-authenticated-dns-1",
         })
     );
-    assert!(
-        tunnel
-            .as_json()
-            .contains(r#""rules":[{"action":"hijack-dns","port":53}]"#)
+    assert_eq!(
+        tunnel_json["route"]["rules"][0],
+        serde_json::json!({"action":"hijack-dns","port":53})
     );
+    assert_eq!(tunnel_json["route"]["rules"][1]["clash_mode"], "Direct");
+    assert_eq!(tunnel_json["route"]["rules"][2]["clash_mode"], "Global");
     assert!(!proxy.as_json().contains("hijack-dns"));
     let proxy_json: serde_json::Value = serde_json::from_str(proxy.as_json()).expect("proxy JSON");
     assert_eq!(proxy_json["dns"]["final"], "cfw-authenticated-dns-1");
@@ -383,7 +384,11 @@ fn application_injects_a_collision_free_selector_for_implicit_multi_remote_profi
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected selector JSON");
         let outbounds = config["outbounds"].as_array().expect("runtime outbounds");
-        assert_eq!(outbounds.len(), 3);
+        assert_eq!(outbounds.len(), 4);
+        assert_eq!(
+            outbounds[3],
+            serde_json::json!({"type":"direct","tag":"cfw-direct"})
+        );
         assert_eq!(outbounds[2]["type"], "selector");
         assert_eq!(outbounds[2]["tag"], "cfw-proxy-selector-2");
         assert_eq!(
@@ -431,7 +436,11 @@ fn explicit_profile_route_is_never_replaced_by_the_application_selector() {
         .expect("explicit route projection");
     let config: serde_json::Value =
         serde_json::from_str(projected.as_json()).expect("projected explicit route JSON");
-    assert_eq!(config["outbounds"].as_array().expect("outbounds").len(), 2);
+    assert_eq!(config["outbounds"].as_array().expect("outbounds").len(), 3);
+    assert_eq!(
+        config["outbounds"][2],
+        serde_json::json!({"type":"direct","tag":"cfw-direct"})
+    );
     assert_eq!(config["route"]["final"], "second");
     assert!(projected.as_json().contains(r#""detour":"second""#));
     assert!(!projected.as_json().contains(r#""type":"selector""#));
@@ -655,8 +664,12 @@ fn every_supported_remote_protocol_uses_the_same_bounded_bootstrap_pair() {
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
         let outbounds = config["outbounds"].as_array().expect("outbound matrix");
-        assert_eq!(outbounds.len(), 8);
-        for outbound in outbounds {
+        assert_eq!(outbounds.len(), 9);
+        assert_eq!(
+            outbounds[8],
+            serde_json::json!({"type":"direct","tag":"cfw-direct"})
+        );
+        for outbound in &outbounds[..8] {
             assert_eq!(outbound["domain_resolver"], expected);
         }
     }
@@ -706,7 +719,11 @@ fn anytls_and_tuic_project_exact_placeholders_and_slots_in_both_modes() {
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
         let outbounds = config["outbounds"].as_array().expect("outbounds");
-        assert_eq!(outbounds.len(), 2);
+        assert_eq!(outbounds.len(), 3);
+        assert_eq!(
+            outbounds[2],
+            serde_json::json!({"type":"direct","tag":"cfw-direct"})
+        );
         assert_eq!(outbounds[0]["type"], "anytls");
         assert_eq!(outbounds[0]["password"], "");
         assert_eq!(outbounds[0]["tls"]["utls"]["fingerprint"], "chrome");

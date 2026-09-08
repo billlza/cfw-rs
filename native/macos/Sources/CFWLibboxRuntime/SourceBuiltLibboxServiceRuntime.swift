@@ -245,7 +245,10 @@
     let adapter: CFWLibboxPlatformAdapter
     private let role: LibboxRuntimeRole
 
-    init(role: LibboxRuntimeRole, packetFileDescriptor: Int32?) throws {
+    init(
+      role: LibboxRuntimeRole, packetFileDescriptor: Int32?,
+      processPolicy: LibboxProcessLookupPolicy
+    ) throws {
       self.role = role
       core = try LibboxPlatformCore(
         role: role,
@@ -253,7 +256,9 @@
       )
       adapter = CFWLibboxPlatformAdapter(
         packetTunnel: role == .packetTunnel,
-        delegate: core
+        delegate: core,
+        processNames: processPolicy.names,
+        processPaths: processPolicy.paths
       )
     }
 
@@ -369,7 +374,8 @@
       do {
         platform = try LibboxPlatformContext(
           role: role,
-          packetFileDescriptor: packetFileDescriptor
+          packetFileDescriptor: packetFileDescriptor,
+          processPolicy: expectedReceipt.processPolicy
         )
       } catch {
         lock.withLock { state = .idle }

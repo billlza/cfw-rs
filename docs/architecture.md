@@ -2,15 +2,18 @@
 
 ## Product boundary
 
-The product supports Apple Silicon and macOS 15 or newer. It has two mutually
-exclusive network modes:
+The product supports Apple Silicon and macOS 15 or newer. Its two network
+integrations have independent switches:
 
 - System Proxy: a signed, non-root user ProxyAgent owns one libbox mixed
   inbound and applies SystemConfiguration preferences transactionally.
 - Tunnel: a Packet Tunnel System Extension owns one libbox instance and uses
   public Network Extension packet-flow methods.
+- Combined: that same Packet Tunnel engine also owns the loopback mixed inbound;
+  its `NEPacketTunnelNetworkSettings` includes HTTP/HTTPS proxy settings.
 
-Every Proxy-to-Tunnel or Tunnel-to-Proxy change passes through Off. The old root
+Changes between these engine configurations pass through Off. One owner and one
+engine remain active; toggling either integration preserves the other intent. The old root
 helper and external Clash-compatible core are retired and never act as a
 fallback.
 
@@ -40,6 +43,7 @@ Off
 ProxyStarting -> ProxyActive -> ProxyStopping -> Off
 TunnelInstalling -> AwaitingApproval -> TunnelStarting
   -> TunnelActive -> TunnelStopping -> Off
+  -> TunnelSystemProxyActive -> TunnelStopping -> Off
 Failed
 ```
 
@@ -50,9 +54,9 @@ observable; a failed start becomes Failed and never tries another engine.
 The actual Agent or System Extension process must hold one globally arbitrated
 engine lease for the full libbox lifetime. A user App Group file cannot provide
 that arbitration for a system extension: the system extension runs as root and
-resolves the same App Group identifier into a different container. The current
-prototype therefore blocks Tunnel startup until a signed, identity-checked XPC
-state transport and global lease service replace that false-sharing design.
+resolves the same App Group identifier into a different container. Signed,
+identity-checked XPC state transport and the Global Authority lease service own
+that cross-context boundary.
 Intent and observed-state journals remain single-writer, versioned, and
 protected by installation ID, configuration epoch, generation, length, and
 SHA-256 digest.
@@ -65,8 +69,9 @@ into two independent models.
 
 The validator accepts a deliberately closed local JSON schema: one to 128
 uniquely tagged `direct`, `block`, SOCKS5, Shadowsocks, VMess, VLESS/Reality, Trojan,
-Hysteria2, AnyTLS, or TUIC v5 outbounds and, optionally, `route.final` naming a
-declared tag. Protocol fields, TLS, transports, endpoint syntax, limits, and
+Hysteria2, AnyTLS, TUIC v5 or selector outbounds, plus ordered typed routing rules
+and `route.final` naming a declared tag. Selector graphs are acyclic. Protocol
+fields, TLS, transports, endpoint syntax, limits, and
 credential kind are typed and unknown fields fail closed. TUIC owns separate
 UUID and password slots; Hysteria2/TUIC QUIC TLS rejects uTLS and Reality while
 AnyTLS follows the standard TLS path. The projection layer owns a TLS 1.2

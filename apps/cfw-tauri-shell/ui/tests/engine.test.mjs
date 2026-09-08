@@ -25,6 +25,26 @@ function proxyEnvelope(overrides = {}) {
   };
 }
 
+test("combined readiness checks both switches only after one ready tunnel attestation", () => {
+  const envelope = proxyEnvelope();
+  envelope.snapshot.desired_mode = "tunnel_system_proxy";
+  envelope.snapshot.state.state = "tunnel_system_proxy_active";
+  envelope.snapshot.state.runtime.owner = "packet_tunnel_system_extension";
+  envelope.capabilities.tunnel = true;
+  const active = normalizeEngineStatus(envelope);
+  assert.equal(active.mode, "tunnel-system-proxy");
+  assert.equal(active.systemProxyActive, true);
+  assert.equal(active.tunnelActive, true);
+  assert.equal(systemProxyValueLabel(active), "On");
+  assert.equal(tunnelValueLabel(active), "On");
+  envelope.snapshot.state = { state: "failed", target: "tunnel_system_proxy", error: "startup failed", generation: 9 };
+  const failed = normalizeEngineStatus(envelope);
+  assert.equal(failed.systemProxyActive, false);
+  assert.equal(failed.tunnelActive, false);
+  assert.equal(systemProxyValueLabel(failed), "Failed");
+  assert.equal(tunnelValueLabel(failed), "Failed");
+});
+
 test("accepts an identity-bound active proxy snapshot", () => {
   const engine = normalizeEngineStatus(proxyEnvelope());
   assert.equal(engine.mode, "system-proxy");

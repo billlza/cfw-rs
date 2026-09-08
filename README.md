@@ -34,14 +34,17 @@ Tauri UI
   Packet Tunnel System Extension, shared protocol, and bounded public
   `NEPacketTunnelFlow` packet pump.
 
-System Proxy and Tunnel are mutually exclusive. A mode is active only when the
+System Proxy and Tunnel can be enabled independently or together. Combined mode
+uses one Packet Tunnel engine with a loopback mixed listener and NetworkExtension
+proxy settings. A mode is active only when the
 observed runtime identity, generation, configuration digest, and readiness all
 match the requested projection.
 
 The profile validator implements a closed typed subset: one to 128 uniquely
-tagged `direct`, `block`, Shadowsocks, VMess, VLESS (including Reality),
-Trojan, Hysteria2, AnyTLS, or TUIC v5 outbounds, plus an optional `route.final`
-naming a declared tag. Persistent JSON contains canonical credential references,
+tagged `direct`, `block`, SOCKS5, Shadowsocks, VMess, VLESS (including Reality),
+Trojan, Hysteria2, AnyTLS, TUIC v5 and selector outbounds. Ordered domain, IP,
+process, port, network and country rules can route to declared tags. Country
+rules use app-owned sing-box rule-set downloads. Persistent JSON contains canonical credential references,
 never passwords, UUID values, private keys, or other secrets. TUIC keeps its
 UUID and password in two independently typed references. Projection emits only
 empty credential placeholders and closed injection slots. User-defined

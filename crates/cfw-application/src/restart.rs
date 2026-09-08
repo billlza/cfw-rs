@@ -79,7 +79,8 @@ impl EngineRestartSpec {
                     && runtime.context.generation == self.generation
                     && Some(runtime.config_digest.as_str()) == self.config_digest()
             }
-            (EngineState::TunnelActive { runtime }, EngineMode::Tunnel) => {
+            (EngineState::TunnelActive { runtime }, EngineMode::Tunnel)
+            | (EngineState::TunnelSystemProxyActive { runtime }, EngineMode::TunnelSystemProxy) => {
                 runtime.ready
                     && runtime.owner == EngineOwner::PacketTunnelSystemExtension
                     && runtime.context.generation == self.generation

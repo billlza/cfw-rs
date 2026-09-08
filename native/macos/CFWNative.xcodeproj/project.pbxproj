@@ -38,6 +38,7 @@
 		1C6F96E208D25447B809914D /* NativeBridgeABI.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE28F39D69E303AB9E76F5AF /* NativeBridgeABI.swift */; };
 		1D5B8CB0AA6AE7410CC525FD /* AuthorityV1Codec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1B8C9A5CD0697EF290FDC8 /* AuthorityV1Codec.swift */; };
 		1E6E7AC1FB1DB90874772E7D /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 374828D0449C73C8F8420F62 /* Network.framework */; };
+		20C52AE97BE3FF50C236D262 /* LibboxProcessLookupPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F4A8D21CD0316D2E6F9F34D /* LibboxProcessLookupPolicy.swift */; };
 		214369C049B83F2014388F47 /* libCFWPacketTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */; };
 		2228BBD79E09BC5D4CF6384B /* GlobalAuthorityEngineLeaseInspectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB44296713539DAD97D0A561 /* GlobalAuthorityEngineLeaseInspectorTests.swift */; };
 		264A06450650FF1BD2B0577B /* CFWLibboxObjC.m in Sources */ = {isa = PBXBuildFile; fileRef = A499F5929B081DA13698546D /* CFWLibboxObjC.m */; };
@@ -188,6 +189,7 @@
 		BDC14BB7C2FAC8C7450A8693 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A8823AD70E7698BBEC5D4EFC /* NetworkExtension.framework */; };
 		BFABEEC9775FFD6B0ACD39E5 /* AuthorityBackpressureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 452722C7509B126FC38EC3B9 /* AuthorityBackpressureTests.swift */; };
 		C03936D210F6FF968A349F09 /* CutoverPreflightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F31C7A64D276147B0B903D0D /* CutoverPreflightTests.swift */; };
+		C0C96DD9F0050EF9F7B15A9A /* CFWConnectionOwnerResolver.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = AD7351E924E1C09B0D05B4BF /* CFWConnectionOwnerResolver.h */; };
 		C3847F2CFB69A06B562270D3 /* BoundedTerminalSecretErasurePropertyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE2CCA9E633E1D476F02286 /* BoundedTerminalSecretErasurePropertyTests.swift */; };
 		C3DF62C3C17E8635D88B5B1E /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
 		C7A0E5AFC9C734BC7CC82289 /* ProviderLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C133F0773520864076543B11 /* ProviderLifecycleTests.swift */; };
@@ -201,6 +203,7 @@
 		CF8D7B40E6DB1DFC301191F2 /* libCFWProxyAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */; };
 		D00E9C42E457BEC0114F41E1 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
 		D06BA5B8CDED7A536F16A41E /* ProxyEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB752DDC87AB652A7909F45 /* ProxyEngine.swift */; };
+		D1D6AA194DBFA1E1D9AA93B7 /* LibboxProcessLookupPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A3104134055CD9F720B60BE /* LibboxProcessLookupPolicyTests.swift */; };
 		D1E17AF7C2749129CE6771CF /* TunnelSecretLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AFA4FE486E719390A3E2C0F /* TunnelSecretLifecycleTests.swift */; };
 		D4D187DE5E7D60EBB0242A3D /* ReplayCursorMonotonicCASPropertyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F6D2AB616423FAC1B12179 /* ReplayCursorMonotonicCASPropertyTests.swift */; };
 		D4E2FABD54C21D032BFC905D /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
@@ -255,6 +258,7 @@
 		FBFD168627E6B687B0CF32D1 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C72C5ECB90D52B622ED1FD9E /* PacketTunnelProvider.swift */; };
 		FE0030F07C4F8304C6BD1506 /* ConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1115B6C06001CB30128567C /* ConfigurationStore.swift */; };
 		FE20D5CDDDA46493E3D8190F /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		FF6F979E948203F4769E73C4 /* CFWConnectionOwnerResolver.m in Sources */ = {isa = PBXBuildFile; fileRef = ED0BD0E330AB9AACB2641D5D /* CFWConnectionOwnerResolver.m */; };
 		FFC4CBAC60356C178708B897 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
 		FFD4858DD6062F98A7D66C7A /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 /* End PBXBuildFile section */
@@ -745,6 +749,7 @@
 			dstPath = "include/$(PRODUCT_NAME)";
 			dstSubfolderSpec = 16;
 			files = (
+				C0C96DD9F0050EF9F7B15A9A /* CFWConnectionOwnerResolver.h in CopyFiles */,
 				3C784AA2A35FF6F8322E1891 /* CFWLibboxObjC.h in CopyFiles */,
 				8D0BBF810CE9EA7BBE3E84A9 /* module.modulemap in CopyFiles */,
 			);
@@ -810,11 +815,13 @@
 		363A7D4E545593B4AF3C4280 /* AuthorityProtocolServiceExampleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityProtocolServiceExampleTests.swift; sourceTree = "<group>"; };
 		374828D0449C73C8F8420F62 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		39B71BA8FC172A948930EE09 /* ProxyOwnershipJournalStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyOwnershipJournalStoreTests.swift; sourceTree = "<group>"; };
+		3F4A8D21CD0316D2E6F9F34D /* LibboxProcessLookupPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxProcessLookupPolicy.swift; sourceTree = "<group>"; };
 		3F810BFA06C702E1E7372201 /* TicketOnlyStartupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketOnlyStartupTests.swift; sourceTree = "<group>"; };
 		40C31EAF47A4BE397A32F597 /* CFWLibboxRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWLibboxRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		452632C2C9A18D7B70323830 /* NativeEngineOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEngineOperations.swift; sourceTree = "<group>"; };
 		452722C7509B126FC38EC3B9 /* AuthorityBackpressureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityBackpressureTests.swift; sourceTree = "<group>"; };
 		465A3C62623695EE6E126275 /* DescriptorRelativeAuthorityJournalStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DescriptorRelativeAuthorityJournalStore.swift; sourceTree = "<group>"; };
+		4A3104134055CD9F720B60BE /* LibboxProcessLookupPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxProcessLookupPolicyTests.swift; sourceTree = "<group>"; };
 		4A62BCB2EA51920E300C4850 /* GlobalAuthorityConnectionContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalAuthorityConnectionContract.swift; sourceTree = "<group>"; };
 		4A6CEC2D04B4AFAA3A8C03B8 /* SystemProxyPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyPreferencesTests.swift; sourceTree = "<group>"; };
 		4B3D6FE468EE9DC213A01F76 /* AuthorityV1CodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityV1CodecTests.swift; sourceTree = "<group>"; };
@@ -895,6 +902,7 @@
 		AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostBridge.swift; sourceTree = "<group>"; };
 		AAD05F579DE857E47E3E3CB7 /* ProxyAgentHostClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyAgentHostClientTests.swift; sourceTree = "<group>"; };
 		AD0016F58D12E75C03B59A78 /* LibboxRuntimeStartReceiptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxRuntimeStartReceiptTests.swift; sourceTree = "<group>"; };
+		AD7351E924E1C09B0D05B4BF /* CFWConnectionOwnerResolver.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CFWConnectionOwnerResolver.h; sourceTree = "<group>"; };
 		ADC1BF63F00F4DEE6497D7B5 /* PeerAuthorizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerAuthorizationTests.swift; sourceTree = "<group>"; };
 		AFCD12790140839D6DC5CE47 /* LibboxConfigurationCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxConfigurationCheckerTests.swift; sourceTree = "<group>"; };
 		B2D915EA460231BB72C07BED /* NativeBridgeResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeResponse.swift; sourceTree = "<group>"; };
@@ -942,6 +950,7 @@
 		EAC5632EC7EB5345F733521E /* AuthorityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityService.swift; sourceTree = "<group>"; };
 		EAEAFE2891FB95ADA4DC08CA /* TunnelPreferenceMutationJournalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelPreferenceMutationJournalTests.swift; sourceTree = "<group>"; };
 		ECC482179E77314934F4F9A6 /* PeerAuthorizationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerAuthorizationPolicy.swift; sourceTree = "<group>"; };
+		ED0BD0E330AB9AACB2641D5D /* CFWConnectionOwnerResolver.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CFWConnectionOwnerResolver.m; sourceTree = "<group>"; };
 		F00644A47AC4FFD8CE6DD476 /* AuthorityV1Sensitive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityV1Sensitive.swift; sourceTree = "<group>"; };
 		F0115E4A2395D1D3CD38C05A /* PacketPumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketPumpTests.swift; sourceTree = "<group>"; };
 		F1115B6C06001CB30128567C /* ConfigurationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationStore.swift; sourceTree = "<group>"; };
@@ -1333,6 +1342,8 @@
 		6A6E6C90701DE22A6F523D90 /* CFWLibboxObjC */ = {
 			isa = PBXGroup;
 			children = (
+				AD7351E924E1C09B0D05B4BF /* CFWConnectionOwnerResolver.h */,
+				ED0BD0E330AB9AACB2641D5D /* CFWConnectionOwnerResolver.m */,
 				A499F5929B081DA13698546D /* CFWLibboxObjC.m */,
 				EFBDA6D17DA3FFD3DC695AB0 /* include */,
 			);
@@ -1434,6 +1445,7 @@
 			isa = PBXGroup;
 			children = (
 				AFCD12790140839D6DC5CE47 /* LibboxConfigurationCheckerTests.swift */,
+				4A3104134055CD9F720B60BE /* LibboxProcessLookupPolicyTests.swift */,
 				2FBA3DF467FC9550C79C4CB2 /* LibboxRuntimeDirectoryTests.swift */,
 				AD0016F58D12E75C03B59A78 /* LibboxRuntimeStartReceiptTests.swift */,
 			);
@@ -1534,6 +1546,7 @@
 			isa = PBXGroup;
 			children = (
 				CF56679A8B961C61681A71BE /* LibboxConfigurationChecker.swift */,
+				3F4A8D21CD0316D2E6F9F34D /* LibboxProcessLookupPolicy.swift */,
 				0EC9560714B4C1B12BCF8054 /* LibboxRuntime.swift */,
 				D320F573306DC97645B252C1 /* SourceBuiltLibboxServiceRuntime.swift */,
 			);
@@ -2275,6 +2288,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3AD92010460D6F0D0B5A40F2 /* LibboxConfigurationCheckerTests.swift in Sources */,
+				D1D6AA194DBFA1E1D9AA93B7 /* LibboxProcessLookupPolicyTests.swift in Sources */,
 				89C473F32B84F2479C626CBF /* LibboxRuntimeDirectoryTests.swift in Sources */,
 				70D47ABC4D757ACC22937E79 /* LibboxRuntimeStartReceiptTests.swift in Sources */,
 			);
@@ -2285,6 +2299,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A6D200B683B5DEBDF3564B6C /* LibboxConfigurationChecker.swift in Sources */,
+				20C52AE97BE3FF50C236D262 /* LibboxProcessLookupPolicy.swift in Sources */,
 				08798F02189C6883F3A79BE1 /* LibboxRuntime.swift in Sources */,
 				1682CE7F97A6CC6120A6E76C /* SourceBuiltLibboxServiceRuntime.swift in Sources */,
 			);
@@ -2395,6 +2410,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FF6F979E948203F4769E73C4 /* CFWConnectionOwnerResolver.m in Sources */,
 				264A06450650FF1BD2B0577B /* CFWLibboxObjC.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

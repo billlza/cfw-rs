@@ -156,6 +156,50 @@ pub(crate) fn profiles_snapshot(
         .map_err(|error| error.to_string())
 }
 
+pub(super) async fn select_saved_proxy(
+    engine: &ManagedEngine,
+    profiles: &ManagedProfiles,
+    profile_id: String,
+    group: String,
+    selected: String,
+) -> Result<(), String> {
+    let maintenance = engine
+        .reserve_profile_mutation()
+        .map_err(|error| error.to_string())?;
+    let repository = profiles.repository().clone();
+    // A dropped IPC waiter cannot release the maintenance guard while the
+    // blocking profile transaction still owns it.
+    tauri::async_runtime::spawn_blocking(move || {
+        let _maintenance = maintenance;
+        persist_saved_proxy_selection(&repository, &profile_id, &group, &selected)
+    })
+    .await
+    .map_err(|error| format!("saved proxy selection task failed: {error}"))?
+}
+
+fn persist_saved_proxy_selection(
+    repository: &ProfileRepository,
+    profile_id: &str,
+    group: &str,
+    selected: &str,
+) -> Result<(), String> {
+    let stored = repository
+        .load_selected()
+        .map_err(|error| error.to_string())?
+        .ok_or("no active profile is selected")?;
+    if stored.record.id != profile_id {
+        return Err("selected profile changed before the proxy selection was applied".into());
+    }
+    let profile = stored
+        .profile
+        .with_selected_outbound(group, selected)
+        .map_err(|error| error.to_string())?;
+    repository
+        .replace_if_unchanged(&stored, None, &profile, stored.source_url.as_deref())
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) fn profile_credential_requirements(
     profiles: State<'_, ManagedProfiles>,
@@ -486,6 +530,52 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    #[test]
+    fn saved_selection_updates_only_the_selected_profile_and_preserves_credentials() {
+        let directory = TempDir::new().expect("profile directory");
+        let repository = ProfileRepository::new(directory.path().join("profiles"));
+        let profile = ValidatedSingBoxProfile::parse(&serde_json::json!({
+            "outbounds": [
+                {"type": "socks5", "tag": "Work node", "server": "proxy.example.com", "server_port": 1080, "authentication": {
+                    "username_credential_ref": {"id": "11111111-1111-4111-8111-111111111111", "kind": "socks5_username"},
+                    "password_credential_ref": {"id": "22222222-2222-4222-8222-222222222222", "kind": "socks5_password"}
+                }},
+                {"type": "direct", "tag": "DIRECT"}, {"type": "block", "tag": "REJECT"},
+                {"type": "selector", "tag": "PROXY", "outbounds": ["Work node", "DIRECT", "REJECT"]}
+            ], "route": {"final": "PROXY"}
+        }).to_string()).expect("selector profile");
+        let imported = repository.import(Some("Work"), &profile).expect("import");
+        repository.select(&imported.id).expect("select profile");
+        persist_saved_proxy_selection(&repository, &imported.id, "PROXY", "REJECT")
+            .expect("save selection");
+        let selected = repository
+            .load_selected()
+            .expect("reload")
+            .expect("selected profile");
+        assert_eq!(selected.profile.proxy_selections()["PROXY"], "REJECT");
+        assert_eq!(selected.profile.as_json(), profile.as_json());
+        assert_eq!(selected.record.name, "Work");
+        assert_eq!(
+            selected.profile.credential_references(),
+            profile.credential_references()
+        );
+        assert_eq!(selected.profile.digest(), profile.digest());
+        for (id, group, node) in [
+            ("different-profile", "PROXY", "DIRECT"),
+            (imported.id.as_str(), "PROXY", "absent"),
+        ] {
+            assert!(persist_saved_proxy_selection(&repository, id, group, node).is_err());
+            assert_eq!(
+                repository
+                    .load_selected()
+                    .expect("reload after rejection")
+                    .expect("selected")
+                    .profile,
+                selected.profile
+            );
+        }
+    }
 
     struct OrphanGcVault {
         preview_count: AtomicUsize,

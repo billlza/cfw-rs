@@ -19,6 +19,8 @@ pub(crate) struct RuntimeOutboundProjection {
     pub(crate) outbounds: Vec<Value>,
     pub(crate) credential_slots: Vec<CredentialSlot>,
     pub(crate) selected_outbound: String,
+    pub(crate) direct_outbound: String,
+    pub(crate) global_outbound: String,
     pub(crate) injected_route_final: Option<String>,
 }
 
@@ -52,7 +54,7 @@ impl ProfileDocument {
             .is_some();
         let inject_selector =
             !has_explicit_final && self.outbounds[0].is_remote() && remote_tags.len() >= 2;
-        let injected_route_final = inject_selector.then(|| self.selector_tag());
+        let injected_route_final = inject_selector.then(|| self.unused_tag(APP_SELECTOR_TAG));
         if let Some(selector_tag) = injected_route_final.as_ref() {
             outbounds.push(json!({
                 "type": "selector",
@@ -65,25 +67,49 @@ impl ProfileDocument {
         let selected_outbound = injected_route_final
             .clone()
             .unwrap_or_else(|| profile_final.clone());
+        let direct_outbound = self
+            .outbounds
+            .iter()
+            .find_map(|outbound| match outbound {
+                ProfileOutbound::Direct { tag } => Some(tag.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                let tag = self.unused_tag("cfw-direct");
+                outbounds.push(json!({"type": "direct", "tag": tag}));
+                tag
+            });
+        let global_outbound = injected_route_final
+            .clone()
+            .or_else(|| {
+                self.outbounds.iter().find_map(|outbound| match outbound {
+                    ProfileOutbound::Selector { tag, .. } => Some(tag.clone()),
+                    _ => None,
+                })
+            })
+            .or_else(|| remote_tags.first().cloned())
+            .unwrap_or_else(|| selected_outbound.clone());
         Ok(RuntimeOutboundProjection {
             outbounds,
             credential_slots: slots,
             selected_outbound,
+            direct_outbound,
+            global_outbound,
             injected_route_final,
         })
     }
 
-    fn selector_tag(&self) -> String {
+    fn unused_tag(&self, prefix: &str) -> String {
         let profile_tags = self
             .outbounds
             .iter()
             .map(ProfileOutbound::tag)
             .collect::<BTreeSet<_>>();
-        if !profile_tags.contains(APP_SELECTOR_TAG) {
-            return APP_SELECTOR_TAG.to_owned();
+        if !profile_tags.contains(prefix) {
+            return prefix.to_owned();
         }
         for suffix in 2..=self.outbounds.len() + 1 {
-            let candidate = format!("{APP_SELECTOR_TAG}-{suffix}");
+            let candidate = format!("{prefix}-{suffix}");
             if !profile_tags.contains(candidate.as_str()) {
                 return candidate;
             }
@@ -101,6 +127,19 @@ impl ProfileOutbound {
         let (mut object, slots) = match self {
             Self::Direct { tag } => (base_outbound("direct", tag), Vec::new()),
             Self::Block { tag } => (base_outbound("block", tag), Vec::new()),
+            Self::Selector {
+                tag,
+                outbounds,
+                default,
+            } => {
+                let mut object = base_outbound("selector", tag);
+                object.insert("outbounds".into(), json!(outbounds));
+                if let Some(default) = default {
+                    object.insert("default".into(), json!(default));
+                }
+                object.insert("interrupt_exist_connections".into(), Value::Bool(false));
+                (object, Vec::new())
+            }
             Self::Socks5 {
                 tag,
                 server,

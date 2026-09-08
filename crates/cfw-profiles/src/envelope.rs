@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -29,6 +30,8 @@ struct ProfileEnvelope {
     created_epoch_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    proxy_selections: BTreeMap<String, String>,
 }
 
 pub(crate) struct DecodedEnvelope {
@@ -67,6 +70,7 @@ pub(crate) fn encode_with_timestamp(
             .map(normalize_source_url)
             .transpose()?
             .map(ToOwned::to_owned),
+        proxy_selections: profile.proxy_selections().clone(),
     };
     let bytes = serde_json::to_vec(&envelope)?;
     if bytes.len() > MAX_ENVELOPE_BYTES {
@@ -127,11 +131,14 @@ pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEnvelop
         return Err(ProfileError::NonCanonicalEnvelope(expected_id.to_string()));
     }
 
-    let profile = ValidatedSingBoxProfile::parse(&serde_json::to_string(&envelope.profile)?)?;
+    let mut profile = ValidatedSingBoxProfile::parse(&serde_json::to_string(&envelope.profile)?)?;
     if profile.digest() != envelope.digest {
         return Err(ProfileError::DigestMismatch {
             id: expected_id.to_string(),
         });
+    }
+    for (group, selected) in &envelope.proxy_selections {
+        profile = profile.with_selected_outbound(group, selected)?;
     }
     Ok(DecodedEnvelope {
         name: envelope.name,

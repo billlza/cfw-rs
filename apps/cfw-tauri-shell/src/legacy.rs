@@ -572,7 +572,9 @@ pub(crate) async fn recover_legacy_cutover(
     let active_digest = match journal.target {
         EngineMode::SystemProxy => journal.system_proxy_digest.as_str(),
         EngineMode::Tunnel => journal.tunnel_digest.as_str(),
-        EngineMode::Off => unreachable!("journal rejects Off"),
+        EngineMode::Off | cfw_engine_api::EngineMode::TunnelSystemProxy => {
+            unreachable!("journal rejects unsupported replacement modes")
+        }
     };
     let mut replacement_active = require_replacement_active(
         engine.coordinator.snapshot(),
@@ -668,7 +670,9 @@ pub(crate) async fn recover_legacy_cutover(
     let active_digest = match journal.target {
         EngineMode::SystemProxy => journal.system_proxy_digest.as_str(),
         EngineMode::Tunnel => journal.tunnel_digest.as_str(),
-        EngineMode::Off => unreachable!("journal rejects Off"),
+        EngineMode::Off | cfw_engine_api::EngineMode::TunnelSystemProxy => {
+            unreachable!("journal rejects unsupported replacement modes")
+        }
     };
     require_replacement_active(
         engine.coordinator.snapshot(),
@@ -888,7 +892,9 @@ fn target_digest(request: &cfw_engine_api::CutoverPreflightRequest) -> &str {
     match request.target() {
         EngineMode::SystemProxy => &request.system_proxy_request().config_digest,
         EngineMode::Tunnel => &request.tunnel_request().config_digest,
-        EngineMode::Off => unreachable!("cutover requests reject Off"),
+        EngineMode::Off | EngineMode::TunnelSystemProxy => {
+            unreachable!("cutover requests reject unsupported replacement modes")
+        }
     }
 }
 
@@ -914,7 +920,9 @@ fn require_replacement_active(
         && runtime.owner
             == match target {
                 EngineMode::SystemProxy => cfw_engine_api::EngineOwner::ProxyAgent,
-                EngineMode::Tunnel => cfw_engine_api::EngineOwner::PacketTunnelSystemExtension,
+                EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
+                    cfw_engine_api::EngineOwner::PacketTunnelSystemExtension
+                }
                 EngineMode::Off => unreachable!("active target cannot be Off"),
             }
         && &runtime.context == expected_context

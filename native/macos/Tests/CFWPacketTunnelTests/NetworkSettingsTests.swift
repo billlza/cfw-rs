@@ -51,7 +51,8 @@ private func prefixContains(_ prefix: [UInt8], length: UInt8, address: [UInt8]) 
 private func descriptor(
   ipv6Enabled: Bool,
   bypassPrivateNetworks: Bool = true,
-  directIPv4Hosts: [String] = []
+  directIPv4Hosts: [String] = [],
+  systemProxyPort: UInt16? = nil
 ) throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
@@ -59,7 +60,8 @@ private func descriptor(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
       directIPv4Hosts: directIPv4Hosts,
-      mtu: 1_500
+      mtu: 1_500,
+      systemProxyPort: systemProxyPort
     ),
     credentialAudience: CredentialAudience(
       profileID: UUID(),
@@ -70,6 +72,23 @@ private func descriptor(
     byteCount: 2,
     sha256: SHA256Digest(hex: String(repeating: "00", count: 32))
   )
+}
+
+@Test func combinedTunnelPublishesRealProxySettingsAndRemovingProxyPreservesRoutes() throws {
+  let combined = PacketTunnelProvider.networkSettings(
+    descriptor: try descriptor(ipv6Enabled: true, systemProxyPort: 7891)
+  )
+  let proxy = try #require(combined.proxySettings)
+  #expect(proxy.httpEnabled && proxy.httpsEnabled)
+  #expect(proxy.httpServer?.address == "127.0.0.1")
+  #expect(proxy.httpServer?.port == 7891)
+  #expect(proxy.httpsServer?.port == 7891)
+  #expect(proxy.matchDomains == [""])
+  let tunnel = PacketTunnelProvider.networkSettings(descriptor: try descriptor(ipv6Enabled: true))
+  #expect(tunnel.proxySettings == nil)
+  #expect(tunnel.ipv4Settings?.addresses == combined.ipv4Settings?.addresses)
+  #expect(tunnel.ipv6Settings?.addresses == combined.ipv6Settings?.addresses)
+  #expect(tunnel.dnsSettings?.servers == combined.dnsSettings?.servers)
 }
 
 @Test func sourceOwnedDirectIPv4HostBecomesAnExact32ExcludedRoute() throws {

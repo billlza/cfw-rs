@@ -68,3 +68,44 @@ impl fmt::Debug for EngineControllerAccess {
             .finish()
     }
 }
+
+/// Explicit saved choices override libbox's previous controller cache. Apply
+/// them before publishing Active and require readback through the same client.
+pub(crate) async fn restore_proxy_selections(
+    profile: &cfw_singbox_config::ValidatedSingBoxProfile,
+    settings: &EngineSettings,
+) -> Result<(), crate::EngineCoordinatorError> {
+    if profile.proxy_selections().is_empty() {
+        return Ok(());
+    }
+    let endpoint = EngineControllerAccess::resolve(settings.clone())?.client_endpoint();
+    let operation = async {
+        let client =
+            cfw_controller::ControllerClient::new(endpoint).map_err(|error| error.to_string())?;
+        for (group, selected) in profile.proxy_selections() {
+            client
+                .select_proxy(group, selected)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let observed = client.proxies().await.map_err(|error| error.to_string())?;
+        for (group, selected) in profile.proxy_selections() {
+            if !observed
+                .groups
+                .iter()
+                .any(|entry| &entry.name == group && entry.now.as_ref() == Some(selected))
+            {
+                return Err("controller did not confirm the saved node choice".to_owned());
+            }
+        }
+        Ok(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), operation)
+        .await
+        .map_err(|_| {
+            crate::EngineCoordinatorError::ProxySelectionInitialization(
+                "controller initialization timed out".into(),
+            )
+        })?
+        .map_err(crate::EngineCoordinatorError::ProxySelectionInitialization)
+}

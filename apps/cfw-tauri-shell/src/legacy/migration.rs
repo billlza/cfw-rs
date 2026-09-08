@@ -135,7 +135,10 @@ pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
                 let digest = match journal.target {
                     cfw_engine_api::EngineMode::SystemProxy => &journal.system_proxy_digest,
                     cfw_engine_api::EngineMode::Tunnel => &journal.tunnel_digest,
-                    cfw_engine_api::EngineMode::Off => unreachable!("journal rejects Off"),
+                    cfw_engine_api::EngineMode::Off
+                    | cfw_engine_api::EngineMode::TunnelSystemProxy => {
+                        unreachable!("journal rejects unsupported replacement modes")
+                    }
                 };
                 let proof = super::require_replacement_active(
                     engine.coordinator.snapshot(),

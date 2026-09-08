@@ -1590,12 +1590,14 @@ extension ConfigurationDescriptor {
     guard let tunnelOptions else {
       return [:]
     }
-    return [
+    var values: [String: Any] = [
       "ipv6Enabled": tunnelOptions.ipv6Enabled ? "true" : "false",
       "bypassPrivateNetworks": tunnelOptions.bypassPrivateNetworks ? "true" : "false",
       "directIPv4Hosts": tunnelOptions.directIPv4Hosts,
       "mtu": String(tunnelOptions.mtu),
     ]
+    if let port = tunnelOptions.systemProxyPort { values["systemProxyPort"] = String(port) }
+    return values
   }
 }
 
@@ -1695,11 +1697,21 @@ extension NETunnelProviderManager {
     default:
       throw AppleNetworkError.providerResponseMismatch
     }
+    let systemProxyPort: UInt16?
+    if let value = configuration["systemProxyPort"] {
+      guard let text = value as? String, let port = UInt16(text), port > 0,
+        text == String(port)
+      else { throw AppleNetworkError.providerResponseMismatch }
+      systemProxyPort = port
+    } else {
+      systemProxyPort = nil
+    }
     return try TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
       directIPv4Hosts: directIPv4Hosts,
-      mtu: mtu
+      mtu: mtu,
+      systemProxyPort: systemProxyPort
     )
   }
 }

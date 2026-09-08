@@ -123,6 +123,13 @@ impl EngineSettings {
 pub enum ProjectionMode {
     SystemProxy,
     Tunnel,
+    TunnelSystemProxy,
+}
+
+impl ProjectionMode {
+    pub const fn has_tunnel(self) -> bool {
+        matches!(self, Self::Tunnel | Self::TunnelSystemProxy)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -214,6 +221,8 @@ impl ValidatedSingBoxProfile {
             fallback_server: BOOTSTRAP_DNS_FALLBACK_TAG,
         })?;
         let selected_outbound = runtime_outbounds.selected_outbound.clone();
+        let direct_outbound = runtime_outbounds.direct_outbound.clone();
+        let global_outbound = runtime_outbounds.global_outbound.clone();
         let injected_route_final = runtime_outbounds.injected_route_final.clone();
         let outbounds = runtime_outbounds.outbounds;
         let credential_slots = runtime_outbounds.credential_slots;
@@ -300,7 +309,7 @@ impl ValidatedSingBoxProfile {
                     "listen_port": settings.mixed_port
                 })
             }
-            ProjectionMode::Tunnel => {
+            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => {
                 let mut addresses = vec![format!(
                     "{}/{}",
                     TUNNEL_ADDRESS_PLAN.ipv4_address, TUNNEL_ADDRESS_PLAN.ipv4_prefix_length
@@ -324,7 +333,19 @@ impl ValidatedSingBoxProfile {
                 })
             }
         };
-        root.insert("inbounds".into(), Value::Array(vec![inbound]));
+        let mut inbounds = vec![inbound];
+        if mode == ProjectionMode::TunnelSystemProxy {
+            if settings.mixed_port == 0 {
+                return Err(ConfigError::InvalidMixedPort);
+            }
+            inbounds.push(json!({
+                "type": "mixed",
+                "tag": "cfw-system-proxy",
+                "listen": "127.0.0.1",
+                "listen_port": settings.mixed_port,
+            }));
+        }
+        root.insert("inbounds".into(), Value::Array(inbounds));
         root.insert(
             "dns".into(),
             json!({
@@ -357,11 +378,25 @@ impl ValidatedSingBoxProfile {
             route.insert("final".into(), Value::String(final_tag));
         }
         route.insert("default_domain_resolver".into(), default_domain_resolver);
-        if mode == ProjectionMode::Tunnel {
-            route.insert(
-                "rules".into(),
-                json!([{ "port": 53, "action": "hijack-dns" }]),
-            );
+        let (mut rules, rule_sets) = self.document.project_rules(&selected_outbound);
+        rules.splice(
+            0..0,
+            [
+                json!({"clash_mode": "Direct", "action": "route", "outbound": direct_outbound}),
+                json!({"clash_mode": "Global", "action": "route", "outbound": global_outbound}),
+            ],
+        );
+        if mode.has_tunnel() {
+            rules.insert(0, json!({ "port": 53, "action": "hijack-dns" }));
+        }
+        if !rules.is_empty() {
+            route.insert("rules".into(), Value::Array(rules));
+        }
+        if !rule_sets.is_empty() {
+            route.insert("rule_set".into(), Value::Array(rule_sets));
+            root.get_mut("experimental")
+                .expect("app-owned experimental settings")["cache_file"] =
+                json!({"enabled": true, "path": "routing-cache.db", "cache_id": profile_id});
         }
         if !route.is_empty() {
             root.insert("route".into(), Value::Object(route));
@@ -378,22 +413,25 @@ impl ValidatedSingBoxProfile {
             });
         }
         let configuration_digest = sha256_hex(json.as_bytes());
-        let network_options = match mode {
+        let mut network_options = match mode {
             ProjectionMode::SystemProxy => Value::Null,
-            ProjectionMode::Tunnel => json!({
+            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => json!({
                 "bypass_private_networks": settings.bypass_private_networks,
                 "direct_ipv4_hosts": direct_ipv4_hosts,
                 "ipv6_enabled": settings.enable_ipv6,
                 "mtu": settings.tunnel_mtu,
             }),
         };
+        if mode == ProjectionMode::TunnelSystemProxy {
+            network_options["system_proxy_port"] = json!(settings.mixed_port);
+        }
         let identity = canonicalize(json!({
             "configuration_sha256": configuration_digest,
             "credential_audience": credential_audience,
             "credential_slots": credential_slots,
             "mode": match mode {
                 ProjectionMode::SystemProxy => "system_proxy",
-                ProjectionMode::Tunnel => "tunnel",
+                ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => "tunnel",
             },
             "network_options": network_options,
             "schema_version": CONFIGURATION_IDENTITY_SCHEMA_VERSION,

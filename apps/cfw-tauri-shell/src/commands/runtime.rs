@@ -102,6 +102,7 @@ pub(crate) fn read_runtime_config_text(
     let settings = engine.engine_settings()?;
     let mode = match engine.coordinator.snapshot().desired_mode {
         EngineMode::Tunnel => ProjectionMode::Tunnel,
+        EngineMode::TunnelSystemProxy => ProjectionMode::TunnelSystemProxy,
         // With the engine off there is no live configuration; the System Proxy
         // projection is the one a start would use first.
         EngineMode::Off | EngineMode::SystemProxy => ProjectionMode::SystemProxy,
@@ -157,7 +158,12 @@ fn project_for_mode(
     let modes: &[ProjectionMode] = match mode {
         EngineMode::SystemProxy => &[ProjectionMode::SystemProxy],
         EngineMode::Tunnel => &[ProjectionMode::Tunnel],
-        EngineMode::Off => &[ProjectionMode::SystemProxy, ProjectionMode::Tunnel],
+        EngineMode::TunnelSystemProxy => &[ProjectionMode::TunnelSystemProxy],
+        EngineMode::Off => &[
+            ProjectionMode::SystemProxy,
+            ProjectionMode::Tunnel,
+            ProjectionMode::TunnelSystemProxy,
+        ],
     };
     let mut bytes = 0;
     for mode in modes {

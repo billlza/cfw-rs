@@ -171,9 +171,9 @@ fn isolated_coordinator(backend: Arc<FakeBackend>) -> EngineModeCoordinator {
 
 fn active_generation(state: &EngineState) -> Option<u64> {
     match state {
-        EngineState::ProxyActive { runtime } | EngineState::TunnelActive { runtime } => {
-            Some(runtime.context.generation)
-        }
+        EngineState::ProxyActive { runtime }
+        | EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime } => Some(runtime.context.generation),
         _ => None,
     }
 }
@@ -414,7 +414,7 @@ async fn run_permutation(perm: &[Step]) -> Result<(), String> {
                             .iter()
                             .map(|request| request.context.generation)
                             .collect(),
-                        EngineMode::Tunnel => backend
+                        EngineMode::Tunnel | EngineMode::TunnelSystemProxy => backend
                             .tunnel_requests()
                             .iter()
                             .map(|request| request.context.generation)

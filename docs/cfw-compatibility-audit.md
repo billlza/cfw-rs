@@ -41,7 +41,28 @@ coarsely classified startup errors still need more useful diagnostic categories.
 
 ## Functionality comparison
 
-| Capability | Installed CFW UI/code | CFM 40046 / current contract | Assessment |
+### Corrections prepared for build 40047
+
+The table below preserves the installed 40046 baseline. The successor source
+now implements independent System Proxy/TUN switches (including both enabled
+under one Packet Tunnel owner), selector groups, supported ordered Clash rules,
+country rule sets, real Direct/Global routing and saved policy views while Off.
+Node choices are separate envelope preferences, so changing a choice does not
+change the imported document's Keychain audience. Configuration replacements
+use the new source defaults; the original profile backup supports binary rollback.
+
+Production-runtime tests with the pinned libbox have exercised real HTTP
+forwarding, process-name rejection, mode changes, selector changes and controller
+group/rule data. Normal-user process matching uses bounded public `libproc`
+queries limited to configured names/paths; it requires no additional privilege.
+These component checks still do not prove installed SystemConfiguration or TUN
+behavior. Installation and OS readback must complete before that claim.
+
+Automatic url-test/fallback groups, providers, arbitrary source DNS settings,
+LAN exposure and a standalone core while both switches are Off remain gaps.
+Unsupported policy imports fail explicitly before profile commit.
+
+| Capability | Installed CFW UI/code | CFM 40046 baseline | Assessment |
 | --- | --- | --- | --- |
 | Core without system proxy or TUN | Core and local mixed listener can remain available independently | `Off` stops the engine; starts select System Proxy or Tunnel | Major missing use case |
 | System Proxy and TUN together | Independent controls; both are shown enabled in the inspected CFW view | Exclusive `Off / SystemProxy / Tunnel` engine enum and owner transitions | Deliberate product regression, not an OS requirement |

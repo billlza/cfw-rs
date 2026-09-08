@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithPacketTunnel:(BOOL)packetTunnel
                              delegate:(id<CFWLibboxPlatformDelegate>)delegate
+                         processNames:(NSArray<NSString *> *)processNames
+                         processPaths:(NSArray<NSString *> *)processPaths
     NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 

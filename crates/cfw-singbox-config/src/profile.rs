@@ -22,6 +22,8 @@ pub(crate) struct ProfileRoute {
     #[serde(rename = "final")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) final_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) rules: Vec<crate::routing::ProfileRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +34,12 @@ pub(crate) enum ProfileOutbound {
     },
     Block {
         tag: String,
+    },
+    Selector {
+        tag: String,
+        outbounds: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
     },
     Socks5 {
         tag: String,
@@ -416,13 +424,17 @@ impl ProfileDocument {
 
 impl ProfileOutbound {
     pub(crate) fn is_remote(&self) -> bool {
-        !matches!(self, Self::Direct { .. } | Self::Block { .. })
+        !matches!(
+            self,
+            Self::Direct { .. } | Self::Block { .. } | Self::Selector { .. }
+        )
     }
 
     pub(crate) fn tag(&self) -> &str {
         match self {
             Self::Direct { tag }
             | Self::Block { tag }
+            | Self::Selector { tag, .. }
             | Self::Socks5 { tag, .. }
             | Self::Shadowsocks { tag, .. }
             | Self::Vmess { tag, .. }
@@ -436,7 +448,7 @@ impl ProfileOutbound {
 
     pub(crate) fn credential_refs(&self) -> Vec<&CredentialRef> {
         match self {
-            Self::Direct { .. } | Self::Block { .. } => Vec::new(),
+            Self::Direct { .. } | Self::Block { .. } | Self::Selector { .. } => Vec::new(),
             Self::Socks5 { authentication, .. } => match authentication {
                 Some(authentication) => vec![
                     &authentication.username_credential_ref,

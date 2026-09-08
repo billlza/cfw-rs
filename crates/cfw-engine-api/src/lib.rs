@@ -1,4 +1,4 @@
-//! Stable product-facing types for the mutually-exclusive networking engines.
+//! Stable product-facing types for the networking engine and its OS integration.
 //!
 //! No type in this crate exposes Tauri, Apple framework, libbox, or Clash API
 //! implementation details. Native adapters translate at this boundary.
@@ -28,6 +28,26 @@ pub enum EngineMode {
     Off,
     SystemProxy,
     Tunnel,
+    TunnelSystemProxy,
+}
+
+impl EngineMode {
+    pub const fn system_proxy_enabled(self) -> bool {
+        matches!(self, Self::SystemProxy | Self::TunnelSystemProxy)
+    }
+
+    pub const fn tunnel_enabled(self) -> bool {
+        matches!(self, Self::Tunnel | Self::TunnelSystemProxy)
+    }
+
+    pub const fn from_switches(system_proxy: bool, tunnel: bool) -> Self {
+        match (system_proxy, tunnel) {
+            (false, false) => Self::Off,
+            (true, false) => Self::SystemProxy,
+            (false, true) => Self::Tunnel,
+            (true, true) => Self::TunnelSystemProxy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +140,9 @@ pub enum EngineState {
     TunnelActive {
         runtime: RuntimeIdentity,
     },
+    TunnelSystemProxyActive {
+        runtime: RuntimeIdentity,
+    },
     TunnelStopping {
         generation: u64,
     },
@@ -135,6 +158,7 @@ impl EngineState {
         match self {
             Self::ProxyActive { .. } => EngineMode::SystemProxy,
             Self::TunnelActive { .. } => EngineMode::Tunnel,
+            Self::TunnelSystemProxyActive { .. } => EngineMode::TunnelSystemProxy,
             _ => EngineMode::Off,
         }
     }
@@ -740,6 +764,9 @@ pub struct TunnelNetworkOptions {
     pub bypass_private_networks: bool,
     pub direct_ipv4_hosts: DirectIpv4HostRoutes,
     pub mtu: u16,
+    /// The tunnel's own loopback mixed listener used by macOS HTTP/HTTPS proxy settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_proxy_port: Option<u16>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -755,7 +782,7 @@ impl CutoverPreflightRequest {
         system_proxy_request: EngineStartRequest,
         tunnel_request: EngineStartRequest,
     ) -> Result<Self, CutoverPreflightRequestError> {
-        if target == EngineMode::Off {
+        if !matches!(target, EngineMode::SystemProxy | EngineMode::Tunnel) {
             return Err(CutoverPreflightRequestError::ActiveTargetRequired);
         }
         if system_proxy_request.tunnel_options.is_some() || tunnel_request.tunnel_options.is_none()
@@ -1313,7 +1340,7 @@ pub enum NativeBridgeCommand {
         request: CredentialPresenceWireRequest,
     },
     PreflightCutover {
-        request: CutoverPreflightRequest,
+        request: Box<CutoverPreflightRequest>,
     },
     PreviewCredentialGarbageCollection {
         request: CredentialGarbageCollectionRequest,

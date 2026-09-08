@@ -23,8 +23,9 @@ import {
   normalizeEngineStatus,
   summarizeEngineEvent,
   systemProxyValueLabel,
+  modeHasSystemProxy,
+  modeHasTunnel,
   tunnelValueLabel,
-  formatGeoipLabel,
   formatBytes,
   formatRate,
   formatRelativeUpdated,
@@ -51,6 +52,8 @@ import {
   normalizeCredentialReceipt,
   normalizeGcReceipt,
 } from "./credentials.js";
+
+import { savedProfilePolicy } from "./profile-policy.js";
 
 import {
   PROFILE_SOURCE_ACCEPT,
@@ -103,7 +106,7 @@ const REASONS = Object.freeze({
   bindAddress: "The mixed inbound address is fixed by the projected configuration and cannot be changed in this build.",
   logLevel: "The projected configuration pins the engine log level to info and the engine controller accepts no log-level change.",
   mixin: "Mixin is unavailable: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy.",
-  geoip: "No GeoIP database can be downloaded: the accepted profile subset contains no rule set or GeoIP matcher, so this engine consumes no GeoIP database.",
+  geoip: "Country rules use sing-box rule sets, downloaded on first start and refreshed daily while the engine runs. An existing Clash Country.mmdb file is not used.",
   restoreDns: "This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS.",
   engineNotOff: "Profile changes require the engine to be Off. Turn System Proxy and TUN Mode off first.",
 });
@@ -506,9 +509,9 @@ function visibleConnections() {
   }).slice(0, MAX_CONNECTION_ROWS);
 }
 
-function visibleRules() {
+function visibleRules(source = state.rules) {
   const regex = safeRegex(state.ruleSearch);
-  return state.rules.filter((rule) => {
+  return source.filter((rule) => {
     const haystack = [rule.index, rule.type, rule.payload, rule.proxy, rule.hits].filter(Boolean).join(" ");
     return !state.ruleSearch || (regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.ruleSearch.toLowerCase()));
   }).slice(0, 2000);
@@ -909,17 +912,17 @@ function renderGeneral() {
   const launchAtLogin = launchAtLoginPresentation();
   const tunnelRecoveryAction = engine.state === "AwaitingApproval"
     ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>Approve…</button>`
-    : engine.state === "Failed" && engine.desiredMode === "tunnel"
+    : engine.state === "Failed" && modeHasTunnel(engine.desiredMode)
       ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>Retry</button>`
       : "";
-  const proxyRecoveryAction = engine.state === "Failed" && engine.desiredMode === "system-proxy"
+  const proxyRecoveryAction = engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)
     ? `<button class="cfw-text-button" data-action="retry-system-proxy"${proxyRetryDisabled}>Retry</button>`
     : "";
   const cancellationDisabled = state.engineMutationBusy || state.migrationHandoff ? " disabled" : "";
-  const tunnelCancellationAction = engine.desiredMode === "tunnel" && !engine.tunnelActive
+  const tunnelCancellationAction = modeHasTunnel(engine.desiredMode) && !engine.tunnelActive
     ? `<button class="cfw-text-button" data-action="cancel-tun-mode"${cancellationDisabled}>Cancel request</button>`
     : "";
-  const proxyCancellationAction = engine.desiredMode === "system-proxy" && !engine.systemProxyActive
+  const proxyCancellationAction = modeHasSystemProxy(engine.desiredMode) && !engine.systemProxyActive
     ? `<button class="cfw-text-button" data-action="cancel-system-proxy"${cancellationDisabled}>Cancel request</button>`
     : "";
   const migrationBanner = renderMigrationBanner();
@@ -1012,9 +1015,8 @@ function renderGeneral() {
         <div class="cfw-row">
           <div class="cfw-row-left">GeoIP Database</div>
           <div class="cfw-row-right">
-            <span class="cfw-link-value" title="${escapeHtml(state.geoipStatus?.path ?? "")}">${escapeHtml(formatGeoipLabel(state.geoipStatus))}</span>
-            <button class="cfw-text-button" disabled title="${escapeHtml(REASONS.geoip)}">Update</button>
-            ${renderRowNote("Not consumed by this engine", REASONS.geoip)}
+            <span class="cfw-link-value">${escapeHtml(state.savedProfilePolicy?.geoipCountries.join(", ") || "No country rules configured")}</span>
+            ${renderRowNote("Automatic updates", REASONS.geoip)}
           </div>
         </div>
 
@@ -1280,8 +1282,10 @@ function isTimedOutProxy(node) {
 }
 
 function renderProxies() {
+  const controllerLive = freshProxyControllerSnapshotAvailable();
+  const sourceGroups = controllerLive ? state.proxyGroups : state.savedProfilePolicy?.groups ?? [];
   const filter = state.proxyFilter.trim().toLowerCase();
-  const groups = state.proxyGroups
+  const groups = sourceGroups
     .map((group) => ({
       ...group,
       options: (group.options.length ? group.options : group.observedOption ? [group.observedOption] : []).filter((node) => {
@@ -1297,14 +1301,13 @@ function renderProxies() {
     ?? groups.find((group) => isManualProxyGroup(group.type))
     ?? groups[0]
     ?? null;
-  const manual = activeGroup ? isManualProxyGroup(activeGroup.type) : false;
+  const manual = Boolean(activeGroup && isManualProxyGroup(activeGroup.type) && (controllerLive || engineIsOff()) && !state.savedProxySelectionBusy);
   const hideTimedOut = Boolean(state.toggles.hideUnavailable);
   const showProxiesList = state.toggles.showProxiesList !== false;
   const blinkNode = state.proxyBlinkNode;
-  const controllerLive = freshProxyControllerSnapshotAvailable();
   const emptyMessage = controllerLive && state.proxyGroups.length === 0
     ? "Active profile has no proxy groups. Switch to a subscription with nodes."
-    : "Controller unavailable. No live proxy groups are being displayed.";
+    : state.savedProfilePolicyError ?? "No saved nodes are available. Select or import a profile.";
   const modeUnavailableTitle = controllerLive
     ? "Switch proxy mode"
     : "Start the engine and wait for a live controller snapshot to switch mode";
@@ -1319,6 +1322,7 @@ function renderProxies() {
       ${modeSwitch}
 
       <div class="cfw-proxy-page">
+        ${!controllerLive && state.savedProfilePolicy ? `<p class="muted">Saved configuration · ${escapeHtml(state.savedProfilePolicy.name)}. Engine: ${escapeHtml(engineStateLabel(state.engine))}. ${engineIsOff() ? "Selections apply on the next start." : escapeHtml(state.engine.availabilityReason ?? "Live status is unavailable.")}</p>` : ""}
         ${activeGroup ? `
           <div class="cfw-proxy-head">
             <div class="cfw-proxy-title">
@@ -2524,7 +2528,7 @@ function renderProfiles() {
         <input class="profile-file-hidden" data-profile-file type="file" accept="${PROFILE_SOURCE_ACCEPT}" aria-label="Local JSON, YAML, or node-link profile" ${blocked} />
       </section>
 
-      <p class="profile-note">Clash YAML imports proxy nodes only. Proxy groups, routing rules, and DNS settings are not imported.</p>
+      <p class="profile-note">Clash YAML imports nodes, selector groups, and supported routing rules. Unsupported rules are reported before saving. DNS and listener settings are managed by the app.</p>
       ${mutationReason ? `<p class="profile-note">${escapeHtml(mutationReason)}</p>` : ""}
 
       <section class="cfw-profile-list">
@@ -2948,14 +2952,16 @@ function renderConnectionDetail(connection) {
 }
 
 function renderRules() {
-  const rules = visibleRules();
+  const live = state.engine.active;
+  const source = live ? state.rules : state.savedProfilePolicy?.rules ?? [];
+  const rules = visibleRules(source);
   return `
     <div class="rules-layout">
       <section class="panel toolbar-panel">
         <div>
           <p class="label">Router</p>
-          <h3>${rules.length} / ${state.rules.length} active rule entries</h3>
-          <p class="muted">Live data from the engine controller, including rule type, payload, proxy target and hit counters when the engine exposes them.</p>
+          <h3>${rules.length} / ${source.length} ${live ? "active" : "saved"} rule entries</h3>
+          <p class="muted">${live ? "Live rules from the running engine." : "Saved profile rules; hit counters become available when the engine reports them."}</p>
         </div>
         <div class="search-box">
           <input value="${escapeHtml(state.ruleSearch)}" data-rule-search aria-label="Search rules" placeholder="Search rules" />
@@ -2978,7 +2984,7 @@ function renderRules() {
               <span>${escapeHtml(rule.proxy)}</span>
               <span>${escapeHtml(rule.hits)}</span>
             </div>
-          `).join("") || '<p class="empty">No rules loaded from the controller.</p>'}
+          `).join("") || `<p class="empty">${escapeHtml(state.savedProfilePolicyError ?? (live ? "No rules loaded from the controller." : "The selected profile has no explicit rules."))}</p>`}
         </div>
       </section>
     </div>
@@ -3343,6 +3349,29 @@ async function applyProxyMode(mode) {
 }
 
 async function applyProxySelection(groupName, proxyName) {
+  if (engineIsOff() && state.savedProfilePolicy) {
+    const policy = state.savedProfilePolicy;
+    const group = policy.groups.find((item) => item.name === groupName);
+    if (state.savedProxySelectionBusy || !group || !isManualProxyGroup(group.type)
+      || !group.options.some((item) => item.name === proxyName)) return false;
+    state.savedProxySelectionBusy = true;
+    try {
+      await invoke("select_proxy", { profileId: policy.profileId, group: groupName, proxy: proxyName });
+      await loadProfilesSnapshot();
+      const observed = state.savedProfilePolicy;
+      if (observed?.profileId !== policy.profileId || observed.groups.find((item) => item.name === groupName)?.now !== proxyName) {
+        throw new Error("Saved proxy selection could not be confirmed");
+      }
+      appendLog("info", "proxy", `Saved ${proxyName} for ${groupName}; it will apply on the next start`);
+      return true;
+    } catch (error) {
+      appendLog("error", "proxy", errorText(error));
+      return false;
+    } finally {
+      state.savedProxySelectionBusy = false;
+      renderPage();
+    }
+  }
   const group = state.proxyGroups.find((item) => item.name === groupName);
   if (!group) return false;
   if (!freshProxyControllerSnapshotAvailable()) {
@@ -3820,8 +3849,8 @@ function bindGlobalEvents() {
       g: () => applyProxyMode("Global"),
       r: () => applyProxyMode("Rule"),
       d: () => applyProxyMode("Direct"),
-      p: () => applyToggle("systemProxy", state.engine.desiredMode !== "system-proxy", "shortcut"),
-      t: () => applyToggle("tunMode", state.engine.desiredMode !== "tunnel", "shortcut"),
+      p: () => applyToggle("systemProxy", !modeHasSystemProxy(state.engine.desiredMode), "shortcut"),
+      t: () => applyToggle("tunMode", !modeHasTunnel(state.engine.desiredMode), "shortcut"),
       s: () => handleAction("save-settings"),
     }[key];
     if (shortcutAction) {
@@ -5134,6 +5163,24 @@ async function loadRulesSnapshot(token = captureEngineIdentityToken()) {
   }
 }
 
+async function loadSavedProfilePolicy() {
+  const epoch = ++runtime.savedProfilePolicyEpoch;
+  const active = state.profiles.find((profile) => profile.active);
+  state.savedProfilePolicy = null;
+  state.savedProfilePolicyError = null;
+  if (!active) return;
+  try {
+    const text = await invoke("read_profile_text", { id: active.id });
+    if (epoch !== runtime.savedProfilePolicyEpoch) return;
+    if (text?.id !== active.id) throw new TypeError("saved profile identity changed");
+    state.savedProfilePolicy = savedProfilePolicy(text);
+  } catch (error) {
+    if (epoch !== runtime.savedProfilePolicyEpoch) return;
+    state.savedProfilePolicyError = errorText(error);
+    appendLog("error", "profile", state.savedProfilePolicyError);
+  }
+}
+
 async function loadProfilesSnapshot() {
   try {
     const profiles = await invoke("profiles_snapshot");
@@ -5160,12 +5207,16 @@ async function loadProfilesSnapshot() {
       sourceError: known.get(profile.id)?.sourceError ?? null,
     }));
     state.profilesUnavailableReason = null;
+    await loadSavedProfilePolicy();
     if (state.credentialSetup && !state.profiles.some(({ id }) => id === state.credentialSetup.profileId)) {
       state.credentialSetup = null;
     }
     return true;
   } catch (error) {
     state.profiles = [];
+    runtime.savedProfilePolicyEpoch += 1;
+    state.savedProfilePolicy = null;
+    state.savedProfilePolicyError = errorText(error);
     state.profilesUnavailableReason = errorText(error);
     appendLog("error", "profile", state.profilesUnavailableReason);
     return false;

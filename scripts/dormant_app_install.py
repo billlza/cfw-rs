@@ -297,6 +297,17 @@ INSTALLED_40045_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Build 40046 retains the current service vocabulary. Its notarized tree is
+# bound by the original signed-app manifest and the closed 40045 -> 40046 install.
+INSTALLED_40046_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40046",
+    tree_sha256="49f6b28e70b5e3bde5d86179f0c47a8e2e2ce29bca69c04b7d160d852f448e22",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
@@ -304,6 +315,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40043_PREDECESSOR.build_number: INSTALLED_40043_PREDECESSOR,
         INSTALLED_40044_PREDECESSOR.build_number: INSTALLED_40044_PREDECESSOR,
         INSTALLED_40045_PREDECESSOR.build_number: INSTALLED_40045_PREDECESSOR,
+        INSTALLED_40046_PREDECESSOR.build_number: INSTALLED_40046_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

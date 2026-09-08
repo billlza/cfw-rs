@@ -36,38 +36,48 @@ pub(crate) use cutover::{
     CutoverAuthority, prepare_legacy_cutover, run_native_preflight, validate_outcome_binding,
 };
 
-/// Maps an independent 0.3.5-style on/off switch onto the mutually exclusive
-/// 0.4.0 engine modes.
-///
-/// `None` means "no transition": turning a switch off that does not own the
-/// current desired mode must not stop the other mode's data plane, and an
-/// in-flight or proven-active mode must not be restarted. An explicit retry is
-/// admitted only from a terminal/retryable state for that same desired mode.
+/// Changes one OS integration switch while preserving the other switch.
+/// Both enabled integrations share the Packet Tunnel's single libbox instance.
 pub(crate) fn switch_transition(
     snapshot: &EngineSnapshot,
     switch: EngineMode,
     enabled: bool,
 ) -> Option<EngineMode> {
-    debug_assert_ne!(switch, EngineMode::Off, "a switch owns a real mode");
-    if !enabled {
-        return (snapshot.desired_mode == switch).then_some(EngineMode::Off);
+    let desired = snapshot.desired_mode;
+    let target = match switch {
+        EngineMode::SystemProxy => EngineMode::from_switches(enabled, desired.tunnel_enabled()),
+        EngineMode::Tunnel => EngineMode::from_switches(desired.system_proxy_enabled(), enabled),
+        EngineMode::Off | EngineMode::TunnelSystemProxy => return None,
+    };
+    if target != desired {
+        return Some(target);
     }
-    if snapshot.desired_mode != switch {
-        return Some(switch);
+    if !enabled {
+        return None;
     }
     match &snapshot.state {
-        EngineState::Off => Some(switch),
-        EngineState::AwaitingApproval { .. } if switch == EngineMode::Tunnel => Some(switch),
-        EngineState::Failed { target, .. } if *target == switch => Some(switch),
+        EngineState::Off => Some(target),
+        EngineState::Failed {
+            target: failed_target,
+            ..
+        } if *failed_target == target => Some(target),
+        EngineState::AwaitingApproval { .. } if target.tunnel_enabled() => Some(target),
         EngineState::ProxyActive { runtime }
-            if switch == EngineMode::SystemProxy && !runtime.ready =>
+        | EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime }
+            if !runtime.ready =>
         {
-            Some(switch)
-        }
-        EngineState::TunnelActive { runtime } if switch == EngineMode::Tunnel && !runtime.ready => {
-            Some(switch)
+            Some(target)
         }
         _ => None,
+    }
+}
+
+fn mode_owns_switch(mode: EngineMode, switch: EngineMode) -> bool {
+    match switch {
+        EngineMode::SystemProxy => mode.system_proxy_enabled(),
+        EngineMode::Tunnel => mode.tunnel_enabled(),
+        EngineMode::Off | EngineMode::TunnelSystemProxy => false,
     }
 }
 
@@ -83,7 +93,7 @@ pub(crate) fn serialized_switch_transition(
     switch: EngineMode,
     enabled: bool,
 ) -> Result<Option<EngineMode>, &'static str> {
-    if !enabled && observed.desired_mode != switch {
+    if !enabled && !mode_owns_switch(observed.desired_mode, switch) {
         return Ok(None);
     }
     if enabled && observed != current {
@@ -274,6 +284,9 @@ impl ManagedEngine {
             EngineMode::Off => false,
             EngineMode::SystemProxy => self.capabilities.system_proxy,
             EngineMode::Tunnel => self.capabilities.tunnel,
+            EngineMode::TunnelSystemProxy => {
+                self.capabilities.tunnel && self.capabilities.system_proxy
+            }
         };
         if available {
             Ok(())
@@ -558,7 +571,7 @@ fn record_endpoint_runtime(
 ) -> Result<(), String> {
     let active = match &snapshot.state {
         EngineState::Off if snapshot.desired_mode == EngineMode::Off => None,
-        EngineState::AwaitingApproval { .. } if snapshot.desired_mode == EngineMode::Tunnel => None,
+        EngineState::AwaitingApproval { .. } if snapshot.desired_mode.tunnel_enabled() => None,
         EngineState::ProxyActive { runtime }
             if snapshot.desired_mode == EngineMode::SystemProxy
                 && runtime.owner == EngineOwner::ProxyAgent
@@ -572,7 +585,8 @@ fn record_endpoint_runtime(
             })
         }
         EngineState::TunnelActive { runtime }
-            if snapshot.desired_mode == EngineMode::Tunnel
+        | EngineState::TunnelSystemProxyActive { runtime }
+            if snapshot.desired_mode == snapshot.state.active_mode()
                 && runtime.owner == EngineOwner::PacketTunnelSystemExtension
                 && runtime.ready
                 && runtime.context.generation == snapshot.generation

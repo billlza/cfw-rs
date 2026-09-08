@@ -53,6 +53,7 @@ pub struct ValidatedSingBoxProfile {
     pub(crate) canonical_json: String,
     pub(crate) document: ProfileDocument,
     digest: String,
+    proxy_selections: std::collections::BTreeMap<String, String>,
     pub(crate) dns_projection: DnsProjection,
     pub(crate) release_packet_evidence_case: Option<ReleasePacketEvidenceCase>,
 }
@@ -91,6 +92,7 @@ impl ValidatedSingBoxProfile {
             canonical_json,
             document,
             digest,
+            proxy_selections: std::collections::BTreeMap::new(),
             dns_projection: DnsProjection::Ordinary,
             release_packet_evidence_case: None,
         })
@@ -148,12 +150,44 @@ impl ValidatedSingBoxProfile {
     /// transport. Merely declaring an unused remote does not make a DIRECT or
     /// BLOCK final route safe for one-way legacy VPN retirement.
     pub fn routes_through_remote(&self) -> bool {
-        let selected = self.document.effective_final_outbound_tag();
-        self.document
+        self.document.selected_route_is_remote()
+    }
+
+    /// User choices are separate from the imported document and its credential
+    /// audience. The projected configuration identity still binds each choice.
+    pub fn proxy_selections(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.proxy_selections
+    }
+
+    /// Changes only a validated selector's runtime default. Neither the imported
+    /// JSON nor its digest changes when choosing another already-declared node.
+    pub fn with_selected_outbound(&self, group: &str, selected: &str) -> Result<Self, ConfigError> {
+        let mut profile = self.clone();
+        let selector = profile
+            .document
             .outbounds
-            .iter()
-            .find(|outbound| outbound.tag() == selected)
-            .is_some_and(crate::profile::ProfileOutbound::is_remote)
+            .iter_mut()
+            .find(|outbound| outbound.tag() == group);
+        let Some(crate::profile::ProfileOutbound::Selector {
+            outbounds, default, ..
+        }) = selector
+        else {
+            return Err(ConfigError::UnsupportedPolicyShape {
+                path: "$.outbounds".into(),
+                reason: "selection requires a saved selector group".into(),
+            });
+        };
+        if !outbounds.iter().any(|tag| tag == selected) {
+            return Err(ConfigError::UnsupportedPolicyShape {
+                path: "$.outbounds".into(),
+                reason: "selection must name a member of the group".into(),
+            });
+        }
+        *default = Some(selected.to_owned());
+        profile
+            .proxy_selections
+            .insert(group.to_owned(), selected.to_owned());
+        Ok(profile)
     }
 }
 

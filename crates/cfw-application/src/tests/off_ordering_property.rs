@@ -102,7 +102,9 @@ enum ActiveMode {
 fn active_mode(state: &EngineState) -> ActiveMode {
     match state {
         EngineState::ProxyActive { .. } => ActiveMode::Proxy,
-        EngineState::TunnelActive { .. } => ActiveMode::Tunnel,
+        EngineState::TunnelActive { .. } | EngineState::TunnelSystemProxyActive { .. } => {
+            ActiveMode::Tunnel
+        }
         EngineState::Off => ActiveMode::Off,
         other => panic!("unexpected non-terminal state on the happy path: {other:?}"),
     }
@@ -112,7 +114,9 @@ fn active_mode(state: &EngineState) -> ActiveMode {
 fn start_ops(mode: EngineMode) -> Vec<&'static str> {
     match mode {
         EngineMode::SystemProxy => vec!["start_proxy"],
-        EngineMode::Tunnel => vec!["install_tunnel", "start_tunnel"],
+        EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
+            vec!["install_tunnel", "start_tunnel"]
+        }
         EngineMode::Off => unreachable!("Off is not a start target"),
     }
 }
@@ -286,7 +290,7 @@ async fn property_off_precedes_every_cross_mode_start() {
                 // no owner is stopped and no new owner is started.
                 let expected_current_mode = match target {
                     EngineMode::SystemProxy => ActiveMode::Proxy,
-                    EngineMode::Tunnel => ActiveMode::Tunnel,
+                    EngineMode::Tunnel | EngineMode::TunnelSystemProxy => ActiveMode::Tunnel,
                     EngineMode::Off => ActiveMode::Off,
                 };
                 assert_eq!(
@@ -395,7 +399,7 @@ async fn property_unproven_off_never_starts_other_mode() {
                         EngineMode::SystemProxy => {
                             matches!(**observed, NativeEngineStatus::SystemProxy { .. })
                         }
-                        EngineMode::Tunnel => {
+                        EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
                             matches!(**observed, NativeEngineStatus::Tunnel { .. })
                         }
                         EngineMode::Off => unreachable!(),

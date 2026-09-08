@@ -145,6 +145,11 @@ RETIRED_GA_ALLOCATIONS: Final = (
         "ga",
         "retired_product_change_after_install_before_ga_runtime_acceptance",
     ),
+    (
+        "40046",
+        "ga",
+        "retired_product_change_after_install_before_ga_runtime_acceptance",
+    ),
 )
 
 

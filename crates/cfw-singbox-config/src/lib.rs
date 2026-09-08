@@ -12,6 +12,7 @@ mod profile_validation;
 mod projection;
 mod release_dns;
 mod release_packet;
+mod routing;
 mod validation;
 
 /// Product-owned minimum for every remote TLS connection emitted by the

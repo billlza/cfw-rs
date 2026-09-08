@@ -1,4 +1,6 @@
 #import "CFWLibboxObjC.h"
+#import "CFWConnectionOwnerResolver.h"
+#include <unistd.h>
 
 static NSString *const CFWLibboxPlatformErrorDomain =
     @"com.bill.clashformac.libbox-platform";
@@ -18,6 +20,8 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
 @interface CFWLibboxPlatformAdapter ()
 @property(nonatomic, readonly) BOOL packetTunnel;
 @property(nonatomic, strong, readonly) id<CFWLibboxPlatformDelegate> delegate;
+@property(nonatomic, copy, readonly) NSSet<NSString *> *processNames;
+@property(nonatomic, copy, readonly) NSSet<NSString *> *processPaths;
 @end
 
 @implementation CFWLibboxPlatformAdapter
@@ -44,11 +48,15 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
 }
 
 - (instancetype)initWithPacketTunnel:(BOOL)packetTunnel
-                             delegate:(id<CFWLibboxPlatformDelegate>)delegate {
+                             delegate:(id<CFWLibboxPlatformDelegate>)delegate
+                         processNames:(NSArray<NSString *> *)processNames
+                         processPaths:(NSArray<NSString *> *)processPaths {
   self = [super init];
   if (self != nil) {
     _packetTunnel = packetTunnel;
     _delegate = delegate;
+    _processNames = [NSSet setWithArray:processNames];
+    _processPaths = [NSSet setWithArray:processPaths];
   }
   return self;
 }
@@ -79,15 +87,16 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
       destinationAddress:(NSString *)destinationAddress
          destinationPort:(int32_t)destinationPort
                    error:(NSError **)error {
-  (void)ipProtocol;
-  (void)sourceAddress;
-  (void)sourcePort;
-  (void)destinationAddress;
-  (void)destinationPort;
-  if (error != NULL) {
-    *error = CFWUnsupportedOperation(@"findConnectionOwner");
+  // The root NetworkExtension can use the kernel socket inventory. Ordinary
+  // user processes on current macOS receive only their own sockets from that
+  // API, so resolve configured process matchers through public libproc instead.
+  if (geteuid() == 0) {
+    return LibboxFindConnectionOwner(ipProtocol, sourceAddress, sourcePort,
+                                    destinationAddress, destinationPort, error);
   }
-  return nil;
+  return CFWFindConfiguredConnectionOwner(self.processNames, self.processPaths,
+      ipProtocol, sourceAddress, sourcePort, destinationAddress, destinationPort,
+      error);
 }
 
 - (id<LibboxNetworkInterfaceIterator>)getInterfaces:(NSError **)error {

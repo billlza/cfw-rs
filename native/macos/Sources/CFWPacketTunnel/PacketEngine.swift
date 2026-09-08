@@ -17,6 +17,7 @@ public protocol PacketEngineFactory: Sendable {
 public enum PacketEngineError: Error, Equatable, Sendable {
   case runtime(String)
   case controllerEndpointConflict(port: UInt16)
+  case mixedEndpointConflict(port: UInt16)
 }
 
 public struct LibboxPacketEngineFactory: PacketEngineFactory {
@@ -53,6 +54,9 @@ private final class LibboxPacketEngine: PacketEngine {
         packetFileDescriptor: packetFileDescriptor
       )
     } catch let error as LibboxRuntimeError {
+      if case .endpointConflict(.mixed, let port) = error {
+        throw PacketEngineError.mixedEndpointConflict(port: port)
+      }
       if case .endpointConflict(.controller, let port) = error {
         throw PacketEngineError.controllerEndpointConflict(port: port)
       }

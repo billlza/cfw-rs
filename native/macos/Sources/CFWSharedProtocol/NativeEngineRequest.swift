@@ -366,6 +366,21 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
       throw NativeBridgeProtocolError.configurationDigestMismatch
     }
     try Self.validateCredentialSlots(credentialSlots, root: root)
+    if let port = tunnelOptions?.systemProxyPort {
+      guard let inbounds = root["inbounds"] as? [[String: Any]] else {
+        throw NativeBridgeProtocolError.invalidConfiguration
+      }
+      let mixed = inbounds.filter { $0["type"] as? String == "mixed" }
+      guard mixed.count == 1,
+        mixed[0]["tag"] as? String == "cfw-system-proxy",
+        mixed[0]["listen"] as? String == "127.0.0.1",
+        let number = mixed[0]["listen_port"] as? NSNumber,
+        CFGetTypeID(number) != CFBooleanGetTypeID(),
+        number.doubleValue == Double(port)
+      else {
+        throw NativeBridgeProtocolError.invalidConfiguration
+      }
+    }
     let expectedIdentity = try Self.identityDigest(
       configurationDigest: configContentDigest,
       credentialAudience: credentialAudience,

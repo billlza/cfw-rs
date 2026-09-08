@@ -180,6 +180,7 @@ public struct LibboxLoopbackTCPEndpoint: Equatable, Sendable {
 public struct LibboxRuntimeStartReceipt: Equatable, Sendable {
   public let mixedListener: LibboxLoopbackTCPEndpoint?
   public let controllerListener: LibboxLoopbackTCPEndpoint
+  let processPolicy: LibboxProcessLookupPolicy
 
   public static func parse(
     configuration: Data,
@@ -196,13 +197,13 @@ public struct LibboxRuntimeStartReceipt: Equatable, Sendable {
       throw LibboxRuntimeError.invalidRuntimeEndpoints
     }
     let controller = try parseController(controllerText)
+    let processPolicy = try LibboxProcessLookupPolicy.parse(root)
     let inbounds = root["inbounds"] as? [[String: Any]] ?? []
     let mixed = inbounds.filter { inbound in
       inbound["type"] as? String == "mixed"
         && inbound["tag"] as? String == "cfw-system-proxy"
     }
-    switch role {
-    case .systemProxy:
+    if !mixed.isEmpty {
       guard mixed.count == 1,
         let host = mixed[0]["listen"] as? String,
         let port = exactPort(mixed[0]["listen_port"]),
@@ -213,17 +214,15 @@ public struct LibboxRuntimeStartReceipt: Equatable, Sendable {
       }
       return LibboxRuntimeStartReceipt(
         mixedListener: mixedListener,
-        controllerListener: controller
-      )
-    case .packetTunnel:
-      guard mixed.isEmpty else {
-        throw LibboxRuntimeError.invalidRuntimeEndpoints
-      }
-      return LibboxRuntimeStartReceipt(
-        mixedListener: nil,
-        controllerListener: controller
+        controllerListener: controller,
+        processPolicy: processPolicy
       )
     }
+    guard role == .packetTunnel else {
+      throw LibboxRuntimeError.invalidRuntimeEndpoints
+    }
+    return LibboxRuntimeStartReceipt(
+      mixedListener: nil, controllerListener: controller, processPolicy: processPolicy)
   }
 
   private static func parseController(

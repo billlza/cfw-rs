@@ -359,6 +359,9 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
         }
         self.configuration = nil
       } catch let error as PacketEngineError {
+        if case .mixedEndpointConflict(let port) = error {
+          throw PacketTunnelProviderError.mixedEndpointConflict(port: port)
+        }
         if case .controllerEndpointConflict(let port) = error {
           throw PacketTunnelProviderError.controllerEndpointConflict(port: port)
         }

@@ -3,15 +3,12 @@
 //! Airport subscription endpoints negotiate on the `User-Agent` header and
 //! answer Clash Meta clients with a YAML document whose `proxies` list carries
 //! the modern protocol set (VLESS/Reality, Hysteria2, and the classic types).
-//! This module converts exactly that list into the closed typed profile
-//! schema; it is an import syntax, not a second configuration system.
+//! Nodes, selector groups and supported routing rules are translated into the
+//! typed profile schema. Listeners and operating-system DNS remain app-owned.
+//! Unsupported routing behavior is rejected before any profile is stored.
 //!
 //! Conversion contract:
 //!
-//! - Only `proxies` is read. Listeners, DNS, rules, and `proxy-groups` are
-//!   owned by the app's deterministic projection and are deliberately not
-//!   converted; the other top-level sections of a Clash document are part of
-//!   its envelope and carry no per-node state.
 //! - Every key of a proxy entry is either mapped onto the typed schema,
 //!   listed in [`IGNORED_TUNING_KEYS`] (local socket tuning with no effect on
 //!   destination, trust, or framing), or fails the import with the key name.
@@ -30,8 +27,11 @@
 //!   applies number resolution to them) and leave this module only as
 //!   credential-vault entries, never inside the stored profile.
 
+mod policy;
+
 use cfw_singbox_config::{CredentialKind, MAX_OUTBOUNDS};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 use super::socks5::Network as Socks5Network;
 use super::yaml::{YamlMapping, YamlScalar, YamlValue, load_single_document};
@@ -65,10 +65,9 @@ pub(super) fn import_clash_document(
     let YamlValue::Mapping(root) = root else {
         return Err("Clash subscription document must be a YAML mapping".to_owned());
     };
+    let mut root = ProxyFields::new(root, "Clash profile".into());
     let proxies = root
-        .into_entries()
-        .into_iter()
-        .find_map(|(key, value)| (key == "proxies").then_some(value))
+        .take("proxies")
         .ok_or_else(|| "Clash subscription document has no proxies list".to_owned())?;
     let YamlValue::Sequence(proxies) = proxies else {
         return Err("Clash proxies must be a YAML sequence".to_owned());
@@ -83,23 +82,36 @@ pub(super) fn import_clash_document(
         ));
     }
 
+    let mut names = BTreeMap::new();
     for (index, proxy) in proxies.into_iter().enumerate() {
         let context = format!("proxies[{index}]");
         let YamlValue::Mapping(proxy) = proxy else {
             return Err(format!("{context} must be a YAML mapping"));
         };
-        let outbound = convert_proxy(&mut collector, ProxyFields::new(proxy, context))?;
+        let (source_name, outbound) =
+            convert_proxy(&mut collector, ProxyFields::new(proxy, context))?;
+        let tag = outbound["tag"]
+            .as_str()
+            .ok_or("converted proxy has no tag")?
+            .to_owned();
+        if matches!(source_name.as_str(), "DIRECT" | "REJECT")
+            || names.insert(source_name, tag).is_some()
+        {
+            return Err("Clash proxy names must be unique and cannot use DIRECT or REJECT".into());
+        }
         collector.outbounds.push(outbound);
     }
+    policy::import_policy(&mut root, &mut collector, names)?;
     collector.into_subscription()
 }
 
 fn convert_proxy(
     collector: &mut OutboundCollector,
     mut fields: ProxyFields,
-) -> Result<Value, String> {
+) -> Result<(String, Value), String> {
     let kind = fields.require_string("type")?;
     let name = fields.require_string("name")?;
+    let source_name = name.clone();
     enforce_common_guards(&mut fields)?;
     let outbound = match kind.as_str() {
         "socks5" => convert_socks5(collector, &mut fields, name)?,
@@ -119,7 +131,7 @@ fn convert_proxy(
         }
     };
     fields.reject_leftovers()?;
-    Ok(outbound)
+    Ok((source_name, outbound))
 }
 
 fn convert_socks5(

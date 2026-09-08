@@ -138,10 +138,12 @@ private enum NativeBridgeRequestShape {
     try validateAudience(request["credential_audience"])
     try validateCredentialSlots(request["credential_slots"])
     if let options = request["tunnel_options"], !(options is NSNull) {
-      try exactKeys(
-        object: options,
-        ["ipv6_enabled", "bypass_private_networks", "direct_ipv4_hosts", "mtu"]
-      )
+      let fields = try object(options)
+      var keys: Set<String> = [
+        "ipv6_enabled", "bypass_private_networks", "direct_ipv4_hosts", "mtu",
+      ]
+      if fields["system_proxy_port"] != nil { keys.insert("system_proxy_port") }
+      try exactKeys(fields, keys)
     }
   }
 

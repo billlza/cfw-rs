@@ -71,6 +71,7 @@ pub(crate) struct ImportedSubscription {
 #[derive(Debug, Default)]
 struct OutboundCollector {
     outbounds: Vec<Value>,
+    route: Option<Value>,
     credentials: Vec<ImportedCredential>,
     used_tags: BTreeSet<String>,
     credential_namespace: Option<Uuid>,
@@ -1064,7 +1065,11 @@ impl OutboundCollector {
     /// Encodes the collected outbounds and runs the result through the
     /// closed profile validator, which owns every schema decision.
     fn into_subscription(self) -> Result<ImportedSubscription, String> {
-        let profile_json = serde_json::to_string(&json!({ "outbounds": self.outbounds }))
+        let mut document = json!({ "outbounds": self.outbounds });
+        if let Some(route) = self.route {
+            document["route"] = route;
+        }
+        let profile_json = serde_json::to_string(&document)
             .map_err(|error| format!("failed to encode imported subscription profile: {error}"))?;
         let profile =
             ValidatedSingBoxProfile::parse(&profile_json).map_err(|error| error.to_string())?;
@@ -2528,7 +2533,11 @@ mod tests {
             let runtime: Value =
                 serde_json::from_str(projected.as_json()).expect("runtime projection JSON");
             let runtime_outbounds = runtime["outbounds"].as_array().expect("runtime outbounds");
-            assert_eq!(runtime_outbounds.len(), 47);
+            assert_eq!(runtime_outbounds.len(), 48);
+            assert_eq!(
+                runtime_outbounds[47],
+                json!({"type":"direct","tag":"cfw-direct"})
+            );
             assert_eq!(
                 runtime_outbounds
                     .iter()
@@ -3400,7 +3409,7 @@ proxies:
     network: grpc
     grpc-opts:
       grpc-service-name: tunnel
-  - name: Work
+  - name: Work-2
     type: hysteria2
     server: hy2.example.com
     port: 8443
@@ -3437,6 +3446,7 @@ proxies:
 proxy-groups:
   - name: PROXY
     type: select
+    proxies: [SS Tokyo, VMess Edge]
 rules:
   - MATCH,PROXY
 "#;
@@ -3444,7 +3454,11 @@ rules:
         let profile: Value =
             serde_json::from_str(imported.profile.as_json()).expect("canonical JSON");
         let outbounds = profile["outbounds"].as_array().expect("outbounds array");
-        assert_eq!(outbounds.len(), 7);
+        assert_eq!(outbounds.len(), 8);
+        assert_eq!(outbounds[7]["type"], "selector");
+        assert_eq!(outbounds[7]["tag"], "PROXY");
+        assert_eq!(outbounds[7]["outbounds"], json!(["SS Tokyo", "VMess Edge"]));
+        assert_eq!(profile["route"]["final"], "PROXY");
 
         assert_eq!(outbounds[0]["type"], "shadowsocks");
         assert_eq!(outbounds[0]["tag"], "SS Tokyo");
@@ -3551,6 +3565,49 @@ rules:
             assert!(
                 !stored.contains(secret),
                 "stored profile must not embed secrets"
+            );
+        }
+    }
+
+    #[test]
+    fn clash_import_preserves_groups_process_geoip_and_ordered_rules() {
+        let source = r#"
+proxies:
+  - {name: Node A, type: socks5, server: edge.example.com, port: 1080}
+  - {name: Node B, type: socks5, server: backup.example.com, port: 1080}
+proxy-groups:
+  - {name: PROXY, type: select, proxies: [Node A, Node B, DIRECT]}
+rules:
+  - PROCESS-NAME,Example Client,PROXY
+  - DOMAIN-SUFFIX,example.com,PROXY
+  - IP-CIDR,192.0.2.1/32,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+"#;
+        let imported = import_subscription_document(source).expect("complete Clash policy");
+        let profile: Value = serde_json::from_str(imported.profile.as_json()).expect("profile");
+        assert_eq!(profile["outbounds"][3]["tag"], "PROXY");
+        assert_eq!(
+            profile["outbounds"][3]["outbounds"],
+            json!(["Node A", "Node B", "DIRECT"])
+        );
+        assert_eq!(profile["route"]["final"], "PROXY");
+        assert_eq!(
+            profile["route"]["rules"].as_array().expect("rules").len(),
+            4
+        );
+        assert_eq!(profile["route"]["rules"][0]["type"], "process_name");
+        assert_eq!(profile["route"]["rules"][2]["no_resolve"], true);
+        assert_eq!(profile["route"]["rules"][3]["type"], "geo_ip");
+        for broken in [
+            source.replace("[Node A, Node B, DIRECT]", "[Node A, absent]"),
+            source.replace("[Node A, Node B, DIRECT]", "[PROXY]"),
+            source.replace("GEOIP,CN,DIRECT", "UNKNOWN,CN,DIRECT"),
+            source.replace("type: select", "type: unsupported"),
+        ] {
+            assert!(
+                import_subscription_document(&broken).is_err(),
+                "invalid policy cannot become nodes-only import"
             );
         }
     }

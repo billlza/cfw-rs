@@ -19,6 +19,7 @@ public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case packetPump(PacketPumpError)
   case engineStart(String)
   case controllerEndpointConflict(port: UInt16)
+  case mixedEndpointConflict(port: UInt16)
   case engineStop(String)
   case networkSettings(String)
 }
@@ -50,6 +51,8 @@ extension PacketTunnelProviderError: LocalizedError {
       return "Packet pump failed: \(error)"
     case .engineStart:
       return "Packet tunnel engine start failed."
+    case .mixedEndpointConflict(let port):
+      return "The Packet Tunnel mixed endpoint could not bind to port \(port)."
     case .controllerEndpointConflict(let port):
       return "The Packet Tunnel controller endpoint could not bind to port \(port)."
     case .engineStop:
@@ -135,6 +138,12 @@ extension PacketTunnelProviderError {
           "tunnel-engine-start-failed",
           "Packet tunnel engine startup failed.",
           true
+        )
+      case .mixedEndpointConflict(let port):
+        (
+          "mixed-endpoint-in-use",
+          "The Packet Tunnel mixed endpoint could not bind to port \(port).",
+          false
         )
       case .controllerEndpointConflict(let port):
         (
@@ -484,11 +493,21 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     default:
       throw PacketTunnelProviderError.malformedProviderConfiguration
     }
+    let systemProxyPort: UInt16?
+    if let value = values["systemProxyPort"] {
+      guard let text = value as? String, let port = UInt16(text), port > 0,
+        text == String(port)
+      else { throw PacketTunnelProviderError.malformedProviderConfiguration }
+      systemProxyPort = port
+    } else {
+      systemProxyPort = nil
+    }
     return try TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
       directIPv4Hosts: directIPv4Hosts,
-      mtu: mtu
+      mtu: mtu,
+      systemProxyPort: systemProxyPort
     )
   }
 
@@ -556,6 +575,17 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     dns.matchDomainsNoSearch = true
     settings.dnsSettings = dns
     settings.mtu = NSNumber(value: tunnelOptions.mtu)
+    if let port = tunnelOptions.systemProxyPort {
+      let proxy = NEProxySettings()
+      proxy.httpEnabled = true
+      proxy.httpServer = NEProxyServer(address: "127.0.0.1", port: Int(port))
+      proxy.httpsEnabled = true
+      proxy.httpsServer = NEProxyServer(address: "127.0.0.1", port: Int(port))
+      proxy.matchDomains = [""]
+      proxy.excludeSimpleHostnames = true
+      proxy.exceptionList = ["localhost", "127.0.0.1", "::1", "*.local"]
+      settings.proxySettings = proxy
+    }
     return settings
   }
 }

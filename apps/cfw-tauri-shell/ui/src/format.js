@@ -154,6 +154,7 @@ const ENGINE_STATE_LABELS = Object.freeze({
   awaiting_approval: "AwaitingApproval",
   tunnel_starting: "TunnelStarting",
   tunnel_active: "TunnelActive",
+  tunnel_system_proxy_active: "TunnelSystemProxyActive",
   tunnel_stopping: "TunnelStopping",
   failed: "Failed",
 });
@@ -167,13 +168,23 @@ const ENGINE_STATE_TEXT = Object.freeze({
   AwaitingApproval: "Needs approval",
   TunnelStarting: "Starting…",
   TunnelActive: "On",
+  TunnelSystemProxyActive: "On",
   TunnelStopping: "Stopping…",
   Failed: "Failed",
 });
 
+export function modeHasSystemProxy(mode) {
+  return mode === "system-proxy" || mode === "tunnel-system-proxy";
+}
+
+export function modeHasTunnel(mode) {
+  return mode === "tunnel" || mode === "tunnel-system-proxy";
+}
+
 function engineMode(value) {
   if (value === "system_proxy") return "system-proxy";
   if (value === "tunnel") return "tunnel";
+  if (value === "tunnel_system_proxy") return "tunnel-system-proxy";
   if (value === "off") return "off";
   throw new TypeError("engine mode is invalid");
 }
@@ -237,14 +248,14 @@ export function normalizeEngineStatus(value) {
       configDigest,
     );
     mode = "system-proxy";
-  } else if (stateTag === "tunnel_active") {
+  } else if (stateTag === "tunnel_active" || stateTag === "tunnel_system_proxy_active") {
     runtimeIdentity = normalizeRuntimeIdentity(
       snapshot.state.runtime,
       "packet_tunnel_system_extension",
       snapshot.generation,
       configDigest,
     );
-    mode = "tunnel";
+    mode = stateTag === "tunnel_system_proxy_active" ? "tunnel-system-proxy" : "tunnel";
   } else if (stateTag === "failed" && typeof snapshot.state.error === "string") {
     reason = redactDiagnosticText(snapshot.state.error).slice(0, 512);
   }
@@ -258,8 +269,8 @@ export function normalizeEngineStatus(value) {
     mode,
     state: ENGINE_STATE_LABELS[stateTag],
     active: mode !== "off",
-    systemProxyActive: mode === "system-proxy",
-    tunnelActive: mode === "tunnel",
+    systemProxyActive: modeHasSystemProxy(mode),
+    tunnelActive: modeHasTunnel(mode),
     systemProxyAvailable: capabilities.system_proxy === true,
     tunnelAvailable: capabilities.tunnel === true,
     providerManagementAvailable: capabilities.provider_management === true,
@@ -278,10 +289,12 @@ export function engineStateLabel(engine) {
 
 export function systemProxyValueLabel(engine) {
   if (!engine) return "Unknown";
+  if (engine.state === "TunnelSystemProxyActive") return "On";
+  if (engine.desiredMode === "tunnel-system-proxy" && ["TunnelInstalling", "AwaitingApproval", "TunnelStarting", "TunnelStopping"].includes(engine.state)) return ENGINE_STATE_TEXT[engine.state];
   if (["ProxyStarting", "ProxyActive", "ProxyStopping"].includes(engine.state)) {
     return ENGINE_STATE_TEXT[engine.state];
   }
-  if (engine.state === "Failed" && engine.desiredMode === "system-proxy") return "Failed";
+  if (engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)) return "Failed";
   return "Off";
 }
 
@@ -289,9 +302,9 @@ export function systemProxyValueLabel(engine) {
 /// the engine, otherwise the plain off state.
 export function tunnelValueLabel(engine) {
   if (!engine) return "Unknown";
-  const tunnelStates = ["TunnelInstalling", "AwaitingApproval", "TunnelStarting", "TunnelActive", "TunnelStopping"];
+  const tunnelStates = ["TunnelInstalling", "AwaitingApproval", "TunnelStarting", "TunnelActive", "TunnelSystemProxyActive", "TunnelStopping"];
   if (tunnelStates.includes(engine.state)) return ENGINE_STATE_TEXT[engine.state];
-  if (engine.state === "Failed" && engine.desiredMode === "tunnel") return "Failed";
+  if (engine.state === "Failed" && modeHasTunnel(engine.desiredMode)) return "Failed";
   return "Off";
 }
 

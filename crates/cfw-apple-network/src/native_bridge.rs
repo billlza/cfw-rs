@@ -444,7 +444,9 @@ impl NativeBridge for NativeFrameworkBridge {
     ) -> NativeBridgeFuture<'_, CutoverPreflightOutcome> {
         Box::pin(async move {
             match self
-                .invoke(NativeBridgeCommand::PreflightCutover { request })
+                .invoke(NativeBridgeCommand::PreflightCutover {
+                    request: Box::new(request),
+                })
                 .await?
             {
                 NativeBridgeResult::CutoverPreflight(outcome) => Ok(outcome),

@@ -1,17 +1,15 @@
 //! Controller-backed read, query, and stream commands.
 //!
-//! Every command in this module talks to the clash-compatible controller of the
+//! Live commands talk to the clash-compatible controller of the
 //! engine *this process started*. The host, port, and per-run secret are taken
 //! from the managed engine's [`cfw_application::EngineControllerAccess`]; they
 //! are never read from user settings, never read from a profile, and never
 //! logged or returned.
 //!
-//! Nothing here can start, stop, or reconfigure an engine, so no Global
-//! Authority decision is bypassed: these are read/query operations against the
-//! loopback controller of an already-running engine. When no engine is running
-//! there is nothing to talk to and the commands fail closed with the same
-//! unreachable-controller error shape 0.3.5 surfaced, so the restored UI keeps
-//! classifying it exactly as it always did.
+//! Runtime policy changes use that same authenticated controller. While the
+//! engine is proven Off, selector choices instead go through the profile use
+//! case and its maintenance lease; they do not start an engine or write any
+//! OS integration. Live measurements remain unavailable until the engine runs.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -154,6 +152,7 @@ fn running_runtime_identity(
             Ok(runtime)
         }
         EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime }
             if runtime.ready
                 && runtime.owner == EngineOwner::PacketTunnelSystemExtension
                 && runtime.context.generation == snapshot.generation
@@ -250,9 +249,20 @@ pub(crate) async fn rules_snapshot(
 #[tauri::command]
 pub(crate) async fn select_proxy(
     engine: State<'_, ManagedEngine>,
+    profiles: State<'_, super::ManagedProfiles>,
+    profile_id: Option<String>,
     group: String,
     proxy: String,
 ) -> Result<(), String> {
+    let snapshot = engine.coordinator.snapshot();
+    if snapshot.state == EngineState::Off
+        && snapshot.desired_mode == cfw_engine_api::EngineMode::Off
+    {
+        let profile_id =
+            profile_id.ok_or("saved proxy selection requires the displayed profile identity")?;
+        return super::profiles::select_saved_proxy(&engine, &profiles, profile_id, group, proxy)
+            .await;
+    }
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .select_proxy(&group, &proxy)

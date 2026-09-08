@@ -7,6 +7,10 @@
 - Require the production libbox adapter at compilation so a signed application
   cannot silently omit its real runtime. Failed starts no longer paint active switches.
 - Allow System Proxy and TUN independently or together using one engine owner.
+- Take over existing system proxy settings on an explicit enable request;
+  retain the original settings and restore only fields still owned by CFM.
+- Reconcile a restarted background authority after registering the observer
+  needed to prove the engine Off. Registration alone no longer claims Off.
 - Preserve supported Clash select groups and ordered process, domain, IP, port,
   network and GEOIP rules; reject unsupported policy instead of dropping it.
 - Apply Global/Direct modes to actual routing, and resolve configured process
@@ -30,8 +34,8 @@
   maintenance operation is selected.
 - Start normal System Proxy and TUN requests directly through the existing
   native coordinator, without legacy Prepare or Confirm. Actual legacy runtime
-  or service conflicts, foreign System Proxy ownership and unfinished cutover
-  journals still reject the request with a visible error. Permission and
+  or service conflicts and unfinished cutover journals still reject the request
+  with a visible error. Permission and
   credential checks remain required, and unrelated proxy settings are preserved.
 - Add a release-only, signed-Host maintenance transaction that proves global
   Off, unregisters ProxyAgent before GlobalAuthority, preserves the inactive

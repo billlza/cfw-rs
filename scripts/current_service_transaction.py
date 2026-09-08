@@ -95,7 +95,7 @@ INSTALLED_40019_ACTIONS: Final = install.BoundInstallProfile(
     install.GA_INSTALL_PROFILE, install.INSTALLED_40019_PREDECESSOR
 ).service_actions
 CURRENT_PREDECESSOR_ACTIONS: Final = install.BoundInstallProfile(
-    install.GA_INSTALL_PROFILE, install.INSTALLED_40046_PREDECESSOR
+    install.GA_INSTALL_PROFILE, install.INSTALLED_40047_PREDECESSOR
 ).service_actions
 if INSTALLED_40019_ACTIONS != (
     "prepare",
@@ -128,6 +128,7 @@ if (
         "40044": install.INSTALLED_40044_PREDECESSOR,
         "40045": install.INSTALLED_40045_PREDECESSOR,
         "40046": install.INSTALLED_40046_PREDECESSOR,
+        "40047": install.INSTALLED_40047_PREDECESSOR,
     }
 ):
     raise RuntimeError("service maintenance profile differs from active GA identity")
@@ -385,7 +386,7 @@ def validate_event(
     expected_guard: dict[str, Any] | None,
     intent_sha256: str,
     expected_actions: frozenset[str],
-    expected_off_proof_profiles: frozenset[str],
+    expected_off_proof_profiles: frozenset[str | None],
 ) -> dict[str, Any]:
     if type(expected_sequence) is not int or not 0 <= expected_sequence < len(PHASES):
         raise install.InstallError(
@@ -415,7 +416,7 @@ def validate_event(
         or value["intent_sha256"] != intent_sha256
         or not isinstance(value["action"], str)
         or value["action"] not in expected_actions
-        or not isinstance(value["off_proof_profile"], str)
+        or (value["off_proof_profile"] is not None and not isinstance(value["off_proof_profile"], str))
         or value["off_proof_profile"] not in expected_off_proof_profiles
     ):
         raise install.InstallError(

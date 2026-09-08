@@ -124,8 +124,12 @@ extension NativeBridgeCoordinator {
           for: before, requireAuthorityProof: false)
         try perform(.register, on: .globalAuthority)
       }
-      try await requireCurrentMaintenanceOwnersOff(
-        for: servicePair(), requireAuthorityProof: true)
+      try await requireMaintenanceTunnelOff()
+      try requireServiceProcessAbsent(.proxyAgent)
+      try await requireAuthorityReadyForServiceRegistration()
+      let result = maintenanceResult(action: action, engineStatus: nil)
+      try requireMaintenancePostcondition(result)
+      return result
     case .registerProxyAgent:
       try requirePair(
         before,
@@ -133,10 +137,18 @@ extension NativeBridgeCoordinator {
         authority: [.enabled],
         operation: "ProxyAgent register"
       )
-      try await requireCurrentMaintenanceOwnersOff(
-        for: before, requireAuthorityProof: true)
+      try await requireMaintenanceTunnelOff()
+      try await requireAuthorityReadyForServiceRegistration()
       if before.proxy == .notRegistered {
+        try requireServiceProcessAbsent(.proxyAgent)
         try perform(.register, on: .proxyAgent)
+      }
+      // A restarted Authority cannot prove Off until the Agent has recovered
+      // its ownership journal. Registering the observer starts no data plane;
+      // the normal query then verifies both owners and reconciles the Authority.
+      guard case .off = try await queryStatus() else {
+        throw NativeBridgeExecutionError.failure(
+          .busy, "A native owner is active during service registration.")
       }
       try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: true)
@@ -144,6 +156,20 @@ extension NativeBridgeCoordinator {
     let result = maintenanceResult(action: action, engineStatus: .off)
     try requireMaintenancePostcondition(result)
     return result
+  }
+
+  private func requireAuthorityReadyForServiceRegistration() async throws {
+    let observation = try await engineLease.authorityOwnership()
+    guard observation.lease == nil else {
+      throw NativeBridgeExecutionError.failure(
+        .busy, "An engine lease blocks service registration.")
+    }
+    switch observation.state {
+    case .off, .recovering:
+      return
+    default:
+      try Self.requireGlobalOff(observation)
+    }
   }
 
   /// Proves every available owner Off without implicitly registering a service.
@@ -447,8 +473,8 @@ extension NativeBridgeCoordinator {
           && result.proxyAgent == .notRegistered
           && result.globalAuthority == .notRegistered
       case .registerGlobalAuthority:
-        result.engineStatus == .off
-          && result.offProofProfile == .currentEngineV6AuthorityV11
+        result.engineStatus == nil
+          && result.offProofProfile == nil
           && result.proxyAgent == .notRegistered
           && result.globalAuthority == .enabled
       case .registerProxyAgent:
@@ -468,7 +494,7 @@ extension NativeBridgeCoordinator {
     for action: NativeServiceMaintenanceAction
   ) -> NativeServiceOffProofProfile? {
     switch action {
-    case .status:
+    case .status, .registerGlobalAuthority:
       nil
     case .proveInstalled40019Off, .unregisterInstalled40019ProxyAgent,
       .unregisterInstalled40019GlobalAuthority:
@@ -476,7 +502,7 @@ extension NativeBridgeCoordinator {
     case .recoverInstalled40019GlobalAuthority:
       .installed40019RecoveryCurrentAuthorityV11
     case .proveOff, .unregisterProxyAgent, .unregisterGlobalAuthority,
-      .registerGlobalAuthority, .registerProxyAgent:
+      .registerProxyAgent:
       .currentEngineV6AuthorityV11
     }
   }

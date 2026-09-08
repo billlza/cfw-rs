@@ -39,6 +39,22 @@ and retains separate retry/cancel controls. Existing-system-proxy conflicts now
 have a specific, secret-free error across the native/Rust boundary. Other
 coarsely classified startup errors still need more useful diagnostic categories.
 
+## Installed 40047 follow-up and 40048 corrections
+
+The installed 40047 application now displays the actual PROXY selector with
+three members and all 12 supported source rules. Offline selection changes
+persist, and the complete profile uses the existing vault credentials. A real
+production-runtime test through the selected remote node returned Google 204
+and OpenAI 401 responses. System Proxy and TUN acceptance remain separate.
+
+An explicit System Proxy start still failed at the existing-proxy gate. Build
+40048 accepts existing valid settings, snapshots them before takeover, compares
+the snapshot under the preferences lock, and retains conditional restoration.
+It also removes the service-registration cycle: a restarted Authority can
+register without claiming Off, then the registered ProxyAgent supplies the
+observations needed for normal reconciliation. An active lease still rejects
+the operation. Neither change waives a real networking failure.
+
 ## Functionality comparison
 
 ### Corrections prepared for build 40047

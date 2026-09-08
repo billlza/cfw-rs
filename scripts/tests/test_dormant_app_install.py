@@ -64,6 +64,7 @@ from scripts.dormant_app_install import (
     INSTALLED_40044_PREDECESSOR,
     INSTALLED_40045_PREDECESSOR,
     INSTALLED_40046_PREDECESSOR,
+    INSTALLED_40047_PREDECESSOR,
     SUPPORTED_PREDECESSORS,
     bind_journal_predecessor,
     require_target_application_present,
@@ -75,10 +76,10 @@ from scripts.dormant_app_install import (
 # install admits a predecessor only against its exact recorded tree digest,
 # so an invented digest would be rejected as a tampered bundle, not admitted.
 OLD = AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256)
-NEW = AppIdentity("0.4.0", "40047", "b" * 64)
-# The installed 40046 with its real frozen tree identity: the production
+NEW = AppIdentity("0.4.0", "40048", "b" * 64)
+# The installed 40047 with its real frozen tree identity: the production
 # predecessor of this build.
-INSTALLED = AppIdentity("0.4.0", "40046", INSTALLED_40046_PREDECESSOR.tree_sha256)
+INSTALLED = AppIdentity("0.4.0", "40047", INSTALLED_40047_PREDECESSOR.tree_sha256)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -1042,7 +1043,8 @@ class DormantInstallValidationTests(unittest.TestCase):
             "register-proxy-agent",
         )
         for action in actions:
-            expected_engine_status = None if action == "status" else "off"
+            registration_only = action in {"status", "register-global-authority"}
+            expected_engine_status = None if registration_only else "off"
             receipt = {
                 "action": action.replace("-", "_"),
                 "document": "cfw-current-service-maintenance-v2",
@@ -1050,7 +1052,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                 "global_authority": "not_registered",
                 "off_proof_profile": (
                     None
-                    if action == "status"
+                    if registration_only
                     else (
                         install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
                         if action == install.INSTALLED_40019_RECOVERY_ACTION
@@ -1228,27 +1230,27 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "candidate_toolchain_override")
 
-    def test_ga_profile_has_one_fixed_40047_path_and_journal(self) -> None:
+    def test_ga_profile_has_one_fixed_40048_path_and_journal(self) -> None:
         paths = InstallPaths.production()
 
         self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "40047")
+        self.assertEqual(paths.profile.build_number, "40048")
         # An unbound profile cannot express a predecessor claim at all; the
         # predecessor is observed on the machine and bound separately.
         self.assertFalse(hasattr(paths.profile, "previous_build_number"))
         self.assertEqual(
             paths.repository,
-            paths.operator_repository / "target/release-worktrees/40047",
+            paths.operator_repository / "target/release-worktrees/40048",
         )
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                "/target/candidates/0.4.0/ga/40047/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40048/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                "target/candidates/0.4.0/ga/40047/signing-output/signed-native-products"
+                "target/candidates/0.4.0/ga/40048/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1439,11 +1441,11 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40047_ga_root(self) -> None:
+    def test_production_candidate_is_fixed_to_40048_ga_root(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/candidates/0.4.0/ga/40047/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40048/signed/Clash for Mac.app"
             )
         )
 
@@ -1451,7 +1453,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
         operator = Path("/operator")
-        artifact = operator / "target/release-worktrees/40047"
+        artifact = operator / "target/release-worktrees/40048"
         sources = FrozenReleaseSources(
             executor=ExecutorSource(operator, "a" * 40, "b" * 64),
             artifact=ExecutorSource(artifact, "c" * 40, "d" * 64),
@@ -1488,7 +1490,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                 paths.release_toolchain_root.mkdir(parents=True)
                 paths.candidate_manifest.parent.mkdir(parents=True)
                 paths.candidate_manifest.write_text(
-                    '{"metadata":{"buildNumber":"40047"}}\n', encoding="utf-8"
+                    '{"metadata":{"buildNumber":"40048"}}\n', encoding="utf-8"
                 )
                 sources = FrozenReleaseSources(
                     executor=ExecutorSource(operator, "a" * 40, "b" * 64),
@@ -1738,14 +1740,14 @@ class InstallPredecessorTests(unittest.TestCase):
             INSTALLED_40043_PREDECESSOR.tree_sha256,
             "429d40db9095775a9498a9445799025536c88ff4e900dde14f7a018d8723edf5",
         )
-        predecessor = resolve_predecessor(historical, "40047")
+        predecessor = resolve_predecessor(historical, "40048")
         self.assertEqual(predecessor, INSTALLED_40043_PREDECESSOR)
         self.assertEqual(predecessor.prove_off_action, "prove-off")
         self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
         self.assertIsNone(predecessor.authority_recovery)
         self.assertEqual(bind_journal_predecessor(historical), predecessor)
         for resolve in (
-            lambda observed: resolve_predecessor(observed, "40047"),
+            lambda observed: resolve_predecessor(observed, "40048"),
             bind_journal_predecessor,
         ):
             with self.assertRaises(InstallError) as rejected:
@@ -1762,14 +1764,14 @@ class InstallPredecessorTests(unittest.TestCase):
             INSTALLED_40044_PREDECESSOR.tree_sha256,
             "41ae01c3903f8ab644d74c5ff185a282a5978e4b0a8376198518046408745248",
         )
-        predecessor = resolve_predecessor(historical, "40047")
+        predecessor = resolve_predecessor(historical, "40048")
         self.assertEqual(predecessor, INSTALLED_40044_PREDECESSOR)
         self.assertEqual(predecessor.prove_off_action, "prove-off")
         self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
         self.assertIsNone(predecessor.authority_recovery)
         self.assertEqual(bind_journal_predecessor(historical), predecessor)
         for resolve in (
-            lambda observed: resolve_predecessor(observed, "40047"),
+            lambda observed: resolve_predecessor(observed, "40048"),
             bind_journal_predecessor,
         ):
             with self.assertRaises(InstallError) as rejected:
@@ -1788,7 +1790,7 @@ class InstallPredecessorTests(unittest.TestCase):
         for expected, digest in cases:
             with self.subTest(build=expected.build_number):
                 observed = AppIdentity("0.4.0", expected.build_number, digest)
-                predecessor = resolve_predecessor(observed, "40047")
+                predecessor = resolve_predecessor(observed, "40048")
                 self.assertEqual(predecessor, expected)
                 self.assertEqual(predecessor.tree_sha256, digest)
                 self.assertEqual(predecessor.prove_off_action, "prove-off")
@@ -1796,7 +1798,7 @@ class InstallPredecessorTests(unittest.TestCase):
                 self.assertIsNone(predecessor.authority_recovery)
                 self.assertEqual(bind_journal_predecessor(observed), predecessor)
                 for resolve in (
-                    lambda value: resolve_predecessor(value, "40047"),
+                    lambda value: resolve_predecessor(value, "40048"),
                     bind_journal_predecessor,
                 ):
                     with self.assertRaises(InstallError) as rejected:
@@ -1808,11 +1810,11 @@ class InstallPredecessorTests(unittest.TestCase):
                     self.assertEqual(rejected.exception.code, "candidate_not_newer")
 
     def test_current_schema_predecessor_selects_the_current_vocabulary(self) -> None:
-        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40047 install
+        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40048 install
         # needs none of the 40019 compatibility actions.
         predecessor = resolve_predecessor(
             AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-            "40047",
+            "40048",
         )
         self.assertEqual(predecessor, INSTALLED_40041_PREDECESSOR)
         self.assertEqual(predecessor.off_proof_profile, "current_engine_v6_authority_v1_1")
@@ -1825,7 +1827,7 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_legacy_predecessor_still_selects_the_compatibility_vocabulary(self) -> None:
         predecessor = resolve_predecessor(
             AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
-            "40047",
+            "40048",
         )
         self.assertEqual(predecessor, INSTALLED_40019_PREDECESSOR)
         self.assertEqual(
@@ -1840,14 +1842,14 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_unrecognised_predecessor_is_rejected_rather_than_guessed(self) -> None:
         # No admissible wire protocol exists for an unknown installed build.
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "40047")
+            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "40048")
         self.assertEqual(raised.exception.code, "predecessor_unsupported")
 
     def test_predecessor_build_number_alone_is_not_trusted(self) -> None:
         # CFBundleVersion is an unauthenticated bundle string; the exact frozen
         # tree identity must agree with it.
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "40047")
+            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "40048")
         self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
     def test_downgrade_and_reinstall_are_rejected(self) -> None:
@@ -1861,7 +1863,7 @@ class InstallPredecessorTests(unittest.TestCase):
         with self.assertRaises(InstallError) as raised:
             resolve_predecessor(
                 AppIdentity("0.3.5", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-                "40047",
+                "40048",
             )
         self.assertEqual(raised.exception.code, "install_identity_mismatch")
 
@@ -1903,10 +1905,11 @@ class InstallPredecessorTests(unittest.TestCase):
                 "40044": INSTALLED_40044_PREDECESSOR,
                 "40045": INSTALLED_40045_PREDECESSOR,
                 "40046": INSTALLED_40046_PREDECESSOR,
+                "40047": INSTALLED_40047_PREDECESSOR,
             },
         )
         with self.assertRaises(TypeError):
-            SUPPORTED_PREDECESSORS["40047"] = INSTALLED_40043_PREDECESSOR  # type: ignore[index]
+            SUPPORTED_PREDECESSORS["40048"] = INSTALLED_40043_PREDECESSOR  # type: ignore[index]
 
     def test_current_predecessor_event_contract_never_admits_recovery(self) -> None:
         # A current-schema predecessor speaks the plain vocabulary at every
@@ -1917,6 +1920,7 @@ class InstallPredecessorTests(unittest.TestCase):
             INSTALLED_40044_PREDECESSOR,
             INSTALLED_40045_PREDECESSOR,
             INSTALLED_40046_PREDECESSOR,
+            INSTALLED_40047_PREDECESSOR,
         ):
             with self.subTest(previous=predecessor.build_number):
                 bound = install.BoundInstallProfile(GA_INSTALL_PROFILE, predecessor)
@@ -1934,14 +1938,25 @@ class InstallPredecessorTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     bound.service_event_proof_profiles,
-                    (install.CURRENT_OFF_PROOF_PROFILE,) * len(bound.service_actions),
+                    (
+                        install.CURRENT_OFF_PROOF_PROFILE,
+                        install.CURRENT_OFF_PROOF_PROFILE,
+                        install.CURRENT_OFF_PROOF_PROFILE,
+                        install.CURRENT_OFF_PROOF_PROFILE,
+                        None,
+                        install.CURRENT_OFF_PROOF_PROFILE,
+                        install.CURRENT_OFF_PROOF_PROFILE,
+                    ),
                 )
                 for sequence in range(len(bound.service_actions)):
                     actions, profiles = bound.service_event_contract(
                         sequence, authority_recovery_prepared=False
                     )
                     self.assertEqual(actions, frozenset({bound.service_actions[sequence]}))
-                    self.assertEqual(profiles, frozenset({install.CURRENT_OFF_PROOF_PROFILE}))
+                    self.assertEqual(
+                        profiles,
+                        frozenset({None if sequence == 4 else install.CURRENT_OFF_PROOF_PROFILE}),
+                    )
                     with self.assertRaises(InstallError) as raised:
                         bound.service_event_contract(sequence, authority_recovery_prepared=True)
                     self.assertEqual(raised.exception.code, "service_journal_invalid")
@@ -2001,10 +2016,10 @@ class InstallPredecessorTests(unittest.TestCase):
         self.assertEqual(observed, recorded)
         self.assertEqual(observed.predecessor, INSTALLED_40019_PREDECESSOR)
         self.assertEqual(observed.profile.build_number, GA_INSTALL_PROFILE.build_number)
-        # The installed 40046 is the production observation for this build.
+        # The installed 40047 is the production observation for this build.
         self.assertEqual(
             install.BoundInstallProfile.observed(GA_INSTALL_PROFILE, INSTALLED).predecessor,
-            INSTALLED_40046_PREDECESSOR,
+            INSTALLED_40047_PREDECESSOR,
         )
         # Observation demands a supported predecessor strictly older than this
         # build; the GA build itself is neither.
@@ -2015,7 +2030,7 @@ class InstallPredecessorTests(unittest.TestCase):
         # evidence of any supported predecessor.
         self.assertEqual(
             install.BoundInstallProfile.recorded(GA_INSTALL_PROFILE, INSTALLED).predecessor,
-            INSTALLED_40046_PREDECESSOR,
+            INSTALLED_40047_PREDECESSOR,
         )
         with self.assertRaises(InstallError) as raised:
             install.BoundInstallProfile.recorded(

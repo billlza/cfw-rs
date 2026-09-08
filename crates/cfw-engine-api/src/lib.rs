@@ -1294,9 +1294,8 @@ impl NativeServiceMaintenanceResult {
                 && self.proxy_agent == Status::NotRegistered
                 && self.global_authority == Status::NotRegistered,
             Action::RegisterGlobalAuthority => {
-                self.engine_status == Some(NativeServiceEngineStatus::Off)
-                    && self.off_proof_profile
-                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                self.engine_status.is_none()
+                    && self.off_proof_profile.is_none()
                     && self.proxy_agent == Status::NotRegistered
                     && self.global_authority == Status::Enabled
             }
@@ -1817,9 +1816,9 @@ mod tests {
             },
             NativeServiceMaintenanceResult {
                 action: Action::RegisterGlobalAuthority,
-                engine_status: Some(NativeServiceEngineStatus::Off),
+                engine_status: None,
                 global_authority: Status::Enabled,
-                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                off_proof_profile: None,
                 proxy_agent: Status::NotRegistered,
             },
             NativeServiceMaintenanceResult {

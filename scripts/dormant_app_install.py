@@ -308,6 +308,17 @@ INSTALLED_40046_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Build 40047 retains the current service vocabulary. Its notarized tree is
+# bound by the original signed-app manifest and the closed 40046 -> 40047 install.
+INSTALLED_40047_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40047",
+    tree_sha256="7195dd5922cbf6cf38284c2aba83619cb727c1638f52559add6d780fb853b593",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
@@ -316,6 +327,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40044_PREDECESSOR.build_number: INSTALLED_40044_PREDECESSOR,
         INSTALLED_40045_PREDECESSOR.build_number: INSTALLED_40045_PREDECESSOR,
         INSTALLED_40046_PREDECESSOR.build_number: INSTALLED_40046_PREDECESSOR,
+        INSTALLED_40047_PREDECESSOR.build_number: INSTALLED_40047_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (
@@ -424,13 +436,13 @@ class BoundInstallProfile:
         )
 
     @property
-    def service_event_proof_profiles(self) -> tuple[str, ...]:
+    def service_event_proof_profiles(self) -> tuple[str | None, ...]:
         return (
             self.predecessor.off_proof_profile,
             self.predecessor.off_proof_profile,
             self.predecessor.off_proof_profile,
             self.predecessor.off_proof_profile,
-            CURRENT_OFF_PROOF_PROFILE,
+            None,  # Authority registration is not an engine Off proof.
             CURRENT_OFF_PROOF_PROFILE,
             CURRENT_OFF_PROOF_PROFILE,
         )
@@ -454,7 +466,7 @@ class BoundInstallProfile:
         sequence: int,
         *,
         authority_recovery_prepared: bool,
-    ) -> tuple[frozenset[str], frozenset[str]]:
+    ) -> tuple[frozenset[str], frozenset[str | None]]:
         """The exact action and off-proof profile admissible at one event.
 
         Every step admits exactly one action and one profile. A prepared
@@ -1870,7 +1882,7 @@ def parse_service_maintenance_receipt(
         "prove-off": frozenset({CURRENT_OFF_PROOF_PROFILE}),
         "unregister-proxy-agent": frozenset({CURRENT_OFF_PROOF_PROFILE}),
         "unregister-global-authority": frozenset({CURRENT_OFF_PROOF_PROFILE}),
-        "register-global-authority": frozenset({CURRENT_OFF_PROOF_PROFILE}),
+        "register-global-authority": frozenset({None}),
         "register-proxy-agent": frozenset({CURRENT_OFF_PROOF_PROFILE}),
         "prove-installed-40019-off": frozenset(
             {INSTALLED_40019_OFF_PROOF_PROFILE}
@@ -1896,7 +1908,7 @@ def parse_service_maintenance_receipt(
         or receipt.get("action") != expected_action.replace("-", "_")
         or receipt.get("document") != SERVICE_MAINTENANCE_DOCUMENT
         or receipt.get("engine_status")
-        != (None if expected_action == "status" else "off")
+        != (None if expected_action in {"status", "register-global-authority"} else "off")
         or all(
             receipt.get("off_proof_profile") != profile
             for profile in proof_profiles[expected_action]

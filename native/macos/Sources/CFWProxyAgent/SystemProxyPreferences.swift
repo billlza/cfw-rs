@@ -195,7 +195,7 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
         throw SystemProxyPreferencesError.noEligibleNetworkServices
       }
       let services = try records.map { record in
-        try Self.requireInactiveProxyConfiguration(
+        try Self.validateProxyEnableFlags(
           record.configuration, serviceID: record.serviceID)
         return try SystemProxyServiceOwnership(
           serviceID: record.serviceID,
@@ -238,7 +238,7 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
         guard record.proxyProtocol != nil else {
           throw SystemProxyPreferencesError.proxyProtocolMissing(service.serviceID)
         }
-        try Self.requireInactiveProxyConfiguration(
+        try Self.validateProxyEnableFlags(
           record.configuration, serviceID: service.serviceID)
         for ownedField in service.fields {
           let currentValue = try Self.value(
@@ -712,21 +712,18 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
     }
   }
 
-  /// A fresh ownership journal cannot authorize replacing an existing proxy.
-  /// Check again under the preferences lock before any service is changed.
-  /// Disabled endpoints may remain configured and are preserved by the journal.
-  static func requireInactiveProxyConfiguration(
+  /// Enabling System Proxy explicitly takes over the selected services. Their
+  /// complete original proxy fields are journaled and compared under the lock;
+  /// restoration changes only protocol groups still owned by this operation.
+  static func validateProxyEnableFlags(
     _ configuration: [String: Any],
     serviceID: String
   ) throws {
     for field in SystemProxyField.allCases where field.isEnableFlag {
       switch try value(configuration[field.rawValue], serviceID: serviceID, field: field) {
-      case .none, .boolean(false), .integer(0):
+      case .none, .boolean, .integer(0), .integer(1):
         continue
-      case .boolean(true), .integer:
-        throw SystemProxyPreferencesError.existingProxyConfiguration(
-          serviceID: serviceID, field: field)
-      case .string:
+      case .integer, .string:
         throw SystemProxyPreferencesError.unsupportedValue(serviceID: serviceID, field: field)
       }
     }

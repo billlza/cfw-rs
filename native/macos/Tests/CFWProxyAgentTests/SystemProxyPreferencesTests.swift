@@ -429,18 +429,15 @@ private func appliedEffectiveProxies() -> [String: Any] {
 }
 
 @Test(arguments: SystemProxyField.allCases.filter(\.isEnableFlag))
-func existingProxyActivationIsRejectedBeforeOwnership(field: SystemProxyField) {
-  #expect(
-    throws: SystemProxyPreferencesError.existingProxyConfiguration(
-      serviceID: "foreign-proxy-service", field: field)
-  ) {
-    try SCPreferencesSystemProxyPreferences.requireInactiveProxyConfiguration(
-      [field.rawValue: 1], serviceID: "foreign-proxy-service")
+func explicitProxyActivationCanTakeOverValidExistingSettings(field: SystemProxyField) throws {
+  for value: Any in [true, false, 0, 1] {
+    try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+      [field.rawValue: value], serviceID: "previous-proxy-service")
   }
 }
 
 @Test func disabledProxyEndpointsDoNotBlockNewOwnership() throws {
-  try SCPreferencesSystemProxyPreferences.requireInactiveProxyConfiguration(
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
     [
       "HTTPEnable": 0,
       "HTTPProxy": "127.0.0.1",
@@ -453,18 +450,14 @@ func existingProxyActivationIsRejectedBeforeOwnership(field: SystemProxyField) {
       "ProxyAutoDiscoveryEnable": 0,
     ],
     serviceID: "inactive-service")
-  try SCPreferencesSystemProxyPreferences.requireInactiveProxyConfiguration(
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
     [:], serviceID: "unconfigured-service")
 }
 
-@Test func booleanProxyActivationIsAnExistingOwnerConflict() {
-  #expect(
-    throws: SystemProxyPreferencesError.existingProxyConfiguration(
-      serviceID: "foreign-proxy-service", field: .httpEnabled)
-  ) {
-    try SCPreferencesSystemProxyPreferences.requireInactiveProxyConfiguration(
-      ["HTTPEnable": true], serviceID: "foreign-proxy-service")
-  }
+@Test(arguments: [-1, 2, 255])
+func numericEnableFlagsKeepSystemConfigurationBooleanSemantics(value: Int) throws {
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+    ["HTTPEnable": value], serviceID: "previous-proxy-service")
 }
 
 @Test(arguments: ["1", "false", ""])
@@ -473,7 +466,7 @@ func malformedProxyEnableFlagsAreNotTreatedAsInactive(value: String) {
     throws: SystemProxyPreferencesError.unsupportedValue(
       serviceID: "malformed-service", field: .httpEnabled)
   ) {
-    try SCPreferencesSystemProxyPreferences.requireInactiveProxyConfiguration(
+    try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
       ["HTTPEnable": value], serviceID: "malformed-service")
   }
 }
@@ -492,10 +485,8 @@ func malformedProxyEnableFlagsAreNotTreatedAsInactive(value: String) {
   let service = try #require(journal.services.first)
   let foreignConfiguration = appliedEffectiveProxies()
 
-  #expect(throws: SystemProxyPreferencesError.self) {
-    try SCPreferencesSystemProxyPreferences.requireInactiveProxyConfiguration(
-      foreignConfiguration, serviceID: service.serviceID)
-  }
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+    foreignConfiguration, serviceID: service.serviceID)
   let restoration = try SCPreferencesSystemProxyPreferences.restoration(
     for: service, configuration: foreignConfiguration)
 

@@ -253,6 +253,86 @@ private func appliedEffectiveProxies() -> [String: Any] {
   #expect(recorder.freeFlags == [[]])
 }
 
+@Test func applyingProxyWithoutAuthorizationRejectsBeforeOpeningPreferencesOrLocking() throws {
+  let recorder = AuthorizationOperationRecorder()
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed)
+  )
+  let journal = try proxyJournal(originalProxyEnabled: false)
+
+  #expect(
+    throws: SystemProxyPreferencesError.authorizationDenied(errAuthorizationInteractionNotAllowed)
+  ) {
+    try subject.apply(journal)
+  }
+  #expect(recorder.interactionFlags == [false])
+  #expect(recorder.createPreferencesCount == 0)
+}
+
+@Test(arguments: [true, false])
+func restorationSkipsAuthorizationOnlyWhenStoredAndEffectiveValuesAreRestored(
+  effectiveRestored: Bool
+) throws {
+  let recorder = AuthorizationOperationRecorder()
+  let writes = PreferencesOperationRecorder(applyResults: [])
+  let preferences = try #require(
+    SCPreferencesCreate(
+      nil, "Restored proxy observation" as CFString,
+      "cfm-restore-test-\(UUID().uuidString).plist" as CFString))
+  // An in-memory SCPreferences session: no commit, system mutation or live
+  // network interface is needed to exercise the real service enumeration.
+  #expect(
+    SCPreferencesSetValue(preferences, "CurrentSet" as CFString, "/Sets/test-set" as CFString))
+  #expect(
+    SCPreferencesSetValue(
+      preferences, "Sets" as CFString,
+      [
+        "test-set": [
+          "Network": ["Service": ["service-1": ["__LINK__": "/NetworkServices/service-1"]]]
+        ]
+      ] as CFDictionary))
+  #expect(
+    SCPreferencesSetValue(
+      preferences, "NetworkServices" as CFString,
+      [
+        "service-1": [
+          "Interface": ["Type": "Ethernet", "DeviceName": "en0", "Hardware": "Ethernet"],
+          "Proxies": [
+            "HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0,
+            "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0,
+          ],
+        ]
+      ] as CFDictionary))
+  let base = testingAuthorizationOperations(
+    recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed)
+  let authorization = SCPreferencesAuthorizationOperations(
+    createAuthorization: base.createAuthorization,
+    copyRights: base.copyRights,
+    createPreferences: { _ in preferences },
+    freeAuthorization: base.freeAuthorization)
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(
+      recorder: writes, effectiveProxies: effectiveRestored ? [:] : appliedEffectiveProxies()),
+    authorizationOperations: authorization)
+
+  if effectiveRestored {
+    let result = try subject.restore(proxyJournal(originalProxyEnabled: false))
+    #expect(result.isComplete)
+    #expect(recorder.interactionFlags.isEmpty)
+  } else {
+    #expect(
+      throws: SystemProxyPreferencesError.authorizationDenied(errAuthorizationInteractionNotAllowed)
+    ) {
+      try subject.restore(proxyJournal(originalProxyEnabled: false))
+    }
+    #expect(recorder.interactionFlags == [false])
+  }
+  #expect(writes.commitCount == 0)
+  #expect(writes.applyCount == 0)
+}
+
 @Test func operationFailureKeepsAuthorizationAvailableForCleanup() throws {
   let recorder = AuthorizationOperationRecorder()
   let subject = SCPreferencesSystemProxyPreferences(

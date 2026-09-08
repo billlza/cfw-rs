@@ -16,7 +16,9 @@ disconnect as a fatal stale operation. System Proxy never became effective.
 bounded user-interaction request acquires no Authority or Host mutation lease
 and starts no listener. Runtime transactions check rights without interaction,
 retain the Agent's own authorization reference, and never destroy unrelated
-shared credentials. Read-only recovery does not require a write grant; settings
+shared credentials. Lock acquisition is also checked before entering SCHelper;
+it must not open an implicit authorization dialog during process recovery.
+Read-only recovery does not require a write grant; settings
 already restored in both storage and effective state require no publication.
 Repeated revocation retains quarantine and its revision until a real Off proof.
 

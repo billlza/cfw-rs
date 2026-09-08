@@ -334,6 +334,23 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   }
 
   func restore(_ journal: ProxyOwnershipJournal) throws -> ProxyRestoreResult {
+    // SCPreferencesLock itself asks SCHelper for write authorization. Observe
+    // an already-restored journal without taking that privileged lock; a real
+    // restoration re-reads the preferences under the lock below.
+    let alreadyRestored = try withAuthorizedPreferences { preferences in
+      let records = try loadServiceRecords(preferences: preferences, enabledOnly: false)
+      let recordsByID = Dictionary(uniqueKeysWithValues: records.map { ($0.serviceID, $0) })
+      for service in journal.services {
+        guard let record = recordsByID[service.serviceID], record.proxyProtocol != nil else {
+          return false
+        }
+        let restoration = try Self.restoration(for: service, configuration: record.configuration)
+        if restoration.changed || !restoration.conflicts.isEmpty { return false }
+      }
+      return try firstEffectiveMismatch(restoredValues(journal)) == nil
+    }
+    if alreadyRestored { return ProxyRestoreResult(conflicts: []) }
+
     let outcome: (result: ProxyRestoreResult, didPublish: Bool) = try withLockedPreferences {
       preferences in
       let records = try loadServiceRecords(
@@ -515,7 +532,11 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   private func withLockedPreferences<T>(
     _ operation: (SCPreferences) throws -> T
   ) throws -> T {
-    try withAuthorizedPreferences { preferences in
+    // Locking is a privileged SCHelper operation too, even before any write.
+    // A restarted Agent must report missing authorization instead of blocking
+    // its initialization (and XPC listener) on an implicit system dialog.
+    try authorization.verify()
+    return try withAuthorizedPreferences { preferences in
       guard SCPreferencesLock(preferences, false) else {
         throw SystemProxyPreferencesError.preferencesLockFailed(SCError())
       }

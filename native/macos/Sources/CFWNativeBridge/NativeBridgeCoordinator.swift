@@ -218,6 +218,7 @@ actor NativeBridgeCoordinator {
   let hostOperationLease: any NativeHostOperationLeaseAcquiring
   let serviceMaintainer: any CurrentAppServiceMaintaining
   let serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving
+  let systemProxySwitchObserver: any CurrentSystemProxySwitchObserving
   var activeOperation: UUID?
   var startupPreferenceRecoveryComplete = false
   var pendingTunnelInstallation: NativePendingTunnelInstallation?
@@ -238,7 +239,9 @@ actor NativeBridgeCoordinator {
     hostOperationLease: any NativeHostOperationLeaseAcquiring,
     serviceMaintainer: any CurrentAppServiceMaintaining = CurrentAppServiceMaintainer(),
     serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving =
-      CurrentAppServiceRuntimeObserver()
+      CurrentAppServiceRuntimeObserver(),
+    systemProxySwitchObserver: any CurrentSystemProxySwitchObserving =
+      CurrentSystemProxySwitchObserver()
   ) {
     self.proxy = proxy
     self.installed40019Proxy =
@@ -251,6 +254,7 @@ actor NativeBridgeCoordinator {
     self.hostOperationLease = hostOperationLease
     self.serviceMaintainer = serviceMaintainer
     self.serviceRuntimeObserver = serviceRuntimeObserver
+    self.systemProxySwitchObserver = systemProxySwitchObserver
   }
 
   func execute(_ command: NativeBridgeCommand) async throws -> NativeBridgeResult {

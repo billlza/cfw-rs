@@ -2,6 +2,7 @@ import CFWCredentialTransport
 import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
+import OSLog
 
 protocol ProxyEngineLeaseHolding: AnyObject {
   func release() throws
@@ -159,6 +160,8 @@ private final class ProxyOperationCompletion: @unchecked Sendable {
 }
 
 final class ProxySessionLifecycle: @unchecked Sendable {
+  private static let logger = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-restoration")
   private final class Session {
     let id: UUID
     let configuration: ConfigurationDescriptor
@@ -621,6 +624,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       let result = try dependencies.preferences.restore(journal)
       guard result.isComplete else {
         return [.ownershipConflict(result.conflicts)]
+      }
+      if !result.preservedExternalChanges.isEmpty {
+        Self.logger.notice(
+          "Preserving \(result.preservedExternalChanges.count, privacy: .public) externally changed proxy fields after verifying that the listener is no longer selected."
+        )
       }
       do {
         try dependencies.journalStore.remove()

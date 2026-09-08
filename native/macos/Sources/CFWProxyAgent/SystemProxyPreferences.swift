@@ -337,19 +337,7 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
     // SCPreferencesLock itself asks SCHelper for write authorization. Observe
     // an already-restored journal without taking that privileged lock; a real
     // restoration re-reads the preferences under the lock below.
-    let alreadyRestored = try withAuthorizedPreferences { preferences in
-      let records = try loadServiceRecords(preferences: preferences, enabledOnly: false)
-      let recordsByID = Dictionary(uniqueKeysWithValues: records.map { ($0.serviceID, $0) })
-      for service in journal.services {
-        guard let record = recordsByID[service.serviceID], record.proxyProtocol != nil else {
-          return false
-        }
-        let restoration = try Self.restoration(for: service, configuration: record.configuration)
-        if restoration.changed || !restoration.conflicts.isEmpty { return false }
-      }
-      return try firstEffectiveMismatch(restoredValues(journal)) == nil
-    }
-    if alreadyRestored { return ProxyRestoreResult(conflicts: []) }
+    if let released = try observeReleasedPreferences(journal) { return released }
 
     let outcome: (result: ProxyRestoreResult, didPublish: Bool) = try withLockedPreferences {
       preferences in
@@ -459,8 +447,85 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
     }
     if outcome.didPublish, outcome.result.isComplete {
       try verifyEffectiveRestoredValues(journal)
+    } else if !outcome.result.conflicts.isEmpty,
+      let released = try observeReleasedPreferences(journal)
+    {
+      return released
     }
     return outcome.result
+  }
+
+  /// A user may already have disabled our proxy or selected another port.
+  /// Prove that both stored and effective settings reflect that replacement
+  /// without acquiring write authorization or reapplying an obsolete snapshot.
+  private func observeReleasedPreferences(_ journal: ProxyOwnershipJournal) throws
+    -> ProxyRestoreResult?
+  {
+    try withAuthorizedPreferences { preferences in
+      let records = try loadServiceRecords(preferences: preferences, enabledOnly: false)
+      let recordsByID = Dictionary(uniqueKeysWithValues: records.map { ($0.serviceID, $0) })
+      var externalChanges: [ProxyOwnershipConflict] = []
+      for service in journal.services {
+        guard let record = recordsByID[service.serviceID], record.proxyProtocol != nil else {
+          return nil
+        }
+        let restoration = try Self.restoration(for: service, configuration: record.configuration)
+        guard !restoration.changed else { return nil }
+        for conflict in restoration.conflicts {
+          guard
+            try Self.isReleasedProxyGroup(
+              conflict.field, service: service, configuration: record.configuration)
+          else { return nil }
+        }
+        externalChanges.append(contentsOf: restoration.conflicts)
+      }
+      guard let primaryServiceID = operations.primaryServiceID(),
+        let service = journal.services.first(where: { $0.serviceID == primaryServiceID }),
+        let record = recordsByID[primaryServiceID]
+      else {
+        throw SystemProxyPreferencesError.effectiveProxyStateUnavailable
+      }
+      let expectedValues = try service.fields.map { ownedField in
+        (
+          ownedField.field,
+          try Self.value(
+            record.configuration[ownedField.field.rawValue],
+            serviceID: primaryServiceID, field: ownedField.field)
+        )
+      }
+      guard try firstEffectiveMismatch(expectedValues) == nil else { return nil }
+      return ProxyRestoreResult(conflicts: [], preservedExternalChanges: externalChanges)
+    }
+  }
+
+  private static func isReleasedProxyGroup(
+    _ field: SystemProxyField,
+    service: SystemProxyServiceOwnership,
+    configuration: [String: Any]
+  ) throws -> Bool {
+    let enableField: SystemProxyField
+    let portField: SystemProxyField
+    switch field {
+    case .httpEnabled, .httpHost, .httpPort:
+      (enableField, portField) = (.httpEnabled, .httpPort)
+    case .httpsEnabled, .httpsHost, .httpsPort:
+      (enableField, portField) = (.httpsEnabled, .httpsPort)
+    case .socksEnabled, .socksHost, .socksPort:
+      (enableField, portField) = (.socksEnabled, .socksPort)
+    case .proxyAutoConfigEnabled, .proxyAutoDiscoveryEnabled:
+      // PAC/WPAD can still select our listener; preserve the unresolved conflict.
+      return false
+    }
+    let enabled = try value(
+      configuration[enableField.rawValue], serviceID: service.serviceID, field: enableField)
+    if !isEffectivelyEnabled(enabled) { return true }
+    let currentPort = try value(
+      configuration[portField.rawValue], serviceID: service.serviceID, field: portField)
+    guard case .integer(let port) = currentPort, (1...65_535).contains(port),
+      let ownedPort = service.fields.first(where: { $0.field == portField })
+    else { return false }
+    // A hostname edit on the same port may be a loopback alias for our listener.
+    return currentPort != ownedPort.appliedValue
   }
 
   static func restoration(

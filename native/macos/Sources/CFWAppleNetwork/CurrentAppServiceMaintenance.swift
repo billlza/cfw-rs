@@ -1,5 +1,83 @@
 import Darwin
 import Foundation
+import SystemConfiguration
+
+public enum CurrentSystemProxySwitchStatus: Equatable, Sendable {
+  case disabled
+  case enabled
+  case unobservable
+}
+
+public protocol CurrentSystemProxySwitchObserving: Sendable {
+  func status() -> CurrentSystemProxySwitchStatus
+}
+
+/// Read-only precondition for repairing orphaned services. This deliberately
+/// cannot authorize normal engine use or attest a restored ownership journal.
+public struct CurrentSystemProxySwitchObserver: CurrentSystemProxySwitchObserving {
+  public init() {}
+
+  public func status() -> CurrentSystemProxySwitchStatus {
+    guard let effective = SCDynamicStoreCopyProxies(nil) as? [String: Any],
+      let preferences = SCPreferencesCreate(nil, "Clash for Mac service repair" as CFString, nil),
+      let services = SCNetworkServiceCopyAll(preferences) as? [SCNetworkService],
+      !services.isEmpty
+    else { return .unobservable }
+    let effectiveStatus = Self.classify(effective)
+    guard effectiveStatus == .disabled else { return effectiveStatus }
+    for service in services {
+      guard let proxies = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies)
+      else {
+        continue
+      }
+      guard let configuration = SCNetworkProtocolGetConfiguration(proxies) as? [String: Any] else {
+        continue
+      }
+      let status = Self.classify(configuration)
+      guard status == .disabled else { return status }
+    }
+    return .disabled
+  }
+
+  static func classify(_ configuration: [String: Any]) -> CurrentSystemProxySwitchStatus {
+    for field in [
+      "HTTPEnable", "HTTPSEnable", "SOCKSEnable", "ProxyAutoConfigEnable",
+      "ProxyAutoDiscoveryEnable",
+    ] {
+      guard let value = configuration[field] else { continue }
+      guard let number = value as? NSNumber else { return .unobservable }
+      if number == 1 { return .enabled }
+      guard number == 0 else { return .unobservable }
+    }
+    if let scoped = configuration["__SCOPED__"] {
+      guard let configurations = scoped as? [String: [String: Any]], configurations.count <= 128
+      else {
+        return .unobservable
+      }
+      for configuration in configurations.values {
+        guard configuration["__SCOPED__"] == nil, configuration["__SUPPLEMENTAL__"] == nil else {
+          return .unobservable
+        }
+        let status = classify(configuration)
+        guard status == .disabled else { return status }
+      }
+    }
+    if let supplemental = configuration["__SUPPLEMENTAL__"] {
+      guard let configurations = supplemental as? [[String: Any]], configurations.count <= 128
+      else {
+        return .unobservable
+      }
+      for configuration in configurations {
+        guard configuration["__SCOPED__"] == nil, configuration["__SUPPLEMENTAL__"] == nil else {
+          return .unobservable
+        }
+        let status = classify(configuration)
+        guard status == .disabled else { return status }
+      }
+    }
+    return .disabled
+  }
+}
 
 public enum CurrentAppService: UInt32, CaseIterable, Sendable {
   case proxyAgent = 1

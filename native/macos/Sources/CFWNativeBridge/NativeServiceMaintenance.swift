@@ -10,6 +10,8 @@ extension NativeBridgeCoordinator {
     switch action {
     case .status:
       return maintenanceResult(action: action, engineStatus: nil)
+    case .retireOrphanedServices:
+      return try await retireOrphanedServices()
     case .proveOff:
       try requirePair(
         before,
@@ -156,6 +158,64 @@ extension NativeBridgeCoordinator {
     let result = maintenanceResult(action: action, engineStatus: .off)
     try requireMaintenancePostcondition(result)
     return result
+  }
+
+  private func retireOrphanedServices() async throws -> NativeServiceMaintenanceResult {
+    try requirePair(
+      servicePair(), proxy: [.enabled, .notRegistered], authority: [.enabled, .notRegistered],
+      operation: "Orphaned service retirement")
+    try await requireOrphanedServiceRetirementBoundary()
+    if servicePair().proxy == .enabled {
+      let snapshot = try Self.requireObservation(
+        await Self.observe { try await self.proxy.snapshot() }, component: "ProxyAgent")
+      guard
+        Self.isStableOff(snapshot)
+          || (snapshot.mode == .systemProxy && snapshot.state.kind == .failed)
+      else {
+        throw NativeBridgeExecutionError.failure(.busy, "An active ProxyAgent cannot be retired.")
+      }
+      try await requireOrphanedServiceRetirementBoundary()
+      try perform(.unregister, on: .proxyAgent)
+    }
+    try await waitForServiceProcessAbsence(.proxyAgent)
+    try await requireOrphanedServiceRetirementBoundary()
+    if servicePair().authority == .enabled {
+      try perform(.unregister, on: .globalAuthority)
+    }
+    try await waitForServiceProcessAbsence(.globalAuthority)
+    try requireServiceProcessAbsent(.proxyAgent)
+    try await requireOrphanedServiceRetirementBoundary()
+    // No Off attestation: the journals remain for the replacement's recovery.
+    let result = maintenanceResult(action: .retireOrphanedServices, engineStatus: nil)
+    try requireMaintenancePostcondition(result)
+    return result
+  }
+
+  private func requireOrphanedServiceRetirementBoundary() async throws {
+    try await requireMaintenanceTunnelOff()
+    let before = servicePair()
+    let authorityProcess = serviceRuntimeObserver.status(of: .globalAuthority)
+    try requireUnchangedServicePair(before)
+    switch authorityProcess {
+    case .absent:
+      break
+    case .present:
+      throw NativeBridgeExecutionError.failure(
+        .busy, "A running Authority cannot be retired as orphaned.")
+    case .unobservable:
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven, "Authority process absence cannot be observed.")
+    }
+    switch systemProxySwitchObserver.status() {
+    case .disabled:
+      return
+    case .enabled:
+      throw NativeBridgeExecutionError.failure(
+        .busy, "System proxy switches must be disabled before orphaned service retirement.")
+    case .unobservable:
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven, "System proxy settings cannot be observed for service retirement.")
+    }
   }
 
   private func requireAuthorityReadyForServiceRegistration() async throws {
@@ -437,6 +497,9 @@ extension NativeBridgeCoordinator {
       switch result.action {
       case .status:
         result.engineStatus == nil && result.offProofProfile == nil
+      case .retireOrphanedServices:
+        result.engineStatus == nil && result.offProofProfile == nil
+          && result.proxyAgent == .notRegistered && result.globalAuthority == .notRegistered
       case .proveOff:
         result.engineStatus == .off
           && result.offProofProfile == .currentEngineV6AuthorityV11
@@ -494,7 +557,7 @@ extension NativeBridgeCoordinator {
     for action: NativeServiceMaintenanceAction
   ) -> NativeServiceOffProofProfile? {
     switch action {
-    case .status, .registerGlobalAuthority:
+    case .status, .registerGlobalAuthority, .retireOrphanedServices:
       nil
     case .proveInstalled40019Off, .unregisterInstalled40019ProxyAgent,
       .unregisterInstalled40019GlobalAuthority:

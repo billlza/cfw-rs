@@ -14,6 +14,7 @@ pub(crate) enum ServiceMaintenanceAction {
     ProveOff,
     ProveInstalled40019Off,
     Status,
+    RetireOrphanedServices,
     UnregisterProxyAgent,
     UnregisterInstalled40019ProxyAgent,
     UnregisterGlobalAuthority,
@@ -63,6 +64,7 @@ pub(crate) fn parse_launch_mode(arguments: &[OsString]) -> Result<LaunchMode, St
             Some("prove-off") => ServiceMaintenanceAction::ProveOff,
             Some("prove-installed-40019-off") => ServiceMaintenanceAction::ProveInstalled40019Off,
             Some("status") => ServiceMaintenanceAction::Status,
+            Some("retire-orphaned-services") => ServiceMaintenanceAction::RetireOrphanedServices,
             Some("unregister-proxy-agent") => ServiceMaintenanceAction::UnregisterProxyAgent,
             Some("unregister-installed-40019-proxy-agent") => {
                 ServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent
@@ -121,6 +123,10 @@ mod tests {
     #[test]
     fn service_maintenance_modes_are_exact_and_closed() {
         let cases = [
+            (
+                "retire-orphaned-services",
+                ServiceMaintenanceAction::RetireOrphanedServices,
+            ),
             ("prove-off", ServiceMaintenanceAction::ProveOff),
             (
                 "prove-installed-40019-off",

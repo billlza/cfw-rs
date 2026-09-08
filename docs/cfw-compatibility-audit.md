@@ -86,6 +86,29 @@ skipped when no ownership journal exists, so TUN-only operation does not acquire
 an unrelated network-preferences grant. Unattended cleanup after credentials
 expire remains an explicit recovery failure, not a successful Off state.
 
+## Prepared 40050 recovery corrections
+
+An externally disabled proxy or a valid replacement port can finish cleanup
+once stored and effective settings agree. The replacement settings are
+preserved, and the result reports the external changes separately from
+unresolved ownership conflicts. A stale effective CFM endpoint, invalid port,
+same-port hostname alias, missing service or ambiguous PAC/WPAD state still
+prevents successful cleanup. The persisted journal format is unchanged.
+
+The explicit `--service-maintenance-v2 retire-orphaned-services` operation
+addresses a dead Authority whose pending recovery state prevented an upgrade.
+It requires the Authority process to be absent, TUN to be inactive, and all
+observed system proxy switches to be disabled. An active ProxyAgent is rejected.
+It unregisters only the current application's services, rechecks its boundaries
+between mutations and preserves recovery journals. The result carries no Off
+attestation. The ordinary maintenance path keeps its existing Off requirements.
+
+These are source changes, not installed-app acceptance. A new isolated core
+probe using 40049 sources and its pinned libbox forwarded Google 204 and OpenAI
+401 responses, with its outbound sockets bound to en0. CFW remained running;
+this confirms the core path without changing system networking and does not
+prove System Proxy or TUN takeover. Signed 40049 was not installed.
+
 ## Functionality comparison
 
 ### Corrections prepared for build 40047

@@ -2,6 +2,7 @@ import Foundation
 
 public enum NativeServiceMaintenanceAction: String, Codable, Equatable, Sendable {
   case status
+  case retireOrphanedServices = "retire_orphaned_services"
   case proveOff = "prove_off"
   case proveInstalled40019Off = "prove_installed_40019_off"
   case unregisterProxyAgent = "unregister_proxy_agent"

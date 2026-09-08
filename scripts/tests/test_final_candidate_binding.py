@@ -717,7 +717,7 @@ class FinalCandidateEnvironmentStatusTests(_CleanWorkspaceMixin):
     def test_default_inputs_are_confined_to_the_active_ga_stage_root(self) -> None:
         self.assertEqual(
             DEFAULT_EVIDENCE_DIRECTORY,
-            "target/candidates/0.4.0/ga/40049/stage-inputs/final-candidate",
+            "target/candidates/0.4.0/ga/40050/stage-inputs/final-candidate",
         )
 
     def test_absent_inputs_report_not_run_and_block(self) -> None:
@@ -785,74 +785,74 @@ class FinalCandidateSelfCheckTests(unittest.TestCase):
     def test_self_check_contract_holds(self) -> None:
         self_check()
 
-    def test_real_workspace_scan_reports_the_live_updater_key_gate(self) -> None:
-        # Requirement 8.1 is conditional: *if* updater-key material sits in the
-        # workspace the candidate is blocked. Whether this checkout holds a key
-        # right now is a transient environment fact - the mandated remediation
-        # relocates it to an access-controlled store outside the repository - so
-        # this test asserts the invariant instead of the current state.
+    def test_workspace_scan_reports_the_updater_key_gate_in_isolated_workspaces(self) -> None:
         from scripts.release_secret_material_blocker import evaluate_workspace
 
-        # Independent path/name-only oracle for what the workspace holds now.
-        live = evaluate_workspace(REPOSITORY)
-        report = environment_status(REPOSITORY)
-
-        # The reported gate mirrors the real scan exactly, key or no key.
-        self.assertEqual(
-            [block["path"] for block in report["workspace_secret_blocks"]],
-            [response.detected_path for response in live],
-        )
-        self.assertEqual(
-            WORKSPACE_SECRET_BLOCK in report["blocked_inputs"],
-            bool(report["workspace_secret_blocks"]),
-        )
-        for block in report["workspace_secret_blocks"]:
-            # Path/name and response flags only; no key bytes are ever carried.
-            self.assertEqual(
-                set(block),
-                {
-                    "path",
-                    "name",
-                    "relocation_target",
-                    "exposure_plausible",
-                    "rotation_required",
-                    "credential_kind",
-                    "required_trust_action",
-                    "updater_trust_migration_required",
-                    "notary_profile_reprovision_required",
-                    "trust_domain_identification_required",
-                },
-            )
-            self.assertTrue(block["path"].endswith(block["name"]))
-            self.assertIn(
-                Path(block["name"]).suffix.lower(),
-                {".key", ".p8", ".pem"},
-            )
-            if block["credential_kind"] == "updater-signing-key":
-                self.assertEqual(
-                    block["rotation_required"],
-                    block["updater_trust_migration_required"],
+        # Exercise the real scanner and report integration with deterministic
+        # inputs. Build/UI workers may create and remove live target directories;
+        # their concurrent lifecycle is not a stable fixture for this invariant.
+        for has_key in (False, True):
+            with self.subTest(has_key=has_key), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                if has_key:
+                    (workspace / "updater.key").write_text("test fixture; no key material")
+                live = evaluate_workspace(workspace)
+                report = environment_status(
+                    REPOSITORY, workspace_root=workspace,
+                    evidence_directory=workspace / "absent",
                 )
-            else:
-                self.assertFalse(block["updater_trust_migration_required"])
-        # The status is derived from the blocked-input set; it is never acceptance.
-        self.assertEqual(
-            report["status"], BLOCKED if report["blocked_inputs"] else "inputs-present"
-        )
-        self.assertNotEqual(report["status"], VERIFIED)
+                self.assertEqual(len(live), int(has_key))
+                # The reported gate mirrors the real scan exactly, key or no key.
+                self.assertEqual(
+                    [block["path"] for block in report["workspace_secret_blocks"]],
+                    [response.detected_path for response in live],
+                )
+                self.assertEqual(
+                    WORKSPACE_SECRET_BLOCK in report["blocked_inputs"],
+                    bool(report["workspace_secret_blocks"]),
+                )
+                for block in report["workspace_secret_blocks"]:
+                    # Path/name and response flags only; no key bytes are ever carried.
+                    self.assertEqual(
+                        set(block),
+                        {
+                            "path",
+                            "name",
+                            "relocation_target",
+                            "exposure_plausible",
+                            "rotation_required",
+                            "credential_kind",
+                            "required_trust_action",
+                            "updater_trust_migration_required",
+                            "notary_profile_reprovision_required",
+                            "trust_domain_identification_required",
+                        },
+                    )
+                    self.assertTrue(block["path"].endswith(block["name"]))
+                    self.assertIn(
+                        Path(block["name"]).suffix.lower(),
+                        {".key", ".p8", ".pem"},
+                    )
+                    if block["credential_kind"] == "updater-signing-key":
+                        self.assertEqual(
+                            block["rotation_required"],
+                            block["updater_trust_migration_required"],
+                        )
+                    else:
+                        self.assertFalse(block["updater_trust_migration_required"])
+                # The status is derived from the blocked-input set; it is never acceptance.
+                self.assertEqual(
+                    report["status"], BLOCKED if report["blocked_inputs"] else "inputs-present"
+                )
+                self.assertNotEqual(report["status"], VERIFIED)
 
-        # An absent workspace key promotes nothing: the physical inputs are still
-        # environment-gated, so the candidate stays blocked either way.
-        with tempfile.TemporaryDirectory() as tmp:
-            gated = environment_status(REPOSITORY, evidence_directory=Path(tmp) / "absent")
-        self.assertEqual(gated["status"], BLOCKED)
-        self.assertTrue(set(PHYSICAL_INPUTS).issubset(gated["blocked_inputs"]))
-        for name in PHYSICAL_INPUTS:
-            self.assertEqual(gated["inputs"][name]["state"], NOT_RUN)
-
-        # The scan still fails closed: an unavailable root is never "no key".
-        with self.assertRaises(PublicationError):
-            environment_status(REPOSITORY, workspace_root=REPOSITORY / "no-such-workspace")
+                # Secret absence never promotes missing physical evidence.
+                self.assertEqual(report["status"], BLOCKED)
+                self.assertTrue(set(PHYSICAL_INPUTS).issubset(report["blocked_inputs"]))
+                for name in PHYSICAL_INPUTS:
+                    self.assertEqual(report["inputs"][name]["state"], NOT_RUN)
+                with self.assertRaises(PublicationError):
+                    environment_status(REPOSITORY, workspace_root=workspace / "missing")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,40 @@
 import Darwin
+import Foundation
 import Testing
 
 @testable import CFWAppleNetwork
 
 private enum MaintenanceFixtureError: Error { case injected }
+
+@Test func orphanedServiceProxyObservationIncludesScopedAndSupplementalSwitches() {
+  #expect(CurrentSystemProxySwitchObserver.classify([:]) == .disabled)
+  #expect(CurrentSystemProxySwitchObserver.classify(["HTTPEnable": false]) == .disabled)
+  #expect(CurrentSystemProxySwitchObserver.classify(["HTTPEnable": true]) == .enabled)
+  #expect(CurrentSystemProxySwitchObserver.classify(["HTTPEnable": "0"]) == .unobservable)
+  #expect(CurrentSystemProxySwitchObserver.classify(["SOCKSEnable": -1]) == .unobservable)
+  #expect(
+    CurrentSystemProxySwitchObserver.classify([
+      "__SCOPED__": ["en0": ["HTTPSEnable": 1]]
+    ]) == .enabled)
+  #expect(
+    CurrentSystemProxySwitchObserver.classify([
+      "__SUPPLEMENTAL__": [["ProxyAutoConfigEnable": 1]]
+    ]) == .enabled)
+  #expect(
+    CurrentSystemProxySwitchObserver.classify([
+      "__SCOPED__": ["en0": ["HTTPSEnable": 0]],
+      "__SUPPLEMENTAL__": [["SOCKSEnable": 0]],
+    ]) == .disabled)
+  #expect(CurrentSystemProxySwitchObserver.classify(["__SCOPED__": "unavailable"]) == .unobservable)
+  #expect(
+    CurrentSystemProxySwitchObserver.classify([
+      "__SCOPED__": ["en0": ["__SCOPED__": ["en1": ["HTTPEnable": 0]]]]
+    ]) == .unobservable)
+  #expect(
+    CurrentSystemProxySwitchObserver.classify([
+      "__SUPPLEMENTAL__": Array(repeating: ["HTTPEnable": 0], count: 129)
+    ]) == .unobservable)
+}
 
 private final class MaintenanceProxyService: ProxyAgentServicing, @unchecked Sendable {
   var statuses: [ProxyAgentRegistrationStatus]

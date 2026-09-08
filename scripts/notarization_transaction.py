@@ -30,6 +30,7 @@ import stat
 import sys
 from typing import Any, Callable, Iterator
 import uuid
+from urllib.parse import urlsplit
 
 if __package__:
     from .candidate_freeze import (
@@ -1662,10 +1663,35 @@ def _run_bounded_process(
 
 
 def production_command_runner(
-    _role: CommandRole,
+    role: CommandRole,
     command: list[str],
     timeout: float,
 ) -> CommandResult:
+    proxy = os.environ.get("CFW_NOTARY_PROXY")
+    if proxy is not None and role in {
+        CommandRole.SUBMIT, CommandRole.WAIT, CommandRole.INFO,
+        CommandRole.HISTORY, CommandRole.FETCH_LOG,
+    }:
+        try:
+            parsed = urlsplit(proxy)
+            valid = (
+                parsed.scheme == "http"
+                and parsed.hostname in {"127.0.0.1", "::1"}
+                and parsed.port is not None and 1 <= parsed.port <= 65535
+                and parsed.username is None and parsed.password is None
+                and not parsed.path and not parsed.query and not parsed.fragment
+                and not any(character.isspace() for character in proxy)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise TransactionError(
+                "invalid_notary_proxy", "notary proxy must be a credential-free loopback HTTP endpoint"
+            )
+        environment = dict(os.environ)
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            environment[name] = proxy
+        return _run_bounded_process(command, timeout, environment=environment)
     return _run_bounded_process(command, timeout)
 
 

@@ -1184,6 +1184,7 @@ pub trait EngineBackend: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeServiceMaintenanceAction {
+    RetireOrphanedServices,
     Status,
     ProveOff,
     #[serde(rename = "prove_installed_40019_off")]
@@ -1243,6 +1244,12 @@ impl NativeServiceMaintenanceResult {
 
         match self.action {
             Action::Status => self.engine_status.is_none() && self.off_proof_profile.is_none(),
+            Action::RetireOrphanedServices => {
+                self.engine_status.is_none()
+                    && self.off_proof_profile.is_none()
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::NotRegistered
+            }
             Action::ProveOff => {
                 self.engine_status == Some(NativeServiceEngineStatus::Off)
                     && self.off_proof_profile
@@ -1773,6 +1780,29 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn orphaned_retirement_receipt_is_not_an_off_proof() {
+        let mut result = NativeServiceMaintenanceResult {
+            action: NativeServiceMaintenanceAction::RetireOrphanedServices,
+            engine_status: None,
+            global_authority: NativeServiceRegistrationStatus::NotRegistered,
+            off_proof_profile: None,
+            proxy_agent: NativeServiceRegistrationStatus::NotRegistered,
+        };
+        assert!(result.validate());
+        result.engine_status = Some(NativeServiceEngineStatus::Off);
+        assert!(!result.validate());
+        result.engine_status = None;
+        result.off_proof_profile = Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1);
+        assert!(!result.validate());
+        result.off_proof_profile = None;
+        result.proxy_agent = NativeServiceRegistrationStatus::Enabled;
+        assert!(!result.validate());
+        result.proxy_agent = NativeServiceRegistrationStatus::NotRegistered;
+        result.global_authority = NativeServiceRegistrationStatus::Enabled;
+        assert!(!result.validate());
     }
 
     #[test]

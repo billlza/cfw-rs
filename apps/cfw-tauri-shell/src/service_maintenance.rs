@@ -147,6 +147,9 @@ const fn native_action(action: ServiceMaintenanceAction) -> NativeServiceMainten
             NativeServiceMaintenanceAction::ProveInstalled40019Off
         }
         ServiceMaintenanceAction::Status => NativeServiceMaintenanceAction::Status,
+        ServiceMaintenanceAction::RetireOrphanedServices => {
+            NativeServiceMaintenanceAction::RetireOrphanedServices
+        }
         ServiceMaintenanceAction::UnregisterProxyAgent => {
             NativeServiceMaintenanceAction::UnregisterProxyAgent
         }

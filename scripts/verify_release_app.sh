@@ -438,8 +438,8 @@ if context is CandidateBundleContext.UNSIGNED_HOST:
 print(paths.build_identity.build_version)
 PY
 )" || die "bundle build identity is invalid"
-[[ "$build_number" == "40049" ]] ||
-  die "release application is not the fixed GA build 40049"
+[[ "$build_number" == "40050" ]] ||
+  die "release application is not the fixed GA build 40050"
 case "$verification_context" in
   signing-attempt-work|signing-attempt-publish-ready)
     ((pre_notary == 1)) ||
@@ -451,7 +451,7 @@ case "$verification_context" in
     die "release application verification context is invalid"
     ;;
 esac
-signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40049/profiles/signing-preflight.json"
+signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40050/profiles/signing-preflight.json"
 require_regular_file "$signing_preflight_manifest"
 expected_signing_certificate_sha256="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \

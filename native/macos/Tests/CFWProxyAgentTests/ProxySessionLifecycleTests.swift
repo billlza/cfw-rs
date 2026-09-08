@@ -345,10 +345,15 @@ private final class FakeSystemProxyPreferences: SystemProxyPreferences, @uncheck
   private var applyCountValue = 0
   private var restoreCountValue = 0
   private var restoreFailuresRemaining = 0
+  private let prepareFailure: SystemProxyPreferencesError?
   var applyFailsAfterPartialMutation = false
 
-  init(values: [SystemProxyField: ProxyPreferenceValue] = [:]) {
+  init(
+    values: [SystemProxyField: ProxyPreferenceValue] = [:],
+    prepareFailure: SystemProxyPreferencesError? = nil
+  ) {
     self.values = values
+    self.prepareFailure = prepareFailure
   }
 
   var prepareCount: Int {
@@ -385,6 +390,7 @@ private final class FakeSystemProxyPreferences: SystemProxyPreferences, @uncheck
   ) throws -> ProxyOwnershipJournal {
     try lock.withLock {
       prepareCountValue += 1
+      if let prepareFailure { throw prepareFailure }
       return try Self.journal(
         configuration: configuration,
         endpoint: endpoint,
@@ -604,6 +610,27 @@ private func recoveryLifecycle(
 
 @Suite(.serialized)
 struct ProxySessionLifecycleTests {
+  @Test func existingProxyFailurePreservesTheCauseAndMakesNoPreferenceWrite() throws {
+    let preferences = FakeSystemProxyPreferences(
+      values: [.httpEnabled: .integer(1), .httpPort: .integer(7_890)],
+      prepareFailure: .existingProxyConfiguration(serviceID: "other-app", field: .httpEnabled))
+    let fixture = makeFixture(preferences: preferences)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor()) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.failure(.existingSystemProxy)])
+    #expect(
+      ProxySessionLifecycleError.existingSystemProxy.engineFailure.code == "existing-system-proxy")
+    #expect(preferences.applyCount == 0)
+    #expect(preferences.restoreCount == 0)
+    #expect(preferences.currentValue(.httpPort) == .integer(7_890))
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(fixture.journalStore.journal == nil)
+  }
+
   @Test func preferencesAreNotAppliedBeforeMixedListenerReadiness() throws {
     let fixture = makeFixture()
     let start = OperationRecorder()

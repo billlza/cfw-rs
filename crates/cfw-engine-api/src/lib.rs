@@ -904,6 +904,7 @@ pub enum BackendErrorKind {
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
+    ExistingSystemProxy,
     CredentialsUnavailable,
     CredentialConflict,
     CredentialVaultMissing,
@@ -1014,6 +1015,7 @@ impl BackendErrorKind {
             Self::PermissionDenied
             | Self::ApprovalDenied
             | Self::ConfigurationRejected
+            | Self::ExistingSystemProxy
             | Self::CredentialsUnavailable
             | Self::CredentialConflict
             | Self::CredentialVaultMissing
@@ -1045,6 +1047,9 @@ impl BackendErrorKind {
             Self::PermissionDenied => "The native operation was denied.",
             Self::ApprovalDenied => "Required operating-system approval was denied.",
             Self::ConfigurationRejected => "The native configuration was rejected.",
+            Self::ExistingSystemProxy => {
+                "Another system proxy is enabled. Turn it off in its app or System Settings before enabling Clash for Mac. Existing proxy settings were not changed."
+            }
             Self::CredentialsUnavailable => "Required credentials are unavailable.",
             Self::CredentialConflict => "Credential material conflicts with an immutable entry.",
             Self::CredentialVaultMissing => "The credential vault is unavailable.",

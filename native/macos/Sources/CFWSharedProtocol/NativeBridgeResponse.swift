@@ -116,6 +116,7 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case permissionDenied = "permission_denied"
   case approvalDenied = "approval_denied"
   case configurationRejected = "configuration_rejected"
+  case existingSystemProxy = "existing_system_proxy"
   case mixedEndpointInUse = "mixed_endpoint_in_use"
   case controllerEndpointInUse = "controller_endpoint_in_use"
   case credentialsUnavailable = "credentials_unavailable"
@@ -161,6 +162,8 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
     case .permissionDenied: "The native operation was denied."
     case .approvalDenied: "Required operating-system approval was denied."
     case .configurationRejected: "The native configuration was rejected."
+    case .existingSystemProxy:
+      "Another system proxy is enabled. Turn it off in its app or System Settings before enabling Clash for Mac. Existing proxy settings were not changed."
     case .mixedEndpointInUse: "The mixed listener endpoint is already in use."
     case .controllerEndpointInUse: "The controller endpoint is already in use."
     case .credentialsUnavailable: "Required credentials are unavailable."

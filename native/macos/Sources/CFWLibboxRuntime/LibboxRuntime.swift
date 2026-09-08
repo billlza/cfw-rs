@@ -2,6 +2,13 @@ import CFWSharedProtocol
 import Darwin
 import Foundation
 
+#if CFW_LINKED_LIBBOX && !canImport(Libbox)
+  #error("The native runtime target requires the Libbox module.")
+#endif
+#if CFW_LINKED_LIBBOX && !canImport(CFWLibboxObjC)
+  #error("The native runtime target requires the CFWLibboxObjC module.")
+#endif
+
 public enum LibboxRuntimeRole: String, Codable, Equatable, Sendable {
   case systemProxy
   case packetTunnel

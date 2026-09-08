@@ -276,6 +276,15 @@ export function engineStateLabel(engine) {
   return ENGINE_STATE_TEXT[engine?.state] ?? "Unknown";
 }
 
+export function systemProxyValueLabel(engine) {
+  if (!engine) return "Unknown";
+  if (["ProxyStarting", "ProxyActive", "ProxyStopping"].includes(engine.state)) {
+    return ENGINE_STATE_TEXT[engine.state];
+  }
+  if (engine.state === "Failed" && engine.desiredMode === "system-proxy") return "Failed";
+  return "Off";
+}
+
 /// Value shown next to the TUN switch: the tunnel's own lifecycle when it owns
 /// the engine, otherwise the plain off state.
 export function tunnelValueLabel(engine) {

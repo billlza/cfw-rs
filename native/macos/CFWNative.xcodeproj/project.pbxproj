@@ -149,6 +149,7 @@
 		8BEC0E565ADC2DDB40473F03 /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
 		8C8259C6DD9A3118958C7480 /* libCFWPacketTunnel.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */; };
 		8CA34BA1CB9E39ED22D1201C /* ProxyOwnershipJournalStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B71BA8FC172A948930EE09 /* ProxyOwnershipJournalStoreTests.swift */; };
+		8D0BBF810CE9EA7BBE3E84A9 /* module.modulemap in CopyFiles */ = {isa = PBXBuildFile; fileRef = 68B741CFF54A1A343F60A99D /* module.modulemap */; };
 		90020793404E0EABF8D72D1E /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		930613C9BEEDDD2FFC874965 /* NativeBridgeProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */; };
 		95BC27876DFD33B32D080B81 /* AuthorityTunnelStartPreparer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23AB3114001202652F8107CF /* AuthorityTunnelStartPreparer.swift */; };
@@ -745,6 +746,7 @@
 			dstSubfolderSpec = 16;
 			files = (
 				3C784AA2A35FF6F8322E1891 /* CFWLibboxObjC.h in CopyFiles */,
+				8D0BBF810CE9EA7BBE3E84A9 /* module.modulemap in CopyFiles */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -842,6 +844,7 @@
 		66D069304736A571212FCD7C /* CredentialMaterial.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialMaterial.swift; sourceTree = "<group>"; };
 		66D9AB858A84F1720EDC114E /* NativeBridgeCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCommand.swift; sourceTree = "<group>"; };
 		6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CryptoKit.framework; path = System/Library/Frameworks/CryptoKit.framework; sourceTree = SDKROOT; };
+		68B741CFF54A1A343F60A99D /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		6934B0642FFA67B5D3B7C228 /* CFWCredentialVaultTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWCredentialVaultTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		696735177BB69D7FE969CEEE /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		6AF5E602BD7F6C68A8AF548D /* GlobalAuthorityReleaseGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalAuthorityReleaseGate.swift; sourceTree = "<group>"; };
@@ -1541,6 +1544,7 @@
 			isa = PBXGroup;
 			children = (
 				298B080814FE88D1912CE2F0 /* CFWLibboxObjC.h */,
+				68B741CFF54A1A343F60A99D /* module.modulemap */,
 			);
 			path = include;
 			sourceTree = "<group>";
@@ -2954,6 +2958,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MODULEMAP_FILE = "$(SRCROOT)/Sources/CFWLibboxObjC/include/module.modulemap";
 				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxObjC;
 				PRODUCT_MODULE_NAME = CFWLibboxObjC;
 				SDKROOT = macosx;
@@ -3091,6 +3096,11 @@
 				PRODUCT_MODULE_NAME = CFWLibboxRuntime;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) CFW_LINKED_LIBBOX";
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Sources/CFWLibboxObjC/include",
+				);
 			};
 			name = Debug;
 		};
@@ -3354,6 +3364,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MODULEMAP_FILE = "$(SRCROOT)/Sources/CFWLibboxObjC/include/module.modulemap";
 				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxObjC;
 				PRODUCT_MODULE_NAME = CFWLibboxObjC;
 				SDKROOT = macosx;
@@ -3891,6 +3902,11 @@
 				PRODUCT_MODULE_NAME = CFWLibboxRuntime;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) CFW_LINKED_LIBBOX";
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Sources/CFWLibboxObjC/include",
+				);
 			};
 			name = Release;
 		};

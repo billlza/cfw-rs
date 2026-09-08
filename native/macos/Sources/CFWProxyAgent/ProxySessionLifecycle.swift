@@ -27,6 +27,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case engineStop(String)
   case engineFailed(ProxyEngineFailure)
   case preferences(String)
+  case existingSystemProxy
   case ownershipJournal(String)
   case ownershipConflict([ProxyOwnershipConflict])
   case cleanupFailed(original: String, cleanup: [String])
@@ -49,6 +50,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
     case .engineStop: code = "proxy-engine-stop-failed"
     case .engineFailed: code = "proxy-engine-crashed"
     case .preferences: code = "system-proxy-preferences-failed"
+    case .existingSystemProxy: code = "existing-system-proxy"
     case .ownershipJournal: code = "proxy-ownership-journal-failed"
     case .ownershipConflict: code = "system-proxy-ownership-conflict"
     case .cleanupFailed: code = "proxy-cleanup-failed"
@@ -90,6 +92,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy runtime exited unexpectedly."
     case .preferences:
       "System proxy preference transaction failed."
+    case .existingSystemProxy:
+      "Another system proxy is enabled. Existing proxy settings were not changed."
     case .ownershipJournal:
       "System proxy ownership journal operation failed."
     case .ownershipConflict:
@@ -396,6 +400,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
           configuration: session.configuration,
           endpoint: endpoint
         )
+      } catch SystemProxyPreferencesError.existingProxyConfiguration {
+        throw ProxySessionLifecycleError.existingSystemProxy
       } catch {
         throw ProxySessionLifecycleError.preferences(error.localizedDescription)
       }
@@ -408,6 +414,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
       do {
         try dependencies.preferences.apply(preparedJournal)
+      } catch SystemProxyPreferencesError.existingProxyConfiguration {
+        throw ProxySessionLifecycleError.existingSystemProxy
       } catch {
         throw ProxySessionLifecycleError.preferences(error.localizedDescription)
       }

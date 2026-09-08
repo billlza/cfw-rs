@@ -22,6 +22,27 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
 
 @implementation CFWLibboxPlatformAdapter
 
++ (BOOL)startOrReloadService:(LibboxCommandServer *)server
+              configuration:(NSString *)configuration
+                    options:(LibboxOverrideOptions *)options
+           reportedConflict:(LibboxRuntimeStartConflict *_Nullable *_Nonnull)conflict
+                      error:(NSError *_Nullable *_Nullable)error {
+  NSError *startError = nil;
+  LibboxRuntimeStartConflict *result =
+      [server startOrReloadServiceReportingConflict:configuration
+                                           options:options
+                                             error:&startError];
+  *conflict = nil;
+  if (startError != nil) {
+    if (error != NULL) {
+      *error = startError;
+    }
+    return NO;
+  }
+  *conflict = result;
+  return YES;
+}
+
 - (instancetype)initWithPacketTunnel:(BOOL)packetTunnel
                              delegate:(id<CFWLibboxPlatformDelegate>)delegate {
   self = [super init];
@@ -176,4 +197,3 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
 }
 
 @end
-

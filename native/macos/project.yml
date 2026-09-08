@@ -207,6 +207,10 @@ targets:
           - $(inherited)
           - ../../target/native-dependencies/Libbox.xcframework/macos-arm64
         PRODUCT_MODULE_NAME: CFWLibboxRuntime
+        SWIFT_INCLUDE_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Sources/CFWLibboxObjC/include
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) CFW_LINKED_LIBBOX
 
   CFWLibboxObjC:
     type: library.static
@@ -231,6 +235,7 @@ targets:
           - $(inherited)
           - ../../target/native-dependencies/Libbox.xcframework/macos-arm64
         PRODUCT_MODULE_NAME: CFWLibboxObjC
+        MODULEMAP_FILE: $(SRCROOT)/Sources/CFWLibboxObjC/include/module.modulemap
 
   CFWPacketTunnel:
     type: library.static

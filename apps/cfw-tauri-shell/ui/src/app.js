@@ -22,6 +22,7 @@ import {
   engineStateLabel,
   normalizeEngineStatus,
   summarizeEngineEvent,
+  systemProxyValueLabel,
   tunnelValueLabel,
   formatGeoipLabel,
   formatBytes,
@@ -914,6 +915,13 @@ function renderGeneral() {
   const proxyRecoveryAction = engine.state === "Failed" && engine.desiredMode === "system-proxy"
     ? `<button class="cfw-text-button" data-action="retry-system-proxy"${proxyRetryDisabled}>Retry</button>`
     : "";
+  const cancellationDisabled = state.engineMutationBusy || state.migrationHandoff ? " disabled" : "";
+  const tunnelCancellationAction = engine.desiredMode === "tunnel" && !engine.tunnelActive
+    ? `<button class="cfw-text-button" data-action="cancel-tun-mode"${cancellationDisabled}>Cancel request</button>`
+    : "";
+  const proxyCancellationAction = engine.desiredMode === "system-proxy" && !engine.systemProxyActive
+    ? `<button class="cfw-text-button" data-action="cancel-system-proxy"${cancellationDisabled}>Cancel request</button>`
+    : "";
   const migrationBanner = renderMigrationBanner();
   const engineReason = engine.state === "Failed"
     ? engine.availabilityReason
@@ -1021,6 +1029,7 @@ function renderGeneral() {
           <div class="cfw-row-right">
             <span class="cfw-link-value">${escapeHtml(tunnelValueLabel(engine))}</span>
             ${tunnelRecoveryAction}
+            ${tunnelCancellationAction}
             ${tunnelReason ? renderRowNote("Unavailable", tunnelReason) : ""}
             ${renderInlineSwitch("tunMode", "TUN Mode", {
               reason: tunnelReason,
@@ -1046,7 +1055,9 @@ function renderGeneral() {
         <div class="cfw-row">
           <div class="cfw-row-left">System Proxy</div>
           <div class="cfw-row-right">
+            <span class="cfw-link-value">${escapeHtml(systemProxyValueLabel(engine))}</span>
             ${proxyRecoveryAction}
+            ${proxyCancellationAction}
             ${proxyReason ? renderRowNote("Unavailable", proxyReason) : ""}
             ${renderInlineSwitch("systemProxy", "System Proxy", {
               reason: proxyReason,
@@ -3809,8 +3820,8 @@ function bindGlobalEvents() {
       g: () => applyProxyMode("Global"),
       r: () => applyProxyMode("Rule"),
       d: () => applyProxyMode("Direct"),
-      p: () => applyToggle("systemProxy", !state.toggles.systemProxy, "shortcut"),
-      t: () => applyToggle("tunMode", !state.toggles.tunMode, "shortcut"),
+      p: () => applyToggle("systemProxy", state.engine.desiredMode !== "system-proxy", "shortcut"),
+      t: () => applyToggle("tunMode", state.engine.desiredMode !== "tunnel", "shortcut"),
       s: () => handleAction("save-settings"),
     }[key];
     if (shortcutAction) {
@@ -3846,7 +3857,7 @@ async function applyToggle(key, checked, source) {
     throw new Error("A network mode change is already in progress");
   }
   const previous = state.toggles[key];
-  state.toggles[key] = checked;
+  if (!isEngineMutation) state.toggles[key] = checked;
   const engineRequestId = isEngineMutation ? runtime.engineStatusRequestId + 1 : null;
   if (isEngineMutation) {
     runtime.engineStatusRequestId = engineRequestId;
@@ -3878,7 +3889,9 @@ async function applyToggle(key, checked, source) {
       const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
       applyPersistedSettings(snapshot);
     }
-    appendLog("info", source, `${key} changed to ${checked ? "on" : "off"}`);
+    appendLog("info", source, isEngineMutation
+      ? `${key} request completed; engine ${engineStateLabel(state.engine)}`
+      : `${key} changed to ${checked ? "on" : "off"}`);
     return true;
   } catch (error) {
     if (isEngineMutation && engineRequestId !== runtime.engineStatusRequestId) return false;
@@ -4302,6 +4315,10 @@ export async function handleAction(action) {
   }
   if (action === "retry-system-proxy") {
     await applyToggle("systemProxy", true, "explicit retry");
+    renderPage();
+  }
+  if (action === "cancel-system-proxy" || action === "cancel-tun-mode") {
+    await applyToggle(action === "cancel-system-proxy" ? "systemProxy" : "tunMode", false, "cancel request");
     renderPage();
   }
   if (action === "retry-tun-mode") {
@@ -4840,11 +4857,10 @@ function applyEngineStatus(payload) {
     state.controllerVersion = null;
     state.controllerStatus = "engine off";
   }
-  // Switches express the user's desired mode. Runtime readiness remains a
-  // separate label/status dot; pending and failed requests stay switchable Off
-  // while the adjacent action provides an explicit, state-bound retry.
-  state.toggles.systemProxy = state.engine.desiredMode === "system-proxy";
-  state.toggles.tunMode = state.engine.desiredMode === "tunnel";
+  // Green switches represent verified runtime activity. Pending and failed
+  // intentions retain separate retry/cancel actions and never look connected.
+  state.toggles.systemProxy = state.engine.systemProxyActive;
+  state.toggles.tunMode = state.engine.tunnelActive;
   if (state.engine.active) {
     if (!state.engineStartedAt) state.engineStartedAt = Date.now();
     state.traffic.runtimeSeconds = Math.floor((Date.now() - state.engineStartedAt) / 1000);

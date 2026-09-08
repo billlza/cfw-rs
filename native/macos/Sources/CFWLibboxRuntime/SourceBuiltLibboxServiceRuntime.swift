@@ -6,6 +6,7 @@
   import Libbox
   import Network
   import OSLog
+  import Synchronization
 
   private final class OwnedPacketDescriptor: @unchecked Sendable {
     private let lock = NSLock()
@@ -128,8 +129,7 @@
         qos: .utility
       )
       let firstPath = DispatchSemaphore(value: 0)
-      let firstPathLock = NSLock()
-      var waitingForFirstPath = true
+      let waitingForFirstPath = Mutex(true)
       try monitorLock.withLock {
         guard self.monitor == nil else {
           throw LibboxRuntimeError.networkMonitorAlreadyStarted
@@ -139,11 +139,11 @@
       }
       monitor.pathUpdateHandler = { path in
         Self.publish(path, to: listenerBox.listener)
-        let shouldSignal = firstPathLock.withLock { () -> Bool in
-          guard waitingForFirstPath else {
+        let shouldSignal = waitingForFirstPath.withLock { waiting -> Bool in
+          guard waiting else {
             return false
           }
-          waitingForFirstPath = false
+          waiting = false
           return true
         }
         if shouldSignal {
@@ -167,7 +167,7 @@
       stopMonitor()
     }
 
-    func getInterfaces() throws -> (any LibboxNetworkInterfaceIteratorProtocol)? {
+    func getInterfaces() throws -> any LibboxNetworkInterfaceIteratorProtocol {
       guard let path = monitorLock.withLock({ monitor?.currentPath }) else {
         throw LibboxRuntimeError.networkMonitorUnavailable
       }
@@ -397,10 +397,13 @@
         let options = LibboxOverrideOptions()
         options.autoRedirect = false
         do {
-          if let reportedConflict = try server.startOrReloadServiceReportingConflict(
-            configurationText,
-            options: options
-          ) {
+          var reportedConflict: LibboxRuntimeStartConflict?
+          try CFWLibboxPlatformAdapter.startOrReloadService(
+            server,
+            configuration: configurationText,
+            options: options,
+            reportedConflict: &reportedConflict)
+          if let reportedConflict {
             let conflict = try LibboxRuntimeEndpointConflict.validated(
               kind: reportedConflict.kind,
               port: reportedConflict.port,

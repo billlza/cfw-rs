@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { engineStateLabel, normalizeEngineStatus, summarizeEngineEvent, tunnelValueLabel } from "../src/format.js";
+import { engineStateLabel, normalizeEngineStatus, summarizeEngineEvent, systemProxyValueLabel, tunnelValueLabel } from "../src/format.js";
 
 function proxyEnvelope(overrides = {}) {
   return {
@@ -40,7 +40,16 @@ test("accepts an identity-bound active proxy snapshot", () => {
     ready: true,
   });
   assert.equal(engineStateLabel(engine), "On");
+  assert.equal(systemProxyValueLabel(engine), "On");
   assert.equal(tunnelValueLabel(engine), "Off");
+});
+
+test("mode labels retain stopping state while another mode is requested", () => {
+  assert.equal(systemProxyValueLabel({ state: "ProxyStopping", desiredMode: "tunnel" }), "Stopping…");
+  assert.equal(tunnelValueLabel({ state: "TunnelStopping", desiredMode: "system-proxy" }), "Stopping…");
+  assert.equal(systemProxyValueLabel({ state: "ProxyStarting", desiredMode: "system-proxy" }), "Starting…");
+  assert.equal(systemProxyValueLabel({ state: "Failed", desiredMode: "system-proxy" }), "Failed");
+  assert.equal(systemProxyValueLabel({ state: "Failed", desiredMode: "tunnel" }), "Off");
 });
 
 test("rejects active state with a mismatched generation, owner, digest or readiness", () => {

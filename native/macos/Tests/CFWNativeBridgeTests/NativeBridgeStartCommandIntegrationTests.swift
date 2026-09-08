@@ -848,6 +848,18 @@ struct NativeBridgeStartCommandIntegrationTests {
     #expect(unknownSystemExtensionFailure.code == .unavailable)
   }
 
+  @Test func existingProxyFailureRemainsSpecificWithoutEchoingSuppliedDiagnostics() throws {
+    let failure = EngineFailure(
+      code: "existing-system-proxy", message: "private-source-value", isRetryable: false)
+    let mapped = NativeBridgeCoordinator.map(ProxyAgentHostError.agentFailure(failure))
+      .responseFailure
+    #expect(mapped.code == .existingSystemProxy)
+    #expect(mapped.message.contains("Another system proxy is enabled"))
+    let wire = try JSONEncoder().encode(mapped)
+    #expect(!String(decoding: wire, as: UTF8.self).contains("private-source-value"))
+    #expect(try JSONDecoder().decode(NativeBridgeFailure.self, from: wire) == mapped)
+  }
+
   @Test func endpointFailureMappingRequiresAnExactNonRetryableOwnerRole() {
     let mixed = EngineFailure(
       code: "mixed-endpoint-in-use", message: "mixed occupied", isRetryable: false)

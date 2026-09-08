@@ -203,6 +203,7 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         | NativeBridgeErrorCode::JournalCorrupt
         | NativeBridgeErrorCode::MixedEndpointInUse
         | NativeBridgeErrorCode::ControllerEndpointInUse
+        | NativeBridgeErrorCode::ExistingSystemProxy
         | NativeBridgeErrorCode::Internal => CredentialVaultError::Internal,
     }
 }

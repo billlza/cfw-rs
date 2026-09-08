@@ -752,6 +752,7 @@ test("unavailable network capabilities block every enable path but never trap an
       command: "set_system_proxy_enabled",
       shortcut: "p",
       retry: "retry-system-proxy",
+      cancel: "cancel-system-proxy",
       desiredMode: "system_proxy",
     },
     {
@@ -759,6 +760,7 @@ test("unavailable network capabilities block every enable path but never trap an
       command: "set_tun_enabled",
       shortcut: "t",
       retry: "retry-tun-mode",
+      cancel: "cancel-tun-mode",
       desiredMode: "tunnel",
     },
   ];
@@ -829,13 +831,13 @@ test("unavailable network capabilities block every enable path but never trap an
       const requestedHtml = await renderPage("general");
       const requestedInput = requestedHtml.match(new RegExp(`<input type="checkbox" data-toggle="${scenario.key}"([^>]*)>`, "u"));
       assert.ok(requestedInput, `${scenario.key} requested input must render`);
-      assert.match(requestedInput[1], /checked/u);
-      assert.doesNotMatch(requestedInput[1], /disabled/u);
+      assert.doesNotMatch(requestedInput[1], /checked/u, "a failed request is never displayed as active");
+      assert.match(requestedInput[1], /disabled/u);
+      assert.match(requestedHtml, new RegExp(`data-action="${scenario.cancel}">Cancel request`, "u"));
 
       invoked.length = 0;
       invocationDetails.length = 0;
-      input.checked = false;
-      await input.trigger("change");
+      await appModule.handleAction(scenario.cancel);
       const disable = invocationDetails.find((entry) => entry.command === scenario.command);
       assert.ok(disable, `${scenario.key} disable must reach native admission`);
       assert.equal(disable.args.enabled, false);
@@ -2436,6 +2438,49 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
   }
 });
 
+test("network switches remain off while startup is pending or fails and cancellation remains available", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProxyResponse = responses.set_system_proxy_enabled;
+  const originalTunnelResponse = responses.set_tun_enabled;
+  try {
+    for (const [key, mode, command, retry, cancel] of [
+      ["systemProxy", "system_proxy", "set_system_proxy_enabled", "retry-system-proxy", "cancel-system-proxy"],
+      ["tunMode", "tunnel", "set_tun_enabled", "retry-tun-mode", "cancel-tun-mode"],
+    ]) {
+      await setEngine(OFF_ENGINE);
+      const pending = deferred();
+      responses[command] = () => pending.promise;
+      const before = invocationDetails.filter((entry) => entry.command === command).length;
+      const operation = appModule.handleAction(retry);
+      await waitForInvocation(command, before);
+      const starting = await renderPage("general");
+      assert.doesNotMatch(starting, new RegExp(`data-toggle="${key}" checked`, "u"));
+      assert.match(starting, new RegExp(`data-toggle="${key}"\\s+disabled`, "u"));
+      pending.resolve({
+        snapshot: { desired_mode: mode, generation: 200, config_digest: null, state: { state: "failed", target: mode, error: "native startup failed" } },
+        capabilities: { system_proxy: true, tunnel: true },
+      });
+      await operation;
+      const failed = await renderPage("general");
+      assert.doesNotMatch(failed, new RegExp(`data-toggle="${key}" checked`, "u"));
+      assert.match(failed, /native startup failed/u);
+      assert.match(failed, new RegExp(`data-action="${cancel}">Cancel request`, "u"));
+      responses[command] = OFF_ENGINE;
+      await appModule.handleAction(cancel);
+      assert.equal(invocationDetails.filter((entry) => entry.command === command).at(-1).args.enabled, false);
+      assert.equal(state.engine.desiredMode, "off");
+    }
+    await setEngine(RUNNING_ENGINE);
+    assert.match(await renderPage("general"), /data-toggle="systemProxy" checked/u);
+  } finally {
+    if (originalProxyResponse === undefined) delete responses.set_system_proxy_enabled;
+    else responses.set_system_proxy_enabled = originalProxyResponse;
+    if (originalTunnelResponse === undefined) delete responses.set_tun_enabled;
+    else responses.set_tun_enabled = originalTunnelResponse;
+    await setEngine(originalEngine);
+  }
+});
+
 test("the General page surfaces approval and capability reasons", async () => {
   await setEngine({
     snapshot: { desired_mode: "tunnel", generation: 1, config_digest: null, state: { state: "awaiting_approval", generation: 1 } },
@@ -2444,12 +2489,14 @@ test("the General page surfaces approval and capability reasons", async () => {
   const awaitingApproval = await renderPage("general");
   assert.ok(awaitingApproval.includes("Needs approval"));
   assert.match(awaitingApproval, /data-action="retry-tun-mode">Approve/u);
-  assert.match(awaitingApproval, /data-toggle="tunMode" checked/u);
+  assert.doesNotMatch(awaitingApproval, /data-toggle="tunMode" checked/u);
+  assert.match(awaitingApproval, /data-action="cancel-tun-mode">Cancel request/u);
 
   state.engineMutationBusy = true;
   const mutationBusy = await renderPage("general");
   assert.match(mutationBusy, /data-action="retry-tun-mode" disabled>Approve/u);
-  assert.match(mutationBusy, /data-toggle="tunMode" checked disabled/u);
+  assert.match(mutationBusy, /data-toggle="tunMode"\s+disabled/u);
+  assert.match(mutationBusy, /data-action="cancel-tun-mode" disabled/u);
   state.engineMutationBusy = false;
 
   await setEngine({
@@ -2463,7 +2510,8 @@ test("the General page surfaces approval and capability reasons", async () => {
   });
   const failedProxy = await renderPage("general");
   assert.match(failedProxy, /data-action="retry-system-proxy">Retry/u);
-  assert.match(failedProxy, /data-toggle="systemProxy" checked/u);
+  assert.doesNotMatch(failedProxy, /data-toggle="systemProxy" checked/u);
+  assert.match(failedProxy, /data-action="cancel-system-proxy">Cancel request/u);
 
   await setEngine({
     snapshot: { desired_mode: "off", generation: 0, config_digest: null, state: { state: "off" } },

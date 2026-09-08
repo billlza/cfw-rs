@@ -3,6 +3,17 @@ import Foundation
 import Testing
 
 #if canImport(Libbox)
+  @Test func linkedRuntimeImplementationIsAvailable() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+      do { try FileManager.default.removeItem(at: root) } catch { Issue.record(error) }
+    }
+    let directories = try LibboxRuntimeDirectories.prepare(container: root, role: .systemProxy)
+    let runtime = try SourceBuiltLibboxServiceRuntime(role: .systemProxy, directories: directories)
+    try runtime.stop()
+  }
+
   @Test func pinnedLibboxAcceptsProjectedSOCKS5AnonymousAndAuthenticatedShapes() throws {
     for network: String? in [nil, "tcp", "udp"] {
       var anonymous: [String: Any] = [

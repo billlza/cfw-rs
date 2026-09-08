@@ -230,6 +230,10 @@ extension NativeBridgeCoordinator {
       case .transportCapacityExceeded:
         return .failure(.busy, error.localizedDescription)
       case .agentFailure(let failure):
+        if failure.code == "existing-system-proxy" {
+          return .failure(
+            .existingSystemProxy, NativeBridgeErrorCode.existingSystemProxy.stableMessage)
+        }
         return .failure(
           endpointConflictCode(failure, allowsMixed: true)
             ?? (failure.isRetryable ? .unavailable : .configurationRejected),

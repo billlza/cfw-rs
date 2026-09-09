@@ -1277,6 +1277,7 @@ LIBBOX_VET_PACKAGES=(".")
             "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
             "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
             "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+            "profileProbePatchSha256=$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
             "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
             "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
             "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",

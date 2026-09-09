@@ -136,6 +136,8 @@ fi
   "$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \
   "$SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH" \
   "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" \
+  "$SING_BOX_PROFILE_PROBE_PATCH_PATH" \
+  "$SING_BOX_PROFILE_PROBE_PATCH_SHA256" \
   "$SING_BOX_PATCHED_DIFF_SHA256" \
   "$SING_BOX_COMBINED_DIFF_SHA256" \
   "$SING_BOX_PATCHED_GO_MOD_SHA256" \
@@ -164,6 +166,8 @@ from pathlib import Path
     dns_failover_patch_sha256,
     endpoint_conflict_patch_path,
     endpoint_conflict_patch_sha256,
+    profile_probe_patch_path,
+    profile_probe_patch_sha256,
     patched_diff_sha256,
     combined_diff_sha256,
     patched_go_mod_sha256,
@@ -198,6 +202,7 @@ expected_native = {
             "path": endpoint_conflict_patch_path,
             "sha256": endpoint_conflict_patch_sha256,
         },
+        "profileProbePatch": {"path": profile_probe_patch_path, "sha256": profile_probe_patch_sha256},
         "combinedDiffSha256": combined_diff_sha256,
     },
     "singBoxForAppleReference": {"commit": apple_commit},
@@ -233,6 +238,7 @@ verify_repository_patch(
     endpoint_conflict_patch_sha256,
     "sing-box endpoint conflict patch",
 )
+verify_repository_patch(profile_probe_patch_path, profile_probe_patch_sha256, "profile probe patch")
 verify_repository_patch(
     raw_packet_patch_path,
     raw_packet_patch_sha256,

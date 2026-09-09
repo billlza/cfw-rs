@@ -161,6 +161,33 @@ impl fmt::Debug for ProjectedConfig {
 }
 
 impl ProjectedConfig {
+    /// A transient, outbound-only view for explicit node latency tests. The
+    /// normal projection remains the source of protocol/DNS/credential policy;
+    /// listeners, system routes, persistence and autonomous tests are excluded.
+    pub fn proxy_probe_json(&self) -> Result<String, ConfigError> {
+        let mut root: Map<String, Value> = serde_json::from_str(&self.json)?;
+        root.retain(|key, _| matches!(key.as_str(), "outbounds" | "endpoints" | "dns"));
+        let mut original: Value = serde_json::from_str(&self.json)?;
+        if let Some(resolver) = original["route"].get_mut("default_domain_resolver") {
+            root.insert(
+                "route".into(),
+                json!({"default_domain_resolver": resolver.take()}),
+            );
+        }
+        if let Some(Value::Array(outbounds)) = root.get_mut("outbounds") {
+            for outbound in outbounds {
+                if outbound["type"] == "urltest" {
+                    *outbound = json!({
+                        "type": "selector",
+                        "tag": outbound["tag"],
+                        "outbounds": outbound["outbounds"],
+                    });
+                }
+            }
+        }
+        Ok(serde_json::to_string(&root)?)
+    }
+
     pub fn mode(&self) -> ProjectionMode {
         self.mode
     }

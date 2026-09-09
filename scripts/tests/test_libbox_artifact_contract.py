@@ -55,6 +55,7 @@ class LibboxArtifactContractTests(unittest.TestCase):
             "endpointConflictPatchSha256": self.pins[
                 "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"
             ],
+            "profileProbePatchSha256": self.pins["SING_BOX_PROFILE_PROBE_PATCH_SHA256"],
             "patchedDiffSha256": self.pins["SING_BOX_PATCHED_DIFF_SHA256"],
             "combinedDiffSha256": self.pins["SING_BOX_COMBINED_DIFF_SHA256"],
             "patchedGoModSha256": self.pins["SING_BOX_PATCHED_GO_MOD_SHA256"],

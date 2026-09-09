@@ -182,6 +182,8 @@ XCODEGEN_PATCH_BODY = b"synthetic XcodeGen installed-resource patch body\n"
 SECURITY_SHA = _sha(PATCH_BODIES["security"])
 RAW_SHA = _sha(PATCH_BODIES["raw"])
 DNS_SHA = _sha(PATCH_BODIES["dns"])
+PATCH_BODIES["probe"] = b"profile probe patch fixture\n"
+PROBE_SHA = _sha(PATCH_BODIES["probe"])
 ENDPOINT_SHA = _sha(PATCH_BODIES["endpoint"])
 COMBINED_SHA = _sha(b"synthetic combined diff body\n")
 REJECTED_PATCH_DIGESTS = sorted(REQUIRED_REJECTED_PATCH_DIGESTS)
@@ -204,6 +206,7 @@ LIBBOX_MODULE_CACHE_CONTRACT_PATH = "scripts/libbox_module_cache_contract.sh"
 XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
+    "probe": "native/macos/patches/sing-box-v1.13.15-profile-probe.patch",
     "security": "native/macos/patches/security.patch",
     "raw": "native/macos/patches/raw-packet.patch",
     "dns": "native/macos/patches/dns-failover.patch",
@@ -244,6 +247,7 @@ LIBBOX_ARTIFACT_BINDINGS = [
     "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
     "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
     "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+    "profileProbePatchSha256=$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
     "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
     "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
     "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
@@ -594,6 +598,8 @@ class Fixture:
             "SING_BOX_DNS_FAILOVER_PATCH_SHA256": DNS_SHA,
             "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH": PATCH_PATHS["endpoint"],
             "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256": ENDPOINT_SHA,
+            "SING_BOX_PROFILE_PROBE_PATCH_PATH": PATCH_PATHS["probe"],
+            "SING_BOX_PROFILE_PROBE_PATCH_SHA256": PROBE_SHA,
             "SING_BOX_PATCHED_DIFF_SHA256": SECURITY_SHA,
             "SING_BOX_COMBINED_DIFF_SHA256": COMBINED_SHA,
             "SING_BOX_PATCHED_GO_MOD_SHA256": _sha(b"patched go.mod"),
@@ -931,6 +937,12 @@ class Fixture:
                     "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
                     "sha256": ENDPOINT_SHA,
                 },
+                {
+                    "name": "sing-box profile probe patch",
+                    "pathKey": "SING_BOX_PROFILE_PROBE_PATCH_PATH",
+                    "sha256Key": "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+                    "sha256": PROBE_SHA,
+                },
             ],
             "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
             "combinedDiffSha256": COMBINED_SHA,
@@ -1006,6 +1018,7 @@ class Fixture:
                         "$SING_BOX_RAW_PACKET_PATCH_SHA256",
                         "$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
                         "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+                        "$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
                     ],
                     "forbidNetworkRecursion": True,
                 }
@@ -1035,6 +1048,7 @@ class Fixture:
                     "path": PATCH_PATHS["endpoint"],
                     "sha256": ENDPOINT_SHA,
                 },
+                "profileProbePatch": {"path": PATCH_PATHS["probe"], "sha256": PROBE_SHA},
                 "combinedDiffSha256": COMBINED_SHA,
             },
             "singBoxForAppleReference": {"commit": APPLE_REFERENCE_COMMIT},

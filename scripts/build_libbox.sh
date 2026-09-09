@@ -183,6 +183,7 @@ cfw_run_release_python_script \
   --metadata "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256" \
   --metadata "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \
   --metadata "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" \
+  --metadata "profileProbePatchSha256=$SING_BOX_PROFILE_PROBE_PATCH_SHA256" \
   --metadata "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256" \
   --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256" \
   --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \

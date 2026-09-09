@@ -1,0 +1,390 @@
+diff --git a/experimental/libbox/profile_probe.go b/experimental/libbox/profile_probe.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..01a64685c642e1d65323ecc044b93534634d8909
+--- /dev/null
++++ b/experimental/libbox/profile_probe.go
+@@ -0,0 +1,153 @@
++package libbox
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net"
++	"sync"
++	"time"
++
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/common/urltest"
++	"github.com/sagernet/sing-box/include"
++	"github.com/sagernet/sing-box/option"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// Profile probes originate application requests only: no inbounds, controller,
++// system interface, routing policy, persistent cache, or background URL tests.
++// One bounded batch may run per process. Its Box is always closed before reply.
++var profileProbeSlot = make(chan struct{}, 1)
++
++type profileProbeResult struct {
++	Name      string  `json:"name"`
++	Delay     *uint32 `json:"delay"`
++	ErrorKind *string `json:"error_kind"`
++}
++
++func profileProbeContext() context.Context {
++	// Do not read libbox Setup globals: a profile probe may overlap the first
++	// connected runtime's setup, and it never needs persistent directories.
++	return box.Context(context.Background(), include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry())
++}
++
++func TestProfileProxies(configuration, namesJSON string, timeoutMS int32) (string, error) {
++	select {
++	case profileProbeSlot <- struct{}{}:
++		defer func() { <-profileProbeSlot }()
++	default:
++		return "", errors.New("profile probe already running")
++	}
++	if len(configuration) == 0 || len(configuration) > 4*1024*1024 || len(namesJSON) > 32768 || timeoutMS < 100 || timeoutMS > 10000 {
++		return "", errors.New("invalid profile probe bounds")
++	}
++	var names []string
++	if err := json.Unmarshal([]byte(namesJSON), &names); err != nil || len(names) == 0 || len(names) > 32 {
++		return "", errors.New("invalid profile probe targets")
++	}
++	seen := make(map[string]bool, len(names))
++	for _, name := range names {
++		if name == "" || len(name) > 512 || seen[name] {
++			return "", errors.New("invalid profile probe target")
++		}
++		seen[name] = true
++	}
++	ctx, cancel := context.WithTimeout(profileProbeContext(), time.Duration(timeoutMS)*time.Millisecond)
++	defer cancel()
++	options, err := profileProbeOptions(ctx, configuration)
++	if err != nil {
++		return "", err
++	}
++	instance, err := box.New(box.Options{Context: ctx, Options: options})
++	if err != nil {
++		return "", errors.New("profile probe configuration rejected")
++	}
++	return runProfileProbe(ctx, instance, names)
++}
++
++func profileProbeOptions(ctx context.Context, configuration string) (option.Options, error) {
++	var root map[string]json.RawMessage
++	if err := json.Unmarshal([]byte(configuration), &root); err != nil {
++		return option.Options{}, errors.New("invalid profile probe document")
++	}
++	for key := range root {
++		if key != "outbounds" && key != "endpoints" && key != "dns" && key != "route" {
++			return option.Options{}, errors.New("unsupported profile probe section")
++		}
++	}
++	var route map[string]json.RawMessage
++	if data, ok := root["route"]; ok {
++		if err := json.Unmarshal(data, &route); err != nil {
++			return option.Options{}, errors.New("invalid profile probe resolver")
++		}
++		for key := range route {
++			if key != "default_domain_resolver" {
++				return option.Options{}, errors.New("profile probe cannot configure routes")
++			}
++		}
++	}
++	options, err := parseConfig(ctx, configuration)
++	if err != nil {
++		return option.Options{}, errors.New("profile probe configuration rejected")
++	}
++	for _, endpoint := range options.Endpoints {
++		wireguard, ok := endpoint.Options.(*option.WireGuardEndpointOptions)
++		if endpoint.Type != "wireguard" || !ok || wireguard.System || wireguard.ListenPort != 0 {
++			return option.Options{}, errors.New("profile probe requires a userspace client endpoint")
++		}
++	}
++	for _, outbound := range options.Outbounds {
++		if outbound.Type == "urltest" {
++			return option.Options{}, errors.New("profile probe cannot start background tests")
++		}
++	}
++	options.Log = &option.LogOptions{Disabled: true}
++	return options, nil
++}
++
++func runProfileProbe(ctx context.Context, instance *box.Box, names []string) (response string, err error) {
++	defer func() {
++		if closeErr := instance.Close(); closeErr != nil {
++			response = ""
++			err = errors.Join(err, errors.New("profile probe cleanup failed"))
++		}
++	}()
++	if startErr := instance.Start(); startErr != nil {
++		return "", errors.New("profile probe startup failed")
++	}
++	results := make([]profileProbeResult, len(names))
++	var workers sync.WaitGroup
++	for index, name := range names {
++		workers.Go(func() {
++			result := profileProbeResult{Name: name}
++			var dialer N.Dialer
++			if outbound, ok := instance.Outbound().Outbound(name); ok {
++				dialer = outbound
++			} else if endpoint, ok := instance.Endpoint().Get(name); ok {
++				dialer = endpoint
++			}
++			if dialer == nil {
++				kind := "not_found"
++				result.ErrorKind = &kind
++			} else {
++				delay, probeErr := urltest.URLTest(ctx, "https://www.gstatic.com/generate_204", dialer)
++				if probeErr != nil {
++					kind := "probe_failed"
++					var networkError net.Error
++					if errors.Is(probeErr, context.DeadlineExceeded) || errors.As(probeErr, &networkError) && networkError.Timeout() {
++						kind = "timeout"
++					}
++					result.ErrorKind = &kind
++				} else {
++					value := max(uint32(delay), 1)
++					result.Delay = &value
++				}
++			}
++			results[index] = result
++		})
++	}
++	workers.Wait()
++	data, err := json.Marshal(results)
++	return string(data), err
++}
+diff --git a/experimental/libbox/profile_probe_test.go b/experimental/libbox/profile_probe_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f44d9cf68e881dc9c85c1930ad9301c2551bda8f
+--- /dev/null
++++ b/experimental/libbox/profile_probe_test.go
+@@ -0,0 +1,225 @@
++package libbox
++
++import (
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/json"
++	"io"
++	"math/big"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing/service"
++)
++
++func probeHTTPConfig(t *testing.T, address string) string {
++	t.Helper()
++	host, portText, err := net.SplitHostPort(address)
++	if err != nil {
++		t.Fatal(err)
++	}
++	port, err := strconv.Atoi(portText)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data, err := json.Marshal(map[string]any{"outbounds": []any{map[string]any{
++		"type": "http", "tag": "node", "server": host, "server_port": port,
++	}}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return string(data)
++}
++
++func decodeProbeResults(t *testing.T, response string) []profileProbeResult {
++	t.Helper()
++	var results []profileProbeResult
++	if err := json.Unmarshal([]byte(response), &results); err != nil {
++		t.Fatal(err)
++	}
++	return results
++}
++
++func TestProfileProbeRejectsNetworkingIntegration(t *testing.T) {
++	for _, configuration := range []string{
++		`{"outbounds":[{"type":"direct","tag":"node"}],"inbounds":[]}`,
++		`{"outbounds":[{"type":"direct","tag":"node"}],"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"}}}`,
++		`{"outbounds":[{"type":"direct","tag":"node"}],"route":{"auto_detect_interface":true}}`,
++		`{"outbounds":[{"type":"direct","tag":"node"}],"log":{"output":"/tmp/profile-probe.log"}}`,
++		`{"outbounds":[{"type":"direct","tag":"node"},{"type":"urltest","tag":"auto","outbounds":["node"]}]}`,
++	} {
++		if _, err := TestProfileProxies(configuration, `["node"]`, 100); err == nil {
++			t.Fatal("accepted OS integration or background activity")
++		}
++	}
++	if _, err := TestProfileProxies(`{"outbounds":[]}`, `["node","node"]`, 100); err == nil {
++		t.Fatal("accepted duplicate targets")
++	}
++	if _, err := TestProfileProxies(`{"outbounds":[]}`, `["node"]`, 10001); err == nil {
++		t.Fatal("accepted unbounded timeout")
++	}
++}
++
++func TestProfileProbeUsesProtocolAndReportsFailure(t *testing.T) {
++	var connects atomic.Int32
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodConnect && r.Host == "www.gstatic.com:443" {
++			connects.Add(1)
++		}
++		w.WriteHeader(http.StatusBadGateway)
++	}))
++	defer proxy.Close()
++	response, err := TestProfileProxies(probeHTTPConfig(t, proxy.Listener.Addr().String()), `["node","missing"]`, 500)
++	if err != nil {
++		t.Fatal(err)
++	}
++	results := decodeProbeResults(t, response)
++	if connects.Load() != 1 {
++		t.Fatal("did not use the configured HTTP CONNECT proxy")
++	}
++	if len(results) != 2 || results[0].Delay != nil || *results[0].ErrorKind != "probe_failed" || *results[1].ErrorKind != "not_found" {
++		t.Fatalf("unexpected results: %+v", results)
++	}
++}
++
++func TestProfileProbeTimeoutAndSingleFlight(t *testing.T) {
++	entered := make(chan struct{}, 1)
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		entered <- struct{}{}
++		<-r.Context().Done()
++	}))
++	defer proxy.Close()
++	configuration := probeHTTPConfig(t, proxy.Listener.Addr().String())
++	done := make(chan error, 1)
++	started := time.Now()
++	go func() {
++		response, err := TestProfileProxies(configuration, `["node"]`, 500)
++		if err == nil {
++			results := decodeProbeResults(t, response)
++			if len(results) != 1 || results[0].Delay != nil || results[0].ErrorKind == nil || *results[0].ErrorKind != "timeout" {
++				t.Error("timeout was not reported")
++			}
++		}
++		done <- err
++	}()
++	select {
++	case <-entered:
++	case <-time.After(2 * time.Second):
++		t.Fatal("probe did not reach proxy")
++	}
++	if _, err := TestProfileProxies(configuration, `["node"]`, 100); err == nil || !strings.Contains(err.Error(), "already running") {
++		t.Fatal("concurrent batch admitted")
++	}
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("probe exceeded its deadline")
++	}
++	if time.Since(started) > 2*time.Second {
++		t.Fatal("unbounded timeout")
++	}
++}
++
++type probeCertificateStore struct{ pool *x509.CertPool }
++
++func (s probeCertificateStore) Name() string                   { return "test certificate store" }
++func (s probeCertificateStore) Start(adapter.StartStage) error { return nil }
++func (s probeCertificateStore) Close() error                   { return nil }
++func (s probeCertificateStore) Pool() *x509.CertPool           { return s.pool }
++
++// Real HTTP CONNECT + verified HTTPS sockets, with a test CA scoped only to
++// this Box context. Production uses the normal system trust store.
++func TestProfileProbeMeasuresHTTPSRoundTrip(t *testing.T) {
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	certificate := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"www.gstatic.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
++	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leaf, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pool := x509.NewCertPool()
++	pool.AddCert(leaf)
++	var requests atomic.Int32
++	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodHead && r.URL.Path == "/generate_204" {
++			requests.Add(1)
++		}
++		time.Sleep(20 * time.Millisecond)
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	target.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}, MinVersion: tls.VersionTLS12}
++	target.StartTLS()
++	defer target.Close()
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodConnect || r.Host != "www.gstatic.com:443" {
++			w.WriteHeader(http.StatusBadRequest)
++			return
++		}
++		remote, err := net.Dial("tcp", target.Listener.Addr().String())
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		defer remote.Close()
++		client, buffer, err := w.(http.Hijacker).Hijack()
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		defer client.Close()
++		if _, err = buffer.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
++			t.Error(err)
++			return
++		}
++		if err = buffer.Flush(); err != nil {
++			t.Error(err)
++			return
++		}
++		done := make(chan struct{})
++		go func() { _, _ = io.Copy(remote, buffer); remote.Close(); close(done) }()
++		_, _ = io.Copy(client, remote)
++		client.Close()
++		<-done
++	}))
++	defer proxy.Close()
++	ctx, cancel := context.WithTimeout(profileProbeContext(), 2*time.Second)
++	defer cancel()
++	ctx = service.ContextWith[adapter.CertificateStore](ctx, probeCertificateStore{pool})
++	options, err := profileProbeOptions(ctx, probeHTTPConfig(t, proxy.Listener.Addr().String()))
++	if err != nil {
++		t.Fatal(err)
++	}
++	instance, err := box.New(box.Options{Context: ctx, Options: options})
++	if err != nil {
++		t.Fatal(err)
++	}
++	response, err := runProfileProbe(ctx, instance, []string{"node"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	results := decodeProbeResults(t, response)
++	if len(results) != 1 || results[0].Delay == nil || *results[0].Delay < 20 || results[0].ErrorKind != nil || requests.Load() != 1 {
++		t.Fatalf("HTTPS round trip was not measured: %+v", results)
++	}
++}

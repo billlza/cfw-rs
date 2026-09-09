@@ -34,6 +34,13 @@ public enum SystemProxyAuthorizationFailure: Int, Sendable {
 }
 
 @objc public protocol CFWProxyAgentXPCProtocol {
+  /// Bounded outbound-only application requests. No listener or OS integration
+  /// may be created. Credentials remain in the separate in-memory Data argument.
+  func testProfileProxies(
+    _ configuration: Data, proxies: Data, timeoutMS: UInt16,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  )
+
   /// Requests only the macOS network-preferences right. It starts no engine,
   /// acquires no Authority lease, and carries no credential material over XPC.
   func authorizeSystemProxy(restorationOnly: Bool, withReply reply: @escaping (NSError?) -> Void)

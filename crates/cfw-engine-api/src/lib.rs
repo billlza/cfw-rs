@@ -19,7 +19,10 @@ pub use cfw_singbox_config::{
 // Version 8 adds the closed installed-40019 migration actions and proof
 // profiles. Older native bridges cannot express the exact legacy/current
 // service boundary, so the complete Host/native graph advances together.
-pub const ENGINE_PROTOCOL_VERSION: u16 = 8;
+mod profile_probe;
+pub use profile_probe::{ProfileDelayTestRequest, ProfileProbeFailure, ProfileProxyDelay};
+
+pub const ENGINE_PROTOCOL_VERSION: u16 = 9;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1350,6 +1353,9 @@ pub enum NativeBridgeCommand {
     PreflightCutover {
         request: Box<CutoverPreflightRequest>,
     },
+    TestProfileDelays {
+        request: ProfileDelayTestRequest,
+    },
     PreviewCredentialGarbageCollection {
         request: CredentialGarbageCollectionRequest,
     },
@@ -1398,6 +1404,10 @@ impl fmt::Debug for NativeBridgeCommand {
                 .debug_struct("QueryCredentialPresence")
                 .field("request", request)
                 .finish(),
+            Self::TestProfileDelays { request } => formatter
+                .debug_struct("TestProfileDelays")
+                .field("request", request)
+                .finish(),
             Self::PreflightCutover { request } => formatter
                 .debug_struct("PreflightCutover")
                 .field("request", request)
@@ -1444,6 +1454,7 @@ pub enum NativeBridgeResult {
     CredentialGarbageCollectionReceipt(CredentialGarbageCollectionReceipt),
     CutoverPreflight(CutoverPreflightOutcome),
     ServiceMaintenance(NativeServiceMaintenanceResult),
+    ProfileDelays(Vec<ProfileProxyDelay>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1646,16 +1657,16 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v8_contract_fixtures_decode_in_rust() {
+    fn native_bridge_v9_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/query-request.json"
+            "../../../contracts/native-bridge-v9/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
         let maintenance: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/maintenance-request.json"
+            "../../../contracts/native-bridge-v9/maintenance-request.json"
         ))
         .expect("maintenance request fixture");
         assert!(matches!(
@@ -1666,7 +1677,7 @@ mod tests {
         ));
 
         let maintenance_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/maintenance-response.json"
+            "../../../contracts/native-bridge-v9/maintenance-response.json"
         ))
         .expect("maintenance response fixture");
         let Some(NativeBridgeResult::ServiceMaintenance(maintenance_result)) =
@@ -1681,7 +1692,7 @@ mod tests {
         );
 
         let recovery: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/recovery-maintenance-request.json"
+            "../../../contracts/native-bridge-v9/recovery-maintenance-request.json"
         ))
         .expect("recovery maintenance request fixture");
         assert!(matches!(
@@ -1691,7 +1702,7 @@ mod tests {
             }
         ));
         let recovery_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/recovery-maintenance-response.json"
+            "../../../contracts/native-bridge-v9/recovery-maintenance-response.json"
         ))
         .expect("recovery maintenance response fixture");
         let Some(NativeBridgeResult::ServiceMaintenance(recovery_result)) =
@@ -1710,7 +1721,7 @@ mod tests {
         );
 
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/gc-preview-request.json"
+            "../../../contracts/native-bridge-v9/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1733,7 +1744,7 @@ mod tests {
         );
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/gc-preview-response.json"
+            "../../../contracts/native-bridge-v9/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1747,7 +1758,7 @@ mod tests {
         );
 
         let conflict: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v8/endpoint-conflict-response.json"
+            "../../../contracts/native-bridge-v9/endpoint-conflict-response.json"
         ))
         .expect("endpoint conflict response fixture");
         assert!(conflict.result.is_none());
@@ -2009,7 +2020,7 @@ mod tests {
 
     #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v8/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v9/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(

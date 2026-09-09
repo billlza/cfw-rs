@@ -128,6 +128,9 @@ export const state = {
   closingAllConnections: false,
   lastRefresh: "Just now",
   controllerStatus: "controller offline",
+  proxyGroupHideTimeouts: new Map(),
+  proxyDelayResults: new Map(),
+  proxyDelayMessage: null,
   toggles: {
     systemProxy: false,
     tunMode: false,

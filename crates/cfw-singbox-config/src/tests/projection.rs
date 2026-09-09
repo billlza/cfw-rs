@@ -21,6 +21,40 @@ const TUIC_UUID_ID: &str = "99999999-9999-4999-8999-999999999999";
 const TUIC_PASSWORD_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab";
 const PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
+#[test]
+fn profile_probes_preserve_protocol_dns_and_credential_slots_without_network_integration() {
+    let profile = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[
+          {{"type":"shadowsocks","tag":"remote","server":"node.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}}},
+          {{"type":"urltest","tag":"automatic","outbounds":["remote"],"url":"https://www.gstatic.com/generate_204","interval_seconds":300,"tolerance_ms":50,"idle_timeout_seconds":1800}}
+        ],"route":{{"final":"automatic"}}}}"#
+    )).expect("profile");
+    let projected = profile
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("projection");
+    let runtime: serde_json::Value = serde_json::from_str(projected.as_json()).expect("runtime");
+    let probe: serde_json::Value =
+        serde_json::from_str(&projected.proxy_probe_json().expect("probe")).expect("JSON");
+    assert_eq!(probe["outbounds"][0], runtime["outbounds"][0]);
+    assert_eq!(probe["dns"], runtime["dns"]);
+    assert_eq!(probe["outbounds"][1]["type"], "selector");
+    assert_eq!(
+        probe["outbounds"][1]["outbounds"],
+        serde_json::json!(["remote"])
+    );
+    assert_eq!(probe["route"].as_object().expect("resolver").len(), 1);
+    for key in ["inbounds", "experimental", "log", "services", "ntp"] {
+        assert!(probe.get(key).is_none(), "probe must not contain {key}");
+    }
+    assert_eq!(projected.credential_slots().len(), 1);
+    let pointer = projected.credential_slots()[0].json_pointer();
+    assert_eq!(probe.pointer(pointer), Some(&serde_json::json!("")));
+}
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TunnelAddressPlanContract {

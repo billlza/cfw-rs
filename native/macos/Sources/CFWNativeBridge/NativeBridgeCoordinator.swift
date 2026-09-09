@@ -259,6 +259,10 @@ actor NativeBridgeCoordinator {
 
   func execute(_ command: NativeBridgeCommand) async throws -> NativeBridgeResult {
     try Task.checkCancellation()
+    // Profile probes neither own nor mutate the machine's network state.
+    if case .testProfileDelays(let request) = command {
+      return .profileDelays(try await testProfileDelays(request))
+    }
     // Authorization owns no network state. Do not keep the machine's mutation
     // lease while macOS waits for the user; the later start acquires it normally.
     let operationLease: (any NativeHostOperationLeaseHolding)?
@@ -282,6 +286,8 @@ actor NativeBridgeCoordinator {
     defer { operationLease?.release() }
 
     switch command {
+    case .testProfileDelays:
+      throw NativeBridgeProtocolError.invalidCommand
     case .queryStatus:
       return .status(try await queryExternalStatus())
     case .authorizeSystemProxy, .authorizeSystemProxyRestoration:

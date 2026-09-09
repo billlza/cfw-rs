@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 public enum NativeBridgeProtocolConstants {
-  public static let schemaVersion: UInt16 = 8
+  public static let schemaVersion: UInt16 = 9
   public static let maximumRequestBytes = 1_048_576
   public static let maximumResponseBytes = 1_048_576
   public static let maximumFailureMessageBytes = 1_024
@@ -387,7 +387,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     guard contentDigest == configContentDigest.hex else {
       throw NativeBridgeProtocolError.configurationDigestMismatch
     }
-    try Self.validateCredentialSlots(credentialSlots, root: root)
+    try ConfigurationCredentialSlots.validate(credentialSlots, root: root)
     if let port = tunnelOptions?.systemProxyPort {
       guard let inbounds = root["inbounds"] as? [[String: Any]] else {
         throw NativeBridgeProtocolError.invalidConfiguration
@@ -472,61 +472,6 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
       identitySHA256: configDigest,
       credentialSlots: credentialSlots
     )
-  }
-
-  private static func validateCredentialSlots(
-    _ slots: [CredentialSlot],
-    root: [String: Any]
-  ) throws {
-    guard slots.count <= NativeBridgeProtocolConstants.maximumCredentialSlots else {
-      throw NativeBridgeProtocolError.invalidCredentialSlot
-    }
-    var pointers = Set<String>()
-    var referenceKinds: [UUID: CredentialKind] = [:]
-    for slot in slots {
-      guard pointers.insert(slot.jsonPointer).inserted else {
-        throw NativeBridgeProtocolError.duplicateCredentialPointer
-      }
-      if let prior = referenceKinds.updateValue(slot.reference.kind, forKey: slot.reference.id),
-        prior != slot.reference.kind
-      {
-        throw NativeBridgeProtocolError.conflictingCredentialKind
-      }
-      guard let outbounds = root[slot.target.configurationContainer] as? [Any],
-        Int(slot.outboundIndex) < outbounds.count,
-        let outbound = outbounds[Int(slot.outboundIndex)] as? [String: Any],
-        Self.placeholder(in: outbound, target: slot.target) == ""
-      else {
-        throw NativeBridgeProtocolError.nonEmptyCredentialPlaceholder
-      }
-    }
-  }
-
-  private static func placeholder(
-    in outbound: [String: Any],
-    target: CredentialTarget
-  ) -> String? {
-    switch target {
-    case .wireguardPrivateKey:
-      outbound["type"] as? String == "wireguard" ? outbound["private_key"] as? String : nil
-    case .wireguardPreSharedKey:
-      if outbound["type"] as? String == "wireguard",
-        let peers = outbound["peers"] as? [[String: Any]], peers.count == 1
-      {
-        peers[0]["pre_shared_key"] as? String
-      } else {
-        nil
-      }
-    case .socks5Username:
-      outbound["username"] as? String
-    case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
-      .tuicPassword, .socks5Password:
-      outbound["password"] as? String
-    case .vmessUUID, .vlessUUID, .tuicUUID:
-      outbound["uuid"] as? String
-    case .hysteria2ObfsPassword:
-      (outbound["obfs"] as? [String: Any])?["password"] as? String
-    }
   }
 
   private struct IdentityDocument: Encodable {

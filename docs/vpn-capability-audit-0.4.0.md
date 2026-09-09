@@ -6,6 +6,11 @@ then exposed an Authority startup recovery defect. Build 40051 corrects the
 durable cleanup recovery and status protocol. This document is a delivery
 checklist; installed network acceptance remains separate.
 
+Build 40052 adds explicit latency testing while disconnected. It uses a transient
+outbound-only libbox instance with no controller, inbound, system interface or
+network-preference mutation. The saved-node locator and per-group timeout filter
+also work without starting System Proxy or TUN.
+
 ## Product gaps
 
 The detailed historical comparison is in [the CFW audit](cfw-compatibility-audit.md).

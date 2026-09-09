@@ -24,7 +24,11 @@
       "path": "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
       "sha256": "5a956c63025b4692db43d2c77ac46de1ae573e0afcc866de9b59704a273b0c02"
     },
-    "combinedDiffSha256": "888e52565dcde4961ee6f35d4f23669df68205ff9448a16b55ed87cd1d5cb0df"
+    "combinedDiffSha256": "fe972650dc23075f0feb1c9220192a3974351ad47aa40e220871d1baf53b842b",
+    "profileProbePatch": {
+      "path": "native/macos/patches/sing-box-v1.13.15-profile-probe.patch",
+      "sha256": "44dedb4ed24004cbd811584407c4a4a69c1ed24067cd1cf0081fc1c398f91f6d"
+    }
   },
   "singBoxForAppleReference": {
     "commit": "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"

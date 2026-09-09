@@ -216,6 +216,36 @@ impl NativeFrameworkBridge {
         })
     }
 
+    pub fn test_profile_delays(
+        &self,
+        request: cfw_engine_api::ProfileDelayTestRequest,
+    ) -> NativeBridgeFuture<'_, Vec<cfw_engine_api::ProfileProxyDelay>> {
+        Box::pin(async move {
+            let expected = request.proxies.clone();
+            match self
+                .invoke(NativeBridgeCommand::TestProfileDelays { request })
+                .await?
+            {
+                NativeBridgeResult::ProfileDelays(results)
+                    if results.len() == expected.len()
+                        && results.iter().zip(&expected).all(|(result, name)| {
+                            &result.name == name
+                                && matches!(
+                                    (result.delay, result.error_kind),
+                                    (Some(1..), None) | (None, Some(_))
+                                )
+                        }) =>
+                {
+                    Ok(results)
+                }
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "native profile probe response does not match the request",
+                )),
+            }
+        })
+    }
+
     fn invoke(&self, command: NativeBridgeCommand) -> NativeBridgeFuture<'_, NativeBridgeResult> {
         let authorization = matches!(
             command,

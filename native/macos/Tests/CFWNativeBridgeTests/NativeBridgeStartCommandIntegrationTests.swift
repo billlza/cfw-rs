@@ -89,6 +89,12 @@ private actor RecordingSystemProxyStartPreparer: SystemProxyStartPreparing {
 }
 
 private actor StartableProxyAgent: ProxyAgentTransporting {
+  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+    -> [ProfileProxyDelay]
+  {
+    throw ProxyAgentHostError.malformedResponse
+  }
+
   func authorizeSystemProxy(restorationOnly: Bool) async throws {}
   private let descriptor: ConfigurationDescriptor
   private let registrationError: ProxyAgentHostError?
@@ -192,6 +198,12 @@ private enum FailedStartRetryFault: CaseIterable, Equatable, Sendable {
 }
 
 private actor FailedStartProxyAgent: ProxyAgentTransporting {
+  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+    -> [ProfileProxyDelay]
+  {
+    throw ProxyAgentHostError.malformedResponse
+  }
+
   func authorizeSystemProxy(restorationOnly: Bool) async throws {}
   private let descriptor: ConfigurationDescriptor
   private let failure = EngineFailure(

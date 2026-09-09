@@ -1130,11 +1130,6 @@ dd {
   font-weight: 700;
 }
 
-.proxy-shield {
-  color: var(--accent);
-  font-size: 24px;
-}
-
 .proxy-type-badge {
   display: inline-grid;
   width: 24px;

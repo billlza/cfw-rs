@@ -26,6 +26,11 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
     subsystem: "com.bill.clashformac", category: "system-proxy-authorization")
   private let lifecycle: any ProxySystemProxyOwning
   private let configurationChecker: any LibboxConfigurationChecking
+  private let profileProbe: any LibboxProfileProbing
+  private let profileProbeLock = NSLock()
+  private var profileProbePending = false
+  private let profileProbeQueue = DispatchQueue(
+    label: "com.bill.clashformac.profile-probe", qos: .utility)
   private let preferences: SCPreferencesSystemProxyPreferences
   private let journalStore: any ProxyOwnershipJournalStoring
   private let authorizationQueue = DispatchQueue(
@@ -37,12 +42,56 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
     lifecycle: any ProxySystemProxyOwning,
     configurationChecker: any LibboxConfigurationChecking,
     preferences: SCPreferencesSystemProxyPreferences,
-    journalStore: any ProxyOwnershipJournalStoring
+    journalStore: any ProxyOwnershipJournalStoring,
+    profileProbe: any LibboxProfileProbing = SourceBuiltLibboxProfileProbe()
   ) {
+    self.profileProbe = profileProbe
     self.lifecycle = lifecycle
     self.configurationChecker = configurationChecker
     self.preferences = preferences
     self.journalStore = journalStore
+  }
+
+  func testProfileProxies(
+    _ configuration: Data, proxies: Data, timeoutMS: UInt16,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let response = ProxyXPCReply(reply)
+    let names: [String]
+    do {
+      guard !configuration.isEmpty,
+        configuration.count <= Int(NativeProtocolConstants.maximumConfigurationBytes),
+        proxies.count <= 32768
+      else { throw NativeBridgeProtocolError.invalidConfiguration }
+      names = try JSONDecoder().decode([String].self, from: proxies)
+      try ProfileDelayTestRequest.validateTargets(names, timeoutMS: timeoutMS)
+    } catch {
+      response.finish(data: nil, error: ProfileProbeServiceFailure.invalidRequest.error)
+      return
+    }
+    let admitted = profileProbeLock.withLock {
+      guard !profileProbePending else { return false }
+      profileProbePending = true
+      return true
+    }
+    guard admitted else {
+      response.finish(data: nil, error: ProfileProbeServiceFailure.busy.error)
+      return
+    }
+    profileProbeQueue.async { [self] in
+      var bytes = configuration
+      defer {
+        bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex)
+        profileProbeLock.withLock { profileProbePending = false }
+      }
+      do {
+        let result = try profileProbe.test(
+          configuration: bytes, proxies: names, timeoutMS: timeoutMS)
+        response.finish(data: try JSONEncoder().encode(result), error: nil)
+      } catch {
+        response.finish(data: nil, error: ProfileProbeServiceFailure.executionFailed.error)
+      }
+    }
   }
 
   func authorizeSystemProxy(restorationOnly: Bool, withReply reply: @escaping (NSError?) -> Void) {

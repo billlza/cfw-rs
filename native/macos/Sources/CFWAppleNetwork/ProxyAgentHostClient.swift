@@ -137,6 +137,8 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
 }
 
 public protocol ProxyAgentTransporting: Sendable {
+  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+    -> [ProfileProxyDelay]
   func authorizeSystemProxy(restorationOnly: Bool) async throws
   func registrationStatus() async -> ProxyAgentRegistrationStatus
   func ensureRegistered() async throws
@@ -660,6 +662,52 @@ public actor AuthenticatedProxyAgentTransport:
     }
   }
 
+  public func testProfileProxies(
+    configuration: Data, proxies: [String], timeoutMS: UInt16
+  ) async throws -> [ProfileProxyDelay] {
+    try ProfileDelayTestRequest.validateTargets(proxies, timeoutMS: timeoutMS)
+    guard !configuration.isEmpty,
+      configuration.count <= Int(NativeProtocolConstants.maximumConfigurationBytes)
+    else { throw ProxyAgentHostError.malformedResponse }
+    let names = try JSONEncoder().encode(proxies)
+    return try await awaitProxyAgentResponse(
+      connect: { try connectedSession() },
+      deadline: CallbackDeadlineScheduler(timeout: .milliseconds(Int64(timeoutMS) + 5000)),
+      decode: { data in
+        guard data.count <= 65536 else { throw ProxyAgentHostError.malformedResponse }
+        let results = try JSONDecoder().decode([ProfileProxyDelay].self, from: data)
+        guard results.map(\.name) == proxies else { throw ProxyAgentHostError.responseMismatch }
+        return results
+      },
+      operation: { connection, finish in
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+          }) as? CFWProxyAgentXPCProtocol
+        else {
+          finish(
+            .failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable")))
+          return
+        }
+        proxy.testProfileProxies(configuration, proxies: names, timeoutMS: timeoutMS) {
+          data, error in
+          if let error {
+            if error.domain == ProfileProbeServiceFailure.domain,
+              let failure = ProfileProbeServiceFailure(rawValue: error.code)
+            {
+              finish(.failure(ProxyAgentHostError.agentFailure(failure.failure)))
+            } else {
+              finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+            }
+          } else if let data {
+            finish(.success(data))
+          } else {
+            finish(.failure(ProxyAgentHostError.malformedResponse))
+          }
+        }
+      })
+  }
+
   public func validateConfiguration(
     _ configuration: Data,
     descriptor: ConfigurationDescriptor
@@ -772,13 +820,47 @@ public actor AuthenticatedProxyAgentTransport:
         @escaping @Sendable (Result<Data, Error>) -> Void
       ) -> Void
   ) async throws -> CommandResult {
+    try await awaitProxyAgentResponse(
+      connect: connect,
+      decode: { data in
+        let response: ProxyAgentDecodedResponse
+        do {
+          response = try decode(data)
+        } catch {
+          throw ProxyAgentHostError.malformedResponse
+        }
+        guard response.requestID == requestID else {
+          throw ProxyAgentHostError.responseMismatch
+        }
+        if let failure = response.failure {
+          throw ProxyAgentHostError.agentFailure(failure)
+        }
+        guard let result = response.result else {
+          throw ProxyAgentHostError.malformedResponse
+        }
+        guard result.kind == expectedKind else {
+          throw ProxyAgentHostError.malformedResponse
+        }
+        return result
+      }, operation: operation)
+  }
+
+  private func awaitProxyAgentResponse<Value: Sendable>(
+    connect: () throws -> ProxyAgentConnectionReference,
+    deadline: CallbackDeadlineScheduler? = nil,
+    decode: @escaping @Sendable (Data) throws -> Value,
+    operation:
+      @escaping @Sendable (
+        NSXPCConnection, @escaping @Sendable (Result<Data, Error>) -> Void
+      ) -> Void
+  ) async throws -> Value {
     let token = try outstandingRequests.reserve()
     defer { outstandingRequests.release(token) }
     let reference = try connect()
     defer { reference.lifecycle.release(token: token) }
     do {
       let responseData: Data = try await awaitBoundedCallback(
-        deadline: replyDeadline,
+        deadline: deadline ?? replyDeadline,
         timeoutError: ProxyAgentHostError.transportTimedOut
       ) { finish in
         guard
@@ -798,25 +880,7 @@ public actor AuthenticatedProxyAgentTransport:
           finish(result)
         }
       }
-      let response: ProxyAgentDecodedResponse
-      do {
-        response = try decode(responseData)
-      } catch {
-        throw ProxyAgentHostError.malformedResponse
-      }
-      guard response.requestID == requestID else {
-        throw ProxyAgentHostError.responseMismatch
-      }
-      if let failure = response.failure {
-        throw ProxyAgentHostError.agentFailure(failure)
-      }
-      guard let result = response.result else {
-        throw ProxyAgentHostError.malformedResponse
-      }
-      guard result.kind == expectedKind else {
-        throw ProxyAgentHostError.malformedResponse
-      }
-      return result
+      return try decode(responseData)
     } catch {
       if Self.shouldRetireConnection(after: error) {
         retireConnection(reference)

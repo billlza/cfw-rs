@@ -70,10 +70,12 @@ public enum ProxyAgentExecutable {
       )
     )
     // The Authority owner coordinator binds an Authority owner capability before any
-    // libbox or System Proxy mutation, attests exact ready/stopped state with the
+    // forwarding-runtime or System Proxy mutation, attests exact ready/stopped state with the
     // exact operation context and effective proxy observation, and forces a stop on
     // revocation. The authenticated Host→ProxyAgent capability channel and the
-    // role-scoped Authority owner XPC client are the only production start path.
+    // role-scoped Authority owner XPC client are the only forwarding-runtime start path.
+    // Explicit profile probes are bounded application requests with no inbound
+    // or OS integration, handled independently by the same authenticated service.
     let revocation = ProxyRevocationChannel()
     let authorityRemote = NSXPCGlobalAuthorityRemote(
       role: .proxyAgent,

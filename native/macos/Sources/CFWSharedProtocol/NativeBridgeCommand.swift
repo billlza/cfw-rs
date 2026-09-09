@@ -14,6 +14,7 @@ public enum NativeBridgeCommand: Equatable, Sendable {
   case provisionCredentials(CredentialProvisionRequest)
   case queryCredentialPresence(CredentialPresenceRequest)
   case preflightCutover(CutoverPreflightRequest)
+  case testProfileDelays(ProfileDelayTestRequest)
   case previewCredentialGarbageCollection(CredentialGarbageCollectionRequest)
   case commitCredentialGarbageCollection(CredentialGarbageCollectionCommitRequest)
 }
@@ -30,7 +31,7 @@ extension NativeBridgeCommand: Codable {
     case context
   }
 
-  private enum Opcode: String, Codable {
+  enum Opcode: String, Codable {
     case queryStatus = "query_status"
     case authorizeSystemProxy = "authorize_system_proxy"
     case authorizeSystemProxyRestoration = "authorize_system_proxy_restoration"
@@ -44,6 +45,7 @@ extension NativeBridgeCommand: Codable {
     case provisionCredentials = "provision_credentials"
     case queryCredentialPresence = "query_credential_presence"
     case preflightCutover = "preflight_cutover"
+    case testProfileDelays = "test_profile_delays"
     case previewCredentialGarbageCollection = "preview_credential_garbage_collection"
     case commitCredentialGarbageCollection = "commit_credential_garbage_collection"
   }
@@ -95,7 +97,7 @@ extension NativeBridgeCommand: Codable {
         .startTunnel,
         .provisionCredentials,
         .queryCredentialPresence, .previewCredentialGarbageCollection,
-        .commitCredentialGarbageCollection, .preflightCutover:
+        .commitCredentialGarbageCollection, .preflightCutover, .testProfileDelays:
         throw NativeBridgeProtocolError.invalidCommand
       }
     case .provisionCredentials:
@@ -108,6 +110,9 @@ extension NativeBridgeCommand: Codable {
       self = .queryCredentialPresence(
         try payload.decode(CredentialPresenceRequest.self, forKey: .request)
       )
+    case .testProfileDelays:
+      let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      self = .testProfileDelays(try payload.decode(ProfileDelayTestRequest.self, forKey: .request))
     case .preflightCutover:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       self = .preflightCutover(
@@ -169,6 +174,10 @@ extension NativeBridgeCommand: Codable {
       try payload.encode(request, forKey: .request)
     case .queryCredentialPresence(let request):
       try container.encode(Opcode.queryCredentialPresence, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(request, forKey: .request)
+    case .testProfileDelays(let request):
+      try container.encode(Opcode.testProfileDelays, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       try payload.encode(request, forKey: .request)
     case .preflightCutover(let request):

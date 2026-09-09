@@ -265,6 +265,7 @@ public enum NativeBridgeResult: Equatable, Sendable {
   case credentialGarbageCollectionReceipt(CredentialGarbageCollectionReceipt)
   case cutoverPreflight(CutoverPreflightOutcome)
   case serviceMaintenance(NativeServiceMaintenanceResult)
+  case profileDelays([ProfileProxyDelay])
 }
 
 extension NativeBridgeResult: Codable {
@@ -284,6 +285,7 @@ extension NativeBridgeResult: Codable {
     case credentialGarbageCollectionReceipt = "credential_garbage_collection_receipt"
     case cutoverPreflight = "cutover_preflight"
     case serviceMaintenance = "service_maintenance"
+    case profileDelays = "profile_delays"
   }
 
   public init(from decoder: Decoder) throws {
@@ -317,6 +319,8 @@ extension NativeBridgeResult: Codable {
       self = .cutoverPreflight(
         try container.decode(CutoverPreflightOutcome.self, forKey: .value)
       )
+    case .profileDelays:
+      self = .profileDelays(try container.decode([ProfileProxyDelay].self, forKey: .value))
     case .serviceMaintenance:
       self = .serviceMaintenance(
         try container.decode(NativeServiceMaintenanceResult.self, forKey: .value)
@@ -353,6 +357,9 @@ extension NativeBridgeResult: Codable {
     case .cutoverPreflight(let outcome):
       try container.encode(Kind.cutoverPreflight, forKey: .kind)
       try container.encode(outcome, forKey: .value)
+    case .profileDelays(let results):
+      try container.encode(Kind.profileDelays, forKey: .kind)
+      try container.encode(results, forKey: .value)
     case .serviceMaintenance(let result):
       try container.encode(Kind.serviceMaintenance, forKey: .kind)
       try container.encode(result, forKey: .value)

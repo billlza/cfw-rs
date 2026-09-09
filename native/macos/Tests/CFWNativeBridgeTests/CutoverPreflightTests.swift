@@ -9,6 +9,14 @@ import Testing
 @testable import CFWSharedProtocol
 
 private actor RecordingProxyAgent: ProxyAgentTransporting {
+  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+    -> [ProfileProxyDelay]
+  {
+    #expect(!configuration.isEmpty)
+    #expect(timeoutMS == 5000)
+    return try proxies.map { try ProfileProxyDelay(name: $0, delay: 42, errorKind: nil) }
+  }
+
   func authorizeSystemProxy(restorationOnly: Bool) async throws {}
   private let observedSnapshot: EngineSnapshot
   private let rejectsValidation: Bool
@@ -65,6 +73,33 @@ private actor RecordingProxyAgent: ProxyAgentTransporting {
 
   func mutationCounts() -> (Int, Int) { (startCalls, stopCalls) }
   func validationCount() -> Int { validationCalls }
+}
+
+private struct ForbiddenProfileProbeOperationLease: NativeHostOperationLeaseAcquiring {
+  func acquire() throws -> any NativeHostOperationLeaseHolding {
+    throw UnusedSystemProxyStartPreparerError.unexpectedInvocation
+  }
+}
+
+@Test func offlineProfileProbeDoesNotAcquireNetworkOwnershipOrStartEitherMode() async throws {
+  let proxy = RecordingProxyAgent()
+  let tunnel = RecordingTunnelHost()
+  let coordinator = NativeBridgeCoordinator(
+    proxy: proxy, systemProxyPreparer: UnusedSystemProxyStartPreparer(), tunnel: tunnel,
+    engineLease: AvailableEngineLease(), credentialVault: EmptyCredentialVault(),
+    hostOperationLease: ForbiddenProfileProbeOperationLease())
+  let request = try ProfileDelayTestRequest(
+    audience: preflightRequest().systemProxyRequest.credentialAudience,
+    configJSON: #"{"outbounds":[{"type":"direct","tag":"node"}]}"#,
+    credentialSlots: [], proxies: ["node"], timeoutMS: 5000)
+  let envelope = NativeRequestEnvelope(requestID: UUID(), command: .testProfileDelays(request))
+  let decoded = try NativeBridgeProtocolCodec.decodeRequest(JSONEncoder().encode(envelope))
+  let result = try await coordinator.execute(decoded.command)
+  #expect(
+    result == .profileDelays([try ProfileProxyDelay(name: "node", delay: 42, errorKind: nil)]))
+  #expect(await proxy.mutationCounts() == (0, 0))
+  #expect(await proxy.validationCount() == 0)
+  #expect(await tunnel.mutationCounts() == (install: 0, cancel: 0, start: 0, stop: 0))
 }
 
 private actor RecordingTunnelHost: TunnelHostBridging {

@@ -42,25 +42,27 @@ private enum NativeBridgeRequestShape {
 
   private static func validateCommand(_ value: Any?) throws {
     let command = try object(value)
-    guard let opcode = command["opcode"] as? String else {
+    guard let opcodeText = command["opcode"] as? String,
+      let opcode = NativeBridgeCommand.Opcode(rawValue: opcodeText)
+    else {
       throw NativeBridgeProtocolError.invalidCommand
     }
     switch opcode {
-    case "query_status":
+    case .queryStatus, .authorizeSystemProxy, .authorizeSystemProxyRestoration:
       try exactKeys(command, ["opcode"])
-    case "maintain_current_services":
+    case .maintainCurrentServices:
       try exactKeys(command, ["opcode", "payload"])
       let payload = try object(command["payload"])
       try exactKeys(payload, ["action"])
-    case "start_system_proxy", "start_tunnel":
+    case .startSystemProxy, .startTunnel:
       try exactKeys(command, ["opcode", "payload"])
       try validateEngineStartRequest(requestPayload(command))
-    case "stop_system_proxy", "install_tunnel", "cancel_tunnel_install", "stop_tunnel":
+    case .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
       try exactKeys(command, ["opcode", "payload"])
       let payload = try object(command["payload"])
       try exactKeys(payload, ["context"])
       try validateContext(payload["context"])
-    case "provision_credentials":
+    case .provisionCredentials:
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
       try exactKeys(request, ["audience", "required_references", "entries"])
@@ -74,24 +76,31 @@ private enum NativeBridgeRequestShape {
         try exactKeys(entry, ["reference", "secret"])
         try validateReference(entry["reference"])
       }
-    case "query_credential_presence":
+    case .queryCredentialPresence:
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
       try exactKeys(request, ["audience", "references"])
       try validateAudience(request["audience"])
       try validateReferences(request["references"])
-    case "preflight_cutover":
+    case .testProfileDelays:
+      try exactKeys(command, ["opcode", "payload"])
+      let request = try requestPayload(command)
+      try exactKeys(
+        request, ["audience", "config_json", "credential_slots", "proxies", "timeout_ms"])
+      try validateAudience(request["audience"])
+      try validateCredentialSlots(request["credential_slots"])
+    case .preflightCutover:
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
       try exactKeys(request, ["target", "system_proxy_request", "tunnel_request"])
       try validateEngineStartRequest(object(request["system_proxy_request"]))
       try validateEngineStartRequest(object(request["tunnel_request"]))
-    case "preview_credential_garbage_collection":
+    case .previewCredentialGarbageCollection:
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
       try exactKeys(request, ["snapshot_digest", "catalog"])
       try validateCatalog(request["catalog"])
-    case "commit_credential_garbage_collection":
+    case .commitCredentialGarbageCollection:
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
       try exactKeys(
@@ -111,8 +120,6 @@ private enum NativeBridgeRequestShape {
         try validateAudience(binding["audience"])
         try validateReference(binding["reference"])
       }
-    default:
-      throw NativeBridgeProtocolError.invalidCommand
     }
   }
 

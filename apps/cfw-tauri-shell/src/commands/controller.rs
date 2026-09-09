@@ -9,7 +9,7 @@
 //! Runtime policy changes use that same authenticated controller. While the
 //! engine is proven Off, selector choices instead go through the profile use
 //! case and its maintenance lease; they do not start an engine or write any
-//! OS integration. Live measurements remain unavailable until the engine runs.
+//! OS integration. Explicit offline probes use a transient outbound-only libbox.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -273,6 +273,8 @@ pub(crate) async fn select_proxy(
 #[tauri::command]
 pub(crate) async fn test_proxy_delays(
     engine: State<'_, ManagedEngine>,
+    profiles: State<'_, super::ManagedProfiles>,
+    profile_id: Option<String>,
     proxies: Vec<String>,
     url: Option<String>,
     timeout_ms: Option<u16>,
@@ -289,12 +291,70 @@ pub(crate) async fn test_proxy_delays(
         )
         .to_ipc());
     }
-    let client = controller_client(&engine).map_err(|error| error.to_ipc())?;
     let target_url = resolve_delay_test_url(url).map_err(|error| error.to_ipc())?;
     let timeout = timeout_ms.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS);
     let limit = concurrency
         .unwrap_or(DEFAULT_DELAY_CONCURRENCY)
         .clamp(1, MAX_DELAY_CONCURRENCY);
+    let snapshot = engine.coordinator.snapshot();
+    if snapshot.state == EngineState::Off
+        && snapshot.desired_mode == cfw_engine_api::EngineMode::Off
+    {
+        if proxies.len() > MAX_DELAY_CONCURRENCY || !(100..=10_000).contains(&timeout) {
+            return Err("offline latency batch or timeout exceeds its bounds".into());
+        }
+        let stored = profiles
+            .repository()
+            .require_selected()
+            .map_err(|error| error.to_string())?;
+        if profile_id.as_deref() != Some(stored.record.id.as_str()) {
+            return Err("selected profile changed before the latency test".into());
+        }
+        let projected = stored
+            .profile
+            .project(
+                &stored.record.id,
+                cfw_singbox_config::ProjectionMode::SystemProxy,
+                &engine.engine_settings()?,
+            )
+            .map_err(|error| error.to_string())?;
+        let request = cfw_engine_api::ProfileDelayTestRequest {
+            audience: projected.credential_audience().clone(),
+            config_json: projected
+                .proxy_probe_json()
+                .map_err(|error| error.to_string())?,
+            credential_slots: projected.credential_slots().to_vec(),
+            proxies,
+            timeout_ms: timeout,
+        };
+        return profiles
+            .credential_vault()
+            .test_profile_delays(request)
+            .await
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(|result| ProxyDelayResult {
+                        name: result.name,
+                        delay: result.delay,
+                        error_kind: result.error_kind.map(|kind| match kind {
+                            cfw_engine_api::ProfileProbeFailure::Timeout => {
+                                cfw_controller::ProxyDelayFailureKind::Timeout
+                            }
+                            cfw_engine_api::ProfileProbeFailure::NotFound => {
+                                cfw_controller::ProxyDelayFailureKind::NotFound
+                            }
+                            cfw_engine_api::ProfileProbeFailure::ProbeFailed => {
+                                cfw_controller::ProxyDelayFailureKind::ProbeFailed
+                            }
+                        }),
+                        error: None,
+                    })
+                    .collect()
+            })
+            .map_err(|error| format!("Profile latency test failed: {}", error.message));
+    }
+    let client = controller_client(&engine).map_err(|error| error.to_ipc())?;
     Ok(client
         .proxy_delays(proxies, target_url, timeout, limit)
         .await)

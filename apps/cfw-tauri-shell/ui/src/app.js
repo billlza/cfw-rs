@@ -323,11 +323,12 @@ function applyControllerSnapshot(snapshot) {
         // Keep in-flight Pending / partial results while a delay test runs.
         delay = previousDelays.get(name);
       }
+      const measured = state.proxyDelayResults.get(name);
       return {
         name,
-        delay,
-        delayFailure: null,
-        dead: false,
+        delay: measured ? measured.delay : delay,
+        delayFailure: measured?.delayFailure ?? null,
+        dead: Boolean(measured?.delayFailure),
         kind: node?.kind ?? node?.type ?? nestedGroup?.kind ?? group.kind ?? "Proxy",
         udp: node?.udp ?? null,
       };
@@ -1089,7 +1090,7 @@ function delayClass(delay, failure = null) {
 
 function delayLabel(delay, failure = null) {
   if (failure) return delayFailureLabel(failure);
-  if (delay === null || delay === undefined) return "Pending";
+  if (delay === null || delay === undefined) return state.toggles.testingDelays ? "Testing…" : "Not tested";
   if (delay <= 0) return "Probe failed";
   return `${delay} ms`;
 }
@@ -1103,6 +1104,7 @@ function delayConcurrency() {
 function cancelDelayTest() {
   runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1;
   state.toggles.testingDelays = false;
+  if (runtime.delayBatchInFlight) state.proxyDelayMessage = "Stopping latency test after the current batch…";
 }
 
 function queueLiveStreamChange(lane, running, commands) {
@@ -1179,7 +1181,8 @@ function orderNamesVisibleFirst(names) {
 
 function applyDelayToProxyNodes(name, delay, failure = null) {
   const value = typeof delay === "number" && Number.isFinite(delay) ? delay : null;
-  state.proxyGroups.forEach((group) => {
+  state.proxyDelayResults.set(name, { delay: value, delayFailure: failure });
+  displayedProxyGroups().forEach((group) => {
     group.options.forEach((node) => {
       if (node.name === name) {
         node.delay = value;
@@ -1197,7 +1200,7 @@ function patchProxyDelayLabels(names) {
     if (!name || (nameSet && !nameSet.has(name))) return;
     let delay = null;
     let failure = null;
-    for (const group of state.proxyGroups) {
+    for (const group of displayedProxyGroups()) {
       const node = group.options.find((item) => item.name === name);
       if (node) {
         delay = node.delay;
@@ -1211,14 +1214,15 @@ function patchProxyDelayLabels(names) {
   const tool = document.querySelector('[data-action="delay-test"]');
   if (tool) {
     tool.classList.toggle("active", Boolean(state.toggles.testingDelays));
-    tool.disabled = Boolean(state.toggles.testingDelays);
+    tool.title = state.toggles.testingDelays ? "Cancel latency test" : "Test latency";
+    tool.disabled = Boolean(runtime.delayBatchInFlight && !state.toggles.testingDelays);
   }
 }
 
 function finalizeDelayTestNames(names) {
   names.forEach((name) => {
     let found = null;
-    for (const group of state.proxyGroups) {
+    for (const group of displayedProxyGroups()) {
       const node = group.options.find((item) => item.name === name);
       if (node) {
         found = node;
@@ -1274,35 +1278,36 @@ function proxyToolIcon(kind) {
   }
 }
 
-function isTimedOutProxy(node) {
-  if (!node) return false;
-  if (node.dead) return true;
-  if (node.delayFailure) return true;
-  return typeof node.delay === "number" && node.delay <= 0;
+function displayedProxyGroups() {
+  return freshProxyControllerSnapshotAvailable() ? state.proxyGroups : state.savedProfilePolicy?.groups ?? [];
 }
 
-function renderProxies() {
-  const controllerLive = freshProxyControllerSnapshotAvailable();
-  const sourceGroups = controllerLive ? state.proxyGroups : state.savedProfilePolicy?.groups ?? [];
-  const filter = state.proxyFilter.trim().toLowerCase();
-  const groups = sourceGroups
-    .map((group) => ({
-      ...group,
-      options: (group.options.length ? group.options : group.observedOption ? [group.observedOption] : []).filter((node) => {
-        const matchesFilter = !filter || group.name.toLowerCase().includes(filter) || node.name.toLowerCase().includes(filter);
-        const shouldHide = state.toggles.hideUnavailable && isTimedOutProxy(node) && group.now !== node.name;
-        return matchesFilter && !shouldHide;
-      }),
-    }))
-    .filter((group) => group.options.length || group.name.toLowerCase().includes(filter));
-  const activeGroup = groups.find((group) => group.name === state.activeProxyGroup)
+function activeProxyGroup() {
+  const groups = displayedProxyGroups();
+  return groups.find((group) => group.name === state.activeProxyGroup)
     ?? groups.find((group) => isManualProxyGroup(group.type) && /选择|select|proxy|节点/i.test(group.name))
     ?? groups.find((group) => isManualProxyGroup(group.type) && group.name.toUpperCase() !== "GLOBAL")
     ?? groups.find((group) => isManualProxyGroup(group.type))
     ?? groups[0]
     ?? null;
+}
+
+function hideTimedOutProxies(group) {
+  return state.proxyGroupHideTimeouts.get(group.name) ?? state.toggles.hideUnavailable;
+}
+
+function renderProxies() {
+  const controllerLive = freshProxyControllerSnapshotAvailable();
+  const groups = displayedProxyGroups();
+  const activeGroup = activeProxyGroup();
+  const filter = state.proxyFilter.trim().toLowerCase();
+  const options = activeGroup?.options.length ? activeGroup.options : activeGroup?.observedOption ? [activeGroup.observedOption] : [];
+  const visibleNodes = options.filter((node) => {
+    const matchesFilter = !filter || activeGroup.name.toLowerCase().includes(filter) || node.name.toLowerCase().includes(filter);
+    return matchesFilter && !(hideTimedOutProxies(activeGroup) && node.delayFailure === "timeout");
+  });
   const manual = Boolean(activeGroup && isManualProxyGroup(activeGroup.type) && (controllerLive || engineIsOff()) && !state.savedProxySelectionBusy);
-  const hideTimedOut = Boolean(state.toggles.hideUnavailable);
+  const hideTimedOut = activeGroup ? hideTimedOutProxies(activeGroup) : false;
   const showProxiesList = state.toggles.showProxiesList !== false;
   const blinkNode = state.proxyBlinkNode;
   const emptyMessage = controllerLive && state.proxyGroups.length === 0
@@ -1326,7 +1331,6 @@ function renderProxies() {
         ${activeGroup ? `
           <div class="cfw-proxy-head">
             <div class="cfw-proxy-title">
-              <span class="proxy-shield">◇</span>
               <h2>${escapeHtml(activeGroup.name)}</h2>
               <span class="proxy-type-badge">${escapeHtml(activeGroup.type?.slice(0, 1) ?? "S")}</span>
               <b>${escapeHtml(activeGroup.now ?? "")}</b>
@@ -1335,14 +1339,15 @@ function renderProxies() {
               <input class="proxy-filter" data-proxy-filter placeholder="Filter" value="${escapeHtml(state.proxyFilter)}" aria-label="Filter proxies" />
               <button class="proxy-tool" data-action="scroll-to-selected-proxy" title="Scroll to selected proxy">${proxyToolIcon("scroll")}</button>
               <button class="proxy-tool ${hideTimedOut ? "active" : ""}" data-action="toggle-hide-timed-out" title="Show/Hide timed-out proxies">${proxyToolIcon(hideTimedOut ? "report-off" : "report")}</button>
-              <button class="proxy-tool ${state.toggles.testingDelays ? "active" : ""}" data-action="delay-test" title="Test latency" ${state.toggles.testingDelays ? "disabled" : ""}>${proxyToolIcon("delay")}</button>
+              <button class="proxy-tool ${state.toggles.testingDelays ? "active" : ""}" data-action="delay-test" title="${state.toggles.testingDelays ? "Cancel latency test" : "Test latency"}" ${runtime.delayBatchInFlight && !state.toggles.testingDelays ? "disabled" : ""}>${proxyToolIcon("delay")}</button>
               <button class="proxy-tool ${showProxiesList ? "active" : ""}" data-action="toggle-show-proxies" title="Show/hide proxies">${proxyToolIcon(showProxiesList ? "eye" : "eye-off")}</button>
             </div>
           </div>
+          ${state.proxyDelayMessage ? `<p role="status" class="muted">${escapeHtml(state.proxyDelayMessage)}</p>` : ""}
           <div class="cfw-proxy-content">
             ${showProxiesList ? `
             <div class="cfw-node-grid" data-proxy-node-grid>
-              ${activeGroup.options.map((node) => `
+              ${visibleNodes.map((node) => `
                 <button class="cfw-node-card ${activeGroup.now === node.name ? "selected" : ""} ${blinkNode === node.name ? "blink" : ""} ${manual ? "" : "readonly"}" data-proxy-node="${escapeHtml(node.name)}" ${manual ? `data-group="${escapeHtml(activeGroup.name)}" data-node="${escapeHtml(node.name)}"` : "disabled"} title="${manual ? "Select proxy" : "This group type is chosen by the engine, not by the dashboard"}">
                   <i></i>
                   <span>
@@ -1759,6 +1764,8 @@ function invalidateEngineBoundState(active) {
     lane.binding = null;
   }
   cancelDelayTest();
+  state.proxyDelayResults.clear();
+  state.proxyDelayMessage = null;
   clearControllerBackedState();
   clearProviderBackedState();
   state.controllerVersion = null;
@@ -4075,14 +4082,15 @@ export async function handleAction(action) {
     }
   }
   if (action === "scroll-to-selected-proxy") {
-    const group = state.proxyGroups.find((item) => item.name === state.activeProxyGroup)
-      ?? state.proxyGroups[0];
+    const group = activeProxyGroup();
     const selected = group?.now;
     if (!selected) {
       appendLog("warning", "proxy", "No selected proxy to scroll to");
       return;
     }
     state.toggles.showProxiesList = true;
+    state.proxyFilter = "";
+    state.proxyGroupHideTimeouts.set(group.name, false);
     state.proxyBlinkNode = selected;
     renderPage();
     requestAnimationFrame(() => {
@@ -4096,8 +4104,13 @@ export async function handleAction(action) {
       }
     }, 1200);
   }
-  if (action === "toggle-hide-timed-out" || action === "toggle-hide-unavailable") {
+  if (action === "toggle-hide-timed-out") {
+    const group = activeProxyGroup();
+    if (group) state.proxyGroupHideTimeouts.set(group.name, !hideTimedOutProxies(group));
+  }
+  if (action === "toggle-hide-unavailable") {
     state.toggles.hideUnavailable = !state.toggles.hideUnavailable;
+    state.proxyGroupHideTimeouts.clear();
   }
   if (action === "toggle-show-proxies") {
     state.toggles.showProxiesList = !(state.toggles.showProxiesList !== false);
@@ -4147,17 +4160,21 @@ export async function handleAction(action) {
     }
   }
   if (action === "delay-test") {
-    if (!controllerActionAllowed("Delay test", "proxy")) return;
     if (state.toggles.testingDelays) {
       cancelDelayTest();
-      appendLog("info", "proxy", "Delay test cancelled");
+      state.proxyDelayMessage = runtime.delayBatchInFlight ? "Stopping latency test after the current batch…" : "Latency test cancelled.";
+      appendLog("info", "proxy", state.proxyDelayMessage);
+      renderPage();
       patchProxyDelayLabels();
       return;
     }
-    const activeGroup = state.proxyGroups.find((group) => group.name === state.activeProxyGroup)
-      ?? state.proxyGroups.find((group) => isManualProxyGroup(group.type) && group.name.toUpperCase() !== "GLOBAL")
-      ?? state.proxyGroups[0]
-      ?? null;
+    if (runtime.delayBatchInFlight) return;
+    const offline = engineIsOff();
+    if (!offline && !controllerActionAllowed("Delay test", "proxy")) return;
+    const activeGroup = activeProxyGroup();
+    const policyEpoch = runtime.savedProfilePolicyEpoch;
+    const engineToken = captureEngineIdentityToken();
+    const profileId = offline ? state.savedProfilePolicy?.profileId : null;
     // CFW only latency-tests the current section's `all` list — not every group.
     const names = orderNamesVisibleFirst(
       [...new Set((activeGroup?.options ?? []).map((node) => node.name))]
@@ -4167,17 +4184,23 @@ export async function handleAction(action) {
       appendLog("warning", "proxy", "No proxy nodes available for delay test");
     } else {
       const generation = (runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1);
+      const isCurrent = () => generation === runtime.delayTestGeneration
+        && (offline ? engineIsOff() && policyEpoch === runtime.savedProfilePolicyEpoch
+          && profileId === state.savedProfilePolicy?.profileId : engineIdentityTokenIsCurrent(engineToken));
       state.toggles.testingDelays = true;
+      state.proxyDelayMessage = "Testing latency…";
+      state.toggles.showProxiesList = true;
       if (activeGroup) {
         activeGroup.options.forEach((node) => {
           if (names.includes(node.name)) {
+            state.proxyDelayResults.delete(node.name);
             node.delay = null;
             node.delayFailure = null;
             node.dead = false;
           }
         });
       }
-      patchProxyDelayLabels(names);
+      renderPage();
       try {
         // No delay-test URL preference exists in 0.4.0; the command supplies
         // the pinned engine's fixed HTTPS connectivity target.
@@ -4185,18 +4208,27 @@ export async function handleAction(action) {
         const failureByName = new Map();
         let offset = 0;
         while (offset < names.length) {
-          if (generation !== runtime.delayTestGeneration) break;
+          if (!isCurrent()) break;
           const concurrency = delayConcurrency();
           const chunk = names.slice(offset, offset + concurrency);
           offset += chunk.length;
-          const results = await invoke("test_proxy_delays", {
-            proxies: chunk,
-            timeoutMs: 5000,
-            concurrency,
-          });
-          if (generation !== runtime.delayTestGeneration) break;
+          runtime.delayBatchInFlight = true;
+          let results;
+          try {
+            results = await invoke("test_proxy_delays", {
+              profileId,
+              proxies: chunk,
+              timeoutMs: 5000,
+              concurrency,
+            });
+          } finally {
+            runtime.delayBatchInFlight = false;
+          }
+          if (!isCurrent()) break;
+          if (!Array.isArray(results)) throw new TypeError("Invalid latency response");
           const seen = new Set();
-          for (const item of results ?? []) {
+          for (const item of results) {
+            if (!chunk.includes(item.name) || seen.has(item.name)) throw new TypeError("Latency response targets do not match the request");
             seen.add(item.name);
             if (Number.isFinite(item.delay) && item.delay > 0) {
               delayByName.set(item.name, item.delay);
@@ -4215,7 +4247,7 @@ export async function handleAction(action) {
           }
           patchProxyDelayLabels(chunk);
         }
-        if (generation === runtime.delayTestGeneration) {
+        if (isCurrent()) {
           finalizeDelayTestNames(names);
           const failed = failureByName.size
             + names.filter((name) => !delayByName.has(name) && !failureByName.has(name)).length;
@@ -4227,6 +4259,7 @@ export async function handleAction(action) {
           const failureSummary = [...failures.entries()]
             .map(([kind, count]) => `${count} ${delayFailureLabel(kind).toLowerCase()}`)
             .join(", ");
+          state.proxyDelayMessage = `${ok} passed, ${failed} failed${failureSummary ? ` (${failureSummary})` : ""}.`;
           appendLog(
             failed ? "error" : "info",
             "proxy",
@@ -4234,15 +4267,18 @@ export async function handleAction(action) {
           );
         }
       } catch (error) {
-        if ((runtime.delayTestGeneration ?? 0) === generation) {
+        if (isCurrent()) {
           finalizeDelayTestNames(names);
+          state.proxyDelayMessage = `Latency test failed: ${errorText(error)}`;
           appendLog("error", "proxy", `Delay test failed: ${errorText(error)}`);
         }
       } finally {
         if ((runtime.delayTestGeneration ?? 0) === generation) {
           state.toggles.testingDelays = false;
-          patchProxyDelayLabels(names);
+        } else if (!state.toggles.testingDelays && state.proxyDelayMessage?.startsWith("Stopping latency")) {
+          state.proxyDelayMessage = "Latency test cancelled.";
         }
+        if (state.activePage === "proxies") renderPage();
       }
     }
   }
@@ -5164,6 +5200,8 @@ async function loadRulesSnapshot(token = captureEngineIdentityToken()) {
 }
 
 async function loadSavedProfilePolicy() {
+  const previous = state.savedProfilePolicy;
+  const previousBody = runtime.savedProfilePolicyBody;
   const epoch = ++runtime.savedProfilePolicyEpoch;
   const active = state.profiles.find((profile) => profile.active);
   state.savedProfilePolicy = null;
@@ -5174,6 +5212,19 @@ async function loadSavedProfilePolicy() {
     if (epoch !== runtime.savedProfilePolicyEpoch) return;
     if (text?.id !== active.id) throw new TypeError("saved profile identity changed");
     state.savedProfilePolicy = savedProfilePolicy(text);
+    if (previous?.profileId !== text.id || previousBody !== text.body) {
+      cancelDelayTest();
+      state.proxyDelayResults.clear();
+      state.proxyGroupHideTimeouts.clear();
+      state.proxyDelayMessage = null;
+    }
+    runtime.savedProfilePolicyBody = text.body;
+    for (const group of state.savedProfilePolicy.groups) {
+      for (const node of group.options) {
+        const measured = state.proxyDelayResults.get(node.name);
+        if (measured) Object.assign(node, measured);
+      }
+    }
   } catch (error) {
     if (epoch !== runtime.savedProfilePolicyEpoch) return;
     state.savedProfilePolicyError = errorText(error);

@@ -45,6 +45,8 @@ private func recoveryCommittedState(
     transition = .ready
   case .stopping:
     transition = .beginStop
+  case .quarantined:
+    transition = .reconcileOff
   default:
     throw RecoveryReconciliationFixtureError.setup
   }
@@ -142,7 +144,7 @@ private func expectedRecoveryAction(
     .verifyOff
   case .active:
     .reattestOwner
-  case .stopping:
+  case .stopping, .quarantined:
     .stopOwner
   default:
     throw RecoveryReconciliationFixtureError.setup
@@ -229,6 +231,7 @@ private func recoveryAuthorityCode<Result>(
     (.off, .disconnected),
     (.active, .invalid),
     (.stopping, .disconnected),
+    (.quarantined, .disconnected),
   ]
 
   for (initialState, managedTunnel) in cases {
@@ -303,9 +306,10 @@ private func recoveryAuthorityCode<Result>(
   }
 }
 
-@Test func recoveryReconciliationRejectsEveryMissingExternalProof() throws {
+@Test(arguments: [AuthorityState.stopping, .quarantined])
+func recoveryReconciliationRejectsEveryMissingExternalProof(state: AuthorityState) throws {
   try withTemporaryRecoveryDirectory { root, anchor in
-    try seedRecoveryJournal(at: root, anchor: anchor, state: .stopping)
+    try seedRecoveryJournal(at: root, anchor: anchor, state: state)
     try withRecoveredCore(at: root, anchor: anchor) { core, cursor, store in
       let incompleteRequests = try [
         exactRecoveryRequest(cursor: cursor, proxyOwnershipCleared: false),

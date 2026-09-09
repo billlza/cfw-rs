@@ -384,7 +384,7 @@ fn snapshot_of(choices: &CaseChoices) -> AuthoritySnapshot {
         last_failure: None,
         lease_view: None,
         protocol_version: ProtocolVersion::v1(),
-        replay_cursor: replay_cursor_of(choices),
+        replay_cursor: Some(replay_cursor_of(choices)),
         revision: choices.revision + choices.revision_delta,
         state: AuthorityState::Off,
     }

@@ -378,6 +378,8 @@ public struct AuthoritySnapshot: Codable, Equatable, Sendable {
   /// The durable installation lineage. A freshly installed Authority has no
   /// cursor yet and reports a strict global Off snapshot at its current
   /// revision; the first successful prepare atomically enrolls the lineage.
+  /// Recovery failures can also lack a trusted cursor. Their non-Off state
+  /// remains observable and does not authorize a start or reconciliation.
   public let replayCursor: ReplayCursor?
   public let leaseView: LeaseView?
   public let lastFailure: AuthorityFailureSummary?
@@ -388,11 +390,22 @@ public struct AuthoritySnapshot: Codable, Equatable, Sendable {
     replayCursor: ReplayCursor?, leaseView: LeaseView?,
     lastFailure: AuthorityFailureSummary?, consoleUID: UInt32?
   ) throws {
-    guard revision > 0, replayCursor?.revision ?? 0 <= revision,
-      (state == .off || state == .recovering || state == .quarantined) == (leaseView == nil)
-    else { throw AuthorityV1ValidationError.invalidState }
-    guard replayCursor != nil || (state == .off && leaseView == nil) else {
+    guard revision > 0, replayCursor?.revision ?? 0 <= revision else {
       throw AuthorityV1ValidationError.invalidState
+    }
+    switch state {
+    case .off, .recovering:
+      guard leaseView == nil else { throw AuthorityV1ValidationError.invalidState }
+    case .quarantined:
+      if let leaseView {
+        guard replayCursor != nil, leaseView.state == .revoked else {
+          throw AuthorityV1ValidationError.invalidState
+        }
+      }
+    case .preparing, .starting, .active, .stopping:
+      guard replayCursor != nil, leaseView != nil else {
+        throw AuthorityV1ValidationError.invalidState
+      }
     }
     self.protocolVersion = protocolVersion
     self.state = state

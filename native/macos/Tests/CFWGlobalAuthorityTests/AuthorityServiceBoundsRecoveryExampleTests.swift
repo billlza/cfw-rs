@@ -252,6 +252,38 @@ private func boundsCursor() throws -> ReplayCursor {
   #expect(decoded.result.revision == 1)
 }
 
+@Test(arguments: [AuthorityState.recovering, .quarantined])
+func snapshotWithoutTrustedCursorReportsRecoveryAndStillRejectsStarts(
+  state: AuthorityState
+) throws {
+  let objects = makeCore(reducer: try GlobalAuthorityReducer(state: state, revision: 1))
+  let host = try service(for: objects.core)
+  let envelope = try AuthorityV1Codec.encode(
+    AuthorityRequestEnvelope(
+      requestID: AuthorityIdentifier(UUID()), command: .snapshot(SnapshotRequest())))
+  var response: Data?
+  host.snapshot(envelope) { data, error in
+    #expect(error == nil)
+    response = data
+  }
+  let snapshot = try AuthorityV1Codec.decodeResponse(
+    AuthoritySnapshot.self, from: try #require(response)
+  ).result
+  #expect(snapshot.state == state)
+  #expect(snapshot.replayCursor == nil)
+  #expect(snapshot.leaseView == nil)
+  let (request, configuration) = try systemProxyRequest()
+  let start = try AuthorityV1Codec.encode(
+    AuthorityRequestEnvelope(
+      requestID: AuthorityIdentifier(UUID()), command: .prepareStart(request)))
+  host.prepareStart(start, configuration: configuration, secretPayload: nil) { data, error in
+    #expect(data == nil)
+    #expect(
+      authorityError(error) == (state == .recovering ? .globalAuthorityRecovering : .quarantined))
+  }
+  #expect(objects.journal.count == 0)
+}
+
 @Test func recoveringAuthorityRejectsNewStartsThroughService() throws {
   let cursor = try boundsCursor()
   let objects = makeCore(

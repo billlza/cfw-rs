@@ -399,27 +399,39 @@ pub struct AuthoritySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_view: Option<LeaseView>,
     pub protocol_version: ProtocolVersion,
-    pub replay_cursor: ReplayCursor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_cursor: Option<ReplayCursor>,
     pub revision: u64,
     pub state: AuthorityState,
 }
 impl WireValidate for AuthoritySnapshot {
     fn validate(&self) -> Result<(), CodecError> {
         self.protocol_version.validate()?;
-        self.replay_cursor.validate()?;
+        if let Some(cursor) = &self.replay_cursor {
+            cursor.validate()?;
+        }
         if let Some(lease) = &self.lease_view {
             lease.validate()?;
         }
         if let Some(failure) = &self.last_failure {
             failure.validate()?;
         }
-        let lease_free = matches!(
-            self.state,
-            AuthorityState::Off | AuthorityState::Recovering | AuthorityState::Quarantined
-        );
+        let valid_ownership = match self.state {
+            AuthorityState::Off | AuthorityState::Recovering => self.lease_view.is_none(),
+            AuthorityState::Quarantined => self.lease_view.as_ref().is_none_or(|lease| {
+                self.replay_cursor.is_some() && lease.state == LeaseState::Revoked
+            }),
+            AuthorityState::Preparing
+            | AuthorityState::Starting
+            | AuthorityState::Active
+            | AuthorityState::Stopping => self.replay_cursor.is_some() && self.lease_view.is_some(),
+        };
         if self.revision == 0
-            || self.replay_cursor.revision > self.revision
-            || lease_free != self.lease_view.is_none()
+            || self
+                .replay_cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.revision > self.revision)
+            || !valid_ownership
         {
             Err(CodecError::BoundViolation)
         } else {
@@ -1272,6 +1284,43 @@ mod tests {
         ))
         .unwrap();
         decode_request(&fixture("handshake-request-envelope.json")).unwrap();
+    }
+
+    #[test]
+    fn recovery_snapshots_round_trip_without_authorizing_an_owner() {
+        for name in [
+            "snapshot-unenrolled.json",
+            "snapshot-recovering-without-cursor.json",
+            "snapshot-quarantined-without-cursor.json",
+            "snapshot-quarantined-lease.json",
+        ] {
+            verify_canonical_fixture::<AuthoritySnapshot>(&fixture(name)).unwrap();
+        }
+        let active: AuthoritySnapshot = serde_json::from_slice(&fixture("snapshot.json")).unwrap();
+        for state in [
+            AuthorityState::Preparing,
+            AuthorityState::Starting,
+            AuthorityState::Active,
+            AuthorityState::Stopping,
+        ] {
+            let mut invalid = active.clone();
+            invalid.state = state;
+            invalid.replay_cursor = None;
+            assert_eq!(invalid.validate(), Err(CodecError::BoundViolation));
+        }
+        for state in [
+            AuthorityState::Off,
+            AuthorityState::Recovering,
+            AuthorityState::Quarantined,
+        ] {
+            let mut invalid = active.clone();
+            invalid.state = state;
+            assert_eq!(invalid.validate(), Err(CodecError::BoundViolation));
+        }
+        let mut revoked: AuthoritySnapshot =
+            serde_json::from_slice(&fixture("snapshot-quarantined-lease.json")).unwrap();
+        revoked.replay_cursor = None;
+        assert_eq!(revoked.validate(), Err(CodecError::BoundViolation));
     }
 
     #[test]

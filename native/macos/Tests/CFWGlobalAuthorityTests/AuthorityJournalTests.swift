@@ -112,6 +112,15 @@ private func journalImage(
   )
 }
 
+@Test func recoveryRejectsQuarantineOutsideTheDurableCleanupTransition() throws {
+  for state in [AuthorityState.recovering, .quarantined] {
+    let image = try journalImage([
+      committedState(revision: 1, state: state, transition: .ready)
+    ])
+    #expect(AuthorityJournalRecoveryReducer.recover(image).posture == .quarantined(.invalidState))
+  }
+}
+
 private func temporaryJournalDirectory() throws -> URL {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent("cfw-authority-journal-\(UUID().uuidString)", isDirectory: true)
@@ -556,6 +565,30 @@ private func isQuarantined(
 
     anchor.replaceForTesting(generationOneAnchor)
     #expect(isQuarantined(store.recover(), reason: .rollback))
+  }
+}
+
+@Test func quarantinedCleanupReconciliationCanCrossACompactionBoundary() throws {
+  try withTemporaryJournalDirectory { root in
+    let anchor = InMemoryAuthorityJournalAnchorStore()
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path, expectedOwnerUID: getuid(),
+      anchorStore: anchor, recordCapacity: 10)
+    try store.appendCommitted(enrollmentState())
+    for revision in UInt64(2)...9 {
+      try store.appendCommitted(committedState(revision: revision))
+    }
+    try store.appendCommitted(
+      committedState(revision: 10, state: .quarantined, transition: .reconcileOff))
+    #expect(store.recover().posture == .recovering(.stopOwner))
+    let head = try store.appendCommitted(
+      committedState(revision: 11, transition: .reconcileOff))
+    let recovered = store.recover()
+    #expect(head.sequence == 2)
+    #expect(try anchor.load()?.committed?.generation == 2)
+    #expect(recovered.committedState?.revision == 11)
+    #expect(recovered.committedState?.state == .off)
+    #expect(recovered.posture == .recovering(.verifyOff))
   }
 }
 

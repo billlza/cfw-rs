@@ -489,6 +489,11 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
     _ installationID: AuthorityIdentifier
   ) throws {
     guard reducer.installationID == nil else { return }
+    switch reducer.state {
+    case .recovering: throw AuthorityDomainError(code: .globalAuthorityRecovering)
+    case .quarantined: throw AuthorityDomainError(code: .quarantined)
+    default: break
+    }
     var enrollment = reducer
     try enrollment.enrollOff(installationID)
     try persist(&enrollment)

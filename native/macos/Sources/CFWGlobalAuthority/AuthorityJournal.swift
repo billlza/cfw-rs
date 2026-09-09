@@ -287,6 +287,13 @@ public enum AuthorityJournalRecoveryReducer {
           action = .stopOwner
         case .off:
           action = .verifyOff
+        case .quarantined
+        where last.state.transition == .reconcileOff || last.state.transition == .checkpoint:
+          // An incomplete cleanup proof is a durable lifecycle result. On
+          // restart retain its validated cursor and require both owners and
+          // their OS resources to prove Off again before admitting a start.
+          // Journal compaction preserves this same state in its checkpoint.
+          action = .stopOwner
         case .recovering, .quarantined:
           return AuthorityJournalRecovery(
             committedState: last.state, head: head,

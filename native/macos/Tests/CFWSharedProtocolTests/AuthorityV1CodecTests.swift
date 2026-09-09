@@ -51,6 +51,41 @@ private func verifyFixture<T: AuthorityV1WireModel>(
   #expect(try AuthorityV1Codec.encode(decoded) == request)
 }
 
+@Test(arguments: [
+  "snapshot-unenrolled.json", "snapshot-recovering-without-cursor.json",
+  "snapshot-quarantined-without-cursor.json", "snapshot-quarantined-lease.json",
+])
+func authorityV1RecoverySnapshotsAreCanonical(name: String) throws {
+  try verifyFixture(AuthoritySnapshot.self, name)
+}
+
+@Test func authorityV1RecoverySnapshotsDoNotAdmitLeaseOrCursorSubstitution() throws {
+  let active = try AuthorityV1Codec.decodeCanonical(
+    AuthoritySnapshot.self, from: authorityFixture("snapshot.json"))
+  for state in [AuthorityState.preparing, .starting, .active, .stopping] {
+    #expect(throws: AuthorityV1ValidationError.invalidState) {
+      try AuthoritySnapshot(
+        protocolVersion: active.protocolVersion, state: state, revision: active.revision,
+        replayCursor: nil, leaseView: active.leaseView, lastFailure: nil, consoleUID: 501)
+    }
+  }
+  for state in [AuthorityState.off, .recovering, .quarantined] {
+    #expect(throws: AuthorityV1ValidationError.invalidState) {
+      try AuthoritySnapshot(
+        protocolVersion: active.protocolVersion, state: state, revision: active.revision,
+        replayCursor: active.replayCursor, leaseView: active.leaseView,
+        lastFailure: nil, consoleUID: 501)
+    }
+  }
+  let revoked = try AuthorityV1Codec.decodeCanonical(
+    AuthoritySnapshot.self, from: authorityFixture("snapshot-quarantined-lease.json"))
+  #expect(throws: AuthorityV1ValidationError.invalidState) {
+    try AuthoritySnapshot(
+      protocolVersion: revoked.protocolVersion, state: .quarantined, revision: revoked.revision,
+      replayCursor: nil, leaseView: revoked.leaseView, lastFailure: nil, consoleUID: 501)
+  }
+}
+
 @Test func authorityV1LimitsMatchTheProtocolContract() {
   #expect(AuthorityV1Limits.maximumEnvelopeBytes == 1_048_576)
   #expect(AuthorityV1Limits.maximumConfigurationBytes == 768 * 1_024)

@@ -220,11 +220,11 @@ class StageFixture:
 
 class ProductionStageIdentityTests(unittest.TestCase):
     def test_contract_is_one_ga_root_and_three_ordered_stages(self) -> None:
-        self.assertEqual((PRODUCT_VERSION, GA_BUILD), ("0.4.0", "40050"))
+        self.assertEqual((PRODUCT_VERSION, GA_BUILD), ("0.4.0", "40051"))
         self.assertEqual(GA_APP_ARTIFACT_KIND, "notarized-ga-candidate-v1")
         self.assertEqual(
             GA_ROOT,
-            Path("target/candidates/0.4.0/ga/40050"),
+            Path("target/candidates/0.4.0/ga/40051"),
         )
         self.assertEqual(STAGES, ("prepackage", "ga-acceptance", "publication"))
         self.assertEqual(SIGNED_APP, GA_ROOT / "signed/Clash for Mac.app")
@@ -674,7 +674,7 @@ class AdapterContractTests(unittest.TestCase):
         }
         for repository in (
             self.fixture.repository,
-            self.fixture.repository / "target/release-worktrees/40050",
+            self.fixture.repository / "target/release-worktrees/40051",
         ):
             with self.subTest(repository=repository):
                 self.assertEqual(
@@ -774,7 +774,7 @@ class AdapterContractTests(unittest.TestCase):
 
         self.assertEqual(
             adapter.CANDIDATE_APP_RELATIVE,
-            "target/candidates/0.4.0/ga/40050/signed/Clash for Mac.app",
+            "target/candidates/0.4.0/ga/40051/signed/Clash for Mac.app",
         )
         self.assertTrue(callable(adapter.verify_dmg_set))
         self.assertTrue(callable(adapter.verify_updater_set))
@@ -952,7 +952,7 @@ class AdapterContractTests(unittest.TestCase):
     def test_acceptance_binds_prepackage_journals_and_trusted_runtime_result(self) -> None:
         install = {
             "candidate": {
-                "build_number": "40050",
+                "build_number": "40051",
                 "manifest_sha256": "1" * 64,
                 "release_source_sha256": "2" * 64,
                 "repository_commit": "3" * 40,
@@ -1118,7 +1118,7 @@ class MigrationJournalContractIntegrationTests(unittest.TestCase):
         fixture = StageFixture()
         self.addCleanup(fixture.cleanup)
         expected_candidate = {
-            "build_number": "40050",
+            "build_number": "40051",
             "manifest_sha256": "1" * 64,
             "release_source_sha256": "2" * 64,
             "repository_commit": "3" * 40,

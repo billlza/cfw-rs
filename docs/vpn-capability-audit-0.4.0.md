@@ -1,9 +1,10 @@
 # 0.4.0 VPN capability and CFW compatibility audit
 
 Checked 2026-09-09 against the installed CFW 0.20.39 and the pinned sing-box
-1.13.15 source. Build 40050 has not been frozen, signed or installed. This
-document is a delivery checklist, not a declaration that runtime acceptance
-has passed.
+1.13.15 source. Build 40050 completed signing, notarization and installation,
+then exposed an Authority startup recovery defect. Build 40051 corrects the
+durable cleanup recovery and status protocol. This document is a delivery
+checklist; installed network acceptance remains separate.
 
 ## Product gaps
 

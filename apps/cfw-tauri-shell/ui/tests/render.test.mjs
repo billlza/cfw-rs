@@ -488,6 +488,43 @@ test("offline latency cancellation discards the in-flight reply and releases the
   }
 });
 
+test("refreshing the same saved profile terminates the visible latency progress", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProfiles = responses.profiles_snapshot;
+  const originalText = responses.read_profile_text;
+  const originalDelays = responses.test_proxy_delays;
+  const reply = deferred();
+  let operation;
+  try {
+    responses.profiles_snapshot = [{ id: "toolbar-profile", name: "Saved", active: true, bytes: 200, source_kind: "local", updated_epoch_secs: 1 }];
+    responses.read_profile_text = { id: "toolbar-profile", name: "Saved", body: JSON.stringify({ outbounds: [
+      { type: "socks5", tag: "Node A" }, { type: "socks5", tag: "Node B" },
+      { type: "selector", tag: "PROXY", outbounds: ["Node A", "Node B"] },
+    ] }) };
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    state.activeProxyGroup = "PROXY";
+    responses.test_proxy_delays = reply.promise;
+    await renderPage("proxies");
+    operation = appModule.handleAction("delay-test");
+    assert.equal(state.toggles.testingDelays, true);
+    await reloadButton.click();
+    reply.resolve([{ name: "Node A", delay: 99, error_kind: null }]);
+    await operation;
+    assert.equal(state.toggles.testingDelays, false);
+    assert.doesNotMatch(page.innerHTML, /Testing latency…|Stopping latency test/u);
+    assert.doesNotMatch(page.innerHTML, /99 ms/u);
+  } finally {
+    reply.resolve([]);
+    if (operation) await operation;
+    responses.profiles_snapshot = originalProfiles;
+    responses.read_profile_text = originalText;
+    if (originalDelays === undefined) delete responses.test_proxy_delays;
+    else responses.test_proxy_delays = originalDelays;
+    await setEngine(originalEngine);
+  }
+});
+
 const dispatchDocumentEvent = async (type, event = {}) => {
   for (const listener of documentListeners.get(type) ?? []) {
     const result = listener({

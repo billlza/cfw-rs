@@ -5200,6 +5200,7 @@ async function loadRulesSnapshot(token = captureEngineIdentityToken()) {
 }
 
 async function loadSavedProfilePolicy() {
+  if (state.toggles.testingDelays) cancelDelayTest();
   const previous = state.savedProfilePolicy;
   const previousBody = runtime.savedProfilePolicyBody;
   const epoch = ++runtime.savedProfilePolicyEpoch;

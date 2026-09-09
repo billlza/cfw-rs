@@ -26,7 +26,7 @@ const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
 const GO_TOOLS_TREE_SHA256_ENV: &str = "CFW_GO_TOOLS_TREE_SHA256";
 const GO_MODULE_CACHE_TREE_SHA256_ENV: &str = "CFW_GO_MODULE_CACHE_TREE_SHA256";
 
-const LIBBOX_METADATA_KEYS: [&str; 24] = [
+const LIBBOX_METADATA_KEYS: [&str; 25] = [
     "sourceTag",
     "sourceCommit",
     "goVersion",
@@ -47,6 +47,7 @@ const LIBBOX_METADATA_KEYS: [&str; 24] = [
     "rawPacketPatchSha256",
     "dnsFailoverPatchSha256",
     "endpointConflictPatchSha256",
+    "profileProbePatchSha256",
     "patchedDiffSha256",
     "combinedDiffSha256",
     "patchedGoModSha256",
@@ -120,6 +121,7 @@ struct SingBoxLock {
     raw_packet_patch: SingBoxSourcePatchLock,
     dns_failover_patch: SingBoxSourcePatchLock,
     endpoint_conflict_patch: SingBoxSourcePatchLock,
+    profile_probe_patch: SingBoxSourcePatchLock,
     combined_diff_sha256: String,
 }
 
@@ -314,6 +316,16 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     )?;
     require_pin(
         &pins,
+        "SING_BOX_PROFILE_PROBE_PATCH_PATH",
+        &dependency_lock.sing_box.profile_probe_patch.path,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+        &dependency_lock.sing_box.profile_probe_patch.sha256,
+    )?;
+    require_pin(
+        &pins,
         "SING_BOX_PATCHED_DIFF_SHA256",
         &dependency_lock.sing_box.security_patch.patched_diff_sha256,
     )?;
@@ -343,75 +355,47 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         "SING_BOX_APPLE_REFERENCE_COMMIT",
         &dependency_lock.sing_box_for_apple_reference.commit,
     )?;
-    let security_patch_path = repository_root.join(safe_relative_path(
-        &dependency_lock.sing_box.security_patch.path,
-    )?);
-    println!("cargo:rerun-if-changed={}", security_patch_path.display());
-    require_single_link_regular_file(&security_patch_path)?;
-    let security_patch = fs::read(&security_patch_path).map_err(|error| {
-        format!(
-            "read sing-box security patch {}: {error}",
-            security_patch_path.display()
-        )
-    })?;
-    if sha256_hex(&security_patch) != dependency_lock.sing_box.security_patch.sha256.as_str() {
-        return Err("sing-box security patch digest differs from dependency lock".into());
-    }
-    let raw_packet_patch_path = repository_root.join(safe_relative_path(
-        &dependency_lock.sing_box.raw_packet_patch.path,
-    )?);
-    println!("cargo:rerun-if-changed={}", raw_packet_patch_path.display());
-    require_single_link_regular_file(&raw_packet_patch_path)?;
-    let raw_packet_patch = fs::read(&raw_packet_patch_path).map_err(|error| {
-        format!(
-            "read sing-box raw packet patch {}: {error}",
-            raw_packet_patch_path.display()
-        )
-    })?;
-    if sha256_hex(&raw_packet_patch) != dependency_lock.sing_box.raw_packet_patch.sha256.as_str() {
-        return Err("sing-box raw packet patch digest differs from dependency lock".into());
-    }
-    let dns_failover_patch_path = repository_root.join(safe_relative_path(
-        &dependency_lock.sing_box.dns_failover_patch.path,
-    )?);
-    println!(
-        "cargo:rerun-if-changed={}",
-        dns_failover_patch_path.display()
-    );
-    require_single_link_regular_file(&dns_failover_patch_path)?;
-    let dns_failover_patch = fs::read(&dns_failover_patch_path).map_err(|error| {
-        format!(
-            "read sing-box DNS failover patch {}: {error}",
-            dns_failover_patch_path.display()
-        )
-    })?;
-    if sha256_hex(&dns_failover_patch)
-        != dependency_lock.sing_box.dns_failover_patch.sha256.as_str()
-    {
-        return Err("sing-box DNS failover patch digest differs from dependency lock".into());
-    }
-    let endpoint_conflict_patch_path = repository_root.join(safe_relative_path(
-        &dependency_lock.sing_box.endpoint_conflict_patch.path,
-    )?);
-    println!(
-        "cargo:rerun-if-changed={}",
-        endpoint_conflict_patch_path.display()
-    );
-    require_single_link_regular_file(&endpoint_conflict_patch_path)?;
-    let endpoint_conflict_patch = fs::read(&endpoint_conflict_patch_path).map_err(|error| {
-        format!(
-            "read sing-box endpoint conflict patch {}: {error}",
-            endpoint_conflict_patch_path.display()
-        )
-    })?;
-    if sha256_hex(&endpoint_conflict_patch)
-        != dependency_lock
-            .sing_box
-            .endpoint_conflict_patch
-            .sha256
-            .as_str()
-    {
-        return Err("sing-box endpoint conflict patch digest differs from dependency lock".into());
+    for (description, relative, expected_sha256) in [
+        (
+            "security",
+            &dependency_lock.sing_box.security_patch.path,
+            &dependency_lock.sing_box.security_patch.sha256,
+        ),
+        (
+            "raw packet",
+            &dependency_lock.sing_box.raw_packet_patch.path,
+            &dependency_lock.sing_box.raw_packet_patch.sha256,
+        ),
+        (
+            "DNS failover",
+            &dependency_lock.sing_box.dns_failover_patch.path,
+            &dependency_lock.sing_box.dns_failover_patch.sha256,
+        ),
+        (
+            "endpoint conflict",
+            &dependency_lock.sing_box.endpoint_conflict_patch.path,
+            &dependency_lock.sing_box.endpoint_conflict_patch.sha256,
+        ),
+        (
+            "profile probe",
+            &dependency_lock.sing_box.profile_probe_patch.path,
+            &dependency_lock.sing_box.profile_probe_patch.sha256,
+        ),
+    ] {
+        let path = repository_root.join(safe_relative_path(relative)?);
+        println!("cargo:rerun-if-changed={}", path.display());
+        require_single_link_regular_file(&path)?;
+        let bytes = fs::read(&path).map_err(|error| {
+            format!(
+                "read sing-box {description} patch {}: {error}",
+                path.display()
+            )
+        })?;
+        if sha256_hex(&bytes) != *expected_sha256 {
+            return Err(format!(
+                "sing-box {description} patch digest differs from dependency lock"
+            ));
+        }
     }
 
     let dependency_root = repository_root.join("target/native-dependencies");
@@ -457,6 +441,10 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         (
             "endpointConflictPatchSha256",
             "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        ),
+        (
+            "profileProbePatchSha256",
+            "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
         ),
         ("patchedDiffSha256", "SING_BOX_PATCHED_DIFF_SHA256"),
         ("combinedDiffSha256", "SING_BOX_COMBINED_DIFF_SHA256"),

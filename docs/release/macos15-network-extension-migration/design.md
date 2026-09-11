@@ -67,6 +67,15 @@ After code identity passes, authorization binds effective UID, audit session,
 live console user, lease owner, connection nonce, operation ID, and generation.
 The service exports its protocol only after these checks succeed.
 
+The Packet Tunnel is a root system extension, but its audit session is assigned
+by macOS and need not be zero. Its peer policy accepts the default session or an
+assigned session, rejects the unassigned `AU_ASSIGN_ASID` sentinel, and retains
+the actual session in the connection identity. It does not equate the Provider
+session with the Host login session. Exact Provider signing and capability
+requirements, effective UID zero, single-use ticket redemption, and the bound
+owner connection still authorize tunnel operations. Host and Proxy Agent retain
+their console-user and lease-owner session checks.
+
 ## Provisioning and signing design
 
 Provisioning is target-local:

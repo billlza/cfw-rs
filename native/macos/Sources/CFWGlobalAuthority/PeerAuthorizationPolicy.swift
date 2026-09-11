@@ -48,7 +48,11 @@ public struct GlobalAuthorityPeerPolicy: Sendable {
         validUserSession(auditSessionID)
       else { throw GlobalAuthorityAuthorizationError.identityRejected }
     case .provider:
-      guard euid == 0, auditSessionID == 0 else {
+      // launchd can assign a nonzero audit session to a root system extension.
+      // It is connection context, not a fixed identifier for the Provider role;
+      // the role-specific listener has already verified the signed identity.
+      // AU_ASSIGN_ASID (-1) requests allocation and is not an assigned session.
+      guard euid == 0, auditSessionID != UInt32.max else {
         throw GlobalAuthorityAuthorizationError.identityRejected
       }
     }

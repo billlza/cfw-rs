@@ -46,6 +46,24 @@ private final class SequenceConsoleResolver:
   #expect(proxy.connectionIdentityDigest != provider.connectionIdentityDigest)
 }
 
+@Test(arguments: [UInt32(0), 7, 100_018, 4_000_000])
+func signedRootProviderAcceptsSystemAssignedAuditSession(session: UInt32) throws {
+  let authorizer = RoleScopedConnectionPeerAuthorizer(
+    consoleResolver: SequenceConsoleResolver([501]))
+  let peer = try authorizer.authorize(
+    role: .provider, processIdentifier: 72_990,
+    effectiveUserIdentifier: 0, auditSessionIdentifier: session,
+    leaseOwnerUID: 501)
+  #expect(peer.role == .provider)
+  #expect(peer.euid == 0)
+  #expect(peer.auditSessionID == session)
+
+  let otherSession = try GlobalAuthorityPeerPolicy().authorizeRoleScopedConnection(
+    role: .provider, pid: 72_990, euid: 0,
+    auditSessionID: session + 1, liveConsoleUID: 501, leaseOwnerUID: 501)
+  #expect(peer.connectionIdentityDigest != otherSession.connectionIdentityDigest)
+}
+
 @Test func roleScopedPolicyRejectsEveryInvalidPublicConnectionAttribute() {
   let policy = GlobalAuthorityPeerPolicy()
   let invalidHost: [(pid_t, uid_t, UInt32, uid_t?)] = [
@@ -73,7 +91,7 @@ private final class SequenceConsoleResolver:
     }
   }
 
-  for (euid, session): (uid_t, UInt32) in [(501, 0), (0, 7)] {
+  for (euid, session): (uid_t, UInt32) in [(501, 0), (501, 100_018), (0, UInt32.max)] {
     #expect(throws: GlobalAuthorityAuthorizationError.identityRejected) {
       try policy.authorizeRoleScopedConnection(
         role: .provider, pid: 42, euid: euid,

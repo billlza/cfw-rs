@@ -35,13 +35,13 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
     def test_active_identity_is_the_single_ga_build(self) -> None:
         identity = allocations.ACTIVE_RELEASE_IDENTITY
         self.assertEqual(identity.product_version, "0.4.0")
-        self.assertEqual(identity.ga_build, "40057")
+        self.assertEqual(identity.ga_build, "40058")
         allocations.verify_source_bindings(allocations.load_contract())
 
     def test_tracked_contract_matches_active_ga_and_retires_consumed_ga_builds(self) -> None:
         value = allocations.load_contract()
-        allocations.validate_contract(value, expected_ga="40057")
-        self.assertEqual(value["active_ga"], "40057")
+        allocations.validate_contract(value, expected_ga="40058")
+        self.assertEqual(value["active_ga"], "40058")
         expected = {
             "40030": ("validation", "retired_unbuilt_policy_superseded"),
             "40031": (
@@ -114,7 +114,11 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                 "ga",
                 "retired_product_change_after_install_before_ga_runtime_acceptance",
             ),
-            "40057": ("ga", "active_ga"),
+            "40057": (
+                "ga",
+                "retired_product_change_after_install_before_ga_runtime_acceptance",
+            ),
+            "40058": ("ga", "active_ga"),
         }
         for build, (role, status) in expected.items():
             with self.subTest(build=build):
@@ -159,7 +163,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "policy-superseded 40030 allocation changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40031_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -185,7 +189,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40032_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -211,7 +215,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40033_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -237,7 +241,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40034_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -263,7 +267,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40035_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -289,7 +293,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40036_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -315,7 +319,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40037_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -341,7 +345,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40038_cannot_be_reactivated_or_reassigned(self) -> None:
         mutations = (
@@ -367,7 +371,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40039_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -396,7 +400,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40040_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -425,7 +429,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40041_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -454,7 +458,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40042_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -483,7 +487,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40043_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -512,7 +516,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40044_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -541,7 +545,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40045_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -570,7 +574,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40046_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -599,7 +603,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40047_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -628,7 +632,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40048_cannot_be_reactivated_or_relabelled(self) -> None:
         mutations = (
@@ -657,26 +661,26 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
                     allocations.ReleaseBuildAllocationError,
                     "retired GA allocations changed",
                 ):
-                    allocations.validate_contract(value, expected_ga="40057")
+                    allocations.validate_contract(value, expected_ga="40058")
 
-    def test_only_40057_can_be_the_single_active_ga(self) -> None:
+    def test_only_40058_can_be_the_single_active_ga(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
         value["allocations"].append(
-            {"build": "40057", "role": "ga", "status": "active_ga"}
+            {"build": "40058", "role": "ga", "status": "active_ga"}
         )
         with self.assertRaisesRegex(
             allocations.ReleaseBuildAllocationError,
             "allocated more than once",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
         value = copy.deepcopy(allocations.load_contract())
-        self.allocation_for_build(value, "40057")["role"] = "final"
+        self.allocation_for_build(value, "40058")["role"] = "final"
         with self.assertRaisesRegex(
             allocations.ReleaseBuildAllocationError,
             "wrong role",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
     def test_active_ga_source_binding_cannot_drift(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
@@ -685,7 +689,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
             allocations.ReleaseBuildAllocationError,
             "differs from release source constants",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
     def test_allocation_history_cannot_omit_a_reserved_build(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
@@ -700,7 +704,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
             allocations.ReleaseBuildAllocationError,
             "immutable retired allocation prefix changed",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
     def test_non_string_role_is_a_stable_contract_error(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
@@ -709,7 +713,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
             allocations.ReleaseBuildAllocationError,
             "build 40021 role or status is invalid",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40026_status_cannot_be_rewritten(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
@@ -718,7 +722,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
             allocations.ReleaseBuildAllocationError,
             "immutable retired allocation prefix changed",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
     def test_retired_40028_status_cannot_be_rewritten(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
@@ -727,7 +731,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
             allocations.ReleaseBuildAllocationError,
             "immutable retired allocation prefix changed",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
     def test_allocation_history_rejects_records_after_the_active_ga(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
@@ -746,7 +750,7 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
             allocations.ReleaseBuildAllocationError,
             "must end with exactly one active GA allocation",
         ):
-            allocations.validate_contract(value, expected_ga="40057")
+            allocations.validate_contract(value, expected_ga="40058")
 
 
 if __name__ == "__main__":

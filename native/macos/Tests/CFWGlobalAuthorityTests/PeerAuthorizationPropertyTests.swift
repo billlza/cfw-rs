@@ -80,7 +80,7 @@ private struct RoleScopedConnectionProperty {
     case .provider:
       GeneratedConnection(
         role: role, pid: choices.pid, euid: 0,
-        auditSessionID: 0, liveConsoleUID: choices.providerConsoleUID,
+        auditSessionID: choices.session, liveConsoleUID: choices.providerConsoleUID,
         leaseOwnerUID: choices.uid)
     }
   }
@@ -105,9 +105,9 @@ private struct RoleScopedConnectionProperty {
           value.euid = 501
           return value
         },
-        ConnectionMutation(name: "provider has a user audit session") {
+        ConnectionMutation(name: "provider has an unassigned audit session sentinel") {
           var value = $0
-          value.auditSessionID = 7
+          value.auditSessionID = UInt32.max
           return value
         },
       ]

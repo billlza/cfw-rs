@@ -52,10 +52,18 @@ private func exampleDigest(_ data: Data) throws -> CFWSharedProtocol.SHA256Diges
 }
 
 private func examplePeer(_ role: AuthorityRole, ownerUID: UInt32 = 501) throws -> PeerIdentity {
-  PeerIdentity(
+  if role == .provider {
+    // Replay the nonzero root session observed on the installed system extension
+    // through the real peer policy before exercising handshake, redemption,
+    // duplicate rejection and per-request reauthorization at the service edge.
+    return try GlobalAuthorityPeerPolicy().authorizeRoleScopedConnection(
+      role: role, pid: 72_990, euid: 0, auditSessionID: 100_018,
+      liveConsoleUID: 501, leaseOwnerUID: ownerUID)
+  }
+  return PeerIdentity(
     connectionIdentityDigest: try exampleDigest(Data("connection".utf8)),
-    pid: 42, euid: role == .provider ? 0 : ownerUID,
-    auditSessionID: role == .provider ? 0 : 7,
+    pid: 42, euid: ownerUID,
+    auditSessionID: 7,
     role: role, consoleUID: 501)
 }
 

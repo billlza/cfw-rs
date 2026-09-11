@@ -515,6 +515,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     cleanupErrors: [ProxySessionLifecycleError]
   ) {
     let terminalError = combinedError(original: originalError, cleanup: cleanupErrors)
+    let cleanupCodes = cleanupErrors.map { $0.engineFailure.code }.joined(separator: ",")
+    Self.logger.error(
+      "System Proxy start failed: stage=\(originalError.engineFailure.code, privacy: .public) cleanup=\(cleanupCodes, privacy: .public)"
+    )
     if failedSession.engine == nil, failedSession.journal == nil, failedSession.lease == nil {
       session = nil
       lifecycle = .idle

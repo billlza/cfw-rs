@@ -207,6 +207,85 @@ private func testingOperations(
   )
 }
 
+private final class DelayedEffectivePreferences: @unchecked Sendable {
+  private let lock = NSLock()
+  private var observations: [[String: Any]?]
+  private var count = 0
+
+  init(_ observations: [[String: Any]?]) { self.observations = observations }
+
+  var readCount: Int { lock.withLock { count } }
+
+  func read() -> [String: Any]? {
+    lock.withLock {
+      count += 1
+      if observations.count > 1 { return observations.removeFirst() }
+      return observations[0]
+    }
+  }
+
+  var operations: SCPreferencesOperations {
+    SCPreferencesOperations(
+      commitChanges: { _ in
+        Issue.record("Observation must not commit preferences")
+        return false
+      },
+      applyChanges: { _ in
+        Issue.record("Observation must not reapply preferences")
+        return false
+      },
+      synchronize: { _ in }, errorCode: { 987 },
+      effectiveProxies: { self.read() }, primaryServiceID: { "service-1" })
+  }
+}
+
+@Test func effectiveActivationWaitsForCommittedSettingsToBecomeVisible() throws {
+  var previous = appliedEffectiveProxies()
+  previous["HTTPProxy"] = "localhost"
+  let observations = DelayedEffectivePreferences([
+    previous, previous, appliedEffectiveProxies(),
+  ])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+
+  try subject.verifyEffectiveAppliedValues(proxyJournal(originalProxyEnabled: true))
+
+  #expect(observations.readCount == 3)
+}
+
+@Test func effectiveRestorationWaitsForOriginalSettingsToBecomeVisible() throws {
+  let observations = DelayedEffectivePreferences([
+    appliedEffectiveProxies(), appliedEffectiveProxies(), [:],
+  ])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+
+  try subject.verifyEffectiveRestoredValues(proxyJournal(originalProxyEnabled: false))
+
+  #expect(observations.readCount == 3)
+}
+
+@Test func unavailableEffectiveProxyStateIsNotRetriedAsAValueMismatch() throws {
+  let observations = DelayedEffectivePreferences([nil, appliedEffectiveProxies()])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+  #expect(throws: SystemProxyPreferencesError.effectiveProxyStateUnavailable) {
+    try subject.verifyEffectiveAppliedValues(proxyJournal(originalProxyEnabled: false))
+  }
+  #expect(observations.readCount == 1)
+}
+
+@Test func malformedEffectiveProxyStateIsNotRetriedAsAValueMismatch() throws {
+  var malformed = appliedEffectiveProxies()
+  malformed["HTTPProxy"] = ["invalid-host"]
+  let observations = DelayedEffectivePreferences([malformed, appliedEffectiveProxies()])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+  #expect(
+    throws: SystemProxyPreferencesError.unsupportedValue(
+      serviceID: "effective-primary-service", field: .httpHost)
+  ) {
+    try subject.verifyEffectiveAppliedValues(proxyJournal(originalProxyEnabled: false))
+  }
+  #expect(observations.readCount == 1)
+}
+
 private func proxyJournal(
   originalProxyEnabled: Bool,
   originalValues: [SystemProxyField: ProxyPreferenceValue]? = nil,

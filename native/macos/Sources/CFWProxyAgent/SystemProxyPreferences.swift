@@ -747,8 +747,18 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   private func verifyEffectiveValues(
     _ expectedValues: [(SystemProxyField, ProxyPreferenceValue?)]
   ) throws {
-    if let field = try firstEffectiveMismatch(expectedValues) {
-      throw SystemProxyPreferencesError.effectiveVerificationFailed(field: field)
+    // SCPreferencesApplyChanges publishes the request before configd finishes
+    // updating SCDynamicStore. Both activation and restoration must wait for
+    // that observation to converge after releasing the preferences lock.
+    // Only a value mismatch is transient; unavailable or malformed state still
+    // throws immediately, and a persistent mismatch never counts as success.
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while let field = try firstEffectiveMismatch(expectedValues) {
+      guard clock.now < deadline else {
+        throw SystemProxyPreferencesError.effectiveVerificationFailed(field: field)
+      }
+      Thread.sleep(forTimeInterval: 0.02)
     }
   }
 

@@ -7,7 +7,7 @@ releasable Network Extension product.
 > **v0.4.0 policy calibration:** the executable ordinary-GA versus assurance
 > boundary is recorded in
 > [`docs/release/ga-assurance-policy-v040.md`](docs/release/ga-assurance-policy-v040.md).
-> The release has one candidate identity: build 40056. Build 40030 is retired
+> The release has one candidate identity: build 40057. Build 40030 is retired
 > unbuilt as `retired_unbuilt_policy_superseded`; it must never be rebuilt,
 > signed, installed, or used as a validation companion. Build 40031 is retired
 > after candidate freeze and a failed private signing attempt, before canonical
@@ -103,9 +103,9 @@ releasable Network Extension product.
 > [`ga-build-40054-retirement.md`](docs/release/ga-build-40054-retirement.md).
 > Build 40055 reached first-time VPN consent and the real Provider, exposing a
 > five-second human-consent deadline and the wrong provider-start API. The
-> corrections require 40056; see
+> corrections require 40057; see
 > [`ga-build-40055-retirement.md`](docs/release/ga-build-40055-retirement.md).
-> A passing policy or source check alone does not consume build 40056. Its
+> A passing policy or source check alone does not consume build 40057. Its
 > first durable candidate freeze does, after which only supported recovery may
 > reuse those exact frozen bytes and their append-only transaction identities.
 
@@ -131,7 +131,7 @@ not a recovery mechanism.
 A changed whole-repository commit or release-source checksum does not by itself
 establish a product change. In particular, the test-isolation failure recorded
 for retired 40042 is historical evidence of a workflow limitation, not a rule
-for retiring later candidates. Preserve 40056 while repairing evidence tooling.
+for retiring later candidates. Preserve 40057 while repairing evidence tooling.
 The current frozen product-input v1 document includes the complete source
 identity; its digest cannot alone distinguish product and evidence changes.
 Do not relabel that document or claim that a newer test suite ran at its commit.
@@ -309,14 +309,14 @@ the complete failed preparation with `git worktree move` in a new private
 history path outside the main workspace. Preserve its source, generated inputs,
 attempt logs and original receipt; the receipt remains in the original main
 Git administrative directory and does not authorize the moved history path.
-Recreate the fixed `target/release-worktrees/40056` path at the verified new
+Recreate the fixed `target/release-worktrees/40057` path at the verified new
 commit, create an empty `target` with mode `0700`, and run
-`scripts/authorize_release_worktree.sh 40056` from the main checkout before
+`scripts/authorize_release_worktree.sh 40057` from the main checkout before
 copying and revalidating managed dependency inputs. Never edit the old receipt
 or copy it into the new registration. Git may name the new administrative
 directory `400491`; scope identity comes from the reciprocal worktree path and
 receipt, not this suffix. This is another preparation attempt using build
-40056, not candidate retirement or a new build allocation.
+40057, not candidate retirement or a new build allocation.
 These reversible checkout, enrollment, input-copy and environment-preflight
 steps, followed by the candidate build, may run in parallel with hosted CI for
 the same source commit. Required local source/build admission checks still run
@@ -677,8 +677,8 @@ the sealed publication evidence but remains fail closed until that evidence has
 been prepared, legally reviewed, and finalized for the exact signed app. It has
 no success override and accepts only:
 
-- `target/candidates/0.4.0/ga/40056/signed/Clash for Mac.app` as the signed binary root;
-- `target/candidates/0.4.0/ga/40056/stage-inputs/publication` as the final evidence root.
+- `target/candidates/0.4.0/ga/40057/signed/Clash for Mac.app` as the signed binary root;
+- `target/candidates/0.4.0/ga/40057/stage-inputs/publication` as the final evidence root.
 
 It never scans or accepts `target/release`, which retains historical 0.3.5
 signed artifacts containing the old core/helper layout.
@@ -723,8 +723,8 @@ been signed, notarized, and stapled. Tools use the fixed frozen checkout for
 all product inputs and outputs:
 
 ```bash
-publication_artifact_repository="$PWD/target/release-worktrees/40056"
-publication_ga="$publication_artifact_repository/target/candidates/0.4.0/ga/40056"
+publication_artifact_repository="$PWD/target/release-worktrees/40057"
+publication_ga="$publication_artifact_repository/target/candidates/0.4.0/ga/40057"
 publication_inputs="$publication_ga/stage-inputs"
 publication_libbox="$publication_artifact_repository/target/sources/sing-box-v1.13.15-patched"
 
@@ -758,7 +758,7 @@ the old approval and record the comparison separately. The current closure
 record must name its own digest and current release authorization; it must not
 pretend that the earlier reviewer saw a subsequently rebuilt source archive.
 
-### Single-GA 40056 release sequence
+### Single-GA 40057 release sequence
 
 The canonical allocation ledger is
 [`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json).
@@ -819,7 +819,7 @@ while awaiting macOS authorization. 40054 separates authorization from runtime
 startup and fixes repeated revocation after quarantine. The preserved 40048
 signed tree is its predecessor; see
 [`ga-build-40048-retirement.md`](docs/release/ga-build-40048-retirement.md).
-Build 40056 is the sole `active_ga` identity. Local installation and smoke
+Build 40057 is the sole `active_ga` identity. Local installation and smoke
 testing do not require the public-release evidence or claim GA acceptance.
 
 Run the sequence below from one clean release commit. Source, CI, preflight, or
@@ -831,7 +831,7 @@ confirm that no freeze intent or signing mutation exists, then preserve the
 old preflight tree under a unique private history path. The builder refuses to
 overwrite an existing preflight root. Once
 `candidate-freeze/intent.json` exists, recovery may only continue an exact
-supported 40056 transaction without changing application or nested-code
+supported 40057 transaction without changing application or nested-code
 signature bytes. A transaction in the explicit post-receipt
 `verification_blocked` state may reopen and verify only its complete exact
 private work and receipt; it must not invoke the signing helper or receipt
@@ -879,7 +879,7 @@ wire proof.
 
    ```bash
    CFW_RELEASE_RUST_TOOLCHAIN=private \
-   CFW_BUILD_NUMBER=40056 \
+   CFW_BUILD_NUMBER=40057 \
    NOTARY_PROFILE=clashformac-notary \
    MACOS_SIGN_IDENTITY='Developer ID Application: Zi ang Li (YKUPL7Z869)' \
    HOST_PROVISIONING_PROFILE_PATH=/absolute/path/to/host.provisionprofile \
@@ -948,9 +948,9 @@ wire proof.
 
    ```bash
    scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
-     --artifact-repository /absolute/operator/target/release-worktrees/40056 \
-     --output /absolute/operator/target/release-worktrees/40056/target/candidates/0.4.0/ga/40056/stage-inputs/local-ci-lanes.json \
-     --journal /absolute/private/history/local-ci-40056
+     --artifact-repository /absolute/operator/target/release-worktrees/40057 \
+     --output /absolute/operator/target/release-worktrees/40057/target/candidates/0.4.0/ga/40057/stage-inputs/local-ci-lanes.json \
+     --journal /absolute/private/history/local-ci-40057
    ```
 
    Run this entry from the clean operator checkout. The explicit artifact path
@@ -989,7 +989,7 @@ wire proof.
    fixed recovery entry:
 
    ```bash
-   CFW_BUILD_NUMBER=40056 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=40057 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --resume-signing
    ```
 
@@ -1003,7 +1003,7 @@ wire proof.
    A helper failure, an interruption after signing may have started but before
    one complete receipt-bound output was durably recorded, or any other
    ambiguous signing state requires preserving the attempt, retiring build
-   40056, and allocating a successor. Never create fresh timestamped signature
+   40057, and allocating a successor. Never create fresh timestamped signature
    bytes under the same frozen build.
 
    When Apple upload traffic needs the running local proxy, explicitly set
@@ -1016,7 +1016,7 @@ wire proof.
    recover only with that observed ID:
 
    ```bash
-   CFW_BUILD_NUMBER=40056 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=40057 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --recover-notarization-id UUID
    ```
 
@@ -1050,7 +1050,7 @@ wire proof.
 
    Run post-freeze stage verification, packaging, installation, journal export and
    runtime acceptance from the clean **operator checkout** containing the
-   fixed `target/release-worktrees/40056` artifact checkout. These operations
+   fixed `target/release-worktrees/40057` artifact checkout. These operations
    never fall back to treating the operator checkout as artifact source.
    Publication preparation/draft/finalization remain artifact-source operations;
    keep their already reviewed fixed outputs in the frozen checkout. A corrected
@@ -1165,7 +1165,7 @@ wire proof.
    environment; it must not overwrite an already published container;
 7. after the atomic journal export verifies, run the fixed GA runtime collector.
    It independently reopens the DMG set, proves the DMG's
-   contained app equals the installed 40056 tree, derives all twelve required
+   contained app equals the installed 40057 tree, derives all twelve required
    checks from bounded command output and packet captures, and proves shutdown
    restored the CFW guard. Before any command, `collection-intent-v3` stores a
    fresh complete CFW baseline and binds the closed installation/service
@@ -1295,7 +1295,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40056. No updater key, Apple notarization key, local private key, or older
+build 40057. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
@@ -1327,10 +1327,10 @@ Tauri; neither the password nor a caller-selected key/signer path enters argv.
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
 receipt are sealed and atomically published as
-`target/candidates/0.4.0/ga/40056/packages/updater/vVERSION/`. The DMG, accepted result,
+`target/candidates/0.4.0/ga/40057/packages/updater/vVERSION/`. The DMG, accepted result,
 normalized log, private Gatekeeper evidence, submission receipt, and artifact
 manifest are sealed and atomically published for release operations as
-`target/candidates/0.4.0/ga/40056/packages/dmg/vVERSION/`. The canonical seals bind exact
+`target/candidates/0.4.0/ga/40057/packages/dmg/vVERSION/`. The canonical seals bind exact
 names, sizes, SHA-256 values, version/build/source identity, official URL, and
 verification result. Each component seal also binds the exact
 `Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
@@ -1355,7 +1355,7 @@ scripts/release_publication_gate.sh --upload-assets 0.4.0
 ```
 
 The atomic
-`ga/40056/packages/distribution/vVERSION/distribution-set.seal.json` joins the
+`ga/40057/packages/distribution/vVERSION/distribution-set.seal.json` joins the
 same signed app and app manifest to both package seals and every DMG/updater
 asset. It also binds the complete publication-evidence tree and records direct
 digests for the sealed outer Evidence Manifest, machine closure, inventory,

@@ -48,6 +48,24 @@ private struct ServiceClock: AuthorityMonotonicClock {
   func nowMilliseconds() -> UInt64 { 1_000 }
 }
 
+private final class AdvancingServiceClock: AuthorityMonotonicClock, @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: UInt64 = 1_000
+  private let step: UInt64
+
+  init(step: UInt64) { self.step = step }
+
+  func nowMilliseconds() -> UInt64 {
+    lock.withLock {
+      defer { value += step }
+      return value
+    }
+  }
+
+  var lastReading: UInt64 { lock.withLock { value - step } }
+  func set(_ next: UInt64) { lock.withLock { value = next } }
+}
+
 private func serviceDigest(_ data: Data) throws -> CFWSharedProtocol.SHA256Digest {
   try CFWSharedProtocol.SHA256Digest(
     hex: SHA256.hash(data: data).map {
@@ -142,6 +160,33 @@ private func authorityError(_ value: NSError?) -> AuthorityErrorCode? {
     export: { _ in exports += 1 })
   #expect(admitted)
   #expect(exports == 1)
+}
+
+@Test(arguments: [UInt64(1), UInt64(20)])
+func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
+  let fixture = try serviceFixture()
+  let clock = AdvancingServiceClock(step: clockStep)
+  let journal = ServiceJournal()
+  let core = GlobalAuthorityServiceCore(
+    reducer: try .unEnrolledOff(), journal: journal,
+    randomness: ServiceRandomness(), clock: clock)
+  let prepared = try core.prepare(
+    fixture.request, configuration: fixture.configuration,
+    secretPayload: fixture.secretPayload, peer: servicePeer())
+  defer { prepared.erase() }
+
+  #expect(prepared.expiresMonotonic == clock.lastReading + 10_000)
+  #expect(journal.states.map(\.transition) == [.enrollOff, .prepare])
+  let snapshot = try core.snapshot(peer: servicePeer())
+  #expect(snapshot.state == .preparing)
+  #expect(snapshot.leaseView?.expiryMonotonic == prepared.expiresMonotonic)
+
+  clock.set(prepared.expiresMonotonic)
+  let ticket = try #require(prepared.ticket)
+  #expect(throws: AuthorityDomainError(code: .ticketExpired)) {
+    _ = try core.redeemTunnelTicket(
+      RedeemTunnelTicketRequest(ticket: ticket), peer: servicePeer(.provider), peerID: UUID())
+  }
 }
 
 @Test func journalCapacityExhaustionIsExplicitAndDoesNotMutateAuthorityState() throws {

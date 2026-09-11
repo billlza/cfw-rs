@@ -118,9 +118,10 @@ lease.
 3. Host authenticates to the Authority and prepares a one-use ticket, then
    saves and reloads the enabled descriptor, verifying exact ownership and
    configuration. A removed consent configuration is an explicit failure.
-4. Host calls `NETunnelProviderSession.startTunnel(options:)`, the provider API
-   that forwards custom options as-is, with only the opaque ticket. The ordinary
-   `NEVPNConnection.startVPNTunnel(options:)` API is not used for provider data.
+4. Host calls `NETunnelProviderSession.startTunnel(options:)` with only the opaque
+   ticket. macOS may supplement the callback dictionary with connection metadata.
+   Provider extracts only the exact-sized ticket and ignores all other options;
+   they never provide configuration, secrets or an alternative authorization path.
 5. Provider authenticates on the provider-specific Authority listener, redeems
    the ticket once, injects the returned configuration and secrets into libbox,
    zeroizes transport buffers, and attests readiness.

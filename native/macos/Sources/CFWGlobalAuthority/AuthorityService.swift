@@ -390,8 +390,6 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   ) throws -> PreparedStart {
     let leaseID = AuthorityIdentifier(UUID())
     let nonce = try randomDigest()
-    let issued = clock.nowMilliseconds()
-    let expiry = try addLifetime(to: issued)
     var candidate = reducer
 
     switch request.operation.mode {
@@ -425,7 +423,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
         try candidate.prepare(
           AuthorityPrepareInput(
             request: request, leaseID: leaseID,
-            ownerConnectionNonce: nonce, issuedMonotonic: issued,
+            ownerConnectionNonce: nonce, issuedMonotonic: issuedTicket.issuedMonotonic,
             expiryMonotonic: issuedTicket.expiresMonotonic,
             retainsSecretBuffer: true))
         try persist(&candidate)
@@ -448,6 +446,8 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       }
 
     case .systemProxy:
+      let issued = clock.nowMilliseconds()
+      let expiry = try addLifetime(to: issued)
       guard secretPayload == nil else {
         throw AuthorityDomainError(code: .invalidMessage)
       }

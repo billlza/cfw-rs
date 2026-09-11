@@ -531,14 +531,14 @@ struct TicketOnlyStartupTests {
     #expect(throws: PacketTunnelProviderError.invalidStartTicket) {
       _ = try PacketTunnelProvider.startTicket(from: nil)
     }
-    // Extra keys alongside the ticket fail closed.
-    let extra: [String: NSObject] = [
-      NativeProtocolConstants.tunnelStartTicketOptionKey:
-        Data(repeating: 0x1, count: AuthorityV1Limits.ticketBytes) as NSData,
-      "unexpected": NSNumber(value: 1),
+    // Platform metadata or inline configuration cannot replace the ticket.
+    let metadataOnly: [String: NSObject] = [
+      "ServerAddress": "Clash for Mac" as NSString,
+      "VendorData": ["configuration": "untrusted-inline-configuration"] as NSDictionary,
+      "configuration": Data("{}".utf8) as NSData,
     ]
     #expect(throws: PacketTunnelProviderError.invalidStartTicket) {
-      _ = try PacketTunnelProvider.startTicket(from: extra)
+      _ = try PacketTunnelProvider.startTicket(from: metadataOnly)
     }
     #expect(authority.redeemCount == 0)
   }
@@ -565,6 +565,28 @@ struct TicketOnlyStartupTests {
     ]
     let ticket = try PacketTunnelProvider.startTicket(from: options)
     ticket.erase()
+  }
+
+  @Test func platformMetadataDoesNotReplaceTheAuthorityTicket() throws {
+    let options: [String: NSObject] = [
+      NativeProtocolConstants.tunnelStartTicketOptionKey:
+        Data(repeating: 0x5, count: AuthorityV1Limits.ticketBytes) as NSData,
+      "ServerAddress": "Clash for Mac" as NSString,
+      "VendorData": ["configuration": "untrusted-inline-configuration"] as NSDictionary,
+    ]
+    let ticket = try PacketTunnelProvider.startTicket(from: options)
+    defer { ticket.erase() }
+    #expect(try ticket.withUnsafeBytes { Data($0) } == Data(repeating: 0x5, count: 32))
+
+    let authority = FailingRedeemAuthorityClient(
+      error: AuthorityDomainError(code: .ticketInvalid))
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+    fixture.coordinator.start(ticket: ticket, descriptor: fixture.descriptor) { start.record($0) }
+    #expect(start.wait())
+    #expect(authority.redeemCount == 1)
+    #expect(fixture.engine.startCount == 0)
+    #expect(fixture.pump.startCount == 0)
   }
 
   @Test func authorityUnavailableFailsClosedWithNoEngineStart() throws {

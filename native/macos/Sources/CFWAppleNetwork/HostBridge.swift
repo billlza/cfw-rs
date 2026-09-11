@@ -1043,8 +1043,8 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
       guard let session = manager.connection as? NETunnelProviderSession else {
         throw AppleNetworkError.providerDidNotRespond
       }
-      // Only the provider-session API forwards custom options as-is. The base
-      // NEVPNConnection API accepts built-in username/password overrides instead.
+      // Use the provider-session API documented for custom provider options.
+      // macOS may add its own connection metadata before the Provider callback.
       try Self.startProviderSession(session, ticketBytes: ticketBytes)
     } catch let startError {
       if startError is CancellationError {

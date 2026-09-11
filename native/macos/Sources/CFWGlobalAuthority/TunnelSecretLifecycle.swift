@@ -67,13 +67,15 @@ public enum AuthoritySecretLifecycleError: Error, Equatable, Sendable, CustomStr
 /// Owns the outbound Authority ticket until the synchronous XPC encoder borrows it.
 /// The raw ticket is erased whether encoding succeeds or throws.
 public final class AuthorityIssuedTicketTransport: @unchecked Sendable {
+  public let issuedMonotonic: UInt64
   public let expiresMonotonic: UInt64
   private let lock = NSLock()
   private let ticket: StartTicket
   private var available = true
 
-  fileprivate init(ticket: StartTicket, expiresMonotonic: UInt64) {
+  fileprivate init(ticket: StartTicket, issuedMonotonic: UInt64, expiresMonotonic: UInt64) {
     self.ticket = ticket
+    self.issuedMonotonic = issuedMonotonic
     self.expiresMonotonic = expiresMonotonic
   }
 
@@ -250,7 +252,8 @@ public final class TunnelSecretLifecycle: @unchecked Sendable {
       installed = true
       accepted = true
     }
-    return AuthorityIssuedTicketTransport(ticket: ticket, expiresMonotonic: expires)
+    return AuthorityIssuedTicketTransport(
+      ticket: ticket, issuedMonotonic: issued, expiresMonotonic: expires)
   }
 
   public func redeem(

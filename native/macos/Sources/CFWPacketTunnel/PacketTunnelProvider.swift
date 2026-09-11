@@ -233,13 +233,12 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       })
   }
 
-  /// Extracts the single bounded, opaque 32-byte start ticket from the tunnel start
-  /// options. The production channel carries only this value; a missing, extra, or
-  /// wrong-sized entry fails closed with `invalidStartTicket`.
+  /// Extracts only the bounded, opaque 32-byte ticket from the platform options.
+  /// macOS supplements Host options with connection metadata. Those fields never
+  /// supply configuration, credentials or authority; only ticket redemption can.
   static func startTicket(from options: [String: NSObject]?) throws -> StartTicket {
     guard
       let options,
-      options.count == 1,
       let ticketData = options[NativeProtocolConstants.tunnelStartTicketOptionKey] as? NSData
     else {
       throw PacketTunnelProviderError.invalidStartTicket
@@ -255,6 +254,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     options: [String: NSObject]?,
     completionHandler: @escaping @Sendable (Error?) -> Void
   ) {
+    let optionCount = options?.count ?? 0
+    let ticketLength =
+      (options?[NativeProtocolConstants.tunnelStartTicketOptionKey] as? NSData)?.length ?? 0
+    let hasServerMetadata = options?["ServerAddress"] != nil
+    let hasVendorMetadata = options?["VendorData"] != nil
+    Self.logger.info(
+      "Tunnel start option structure: fields=\(optionCount, privacy: .public), ticketBytes=\(ticketLength, privacy: .public), serverMetadata=\(hasServerMetadata, privacy: .public), vendorMetadata=\(hasVendorMetadata, privacy: .public)"
+    )
     guard let startCoordinator else {
       completionHandler(PacketTunnelProviderError.providerUnavailable)
       return

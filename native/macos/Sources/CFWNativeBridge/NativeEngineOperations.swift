@@ -203,12 +203,12 @@ extension NativeBridgeCoordinator {
     }
     defer { credentialMaterial.erase() }
     var credentialPayload: Data?
-    if !request.credentialSlots.isEmpty {
-      do {
-        credentialPayload = try EphemeralCredentialCodec.encode(credentialMaterial)
-      } catch {
-        throw Self.map(error)
-      }
+    do {
+      let encoded = try credentialMaterial.authorityPayload(for: request.credentialSlots)
+      defer { encoded?.erase() }
+      credentialPayload = try encoded?.withUnsafeBytes { Data($0) }
+    } catch {
+      throw Self.map(error)
     }
     defer {
       if var payload = credentialPayload {

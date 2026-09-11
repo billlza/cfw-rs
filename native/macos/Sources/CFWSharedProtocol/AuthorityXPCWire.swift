@@ -197,6 +197,30 @@ public enum AuthorityPreparedStartCodec {
 public enum AuthoritySecretPayloadCodec {
   private static let magic = Data("CFWASV01".utf8)
   private static let headerBytes = 10
+  public static let maximumEncodedBytes =
+    headerBytes
+    + 4 * AuthorityV1Limits.maximumCredentialSlots + AuthorityV1Limits.maximumTotalSecretBytes
+
+  /// The wire carries each referenced secret once, in first descriptor-use order.
+  /// Several injection targets may share a reference, but never disagree on its kind.
+  public static func references(for slots: [CredentialSlot]) throws -> [CredentialReference] {
+    guard slots.count <= AuthorityV1Limits.maximumCredentialSlots else {
+      throw AuthorityV1ValidationError.boundViolation
+    }
+    var seen: [UUID: CredentialKind] = [:]
+    var references: [CredentialReference] = []
+    for slot in slots {
+      if let kind = seen[slot.reference.id] {
+        guard kind == slot.reference.kind else {
+          throw AuthorityV1ValidationError.invalidConfiguration
+        }
+      } else {
+        seen[slot.reference.id] = slot.reference.kind
+        references.append(slot.reference)
+      }
+    }
+    return references
+  }
 
   public static func encode(_ material: AuthoritySecretMaterial) throws -> SensitiveBytes? {
     guard !material.slots.isEmpty else { return nil }
@@ -207,9 +231,7 @@ public enum AuthoritySecretPayloadCodec {
       append(UInt32(slot.byteCount), to: &data)
       data.append(try slot.transportCopy())
     }
-    guard
-      data.count <= headerBytes + 4 * AuthorityV1Limits.maximumCredentialSlots
-        + AuthorityV1Limits.maximumTotalSecretBytes
+    guard data.count <= maximumEncodedBytes
     else { throw AuthorityV1ValidationError.boundViolation }
     defer { data.resetBytes(in: data.startIndex..<data.endIndex) }
     return try SensitiveBytes(copying: data, maximumCount: data.count)
@@ -218,13 +240,13 @@ public enum AuthoritySecretPayloadCodec {
   public static func decode(
     _ payload: Data?, descriptor: AuthorityConfigurationDescriptor
   ) throws -> AuthoritySecretMaterial {
-    if descriptor.credentialSlots.isEmpty {
+    let references = try references(for: descriptor.credentialSlots)
+    if references.isEmpty {
       guard payload == nil else { throw AuthorityV1ValidationError.invalidConfiguration }
       return try AuthoritySecretMaterial(slots: [])
     }
     guard var payload, payload.count >= headerBytes,
-      payload.count <= headerBytes + 4 * AuthorityV1Limits.maximumCredentialSlots
-        + AuthorityV1Limits.maximumTotalSecretBytes
+      payload.count <= maximumEncodedBytes
     else { throw AuthorityV1ValidationError.boundViolation }
     defer { payload.resetBytes(in: payload.startIndex..<payload.endIndex) }
     var offset = 0
@@ -233,12 +255,12 @@ public enum AuthoritySecretPayloadCodec {
     }
     offset += magic.count
     let count: UInt16 = try read(from: payload, offset: &offset)
-    guard Int(count) == descriptor.credentialSlots.count else {
+    guard Int(count) == references.count else {
       throw AuthorityV1ValidationError.invalidConfiguration
     }
     var slots: [AuthoritySecretSlot] = []
     do {
-      for descriptorSlot in descriptor.credentialSlots {
+      for reference in references {
         let length: UInt32 = try read(from: payload, offset: &offset)
         guard length > 0,
           length <= UInt32(AuthorityV1Limits.maximumIndividualSecretBytes),
@@ -248,7 +270,7 @@ public enum AuthoritySecretPayloadCodec {
         offset += Int(length)
         slots.append(
           try AuthoritySecretSlot(
-            reference: descriptorSlot.reference, copying: bytes))
+            reference: reference, copying: bytes))
       }
       guard offset == payload.count else {
         throw AuthorityV1ValidationError.noncanonicalRepresentation

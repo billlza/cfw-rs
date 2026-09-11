@@ -134,7 +134,7 @@ public struct AuthorityBackedTunnelStartPreparer: TunnelStartPreparing {
       maximumCount: AuthorityV1Limits.maximumConfigurationBytes)
     let secrets = try preparation.credentialPayload.map {
       try SensitiveBytes(
-        copying: $0, maximumCount: AuthorityV1Limits.maximumTotalSecretBytes)
+        copying: $0, maximumCount: AuthoritySecretPayloadCodec.maximumEncodedBytes)
     }
 
     // (5) Prepare with the Authority. A Tunnel preparation must return the

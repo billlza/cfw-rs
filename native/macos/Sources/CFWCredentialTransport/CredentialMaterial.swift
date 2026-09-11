@@ -92,6 +92,34 @@ public struct CredentialMaterial: Equatable, Sendable {
     entries = validatedEntries
   }
 
+  /// Encodes the Authority's bounded XPC format, preserving descriptor order
+  /// instead of the vault's UUID ordering. The caller owns and erases the result.
+  public func authorityPayload(for slots: [CredentialSlot]) throws -> SensitiveBytes? {
+    let references = try AuthoritySecretPayloadCodec.references(for: slots)
+    let required = Set(references.map(\.id))
+    let supplied = Dictionary(uniqueKeysWithValues: entries.map { ($0.reference.id, $0) })
+    for entry in entries where !required.contains(entry.reference.id) {
+      throw CredentialMaterialError.unexpectedReference(entry.reference.id)
+    }
+    var secrets: [AuthoritySecretSlot] = []
+    defer { for secret in secrets { secret.erase() } }
+    for reference in references {
+      guard let entry = supplied[reference.id] else {
+        throw CredentialMaterialError.missingReference(reference.id)
+      }
+      guard entry.reference.kind == reference.kind else {
+        throw CredentialMaterialError.kindMismatch(reference.id)
+      }
+      secrets.append(
+        try entry.withSecretBytes {
+          try AuthoritySecretSlot(reference: reference, copying: $0)
+        })
+    }
+    let material = try AuthoritySecretMaterial(slots: secrets)
+    defer { material.erase() }
+    return try AuthoritySecretPayloadCodec.encode(material)
+  }
+
   public mutating func erase() {
     for index in entries.indices {
       entries[index].erase()

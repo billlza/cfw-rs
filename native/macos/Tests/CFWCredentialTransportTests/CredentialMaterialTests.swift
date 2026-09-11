@@ -320,3 +320,51 @@ import Testing
     )
   }
 }
+
+@Test func authorityCredentialEncodingRejectsReferenceDisagreement() throws {
+  let reference = CredentialReference(id: UUID(), kind: .trojanPassword)
+  let slot = try CredentialSlot(
+    reference: reference, target: .trojanPassword,
+    outboundIndex: 0, jsonPointer: "/outbounds/0/password")
+  #expect(throws: CredentialMaterialError.missingReference(reference.id)) {
+    try CredentialMaterial.empty.authorityPayload(for: [slot])
+  }
+  var material = try CredentialMaterial(entries: [
+    CredentialMaterialEntry(reference: reference, secret: Data("test-secret".utf8))
+  ])
+  defer { material.erase() }
+  #expect(throws: CredentialMaterialError.unexpectedReference(reference.id)) {
+    try material.authorityPayload(for: [])
+  }
+  let wrongKind = CredentialReference(id: reference.id, kind: .shadowsocksPassword)
+  let conflicting = try CredentialSlot(
+    reference: wrongKind, target: .shadowsocksPassword,
+    outboundIndex: 1, jsonPointer: "/outbounds/1/password")
+  #expect(throws: CredentialMaterialError.kindMismatch(reference.id)) {
+    try material.authorityPayload(for: [conflicting])
+  }
+  #expect(throws: AuthorityV1ValidationError.invalidConfiguration) {
+    try material.authorityPayload(for: [slot, conflicting])
+  }
+}
+
+@Test func authorityCredentialEncodingKeepsTheSecretByteLimit() throws {
+  let slotCount =
+    AuthorityV1Limits.maximumTotalSecretBytes / AuthorityV1Limits.maximumIndividualSecretBytes + 1
+  let slots = try (0..<slotCount).map { index in
+    try CredentialSlot(
+      reference: CredentialReference(id: UUID(), kind: .trojanPassword),
+      target: .trojanPassword, outboundIndex: UInt16(index),
+      jsonPointer: "/outbounds/\(index)/password")
+  }
+  var material = try CredentialMaterial(
+    entries: slots.map {
+      try CredentialMaterialEntry(
+        reference: $0.reference,
+        secret: Data(repeating: 0x61, count: AuthorityV1Limits.maximumIndividualSecretBytes))
+    })
+  defer { material.erase() }
+  #expect(throws: AuthorityV1ValidationError.boundViolation) {
+    try material.authorityPayload(for: slots)
+  }
+}

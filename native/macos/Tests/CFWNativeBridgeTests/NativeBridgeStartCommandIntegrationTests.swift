@@ -268,6 +268,7 @@ private actor FailedStartProxyAgent: ProxyAgentTransporting {
 }
 
 private actor StartableTunnelHost: TunnelHostBridging {
+  private let expectedInjectedConfiguration: Data?
   private let descriptor: ConfigurationDescriptor
   private let recoveryStatus: RecoveryManagedTunnelStatus
   private let startError: AppleNetworkError?
@@ -299,8 +300,10 @@ private actor StartableTunnelHost: TunnelHostBridging {
     cleanupEvents: NativeCleanupEventLog? = nil,
     failedStartSnapshot: EngineFailure? = nil,
     snapshotFailures: Int = 0,
-    stopFailures: Int = 0
+    stopFailures: Int = 0,
+    expectedInjectedConfiguration: Data? = nil
   ) {
+    self.expectedInjectedConfiguration = expectedInjectedConfiguration
     self.descriptor = descriptor
     self.recoveryStatus = recoveryStatus
     self.startError = startError
@@ -326,6 +329,28 @@ private actor StartableTunnelHost: TunnelHostBridging {
     descriptor: ConfigurationDescriptor,
     credentialPayload: Data?
   ) throws {
+    let authorityDescriptor = try AuthorityConfigurationDescriptor(
+      byteCount: UInt32(descriptor.byteCount), configSHA256: descriptor.sha256,
+      identitySHA256: descriptor.identitySHA256,
+      credentialAudience: descriptor.credentialAudience,
+      credentialSlots: descriptor.credentialSlots, tunnelOptions: descriptor.tunnelOptions)
+    let material = try AuthoritySecretPayloadCodec.decode(
+      credentialPayload, descriptor: authorityDescriptor)
+    defer { material.erase() }
+    let entries = try material.slots.map { slot in
+      try slot.withUnsafeBytes {
+        try CredentialMaterialEntry(reference: slot.reference, secret: Data($0))
+      }
+    }
+    var credentials = try CredentialMaterial(entries: entries)
+    defer { credentials.erase() }
+    let filled = try CredentialInjector.inject(
+      template: configuration, slots: descriptor.credentialSlots, material: credentials)
+    if let expectedInjectedConfiguration {
+      #expect(
+        try JSONSerialization.jsonObject(with: filled) as? NSDictionary
+          == JSONSerialization.jsonObject(with: expectedInjectedConfiguration) as? NSDictionary)
+    }
     startCalls += 1
     if let startPendingPreferenceDescriptor {
       pendingPreferenceDescriptor = startPendingPreferenceDescriptor
@@ -600,7 +625,9 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   func currentState() -> AuthorityState { observation.state }
 }
 
-private final class EmptyCredentialVault: NativeCredentialVaulting, @unchecked Sendable {
+private final class StartCredentialVault: NativeCredentialVaulting, @unchecked Sendable {
+  private let material: CredentialMaterial
+  init(material: CredentialMaterial = .empty) { self.material = material }
   func provision(
     audience: CredentialAudience,
     requiredReferences: [CredentialReference],
@@ -616,10 +643,11 @@ private final class EmptyCredentialVault: NativeCredentialVaulting, @unchecked S
     audience: CredentialAudience,
     slots: [CredentialSlot]
   ) throws -> CredentialMaterial {
-    guard slots.isEmpty else {
-      throw CredentialMaterialError.missingReference(slots[0].reference.id)
+    let expected = Set(slots.map { $0.reference.id })
+    guard expected == Set(material.entries.map { $0.reference.id }) else {
+      throw CredentialVaultError.missingVault
     }
-    return .empty
+    return material
   }
   func previewGarbageCollection(
     _ request: CredentialGarbageCollectionRequest
@@ -670,14 +698,15 @@ private struct IdentityDocument: Encodable {
 
 private func startRequest(
   tunnelOptions: TunnelNetworkOptions?,
-  generation: UInt64 = 7
+  generation: UInt64 = 7,
+  credentialSlots: [CredentialSlot] = [],
+  configuration: Data = Data(
+    #"{"outbounds":[{"tag":"direct","type":"direct"}],"route":{"final":"direct"}}"#.utf8)
 ) throws -> EngineStartRequest {
   let context = try EngineCommandContext(
     installationID: #require(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
     configEpoch: 2,
     generation: generation)
-  let configuration = Data(
-    #"{"outbounds":[{"tag":"direct","type":"direct"}],"route":{"final":"direct"}}"#.utf8)
   let contentDigest = try sha256(configuration)
   let audience = CredentialAudience(
     profileID: try #require(UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")),
@@ -685,7 +714,7 @@ private func startRequest(
   let identity = IdentityDocument(
     configurationSHA256: contentDigest.hex,
     credentialAudience: audience,
-    credentialSlots: [],
+    credentialSlots: credentialSlots,
     mode: tunnelOptions == nil ? "system_proxy" : "tunnel",
     networkOptions: tunnelOptions,
     schemaVersion: NativeProtocolConstants.schemaVersion)
@@ -697,7 +726,7 @@ private func startRequest(
     configJSON: String(decoding: configuration, as: UTF8.self),
     configContentDigest: contentDigest,
     configDigest: try sha256(encoder.encode(identity)),
-    credentialSlots: [],
+    credentialSlots: credentialSlots,
     tunnelOptions: tunnelOptions)
 }
 
@@ -744,14 +773,15 @@ private func makeCoordinator(
   tunnel: any TunnelHostBridging,
   observation: AuthorityOwnershipObservation,
   systemProxyPreparer: any SystemProxyStartPreparing = UnusedSystemProxyStartPreparer(),
-  engineLease: (any NativeEngineLeaseInspecting)? = nil
+  engineLease: (any NativeEngineLeaseInspecting)? = nil,
+  credentialVault: any NativeCredentialVaulting = StartCredentialVault()
 ) -> NativeBridgeCoordinator {
   NativeBridgeCoordinator(
     proxy: proxy,
     systemProxyPreparer: systemProxyPreparer,
     tunnel: tunnel,
     engineLease: engineLease ?? FixedEngineLease(observation: observation),
-    credentialVault: EmptyCredentialVault(),
+    credentialVault: credentialVault,
     hostOperationLease: AvailableNativeHostOperationLease())
 }
 
@@ -1697,6 +1727,60 @@ struct NativeBridgeStartCommandIntegrationTests {
     // The disagreement never falls back to the Tunnel owner.
     let tunnelCounts = await tunnel.counters()
     #expect(tunnelCounts.start == 0)
+  }
+
+  @Test(arguments: [false, true])
+  func tunnelTransfersRealCredentialFormatInDescriptorOrder(sharedReference: Bool) async throws {
+    let first = CredentialReference(
+      id: try #require(UUID(uuidString: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")),
+      kind: .trojanPassword)
+    let second =
+      sharedReference
+      ? first
+      : CredentialReference(
+        id: try #require(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
+        kind: .trojanPassword)
+    let slots = try [first, second].enumerated().map { index, reference in
+      try CredentialSlot(
+        reference: reference, target: .trojanPassword,
+        outboundIndex: UInt16(index), jsonPointer: "/outbounds/\(index)/password")
+    }
+    let template = Data(
+      #"{"outbounds":[{"type":"trojan","password":""},{"type":"trojan","password":""}]}"#.utf8)
+    let expected = Data(
+      (sharedReference
+        ? #"{"outbounds":[{"type":"trojan","password":"first-test-secret"},{"type":"trojan","password":"first-test-secret"}]}"#
+        : #"{"outbounds":[{"type":"trojan","password":"first-test-secret"},{"type":"trojan","password":"second-test-secret"}]}"#)
+        .utf8)
+    var entries = [
+      try CredentialMaterialEntry(reference: first, secret: Data("first-test-secret".utf8))
+    ]
+    if !sharedReference {
+      entries.append(
+        try CredentialMaterialEntry(reference: second, secret: Data("second-test-secret".utf8)))
+    }
+    var material = try CredentialMaterial(entries: entries)
+    defer { material.erase() }
+    let request = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true),
+      credentialSlots: slots, configuration: template)
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(
+      descriptor: descriptor, expectedInjectedConfiguration: expected)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(
+        state: .active,
+        lease: agreement(for: descriptor, mode: .tunnel)),
+      credentialVault: StartCredentialVault(material: material))
+    guard case .runtime(let runtime) = try await coordinator.execute(.startTunnel(request)) else {
+      Issue.record("credential-bearing Tunnel did not reach runtime")
+      return
+    }
+    #expect(runtime.ready)
+    #expect(await tunnel.counters().start == 1)
+    #expect(await proxy.counters().start == 0)
   }
 
   @Test func tunnelReachesActiveOnlyOnExactAuthorityAgreement() async throws {

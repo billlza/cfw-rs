@@ -65,6 +65,26 @@ def _file_snapshot(path: Path) -> tuple[bytes, int, int, int, int, int]:
 
 
 class ReleaseWorktreeCacheRecoveryTests(unittest.TestCase):
+    def test_new_enrollment_does_not_reauthorize_a_stale_unrelated_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            old = _create_registered_release_worktree(root, "40028")
+            original = _worktree_admin_directory(old) / blocker.RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
+            original_data = original.read_bytes()
+            _run_git(
+                old, "-c", "user.name=Release Test", "-c",
+                "user.email=release-test@example.invalid", "commit", "--allow-empty",
+                "--quiet", "-m", "Updated worktree source",
+            )
+            new = root / "target/release-worktrees/40029"
+            _run_git(root, "worktree", "add", "--quiet", "--detach", str(new), "HEAD")
+            (new / "target").mkdir()
+            receipt = blocker.authorize_release_worktree_cache_scope(root, "40029")
+            self.assertTrue(receipt.is_file())
+            self.assertEqual(original.read_bytes(), original_data)
+            with self.assertRaisesRegex(SecretMaterialReleaseBlock, "identity is stale"):
+                blocker._registered_release_worktree_targets(root, selected_build="40028")
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

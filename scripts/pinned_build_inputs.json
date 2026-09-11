@@ -3286,7 +3286,7 @@
     "scripts/release_publication_gate.sh": "ba42a3018a2063d758a64919db262e4ca909759748bc723a9aa766176f9d3f51",
     "scripts/release_publication_path_contract.sh": "5170dd2d3436f038d67e0b2fa90dde14b4d291900070ed597752434d11578783",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
-    "scripts/release_secret_material_blocker.py": "218ba0ac853bebbdd9563c709fa702f4f1b45175e45cf6ca6ed8b28bdf2b30b9",
+    "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
     "RELEASE.md": "e04162cfbb582d6312e7f50b6be453cfcb0315464f260adb3afca3a345bfc28f",
     "scripts/updater_signing_launcher.py": "36464710b78d8e279003457368acf99828a38e3cbe5dee197bb63d53e2276a27",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",

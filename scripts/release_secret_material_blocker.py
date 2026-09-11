@@ -1508,7 +1508,7 @@ def _authorize_release_worktree_cache_scope(
     """Explicitly enroll one trusted detached worktree before cache writes."""
     canonical_root = _cache_scope_workspace_root(workspace_root, build)
     registered_targets = _registered_release_worktree_targets(
-        canonical_root, require_scope_receipt=False
+        canonical_root, require_scope_receipt=False, selected_build=build
     )
     registered = registered_targets.get(build)
     if registered is None:
@@ -1529,14 +1529,14 @@ def _authorize_release_worktree_cache_scope(
             "release-worktree target must be empty before cache-scope enrollment"
         )
     refreshed = _registered_release_worktree_targets(
-        canonical_root, require_scope_receipt=False
+        canonical_root, require_scope_receipt=False, selected_build=build
     ).get(build)
     if refreshed is None:
         raise SecretMaterialReleaseBlock(
             "release worktree changed before cache-scope enrollment"
         )
     _publish_scope_receipt(refreshed)
-    verified = _registered_release_worktree_targets(canonical_root).get(build)
+    verified = _registered_release_worktree_targets(canonical_root, selected_build=build).get(build)
     if verified is None or verified.receipt_data is None:
         raise SecretMaterialReleaseBlock(
             "release-worktree cache-scope enrollment did not verify"

@@ -249,6 +249,11 @@ pub trait NativeBridge: Send + Sync + 'static {
 
     fn cancel_tunnel_install(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()>;
 
+    fn authorize_tunnel_configuration(
+        &self,
+        request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, ()>;
+
     fn start_tunnel(&self, request: EngineStartRequest) -> NativeBridgeFuture<'_, RuntimeIdentity>;
 
     fn stop_tunnel(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()>;
@@ -315,6 +320,15 @@ impl<B: NativeBridge> EngineBackend for AppleNetworkBackend<B> {
         Box::pin(async move {
             self.bridge
                 .cancel_tunnel_install(context)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
+
+    fn authorize_tunnel_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.bridge
+                .authorize_tunnel_configuration(request)
                 .await
                 .map_err(map_bridge_error)
         })
@@ -401,6 +415,13 @@ impl NativeBridge for MissingNativeBridge {
         Self::unavailable()
     }
 
+    fn authorize_tunnel_configuration(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, ()> {
+        Self::unavailable()
+    }
+
     fn start_tunnel(
         &self,
         _request: EngineStartRequest,
@@ -434,6 +455,16 @@ mod tests {
     }
 
     impl NativeBridge for RecordingBridge {
+        fn authorize_tunnel_configuration(
+            &self,
+            request: EngineStartRequest,
+        ) -> NativeBridgeFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().expect("calls lock").push(request.context);
+                Ok(())
+            })
+        }
+
         fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
             Box::pin(async { Ok(()) })
         }

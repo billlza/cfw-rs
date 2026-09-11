@@ -94,6 +94,7 @@ async fn initial_generation_is_never_reused() {
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(100),
+            authorization_timeout: Duration::from_millis(100),
             status_query_timeout: Duration::from_millis(100),
             status_reconciliation_interval: Duration::from_millis(20),
             initial_generation: 41,
@@ -870,6 +871,13 @@ async fn backend_errors_do_not_fallback_to_another_mode() {
         }
 
         fn cancel_tunnel_install(&self, _context: EngineCommandContext) -> BackendFuture<'_, ()> {
+            panic!("tunnel fallback must not be attempted")
+        }
+
+        fn authorize_tunnel_configuration(
+            &self,
+            _request: EngineStartRequest,
+        ) -> BackendFuture<'_, ()> {
             panic!("tunnel fallback must not be attempted")
         }
 

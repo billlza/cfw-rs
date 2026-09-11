@@ -23,6 +23,9 @@ pub(super) struct FakeBackend {
     tunnel_install_contexts: Mutex<Vec<EngineCommandContext>>,
     tunnel_cancel_contexts: Mutex<Vec<EngineCommandContext>>,
     tunnel_requests: Mutex<Vec<EngineStartRequest>>,
+    pub(super) tunnel_authorization_requests: Mutex<Vec<EngineStartRequest>>,
+    pub(super) tunnel_authorization_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) tunnel_authorization_error: Mutex<Option<BackendErrorKind>>,
     tunnel_stop_contexts: Mutex<Vec<EngineCommandContext>>,
     native_status: Mutex<NativeEngineStatus>,
     query_count: AtomicUsize,
@@ -334,6 +337,31 @@ impl EngineBackend for FakeBackend {
         })
     }
 
+    fn authorize_tunnel_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.tunnel_authorization_requests
+                .lock()
+                .expect("authorization lock")
+                .push(request);
+            let gate = self
+                .tunnel_authorization_gate
+                .lock()
+                .expect("authorization gate")
+                .clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            if let Some(kind) = *self
+                .tunnel_authorization_error
+                .lock()
+                .expect("authorization error")
+            {
+                return Err(BackendError::new(kind, "VPN authorization failed"));
+            }
+            Ok(())
+        })
+    }
+
     fn start_tunnel(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
         Box::pin(async move {
             self.operations
@@ -403,6 +431,7 @@ pub(super) fn coordinator(backend: Arc<FakeBackend>) -> EngineModeCoordinator {
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(100),
+            authorization_timeout: Duration::from_millis(100),
             status_query_timeout: Duration::from_millis(100),
             status_reconciliation_interval: Duration::from_millis(20),
             initial_generation: 0,

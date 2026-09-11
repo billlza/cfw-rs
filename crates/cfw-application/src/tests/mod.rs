@@ -9,3 +9,5 @@ mod off_ordering_property;
 mod restart_spec;
 mod support;
 mod transitions;
+
+mod tunnel_authorization;

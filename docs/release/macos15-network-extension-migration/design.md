@@ -111,11 +111,16 @@ lease.
 ## Tunnel start flow
 
 1. Rust accepts a serialized Tunnel command and allocates an operation context.
-2. Host authenticates to the Authority and prepares a one-use ticket before
-   preference mutation.
-3. Host saves and reloads a bounded non-secret `NETunnelProviderManager`
-   descriptor, verifying exact ownership and configuration.
-4. Host calls `startVPNTunnel(options:)` with only the opaque ticket.
+2. For the first configuration, Host proves global Off and obtains macOS
+   consent by saving and reloading a disabled descriptor-only manager. This
+   separately bounded wait retains no resolved credentials or start ticket.
+   Its write-ahead receipt protects cancellation and late-callback cleanup.
+3. Host authenticates to the Authority and prepares a one-use ticket, then
+   saves and reloads the enabled descriptor, verifying exact ownership and
+   configuration. A removed consent configuration is an explicit failure.
+4. Host calls `NETunnelProviderSession.startTunnel(options:)`, the provider API
+   that forwards custom options as-is, with only the opaque ticket. The ordinary
+   `NEVPNConnection.startVPNTunnel(options:)` API is not used for provider data.
 5. Provider authenticates on the provider-specific Authority listener, redeems
    the ticket once, injects the returned configuration and secrets into libbox,
    zeroizes transport buffers, and attests readiness.

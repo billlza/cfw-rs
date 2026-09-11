@@ -12,6 +12,7 @@ pub enum EngineOperation {
     StopSystemProxy,
     InstallTunnel,
     CancelTunnelInstall,
+    AuthorizeTunnelConfiguration,
     StartTunnel,
     StopTunnel,
 }
@@ -24,6 +25,7 @@ impl std::fmt::Display for EngineOperation {
             Self::StopSystemProxy => "stop_system_proxy",
             Self::InstallTunnel => "install_tunnel",
             Self::CancelTunnelInstall => "cancel_tunnel_install",
+            Self::AuthorizeTunnelConfiguration => "authorize_tunnel_configuration",
             Self::StartTunnel => "start_tunnel",
             Self::StopTunnel => "stop_tunnel",
         };

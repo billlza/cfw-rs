@@ -224,6 +224,10 @@ private actor StubTunnelHost: TunnelHostBridging {
   }
   func installTunnel() throws -> SystemExtensionInstallResult { .completed }
   func cancelTunnelInstallationWait() {}
+  func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) throws {
+    throw AppleNetworkError.providerDidNotRespond
+  }
+
   func startTunnel(
     configuration: Data,
     descriptor: ConfigurationDescriptor,

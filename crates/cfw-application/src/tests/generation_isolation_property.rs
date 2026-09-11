@@ -162,6 +162,7 @@ fn isolated_coordinator(backend: Arc<FakeBackend>) -> EngineModeCoordinator {
         test_session(),
         CoordinatorOptions {
             operation_timeout: OPERATION_TIMEOUT,
+            authorization_timeout: OPERATION_TIMEOUT,
             status_query_timeout: OPERATION_TIMEOUT,
             status_reconciliation_interval: Duration::from_secs(30),
             initial_generation: 0,

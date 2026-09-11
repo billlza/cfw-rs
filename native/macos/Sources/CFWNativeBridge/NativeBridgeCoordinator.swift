@@ -263,8 +263,9 @@ actor NativeBridgeCoordinator {
     if case .testProfileDelays(let request) = command {
       return .profileDelays(try await testProfileDelays(request))
     }
-    // Authorization owns no network state. Do not keep the machine's mutation
-    // lease while macOS waits for the user; the later start acquires it normally.
+    // Proxy authorization only obtains rights and needs no mutation lease.
+    // Tunnel authorization writes a disabled manager, so it keeps the existing
+    // cross-process preference-mutation lease through the bounded user wait.
     let operationLease: (any NativeHostOperationLeaseHolding)?
     do {
       if command == .authorizeSystemProxy || command == .authorizeSystemProxyRestoration {
@@ -310,6 +311,9 @@ actor NativeBridgeCoordinator {
       return .tunnelInstall(try await installTunnel(context))
     case .cancelTunnelInstall(let context):
       try await cancelTunnelInstall(context)
+      return .acknowledged
+    case .authorizeTunnelConfiguration(let request):
+      try await authorizeTunnelConfiguration(request)
       return .acknowledged
     case .startTunnel(let request):
       return .runtime(try await startTunnel(request))

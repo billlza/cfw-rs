@@ -32,6 +32,7 @@ pub(crate) async fn transition(
         session,
         generation_store,
         operation_timeout,
+        authorization_timeout,
         status_query_timeout,
     } = context;
     if target == EngineMode::Off {
@@ -188,12 +189,34 @@ pub(crate) async fn transition(
                 return Ok(state.snapshot.clone());
             }
 
-            state.snapshot.state = EngineState::TunnelStarting { generation };
-            publish(state, snapshots);
+            // Human consent saves only a disabled descriptor. Keep it outside
+            // the ordinary start budget and before credentials or tickets exist.
+            state.snapshot.state = EngineState::AwaitingApproval { generation };
             state.native_lease = Some(NativeLease {
                 kind: NativeLeaseKind::TunnelRuntime,
                 context: context.clone(),
             });
+            publish(state, snapshots);
+            if let Err(source) = call_backend(
+                authorization_timeout,
+                EngineOperation::AuthorizeTunnelConfiguration,
+                backend.authorize_tunnel_configuration(request.clone()),
+            )
+            .await
+            {
+                return fail_backend(
+                    backend,
+                    state,
+                    snapshots,
+                    EngineOperation::AuthorizeTunnelConfiguration,
+                    source,
+                    operation_timeout,
+                    status_query_timeout,
+                )
+                .await;
+            }
+            state.snapshot.state = EngineState::TunnelStarting { generation };
+            publish(state, snapshots);
             let runtime = match call_backend(
                 operation_timeout,
                 EngineOperation::StartTunnel,

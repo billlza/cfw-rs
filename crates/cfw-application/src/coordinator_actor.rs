@@ -204,6 +204,7 @@ pub(crate) async fn run_coordinator(
                             session: &session,
                             generation_store: generation_store.as_deref(),
                             operation_timeout: options.operation_timeout,
+                            authorization_timeout: options.authorization_timeout,
                             status_query_timeout: options.status_query_timeout,
                         };
                         let result = if expected_snapshot

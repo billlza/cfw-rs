@@ -97,9 +97,13 @@ profile mismatch is a release failure.
 
 1. The Host shall save only a bounded, non-secret managed configuration and
    start the Packet Tunnel with one opaque, short-lived, single-use ticket.
+   Initial macOS consent may save a disabled descriptor-only manager while
+   global Off is proven, before resolving credentials or issuing a ticket.
+   Consent has its own bounded wait; active owners, unsafe preferences and
+   ambiguous consent-write cleanup remain rejected.
 2. The Provider shall authenticate to the Authority and redeem configuration
    and secret material exactly once before starting libbox.
-3. Direct configuration or credential transport in `startVPNTunnel(options:)`
+3. Direct configuration or credential transport in `NETunnelProviderSession.startTunnel(options:)`
    is forbidden in production.
 4. A post-save failure, cancellation, ticket expiry, start rejection, readiness
    timeout, or revocation shall stop a possibly connecting tunnel and perform

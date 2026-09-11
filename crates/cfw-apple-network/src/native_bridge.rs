@@ -251,6 +251,7 @@ impl NativeFrameworkBridge {
             command,
             NativeBridgeCommand::AuthorizeSystemProxy
                 | NativeBridgeCommand::AuthorizeSystemProxyRestoration
+                | NativeBridgeCommand::AuthorizeTunnelConfiguration { .. }
         );
         let request = NativeRequestEnvelope::new(command);
         let request_id = request.request_id;
@@ -472,6 +473,24 @@ impl NativeBridge for NativeFrameworkBridge {
                 _ => Err(NativeBridgeError::new(
                     NativeBridgeErrorCode::Internal,
                     "native tunnel install cancellation returned the wrong result kind",
+                )),
+            }
+        })
+    }
+
+    fn authorize_tunnel_configuration(
+        &self,
+        request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, ()> {
+        Box::pin(async move {
+            match self
+                .invoke(NativeBridgeCommand::AuthorizeTunnelConfiguration { request })
+                .await?
+            {
+                NativeBridgeResult::Acknowledged => Ok(()),
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "Tunnel authorization returned an unexpected result",
                 )),
             }
         })

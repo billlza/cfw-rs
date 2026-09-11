@@ -1204,6 +1204,10 @@ pub trait EngineBackend: Send + Sync + 'static {
     /// remains responsible for reconciling any late OS delegate completion.
     fn cancel_tunnel_install(&self, context: EngineCommandContext) -> BackendFuture<'_, ()>;
 
+    /// Obtains first-time consent for a disabled VPN configuration before issuing
+    /// a short-lived start ticket. This operation never starts network forwarding.
+    fn authorize_tunnel_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()>;
+
     fn start_tunnel(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity>;
 
     fn stop_tunnel(&self, context: EngineCommandContext) -> BackendFuture<'_, ()>;
@@ -1371,6 +1375,9 @@ pub enum NativeBridgeCommand {
     CancelTunnelInstall {
         context: EngineCommandContext,
     },
+    AuthorizeTunnelConfiguration {
+        request: EngineStartRequest,
+    },
     StartTunnel {
         request: EngineStartRequest,
     },
@@ -1421,6 +1428,10 @@ impl fmt::Debug for NativeBridgeCommand {
             Self::CancelTunnelInstall { context } => formatter
                 .debug_struct("CancelTunnelInstall")
                 .field("context", context)
+                .finish(),
+            Self::AuthorizeTunnelConfiguration { request } => formatter
+                .debug_struct("AuthorizeTunnelConfiguration")
+                .field("request", request)
                 .finish(),
             Self::StartTunnel { request } => formatter
                 .debug_struct("StartTunnel")

@@ -1074,6 +1074,13 @@ mod tests {
     }
 
     impl EngineBackend for FakeBackend {
+        fn authorize_tunnel_configuration(
+            &self,
+            _request: EngineStartRequest,
+        ) -> BackendFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
         fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
             Box::pin(async move { Ok(self.status.lock().expect("status lock").clone()) })
         }

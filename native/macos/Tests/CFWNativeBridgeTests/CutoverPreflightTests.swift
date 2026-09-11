@@ -133,6 +133,10 @@ private actor RecordingTunnelHost: TunnelHostBridging {
 
   func cancelTunnelInstallationWait() { cancelCalls += 1 }
 
+  func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) throws {
+    throw AppleNetworkError.providerDidNotRespond
+  }
+
   func startTunnel(
     configuration: Data,
     descriptor: ConfigurationDescriptor,

@@ -84,6 +84,7 @@ fn quiet_coordinator(backend: Arc<FakeBackend>) -> EngineModeCoordinator {
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(100),
+            authorization_timeout: Duration::from_millis(100),
             status_query_timeout: Duration::from_millis(100),
             status_reconciliation_interval: Duration::from_secs(30),
             initial_generation: 0,

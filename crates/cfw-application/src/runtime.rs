@@ -58,6 +58,7 @@ pub(crate) struct TransitionContext<'a> {
     pub(crate) session: &'a EngineSessionIdentity,
     pub(crate) generation_store: Option<&'a dyn EngineGenerationStore>,
     pub(crate) operation_timeout: Duration,
+    pub(crate) authorization_timeout: Duration,
     pub(crate) status_query_timeout: Duration,
 }
 

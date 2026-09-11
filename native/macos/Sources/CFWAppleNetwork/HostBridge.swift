@@ -481,7 +481,7 @@ public enum AppleNetworkError: Error, Equatable, Sendable {
 /// Bounded, non-secret inputs the Host hands to the Global Authority when it
 /// prepares a Tunnel start. The configuration and credential bytes travel to the
 /// Authority over its typed XPC prepare call and are never written to preferences
-/// or `startVPNTunnel(options:)`.
+/// or `NETunnelProviderSession.startTunnel(options:)`.
 public struct HostTunnelStartPreparation: Sendable {
   public let descriptor: ConfigurationDescriptor
   public let configuration: Data
@@ -807,6 +807,9 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
 public protocol TunnelHostBridging: Sendable {
   func installTunnel() async throws -> SystemExtensionInstallResult
   func cancelTunnelInstallationWait() async
+  /// Obtains the first VPN-configuration consent using a disabled, descriptor-only
+  /// manager. No Authority lease, start ticket or credential material is involved.
+  func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) async throws
   func startTunnel(
     configuration: Data,
     descriptor: ConfigurationDescriptor,
@@ -865,6 +868,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
   private let installer: any SystemExtensionInstalling
   private let preparer: any TunnelStartPreparing
   private let callbackDeadline: CallbackDeadlineScheduler
+  private let authorizationDeadline: CallbackDeadlineScheduler
   private let preferenceMutationJournal: PreferenceMutationJournal
   private var inFlightManager: NETunnelProviderManager?
 
@@ -873,12 +877,14 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     installer: any SystemExtensionInstalling,
     preparer: any TunnelStartPreparing = FailClosedTunnelStartPreparer(),
     preferenceMutationKeychainAccessGroup: String,
-    callbackTimeout: Duration = .seconds(5)
+    callbackTimeout: Duration = .seconds(5),
+    authorizationTimeout: Duration = .seconds(270)
   ) throws {
     self.providerBundleIdentifier = providerBundleIdentifier
     self.installer = installer
     self.preparer = preparer
     callbackDeadline = CallbackDeadlineScheduler(timeout: callbackTimeout)
+    authorizationDeadline = CallbackDeadlineScheduler(timeout: authorizationTimeout)
     do {
       preferenceMutationJournal = try PreferenceMutationJournal(
         store: KeychainTunnelPreferenceMutationJournalStore(
@@ -892,7 +898,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     }
   }
 
-  /// Builds the single-key `startVPNTunnel(options:)` dictionary carrying only the
+  /// Builds the single-key `NETunnelProviderSession.startTunnel(options:)` dictionary carrying only the
   /// bounded, opaque start ticket. Exposed for focused ticket-only option tests.
   static func ticketStartOptions(_ ticketBytes: Data) -> [String: NSData] {
     [NativeProtocolConstants.tunnelStartTicketOptionKey: ticketBytes as NSData]
@@ -917,7 +923,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     // Prepare with the Global Authority before any preference mutation, persist only
     // the descriptor-only manager, verify the exact reloaded preferences, and start
     // with only the single-use ticket. There is no direct configuration/credential
-    // payload path: `startVPNTunnel(options:)` carries only the ticket.
+    // payload path: `NETunnelProviderSession.startTunnel(options:)` carries only the ticket.
     do {
       try await TicketOnlyTunnelStartFlow.run(
         descriptor: descriptor,
@@ -935,6 +941,37 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     }
   }
 
+  public func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) async throws {
+    let (manager, createdManager) = try await loadOrCreateManager()
+    guard try managedConnectionStatus(manager).isStopped else {
+      throw AppleNetworkError.cleanupUnproven("VPN authorization requires a stopped connection.")
+    }
+    // An existing verified configuration already has its macOS consent. Preserve
+    // it until the ordinary Authority-backed start transaction replaces it.
+    guard createdManager else { return }
+    let values = ManagedTunnelPreferenceValues(
+      descriptor: descriptor, providerBundleIdentifier: providerBundleIdentifier,
+      serverAddress: "Clash for Mac", isEnabled: false,
+      localizedDescription: "Clash for Mac Tunnel")
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: UUID(), createdManager: true, priorValues: nil, writtenValues: values)
+    try Self.applyDescriptorOnlyPreferences(values, to: manager)
+    try await save(manager, receipt: receipt, deadline: authorizationDeadline)
+    try Task.checkCancellation()
+    try await reload(manager)
+    guard try Self.managedPreferenceValues(manager) == values,
+      try managedConnectionStatus(manager).isStopped,
+      let pending = try preferenceMutationJournal.pendingReceipt(
+        expectedDescriptor: descriptor, requireSettledCurrentProcessMutation: true),
+      pending == receipt
+    else {
+      throw AppleNetworkError.cleanupUnproven(
+        "The disabled VPN authorization configuration changed.")
+    }
+    try preferenceMutationJournal.clear(operationID: receipt.operationID)
+    inFlightManager = nil
+  }
+
   // MARK: - ManagedTunnelOperating (NetworkExtension-backed)
 
   func saveDescriptorOnly(
@@ -942,6 +979,10 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     operationID: UUID
   ) async throws {
     let (manager, createdManager) = try await loadOrCreateManager()
+    guard !createdManager else {
+      throw AppleNetworkError.managedManagerVerificationFailed(
+        "The authorized VPN configuration disappeared before start.")
+    }
     guard try managedConnectionStatus(manager).isStopped else {
       throw AppleNetworkError.cleanupUnproven(
         "Managed tunnel preferences cannot be replaced while the OS connection is active."
@@ -999,13 +1040,22 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     }
     defer { inFlightManager = nil }
     do {
-      try manager.connection.startVPNTunnel(options: Self.ticketStartOptions(ticketBytes))
+      guard let session = manager.connection as? NETunnelProviderSession else {
+        throw AppleNetworkError.providerDidNotRespond
+      }
+      // Only the provider-session API forwards custom options as-is. The base
+      // NEVPNConnection API accepts built-in username/password overrides instead.
+      try Self.startProviderSession(session, ticketBytes: ticketBytes)
     } catch let startError {
       if startError is CancellationError {
         throw startError
       }
       throw AppleNetworkError.tunnelStartFailed(startError.localizedDescription)
     }
+  }
+
+  static func startProviderSession(_ session: NETunnelProviderSession, ticketBytes: Data) throws {
+    try session.startTunnel(options: ticketStartOptions(ticketBytes))
   }
 
   public func stopTunnel(expectedConfiguration: ConfigurationDescriptor) async throws {
@@ -1344,7 +1394,8 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
 
   private func save(
     _ manager: NETunnelProviderManager,
-    receipt: TunnelPreferenceMutationReceipt
+    receipt: TunnelPreferenceMutationReceipt,
+    deadline: CallbackDeadlineScheduler? = nil
   ) async throws {
     let stageID = try preferenceMutationJournal.begin(receipt)
     let wait = PreferenceSaveWait(
@@ -1363,7 +1414,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
             wait.cancel()
             return
           }
-          callbackDeadline.schedule { wait.timeout() }
+          (deadline ?? callbackDeadline).schedule { wait.timeout() }
           guard wait.beginSubmission() else { return }
           manager.saveToPreferences { error in
             wait.finish(error)

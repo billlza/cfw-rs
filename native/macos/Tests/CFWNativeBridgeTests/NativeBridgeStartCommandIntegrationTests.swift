@@ -268,6 +268,24 @@ private actor FailedStartProxyAgent: ProxyAgentTransporting {
 }
 
 private actor StartableTunnelHost: TunnelHostBridging {
+  private(set) var authorizationCalls = 0
+  private var authorizationWait: CheckedContinuation<Void, Never>?
+  private let blocksAuthorization: Bool
+  private let authorizationError: AppleNetworkError?
+  func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) async throws {
+    #expect(descriptor == self.descriptor)
+    authorizationCalls += 1
+    if blocksAuthorization {
+      await withCheckedContinuation { authorizationWait = $0 }
+    }
+    if let authorizationError { throw authorizationError }
+  }
+  func hasPendingAuthorization() -> Bool { authorizationWait != nil }
+  func releaseAuthorization() {
+    let wait = authorizationWait
+    authorizationWait = nil
+    wait?.resume()
+  }
   private let expectedInjectedConfiguration: Data?
   private let descriptor: ConfigurationDescriptor
   private let recoveryStatus: RecoveryManagedTunnelStatus
@@ -301,8 +319,12 @@ private actor StartableTunnelHost: TunnelHostBridging {
     failedStartSnapshot: EngineFailure? = nil,
     snapshotFailures: Int = 0,
     stopFailures: Int = 0,
-    expectedInjectedConfiguration: Data? = nil
+    expectedInjectedConfiguration: Data? = nil,
+    blocksAuthorization: Bool = false,
+    authorizationError: AppleNetworkError? = nil
   ) {
+    self.blocksAuthorization = blocksAuthorization
+    self.authorizationError = authorizationError
     self.expectedInjectedConfiguration = expectedInjectedConfiguration
     self.descriptor = descriptor
     self.recoveryStatus = recoveryStatus
@@ -431,6 +453,9 @@ private actor StartableTunnelHost: TunnelHostBridging {
 /// typed timeout, then completes the exact-generation retry. This exercises the
 /// coordinator mutation lifetime without relying on a real System Extension.
 private actor BlockingRetryableInstallationTunnelHost: TunnelHostBridging {
+  func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) throws {
+    throw AppleNetworkError.providerDidNotRespond
+  }
   private let descriptor: ConfigurationDescriptor
   private var firstWait: CheckedContinuation<Void, Never>?
   private(set) var installCalls = 0
@@ -626,6 +651,9 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
 }
 
 private final class StartCredentialVault: NativeCredentialVaulting, @unchecked Sendable {
+  private let lock = NSLock()
+  private var resolutions = 0
+  var resolutionCount: Int { lock.withLock { resolutions } }
   private let material: CredentialMaterial
   init(material: CredentialMaterial = .empty) { self.material = material }
   func provision(
@@ -643,6 +671,7 @@ private final class StartCredentialVault: NativeCredentialVaulting, @unchecked S
     audience: CredentialAudience,
     slots: [CredentialSlot]
   ) throws -> CredentialMaterial {
+    lock.withLock { resolutions += 1 }
     let expected = Set(slots.map { $0.reference.id })
     guard expected == Set(material.entries.map { $0.reference.id }) else {
       throw CredentialVaultError.missingVault
@@ -809,6 +838,86 @@ private func failureCode(
 
 @Suite(.serialized)
 struct NativeBridgeStartCommandIntegrationTests {
+  @Test func tunnelConsentDoesNotReadCredentialsOrStartTheOwner() async throws {
+    let reference = CredentialReference(id: UUID(), kind: .trojanPassword)
+    let slot = try CredentialSlot(
+      reference: reference, target: .trojanPassword,
+      outboundIndex: 0, jsonPointer: "/outbounds/0/password")
+    let request = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true),
+      credentialSlots: [slot],
+      configuration: Data(#"{"outbounds":[{"type":"trojan","password":""}]}"#.utf8))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    var material = try CredentialMaterial(entries: [
+      CredentialMaterialEntry(reference: reference, secret: Data("test-secret".utf8))
+    ])
+    defer { material.erase() }
+    let vault = StartCredentialVault(material: material)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor, blocksAuthorization: true)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil), credentialVault: vault)
+    let command = NativeBridgeCommand.authorizeTunnelConfiguration(request)
+    let wire = try JSONEncoder().encode(NativeRequestEnvelope(command: command))
+    let decoded = try NativeBridgeProtocolCodec.decodeRequest(wire)
+    #expect(decoded.command == command)
+    let waiting = Task { try await coordinator.execute(decoded.command) }
+    #expect(await waitUntil { await tunnel.hasPendingAuthorization() })
+    #expect(vault.resolutionCount == 0)
+    #expect(await tunnel.counters().start == 0)
+    #expect(await failureCode(coordinator, .startTunnel(request)) == .busy)
+    #expect(vault.resolutionCount == 0)
+    await tunnel.releaseAuthorization()
+    guard case .acknowledged = try await waiting.value else {
+      Issue.record("VPN consent did not complete")
+      return
+    }
+    #expect(await tunnel.authorizationCalls == 1)
+    #expect(await tunnel.counters().start == 0)
+    #expect(vault.resolutionCount == 0)
+  }
+
+  @Test func tunnelConsentCannotMutateAnActiveAuthorityOwner() async throws {
+    let request = try startRequest(tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let lease = RecordingEngineLease(
+      observation: AuthorityOwnershipObservation(
+        state: .active, lease: agreement(for: descriptor, mode: .tunnel)))
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil), engineLease: lease)
+    #expect(await failureCode(coordinator, .authorizeTunnelConfiguration(request)) == .busy)
+    #expect(await tunnel.authorizationCalls == 0)
+    #expect(await lease.cancelPreparedCount() == 0)
+    #expect(await coordinator.pendingStartCleanup == nil)
+  }
+
+  @Test func deniedTunnelConsentPreservesItsErrorAndDoesNotResolveCredentials() async throws {
+    let request = try startRequest(tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let error = AppleNetworkError.preferenceSaveFailed(
+      NetworkExtensionOperationFailure(
+        domain: NSPOSIXErrorDomain, code: Int(POSIXErrorCode.EPERM.rawValue),
+        diagnostic: "consent denied"))
+    let tunnel = StartableTunnelHost(descriptor: descriptor, authorizationError: error)
+    let lease = RecordingEngineLease(
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil))
+    let vault = StartCredentialVault()
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      engineLease: lease, credentialVault: vault)
+    #expect(
+      await failureCode(coordinator, .authorizeTunnelConfiguration(request)) == .permissionDenied)
+    #expect(await tunnel.counters().start == 0)
+    #expect(vault.resolutionCount == 0)
+    #expect(await coordinator.pendingStartCleanup == nil)
+  }
+
   @Test func directIPv4HostRouteParticipatesInTheNativeConfigurationIdentity() throws {
     let ordinary = try startRequest(
       tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true)

@@ -35,7 +35,7 @@ candidate satisfies them.
 
 - [x] Prepare Tunnel through the Authority before preference mutation.
 - [x] Persist only a bounded non-secret Tunnel descriptor.
-- [x] Pass only a one-use ticket through `startVPNTunnel(options:)`.
+- [x] Pass only a one-use ticket through `NETunnelProviderSession.startTunnel(options:)`.
 - [x] Redeem the ticket from the authenticated Provider and attest readiness.
 - [x] Implement ownership-sensitive Tunnel preference compensation.
 - [x] Require a Proxy Agent capability before libbox/SystemConfiguration work.

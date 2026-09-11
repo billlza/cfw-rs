@@ -9,6 +9,7 @@ public enum NativeBridgeCommand: Equatable, Sendable {
   case stopSystemProxy(EngineCommandContext)
   case installTunnel(EngineCommandContext)
   case cancelTunnelInstall(EngineCommandContext)
+  case authorizeTunnelConfiguration(EngineStartRequest)
   case startTunnel(EngineStartRequest)
   case stopTunnel(EngineCommandContext)
   case provisionCredentials(CredentialProvisionRequest)
@@ -40,6 +41,7 @@ extension NativeBridgeCommand: Codable {
     case stopSystemProxy = "stop_system_proxy"
     case installTunnel = "install_tunnel"
     case cancelTunnelInstall = "cancel_tunnel_install"
+    case authorizeTunnelConfiguration = "authorize_tunnel_configuration"
     case startTunnel = "start_tunnel"
     case stopTunnel = "stop_tunnel"
     case provisionCredentials = "provision_credentials"
@@ -70,7 +72,7 @@ extension NativeBridgeCommand: Codable {
       self = .maintainCurrentServices(
         try payload.decode(NativeServiceMaintenanceAction.self, forKey: .action)
       )
-    case .startSystemProxy, .startTunnel:
+    case .startSystemProxy, .startTunnel, .authorizeTunnelConfiguration:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       let request = try payload.decode(EngineStartRequest.self, forKey: .request)
       if opcode == .startSystemProxy {
@@ -82,7 +84,8 @@ extension NativeBridgeCommand: Codable {
         guard request.tunnelOptions != nil else {
           throw NativeBridgeProtocolError.invalidCommand
         }
-        self = .startTunnel(request)
+        self =
+          opcode == .startTunnel ? .startTunnel(request) : .authorizeTunnelConfiguration(request)
       }
     case .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
@@ -93,6 +96,7 @@ extension NativeBridgeCommand: Codable {
       case .cancelTunnelInstall: self = .cancelTunnelInstall(context)
       case .stopTunnel: self = .stopTunnel(context)
       case .queryStatus, .authorizeSystemProxy, .authorizeSystemProxyRestoration,
+        .authorizeTunnelConfiguration,
         .maintainCurrentServices, .startSystemProxy,
         .startTunnel,
         .provisionCredentials,
@@ -160,6 +164,10 @@ extension NativeBridgeCommand: Codable {
       try container.encode(Opcode.cancelTunnelInstall, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       try payload.encode(context, forKey: .context)
+    case .authorizeTunnelConfiguration(let request):
+      try container.encode(Opcode.authorizeTunnelConfiguration, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(request, forKey: .request)
     case .startTunnel(let request):
       try container.encode(Opcode.startTunnel, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)

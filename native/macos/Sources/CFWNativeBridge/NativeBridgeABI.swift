@@ -402,7 +402,8 @@ public func cfwNativeBridgeExecuteV1(
     requestID: envelope.requestID,
     admittedAt: admittedAt,
     authorizationRequest: envelope.command == .authorizeSystemProxy
-      || envelope.command == .authorizeSystemProxyRestoration,
+      || envelope.command == .authorizeSystemProxyRestoration
+      || { if case .authorizeTunnelConfiguration = envelope.command { true } else { false } }(),
     cancellationResponse: NativeBridgeABIExecutor.shared.cancellationResponse(
       requestID: envelope.requestID),
     completion: { data in completion.invoke(with: data) },

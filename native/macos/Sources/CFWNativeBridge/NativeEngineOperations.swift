@@ -172,6 +172,43 @@ extension NativeBridgeCoordinator {
     pendingTunnelInstallation = nil
   }
 
+  func authorizeTunnelConfiguration(_ request: EngineStartRequest) async throws {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try requireNoPendingStopBeforeStart()
+    let descriptor = try request.descriptor(slot: .tunnel)
+    do {
+      try await proxy.ensureRegistered()
+      let ownership = try await engineLease.authorityOwnership()
+      guard ownership.state == .off, ownership.lease == nil,
+        try await proxy.snapshot().state.kind == .off
+      else {
+        throw NativeBridgeExecutionError.failure(.busy, "VPN authorization requires global Off.")
+      }
+    } catch {
+      throw Self.map(error)
+    }
+    do {
+      try await tunnel.authorizeTunnelConfiguration(descriptor)
+      try Task.checkCancellation()
+    } catch {
+      let original = error
+      pendingStartCleanup = NativeStopTransaction(
+        owner: .tunnel, commandContext: request.context, descriptor: descriptor)
+      do {
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
+        try await proveFailedStartOff(
+          NativeStopTransaction(
+            owner: .tunnel, commandContext: request.context, descriptor: descriptor))
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "VPN configuration authorization failed and its preference cleanup is unproven.")
+      }
+      throw Self.map(original)
+    }
+  }
+
   func startTunnel(_ request: EngineStartRequest) async throws -> NativeRuntimeIdentity {
     let mutationID = try await beginMutation()
     defer { endMutation(mutationID) }

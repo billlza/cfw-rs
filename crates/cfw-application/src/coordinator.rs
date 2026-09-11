@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub(crate) const COMMAND_QUEUE_CAPACITY: usize = 32;
+const DEFAULT_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(325);
 const DEFAULT_STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_STATUS_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -24,6 +25,8 @@ pub type CoordinatorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoordinatorOptions {
     pub operation_timeout: Duration,
+    /// Bounded user-consent wait, separate from runtime and cleanup deadlines.
+    pub authorization_timeout: Duration,
     pub status_query_timeout: Duration,
     pub status_reconciliation_interval: Duration,
     pub initial_generation: u64,
@@ -33,6 +36,7 @@ impl Default for CoordinatorOptions {
     fn default() -> Self {
         Self {
             operation_timeout: Duration::from_secs(15),
+            authorization_timeout: DEFAULT_AUTHORIZATION_TIMEOUT,
             status_query_timeout: DEFAULT_STATUS_QUERY_TIMEOUT,
             status_reconciliation_interval: DEFAULT_STATUS_RECONCILIATION_INTERVAL,
             initial_generation: 0,
@@ -85,6 +89,7 @@ impl EngineModeCoordinator {
             lineage.session,
             CoordinatorOptions {
                 operation_timeout,
+                authorization_timeout: DEFAULT_AUTHORIZATION_TIMEOUT,
                 status_query_timeout: DEFAULT_STATUS_QUERY_TIMEOUT,
                 status_reconciliation_interval: DEFAULT_STATUS_RECONCILIATION_INTERVAL,
                 initial_generation: lineage.generation,
@@ -130,6 +135,7 @@ impl EngineModeCoordinator {
             },
             CoordinatorOptions {
                 operation_timeout,
+                authorization_timeout: DEFAULT_AUTHORIZATION_TIMEOUT,
                 status_query_timeout: DEFAULT_STATUS_QUERY_TIMEOUT,
                 status_reconciliation_interval: DEFAULT_STATUS_RECONCILIATION_INTERVAL,
                 initial_generation: 0,

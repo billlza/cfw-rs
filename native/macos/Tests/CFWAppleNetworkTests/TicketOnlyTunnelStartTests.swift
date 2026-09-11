@@ -1,5 +1,6 @@
 import CFWSharedProtocol
 import Foundation
+@preconcurrency import NetworkExtension
 import Testing
 
 @testable import CFWAppleNetwork
@@ -231,4 +232,27 @@ struct TicketOnlyTunnelStartTests {
     #expect(!source.contains("TunnelStartPayloadCodec"))
     #expect(!source.contains("tunnelStartPayloadOptionKey"))
   }
+}
+
+private final class RecordingProviderSession: NETunnelProviderSession, @unchecked Sendable {
+  private(set) var suppliedOptions: [String: Any]?
+  private(set) var ordinaryVPNCalls = 0
+
+  override func startTunnel(options: [String: Any]? = nil) throws {
+    suppliedOptions = options
+  }
+
+  override func startVPNTunnel(options: [String: NSObject]? = nil) throws {
+    ordinaryVPNCalls += 1
+  }
+}
+
+@Test func providerSessionAPIReceivesTheExactOpaqueTicket() throws {
+  let session = RecordingProviderSession()
+  let bytes = Data(repeating: 0x73, count: AuthorityV1Limits.ticketBytes)
+  try NetworkExtensionHostBridge.startProviderSession(session, ticketBytes: bytes)
+  #expect(session.ordinaryVPNCalls == 0)
+  let options = try #require(session.suppliedOptions)
+  #expect(Set(options.keys) == [NativeProtocolConstants.tunnelStartTicketOptionKey])
+  #expect(options[NativeProtocolConstants.tunnelStartTicketOptionKey] as? Data == bytes)
 }

@@ -390,6 +390,7 @@ async fn same_digest_request_reconciles_immediately_before_idempotent_success() 
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(100),
+            authorization_timeout: Duration::from_millis(100),
             status_query_timeout: Duration::from_millis(100),
             status_reconciliation_interval: Duration::from_secs(30),
             initial_generation: 0,
@@ -514,6 +515,7 @@ async fn reconciliation_skips_missed_ticks_and_resumes_after_suspension() {
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(100),
+            authorization_timeout: Duration::from_millis(100),
             status_query_timeout: Duration::from_millis(100),
             status_reconciliation_interval: Duration::from_secs(2),
             initial_generation: 0,
@@ -686,6 +688,7 @@ async fn backend_timeout_is_explicit_and_cleanup_is_attempted() {
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(10),
+            authorization_timeout: Duration::from_millis(10),
             status_query_timeout: Duration::from_millis(10),
             status_reconciliation_interval: Duration::from_millis(20),
             initial_generation: 0,

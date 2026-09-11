@@ -413,6 +413,13 @@ impl EndpointRetryBackend {
 }
 
 impl EngineBackend for EndpointRetryBackend {
+    fn authorize_tunnel_configuration(
+        &self,
+        _request: EngineStartRequest,
+    ) -> BackendFuture<'_, ()> {
+        panic!("Tunnel authorization is outside the endpoint retry fixture")
+    }
+
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
         Box::pin(async move { Ok(self.status.lock().expect("status lock").clone()) })
     }

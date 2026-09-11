@@ -448,6 +448,7 @@ func main() {
 	tlsProbe(projector, echRejected)
 	dnsProbe(projector, address)
 	dnsPolicyProbe(projector, address)
+	dnsFallbackProbe(projector, address)
 	groupProbe(projector, address, tcpTarget)
 	wireguardProbe(projector, address, tcpTarget, udpTarget)
 }

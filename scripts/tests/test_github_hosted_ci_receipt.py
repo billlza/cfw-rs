@@ -877,7 +877,7 @@ class HostedCICommandSessionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.executor = Path(temporary.name).resolve()
-        self.repository = self.executor / "target/release-worktrees/40059"
+        self.repository = self.executor / "target/release-worktrees/40060"
         workflow_path = self.repository / hosted.WORKFLOW_PATH
         workflow_path.parent.mkdir(parents=True)
         workflow_path.write_bytes(WORKFLOW_BYTES)

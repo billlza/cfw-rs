@@ -101,8 +101,8 @@ impl Default for EngineSettings {
                     server_name: "dns.alidns.com".to_owned(),
                 },
                 AuthenticatedDnsServer {
-                    address: IpAddr::V4(Ipv4Addr::new(1, 12, 12, 12)),
-                    server_name: "doh.pub".to_owned(),
+                    address: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+                    server_name: "cloudflare-dns.com".to_owned(),
                 },
             ],
         }

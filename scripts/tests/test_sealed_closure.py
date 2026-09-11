@@ -18,7 +18,7 @@ from scripts.publication.sealed_closure import (
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-# The four design-pinned sing-box patches. The supply-chain test hashes these
+# The five design-pinned sing-box patches. The supply-chain test hashes these
 # files itself, so the derived patch closure is bound to the patch bytes in the
 # repository rather than to the pin table the production code already reads.
 PATCH_PATHS = {
@@ -26,6 +26,7 @@ PATCH_PATHS = {
     "raw_packet": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
     "dns_failover": "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
     "endpoint_conflict": "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
+    "profile_probe": "native/macos/patches/sing-box-v1.13.15-profile-probe.patch",
 }
 # Authoritative digest of the raw-packet TUN patch with cleanup ownership retained
 # until Close succeeds. Kept as a literal because hashing the file alone would
@@ -38,9 +39,9 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256), which cannot
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
-# This revision includes x/crypto v0.56.0 and its required Go 1.26.0 minimum.
+# This revision includes all five patches and the real utun interface resolver.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "888e52565dcde4961ee6f35d4f23669df68205ff9448a16b55ed87cd1d5cb0df"
+    "a1f9cef600e7bc198bfe7bb8aef01b2357cabe5be4135179b23a0b06a5b44d9c"
 )
 
 
@@ -152,10 +153,10 @@ class DeriveSupplyChainTests(unittest.TestCase):
         )
         patched_source = supply_chain["patched_source"]
 
-        # The bound patch closure must be exactly the four patch files that live
+        # The bound patch closure must be exactly the five patch files that live
         # in this repository, hashed from their bytes here.
         on_disk = {name: _file_sha256(path) for name, path in PATCH_PATHS.items()}
-        self.assertEqual(len(patched_source["patch_digests"]), 4)
+        self.assertEqual(len(patched_source["patch_digests"]), 5)
         self.assertEqual(patched_source["patch_digests"], sorted(on_disk.values()))
         # ...and the raw-packet patch must be the corrected revision, not the
         # truncated-hunk one that silently dropped four test helpers.

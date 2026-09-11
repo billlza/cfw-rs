@@ -264,3 +264,50 @@ func dnsPolicyProbe(projector, address string) {
 	closeChecked(instance)
 	fmt.Println("PASS DNS single-label wildcard semantics and enabled IPv6 fake-IP")
 }
+
+// Exercise fallback with real TLS handshakes and DNS messages. A certificate
+// identity failure may select only the explicitly configured second resolver;
+// it must never turn off certificate validation or invent an empty answer.
+func dnsFallbackProbe(projector, address string) {
+	certificate, roots := dnsCertificate()
+	primaryPort, stopPrimary := dnsFixture("https", address, certificate)
+	defer stopPrimary()
+	secondaryPort, stopSecondary := dnsFixture("https", address, certificate)
+	defer stopSecondary()
+	for _, bothRejected := range []bool{false, true, false} {
+		server := func(port int, name string) object {
+			return object{"type": "https", "server": address, "server_port": port,
+				"path": "/dns-query", "tls": object{"enabled": true, "server_name": name, "min_version": "1.3"}}
+		}
+		secondaryName := "resolver.example.com"
+		if bothRejected {
+			secondaryName = "wrong-resolver.example.com"
+		}
+		config := project(projector, object{
+			"outbounds": []any{object{"type": "direct", "tag": "direct"}},
+			"dns": object{"servers": []any{
+				server(primaryPort, "wrong-resolver.example.com"),
+				server(secondaryPort, secondaryName),
+			}},
+		})
+		prepareListeners(config, address)
+		instance, ctx := startWithContext(config, roots)
+		router := service.FromContext[adapter.DNSRouter](ctx)
+		require(router != nil, "fallback DNS router")
+		query := new(dns.Msg)
+		query.SetQuestion("probe.invalid.", dns.TypeA)
+		requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		response, err := router.Exchange(requestCtx, query, adapter.DNSQueryOptions{})
+		cancel()
+		closeChecked(instance)
+		if bothRejected {
+			require(err != nil && response == nil, "untrusted resolvers returned a successful DNS response")
+			fmt.Println("PASS DNS rejects both invalid TLS identities without returning a successful answer")
+			continue
+		}
+		require(err == nil && response != nil && len(response.Answer) == 1, "authenticated DNS fallback response")
+		answer, ok := response.Answer[0].(*dns.A)
+		require(ok && answer.A.Equal(net.ParseIP("203.0.113.7")), "authenticated DNS fallback answer")
+		fmt.Println("PASS failed primary TLS identity uses the authenticated TLS 1.3 fallback, including after restart")
+	}
+}

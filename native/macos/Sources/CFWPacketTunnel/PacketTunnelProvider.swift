@@ -530,11 +530,15 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       addresses: [TunnelAddressPlan.ipv4Address],
       subnetMasks: [TunnelAddressPlan.ipv4SubnetMask]
     )
-    ipv4.includedRoutes = [.default()]
+    ipv4.includedRoutes = [
+      .default(),
+      NEIPv4Route(
+        destinationAddress: TunnelAddressPlan.ipv4NetworkAddress,
+        subnetMask: TunnelAddressPlan.ipv4SubnetMask),
+    ]
     var excludedIPv4Routes: [NEIPv4Route] = []
     if tunnelOptions.bypassPrivateNetworks {
       excludedIPv4Routes = [
-        NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
         NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
         NEIPv4Route(destinationAddress: "172.16.0.0", subnetMask: "255.240.0.0"),
         NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
@@ -558,10 +562,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         addresses: [TunnelAddressPlan.ipv6Address],
         networkPrefixLengths: [NSNumber(value: TunnelAddressPlan.ipv6PrefixLength)]
       )
-      ipv6.includedRoutes = [.default()]
+      ipv6.includedRoutes = [
+        .default(),
+        NEIPv6Route(
+          destinationAddress: TunnelAddressPlan.ipv6NetworkAddress,
+          networkPrefixLength: NSNumber(value: TunnelAddressPlan.ipv6PrefixLength)),
+      ]
       if tunnelOptions.bypassPrivateNetworks {
         ipv6.excludedRoutes = [
-          NEIPv6Route(destinationAddress: "::1", networkPrefixLength: 128),
           NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),
           NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10),
           NEIPv6Route(destinationAddress: "ff00::", networkPrefixLength: 8),

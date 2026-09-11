@@ -120,10 +120,10 @@ AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
 # not an authentication mechanism and do not defend against the repository
 # owner. The release-freeze source digest independently binds the raw file.
 AUTHORITY_SIGNING_PREFIX_SHA256 = (
-    "97d4480c594185226a48ba139a0f36b4a48a761a36b0ce27d95455bb95151e57"
+    "ff60443912f81b67b1380e094b313f37e8dd8968c7ada01b90e267a3ebea2a7a"
 )
 AUTHORITY_SIGNING_SUFFIX_SHA256 = (
-    "34c6381c8ec22bd7d28b369ff07497b6a6a1432db0653299807394b26f9adb40"
+    "a8b7f64e8f42ab4c6cc5175c86b226ff4a14d3dae5e70a682b6ce5b9c83ad3bd"
 )
 DEPLOYMENT_TARGET = "15.0"
 TOMBSTONE_PROVENANCE_COMMAND = "\n".join(

@@ -232,10 +232,10 @@ index 0000000000000000000000000000000000000000..76e7e7e8e0a5bf8626d9a2eccf86e239
 +)
 diff --git a/experimental/libbox/raw_packet_tun_darwin.go b/experimental/libbox/raw_packet_tun_darwin.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032434ddf24
+index 0000000000000000000000000000000000000000..d3a404b777d72bd8f457c25dfbb12bf726cb96c2
 --- /dev/null
 +++ b/experimental/libbox/raw_packet_tun_darwin.go
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,252 @@
 +//go:build darwin
 +
 +package libbox
@@ -262,6 +262,7 @@ index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032
 +
 +type rawPacketTun struct {
 +	connection    *net.UnixConn
++	name          string
 +	mtu           int
 +	configuration tun.Options
 +	closeOnce     sync.Once
@@ -274,6 +275,10 @@ index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032
 +// one end of a connected AF_UNIX/SOCK_DGRAM socketpair carrying exactly one
 +// headerless IP packet per datagram.
 +func newRawPacketTun(fd int32, options *tun.Options) (tun.Tun, error) {
++	return newRawPacketTunWithInterfaceResolver(fd, options, resolveRawPacketTunInterface)
++}
++
++func newRawPacketTunWithInterfaceResolver(fd int32, options *tun.Options, resolve func(*tun.Options) (string, error)) (tun.Tun, error) {
 +	if fd < 0 {
 +		return nil, fmt.Errorf("%w: negative file descriptor", errRawPacketTunInvalidDescriptor)
 +	}
@@ -309,6 +314,10 @@ index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032
 +	if options.GSO {
 +		return nil, fmt.Errorf("%w: GSO is unsupported", errRawPacketTunInvalidConfiguration)
 +	}
++	interfaceName, err := resolve(options)
++	if err != nil {
++		return nil, err
++	}
 +
 +	file := os.NewFile(uintptr(fd), rawPacketTunName)
 +	if file == nil {
@@ -333,13 +342,14 @@ index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032
 +		return nil, fmt.Errorf("%w: descriptor did not produce UnixConn", errRawPacketTunInvalidDescriptor)
 +	}
 +
-+	options.Name = rawPacketTunName
++	options.Name = interfaceName
 +	options.FileDescriptor = 0
 +	options.EXP_ExternalConfiguration = true
 +	options.EXP_MultiPendingPackets = false
 +	options.EXP_SendMsgX = false
 +	return &rawPacketTun{
 +		connection:    unixConnection,
++		name:          interfaceName,
 +		mtu:           int(options.MTU),
 +		configuration: cloneRawPacketTunOptions(*options),
 +	}, nil
@@ -379,7 +389,7 @@ index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032
 +}
 +
 +func (t *rawPacketTun) Name() (string, error) {
-+	return rawPacketTunName, nil
++	return t.name, nil
 +}
 +
 +func (t *rawPacketTun) Start() error {
@@ -480,10 +490,10 @@ index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032
 +}
 diff --git a/experimental/libbox/raw_packet_tun_darwin_test.go b/experimental/libbox/raw_packet_tun_darwin_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e640a1212a
+index 0000000000000000000000000000000000000000..808167a7ed3f59f32fbe1df1abff2988394b2735
 --- /dev/null
 +++ b/experimental/libbox/raw_packet_tun_darwin_test.go
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,307 @@
 +//go:build darwin
 +
 +package libbox
@@ -582,7 +592,7 @@ index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e6
 +		t.Fatal(err)
 +	}
 +	defer unix.Close(pair[0])
-+	_, err = newRawPacketTun(
++	_, err = newRawPacketTunWithTestInterface(
 +		int32(pair[1]),
 +		testRawPacketTunOptions(rawPacketTunMaximumMTU+1),
 +	)
@@ -651,7 +661,7 @@ index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e6
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if name != rawPacketTunName || options.Name != rawPacketTunName {
++	if name != "utun42" || options.Name != "utun42" {
 +		t.Fatalf("unexpected logical name: %q / %q", name, options.Name)
 +	}
 +	if !options.EXP_ExternalConfiguration || options.EXP_MultiPendingPackets || options.EXP_SendMsgX {
@@ -711,7 +721,7 @@ index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e6
 +	}
 +	defer unix.Close(pair[0])
 +	options := testRawPacketTunOptions(rawPacketTunMinimumMTU)
-+	if _, err := newRawPacketTun(int32(pair[1]), options); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
++	if _, err := newRawPacketTunWithTestInterface(int32(pair[1]), options); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
 +		t.Fatalf("expected descriptor validation error, got %v", err)
 +	}
 +	if err := unix.Close(pair[1]); !errors.Is(err, unix.EBADF) {
@@ -722,7 +732,7 @@ index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e6
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if _, err := newRawPacketTun(int32(datagram), testRawPacketTunOptions(rawPacketTunMinimumMTU)); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
++	if _, err := newRawPacketTunWithTestInterface(int32(datagram), testRawPacketTunOptions(rawPacketTunMinimumMTU)); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
 +		t.Fatalf("expected connected-socket validation error, got %v", err)
 +	}
 +	if err := unix.Close(datagram); !errors.Is(err, unix.EBADF) {
@@ -737,7 +747,7 @@ index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e6
 +		t.Fatal(err)
 +	}
 +	options := testRawPacketTunOptions(mtu)
-+	created, err := newRawPacketTun(int32(pair[1]), options)
++	created, err := newRawPacketTunWithTestInterface(int32(pair[1]), options)
 +	if err != nil {
 +		unix.Close(pair[0])
 +		t.Fatal(err)
@@ -786,6 +796,10 @@ index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e6
 +	packet[6] = unix.IPPROTO_UDP
 +	packet[7] = 64
 +	return packet
++}
++
++func newRawPacketTunWithTestInterface(fd int32, options *tun.Options) (tun.Tun, error) {
++	return newRawPacketTunWithInterfaceResolver(fd, options, func(*tun.Options) (string, error) { return "utun42", nil })
 +}
 diff --git a/experimental/libbox/raw_packet_tun_other.go b/experimental/libbox/raw_packet_tun_other.go
 new file mode 100644
@@ -840,3 +854,179 @@ index 37fd56c98038a067b3fb98b21d8c60b5fd81d1d3..2b08aec41516c648365efd155ec08593
  	if err != nil {
  		return nil, err
  	}
+diff --git a/experimental/libbox/raw_packet_tun_interface_darwin.go b/experimental/libbox/raw_packet_tun_interface_darwin.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0ef9979224c71bfbe258a4cc2d70f17faea11fb
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_interface_darwin.go
+@@ -0,0 +1,95 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"fmt"
++	tun "github.com/sagernet/sing-tun"
++	"net"
++	"net/netip"
++	"strings"
++)
++
++type rawPacketInterface struct {
++	name      string
++	flags     net.Flags
++	addresses []netip.Addr
++}
++
++// NetworkExtension has already installed the addressed utun before libbox is
++// started. Resolve that interface using public enumeration, never the private
++// provider descriptor. The system TCP stack binds its forwarder to this name.
++func resolveRawPacketTunInterface(options *tun.Options) (string, error) {
++	interfaces, err := net.Interfaces()
++	if err != nil {
++		return "", fmt.Errorf("%w: enumerate packet interface: %v", errRawPacketTunInvalidConfiguration, err)
++	}
++	candidates := make([]rawPacketInterface, 0, len(interfaces))
++	for _, iface := range interfaces {
++		if !strings.HasPrefix(iface.Name, "utun") || iface.Flags&net.FlagPointToPoint == 0 || iface.Flags&net.FlagUp == 0 {
++			continue
++		}
++		addresses, err := iface.Addrs()
++		if err != nil {
++			return "", fmt.Errorf("%w: enumerate packet interface addresses: %v", errRawPacketTunInvalidConfiguration, err)
++		}
++		candidate := rawPacketInterface{name: iface.Name, flags: iface.Flags}
++		for _, address := range addresses {
++			ip, _, err := net.ParseCIDR(address.String())
++			if err != nil {
++				return "", fmt.Errorf("%w: invalid packet interface address", errRawPacketTunInvalidConfiguration)
++			}
++			parsed, ok := netip.AddrFromSlice(ip)
++			if !ok {
++				return "", fmt.Errorf("%w: invalid packet interface IP", errRawPacketTunInvalidConfiguration)
++			}
++			candidate.addresses = append(candidate.addresses, parsed.Unmap())
++		}
++		candidates = append(candidates, candidate)
++	}
++	return matchRawPacketTunInterface(options, candidates)
++}
++
++func matchRawPacketTunInterface(options *tun.Options, candidates []rawPacketInterface) (string, error) {
++	required := make([]netip.Addr, 0, len(options.Inet4Address)+len(options.Inet6Address))
++	for _, prefix := range options.Inet4Address {
++		required = append(required, prefix.Addr())
++	}
++	for _, prefix := range options.Inet6Address {
++		required = append(required, prefix.Addr())
++	}
++	if len(required) == 0 {
++		return "", fmt.Errorf("%w: packet interface addresses are missing", errRawPacketTunInvalidConfiguration)
++	}
++	matched := ""
++	for _, iface := range candidates {
++		if !strings.HasPrefix(iface.name, "utun") || iface.flags&net.FlagPointToPoint == 0 || iface.flags&net.FlagUp == 0 {
++			continue
++		}
++		matches := true
++		for _, expected := range required {
++			found := false
++			for _, actual := range iface.addresses {
++				if actual == expected {
++					found = true
++					break
++				}
++			}
++			if !found {
++				matches = false
++				break
++			}
++		}
++		if !matches {
++			continue
++		}
++		if matched != "" {
++			return "", fmt.Errorf("%w: packet interface is ambiguous", errRawPacketTunInvalidConfiguration)
++		}
++		matched = iface.name
++	}
++	if matched == "" {
++		return "", fmt.Errorf("%w: addressed packet interface is unavailable", errRawPacketTunInvalidConfiguration)
++	}
++	return matched, nil
++}
+diff --git a/experimental/libbox/raw_packet_tun_interface_darwin_test.go b/experimental/libbox/raw_packet_tun_interface_darwin_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e29e815766a4fa51fa0e0dc8afa43a3ccb20aa37
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_interface_darwin_test.go
+@@ -0,0 +1,69 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"errors"
++	tun "github.com/sagernet/sing-tun"
++	"golang.org/x/sys/unix"
++	"net"
++	"net/netip"
++	"testing"
++)
++
++func TestRawPacketInterfaceRequiresUniqueActiveAddressedTunnel(t *testing.T) {
++	v4 := netip.MustParseAddr("198.18.64.1")
++	v6 := netip.MustParseAddr("2001:2:0:64::1")
++	flags := net.FlagUp | net.FlagPointToPoint
++	options := &tun.Options{Inet4Address: []netip.Prefix{netip.PrefixFrom(v4, 30)}, Inet6Address: []netip.Prefix{netip.PrefixFrom(v6, 126)}}
++	good := rawPacketInterface{name: "utun42", flags: flags, addresses: []netip.Addr{v4, v6}}
++	tests := []struct {
++		name       string
++		candidates []rawPacketInterface
++		accepted   bool
++	}{
++		{"exact dual stack", []rawPacketInterface{good}, true},
++		{"missing", nil, false},
++		{"wrong IPv4", []rawPacketInterface{{name: "utun43", flags: flags, addresses: []netip.Addr{netip.MustParseAddr("198.18.0.1"), v6}}}, false},
++		{"missing IPv6", []rawPacketInterface{{name: "utun42", flags: flags, addresses: []netip.Addr{v4}}}, false},
++		{"physical interface", []rawPacketInterface{{name: "en0", flags: flags, addresses: good.addresses}}, false},
++		{"down interface", []rawPacketInterface{{name: "utun42", flags: net.FlagPointToPoint, addresses: good.addresses}}, false},
++		{"not point to point", []rawPacketInterface{{name: "utun42", flags: net.FlagUp, addresses: good.addresses}}, false},
++		{"ambiguous", []rawPacketInterface{good, {name: "utun43", flags: flags, addresses: good.addresses}}, false},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			name, err := matchRawPacketTunInterface(options, test.candidates)
++			if test.accepted {
++				if err != nil || name != "utun42" {
++					t.Fatalf("resolved %q: %v", name, err)
++				}
++			} else if name != "" || !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++				t.Fatalf("invalid interface accepted: %q %v", name, err)
++			}
++		})
++	}
++	empty := &tun.Options{}
++	if _, err := matchRawPacketTunInterface(empty, []rawPacketInterface{good}); !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatal("missing configured addresses accepted")
++	}
++	ipv4Only := &tun.Options{Inet4Address: options.Inet4Address}
++	if name, err := matchRawPacketTunInterface(ipv4Only, []rawPacketInterface{{name: "utun42", flags: flags, addresses: []netip.Addr{v4}}}); err != nil || name != "utun42" {
++		t.Fatalf("IPv4-only interface rejected: %v", err)
++	}
++}
++
++func TestRawPacketInterfaceResolutionFailureClosesTransferredDescriptor(t *testing.T) {
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(pair[1])
++	_, err = newRawPacketTunWithInterfaceResolver(int32(pair[0]), &tun.Options{MTU: 1280}, func(*tun.Options) (string, error) { return "", errRawPacketTunInvalidConfiguration })
++	if !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if _, err = unix.FcntlInt(uintptr(pair[0]), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("transferred descriptor leaked: %v", err)
++	}
++}

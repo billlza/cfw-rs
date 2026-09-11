@@ -116,7 +116,6 @@ private func descriptor(
   )
   #expect(
     ipv4Exclusions == [
-      "127.0.0.0/255.0.0.0",
       "10.0.0.0/255.0.0.0",
       "172.16.0.0/255.240.0.0",
       "192.168.0.0/255.255.0.0",
@@ -130,7 +129,7 @@ private func descriptor(
       "\($0.destinationAddress)/\($0.destinationNetworkPrefixLength.uint16Value)"
     } ?? []
   )
-  #expect(ipv6Exclusions == ["::1/128", "fc00::/7", "fe80::/10", "ff00::/8"])
+  #expect(ipv6Exclusions == ["fc00::/7", "fe80::/10", "ff00::/8"])
   #expect(!ipv4Exclusions.contains("198.18.0.0/255.254.0.0"))
 
   let captured = PacketTunnelProvider.networkSettings(
@@ -152,6 +151,38 @@ private func descriptor(
   #expect(settings.dnsSettings?.matchDomains == [""])
   #expect(settings.dnsSettings?.matchDomainsNoSearch == true)
   #expect(settings.mtu?.uint16Value == 1_500)
+}
+
+@Test func providerVirtualSubnetsHaveSpecificRoutesAndNoInvalidLoopbackExclusions() throws {
+  let settings = PacketTunnelProvider.networkSettings(descriptor: try descriptor(ipv6Enabled: true))
+  let ipv4 = try #require(settings.ipv4Settings)
+  let ipv6 = try #require(settings.ipv6Settings)
+  #expect(
+    ipv4.includedRoutes?.contains {
+      $0.destinationAddress == TunnelAddressPlan.ipv4NetworkAddress
+        && $0.destinationSubnetMask == TunnelAddressPlan.ipv4SubnetMask
+    } == true)
+  #expect(
+    ipv6.includedRoutes?.contains {
+      $0.destinationAddress == TunnelAddressPlan.ipv6NetworkAddress
+        && $0.destinationNetworkPrefixLength.uint8Value == TunnelAddressPlan.ipv6PrefixLength
+    } == true)
+  #expect(ipv4.excludedRoutes?.contains { $0.destinationAddress == "127.0.0.0" } == false)
+  #expect(ipv6.excludedRoutes?.contains { $0.destinationAddress == "::1" } == false)
+  for address in [TunnelAddressPlan.ipv4Address, TunnelAddressPlan.ipv4DNSPeer] {
+    #expect(
+      prefixContains(
+        try addressBytes(TunnelAddressPlan.ipv4NetworkAddress, family: AF_INET, count: 4),
+        length: TunnelAddressPlan.ipv4PrefixLength,
+        address: try addressBytes(address, family: AF_INET, count: 4)))
+  }
+  for address in [TunnelAddressPlan.ipv6Address, TunnelAddressPlan.ipv6DNSPeer] {
+    #expect(
+      prefixContains(
+        try addressBytes(TunnelAddressPlan.ipv6NetworkAddress, family: AF_INET6, count: 16),
+        length: TunnelAddressPlan.ipv6PrefixLength,
+        address: try addressBytes(address, family: AF_INET6, count: 16)))
+  }
 }
 
 @Test func dualStackProjectionUsesTheMatching126IPv6Prefix() throws {

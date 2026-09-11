@@ -31,7 +31,7 @@ PATCH_PATHS = {
 # until Close succeeds. Kept as a literal because hashing the file alone would
 # still pass if the patch regressed and the pins were recomputed to match.
 EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "3a40130eb30f471bd5ab17cfce289f43e3600bdadcfc1aadab25a68f9703e124"
+    "a7e9ed8316ea913f24d6174fe9cd0f5180366c4f53c49572063cc6ba8ce4d708"
 )
 # The combined diff is the full-object-ID digest of the whole working-tree diff
 # of the patched sing-box checkout

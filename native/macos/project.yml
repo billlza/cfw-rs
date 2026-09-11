@@ -289,7 +289,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NetworkExtension:
-          NEMachServiceName: $(TeamIdentifierPrefix)com.bill.clashformac.packet-tunnel
+          NEMachServiceName: $(TeamIdentifierPrefix)group.com.bill.clashformac.packet-tunnel
           NEProviderClasses:
             com.apple.networkextension.packet-tunnel: CFWPacketTunnel.PacketTunnelProvider
         NSSystemExtensionUsageDescription: >-

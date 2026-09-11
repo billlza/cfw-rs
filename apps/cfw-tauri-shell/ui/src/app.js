@@ -927,9 +927,7 @@ function renderGeneral() {
     ? `<button class="cfw-text-button" data-action="cancel-system-proxy"${cancellationDisabled}>Cancel request</button>`
     : "";
   const migrationBanner = renderMigrationBanner();
-  const engineReason = engine.state === "Failed"
-    ? engine.availabilityReason
-    : state.engineMutationError ?? engine.availabilityReason;
+  const engineReason = state.engineMutationError ?? engine.availabilityReason;
   const projectionError = projection.error ?? "no active profile is selected";
   const projectionNote = projectionError === "no active profile is selected"
     ? "No profile selected"
@@ -3904,15 +3902,15 @@ async function applyToggle(key, checked, source) {
   try {
     if (key === "systemProxy") {
       const status = await invoke("set_system_proxy_enabled", { enabled: checked });
-      if (engineRequestId !== runtime.engineStatusRequestId) return false;
-      applyEngineStatus(status);
+      if (engineRequestId === runtime.engineStatusRequestId) applyEngineStatus(status);
+      else await loadEngineStatus();
       await loadNetworkDiagnostics();
       await loadRuntimeProjection();
       if (state.engine.systemProxyActive) await loadControllerSnapshotWithRetry(6, 500);
     } else if (key === "tunMode") {
       const status = await invoke("set_tun_enabled", { enabled: checked });
-      if (engineRequestId !== runtime.engineStatusRequestId) return false;
-      applyEngineStatus(status);
+      if (engineRequestId === runtime.engineStatusRequestId) applyEngineStatus(status);
+      else await loadEngineStatus();
       await loadRuntimeProjection();
       if (state.engine.tunnelActive) await loadControllerSnapshotWithRetry(12, 500);
     } else if (key === "startAtLogin") {
@@ -3930,7 +3928,6 @@ async function applyToggle(key, checked, source) {
       : `${key} changed to ${checked ? "on" : "off"}`);
     return true;
   } catch (error) {
-    if (isEngineMutation && engineRequestId !== runtime.engineStatusRequestId) return false;
     state.toggles[key] = previous;
     if (key === "startAtLogin") {
       try {

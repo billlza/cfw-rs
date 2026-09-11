@@ -204,6 +204,12 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         | NativeBridgeErrorCode::MixedEndpointInUse
         | NativeBridgeErrorCode::ControllerEndpointInUse
         | NativeBridgeErrorCode::ExistingSystemProxy
+        | NativeBridgeErrorCode::SystemExtensionValidationFailed
+        | NativeBridgeErrorCode::SystemProxyConfigurationFailed
+        | NativeBridgeErrorCode::SystemProxyRuntimeFailed
+        | NativeBridgeErrorCode::SystemProxyPreferencesFailed
+        | NativeBridgeErrorCode::SystemProxyJournalFailed
+        | NativeBridgeErrorCode::SystemProxyAuthorityFailed
         | NativeBridgeErrorCode::Internal => CredentialVaultError::Internal,
     }
 }

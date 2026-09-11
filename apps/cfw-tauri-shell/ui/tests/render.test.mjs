@@ -2620,6 +2620,37 @@ test("network switches remain off while startup is pending or fails and cancella
   }
 });
 
+test("engine status events do not discard a pending switch failure", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalResponse = responses.set_system_proxy_enabled;
+  const originalError = state.engineMutationError;
+  const failure = {
+    snapshot: { desired_mode: "system_proxy", generation: 201, config_digest: null, state: { state: "failed", target: "system_proxy", error: "Earlier startup failed" } },
+    capabilities: { system_proxy: true, tunnel: true },
+  };
+  try {
+    await setEngine(OFF_ENGINE);
+    const pending = deferred();
+    responses.set_system_proxy_enabled = () => pending.promise;
+    const before = invocationDetails.filter(({ command }) => command === "set_system_proxy_enabled").length;
+    const operation = appModule.handleAction("retry-system-proxy");
+    const rejection = assert.rejects(operation, /Current startup failure/u);
+    await waitForInvocation("set_system_proxy_enabled", before);
+    responses.engine_snapshot = failure;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    pending.reject(new Error("Current startup failure"));
+    await rejection;
+    assert.equal(state.engineMutationBusy, false);
+    assert.match(await renderPage("general"), /Current startup failure/u);
+    assert.doesNotMatch(await renderPage("general"), /Earlier startup failed/u);
+  } finally {
+    if (originalResponse === undefined) delete responses.set_system_proxy_enabled;
+    else responses.set_system_proxy_enabled = originalResponse;
+    state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
 test("the General page surfaces approval and capability reasons", async () => {
   await setEngine({
     snapshot: { desired_mode: "tunnel", generation: 1, config_digest: null, state: { state: "awaiting_approval", generation: 1 } },

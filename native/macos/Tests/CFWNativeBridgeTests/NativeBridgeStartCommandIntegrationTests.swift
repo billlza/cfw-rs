@@ -862,6 +862,59 @@ struct NativeBridgeStartCommandIntegrationTests {
     #expect(unknownSystemExtensionFailure.code == .unavailable)
   }
 
+  @Test func extensionValidationFailureRemainsDistinctAcrossTheBridge() throws {
+    let mapped = NativeBridgeCoordinator.map(
+      AppleNetworkError.systemExtensionInstallationFailed(
+        domain: OSSystemExtensionErrorDomain,
+        code: OSSystemExtensionError.validationFailed.rawValue,
+        message: "private diagnostic")
+    )
+    .responseFailure
+    #expect(mapped.code == .systemExtensionValidationFailed)
+    #expect(mapped.message.contains("extension configuration or signature"))
+    let encoded = try JSONEncoder().encode(mapped)
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("private diagnostic"))
+    #expect(try JSONDecoder().decode(NativeBridgeFailure.self, from: encoded) == mapped)
+  }
+
+  @Test func proxyFailureStageIsPreservedWithoutRawDiagnostics() throws {
+    let cases: [(String, NativeBridgeErrorCode)] = [
+      ("proxy-configuration-failed", .systemProxyConfigurationFailed),
+      ("proxy-engine-creation-failed", .systemProxyRuntimeFailed),
+      ("proxy-engine-start-failed", .systemProxyRuntimeFailed),
+      ("system-proxy-preferences-failed", .systemProxyPreferencesFailed),
+      ("proxy-ownership-journal-failed", .systemProxyJournalFailed),
+      ("proxy-engine-lease-failed", .systemProxyAuthorityFailed),
+    ]
+    for (code, expected) in cases {
+      let failure = EngineFailure(code: code, message: "private credential", isRetryable: false)
+      let mapped = NativeBridgeCoordinator.map(ProxyAgentHostError.agentFailure(failure))
+        .responseFailure
+      #expect(mapped.code == expected)
+      #expect(mapped.message == expected.stableMessage)
+      let encoded = try JSONEncoder().encode(mapped)
+      #expect(!String(decoding: encoded, as: UTF8.self).contains("private credential"))
+      #expect(try JSONDecoder().decode(NativeBridgeFailure.self, from: encoded) == mapped)
+    }
+  }
+
+  @Test func proxyAuthorityAndCleanupErrorsRetainTheirRecoveryMeaning() throws {
+    for code in AuthorityErrorCode.allCases {
+      let failure = EngineFailure(
+        code: "authority-\(code.rawValue)", message: "private diagnostic", isRetryable: false)
+      let mapped = NativeBridgeCoordinator.map(ProxyAgentHostError.agentFailure(failure))
+        .responseFailure
+      #expect(mapped.code == code.nativeBridgeCode)
+      #expect(mapped.message == code.stableMessage)
+    }
+    let cleanup = EngineFailure(
+      code: "proxy-cleanup-failed", message: "private cleanup diagnostic", isRetryable: false)
+    let mapped = NativeBridgeCoordinator.map(ProxyAgentHostError.agentFailure(cleanup))
+      .responseFailure
+    #expect(mapped.code == .cleanupUnproven)
+    #expect(!mapped.message.contains("private"))
+  }
+
   @Test func existingProxyFailureRemainsSpecificWithoutEchoingSuppliedDiagnostics() throws {
     let failure = EngineFailure(
       code: "existing-system-proxy", message: "private-source-value", isRetryable: false)

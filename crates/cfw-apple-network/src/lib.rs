@@ -28,6 +28,12 @@ pub enum NativeBridgeErrorCode {
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
+    SystemExtensionValidationFailed,
+    SystemProxyConfigurationFailed,
+    SystemProxyRuntimeFailed,
+    SystemProxyPreferencesFailed,
+    SystemProxyJournalFailed,
+    SystemProxyAuthorityFailed,
     ExistingSystemProxy,
     CredentialsUnavailable,
     CredentialConflict,
@@ -75,6 +81,18 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
             NativeBridgeErrorCode::PermissionDenied => Self::PermissionDenied,
             NativeBridgeErrorCode::ApprovalDenied => Self::ApprovalDenied,
             NativeBridgeErrorCode::ConfigurationRejected => Self::ConfigurationRejected,
+            NativeBridgeErrorCode::SystemExtensionValidationFailed => {
+                Self::SystemExtensionValidationFailed
+            }
+            NativeBridgeErrorCode::SystemProxyConfigurationFailed => {
+                Self::SystemProxyConfigurationFailed
+            }
+            NativeBridgeErrorCode::SystemProxyRuntimeFailed => Self::SystemProxyRuntimeFailed,
+            NativeBridgeErrorCode::SystemProxyPreferencesFailed => {
+                Self::SystemProxyPreferencesFailed
+            }
+            NativeBridgeErrorCode::SystemProxyJournalFailed => Self::SystemProxyJournalFailed,
+            NativeBridgeErrorCode::SystemProxyAuthorityFailed => Self::SystemProxyAuthorityFailed,
             NativeBridgeErrorCode::ExistingSystemProxy => Self::ExistingSystemProxy,
             NativeBridgeErrorCode::CredentialsUnavailable => Self::CredentialsUnavailable,
             NativeBridgeErrorCode::CredentialConflict => Self::CredentialConflict,
@@ -132,6 +150,16 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
             BackendErrorKind::PermissionDenied => Self::PermissionDenied,
             BackendErrorKind::ApprovalDenied => Self::ApprovalDenied,
             BackendErrorKind::ConfigurationRejected => Self::ConfigurationRejected,
+            BackendErrorKind::SystemExtensionValidationFailed => {
+                Self::SystemExtensionValidationFailed
+            }
+            BackendErrorKind::SystemProxyConfigurationFailed => {
+                Self::SystemProxyConfigurationFailed
+            }
+            BackendErrorKind::SystemProxyRuntimeFailed => Self::SystemProxyRuntimeFailed,
+            BackendErrorKind::SystemProxyPreferencesFailed => Self::SystemProxyPreferencesFailed,
+            BackendErrorKind::SystemProxyJournalFailed => Self::SystemProxyJournalFailed,
+            BackendErrorKind::SystemProxyAuthorityFailed => Self::SystemProxyAuthorityFailed,
             BackendErrorKind::ExistingSystemProxy => Self::ExistingSystemProxy,
             BackendErrorKind::CredentialsUnavailable => Self::CredentialsUnavailable,
             BackendErrorKind::CredentialConflict => Self::CredentialConflict,

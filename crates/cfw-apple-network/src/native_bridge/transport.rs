@@ -323,6 +323,27 @@ mod tests {
     }
 
     #[test]
+    fn startup_failure_stages_keep_their_codes_without_exposing_native_text() {
+        for kind in [
+            BackendErrorKind::SystemExtensionValidationFailed,
+            BackendErrorKind::SystemProxyConfigurationFailed,
+            BackendErrorKind::SystemProxyRuntimeFailed,
+            BackendErrorKind::SystemProxyPreferencesFailed,
+            BackendErrorKind::SystemProxyJournalFailed,
+            BackendErrorKind::SystemProxyAuthorityFailed,
+        ] {
+            let error = map_wire_failure(NativeBridgeFailure {
+                code: kind,
+                message: "private native credential".into(),
+            });
+            assert_eq!(BackendErrorKind::from(error.code), kind);
+            assert_eq!(error.message, kind.stable_message());
+            assert!(!error.message.contains("credential"));
+            assert!(!kind.allows_automatic_retry(false));
+        }
+    }
+
+    #[test]
     fn global_authority_failure_preserves_code_and_discards_wire_text() {
         let error = map_wire_failure(NativeBridgeFailure {
             code: BackendErrorKind::GlobalAuthorityUnavailable,

@@ -120,10 +120,10 @@ AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
 # not an authentication mechanism and do not defend against the repository
 # owner. The release-freeze source digest independently binds the raw file.
 AUTHORITY_SIGNING_PREFIX_SHA256 = (
-    "e2a5beefcf5cfa8a30d1705f57f6c6e85ed7bcb8a0cb4d6f0bbe7555353ca45e"
+    "4749eb0500f4413265a3dd916f40898cce47075d783677e70ad1d61cb22b409c"
 )
 AUTHORITY_SIGNING_SUFFIX_SHA256 = (
-    "9ff330b7a16c564eb5c4e9c0cb9851f1a2ccb8c1d1a1bb65bb186341b093a12d"
+    "dd519f481a54932c6684ce5d1a22aab0a7b0df2979d2a49145d36b6a0318785c"
 )
 DEPLOYMENT_TARGET = "15.0"
 TOMBSTONE_PROVENANCE_COMMAND = "\n".join(
@@ -472,7 +472,7 @@ def verify_xcodegen_spec(project: str) -> None:
     # The Packet Tunnel Mach service must be declared in the generated project.
     require_text(
         project,
-        f"NEMachServiceName: $(TeamIdentifierPrefix){EXTENSION_ID}",
+        f"NEMachServiceName: $(TeamIdentifierPrefix){APP_GROUP}.packet-tunnel",
         "Packet Tunnel Mach service declaration",
     )
 
@@ -582,7 +582,7 @@ def verify_packet_tunnel_info(info: dict[str, Any]) -> None:
         )
     if (
         network.get("NEMachServiceName")
-        != f"$(TeamIdentifierPrefix){EXTENSION_ID}"
+        != f"$(TeamIdentifierPrefix){APP_GROUP}.packet-tunnel"
     ):
         raise NativeProductGraphError(
             "generated Packet Tunnel Info.plist Mach service declaration is missing or wrong"

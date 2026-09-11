@@ -341,7 +341,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       capability = try authorization.consumeCapability()
     } catch {
       let deferredStops = finishUnboundStart(startID)
-      completion(.failure(.engineLease(Self.authorityMessage(error))))
+      completion(.failure(Self.authorityFailure(error)))
       completeDeferredStops(deferredStops, with: .success(()))
       return
     }
@@ -360,7 +360,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       lease = try await authority.bind(capability, context: context)
     } catch {
       let deferredStops = finishUnboundStart(startID)
-      completion(.failure(.engineLease(Self.authorityMessage(error))))
+      completion(.failure(Self.authorityFailure(error)))
       completeDeferredStops(deferredStops, with: .success(()))
       return
     }
@@ -466,7 +466,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       // retains the owner context so an explicit stop or another revocation can
       // retry the exact operation instead of manufacturing global Off.
       finishFailedStart(
-        originalError: .engineLease(Self.authorityMessage(error)),
+        originalError: Self.authorityFailure(error),
         descriptor: descriptor,
         completion: completion)
     }
@@ -688,6 +688,16 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
 
   private func monotonicTimestamp() -> UInt64 {
     max(1, clock.nowMilliseconds())
+  }
+
+  private static func authorityFailure(_ error: Error) -> ProxySessionLifecycleError {
+    if let domain = error as? AuthorityDomainError {
+      return .authority(domain.code)
+    }
+    if error is SystemProxyPreferencesError {
+      return .preferences(error.localizedDescription)
+    }
+    return .engineLease(GlobalAuthorityGateError.stableMessage)
   }
 
   private static func authorityMessage(_ error: Error) -> String {

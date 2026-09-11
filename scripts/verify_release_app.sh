@@ -438,8 +438,8 @@ if context is CandidateBundleContext.UNSIGNED_HOST:
 print(paths.build_identity.build_version)
 PY
 )" || die "bundle build identity is invalid"
-[[ "$build_number" == "40052" ]] ||
-  die "release application is not the fixed GA build 40052"
+[[ "$build_number" == "40053" ]] ||
+  die "release application is not the fixed GA build 40053"
 case "$verification_context" in
   signing-attempt-work|signing-attempt-publish-ready)
     ((pre_notary == 1)) ||
@@ -451,7 +451,7 @@ case "$verification_context" in
     die "release application verification context is invalid"
     ;;
 esac
-signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40052/profiles/signing-preflight.json"
+signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40053/profiles/signing-preflight.json"
 require_regular_file "$signing_preflight_manifest"
 expected_signing_certificate_sha256="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \
@@ -703,7 +703,7 @@ app_version="$(plist_value "$app_path/Contents/Info.plist" CFBundleShortVersionS
   die "Packet Tunnel version does not match the host app"
 [[ "$(plist_value "$agent_path/Contents/Info.plist" CFBundleShortVersionString)" == "$app_version" ]] ||
   die "ProxyAgent version does not match the host app"
-[[ "$(plist_value "$extension_path/Contents/Info.plist" NetworkExtension:NEMachServiceName)" == "$expected_team_id.$expected_extension_id" ]] ||
+[[ "$(plist_value "$extension_path/Contents/Info.plist" NetworkExtension:NEMachServiceName)" == "$expected_app_group.packet-tunnel" ]] ||
   die "Packet Tunnel Mach service identity mismatch"
 [[ "$(plist_value "$extension_path/Contents/Info.plist" NetworkExtension:NEProviderClasses:com.apple.networkextension.packet-tunnel)" == "CFWPacketTunnel.PacketTunnelProvider" ]] ||
   die "Packet Tunnel provider class identity mismatch"

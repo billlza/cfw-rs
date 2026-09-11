@@ -495,7 +495,7 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     try #require(start.wait())
 
     let outcome = try #require(start.values.first)
-    guard case .failure(.engineLease) = outcome else {
+    guard case .failure(.authority(.ticketAlreadyRedeemed)) = outcome else {
       Issue.record("Expected fail-closed engine-lease (Authority) failure")
       return
     }
@@ -518,7 +518,7 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     ) { start.record($0) }
     #expect(start.wait())
 
-    guard case .failure(.engineLease) = start.values[0] else {
+    guard case .failure(.authority(.globalAuthorityIdentityRejected)) = start.values[0] else {
       Issue.record("Expected fail-closed Authority rejection")
       return
     }
@@ -685,7 +685,7 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
     #expect(start.wait())
 
-    guard case .failure(.engineLease) = start.values[0] else {
+    guard case .failure(.authority(.globalAuthorityUnavailable)) = start.values[0] else {
       Issue.record("Expected fail-closed readiness refusal")
       return
     }
@@ -707,7 +707,7 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
     #expect(start.wait())
 
-    guard case .failure(.engineLease) = start.values[0] else {
+    guard case .failure(.authority(.globalAuthorityUnavailable)) = start.values[0] else {
       Issue.record("Expected fail-closed attestation failure")
       return
     }

@@ -21,6 +21,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case recoveryBlocked(String)
   case authorizationRequired
   case engineLease(String)
+  case authority(AuthorityErrorCode)
   case configuration(String)
   case engineCreation(String)
   case engineStart(String)
@@ -44,6 +45,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
     case .recoveryBlocked: code = "proxy-recovery-blocked"
     case .authorizationRequired: code = "system-proxy-authorization-required"
     case .engineLease: code = "proxy-engine-lease-failed"
+    case .authority(let failure): code = "authority-\(failure.rawValue)"
     case .configuration: code = "proxy-configuration-failed"
     case .engineCreation: code = "proxy-engine-creation-failed"
     case .engineStart: code = "proxy-engine-start-failed"
@@ -81,6 +83,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "Approve macOS network authorization before starting System Proxy."
     case .engineLease:
       "The machine-wide engine lease operation failed."
+    case .authority(let failure):
+      failure.stableMessage
     case .configuration:
       "System Proxy configuration validation failed."
     case .engineCreation:

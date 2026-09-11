@@ -501,7 +501,7 @@ def verify_candidate(
     require_plist_value(
         network_extension,
         "NEMachServiceName",
-        f"{EXPECTED_TEAM_ID}.{EXPECTED_EXTENSION_ID}",
+        f"{EXPECTED_TEAM_ID}.group.com.bill.clashformac.packet-tunnel",
         extension_info_path,
     )
     require_plist_value(

@@ -374,8 +374,8 @@ struct ProxyOwnerBindingIntegrationTests {
     fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
     #expect(start.wait())
 
-    guard case .failure(.engineLease) = start.values[0] else {
-      Issue.record("Expected fail-closed readiness refusal for a partial application")
+    guard case .failure(.authority(.globalAuthorityUnavailable)) = start.values[0] else {
+      Issue.record("Expected typed readiness refusal for a partial application")
       return
     }
     // No ready attestation was ever sent, and the owned state is torn down.

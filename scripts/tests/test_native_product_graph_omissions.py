@@ -58,7 +58,7 @@ class XcodeGenSpecTests(unittest.TestCase):
 
     def test_missing_packet_tunnel_mach_service_declaration_fails_closed(self) -> None:
         mutated = self.project.replace(
-            "NEMachServiceName: $(TeamIdentifierPrefix)com.bill.clashformac.packet-tunnel",
+            "NEMachServiceName: $(TeamIdentifierPrefix)group.com.bill.clashformac.packet-tunnel",
             "NEMachServiceName: com.example.wrong",
         )
         with self.assertRaisesRegex(NativeProductGraphError, "Mach service"):
@@ -201,7 +201,7 @@ def _valid_packet_info() -> dict[str, object]:
     return {
         "CFBundleExecutable": "$(EXECUTABLE_NAME)",
         "NetworkExtension": {
-            "NEMachServiceName": "$(TeamIdentifierPrefix)com.bill.clashformac.packet-tunnel",
+            "NEMachServiceName": "$(TeamIdentifierPrefix)group.com.bill.clashformac.packet-tunnel",
             "NEProviderClasses": {
                 "com.apple.networkextension.packet-tunnel": "CFWPacketTunnel.PacketTunnelProvider"
             },
@@ -210,6 +210,22 @@ def _valid_packet_info() -> dict[str, object]:
 
 
 class PacketTunnelInfoTests(unittest.TestCase):
+    def test_shipped_mach_service_is_inside_an_entitled_app_group(self) -> None:
+        info = plistlib.loads((REPO_ROOT / "native/macos/Config/PacketTunnel-Info.plist").read_bytes())
+        entitlements = plistlib.loads((REPO_ROOT / "native/macos/Config/PacketTunnel.entitlements").read_bytes())
+        service = info["NetworkExtension"]["NEMachServiceName"]
+        groups = entitlements["com.apple.security.application-groups"]
+        self.assertTrue(
+            any(service.startswith(group + ".") for group in groups),
+            "NetworkExtension requires NEMachServiceName to have an entitled App Group prefix",
+        )
+
+    def test_team_prefixed_service_without_app_group_is_rejected(self) -> None:
+        info = _valid_packet_info()
+        info["NetworkExtension"]["NEMachServiceName"] = "$(TeamIdentifierPrefix)com.bill.clashformac.packet-tunnel"
+        with self.assertRaisesRegex(NativeProductGraphError, "Mach service"):
+            verify_packet_tunnel_info(info)
+
     def test_valid_info_passes(self) -> None:
         verify_packet_tunnel_info(_valid_packet_info())
 

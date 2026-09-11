@@ -116,6 +116,12 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case permissionDenied = "permission_denied"
   case approvalDenied = "approval_denied"
   case configurationRejected = "configuration_rejected"
+  case systemExtensionValidationFailed = "system_extension_validation_failed"
+  case systemProxyConfigurationFailed = "system_proxy_configuration_failed"
+  case systemProxyRuntimeFailed = "system_proxy_runtime_failed"
+  case systemProxyPreferencesFailed = "system_proxy_preferences_failed"
+  case systemProxyJournalFailed = "system_proxy_journal_failed"
+  case systemProxyAuthorityFailed = "system_proxy_authority_failed"
   case existingSystemProxy = "existing_system_proxy"
   case mixedEndpointInUse = "mixed_endpoint_in_use"
   case controllerEndpointInUse = "controller_endpoint_in_use"
@@ -162,6 +168,18 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
     case .permissionDenied: "The native operation was denied."
     case .approvalDenied: "Required operating-system approval was denied."
     case .configurationRejected: "The native configuration was rejected."
+    case .systemProxyAuthorityFailed:
+      "System Proxy ownership or readiness could not be confirmed by the network authority."
+    case .systemExtensionValidationFailed:
+      "macOS rejected the Packet Tunnel extension configuration or signature. Install a corrected application build."
+    case .systemProxyConfigurationFailed:
+      "System Proxy could not resolve or validate the selected configuration."
+    case .systemProxyRuntimeFailed:
+      "The System Proxy runtime could not be created or started."
+    case .systemProxyPreferencesFailed:
+      "System Proxy could not read, apply, or verify macOS network preferences."
+    case .systemProxyJournalFailed:
+      "System Proxy could not save its network recovery record."
     case .existingSystemProxy:
       "Another system proxy is enabled. Turn it off in its app or System Settings before enabling Clash for Mac. Existing proxy settings were not changed."
     case .mixedEndpointInUse: "The mixed listener endpoint is already in use."

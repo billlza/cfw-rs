@@ -934,6 +934,12 @@ pub enum BackendErrorKind {
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
+    SystemExtensionValidationFailed,
+    SystemProxyConfigurationFailed,
+    SystemProxyRuntimeFailed,
+    SystemProxyPreferencesFailed,
+    SystemProxyJournalFailed,
+    SystemProxyAuthorityFailed,
     ExistingSystemProxy,
     CredentialsUnavailable,
     CredentialConflict,
@@ -1045,6 +1051,12 @@ impl BackendErrorKind {
             Self::PermissionDenied
             | Self::ApprovalDenied
             | Self::ConfigurationRejected
+            | Self::SystemExtensionValidationFailed
+            | Self::SystemProxyConfigurationFailed
+            | Self::SystemProxyRuntimeFailed
+            | Self::SystemProxyPreferencesFailed
+            | Self::SystemProxyJournalFailed
+            | Self::SystemProxyAuthorityFailed
             | Self::ExistingSystemProxy
             | Self::CredentialsUnavailable
             | Self::CredentialConflict
@@ -1077,6 +1089,24 @@ impl BackendErrorKind {
             Self::PermissionDenied => "The native operation was denied.",
             Self::ApprovalDenied => "Required operating-system approval was denied.",
             Self::ConfigurationRejected => "The native configuration was rejected.",
+            Self::SystemProxyAuthorityFailed => {
+                "System Proxy ownership or readiness could not be confirmed by the network authority."
+            }
+            Self::SystemExtensionValidationFailed => {
+                "macOS rejected the Packet Tunnel extension configuration or signature. Install a corrected application build."
+            }
+            Self::SystemProxyConfigurationFailed => {
+                "System Proxy could not resolve or validate the selected configuration."
+            }
+            Self::SystemProxyRuntimeFailed => {
+                "The System Proxy runtime could not be created or started."
+            }
+            Self::SystemProxyPreferencesFailed => {
+                "System Proxy could not read, apply, or verify macOS network preferences."
+            }
+            Self::SystemProxyJournalFailed => {
+                "System Proxy could not save its network recovery record."
+            }
             Self::ExistingSystemProxy => {
                 "Another system proxy is enabled. Turn it off in its app or System Settings before enabling Clash for Mac. Existing proxy settings were not changed."
             }

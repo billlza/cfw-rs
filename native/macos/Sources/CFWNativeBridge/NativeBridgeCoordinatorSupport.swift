@@ -236,12 +236,34 @@ extension NativeBridgeCoordinator {
       case .authorizationFailed:
         return .failure(.unavailable, error.localizedDescription)
       case .agentFailure(let failure):
+        if failure.code.hasPrefix("authority-"), !failure.isRetryable,
+          let code = AuthorityErrorCode(
+            rawValue: String(failure.code.dropFirst("authority-".count)))
+        {
+          return .failure(code.nativeBridgeCode, code.stableMessage)
+        }
         if failure.code == "system-proxy-authorization-required" {
           return .failure(.permissionDenied, failure.message)
         }
         if failure.code == "existing-system-proxy" {
           return .failure(
             .existingSystemProxy, NativeBridgeErrorCode.existingSystemProxy.stableMessage)
+        }
+        let operationFailure: NativeBridgeErrorCode? =
+          switch failure.code {
+          case "proxy-configuration-failed", "configuration-rejected":
+            .systemProxyConfigurationFailed
+          case "proxy-engine-creation-failed", "proxy-engine-start-failed", "proxy-engine-crashed":
+            .systemProxyRuntimeFailed
+          case "system-proxy-preferences-failed": .systemProxyPreferencesFailed
+          case "proxy-ownership-journal-failed": .systemProxyJournalFailed
+          case "proxy-engine-lease-failed": .systemProxyAuthorityFailed
+          case "proxy-cleanup-failed", "system-proxy-ownership-conflict", "proxy-recovery-blocked":
+            .cleanupUnproven
+          default: nil
+          }
+        if let operationFailure, !failure.isRetryable {
+          return .failure(operationFailure, operationFailure.stableMessage)
         }
         return .failure(
           endpointConflictCode(failure, allowsMixed: true)
@@ -310,6 +332,17 @@ extension NativeBridgeCoordinator {
       case .invalidConfigurationSlot:
         return .failure(.configurationRejected, error.localizedDescription)
       case .systemExtensionInstallationFailed(let domain, let code, let message):
+        if domain == OSSystemExtensionErrorDomain,
+          [
+            OSSystemExtensionError.validationFailed.rawValue,
+            OSSystemExtensionError.codeSignatureInvalid.rawValue,
+            OSSystemExtensionError.missingEntitlement.rawValue,
+          ].contains(code)
+        {
+          return .failure(
+            .systemExtensionValidationFailed,
+            NativeBridgeErrorCode.systemExtensionValidationFailed.stableMessage)
+        }
         let mappedCode: NativeBridgeErrorCode =
           domain == OSSystemExtensionErrorDomain
             && code == OSSystemExtensionError.authorizationRequired.rawValue

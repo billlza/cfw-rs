@@ -48,7 +48,14 @@ extension NativeBridgeCoordinator {
         configuration: configuration,
         descriptor: descriptor)
     } catch {
-      throw Self.map(error)
+      let failure = Self.map(error)
+      // Preparation can fail after Authority has recorded the attempt but before
+      // its authorization reply reaches us. Keep the exact failed generation
+      // until both the owner and independent Authority observation prove Off.
+      try await proveFailedStartOff(
+        NativeStopTransaction(
+          owner: owner, commandContext: request.context, descriptor: descriptor))
+      throw failure
     }
     do {
       try Task.checkCancellation()

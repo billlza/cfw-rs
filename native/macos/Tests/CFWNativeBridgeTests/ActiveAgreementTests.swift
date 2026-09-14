@@ -575,7 +575,10 @@ private func maintenanceErrorCode(
   }
 }
 
-@Test func orphanedServiceRetirementPreservesRecoveryStateAndDoesNotClaimOff() async throws {
+@Test(arguments: [ConfigurationSlot.localProxy, .systemProxy])
+func orphanedServiceRetirementPreservesRecoveryStateAndDoesNotClaimOff(slot: ConfigurationSlot)
+  async throws
+{
   let events = EventLedger()
   let maintainer = StubServiceMaintainer(onPerform: { mutation, service in
     #expect(mutation == .unregister)
@@ -585,7 +588,7 @@ private func maintenanceErrorCode(
     proxy: .proxyFailed(
       EngineFailure(
         code: "system-proxy-ownership-conflict", message: "Pending recovery", isRetryable: false),
-      configuration: try descriptor(slot: .systemProxy), sequence: 3),
+      configuration: try descriptor(slot: slot), sequence: 3),
     tunnel: .off,
     observation: AuthorityOwnershipObservation(state: .quarantined, lease: nil),
     onAuthorityObservation: {
@@ -653,14 +656,14 @@ func orphanedServiceRetirementRequiresTheAuthorityProcessToBeAbsent(
   #expect(maintainer.unregisterCalls == 0)
 }
 
-@Test(arguments: [true, false])
-func orphanedServiceRetirementRejectsActiveOwners(proxyActive: Bool) async throws {
+@Test(arguments: [ConfigurationSlot.localProxy, .systemProxy, .tunnel])
+func orphanedServiceRetirementRejectsActiveOwners(slot: ConfigurationSlot) async throws {
   let maintainer = StubServiceMaintainer()
   let subject = coordinator(
-    proxy: proxyActive
-      ? .proxyActive(configuration: try descriptor(slot: .systemProxy), sequence: 1) : .off,
-    tunnel: proxyActive
-      ? .off : .tunnelActive(configuration: try descriptor(slot: .tunnel), sequence: 1),
+    proxy: slot.isProxyAgent
+      ? .proxyActive(configuration: try descriptor(slot: slot), sequence: 1) : .off,
+    tunnel: slot.isProxyAgent
+      ? .off : .tunnelActive(configuration: try descriptor(slot: slot), sequence: 1),
     observation: AuthorityOwnershipObservation(state: .quarantined, lease: nil),
     serviceMaintainer: maintainer)
   #expect(await maintenanceErrorCode(subject, action: .retireOrphanedServices) != nil)

@@ -114,6 +114,9 @@ import { createProviderUI } from "./providers.js";
 import { createRuntimeSettingsUI, RUNTIME_LOG_LEVELS } from "./runtime-settings.js";
 import { createGeneralView } from "./general.js";
 import { createProxyView } from "./proxies.js";
+import { createEditingRender } from "./editing-render.js";
+const editingRender = createEditingRender({ document,
+  requestFrame: (callback) => window.requestAnimationFrame(callback), rerender: () => renderPage() });
 const proxyView = createProxyView({ state, runtime, escapeHtml, delayFailureLabel, engineStateLabel, engineIsOff });
 const { delayClass, delayLabel, delayConcurrency, cancelDelayTest, visibleProxyNodeNames, orderNamesVisibleFirst, applyDelayToProxyNodes, patchProxyDelayLabels, finalizeDelayTestNames, slugDomId, isManualProxyGroup, freshProxyControllerSnapshotAvailable, displayedProxyGroups, activeProxyGroup, hideTimedOutProxies, renderProxies, modeIcon, changePage: changeProxyPage, revealSelected: revealSelectedProxy } = proxyView;
 
@@ -2236,6 +2239,13 @@ if (
 }
 
 function renderPage() {
+  editingRender.render([
+    state.activePage, state.glassDialog, state.runtimeSettingsDialog,
+    state.automationDialog, state.profileInspector,
+  ], renderPageContent);
+}
+
+function renderPageContent() {
   const page = pageById(state.activePage);
   const renderer = pageRenderers[page.id];
   if (typeof renderer !== "function") {
@@ -2673,6 +2683,7 @@ function bindPageEvents() {
 function bindGlobalEvents() {
   if (runtime.globalEventsBound) return;
   runtime.globalEventsBound = true;
+  editingRender.bind();
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && (state.profileContextMenu || state.glassDialog)) {

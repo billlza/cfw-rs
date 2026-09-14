@@ -93,8 +93,12 @@ private enum NativeBridgeRequestShape {
     case .testProfileDelays:
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
-      try exactKeys(
-        request, ["audience", "config_json", "credential_slots", "proxies", "timeout_ms"])
+      var keys: Set<String> = [
+        "audience", "config_json", "credential_slots", "proxies", "timeout_ms",
+      ]
+      if request["target_url"] != nil { keys.insert("target_url") }
+      if request["expected_status"] != nil { keys.insert("expected_status") }
+      try exactKeys(request, keys)
       try validateAudience(request["audience"])
       try validateCredentialSlots(request["credential_slots"])
     case .preflightCutover:

@@ -149,7 +149,7 @@ extension PreparedStartWire: AuthorityV1WireModel {
     try operation.validateAuthorityV1()
     guard expiresMonotonic > 0,
       (operation.mode == .tunnel) == (ticket != nil),
-      (operation.mode == .systemProxy) == (ownerCapability != nil),
+      operation.mode.isProxyAgent == (ownerCapability != nil),
       preferenceDescriptorSHA256 == operation.identitySHA256,
       ticket?.count ?? AuthorityV1Limits.ticketBytes == AuthorityV1Limits.ticketBytes,
       ownerCapability?.count ?? AuthorityV1Limits.capabilityBytes

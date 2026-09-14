@@ -466,3 +466,45 @@ then passed all-target/all-feature clippy and 801 Rust tests in
 `parity-all-features-clippy-v1.log` and `parity-all-features-rust-v1.log`. This
 supersedes the narrower 754-test Rust run for release-feature coverage. The
 second preflight is retained as `source-attempt-2`; signing/freezing had not begun.
+
+
+## Installed 40062 defects and successor 40063
+
+40062 completed notarization, installation and unchanged-profile verification.
+Installed Off-mode latency and Local Proxy startup then exposed two older
+wire guards missed by DTO-only and service-core-only tests. The fixes admit
+the defined optional probe URL/status fields and Local Proxy owner capability
+through the complete codecs. Unknown fields, malformed policy and wrong-mode
+capabilities remain rejected. A shared Rust/Swift command fixture now covers
+that envelope boundary. Preparation failure retains its exact generation until
+owner and independent Authority Off observations permit cleanup acknowledgement.
+Stale Stop requests remain rejected; an unavailable observation remains pending.
+The orphaned-service path now recognizes failed Local Proxy owners while still
+rejecting active owners, live Authority, active system proxy and unobservable
+network/process state. Journals are preserved and this path does not claim Off.
+
+Red/green records: profile-probe-envelope-red-v1.log,
+local-capability-wire-red-v1.log, preparation-off-recovery-red-v1.log,
+local-orphan-red-v2.log, native-wire-recovery-green-v1.log and
+native-installed-fixes-full-v2.log. The first orphan test attempt failed to
+compile because its test used the wrong type name; v2 reproduced the actual
+old implementation failure. The linked native run passes 674 tests/25 suites.
+
+The installed dashboard also lost focus after the first search character.
+Editing refresh is now a separate module that preserves focus, selection and
+scroll without storing field contents, and defers replacement during IME
+composition. All 130 UI tests pass; browser checks cover sequential typing,
+mid-string edits and Unicode. Real macOS IME and successor-native acceptance
+remain pending. Main UI, runtime, automation, provider, proxy, rule, connection,
+DNS and import modules were split by responsibility in the client-parity change;
+unrelated recovery/evidence files were retained to avoid unneeded state changes.
+
+40063 is allocated for these changed product bytes. Frozen 40062 receipts remain
+immutable. Installed CFM was independently proven Off after the failed start;
+CFW continues to own TUN and System Proxy. No delayed network action is pending.
+
+Successor source checks also pass: 802 Rust tests across all workspace targets
+and features, clippy with warnings denied, 130 UI tests and UI bundle build,
+390 release identity/input/graph/freeze tests in the closed toolchain environment,
+and all build-boundary checks. The final orphan tests cover active Local Proxy,
+System Proxy and Tunnel rejection. No security guard or assertion was relaxed.

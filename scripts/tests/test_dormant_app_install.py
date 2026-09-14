@@ -77,7 +77,7 @@ from scripts.dormant_app_install import (
 # install admits a predecessor only against its exact recorded tree digest,
 # so an invented digest would be rejected as a tampered bundle, not admitted.
 OLD = AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256)
-NEW = AppIdentity("0.4.0", "40062", "b" * 64)
+NEW = AppIdentity("0.4.0", "40063", "b" * 64)
 # The installed 40048 with its real frozen tree identity: the production
 # predecessor of this build.
 INSTALLED = AppIdentity("0.4.0", "40048", INSTALLED_40048_PREDECESSOR.tree_sha256)
@@ -1231,27 +1231,27 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "candidate_toolchain_override")
 
-    def test_ga_profile_has_one_fixed_40062_path_and_journal(self) -> None:
+    def test_ga_profile_has_one_fixed_40063_path_and_journal(self) -> None:
         paths = InstallPaths.production()
 
         self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "40062")
+        self.assertEqual(paths.profile.build_number, "40063")
         # An unbound profile cannot express a predecessor claim at all; the
         # predecessor is observed on the machine and bound separately.
         self.assertFalse(hasattr(paths.profile, "previous_build_number"))
         self.assertEqual(
             paths.repository,
-            paths.operator_repository / "target/release-worktrees/40062",
+            paths.operator_repository / "target/release-worktrees/40063",
         )
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                "/target/candidates/0.4.0/ga/40062/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40063/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                "target/candidates/0.4.0/ga/40062/signing-output/signed-native-products"
+                "target/candidates/0.4.0/ga/40063/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1442,11 +1442,11 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40062_ga_root(self) -> None:
+    def test_production_candidate_is_fixed_to_40063_ga_root(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/candidates/0.4.0/ga/40062/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40063/signed/Clash for Mac.app"
             )
         )
 
@@ -1454,7 +1454,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
         operator = Path("/operator")
-        artifact = operator / "target/release-worktrees/40062"
+        artifact = operator / "target/release-worktrees/40063"
         sources = FrozenReleaseSources(
             executor=ExecutorSource(operator, "a" * 40, "b" * 64),
             artifact=ExecutorSource(artifact, "c" * 40, "d" * 64),
@@ -1491,7 +1491,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                 paths.release_toolchain_root.mkdir(parents=True)
                 paths.candidate_manifest.parent.mkdir(parents=True)
                 paths.candidate_manifest.write_text(
-                    '{"metadata":{"buildNumber":"40062"}}\n', encoding="utf-8"
+                    '{"metadata":{"buildNumber":"40063"}}\n', encoding="utf-8"
                 )
                 sources = FrozenReleaseSources(
                     executor=ExecutorSource(operator, "a" * 40, "b" * 64),
@@ -1741,14 +1741,14 @@ class InstallPredecessorTests(unittest.TestCase):
             INSTALLED_40043_PREDECESSOR.tree_sha256,
             "429d40db9095775a9498a9445799025536c88ff4e900dde14f7a018d8723edf5",
         )
-        predecessor = resolve_predecessor(historical, "40062")
+        predecessor = resolve_predecessor(historical, "40063")
         self.assertEqual(predecessor, INSTALLED_40043_PREDECESSOR)
         self.assertEqual(predecessor.prove_off_action, "prove-off")
         self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
         self.assertIsNone(predecessor.authority_recovery)
         self.assertEqual(bind_journal_predecessor(historical), predecessor)
         for resolve in (
-            lambda observed: resolve_predecessor(observed, "40062"),
+            lambda observed: resolve_predecessor(observed, "40063"),
             bind_journal_predecessor,
         ):
             with self.assertRaises(InstallError) as rejected:
@@ -1765,14 +1765,14 @@ class InstallPredecessorTests(unittest.TestCase):
             INSTALLED_40044_PREDECESSOR.tree_sha256,
             "41ae01c3903f8ab644d74c5ff185a282a5978e4b0a8376198518046408745248",
         )
-        predecessor = resolve_predecessor(historical, "40062")
+        predecessor = resolve_predecessor(historical, "40063")
         self.assertEqual(predecessor, INSTALLED_40044_PREDECESSOR)
         self.assertEqual(predecessor.prove_off_action, "prove-off")
         self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
         self.assertIsNone(predecessor.authority_recovery)
         self.assertEqual(bind_journal_predecessor(historical), predecessor)
         for resolve in (
-            lambda observed: resolve_predecessor(observed, "40062"),
+            lambda observed: resolve_predecessor(observed, "40063"),
             bind_journal_predecessor,
         ):
             with self.assertRaises(InstallError) as rejected:
@@ -1791,7 +1791,7 @@ class InstallPredecessorTests(unittest.TestCase):
         for expected, digest in cases:
             with self.subTest(build=expected.build_number):
                 observed = AppIdentity("0.4.0", expected.build_number, digest)
-                predecessor = resolve_predecessor(observed, "40062")
+                predecessor = resolve_predecessor(observed, "40063")
                 self.assertEqual(predecessor, expected)
                 self.assertEqual(predecessor.tree_sha256, digest)
                 self.assertEqual(predecessor.prove_off_action, "prove-off")
@@ -1799,7 +1799,7 @@ class InstallPredecessorTests(unittest.TestCase):
                 self.assertIsNone(predecessor.authority_recovery)
                 self.assertEqual(bind_journal_predecessor(observed), predecessor)
                 for resolve in (
-                    lambda value: resolve_predecessor(value, "40062"),
+                    lambda value: resolve_predecessor(value, "40063"),
                     bind_journal_predecessor,
                 ):
                     with self.assertRaises(InstallError) as rejected:
@@ -1811,11 +1811,11 @@ class InstallPredecessorTests(unittest.TestCase):
                     self.assertEqual(rejected.exception.code, "candidate_not_newer")
 
     def test_current_schema_predecessor_selects_the_current_vocabulary(self) -> None:
-        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40062 install
+        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40063 install
         # needs none of the 40019 compatibility actions.
         predecessor = resolve_predecessor(
             AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-            "40062",
+            "40063",
         )
         self.assertEqual(predecessor, INSTALLED_40041_PREDECESSOR)
         self.assertEqual(predecessor.off_proof_profile, "current_engine_v6_authority_v1_1")
@@ -1828,7 +1828,7 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_legacy_predecessor_still_selects_the_compatibility_vocabulary(self) -> None:
         predecessor = resolve_predecessor(
             AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
-            "40062",
+            "40063",
         )
         self.assertEqual(predecessor, INSTALLED_40019_PREDECESSOR)
         self.assertEqual(
@@ -1843,14 +1843,14 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_unrecognised_predecessor_is_rejected_rather_than_guessed(self) -> None:
         # No admissible wire protocol exists for an unknown installed build.
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "40062")
+            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "40063")
         self.assertEqual(raised.exception.code, "predecessor_unsupported")
 
     def test_predecessor_build_number_alone_is_not_trusted(self) -> None:
         # CFBundleVersion is an unauthenticated bundle string; the exact frozen
         # tree identity must agree with it.
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "40062")
+            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "40063")
         self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
     def test_downgrade_and_reinstall_are_rejected(self) -> None:
@@ -1864,7 +1864,7 @@ class InstallPredecessorTests(unittest.TestCase):
         with self.assertRaises(InstallError) as raised:
             resolve_predecessor(
                 AppIdentity("0.3.5", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-                "40062",
+                "40063",
             )
         self.assertEqual(raised.exception.code, "install_identity_mismatch")
 
@@ -1911,7 +1911,7 @@ class InstallPredecessorTests(unittest.TestCase):
             },
         )
         with self.assertRaises(TypeError):
-            SUPPORTED_PREDECESSORS["40062"] = INSTALLED_40043_PREDECESSOR  # type: ignore[index]
+            SUPPORTED_PREDECESSORS["40063"] = INSTALLED_40043_PREDECESSOR  # type: ignore[index]
 
     def test_current_predecessor_event_contract_never_admits_recovery(self) -> None:
         # A current-schema predecessor speaks the plain vocabulary at every

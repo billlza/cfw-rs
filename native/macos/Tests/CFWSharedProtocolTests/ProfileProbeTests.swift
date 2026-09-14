@@ -56,3 +56,45 @@ private func probeRequest(
     }
   }
 }
+
+@Test func profileProbePoliciesPassThroughTheCompleteBridgeEnvelope() throws {
+  for target in [nil, "https://connectivity.example.com/generate_204"] as [String?] {
+    for status in [nil, "204"] as [String?] {
+      let request = try ProfileDelayTestRequest(
+        audience: CredentialAudience(
+          profileID: UUID(), profileDigest: SHA256Digest(hex: String(repeating: "ab", count: 32))),
+        configJSON: #"{"outbounds":[{"type":"direct","tag":"node"}]}"#,
+        credentialSlots: [], proxies: ["node"], timeoutMS: 1200,
+        targetURL: target, expectedStatus: status)
+      let envelope = NativeRequestEnvelope(command: .testProfileDelays(request))
+      let encoded = try JSONEncoder().encode(envelope)
+      #expect(try NativeBridgeProtocolCodec.decodeRequest(encoded) == envelope)
+      var root = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+      var command = try #require(root["command"] as? [String: Any])
+      var payload = try #require(command["payload"] as? [String: Any])
+      var wire = try #require(payload["request"] as? [String: Any])
+      wire["unreviewed_policy"] = true
+      payload["request"] = wire
+      command["payload"] = payload
+      root["command"] = command
+      let unknown = try JSONSerialization.data(withJSONObject: root)
+      #expect(throws: (any Error).self) { try NativeBridgeProtocolCodec.decodeRequest(unknown) }
+    }
+  }
+}
+
+@Test func profileProbeConsumesTheRustCommandFixture() throws {
+  var root = URL(fileURLWithPath: #filePath)
+  for _ in 0..<5 { root.deleteLastPathComponent() }
+  let bytes = try Data(
+    contentsOf: root.appendingPathComponent(
+      "contracts/native-bridge-v10/profile-delay-request.json"))
+  let envelope = try NativeBridgeProtocolCodec.decodeRequest(bytes)
+  guard case .testProfileDelays(let request) = envelope.command else {
+    Issue.record("Expected the profile delay command")
+    return
+  }
+  #expect(request.targetURL == "https://connectivity.example.com/generate_204")
+  #expect(request.expectedStatus == "204")
+  #expect(request.timeoutMS == 1200)
+}

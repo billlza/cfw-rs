@@ -331,9 +331,22 @@ func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
     byteCount: UInt32(bytes.count), configSHA256: digest, identitySHA256: digest,
     credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: digest),
     credentialSlots: [], tunnelOptions: nil)
-  let prepared = try objects.core.prepare(
-    PrepareStartRequest(operation: operation, expectedRevision: 1, configuration: configuration),
-    configuration: bytes, secretPayload: nil, peer: host)
+  let requestID = AuthorityIdentifier(UUID())
+  let request = try AuthorityRequestEnvelope(
+    requestID: requestID,
+    command: .prepareStart(
+      PrepareStartRequest(operation: operation, expectedRevision: 1, configuration: configuration)))
+  var preparedData: Data?
+  var prepareError: NSError?
+  objects.service.prepareStart(
+    try AuthorityV1Codec.encode(request), configuration: bytes, secretPayload: nil
+  ) { data, error in
+    preparedData = data
+    prepareError = error
+  }
+  #expect(prepareError == nil)
+  let prepared = try AuthorityPreparedStartCodec.decode(
+    #require(preparedData), requestID: requestID, operationID: operation.operationID)
   defer { prepared.erase() }
   #expect(prepared.ticket == nil)
   let capability = try #require(prepared.ownerCapability)

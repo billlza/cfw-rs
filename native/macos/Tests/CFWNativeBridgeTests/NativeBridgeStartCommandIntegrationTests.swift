@@ -48,6 +48,9 @@ private final class NativeCleanupEventLog: @unchecked Sendable {
 private actor RecordingSystemProxyStartPreparer: SystemProxyStartPreparing {
   private(set) var prepareCalls = 0
   private(set) var cancelCalls = 0
+  private let failPreparation: Bool
+
+  init(failPreparation: Bool = false) { self.failPreparation = failPreparation }
 
   func prepareSystemProxyStart(
     configuration: Data,
@@ -57,6 +60,7 @@ private actor RecordingSystemProxyStartPreparer: SystemProxyStartPreparing {
       throw AppleNetworkError.invalidConfigurationSlot
     }
     prepareCalls += 1
+    if failPreparation { throw AuthorityDomainError(code: .invalidMessage) }
     let operation = try OperationContext(
       operationID: AuthorityIdentifier(UUID()),
       root: RootContext(
@@ -875,6 +879,35 @@ private func failureCode(
 
 @Suite(.serialized)
 struct NativeBridgeStartCommandIntegrationTests {
+  @Test(arguments: [0, 1])
+  func failedProxyPreparationAcknowledgesOnlyItsExactProvenOffAttempt(
+    observationFailures: Int
+  ) async throws {
+    let request = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    let descriptor = try request.descriptor(slot: .localProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let off = AuthorityOwnershipObservation(state: .off, lease: nil)
+    let lease = RecordingEngineLease(observation: off, ownershipFailures: observationFailures)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: off,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(failPreparation: true),
+      engineLease: lease)
+    #expect(
+      await failureCode(coordinator, .startLocalProxy(request))
+        == (observationFailures == 0 ? .invalidMessage : .cleanupUnproven))
+    let stale = try EngineCommandContext(
+      installationID: request.context.installationID, configEpoch: request.context.configEpoch,
+      generation: request.context.generation + 1)
+    #expect(await failureCode(coordinator, .stopLocalProxy(stale)) == .identityRejected)
+    _ = try await coordinator.execute(.stopLocalProxy(request.context))
+    #expect((await proxy.counters()).start == 0)
+    #expect((await proxy.counters()).stop == 0)
+    guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
+      Issue.record("Failed preparation did not reach the proven Off state")
+      return
+    }
+  }
+
   @Test func failedTunnelOwnerUsesTheSameExactExplicitStopBarrier() async throws {
     let request = try startRequest(tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
     let descriptor = try request.descriptor(slot: .tunnel)

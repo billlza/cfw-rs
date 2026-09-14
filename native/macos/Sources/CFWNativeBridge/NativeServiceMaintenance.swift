@@ -170,7 +170,8 @@ extension NativeBridgeCoordinator {
         await Self.observe { try await self.proxy.snapshot() }, component: "ProxyAgent")
       guard
         Self.isStableOff(snapshot)
-          || (snapshot.mode == .systemProxy && snapshot.state.kind == .failed)
+          || ((snapshot.mode == .localProxy || snapshot.mode == .systemProxy)
+            && snapshot.state.kind == .failed)
       else {
         throw NativeBridgeExecutionError.failure(.busy, "An active ProxyAgent cannot be retired.")
       }

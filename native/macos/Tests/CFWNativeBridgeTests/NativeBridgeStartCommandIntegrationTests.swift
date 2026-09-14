@@ -564,6 +564,7 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   private let cancelPreparedResult: Bool
   private let cleanupEvents: NativeCleanupEventLog?
   private var stopContext: NativeAuthorityStopContext?
+  private var completedCommandContext: EngineCommandContext?
   private(set) var beginCalls = 0
   private(set) var completeCalls = 0
   private(set) var reconcileCalls = 0
@@ -578,7 +579,8 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
     completeError: AuthorityDomainError? = nil,
     completeFailureCommits: Bool = false,
     cancelPreparedResult: Bool = false,
-    cleanupEvents: NativeCleanupEventLog? = nil
+    cleanupEvents: NativeCleanupEventLog? = nil,
+    replayContext: EngineCommandContext? = nil
   ) {
     self.observation = observation
     remainingCompleteFailures = completeFailures
@@ -588,6 +590,7 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
     self.completeFailureCommits = completeFailureCommits
     self.cancelPreparedResult = cancelPreparedResult
     self.cleanupEvents = cleanupEvents
+    completedCommandContext = replayContext
   }
 
   func isAvailable() -> Bool { observation.state == .off }
@@ -617,7 +620,7 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
 
   func recoverStoppingLease() -> NativeRecoveredStop? {
     recoverCalls += 1
-    return recoveredStop
+    return observation.state == .stopping ? recoveredStop : nil
   }
 
   func cancelPreparedStart(for descriptor: ConfigurationDescriptor) -> Bool {
@@ -662,12 +665,22 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
       remainingCompleteFailures -= 1
       if completeFailureCommits {
         observation = AuthorityOwnershipObservation(state: .off, lease: nil)
+        completedCommandContext = try EngineCommandContext(
+          installationID: context.operation.root.installationID.rawValue,
+          configEpoch: context.operation.root.epoch, generation: context.operation.root.generation)
       }
       throw NativeBridgeExecutionError.failure(
         .unavailable,
         "Injected Authority complete-stop failure.")
     }
     observation = AuthorityOwnershipObservation(state: .off, lease: nil)
+    completedCommandContext = try EngineCommandContext(
+      installationID: context.operation.root.installationID.rawValue,
+      configEpoch: context.operation.root.epoch, generation: context.operation.root.generation)
+  }
+
+  func hasCompletedStop(_ context: EngineCommandContext) -> Bool {
+    observation.state == .off && completedCommandContext == context
   }
 
   func counters() -> (begin: Int, complete: Int) {
@@ -1920,6 +1933,103 @@ struct NativeBridgeStartCommandIntegrationTests {
     #expect(recovery.commandContext == request.context)
     #expect(await lease.recoverCount() == 1)
     #expect(await lease.counters() == (begin: 0, complete: 1))
+  }
+
+  @Test(arguments: [false, true], [ConfigurationSlot.localProxy, .systemProxy, .tunnel])
+  func stopAcknowledgesReleasedOwnerWithOrWithoutPriorStatusRead(
+    priorStatusRead: Bool, slot: ConfigurationSlot
+  )
+    async throws
+  {
+    let request = try startRequest(
+      tunnelOptions: slot == .tunnel ? TunnelNetworkOptions(ipv6Enabled: true) : nil,
+      mode: slot == .localProxy ? .localProxy : nil)
+    let descriptor = try request.descriptor(slot: slot)
+    let recovery = try recoveredStop(for: descriptor)
+    let stopping = AuthorityOwnershipObservation(
+      state: .stopping,
+      lease: agreement(for: descriptor, mode: slot.authorityMode, leaseState: .stopping))
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let lease = RecordingEngineLease(observation: stopping, recoveredStop: recovery)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel, observation: stopping, engineLease: lease)
+    if priorStatusRead {
+      guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
+        Issue.record("the exact stopped owner was not reconciled to global Off")
+        return
+      }
+    }
+    let command: NativeBridgeCommand =
+      switch slot {
+      case .localProxy: .stopLocalProxy(request.context)
+      case .systemProxy: .stopSystemProxy(request.context)
+      case .tunnel: .stopTunnel(request.context)
+      }
+    guard case .acknowledged = try await coordinator.execute(command) else {
+      Issue.record("an already completed native stop was not acknowledged")
+      return
+    }
+    #expect(await lease.currentState() == .off)
+    #expect(await proxy.counters().stop == 0)
+    #expect(await lease.counters().begin == 0)
+  }
+
+  @Test(arguments: [false, true])
+  func releasedOwnerStopRejectsWrongContextAndMissingOwnerProof(wrongContext: Bool)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let stopping = AuthorityOwnershipObservation(
+      state: .stopping,
+      lease: agreement(for: descriptor, mode: .tunnel, leaseState: .stopping))
+    let lease = RecordingEngineLease(
+      observation: stopping, recoveredStop: try recoveredStop(for: descriptor),
+      completeError: wrongContext ? nil : AuthorityDomainError(code: .cleanupUnproven))
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel, observation: stopping, engineLease: lease)
+    let context = try EngineCommandContext(
+      installationID: request.context.installationID, configEpoch: request.context.configEpoch,
+      generation: request.context.generation + (wrongContext ? 1 : 0))
+    #expect(
+      await failureCode(coordinator, .stopTunnel(context))
+        == (wrongContext ? .identityRejected : .cleanupUnproven))
+    #expect(await lease.currentState() == .stopping)
+    #expect(await lease.counters().begin == 0)
+    #expect(await lease.counters().complete == (wrongContext ? 0 : 1))
+    #expect(await tunnel.stopCalls == 0)
+  }
+
+  @Test(arguments: [false, true])
+  func releasedOwnerStopReconcilesRestartedAuthorityButRejectsAnotherGeneration(wrongContext: Bool)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let recovering = AuthorityOwnershipObservation(state: .recovering, lease: nil)
+    let lease = RecordingEngineLease(observation: recovering, replayContext: request.context)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel, observation: recovering, engineLease: lease)
+    let context = try EngineCommandContext(
+      installationID: request.context.installationID, configEpoch: request.context.configEpoch,
+      generation: request.context.generation + (wrongContext ? 1 : 0))
+    if wrongContext {
+      #expect(await failureCode(coordinator, .stopTunnel(context)) == .identityRejected)
+    } else {
+      guard case .acknowledged = try await coordinator.execute(.stopTunnel(context)) else {
+        Issue.record("an exact stop did not consume the independently recovered Off proof")
+        return
+      }
+    }
+    #expect(await lease.currentState() == .off)
+    #expect(await lease.reconcileCount() == 1)
+    #expect(await lease.counters() == (begin: 0, complete: 0))
+    #expect(await tunnel.stopCalls == 0)
   }
 
   @Test func queryStatusDoesNotInferOwnerStoppedFromStableOwnerSnapshots()

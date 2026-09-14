@@ -166,8 +166,9 @@ extension NativeBridgeCoordinator {
     if try await resumePendingFailedStartOff(owner, context: context) {
       return
     }
-    try await prepareExplicitStop(owner, context: context)
-    try await drivePendingStop()
+    if try await prepareExplicitStop(owner, context: context) {
+      try await drivePendingStop()
+    }
   }
 
   func installTunnel(_ context: EngineCommandContext) async throws
@@ -413,8 +414,9 @@ extension NativeBridgeCoordinator {
       }
       return
     }
-    try await prepareExplicitStop(.tunnel, context: context)
-    try await drivePendingStop()
+    if try await prepareExplicitStop(.tunnel, context: context) {
+      try await drivePendingStop()
+    }
   }
 
   private func requireNoPendingStopBeforeStart() throws {
@@ -433,7 +435,7 @@ extension NativeBridgeCoordinator {
   private func prepareExplicitStop(
     _ owner: NativeStopOwner,
     context: EngineCommandContext
-  ) async throws {
+  ) async throws -> Bool {
     if let pendingStop {
       guard pendingStop.owner == owner,
         pendingStop.commandContext == context
@@ -443,7 +445,7 @@ extension NativeBridgeCoordinator {
           "The stop retry does not match the pending native stop transaction."
         )
       }
-      return
+      return true
     }
 
     let snapshot: EngineSnapshot
@@ -451,6 +453,29 @@ extension NativeBridgeCoordinator {
       snapshot = try await ownerSnapshot(owner)
     } catch {
       throw Self.map(error)
+    }
+    if Self.isStableOff(snapshot) {
+      // The OS may finish a stop before the Host consumes its final status.
+      // Bind the request to that exact completed/stopping generation, then
+      // require both the independent OS barrier and the durable Off cursor.
+      do {
+        if let recovered = try await engineLease.recoverStoppingLease() {
+          guard recovered.commandContext == context, recovered.owner == owner else {
+            throw NativeBridgeExecutionError.failure(
+              .identityRejected, "The stop request does not match the released owner generation.")
+          }
+        }
+        guard case .off = try await queryStatus() else {
+          throw AuthorityDomainError(code: .cleanupUnproven)
+        }
+        guard try await engineLease.hasCompletedStop(context) else {
+          throw NativeBridgeExecutionError.failure(
+            .identityRejected, "The stop request has no matching completed generation.")
+        }
+        return false
+      } catch {
+        throw Self.map(error)
+      }
     }
     let expectedMode = owner.engineMode
     let stopDescriptor: ConfigurationDescriptor?
@@ -478,6 +503,7 @@ extension NativeBridgeCoordinator {
       owner: owner,
       commandContext: context,
       descriptor: descriptor)
+    return true
   }
 
   private func rollbackStartedOwner(

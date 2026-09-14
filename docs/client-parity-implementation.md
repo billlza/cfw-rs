@@ -602,3 +602,18 @@ ownership or an independent owner observation cannot establish the full barrier.
 `/Users/bill/cfw-release-history/tun-compat-install-40065-20260915/`.
 40066 must establish its own installation and reconnect acceptance before
 handoff. Standalone System Proxy authorization remains unproven.
+
+## Native completed-stop acknowledgement
+
+The native Stop boundary must also work when the caller missed the final Off
+observation. Additional old-source integration cases reproduced IdentityRejected
+both before and after a final status query. The correction admits an already
+stopped owner only after the existing full OS/Authority Off barrier and an exact
+durable installation/epoch/generation cursor. A matching Stopping lease can be
+completed through the existing status recovery; another generation or missing
+owner-stopped proof cannot pass. Ordinary active-owner teardown is unchanged.
+
+680 linked-native tests passed, including all three owner modes, both observation
+orders, unavailable completion proof and restarted-Authority recovery. Build
+40066 completed notarization but was not installed; 40067 carries the additional
+native framework change and must replace the actual installed 40065 application.

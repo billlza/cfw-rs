@@ -188,6 +188,9 @@ protocol NativeEngineLeaseInspecting: Sendable {
   /// Commits global Off only after the owner has attested its teardown and the
   /// Host has observed the matching OS-facing endpoint at its Off barrier.
   func completeStop(_ context: NativeAuthorityStopContext) async throws
+  /// Reports durable release only for the exact installation/epoch/generation
+  /// in the Authority's Off replay cursor; this does not replace OS Off proof.
+  func hasCompletedStop(_ context: EngineCommandContext) async throws -> Bool
 }
 
 protocol Installed40019AuthorityOffProving: Sendable {
@@ -219,6 +222,7 @@ extension NativeEngineLeaseInspecting {
   }
 
   func recoverStoppingLease() async throws -> NativeRecoveredStop? { nil }
+  func hasCompletedStop(_ context: EngineCommandContext) async throws -> Bool { false }
   func cancelPreparedStart(for descriptor: ConfigurationDescriptor) async throws -> Bool {
     false
   }

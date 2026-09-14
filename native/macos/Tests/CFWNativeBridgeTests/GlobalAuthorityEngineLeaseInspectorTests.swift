@@ -159,6 +159,34 @@ private struct AuthorityLeaseFixture {
 
 @Suite(.serialized)
 struct GlobalAuthorityEngineLeaseInspectorTests {
+  @Test func completedStopRequiresExactOffReplayCursor() async throws {
+    let fixture = try AuthorityLeaseFixture()
+    let context = try EngineCommandContext(
+      installationID: fixture.operation.root.installationID.rawValue,
+      configEpoch: fixture.operation.root.epoch, generation: fixture.operation.root.generation)
+    let off = try fixture.snapshot(state: .off, revision: 14, cursor: fixture.cursor(revision: 14))
+    let authority = SequencedAuthorityClient(snapshots: [off])
+    let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
+    #expect(try await inspector.hasCompletedStop(context))
+    for changed in ["installation", "epoch", "generation"] {
+      let other = try EngineCommandContext(
+        installationID: changed == "installation" ? UUID() : context.installationID,
+        configEpoch: changed == "epoch" ? context.configEpoch + 1 : context.configEpoch,
+        generation: changed == "generation" ? context.generation + 1 : context.generation)
+      #expect(try await !inspector.hasCompletedStop(other))
+    }
+    for snapshot in [
+      try fixture.snapshot(state: .off, revision: 14),
+      try fixture.snapshot(
+        state: .active, revision: 14, leaseState: .active, cursor: fixture.cursor),
+    ] {
+      let other = GlobalAuthorityEngineLeaseInspector(
+        authority: SequencedAuthorityClient(snapshots: [snapshot]))
+      #expect(try await !other.hasCompletedStop(context))
+    }
+    #expect(await authority.counts() == (cancel: 0, begin: 0, complete: 0, reconcile: 0))
+  }
+
   @Test(arguments: [ConfigurationSlot.localProxy, .systemProxy])
   func stopRejectsMismatchedModeGenerationAndDigestsBeforeAuthorityMutation(slot: ConfigurationSlot)
     async throws

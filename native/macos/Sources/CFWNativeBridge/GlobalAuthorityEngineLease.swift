@@ -185,6 +185,16 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
         expectedRevision: snapshot.revision))
   }
 
+  func hasCompletedStop(_ context: EngineCommandContext) async throws -> Bool {
+    let snapshot = try await authority.snapshot()
+    guard snapshot.state == .off, snapshot.leaseView == nil,
+      let cursor = snapshot.replayCursor
+    else { return false }
+    return cursor.installationID.rawValue == context.installationID
+      && cursor.acceptedEpoch == context.configEpoch
+      && cursor.acceptedGeneration == context.generation
+  }
+
   /// A completion reply can be lost after the Authority durably commits Off. The
   /// replay cursor's exact installation/epoch/generation tuple is monotonic and
   /// unique, so this is the only safe idempotent success projection after the lease

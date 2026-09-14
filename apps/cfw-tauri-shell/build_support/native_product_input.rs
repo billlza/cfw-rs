@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 const UNSIGNED_RELATIVE_ROOT: &str = "unsigned/native-products";
 const UNSIGNED_BUILD_NUMBER: &str = "40000";
 const UNSIGNED_SIGNING_MODE: &str = "unsigned-validation";
-const GA_PRE_SIGN_RELATIVE_ROOT: &str = "ga-preflight/40066/native-products";
-const GA_BUILD_NUMBER: &str = "40066";
+const GA_PRE_SIGN_RELATIVE_ROOT: &str = "ga-preflight/40067/native-products";
+const GA_BUILD_NUMBER: &str = "40067";
 const GA_PRE_SIGNING_MODE: &str = "pre-sign";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

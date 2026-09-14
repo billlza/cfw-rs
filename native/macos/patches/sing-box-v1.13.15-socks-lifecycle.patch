@@ -1,0 +1,873 @@
+diff --git a/protocol/socks/client.go b/protocol/socks/client.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..005f4319f5426b37f32c14b7f7cb69551a82063e
+--- /dev/null
++++ b/protocol/socks/client.go
+@@ -0,0 +1,170 @@
++package socks
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net"
++	"sync"
++	"time"
++
++	C "github.com/sagernet/sing-box/constant"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/protocol/socks"
++)
++
++// boundedClient keeps the upstream protocol implementation while giving each
++// setup attempt its own cancellation scope. A dial context owns the handshake,
++// not the lifetime of a successfully established connection.
++type boundedClient struct {
++	dialer   N.Dialer
++	server   M.Socksaddr
++	version  socks.Version
++	username string
++	password string
++	timeout  time.Duration
++	direct   bool
++}
++
++var _ N.Dialer = (*boundedClient)(nil)
++
++func (c *boundedClient) begin(ctx context.Context) (context.Context, *socks.Client, func(error) error) {
++	timeout := c.timeout
++	if timeout == 0 {
++		timeout = C.TCPConnectTimeout
++	}
++	ctx, cancel := context.WithTimeout(ctx, timeout)
++	scope := &handshakeDialer{Dialer: c.dialer, server: c.server, direct: c.direct}
++	done := make(chan struct{})
++	stop := context.AfterFunc(ctx, func() {
++		scope.closeOwned()
++		close(done)
++	})
++	finish := func(err error) error {
++		// If cancellation won, wait for its close operation before releasing any
++		// connection to the caller. No callback may outlive this setup attempt.
++		if !stop() {
++			<-done
++		}
++		if cause := ctx.Err(); cause != nil {
++			err = errors.Join(cause, err)
++		}
++		cancel()
++		if err != nil {
++			return errors.Join(err, scope.closeOwned())
++		}
++		scope.release()
++		return nil
++	}
++	return ctx, socks.NewClient(scope, c.server, c.version, c.username, c.password), finish
++}
++
++func (c *boundedClient) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	ctx, client, finish := c.begin(ctx)
++	conn, err := client.DialContext(ctx, network, destination)
++	if err = finish(err); err != nil {
++		return nil, err
++	}
++	return conn, nil
++}
++
++func (c *boundedClient) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	ctx, client, finish := c.begin(ctx)
++	conn, err := client.ListenPacket(ctx, destination)
++	if err = finish(err); err != nil {
++		return nil, err
++	}
++	return conn, nil
++}
++
++type handshakeDialer struct {
++	N.Dialer
++	server M.Socksaddr
++	direct bool
++	peer   M.Socksaddr
++
++	access   sync.Mutex
++	owned    []io.Closer
++	closed   bool
++	closeErr error
++}
++
++func (d *handshakeDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	if N.NetworkName(network) == N.NetworkUDP {
++		if destination.Port == 0 {
++			return nil, errors.New("socks5: UDP relay returned port zero")
++		}
++		if destination.Addr.IsUnspecified() {
++			// Some servers return a wildcard BND.ADDR. Keep the relay's port,
++			// and reach it through the same configured dialer/detour. A detour's
++			// RemoteAddr can be an earlier hop, so only direct sockets use it.
++			server := d.server
++			if d.direct && d.peer.IsIP() && !d.peer.Addr.IsUnspecified() {
++				server = d.peer
++			}
++			server.Port = destination.Port
++			destination = server
++		}
++	}
++	conn, err := d.Dialer.DialContext(ctx, network, destination)
++	if err != nil {
++		return nil, err
++	}
++	if err = d.own(ctx, conn); err != nil {
++		return nil, err
++	}
++	if N.NetworkName(network) == N.NetworkTCP {
++		d.peer = M.SocksaddrFromNet(conn.RemoteAddr())
++	}
++	return conn, nil
++}
++
++func (d *handshakeDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	conn, err := d.Dialer.ListenPacket(ctx, destination)
++	if err != nil {
++		return nil, err
++	}
++	if err = d.own(ctx, conn); err != nil {
++		return nil, err
++	}
++	return conn, nil
++}
++
++func (d *handshakeDialer) own(ctx context.Context, conn io.Closer) error {
++	d.access.Lock()
++	defer d.access.Unlock()
++	if err := ctx.Err(); err != nil {
++		return errors.Join(err, closeHandshakeConn(conn))
++	}
++	d.owned = append(d.owned, conn)
++	return nil
++}
++
++func closeHandshakeConn(conn io.Closer) error {
++	err := conn.Close()
++	// The upstream SOCKS client also closes its control socket on failure.
++	if errors.Is(err, net.ErrClosed) {
++		return nil
++	}
++	return err
++}
++
++func (d *handshakeDialer) closeOwned() error {
++	d.access.Lock()
++	defer d.access.Unlock()
++	if !d.closed {
++		d.closed = true
++		for _, conn := range d.owned {
++			d.closeErr = errors.Join(d.closeErr, closeHandshakeConn(conn))
++		}
++		d.owned = nil
++	}
++	return d.closeErr
++}
++
++func (d *handshakeDialer) release() {
++	d.access.Lock()
++	d.owned = nil
++	d.access.Unlock()
++}
+diff --git a/protocol/socks/outbound.go b/protocol/socks/outbound.go
+index 344c798881eacbac2394e05a4d85f8e4c85e7d42..a0ff3b84092cc9b54310d573458ac4ada923cda0 100644
+--- a/protocol/socks/outbound.go
++++ b/protocol/socks/outbound.go
+@@ -3,6 +3,7 @@ package socks
+ import (
+ 	"context"
+ 	"net"
++	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/outbound"
+@@ -30,7 +31,7 @@ type Outbound struct {
+ 	outbound.Adapter
+ 	dnsRouter adapter.DNSRouter
+ 	logger    logger.ContextLogger
+-	client    *socks.Client
++	client    *boundedClient
+ 	resolve   bool
+ 	uotClient *uot.Client
+ }
+@@ -54,8 +55,12 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		Adapter:   outbound.NewAdapterWithDialerOptions(C.TypeSOCKS, tag, options.Network.Build(), options.DialerOptions),
+ 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
+ 		logger:    logger,
+-		client:    socks.NewClient(outboundDialer, options.ServerOptions.Build(), version, options.Username, options.Password),
+-		resolve:   version == socks.Version4,
++		client: &boundedClient{
++			dialer: outboundDialer, server: options.ServerOptions.Build(), version: version,
++			username: options.Username, password: options.Password,
++			timeout: time.Duration(options.ConnectTimeout), direct: options.Detour == "",
++		},
++		resolve: version == socks.Version4,
+ 	}
+ 	uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)
+ 	if uotOptions.Enabled {
+diff --git a/protocol/socks/outbound_lifecycle_test.go b/protocol/socks/outbound_lifecycle_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..09e0b0f322f943ab59fbfa91c02a831bbe3083c1
+--- /dev/null
++++ b/protocol/socks/outbound_lifecycle_test.go
+@@ -0,0 +1,655 @@
++package socks
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/netip"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/dns"
++	D "github.com/sagernet/sing-box/dns/transport"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json/badoption"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++
++	mdns "github.com/miekg/dns"
++)
++
++// Real local SOCKS control/data sockets; no external endpoints or OS settings.
++type socksFixture struct {
++	tcp        net.Listener
++	udp        net.PacketConn
++	stall      string
++	stallFirst bool
++	bind       string
++	zeroPort   bool
++	dnsReply   bool
++	rejectAuth bool
++	reached    chan int
++	closed     chan int
++	count      atomic.Int32
++	access     sync.Mutex
++	conns      []net.Conn
++	workers    sync.WaitGroup
++	stopOnce   sync.Once
++	closing    bool
++}
++
++func newSocksFixture(t *testing.T, stall string) *socksFixture {
++	t.Helper()
++	tcp, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		tcp.Close()
++		t.Fatal(err)
++	}
++	f := &socksFixture{tcp: tcp, udp: udp, stall: stall, bind: "127.0.0.1", reached: make(chan int, 16), closed: make(chan int, 16)}
++	t.Cleanup(f.close)
++	return f
++}
++
++func (f *socksFixture) start() {
++	f.workers.Add(2)
++	go func() {
++		defer f.workers.Done()
++		for {
++			conn, err := f.tcp.Accept()
++			if err != nil {
++				return
++			}
++			f.access.Lock()
++			if f.closing {
++				f.access.Unlock()
++				conn.Close()
++				return
++			}
++			f.conns = append(f.conns, conn)
++			f.access.Unlock()
++			id := int(f.count.Add(1))
++			f.workers.Add(1)
++			go func() {
++				defer f.workers.Done()
++				defer conn.Close()
++				defer func() { f.closed <- id }()
++				f.serve(conn, id)
++			}()
++		}
++	}()
++	go func() {
++		defer f.workers.Done()
++		buffer := make([]byte, 4096)
++		for {
++			count, peer, err := f.udp.ReadFrom(buffer)
++			if err != nil {
++				return
++			}
++			packet := append([]byte(nil), buffer[:count]...)
++			if f.dnsReply {
++				offset, err := socksAddressLength(packet[3:])
++				if err != nil {
++					continue
++				}
++				offset += 3
++				var query mdns.Msg
++				if query.Unpack(packet[offset:]) != nil {
++					continue
++				}
++				response := new(mdns.Msg)
++				response.SetReply(&query)
++				response.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: query.Question[0].Name, Rrtype: mdns.TypeA, Class: mdns.ClassINET, Ttl: 30}, A: net.ParseIP("203.0.113.9")}}
++				raw, err := response.Pack()
++				if err != nil {
++					continue
++				}
++				packet = append(packet[:offset], raw...)
++			}
++			if _, err = f.udp.WriteTo(packet, peer); err != nil {
++				return
++			}
++		}
++	}()
++}
++
++func (f *socksFixture) close() {
++	f.stopOnce.Do(func() {
++		f.tcp.Close()
++		f.udp.Close()
++		f.access.Lock()
++		f.closing = true
++		for _, c := range f.conns {
++			c.Close()
++		}
++		f.access.Unlock()
++		f.workers.Wait()
++	})
++}
++func readN(conn net.Conn, size int) ([]byte, error) {
++	data := make([]byte, size)
++	_, err := io.ReadFull(conn, data)
++	return data, err
++}
++func (f *socksFixture) waitAt(conn net.Conn, id int, phase string) bool {
++	if f.stall != phase || f.stallFirst && id != 1 {
++		return false
++	}
++	f.reached <- id
++	var buffer [1]byte
++	conn.Read(buffer[:])
++	return true
++}
++func (f *socksFixture) serve(conn net.Conn, id int) {
++	header, err := readN(conn, 2)
++	if err != nil || header[0] != 5 {
++		return
++	}
++	if _, err = readN(conn, int(header[1])); err != nil {
++		return
++	}
++	if f.waitAt(conn, id, "method") {
++		return
++	}
++	if _, err = conn.Write([]byte{5, 2}); err != nil {
++		return
++	}
++	header, err = readN(conn, 2)
++	if err != nil || header[0] != 1 {
++		return
++	}
++	if _, err = readN(conn, int(header[1])); err != nil {
++		return
++	}
++	size, err := readN(conn, 1)
++	if err != nil {
++		return
++	}
++	if _, err = readN(conn, int(size[0])); err != nil {
++		return
++	}
++	if f.waitAt(conn, id, "authentication") {
++		return
++	}
++	authStatus := byte(0)
++	if f.rejectAuth {
++		authStatus = 1
++	}
++	if _, err = conn.Write([]byte{1, authStatus}); err != nil {
++		return
++	}
++	if f.rejectAuth {
++		var buffer [1]byte
++		conn.Read(buffer[:])
++		return
++	}
++	header, err = readN(conn, 4)
++	if err != nil || header[0] != 5 {
++		return
++	}
++	switch header[3] {
++	case 1:
++		_, err = readN(conn, 6)
++	case 4:
++		_, err = readN(conn, 18)
++	case 3:
++		size, err = readN(conn, 1)
++		if err == nil {
++			_, err = readN(conn, int(size[0])+2)
++		}
++	default:
++		return
++	}
++	if err != nil {
++		return
++	}
++	if f.waitAt(conn, id, "request") {
++		return
++	}
++	port := uint16(f.udp.LocalAddr().(*net.UDPAddr).Port)
++	if f.zeroPort {
++		port = 0
++	}
++	response := []byte{5, 0, 0}
++	if ip, err := netip.ParseAddr(f.bind); err == nil {
++		if ip.Is4() {
++			response = append(response, 1)
++		} else {
++			response = append(response, 4)
++		}
++		response = append(response, ip.AsSlice()...)
++	} else {
++		response = append(response, 3, byte(len(f.bind)))
++		response = append(response, []byte(f.bind)...)
++	}
++	response = binary.BigEndian.AppendUint16(response, port)
++	if _, err = conn.Write(response); err != nil {
++		return
++	}
++	if header[1] == 1 {
++		io.Copy(conn, conn)
++	} else {
++		var buffer [1]byte
++		conn.Read(buffer[:])
++	}
++}
++
++func socksAddressLength(data []byte) (int, error) {
++	if len(data) < 1 {
++		return 0, io.ErrUnexpectedEOF
++	}
++	switch data[0] {
++	case 1:
++		if len(data) >= 7 {
++			return 7, nil
++		}
++	case 4:
++		if len(data) >= 19 {
++			return 19, nil
++		}
++	case 3:
++		if len(data) >= 2 && len(data) >= int(data[1])+4 {
++			return int(data[1]) + 4, nil
++		}
++	}
++	return 0, io.ErrUnexpectedEOF
++}
++
++func fixtureOutbound(t *testing.T, f *socksFixture, timeout time.Duration, ctx context.Context, detour string, server string) adapter.Outbound {
++	t.Helper()
++	if server == "" {
++		server = "127.0.0.1"
++	}
++	options := option.SOCKSOutboundOptions{ServerOptions: option.ServerOptions{Server: server, ServerPort: uint16(f.tcp.Addr().(*net.TCPAddr).Port)},
++		DialerOptions: option.DialerOptions{ConnectTimeout: badoption.Duration(timeout), Detour: detour}, Username: "fixture-user", Password: "fixture-password"}
++	result, err := NewOutbound(ctx, nil, log.NewNOPFactory().NewLogger("fixture"), "node", options)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return result
++}
++
++func TestSOCKSHandshakeCancellation(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		for _, phase := range []string{"method", "authentication", "request"} {
++			t.Run(network+"/"+phase, func(t *testing.T) {
++				f := newSocksFixture(t, phase)
++				f.start()
++				outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++				ctx, cancel := context.WithCancel(context.Background())
++				defer cancel()
++				done := make(chan error, 1)
++				go func() {
++					conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr("203.0.113.1:443"))
++					if conn != nil {
++						conn.Close()
++					}
++					done <- err
++				}()
++				select {
++				case <-f.reached:
++				case <-time.After(time.Second):
++					t.Fatal("server did not reach scripted handshake stage")
++				}
++				cancel()
++				select {
++				case err := <-done:
++					if !errors.Is(err, context.Canceled) {
++						t.Errorf("expected cancellation, got %v", err)
++					}
++				case <-time.After(500 * time.Millisecond):
++					t.Error("SOCKS handshake ignored cancellation")
++					f.close()
++					<-done
++					return
++				}
++				select {
++				case <-f.closed:
++				case <-time.After(500 * time.Millisecond):
++					t.Error("cancelled handshake did not close its control connection")
++				}
++			})
++		}
++	}
++}
++
++func TestSOCKSConnectTimeoutIncludesHandshake(t *testing.T) {
++	f := newSocksFixture(t, "request")
++	f.start()
++	outbound := fixtureOutbound(t, f, 100*time.Millisecond, context.Background(), "", "")
++	done := make(chan error, 1)
++	start := time.Now()
++	go func() {
++		conn, err := outbound.DialContext(context.Background(), "udp", M.ParseSocksaddr("203.0.113.1:53"))
++		if conn != nil {
++			conn.Close()
++		}
++		done <- err
++	}()
++	select {
++	case err := <-done:
++		if !errors.Is(err, context.DeadlineExceeded) {
++			t.Errorf("expected configured handshake deadline, got %v", err)
++		}
++		if time.Since(start) > 500*time.Millisecond {
++			t.Error("handshake exceeded its configured bound")
++		}
++	case <-time.After(600 * time.Millisecond):
++		t.Error("connect_timeout did not bound the SOCKS handshake")
++		f.close()
++		<-done
++	}
++}
++
++func TestSOCKSSuccessfulConnectionsOutliveDialContext(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		t.Run(network, func(t *testing.T) {
++			f := newSocksFixture(t, "")
++			f.start()
++			outbound := fixtureOutbound(t, f, 100*time.Millisecond, context.Background(), "", "")
++			ctx, cancel := context.WithCancel(context.Background())
++			conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr("203.0.113.1:443"))
++			cancel()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			time.Sleep(120 * time.Millisecond)
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			for i := 0; i < 3; i++ {
++				payload := []byte("retained-session")
++				if _, err = conn.Write(payload); err != nil {
++					t.Fatal(err)
++				}
++				got := make([]byte, 4096)
++				var count int
++				var readErr error
++				if network == "tcp" {
++					count, readErr = io.ReadFull(conn, got[:len(payload)])
++				} else {
++					count, readErr = conn.Read(got)
++				}
++				if readErr != nil {
++					t.Fatal(readErr)
++				}
++				if string(got[:count]) != string(payload) {
++					t.Fatal("session payload changed")
++				}
++			}
++		})
++	}
++}
++
++func TestSOCKSUDPResolverRecoversAfterCancelledHandshake(t *testing.T) {
++	f := newSocksFixture(t, "request")
++	f.stallFirst = true
++	f.dnsReply = true
++	f.start()
++	outbound := fixtureOutbound(t, f, 150*time.Millisecond, context.Background(), "", "")
++	transport := D.NewUDPRaw(log.NewNOPFactory().NewLogger("dns"), dns.NewTransportAdapter("udp", "dns", nil), outbound, M.ParseSocksaddr("9.9.9.9:53"))
++	defer transport.Close()
++	query := new(mdns.Msg)
++	query.SetQuestion("fixture.invalid.", mdns.TypeA)
++	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
++	_, err := transport.Exchange(ctx, query)
++	cancel()
++	if err == nil {
++		t.Fatal("stalled handshake unexpectedly returned a DNS answer")
++	}
++	select {
++	case <-f.closed:
++	case <-time.After(400 * time.Millisecond):
++		t.Error("expired DNS dial retained its TCP control connection")
++	}
++	next, cancelNext := context.WithTimeout(context.Background(), 600*time.Millisecond)
++	response, err := transport.Exchange(next, query)
++	cancelNext()
++	if err != nil {
++		t.Errorf("same DNS transport could not recover after timeout: %v", err)
++		return
++	}
++	if len(response.Answer) != 1 {
++		t.Fatal("recovered DNS answer missing")
++	}
++	third, cancelThird := context.WithTimeout(context.Background(), 500*time.Millisecond)
++	defer cancelThird()
++	if response, err = transport.Exchange(third, query); err != nil || len(response.Answer) != 1 {
++		t.Fatalf("successful UDP session did not survive query cancellation: %v", err)
++	}
++	if f.count.Load() != 2 {
++		t.Fatalf("expected one failed and one reusable dial; got %d", f.count.Load())
++	}
++}
++
++type relayFixtureOutbound struct {
++	f        *socksFixture
++	expected string
++	calls    chan M.Socksaddr
++}
++
++func (*relayFixtureOutbound) Type() string           { return "fixture" }
++func (*relayFixtureOutbound) Tag() string            { return "fixture" }
++func (*relayFixtureOutbound) Network() []string      { return []string{"tcp", "udp"} }
++func (*relayFixtureOutbound) Dependencies() []string { return nil }
++func (d *relayFixtureOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	if network == "tcp" {
++		return (&net.Dialer{}).DialContext(ctx, "tcp", d.f.tcp.Addr().String())
++	}
++	d.calls <- destination
++	if destination.String() != d.expected {
++		return nil, fmt.Errorf("wrong relay destination: %s", destination)
++	}
++	return (&net.Dialer{}).DialContext(ctx, "udp", d.f.udp.LocalAddr().String())
++}
++func (*relayFixtureOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, errors.New("unexpected fixture packet listener")
++}
++
++type relayFixtureManager struct{ outbound *relayFixtureOutbound }
++
++func (*relayFixtureManager) Start(adapter.StartStage) error  { return nil }
++func (*relayFixtureManager) Close() error                    { return nil }
++func (m *relayFixtureManager) Outbounds() []adapter.Outbound { return []adapter.Outbound{m.outbound} }
++func (m *relayFixtureManager) Outbound(tag string) (adapter.Outbound, bool) {
++	return m.outbound, tag == "fixture"
++}
++func (m *relayFixtureManager) Default() adapter.Outbound { return m.outbound }
++func (*relayFixtureManager) Remove(string) error         { return errors.New("unexpected fixture remove") }
++func (*relayFixtureManager) Create(context.Context, adapter.Router, log.ContextLogger, string, string, any) error {
++	return errors.New("unexpected fixture create")
++}
++
++func TestSOCKSUDPUnspecifiedRelayUsesLogicalServer(t *testing.T) {
++	for _, bind := range []string{"0.0.0.0", "::", "203.0.113.25", "relay.example"} {
++		t.Run(bind, func(t *testing.T) {
++			f := newSocksFixture(t, "")
++			f.bind = bind
++			f.start()
++			expected := bind
++			if bind == "0.0.0.0" || bind == "::" {
++				expected = "198.51.100.10"
++			}
++			recording := &relayFixtureOutbound{f: f, expected: net.JoinHostPort(expected, fmt.Sprint(f.udp.LocalAddr().(*net.UDPAddr).Port)), calls: make(chan M.Socksaddr, 2)}
++			ctx := service.ContextWith[adapter.OutboundManager](context.Background(), &relayFixtureManager{recording})
++			outbound := fixtureOutbound(t, f, time.Second, ctx, "fixture", "198.51.100.10")
++			conn, err := outbound.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.1:53"))
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			payload := []byte("relay-payload")
++			if _, err = conn.Write(payload); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 4096)
++			count, readErr := conn.Read(got)
++			if readErr != nil {
++				t.Fatal(readErr)
++			}
++			if string(got[:count]) != string(payload) {
++				t.Fatal("UDP payload changed")
++			}
++			if called := <-recording.calls; called.String() != recording.expected {
++				t.Fatal("detour or relay port was not preserved")
++			}
++		})
++	}
++}
++
++func TestSOCKSUDPUnspecifiedRelayRejectsZeroPort(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.bind = "0.0.0.0"
++	f.zeroPort = true
++	f.start()
++	recording := &relayFixtureOutbound{f: f, calls: make(chan M.Socksaddr, 2)}
++	ctx := service.ContextWith[adapter.OutboundManager](context.Background(), &relayFixtureManager{recording})
++	outbound := fixtureOutbound(t, f, time.Second, ctx, "fixture", "198.51.100.10")
++	conn, err := outbound.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.1:53"))
++	if conn != nil {
++		conn.Close()
++	}
++	if err == nil {
++		t.Fatal("invalid relay port was accepted")
++	}
++	select {
++	case destination := <-recording.calls:
++		t.Errorf("invalid relay was dialed: %v", destination)
++	default:
++	}
++	select {
++	case <-f.closed:
++	case <-time.After(time.Second):
++		t.Error("invalid relay retained its control connection")
++	}
++}
++
++func TestSOCKSCancelledAttemptDoesNotCloseConcurrentSession(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		t.Run(network, func(t *testing.T) {
++			f := newSocksFixture(t, "request")
++			f.stallFirst = true
++			f.start()
++			outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++			first, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			done := make(chan error, 1)
++			go func() {
++				conn, err := outbound.DialContext(first, network, M.ParseSocksaddr("203.0.113.1:443"))
++				if conn != nil {
++					conn.Close()
++				}
++				done <- err
++			}()
++			select {
++			case <-f.reached:
++			case <-time.After(time.Second):
++				t.Fatal("first handshake did not reach request")
++			}
++			conn, err := outbound.DialContext(context.Background(), network, M.ParseSocksaddr("203.0.113.1:443"))
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			cancel()
++			select {
++			case err = <-done:
++				if !errors.Is(err, context.Canceled) {
++					t.Fatalf("expected cancellation, got %v", err)
++				}
++			case <-time.After(500 * time.Millisecond):
++				t.Fatal("first handshake did not stop")
++			}
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			payload := []byte("independent-session")
++			if _, err = conn.Write(payload); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 4096)
++			var count int
++			if network == "tcp" {
++				count, err = io.ReadFull(conn, got[:len(payload)])
++			} else {
++				count, err = conn.Read(got)
++			}
++			if err != nil {
++				t.Fatalf("cancellation closed an unrelated session: %v", err)
++			}
++			if !bytes.Equal(got[:count], payload) {
++				t.Fatal("concurrent session payload changed")
++			}
++		})
++	}
++}
++
++func TestSOCKSListenPacketPreservesDatagramsAfterSetup(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.bind = "::"
++	f.start()
++	outbound := fixtureOutbound(t, f, 100*time.Millisecond, context.Background(), "", "")
++	ctx, cancel := context.WithCancel(context.Background())
++	destination := M.ParseSocksaddr("203.0.113.1:443")
++	conn, err := outbound.ListenPacket(ctx, destination)
++	cancel()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	time.Sleep(120 * time.Millisecond)
++	if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	for _, size := range []int{1, 512, 1232, 2048} {
++		payload := bytes.Repeat([]byte{byte(size % 251)}, size)
++		if _, err = conn.WriteTo(payload, destination.UDPAddr()); err != nil {
++			t.Fatal(err)
++		}
++		received := make([]byte, 4096)
++		count, peer, err := conn.ReadFrom(received)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(payload, received[:count]) || peer.String() != destination.String() {
++			t.Fatalf("datagram size %d or its destination changed", size)
++		}
++	}
++}
++
++func TestSOCKSAuthenticationFailureClosesControl(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.rejectAuth = true
++	f.start()
++	outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++	conn, err := outbound.DialContext(context.Background(), "udp", M.ParseSocksaddr("203.0.113.1:53"))
++	if conn != nil {
++		conn.Close()
++	}
++	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("authentication failure was lost: %v", err)
++	}
++	select {
++	case <-f.closed:
++	case <-time.After(500 * time.Millisecond):
++		t.Fatal("failed authentication retained its control socket")
++	}
++	if f.count.Load() != 1 {
++		t.Fatal("failed authentication was retried")
++	}
++}

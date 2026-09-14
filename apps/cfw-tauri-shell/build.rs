@@ -26,7 +26,7 @@ const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
 const GO_TOOLS_TREE_SHA256_ENV: &str = "CFW_GO_TOOLS_TREE_SHA256";
 const GO_MODULE_CACHE_TREE_SHA256_ENV: &str = "CFW_GO_MODULE_CACHE_TREE_SHA256";
 
-const LIBBOX_METADATA_KEYS: [&str; 25] = [
+const LIBBOX_METADATA_KEYS: [&str; 26] = [
     "sourceTag",
     "sourceCommit",
     "goVersion",
@@ -48,6 +48,7 @@ const LIBBOX_METADATA_KEYS: [&str; 25] = [
     "dnsFailoverPatchSha256",
     "endpointConflictPatchSha256",
     "profileProbePatchSha256",
+    "socksLifecyclePatchSha256",
     "patchedDiffSha256",
     "combinedDiffSha256",
     "patchedGoModSha256",
@@ -122,6 +123,7 @@ struct SingBoxLock {
     dns_failover_patch: SingBoxSourcePatchLock,
     endpoint_conflict_patch: SingBoxSourcePatchLock,
     profile_probe_patch: SingBoxSourcePatchLock,
+    socks_lifecycle_patch: SingBoxSourcePatchLock,
     combined_diff_sha256: String,
 }
 
@@ -326,6 +328,16 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     )?;
     require_pin(
         &pins,
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+        &dependency_lock.sing_box.socks_lifecycle_patch.path,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
+        &dependency_lock.sing_box.socks_lifecycle_patch.sha256,
+    )?;
+    require_pin(
+        &pins,
         "SING_BOX_PATCHED_DIFF_SHA256",
         &dependency_lock.sing_box.security_patch.patched_diff_sha256,
     )?;
@@ -380,6 +392,11 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
             "profile probe",
             &dependency_lock.sing_box.profile_probe_patch.path,
             &dependency_lock.sing_box.profile_probe_patch.sha256,
+        ),
+        (
+            "SOCKS lifecycle",
+            &dependency_lock.sing_box.socks_lifecycle_patch.path,
+            &dependency_lock.sing_box.socks_lifecycle_patch.sha256,
         ),
     ] {
         let path = repository_root.join(safe_relative_path(relative)?);
@@ -445,6 +462,10 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         (
             "profileProbePatchSha256",
             "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+        ),
+        (
+            "socksLifecyclePatchSha256",
+            "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
         ),
         ("patchedDiffSha256", "SING_BOX_PATCHED_DIFF_SHA256"),
         ("combinedDiffSha256", "SING_BOX_COMBINED_DIFF_SHA256"),

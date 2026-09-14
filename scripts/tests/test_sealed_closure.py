@@ -18,10 +18,11 @@ from scripts.publication.sealed_closure import (
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-# The five design-pinned sing-box patches. The supply-chain test hashes these
+# The six design-pinned sing-box patches. The supply-chain test hashes these
 # files itself, so the derived patch closure is bound to the patch bytes in the
 # repository rather than to the pin table the production code already reads.
 PATCH_PATHS = {
+    "socks_lifecycle": "native/macos/patches/sing-box-v1.13.15-socks-lifecycle.patch",
     "security": "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
     "raw_packet": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
     "dns_failover": "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
@@ -39,9 +40,9 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256), which cannot
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
-# This revision includes all five patches and the real utun interface resolver.
+# This revision includes all six patches and the real utun interface resolver.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "a1f9cef600e7bc198bfe7bb8aef01b2357cabe5be4135179b23a0b06a5b44d9c"
+    "a35bb3246ba23617b506f3d37f559acd57c3e169aa5f94061aee279adb67f7b8"
 )
 
 
@@ -153,10 +154,10 @@ class DeriveSupplyChainTests(unittest.TestCase):
         )
         patched_source = supply_chain["patched_source"]
 
-        # The bound patch closure must be exactly the five patch files that live
+        # The bound patch closure must be exactly the six patch files that live
         # in this repository, hashed from their bytes here.
         on_disk = {name: _file_sha256(path) for name, path in PATCH_PATHS.items()}
-        self.assertEqual(len(patched_source["patch_digests"]), 5)
+        self.assertEqual(len(patched_source["patch_digests"]), 6)
         self.assertEqual(patched_source["patch_digests"], sorted(on_disk.values()))
         # ...and the raw-packet patch must be the corrected revision, not the
         # truncated-hunk one that silently dropped four test helpers.

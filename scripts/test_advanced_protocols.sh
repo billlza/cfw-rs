@@ -36,7 +36,7 @@ export GOCACHE="$protocol_cache"
 configure_offline_go_environment
 protocol_go="$protocol_toolchains/go-$GO_VERSION/bin/go"
 cd "$protocol_source"
-"$protocol_go" test -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" ./protocol/group
+"$protocol_go" test -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" ./protocol/group ./protocol/socks
 "$protocol_go" vet -tags "$LIBBOX_BUILD_TAGS" \
   "$repo_root/scripts/fixtures/advanced_protocol_probe.go" \
   "$repo_root/scripts/fixtures/advanced_dns_probe.go"

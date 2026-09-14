@@ -83,6 +83,7 @@ raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")"
 dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")"
 endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")"
 profile_probe_patch_path="$(libbox_profile_probe_patch_path "$repo_root")"
+socks_lifecycle_patch_path="$(libbox_socks_lifecycle_patch_path "$repo_root")"
 # The security dependency patch is emitted with zero-context scalar replacements
 # so the regenerated module-version patch stays deterministic. This is safe only
 # because libbox_validate_upstream_source has already pinned the exact commit and
@@ -92,13 +93,15 @@ libbox_git "$staging/checkout" apply --whitespace=error-all --unidiff-zero --che
   "$raw_packet_patch_path" \
   "$dns_failover_patch_path" \
   "$endpoint_conflict_patch_path" \
-  "$profile_probe_patch_path"
+  "$profile_probe_patch_path" \
+  "$socks_lifecycle_patch_path"
 libbox_git "$staging/checkout" apply --whitespace=error-all --unidiff-zero \
   "$security_patch_path" \
   "$raw_packet_patch_path" \
   "$dns_failover_patch_path" \
   "$endpoint_conflict_patch_path" \
-  "$profile_probe_patch_path"
+  "$profile_probe_patch_path" \
+  "$socks_lifecycle_patch_path"
 libbox_validate_patched_source "$repo_root" "$staging/checkout"
 
 /bin/mv "$staging/checkout" "$output_root"
@@ -112,3 +115,4 @@ echo "security patch: $SING_BOX_SECURITY_PATCH_SHA256"
 echo "raw packet patch: $SING_BOX_RAW_PACKET_PATCH_SHA256"
 echo "DNS failover patch: $SING_BOX_DNS_FAILOVER_PATCH_SHA256"
 echo "endpoint conflict patch: $SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"
+echo "SOCKS lifecycle patch: $SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256"

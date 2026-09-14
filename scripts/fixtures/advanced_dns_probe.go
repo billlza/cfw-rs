@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
@@ -108,25 +107,26 @@ func dnsFixture(kind, address string, certificate tls.Certificate) (int, func())
 				go func() {
 					defer workers.Done()
 					defer func() { require(conn.CloseWithError(0, "") == nil, "DoQ connection close") }()
-					stream, err := conn.AcceptStream(ctx)
-					if ctx.Err() != nil {
-						return
+					for {
+						stream, err := conn.AcceptStream(ctx)
+						if ctx.Err() != nil || conn.Context().Err() != nil {
+							return
+						}
+						if err != nil {
+							panic(err)
+						}
+						require(stream.SetDeadline(time.Now().Add(5*time.Second)) == nil, "DoQ deadline")
+						var size uint16
+						require(binary.Read(stream, binary.BigEndian, &size) == nil && size <= 4096, "DoQ length")
+						body := make([]byte, size)
+						_, err = io.ReadFull(stream, body)
+						require(err == nil, "DoQ body")
+						answer := dnsAnswer(body)
+						require(binary.Write(stream, binary.BigEndian, uint16(len(answer))) == nil, "DoQ response length")
+						_, err = stream.Write(answer)
+						require(err == nil, "DoQ response")
+						require(stream.Close() == nil, "DoQ stream close")
 					}
-					if err != nil {
-						panic(err)
-					}
-					require(stream.SetDeadline(time.Now().Add(5*time.Second)) == nil, "DoQ deadline")
-					var size uint16
-					require(binary.Read(stream, binary.BigEndian, &size) == nil && size <= 4096, "DoQ length")
-					body := make([]byte, size)
-					_, err = io.ReadFull(stream, body)
-					require(err == nil, "DoQ body")
-					answer := dnsAnswer(body)
-					require(binary.Write(stream, binary.BigEndian, uint16(len(answer))) == nil, "DoQ response length")
-					_, err = stream.Write(answer)
-					require(err == nil, "DoQ response")
-					require(stream.Close() == nil, "DoQ stream close")
-					<-ctx.Done()
 				}()
 			}
 		}()
@@ -166,7 +166,25 @@ func dnsFixture(kind, address string, certificate tls.Certificate) (int, func())
 }
 
 func dnsProbe(projector, address string) {
+	dnsProbeRoute(projector, address, false)
+	dnsProbeRoute(projector, address, true)
+}
+
+func dnsProbeRoute(projector, address string, viaSOCKS bool) {
 	certificate, roots := dnsCertificate()
+	outbounds := []any{object{"type": "direct", "tag": "direct"}}
+	username, password := "dns-probe", ""
+	if viaSOCKS {
+		passwordBytes := make([]byte, 32)
+		_, err := rand.Read(passwordBytes)
+		require(err == nil, "random DNS relay credential")
+		password = base64.StdEncoding.EncodeToString(passwordBytes)
+		port := localPort(address, "tcp")
+		relay := socksServer(address, "dns-relay", port, username, password)
+		defer closeChecked(relay)
+		outbounds = []any{object{"type": "socks5", "tag": "dns-relay", "server": address, "server_port": port,
+			"authentication": object{"username_credential_ref": object{"id": profileID, "kind": "socks5_username"}, "password_credential_ref": object{"id": sharedID, "kind": "socks5_password"}}}}
+	}
 	for _, kind := range []string{"udp", "tcp", "tls", "https", "quic", "http3"} {
 		port, stop := dnsFixture(kind, address, certificate)
 		resolver := object{"type": kind, "server": address, "server_port": port}
@@ -179,27 +197,39 @@ func dnsProbe(projector, address string) {
 		if kind == "https" || kind == "http3" {
 			resolver["path"] = "/dns-query"
 		}
-		config := project(projector, object{"outbounds": []any{object{"type": "direct", "tag": "direct"}}, "dns": object{"servers": []any{resolver}}})
+		config := project(projector, object{"outbounds": outbounds, "dns": object{"servers": []any{resolver}}})
 		prepareListeners(config, address)
+		if viaSOCKS {
+			for _, value := range config["outbounds"].([]any) {
+				node := value.(map[string]any)
+				if node["type"] == "socks" {
+					node["username"], node["password"] = username, password
+				}
+			}
+		}
 		instance, ctx := startWithContext(config, roots)
 		router := service.FromContext[adapter.DNSRouter](ctx)
 		require(router != nil, "DNS router")
 		query := new(dns.Msg)
 		query.SetQuestion("probe.invalid.", dns.TypeA)
-		requestCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		answer, err := router.Exchange(requestCtx, query, adapter.DNSQueryOptions{})
-		cancel()
-		if err != nil {
-			closeChecked(instance)
-			stop()
-			panic(fmt.Errorf("DNS %s: %w", kind, err))
+		// Fresh queries must reuse a healthy transport after the preceding
+		// request context has been cancelled; cached answers cannot prove it.
+		for attempt := 0; attempt < 3; attempt++ {
+			requestCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			answer, err := router.Exchange(requestCtx, query, adapter.DNSQueryOptions{DisableCache: true})
+			cancel()
+			if err != nil {
+				closeChecked(instance)
+				stop()
+				panic(fmt.Errorf("DNS %s through SOCKS=%t attempt=%d: %w", kind, viaSOCKS, attempt, err))
+			}
+			require(len(answer.Answer) == 1, "DNS answer count")
+			addressAnswer, ok := answer.Answer[0].(*dns.A)
+			require(ok && addressAnswer.A.Equal(net.ParseIP("203.0.113.7")), "DNS answer")
 		}
-		require(len(answer.Answer) == 1, "DNS answer count")
-		addressAnswer, ok := answer.Answer[0].(*dns.A)
-		require(ok && addressAnswer.A.Equal(net.ParseIP("203.0.113.7")), "DNS answer")
 		closeChecked(instance)
 		stop()
-		fmt.Println("PASS DNS " + kind + " response from configured resolver on port " + strconv.Itoa(port))
+		fmt.Printf("PASS DNS %s through SOCKS=%t: three uncached exchanges after request cancellation\n", kind, viaSOCKS)
 	}
 }
 

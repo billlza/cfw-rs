@@ -6,16 +6,20 @@ digest is `2cab554855d7a795ba100da2e45f65bdad9bd395a87abe96613aa3ab7c1621a1`.
 TUN, combined mode, and System Proxy carried successful HTTPS requests. Pure
 TUN later showed DNS and TCP timeouts; those failures remain preserved.
 
-The default encrypted DNS pair required TLS 1.3 from both operators. Through
-the selected existing SOCKS node, the pinned sing-box runtime successfully
-queried the primary AliDNS resolver but the secondary `doh.pub` endpoint
-returned `remote error: tls: handshake failure`. An independent TLS client
-observed the same refusal. That secondary could not serve its fallback role.
-The same runtime queried Cloudflare and AliDNS successfully while bound to
-en0, without changing OS proxy/DNS settings or CFW. 40060 retains AliDNS as
-the primary and replaces the failing secondary with Cloudflare; TLS 1.3,
-certificate identity checks,
-the selected outbound, and explicit user DNS choices are preserved.
+The first diagnostic forced a TLS 1.3 minimum and observed a handshake failure
+from `doh.pub` through the selected SOCKS node. That diagnostic was stricter
+than the product: both 40059 and 40060 use a TLS 1.2 minimum and negotiate
+TLS 1.3 when supported. A subsequent test using the actual Rust projection
+and pinned runtime successfully queried both old resolvers, including fallback
+after deliberately rejecting the primary TLS identity. The forced-TLS result
+therefore does not establish the cause of the earlier pure-TUN timeout.
+
+40060 retains primary AliDNS and replaces the secondary with Cloudflare, which
+also passed the stricter TLS 1.3 diagnostic. The actual final projection passed
+primary, secondary, automatic, and rejected-primary fallback queries while
+bound to en0, without changing OS proxy/DNS settings or CFW. This is a tested
+resolver compatibility change; the product TLS minimum, certificate identity
+checks, selected outbound, and explicit user DNS choices are unchanged.
 
 74 configuration tests passed. A local protocol regression uses real TLS and
 DNS messages to show that a rejected primary identity can use the separately
@@ -38,10 +42,15 @@ handoff, no delayed network action may be issued. Isolated probes may release
 their own sockets and processes; the person using CFM owns its switches during
 manual testing. This is a test-operation rule, not a new product startup gate.
 
-Evidence is in `target/dns-recovery-20260912` and
+Evidence is in `target/dns-recovery-20260912`, including
+`projected-old-dns-actual-policy-results.json` for the corrected old-policy
+comparison, and
 `/Users/bill/cfw-release-history/network-start-40059-20260911`, including the
-failed pure-TUN runs and the 01:09 incident timeline. 40060 installation and
-manual runtime acceptance remain separate work.
+failed pure-TUN runs and the 01:09 incident timeline. 40060 was signed,
+notarized, and installed; its two configured nodes passed latency checks with
+the engine Off. Installed pure-TUN restart and long-running network acceptance
+remain open. The installation and package receipts are in
+`/Users/bill/cfw-release-history/network-start-40060-20260912`.
 
 The direct CLI regression requires the existing closed release runtime. The
 supply-chain regression was corrected to include the fifth (profile-probe)

@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "b0d82a330679bf7d7ea2c9100d8a299008a9135691830bcf5b58a73e2ce6613c"
+    "a4a4966619c802defd9092ab9abd9356d3ad73803104faa97ee8d4caad06284d"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "0f2e9e83c9a0a9ada570d98b8530e4e410b91e779fd3858dae65a079b707343e"
+    "93b7d981ce500efd2a3ba21c527aafd3f519d4172549e6895049d985bf3a9b5e"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -127,11 +127,11 @@ REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
 GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
     "_publish_and_confirm_stage": "f8647aa681a7e02ca7e38be3f18cfd903fdc2c9cfedf938d0f8313f407dc1c93",
     "_require_hosted_ci_source_binding": "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a",
-    "_verified_prepackage_inputs": "78524580ade52dcc4a325df6afa9abce357a9f831f4fdc0e1e2a4fb03f1e63cf",
+    "_verified_prepackage_inputs": "6e34f58fb48a90e2505ea5b1ba530059f7c081cb174e3084b9187788e55736b0",
     "_verified_package_sets": "03322fad12344a0f9dbf70acaf152a78a6fa09778794c52202bc6c804110791d",
     "_verified_migration_journals": "aae37ebedddaa00d345475f26ed45e28d69d1097bee7a9a9997b6dd63b7bcc28",
     "_expected_candidate_from_prepackage": "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e",
-    "_require_migration_matches_prepackage": "c7daba62637f629416b2b424d964ffa05642289b11833dfd6e6b49e6f2e8a93d",
+    "_require_migration_matches_prepackage": "f557f53c8188cadefcbb22ab72a0ed38efebc92572e35e62511c66a1b9b5cfe9",
     "_verified_acceptance_inputs": "6a326b17cf90c28e4410a5b883676d4c64d79c18c9d87e7b9e6a1717d561e702",
     "_verified_runtime_acceptance_adapter": "5784c684917110eba0684fb84de273b02b0b934b44d22f2506181d3af7f393ad",
     "_ga_acceptance_files": "d4530d6ef4c092df45eab0dd91f0751872ad82f69c0a8d011f5a0382e3cb9023",
@@ -142,7 +142,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
     "verify_publication_authorization": "cdc26323dba3a714add18e1e30394717e3a98eafef0e87adfa460f7a0b67ae61",
     "derive_runtime_expectation": "6a1661f1f99190f9be401f2df9635cbf2933757767936f8ef4cd0ea8a3e13930",
     "seal_prepackage": "3d63970071f5c47783136635b7091ce7f352f91f9cba15019f37f16dd9a5b223",
-    "seal_ga_acceptance": "9502d03fd6ec48be528f1bec3b7eb95e3c4c06772f7274ad0eafabade7539525",
+    "seal_ga_acceptance": "fd0df66dd638cecdd221b79885495f3b9d185252f7bb9ec07edd3ce9ee146d1e",
     "seal_publication": "808fbaaea13245bb940eecaf1abc047f472211f8e1e95192a34f47e4a71e1f89",
     "_compose_stage_files": "284e186baba2f7dbb21d02b3fc3fb2380e86ada30464b4ceb81a5df9d459ce8f",
     "_current_stage_executor": "4640733086dffe90fffdef7b33fc52163268546e16d404200ee6b18eb9517b55",
@@ -165,7 +165,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "b3570cfb7217969baa71bbb591a471119519022ccfb598d99b5960167d142dac"
+    "d5d9170bd2f6c3680b86961526f90be29627b859dd79e20501e73d387bd059ba"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -178,6 +178,7 @@ NATIVE_LOCK_SING_BOX_FIELDS = frozenset(
         "dnsFailoverPatch",
         "endpointConflictPatch",
         "profileProbePatch",
+        "socksLifecyclePatch",
         "rawPacketPatch",
         "securityPatch",
         "tag",
@@ -230,6 +231,11 @@ REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS = frozenset(
     }
 )
 REQUIRED_PATCH_POLICIES = {
+    "socksLifecyclePatch": (
+        "sing-box SOCKS lifecycle patch",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
+    ),
     "securityPatch": (
         "sing-box security dependencies patch",
         "SING_BOX_SECURITY_PATCH_PATH",
@@ -306,6 +312,7 @@ REQUIRED_BUILD_SCRIPT_POLICIES = {
             "$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
             "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
             "$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+            "$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
         }
     )
 }
@@ -3687,8 +3694,8 @@ def _verify_commits(manifest: dict, env: dict[str, str]) -> None:
 
 def _verify_patches(manifest: dict, env: dict[str, str], repository: Path) -> list[str]:
     patches = manifest.get("patches")
-    if not isinstance(patches, list) or len(patches) != 5:
-        raise PinnedInputError("pinned-input manifest must pin exactly five patches")
+    if not isinstance(patches, list) or len(patches) != 6:
+        raise PinnedInputError("pinned-input manifest must pin exactly six patches")
     rejected_values = manifest.get("rejectedPatchDigests")
     if (
         not isinstance(rejected_values, list)
@@ -4345,7 +4352,7 @@ def main() -> int:
         "reproducible Linux artifact binding, Android packet LAN peer source/tree/"
         "script/protocol/deployment/held-artifact binding, ADB runtime-tool source "
         "binding, physical-collector module graph, "
-        "XcodeGen patch/source binding, sing-box and gomobile commits, five libbox patch "
+        "XcodeGen patch/source binding, sing-box and gomobile commits, six libbox patch "
         "digests, combined diff, Go module inputs and module-cache closure contract, "
         "libbox build tags required by the engine start path, native lock binding, "
         "offline artifact-hash build-script references, and the exact artifact-source "

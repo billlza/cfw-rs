@@ -1278,6 +1278,7 @@ LIBBOX_VET_PACKAGES=(".")
             "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
             "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
             "profileProbePatchSha256=$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+            "socksLifecyclePatchSha256=$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
             "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
             "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
             "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
@@ -1310,7 +1311,7 @@ LIBBOX_VET_PACKAGES=(".")
             encoding="utf-8"
         )
         for fragment in (
-            "const LIBBOX_METADATA_KEYS: [&str; 24]",
+            "const LIBBOX_METADATA_KEYS: [&str; 26]",
             '"goToolchainTreeSha256"',
             '"goToolsTreeSha256"',
             '"goModuleCacheTreeSha256"',
@@ -1319,7 +1320,10 @@ LIBBOX_VET_PACKAGES=(".")
             "endpoint_conflict_patch: SingBoxSourcePatchLock",
             '"SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH"',
             '"SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"',
-            "sing-box endpoint conflict patch digest differs from dependency lock",
+            "sing-box {description} patch digest differs from dependency lock",
+            "socks_lifecycle_patch: SingBoxSourcePatchLock",
+            '"SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH"',
+            '"SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256"',
             "actual_metadata_keys != expected_metadata_keys",
             "CFW_GO_TOOLCHAIN_TREE_SHA256",
             "CFW_GO_TOOLS_TREE_SHA256",

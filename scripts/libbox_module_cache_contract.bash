@@ -10,11 +10,13 @@ LIBBOX_GOMOBILE_BIND_PACKAGES=(
 )
 
 LIBBOX_RACE_TEST_PACKAGES=(
+  "./protocol/socks"
   "./dns"
   "./option"
 )
 
 LIBBOX_TEST_PACKAGES=(
+  "./protocol/socks"
   "."
   "./adapter"
   "./dns"
@@ -32,6 +34,7 @@ LIBBOX_COMPILE_TEST_PACKAGES=(
 )
 
 LIBBOX_VET_PACKAGES=(
+  "./protocol/socks"
   "."
   "./adapter"
   "./dns"

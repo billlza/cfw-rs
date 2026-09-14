@@ -398,6 +398,7 @@ def _libbox_manifest_metadata(
             "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"
         ),
         "profileProbePatchSha256": pin("SING_BOX_PROFILE_PROBE_PATCH_SHA256"),
+        "socksLifecyclePatchSha256": pin("SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256"),
         "patchedDiffSha256": pin("SING_BOX_PATCHED_DIFF_SHA256"),
         "combinedDiffSha256": pin("SING_BOX_COMBINED_DIFF_SHA256"),
         "patchedGoModSha256": pin("SING_BOX_PATCHED_GO_MOD_SHA256"),

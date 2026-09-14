@@ -346,19 +346,29 @@ libbox_profile_probe_patch_path() {
   libbox_repository_relative_path "$1" "$SING_BOX_PROFILE_PROBE_PATCH_PATH" "sing-box profile probe patch"
 }
 
+libbox_socks_lifecycle_patch_path() {
+  libbox_repository_relative_path "$1" "$SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH" "sing-box SOCKS lifecycle patch"
+}
+
 libbox_validate_patches() {
   local repo_root="$1"
-  local security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path profile_probe_patch_path
+  local security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path profile_probe_patch_path socks_lifecycle_patch_path
   security_patch_path="$(libbox_security_patch_path "$repo_root")" || return 1
   raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")" || return 1
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
   endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
   profile_probe_patch_path="$(libbox_profile_probe_patch_path "$repo_root")" || return 1
+  socks_lifecycle_patch_path="$(libbox_socks_lifecycle_patch_path "$repo_root")" || return 1
   libbox_require_regular_file "$security_patch_path" || return 1
   libbox_require_regular_file "$raw_packet_patch_path" || return 1
   libbox_require_regular_file "$dns_failover_patch_path" || return 1
   libbox_require_regular_file "$endpoint_conflict_patch_path" || return 1
   libbox_require_regular_file "$profile_probe_patch_path" || return 1
+  libbox_require_regular_file "$socks_lifecycle_patch_path" || return 1
+  if [[ "$(libbox_sha256 "$socks_lifecycle_patch_path")" != "$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256" ]]; then
+    echo "error: sing-box SOCKS lifecycle patch digest mismatch" >&2
+    return 1
+  fi
   if [[ "$(libbox_sha256 "$profile_probe_patch_path")" != "$SING_BOX_PROFILE_PROBE_PATCH_SHA256" ]]; then
     echo "error: sing-box profile probe patch digest mismatch" >&2
     return 1
@@ -399,7 +409,7 @@ libbox_validate_git_root() {
 libbox_validate_upstream_source() {
   local repo_root="$1"
   local source_root="$2"
-  local security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path profile_probe_patch_path
+  local security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path profile_probe_patch_path socks_lifecycle_patch_path
   libbox_validate_patches "$repo_root" || return 1
   libbox_validate_git_root "$source_root" || return 1
   if [[ -n "$(libbox_git "$source_root" status --porcelain=v1 --untracked-files=all)" ]]; then
@@ -421,6 +431,7 @@ libbox_validate_upstream_source() {
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
   endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
   profile_probe_patch_path="$(libbox_profile_probe_patch_path "$repo_root")" || return 1
+  socks_lifecycle_patch_path="$(libbox_socks_lifecycle_patch_path "$repo_root")" || return 1
   # Zero-context patches are admitted only after the exact upstream commit and
   # go.mod/go.sum digests above have been verified.
   if ! libbox_git "$source_root" apply --whitespace=error-all --unidiff-zero --check \
@@ -428,7 +439,8 @@ libbox_validate_upstream_source() {
     "$raw_packet_patch_path" \
     "$dns_failover_patch_path" \
     "$endpoint_conflict_patch_path" \
-    "$profile_probe_patch_path"; then
+    "$profile_probe_patch_path" \
+    "$socks_lifecycle_patch_path"; then
     echo "error: pinned patches do not apply to the pinned sing-box source" >&2
     return 1
   fi
@@ -501,7 +513,7 @@ libbox_combined_diff_sha256() {
 libbox_validate_patched_source() {
   local repo_root="$1"
   local source_root="$2"
-  local actual_diff actual_combined_diff ignored_files security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path profile_probe_patch_path
+  local actual_diff actual_combined_diff ignored_files security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path profile_probe_patch_path socks_lifecycle_patch_path
   libbox_validate_patches "$repo_root" || return 1
   libbox_validate_git_root "$source_root" || return 1
 
@@ -535,10 +547,12 @@ libbox_validate_patched_source() {
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
   endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
   profile_probe_patch_path="$(libbox_profile_probe_patch_path "$repo_root")" || return 1
+  socks_lifecycle_patch_path="$(libbox_socks_lifecycle_patch_path "$repo_root")" || return 1
   if ! libbox_git "$source_root" apply --whitespace=error-all --unidiff-zero --reverse --check \
     "$endpoint_conflict_patch_path" \
-    "$profile_probe_patch_path"; then
-    echo "error: pinned endpoint conflict patch cannot be reversed cleanly" >&2
+    "$profile_probe_patch_path" \
+    "$socks_lifecycle_patch_path"; then
+    echo "error: pinned endpoint, profile probe, or SOCKS lifecycle patch cannot be reversed cleanly" >&2
     return 1
   fi
   if ! libbox_git "$source_root" apply --whitespace=error-all --reverse --check "$dns_failover_patch_path"; then
@@ -602,6 +616,7 @@ libbox_verify_xcframework_artifact() {
     --metadata "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \
     --metadata "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" \
     --metadata "profileProbePatchSha256=$SING_BOX_PROFILE_PROBE_PATCH_SHA256" \
+    --metadata "socksLifecyclePatchSha256=$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256" \
     --metadata "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256" \
     --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256" \
     --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \

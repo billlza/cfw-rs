@@ -2130,6 +2130,16 @@ dd {
   padding: 8px 10px;
 }
 
+.setting-row > span:first-child {
+  flex: 1 1 48%;
+  min-width: 0;
+}
+
+.setting-row > strong {
+  flex: 0 1 48%;
+  min-width: 0;
+}
+
 .setting-row strong {
   max-width: 52%;
   overflow-wrap: anywhere;
@@ -2156,6 +2166,9 @@ dd {
 
 .setting-action {
   display: flex;
+  flex: 0 1 52%;
+  flex-wrap: wrap;
+  min-width: 0;
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
@@ -2163,7 +2176,13 @@ dd {
 }
 
 .setting-action strong {
+  flex: 1 1 auto;
+  min-width: min(100%, 6ch);
   max-width: none;
+}
+
+.setting-action .button {
+  flex: 0 0 auto;
 }
 
 .settings-taxonomy {

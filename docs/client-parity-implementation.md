@@ -508,3 +508,17 @@ and features, clippy with warnings denied, 130 UI tests and UI bundle build,
 390 release identity/input/graph/freeze tests in the closed toolchain environment,
 and all build-boundary checks. The final orphan tests cover active Local Proxy,
 System Proxy and Tunnel rejection. No security guard or assertion was relaxed.
+
+The installed 40062 Background controls action exposed an additional UI wiring
+defect: its state and handlers were present but renderGlassOverlays omitted the
+automation dialog output. Component preview had rendered it directly and did
+not exercise that dashboard boundary. The complete dashboard regression now
+reproduces the empty overlay before the fix and passes with its controls visible
+and Escape dismissal. Runtime settings receive the same Escape behavior. All
+131 UI tests pass. Settings rows also reserve usable value/control width instead
+of squeezing ports and status text into one-character columns.
+
+40063 preflight attempt 1 was stopped before any candidate freeze; its clean
+source and logs are preserved in native-wire-install-40063-20260915/source-attempt-1.
+The same unconsumed build number is used for the corrected UI source. This is not
+a new allocation, and no frozen application was modified.

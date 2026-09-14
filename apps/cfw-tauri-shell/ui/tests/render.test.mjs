@@ -2897,3 +2897,28 @@ test("the Settings page reports the diagnostics fields the backend calls unavail
   assert.ok(html.includes("Wi-Fi"));
   assert.ok(html.includes("NetworkExtension Packet Tunnel System Extension"));
 });
+
+test("background controls render through the dashboard and Escape dismisses the dialog", async () => {
+  responses.read_automation_settings = {
+    settings: { shortcuts: [], network_enabled: false, network_rules: [] },
+    revision: "automation-v1", network: { kind: "wifi", interface: "en0", ssid: null },
+  };
+  try {
+    await renderPage("settings");
+    await appModule.handleAction("open-automation-settings");
+    assert.match(glassRoot.innerHTML, /aria-labelledby="automation-title"/u);
+    assert.match(glassRoot.innerHTML, /data-shortcut-action="show_dashboard"/u);
+    assert.match(glassRoot.innerHTML, /data-network-add/u);
+    let prevented = false;
+    for (const handler of documentListeners.get("keydown") ?? []) {
+      handler({ key: "Escape", preventDefault() { prevented = true; } });
+    }
+    assert.equal(prevented, true);
+    assert.equal(state.automationDialog, null);
+    assert.doesNotMatch(glassRoot.innerHTML, /automation-title/u);
+  } finally {
+    state.automationDialog = null;
+    delete responses.read_automation_settings;
+    await renderPage("settings");
+  }
+});

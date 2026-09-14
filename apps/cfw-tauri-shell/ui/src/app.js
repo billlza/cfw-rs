@@ -1570,6 +1570,7 @@ function renderGlassOverlays() {
   }
 
   parts.push(runtimeSettingsUI.renderDialog());
+  parts.push(automationSettingsUI.renderDialog());
   root.innerHTML = parts.join("");
   runtimeSettingsUI.bindDialog();
   automationSettingsUI.bindDialog();
@@ -2686,7 +2687,7 @@ function bindGlobalEvents() {
   editingRender.bind();
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && (state.profileContextMenu || state.glassDialog)) {
+    if (event.key === "Escape" && (state.profileContextMenu || state.glassDialog || state.runtimeSettingsDialog || state.automationDialog)) {
       event.preventDefault();
       closeGlassOverlays();
     }

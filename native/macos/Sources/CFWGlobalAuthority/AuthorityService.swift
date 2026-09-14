@@ -91,6 +91,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   private var boundPeerID: UUID?
   private var ownerAuditSessionID: UInt32?
   private var stopDeadlineMonotonic: UInt64?
+  private var lastOwnerHeartbeatMonotonic: UInt64?
 
   public init(
     reducer: GlobalAuthorityReducer,
@@ -102,6 +103,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
     self.journal = journal
     self.randomness = randomness
     self.clock = clock
+    lastOwnerHeartbeatMonotonic = reducer.lease?.issuedMonotonic
     secrets = TunnelSecretLifecycle(randomness: randomness, clock: clock)
   }
 
@@ -127,8 +129,8 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
     }
   }
 
-  /// True once the current owner has durably attested a stop. Used by the liveness
-  /// supervisor to escalate an elapsed stop timeout to Quarantined.
+  /// True once the current owner has durably attested a stop. Connection-loss
+  /// handling must not revoke an owner whose cleanup has already been attested.
   public var ownerHasAttestedStopped: Bool { lock.withLock { reducer.ownerStopped } }
 
   /// Expires an owner that never arrived. Preparing has no data-plane or OS
@@ -143,6 +145,42 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       else { return false }
       try abortUnboundPreparationLocked(operation: lease.operation)
       return true
+    }
+  }
+
+  /// The deadline and the owner it protects belong to the same durable stop.
+  /// Check and quarantine under the reducer lock so a delayed notification or
+  /// timer observation cannot apply an older stop's deadline to a new lease.
+  @discardableResult
+  public func quarantineExpiredStopIfNeeded() throws -> Bool {
+    try lock.withLock {
+      guard reducer.state == .stopping, !reducer.ownerStopped,
+        let deadline = stopDeadlineMonotonic,
+        clock.nowMilliseconds() >= deadline
+      else { return false }
+      _ = try resolveOffLocked(
+        GlobalOffProof(
+          leaseReleased: false, capabilityOrTicketCleared: false,
+          secretBufferCleared: false, ownerEndpointCleared: false,
+          cleanup: .unknown, managedTunnel: .unknown))
+      return true
+    }
+  }
+
+  /// Heartbeat age and revocation are checked against the same current owner.
+  /// Binding seeds its timestamp before publishing Starting; a previous lease's
+  /// contact time must never revoke a newly bound owner.
+  public func revokeExpiredHeartbeatIfNeeded(
+    timeoutMilliseconds: UInt64
+  ) throws -> AuthorityForcedStopOutcome? {
+    try lock.withLock {
+      guard reducer.state == .starting || reducer.state == .active else { return nil }
+      guard let last = lastOwnerHeartbeatMonotonic else {
+        throw AuthorityDomainError(code: .cleanupUnproven)
+      }
+      let now = clock.nowMilliseconds()
+      guard now >= last, now - last >= timeoutMilliseconds else { return nil }
+      return try forceStopLocked()
     }
   }
 
@@ -187,46 +225,51 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   public func forceStop(
     trigger: AuthorityLivenessTrigger
   ) throws -> AuthorityForcedStopOutcome? {
-    try lock.withLock {
-      guard let lease = reducer.lease else { return nil }
-      if reducer.state == .preparing {
-        try abortUnboundPreparationLocked(operation: lease.operation)
-        return AuthorityForcedStopOutcome(
-          directive: nil, ownerPeerID: nil,
-          revision: reducer.revision, quarantined: false)
-      }
-      let before = reducer.revision
-      var candidate = reducer
-      let revision = try candidate.revokeForLiveness()
-      guard revision != before else { return nil }
-      try persist(&candidate)
-      reducer = candidate
-      proxyCapability = nil
-      secrets.terminate(.cancellation)
-      return try forcedOutcomeLocked(revision: revision)
+    try lock.withLock { try forceStopLocked() }
+  }
+
+  private func forceStopLocked() throws -> AuthorityForcedStopOutcome? {
+    guard let lease = reducer.lease else { return nil }
+    if reducer.state == .preparing {
+      try abortUnboundPreparationLocked(operation: lease.operation)
+      return AuthorityForcedStopOutcome(
+        directive: nil, ownerPeerID: nil,
+        revision: reducer.revision, quarantined: false)
     }
+    let before = reducer.revision
+    var candidate = reducer
+    let revision = try candidate.revokeForLiveness()
+    guard revision != before else { return nil }
+    try persist(&candidate)
+    reducer = candidate
+    proxyCapability = nil
+    secrets.terminate(.cancellation)
+    return try forcedOutcomeLocked(revision: revision)
   }
 
   /// Applies an owner/OS Off proof. Off is committed only when every barrier
   /// predicate is proven; any ambiguity retains Quarantined instead of Off.
   @discardableResult
   public func resolveOff(_ proof: GlobalOffProof) throws -> AuthorityOffResolution {
-    try lock.withLock {
-      var candidate = reducer
-      let resolution = try candidate.applyOffProof(
-        proof, expectedRevision: reducer.revision)
-      try persist(&candidate)
-      reducer = candidate
-      stopDeadlineMonotonic = nil
-      if case .off = resolution {
-        proxyCapability = nil
-        configurationDescriptor = nil
-        boundPeerID = nil
-        ownerAuditSessionID = nil
-      }
-      secrets.terminate(.cancellation)
-      return resolution
+    try lock.withLock { try resolveOffLocked(proof) }
+  }
+
+  private func resolveOffLocked(_ proof: GlobalOffProof) throws -> AuthorityOffResolution {
+    var candidate = reducer
+    let resolution = try candidate.applyOffProof(
+      proof, expectedRevision: reducer.revision)
+    try persist(&candidate)
+    reducer = candidate
+    stopDeadlineMonotonic = nil
+    lastOwnerHeartbeatMonotonic = nil
+    if case .off = resolution {
+      proxyCapability = nil
+      configurationDescriptor = nil
+      boundPeerID = nil
+      ownerAuditSessionID = nil
     }
+    secrets.terminate(.cancellation)
+    return resolution
   }
 
   /// Commits the post-restart recovery barrier to Off only when the exact
@@ -328,6 +371,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       try persist(&candidate)
       reducer = candidate
       stopDeadlineMonotonic = nil
+      lastOwnerHeartbeatMonotonic = nil
       proxyCapability = nil
       configurationDescriptor = nil
       boundPeerID = nil
@@ -432,6 +476,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
         }
         reducer = candidate
         stopDeadlineMonotonic = nil
+        lastOwnerHeartbeatMonotonic = nil
         configurationDescriptor = request.configuration
         proxyCapability = nil
         return try PreparedStart(
@@ -468,6 +513,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
         try persist(&candidate)
         reducer = candidate
         stopDeadlineMonotonic = nil
+        lastOwnerHeartbeatMonotonic = nil
         proxyCapability = PendingProxyCapability(
           operation: request.operation, leaseID: leaseID,
           digest: try digest(rawCapability),
@@ -534,6 +580,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       reducer = candidate
       proxyCapability = nil
       boundPeerID = peerID
+      lastOwnerHeartbeatMonotonic = clock.nowMilliseconds()
       return try leaseView(candidate.lease)
     }
   }
@@ -581,6 +628,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
         try persist(&candidate)
         reducer = candidate
         boundPeerID = peerID
+        lastOwnerHeartbeatMonotonic = clock.nowMilliseconds()
         return RedeemResult(
           metadata: try RedeemedTunnelMetadata(
             operation: redemption.operation, lease: leaseView(candidate.lease),
@@ -675,6 +723,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       try persist(&candidate)
       reducer = candidate
       stopDeadlineMonotonic = nil
+      lastOwnerHeartbeatMonotonic = nil
       proxyCapability = nil
       configurationDescriptor = nil
       boundPeerID = nil
@@ -766,6 +815,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
     try persist(&candidate)
     reducer = candidate
     stopDeadlineMonotonic = nil
+    lastOwnerHeartbeatMonotonic = nil
     proxyCapability = nil
     configurationDescriptor = nil
     boundPeerID = nil
@@ -837,7 +887,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
 
   public func ownerPeerID() -> UUID? { lock.withLock { boundPeerID } }
 
-  public func assertOwnerHeartbeat(
+  public func recordOwnerHeartbeat(
     peer: PeerIdentity,
     peerID: UUID
   ) throws {
@@ -847,6 +897,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       else { throw AuthorityDomainError(code: .staleOperation) }
       try requireBoundOwner(
         peer: peer, peerID: peerID, operation: lease.operation)
+      lastOwnerHeartbeatMonotonic = clock.nowMilliseconds()
     }
   }
 
@@ -1110,7 +1161,6 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
       }
       let lease = try self.core.bindProxyOwner(
         value, peer: peer, peerID: self.peerID)
-      self.liveness.recordHeartbeat()
       return try self.response(
         lease, envelope: envelope,
         operationID: value.operation.operationID)
@@ -1131,7 +1181,6 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
         }
         let result = try core.redeemTunnelTicket(
           value, peer: peer, peerID: peerID)
-        liveness.recordHeartbeat()
         return result
       }
       var configurationData = Data()
@@ -1194,9 +1243,6 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
           core.ownerPeerID()
         )
       }
-      liveness.noteStopOrdered(
-        revision: result.1.revision,
-        deadlineMonotonic: result.1.deadlineMonotonic)
       if let ownerPeerID = result.2 {
         events.send(.stop(result.1), to: ownerPeerID)
       }
@@ -1291,9 +1337,8 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     do {
       let peer = try reauthorize()
       try concurrency.withRead {
-        try core.assertOwnerHeartbeat(peer: peer, peerID: peerID)
+        try core.recordOwnerHeartbeat(peer: peer, peerID: peerID)
       }
-      liveness.recordHeartbeat()
       reply(nil)
     } catch {
       reply(xpcError(error))

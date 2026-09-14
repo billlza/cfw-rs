@@ -1,9 +1,9 @@
-import CFWSharedProtocol
 import CryptoKit
 import Foundation
 import Testing
 
 @testable import CFWGlobalAuthority
+@testable import CFWSharedProtocol
 
 // MARK: - Deterministic fakes (no real launchd / NE / SystemConfiguration / clock)
 
@@ -98,14 +98,14 @@ private func hostPeer(ownerUID: UInt32) -> PeerIdentity {
 
 private func systemProxyPrepare(
   ownerUID: UInt32, installation: AuthorityIdentifier, epoch: UInt64,
-  generation: UInt64, revision: UInt64
+  generation: UInt64, revision: UInt64, mode: AuthorityMode = .systemProxy
 ) throws -> (request: PrepareStartRequest, configuration: Data) {
   let configuration = Data("{\"inbounds\":[]}".utf8)
   let configDigest = livenessDigest(configuration)
   let root = try RootContext(
     installationID: installation, epoch: epoch, generation: generation)
   let operation = try OperationContext(
-    operationID: AuthorityIdentifier(UUID()), root: root, mode: .systemProxy,
+    operationID: AuthorityIdentifier(UUID()), root: root, mode: mode,
     configSHA256: configDigest, identitySHA256: livenessIdentity,
     ownerUID: ownerUID, authorityRevision: revision)
   let descriptor = try AuthorityConfigurationDescriptor(
@@ -189,7 +189,7 @@ private func prepareForRecovering(
   let clock = MutableClock(2_000)
   let fixture = try activeSystemProxyCore(clock: clock)
   let supervisor = AuthorityLivenessSupervisor(
-    core: fixture.core, clock: clock,
+    core: fixture.core,
     consoleResolver: FixedConsoleResolver(uid: 502))
 
   let action = try supervisor.observeConsoleUser()
@@ -217,10 +217,9 @@ private func prepareForRecovering(
   let clock = MutableClock(1_000)
   let fixture = try activeSystemProxyCore(clock: clock)
   let supervisor = AuthorityLivenessSupervisor(
-    core: fixture.core, clock: clock,
+    core: fixture.core,
     consoleResolver: FixedConsoleResolver(uid: 501))
 
-  supervisor.recordHeartbeat()
   clock.set(3_000)
   #expect(try supervisor.evaluate() == AuthorityLivenessAction.none)
 
@@ -243,19 +242,16 @@ private func prepareForRecovering(
   let clock = MutableClock(1_000)
   let fixture = try activeSystemProxyCore(clock: clock)
   let supervisor = AuthorityLivenessSupervisor(
-    core: fixture.core, clock: clock,
+    core: fixture.core,
     consoleResolver: FixedConsoleResolver(uid: 501))
 
   #expect(try supervisor.forceStop(.connectionLoss) == .forcedStop(.connectionLoss))
-  let stopRevision = fixture.core.currentRevision
   #expect(fixture.core.authorityState == .stopping)
 
   // A replay of the same durable stop claim must not restart its five-second
   // timeout. Otherwise an ACK retry loop could keep an unproven owner forever.
   clock.set(4_000)
-  supervisor.noteStopOrdered(
-    revision: stopRevision,
-    deadlineMonotonic: 9_000)
+  #expect(try supervisor.forceStop(.connectionLoss) == .none)
   clock.set(6_001)
   #expect(try supervisor.evaluate() == .quarantinedForUnprovenCleanup)
   #expect(fixture.core.authorityState == .quarantined)
@@ -265,20 +261,78 @@ private func prepareForRecovering(
   let clock = MutableClock(1_000)
   let fixture = try activeSystemProxyCore(clock: clock)
   let supervisor = AuthorityLivenessSupervisor(
-    core: fixture.core, clock: clock,
+    core: fixture.core,
     consoleResolver: FixedConsoleResolver(uid: 501))
   let outcome = try #require(
     try fixture.core.forceStop(trigger: .connectionLoss))
   let directive = try #require(outcome.directive)
   #expect(directive.deadlineMonotonic == 6_000)
 
-  // Recording is deliberately delayed. Enforcement remains tied to the
-  // Authority's directive, not to local delivery latency.
-  clock.set(4_000)
-  supervisor.noteStopOrdered(
-    revision: directive.revision,
-    deadlineMonotonic: directive.deadlineMonotonic)
+  // Delivery is deliberately absent. Enforcement remains tied to the
+  // Authority's durable stop, without a second notification to the supervisor.
   clock.set(6_001)
+  #expect(try supervisor.evaluate() == .quarantinedForUnprovenCleanup)
+  #expect(fixture.core.authorityState == .quarantined)
+}
+
+@Test(arguments: [AuthorityMode.localProxy, .systemProxy])
+func aPreviousStopDeadlineCannotQuarantineANewGeneration(mode: AuthorityMode) throws {
+  let clock = MutableClock(1_000)
+  let fixture = try activeSystemProxyCore(clock: clock)
+  let supervisor = AuthorityLivenessSupervisor(
+    core: fixture.core,
+    consoleResolver: FixedConsoleResolver(uid: 501))
+  #expect(try supervisor.forceStop(.connectionLoss) == .forcedStop(.connectionLoss))
+  let unknown = GlobalOffProof(
+    leaseReleased: false, capabilityOrTicketCleared: false,
+    secretBufferCleared: false, ownerEndpointCleared: false,
+    cleanup: .unknown, managedTunnel: .unknown)
+  _ = try fixture.core.resolveOff(unknown)
+  _ = try fixture.core.resolveOff(exactOff())
+  #expect(fixture.core.authorityState == .off)
+
+  clock.set(10_000)
+  let host = hostPeer(ownerUID: 501)
+  let (request, configuration) = try systemProxyPrepare(
+    ownerUID: 501, installation: fixture.installation, epoch: 1, generation: 2,
+    revision: fixture.core.currentRevision, mode: mode)
+  let prepared = try fixture.core.prepare(
+    request, configuration: configuration, secretPayload: nil, peer: host)
+  defer { prepared.ownerCapability?.erase() }
+  let owner = PeerIdentity(
+    connectionIdentityDigest: livenessDigest(Data("next-owner".utf8)),
+    pid: 8, euid: 501, auditSessionID: 3, role: .proxyAgent, consoleUID: 501)
+  let ownerID = UUID()
+  let lease = try fixture.core.bindProxyOwner(
+    BindProxyOwnerRequest(
+      operation: request.operation, leaseID: prepared.leaseID,
+      capability: #require(prepared.ownerCapability)),
+    peer: owner, peerID: ownerID)
+  // Binding a new owner must start its own liveness window atomically, before
+  // the XPC handler can return or deliver any follow-up notification.
+  #expect(try supervisor.evaluate() == AuthorityLivenessAction.none)
+  #expect(fixture.core.authorityState == .starting)
+  clock.set(14_000)
+  #expect(throws: AuthorityDomainError(code: .globalAuthorityIdentityRejected)) {
+    try fixture.core.recordOwnerHeartbeat(peer: owner, peerID: UUID())
+  }
+  try fixture.core.recordOwnerHeartbeat(peer: owner, peerID: ownerID)
+  clock.set(15_001)
+  #expect(try supervisor.evaluate() == AuthorityLivenessAction.none)
+  let directive = try fixture.core.beginStop(
+    BeginStopRequest(
+      operation: request.operation, leaseID: lease.leaseID,
+      expectedRevision: fixture.core.currentRevision), peer: host)
+  #expect(directive.deadlineMonotonic == 20_001)
+
+  // A timer can run after the new durable stop but before the XPC handler
+  // delivers its directive. The previous generation expired at 6_000.
+  #expect(try supervisor.evaluate() == AuthorityLivenessAction.none)
+  #expect(fixture.core.authorityState == .stopping)
+  #expect(fixture.core.currentRevision == directive.revision)
+  clock.set(20_000)
+  try fixture.core.recordOwnerHeartbeat(peer: owner, peerID: ownerID)
+  clock.set(20_002)
   #expect(try supervisor.evaluate() == .quarantinedForUnprovenCleanup)
   #expect(fixture.core.authorityState == .quarantined)
 }

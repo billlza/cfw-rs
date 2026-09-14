@@ -31,11 +31,11 @@ validating candidates, serialize commits, preserve credential audience and
 configuration identity, and prevent delayed work from undoing a user's stop.
 Failure recovery must use the exact prior inputs and a proven ownership state.
 
-## Validation record
+## Initial source validation record
 
-Current evidence directory: `target/client-parity-20260914/`. This is a source
-milestone, not a new installed release. Build 40061 and the user's active network
-have not been replaced or reconfigured by this work.
+Initial evidence directory: `target/client-parity-20260914/`. At this source
+milestone build 40061 and the user's active network had not been replaced or
+reconfigured. Subsequent installed findings are recorded separately below.
 
 - `rust-parity-final-v2.log`: 655 Rust unit/integration checks passed across
   engine API, Apple adapter, application, profiles, projection and shell.
@@ -522,3 +522,29 @@ of squeezing ports and status text into one-character columns.
 source and logs are preserved in native-wire-install-40063-20260915/source-attempt-1.
 The same unconsumed build number is used for the corrected UI source. This is not
 a new allocation, and no frozen application was modified.
+
+## Installed follow-up: 2026-09-15
+
+40063 (`8f01431793ec1c41a7d8daf16912d52dfd68af38`) was signed, notarized and
+installed with all five profile-file digests unchanged. Installed checks passed
+Off-mode latency for both imported nodes, local core traffic, online port/MTU
+replacement, input focus, the background settings dialog, global hotkey dispatch
+and opt-in automatic local startup. CFW still supplied the host TUN during local
+traffic checks, so those measurements do not prove standalone CFM performance.
+
+Manual stop after automatic startup failed: the Authority quarantined a new
+operation using stale liveness timestamps. Old-source regressions reproduce
+both heartbeat and stop-deadline generation races. 40064 seeds, renews and checks
+heartbeat timestamps together with current owner state under the core lock, and
+uses that same core's stop deadline. The duplicate supervisor timestamps are
+removed; timeout duration, authenticated owner binding and exact Off proofs
+are unchanged. Linked-native full-v3 passed 675 tests. The intermediate full-v2
+compile failure and both behavioral red cases remain in the evidence directory.
+
+Source and installed results remain separate: 40064 signed installation,
+repeated automatic/manual lifecycle operations, standalone System Proxy/TUN,
+UDP and DNS quality acceptance are still pending. Do not call the installed
+40063 quarantine a proven Off state. All temporary hotkeys/network rules were
+removed and reread; CFW continues to preserve connectivity. Evidence:
+`/Users/bill/cfw-release-history/native-wire-install-40063-20260915/` and
+`target/client-parity-completion-20260914/liveness-*`.

@@ -525,10 +525,8 @@ struct AuthorityLifecycleContractTests {
     #expect(sessionChangeCore.authorityState == .off)
     #expect(sessionChangeCore.leaseOwnerUID == nil)
 
-    let lateClock = LifecycleContractClock(50_000)
     let lateSupervisor = AuthorityLivenessSupervisor(
-      core: sessionChangeCore,
-      clock: lateClock)
+      core: sessionChangeCore)
     #expect(try lateSupervisor.evaluate() == .none)
     #expect(sessionChangeCore.authorityState != .stopping)
     #expect(sessionChangeCore.authorityState != .quarantined)

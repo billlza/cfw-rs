@@ -83,7 +83,7 @@ public enum AuthorityLivenessAction: Equatable, Sendable {
 
 /// Wires bounded owner heartbeat tracking, the public live-console-user observation,
 /// and the five-second owner stop/reattest timeout to the Authority core. All external
-/// inputs are behind injectable seams (clock, console resolver) so behavior is fully
+/// inputs are behind injectable seams (the core clock and console resolver) so behavior is fully
 /// deterministic in tests; the supervisor never touches launchd, Network Extension, or
 /// SystemConfiguration directly.
 public final class AuthorityLivenessSupervisor: @unchecked Sendable {
@@ -93,35 +93,21 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
     AuthorityV1Limits.commandTimeoutMilliseconds
 
   private let core: GlobalAuthorityServiceCore
-  private let clock: any AuthorityMonotonicClock
   private let consoleResolver: any LiveConsoleUserResolving
   private let events: AuthorityEventHub
   private let heartbeatTimeoutMilliseconds: UInt64
 
-  private let lock = NSLock()
-  private var lastHeartbeatMonotonic: UInt64?
-  private var stopDeadlineMonotonic: UInt64?
-  private var stopOrderedRevision: UInt64?
-
   public init(
     core: GlobalAuthorityServiceCore,
-    clock: any AuthorityMonotonicClock = SystemAuthorityMonotonicClock(),
     consoleResolver: any LiveConsoleUserResolving =
       SystemConfigurationLiveConsoleUserResolver(),
     events: AuthorityEventHub = AuthorityEventHub(),
     heartbeatTimeoutMilliseconds: UInt64 = heartbeatTimeoutMilliseconds
   ) {
     self.core = core
-    self.clock = clock
     self.consoleResolver = consoleResolver
     self.events = events
     self.heartbeatTimeoutMilliseconds = heartbeatTimeoutMilliseconds
-  }
-
-  /// Records a fresh owner heartbeat. Bounded to a single monotonic timestamp per
-  /// owner; the channel carries no owner-supplied identity or secret material.
-  public func recordHeartbeat() {
-    lock.withLock { lastHeartbeatMonotonic = clock.nowMilliseconds() }
   }
 
   /// Re-resolves the public live console user and forces a stop when the owner's user
@@ -159,74 +145,30 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
   /// Quarantined (cleanup cannot be proven, so the machine never returns to Off).
   @discardableResult
   public func evaluate() throws -> AuthorityLivenessAction {
-    let now = clock.nowMilliseconds()
     switch core.authorityState {
     case .preparing:
       return try core.expireUnboundPreparationIfNeeded()
         ? .expiredPreparation : .none
     case .starting, .active:
-      let stale = lock.withLock { () -> Bool in
-        guard let last = lastHeartbeatMonotonic else { return false }
-        return now >= last && now - last >= heartbeatTimeoutMilliseconds
-      }
-      guard stale else { return .none }
-      guard let outcome = try core.forceStop(trigger: .missedHeartbeat) else {
+      guard
+        let outcome = try core.revokeExpiredHeartbeatIfNeeded(
+          timeoutMilliseconds: heartbeatTimeoutMilliseconds)
+      else {
         return .none
       }
       deliver(outcome)
       return .forcedStop(.missedHeartbeat)
     case .stopping:
-      let elapsed = lock.withLock { () -> Bool in
-        guard let deadline = stopDeadlineMonotonic else { return false }
-        return now >= deadline
-      }
-      guard elapsed, !core.ownerHasAttestedStopped else { return .none }
-      _ = try core.resolveOff(Self.unprovenCleanupProof)
-      lock.withLock {
-        stopDeadlineMonotonic = nil
-        stopOrderedRevision = nil
-      }
-      return .quarantinedForUnprovenCleanup
+      return try core.quarantineExpiredStopIfNeeded()
+        ? .quarantinedForUnprovenCleanup : .none
     case .off, .recovering, .quarantined:
       return .none
     }
   }
 
-  /// Records the exact durable directive deadline. Replays of the same stop
-  /// revision cannot move it forward.
-  public func noteStopOrdered(
-    revision: UInt64,
-    deadlineMonotonic: UInt64
-  ) {
-    recordStopOrder(
-      revision: revision,
-      deadlineMonotonic: deadlineMonotonic)
-  }
-
   private func deliver(_ outcome: AuthorityForcedStopOutcome) {
     guard let directive = outcome.directive else { return }
-    recordStopOrder(
-      revision: outcome.revision,
-      deadlineMonotonic: directive.deadlineMonotonic)
     guard let peerID = outcome.ownerPeerID else { return }
     events.send(.revoke(directive), to: peerID)
   }
-
-  private func recordStopOrder(
-    revision: UInt64,
-    deadlineMonotonic: UInt64
-  ) {
-    lock.withLock {
-      guard stopOrderedRevision != revision else { return }
-      stopOrderedRevision = revision
-      stopDeadlineMonotonic = deadlineMonotonic
-    }
-  }
-
-  /// An unproven cleanup proof: unknown owner/OS observation. `applyOffProof` retains
-  /// Quarantined for any such ambiguity rather than committing Off.
-  private static let unprovenCleanupProof = GlobalOffProof(
-    leaseReleased: false, capabilityOrTicketCleared: false,
-    secretBufferCleared: false, ownerEndpointCleared: false,
-    cleanup: .unknown, managedTunnel: .unknown)
 }

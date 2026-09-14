@@ -457,3 +457,12 @@ the pinned XcodeGen added the five production/test source references. The
 regeneration check passes (`parity-xcode-project-v2.log`). The original clean
 source worktree and failed preflight are retained as `source-attempt-1` in the
 40062 install history. The unconsumed build number is reused for this correction.
+
+
+The second preflight reached host Release compilation and found two missing
+LocalProxy branches in feature-gated packet evidence code. Local/System modes
+are now explicitly ineligible for pure-TUN packet evidence. The entire workspace
+then passed all-target/all-feature clippy and 801 Rust tests in
+`parity-all-features-clippy-v1.log` and `parity-all-features-rust-v1.log`. This
+supersedes the narrower 754-test Rust run for release-feature coverage. The
+second preflight is retained as `source-attempt-2`; signing/freezing had not begun.

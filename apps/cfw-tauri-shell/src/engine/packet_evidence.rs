@@ -967,7 +967,9 @@ impl PacketTestPlan {
                         && test.owner() == Some(EngineOwner::PacketTunnelSystemExtension)
                         && test.ready()
                 }
-                EngineMode::SystemProxy | EngineMode::TunnelSystemProxy => false,
+                EngineMode::LocalProxy
+                | EngineMode::SystemProxy
+                | EngineMode::TunnelSystemProxy => false,
             }
     }
 }
@@ -996,8 +998,8 @@ fn test_plan(
                 .digest()
                 .to_owned(),
         ),
-        EngineMode::SystemProxy | EngineMode::TunnelSystemProxy => {
-            unreachable!("Packet evidence never enables System Proxy")
+        EngineMode::LocalProxy | EngineMode::SystemProxy | EngineMode::TunnelSystemProxy => {
+            unreachable!("Packet evidence only uses pure TUN or Off")
         }
     };
     Ok(PacketTestPlan {

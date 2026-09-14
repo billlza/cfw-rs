@@ -449,3 +449,11 @@ relaxed. All original failed attempts remain available.
 against current advisory/yanked status, bans, licenses and sources: zero errors,
 warnings or notes. Existing dependency versions were not upgraded; the new
 global shortcut and Wi-Fi bindings are pinned in the verified Cargo inputs.
+
+
+The first 40062 preflight stopped before candidate freeze because the tracked
+Xcode project omitted newly added shared-protocol files. Regenerating it with
+the pinned XcodeGen added the five production/test source references. The
+regeneration check passes (`parity-xcode-project-v2.log`). The original clean
+source worktree and failed preflight are retained as `source-attempt-1` in the
+40062 install history. The unconsumed build number is reused for this correction.

@@ -23,6 +23,23 @@ pub(crate) struct FileIdentity {
     digest: [u8; 32],
 }
 
+impl FileIdentity {
+    pub(crate) fn revision(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"cfw-settings-revision-v1\0");
+        hash.update(self.device.to_be_bytes());
+        hash.update(self.inode.to_be_bytes());
+        hash.update(self.digest);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut text = String::with_capacity(64);
+        for byte in hash.finalize() {
+            text.push(HEX[usize::from(byte >> 4)] as char);
+            text.push(HEX[usize::from(byte & 15)] as char);
+        }
+        text
+    }
+}
+
 pub(crate) struct StoredBytes {
     pub(crate) bytes: Vec<u8>,
     pub(crate) identity: FileIdentity,
@@ -33,6 +50,23 @@ pub(crate) struct SecureDirectory {
 }
 
 impl SecureDirectory {
+    pub(crate) fn compare_and_swap_atomic(
+        &self,
+        name: &str,
+        expected_revision: Option<&str>,
+        bytes: &[u8],
+        maximum: usize,
+    ) -> Result<(), SettingsStoreError> {
+        self.lock(libc::LOCK_EX)?;
+        let current = self.read_optional_locked(name, maximum, FilePolicy::Private)?;
+        let revision = current.as_ref().map(|stored| stored.identity.revision());
+        if revision.as_deref() != expected_revision {
+            return Err(SettingsStoreError::RuntimeSettingsChanged);
+        }
+        // The descriptor retains its exclusive lock across the trusted read,
+        // replacement and directory sync. write_atomic uses this same lock.
+        self.write_atomic(name, bytes, maximum)
+    }
     pub(crate) fn open_existing(path: &Path) -> Result<Option<Self>, SettingsStoreError> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if !metadata.file_type().is_dir() => {

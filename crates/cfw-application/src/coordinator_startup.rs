@@ -77,13 +77,15 @@ pub(crate) async fn reconcile_initial_state(
         }
     };
 
+    let local = matches!(status, NativeEngineStatus::LocalProxy { .. });
     match status {
         NativeEngineStatus::Off => {
             state.snapshot.desired_mode = EngineMode::Off;
             set_off(state, snapshots);
             Ok(())
         }
-        NativeEngineStatus::SystemProxy { runtime } => {
+        NativeEngineStatus::LocalProxy { runtime }
+        | NativeEngineStatus::SystemProxy { runtime } => {
             let context = ReconciliationContext {
                 backend,
                 state,
@@ -93,9 +95,17 @@ pub(crate) async fn reconcile_initial_state(
                 operation_timeout,
             };
             let kind = RecoveredRuntimeKind {
-                mode: EngineMode::SystemProxy,
+                mode: if local {
+                    EngineMode::LocalProxy
+                } else {
+                    EngineMode::SystemProxy
+                },
                 owner: EngineOwner::ProxyAgent,
-                lease_kind: NativeLeaseKind::SystemProxy,
+                lease_kind: if local {
+                    NativeLeaseKind::LocalProxy
+                } else {
+                    NativeLeaseKind::SystemProxy
+                },
             };
             if matches!(
                 startup_reconciliation,

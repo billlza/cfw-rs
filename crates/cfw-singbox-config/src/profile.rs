@@ -6,12 +6,14 @@ use crate::CredentialRef;
 
 /// Maximum number of outbounds one profile may declare. Public so importers
 /// can bound conversion work before handing a document to the validator.
-pub const MAX_OUTBOUNDS: usize = 128;
+pub use crate::capacity::MAX_OUTBOUNDS;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProfileDocument {
     pub(crate) outbounds: Vec<ProfileOutbound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) providers: Option<crate::providers::ProviderCatalog>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) route: Option<ProfileRoute>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -55,6 +57,34 @@ pub(crate) enum ProfileOutbound {
         interval_seconds: u32,
         tolerance_ms: u16,
         idle_timeout_seconds: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lazy: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hidden: Option<bool>,
+    },
+    Fallback {
+        tag: String,
+        outbounds: Vec<String>,
+        url: String,
+        interval_seconds: u32,
+        idle_timeout_seconds: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lazy: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hidden: Option<bool>,
+    },
+    #[serde(rename = "loadbalance")]
+    LoadBalance {
+        tag: String,
+        outbounds: Vec<String>,
+        url: String,
+        interval_seconds: u32,
+        idle_timeout_seconds: u32,
+        strategy: LoadBalanceStrategy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lazy: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hidden: Option<bool>,
     },
     #[serde(rename = "wireguard")]
     WireGuard {
@@ -79,6 +109,15 @@ pub(crate) enum ProfileOutbound {
         authentication: Option<Socks5Authentication>,
         #[serde(skip_serializing_if = "Option::is_none")]
         network: Option<Socks5Network>,
+    },
+    Http {
+        tag: String,
+        server: String,
+        server_port: u16,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        authentication: Option<HttpProxyAuthentication>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls: Option<OutboundTls>,
     },
     Shadowsocks {
         tag: String,
@@ -165,6 +204,14 @@ pub(crate) enum ProfileOutbound {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LoadBalanceStrategy {
+    ConsistentHashing,
+    StickySessions,
+    RoundRobin,
+}
+
 /// A SOCKS5 authenticated profile always owns both references. Keeping the
 /// pair in one optional value prevents a partial pair from becoming anonymous.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +219,14 @@ pub(crate) enum ProfileOutbound {
 pub(crate) struct Socks5Authentication {
     pub(crate) username_credential_ref: CredentialRef,
     pub(crate) password_credential_ref: CredentialRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HttpProxyAuthentication {
+    pub(crate) username_credential_ref: CredentialRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) password_credential_ref: Option<CredentialRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +338,10 @@ pub(crate) enum V2RayPacketEncoding {
 pub(crate) struct OutboundTls {
     pub(crate) enabled: bool,
     pub(crate) server_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) certificate_sha256: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) certificate_public_key_sha256: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) alpn: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -500,9 +559,12 @@ impl ProfileOutbound {
             Self::Direct { .. }
             | Self::Block { .. }
             | Self::Selector { .. }
-            | Self::UrlTest { .. } => None,
+            | Self::UrlTest { .. }
+            | Self::Fallback { .. }
+            | Self::LoadBalance { .. } => None,
             Self::WireGuard { server, .. }
             | Self::Socks5 { server, .. }
+            | Self::Http { server, .. }
             | Self::Shadowsocks { server, .. }
             | Self::Vmess { server, .. }
             | Self::Vless { server, .. }
@@ -516,7 +578,12 @@ impl ProfileOutbound {
     pub(crate) fn is_remote(&self) -> bool {
         !matches!(
             self,
-            Self::Direct { .. } | Self::Block { .. } | Self::Selector { .. } | Self::UrlTest { .. }
+            Self::Direct { .. }
+                | Self::Block { .. }
+                | Self::Selector { .. }
+                | Self::UrlTest { .. }
+                | Self::Fallback { .. }
+                | Self::LoadBalance { .. }
         )
     }
 
@@ -526,8 +593,11 @@ impl ProfileOutbound {
             | Self::Block { tag }
             | Self::Selector { tag, .. }
             | Self::UrlTest { tag, .. }
+            | Self::Fallback { tag, .. }
+            | Self::LoadBalance { tag, .. }
             | Self::WireGuard { tag, .. }
             | Self::Socks5 { tag, .. }
+            | Self::Http { tag, .. }
             | Self::Shadowsocks { tag, .. }
             | Self::Vmess { tag, .. }
             | Self::Vless { tag, .. }
@@ -550,7 +620,9 @@ impl ProfileOutbound {
             Self::Direct { .. }
             | Self::Block { .. }
             | Self::Selector { .. }
-            | Self::UrlTest { .. } => Vec::new(),
+            | Self::UrlTest { .. }
+            | Self::Fallback { .. }
+            | Self::LoadBalance { .. } => Vec::new(),
             Self::Socks5 { authentication, .. } => match authentication {
                 Some(authentication) => vec![
                     &authentication.username_credential_ref,
@@ -558,6 +630,15 @@ impl ProfileOutbound {
                 ],
                 None => Vec::new(),
             },
+            Self::Http { authentication, .. } => {
+                authentication
+                    .as_ref()
+                    .map_or_else(Vec::new, |authentication| {
+                        std::iter::once(&authentication.username_credential_ref)
+                            .chain(authentication.password_credential_ref.iter())
+                            .collect()
+                    })
+            }
             Self::Hysteria2 {
                 credential_ref,
                 obfs,
@@ -584,7 +665,10 @@ impl ProfileOutbound {
 
     pub(crate) fn group_members(&self) -> Option<&[String]> {
         match self {
-            Self::Selector { outbounds, .. } | Self::UrlTest { outbounds, .. } => Some(outbounds),
+            Self::Selector { outbounds, .. }
+            | Self::UrlTest { outbounds, .. }
+            | Self::Fallback { outbounds, .. }
+            | Self::LoadBalance { outbounds, .. } => Some(outbounds),
             _ => None,
         }
     }

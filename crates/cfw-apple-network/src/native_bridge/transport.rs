@@ -12,7 +12,7 @@ use crate::{NativeBridgeError, NativeBridgeErrorCode};
 
 use super::{BridgeState, Cancel, Execute, LoadedABI};
 
-const MAXIMUM_RESPONSE_BYTES: usize = 1_048_576;
+const MAXIMUM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const EXECUTE_SYMBOL: &CStr = c"cfw_native_bridge_execute_v1";
 const CANCEL_SYMBOL: &CStr = c"cfw_native_bridge_cancel_v1";
 
@@ -86,7 +86,8 @@ fn validate_result(result: &NativeBridgeResult) -> Result<(), NativeBridgeError>
         NativeBridgeResult::Status(NativeEngineStatus::Off)
         | NativeBridgeResult::TunnelInstall(_)
         | NativeBridgeResult::Acknowledged => Ok(()),
-        NativeBridgeResult::Status(NativeEngineStatus::SystemProxy { runtime }) => {
+        NativeBridgeResult::Status(NativeEngineStatus::LocalProxy { runtime })
+        | NativeBridgeResult::Status(NativeEngineStatus::SystemProxy { runtime }) => {
             validate_runtime(runtime, EngineOwner::ProxyAgent)
         }
         NativeBridgeResult::Status(NativeEngineStatus::Tunnel { runtime }) => {
@@ -398,7 +399,7 @@ mod tests {
             uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("request UUID");
         let result = parse_response(
             request_id,
-            include_bytes!("../../../../contracts/native-bridge-v9/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v10/gc-preview-response.json"),
         )
         .expect("cross-language response");
         let NativeBridgeResult::CredentialGarbageCollectionPreview(preview) = result else {
@@ -414,7 +415,7 @@ mod tests {
         let result = parse_response(
             request_id,
             include_bytes!(
-                "../../../../contracts/native-bridge-v9/credential-receipt-response.json"
+                "../../../../contracts/native-bridge-v10/credential-receipt-response.json"
             ),
         )
         .expect("Swift producer credential receipt");
@@ -430,7 +431,7 @@ mod tests {
         let request_id =
             uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").expect("request UUID");
         let mut response: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../../contracts/native-bridge-v9/credential-receipt-response.json"
+            "../../../../contracts/native-bridge-v10/credential-receipt-response.json"
         ))
         .expect("shared receipt fixture");
         for profile_id in [
@@ -454,7 +455,7 @@ mod tests {
             uuid::Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").expect("request UUID");
         let error = parse_response(
             expected,
-            include_bytes!("../../../../contracts/native-bridge-v9/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v10/gc-preview-response.json"),
         )
         .expect_err("mismatched response must fail");
         assert_eq!(error.code, NativeBridgeErrorCode::IdentityRejected);

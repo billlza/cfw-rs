@@ -64,6 +64,31 @@ test("accepts an identity-bound active proxy snapshot", () => {
   assert.equal(tunnelValueLabel(engine), "Off");
 });
 
+test("a local proxy core never lights either OS integration switch", () => {
+  const envelope = proxyEnvelope();
+  envelope.snapshot.desired_mode = "local_proxy";
+  envelope.snapshot.state.state = "local_proxy_active";
+  envelope.capabilities.local_proxy = true;
+  const local = normalizeEngineStatus(envelope);
+  assert.equal(local.mode, "local-proxy");
+  assert.equal(local.active, true);
+  assert.equal(local.localProxyAvailable, true);
+  assert.equal(local.systemProxyActive, false);
+  assert.equal(local.tunnelActive, false);
+  assert.equal(systemProxyValueLabel(local), "Off");
+  assert.equal(tunnelValueLabel(local), "Off");
+  assert.equal(engineStateLabel(local), "Local proxy");
+  for (const state of ["local_proxy_starting", "local_proxy_stopping"]) {
+    envelope.snapshot.state = { state, generation: 9 };
+    const pending = normalizeEngineStatus(envelope);
+    assert.equal(pending.active, false);
+    assert.equal(systemProxyValueLabel(pending), "Off");
+    assert.equal(tunnelValueLabel(pending), "Off");
+  }
+  envelope.snapshot.state = { state: "local_proxy_active", runtime: { ...local.runtimeIdentity, owner: "packet_tunnel_system_extension" } };
+  assert.throws(() => normalizeEngineStatus(envelope), /identity/u);
+});
+
 test("mode labels retain stopping state while another mode is requested", () => {
   assert.equal(systemProxyValueLabel({ state: "ProxyStopping", desiredMode: "tunnel" }), "Stopping…");
   assert.equal(tunnelValueLabel({ state: "TunnelStopping", desiredMode: "system-proxy" }), "Stopping…");

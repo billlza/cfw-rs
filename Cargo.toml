@@ -43,7 +43,7 @@ base64 = { version = "0.23.0", default-features = false, features = ["std"] }
 futures-util = "0.3.33"
 libc = "0.2.189"
 minisign-verify = "0.2.5"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream", "socks"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std"] }
 plist = "1.10.0"
 # Pure-Rust QR encoder for the profile subscription QR code. The image and

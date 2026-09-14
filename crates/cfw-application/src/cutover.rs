@@ -54,13 +54,14 @@ pub(crate) fn start_request(
 ) -> EngineStartRequest {
     EngineStartRequest {
         context,
+        mode: projected.mode(),
         credential_audience: projected.credential_audience().clone(),
         config_json: projected.as_json().to_owned(),
         config_content_digest: projected.configuration_digest().to_owned(),
         config_digest: projected.digest().to_owned(),
         credential_slots: projected.credential_slots().to_vec(),
         tunnel_options: match projected.mode() {
-            ProjectionMode::SystemProxy => None,
+            ProjectionMode::LocalProxy | ProjectionMode::SystemProxy => None,
             ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => {
                 Some(TunnelNetworkOptions {
                     ipv6_enabled: settings.enable_ipv6,

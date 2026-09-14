@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod authority_v1;
+mod credential_rebind;
+pub use credential_rebind::CredentialRebindRequest;
 
 pub use cfw_singbox_config::{
     AuthenticatedDnsServer, CredentialAudience, CredentialBinding, CredentialKind, CredentialRef,
@@ -16,19 +18,21 @@ pub use cfw_singbox_config::{
     MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
 };
 
-// Version 8 adds the closed installed-40019 migration actions and proof
-// profiles. Older native bridges cannot express the exact legacy/current
-// service boundary, so the complete Host/native graph advances together.
+// Version 10 separates local-core ownership and adds candidate checking and
+// same-profile credential rebinding. The complete Host/native graph advances
+// together; older bridges cannot attest these operations.
 mod profile_probe;
+pub use cfw_singbox_config::ProjectionMode as EngineStartMode;
 pub use profile_probe::{ProfileDelayTestRequest, ProfileProbeFailure, ProfileProxyDelay};
 
-pub const ENGINE_PROTOCOL_VERSION: u16 = 9;
+pub const ENGINE_PROTOCOL_VERSION: u16 = 10;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineMode {
     #[default]
     Off,
+    LocalProxy,
     SystemProxy,
     Tunnel,
     TunnelSystemProxy,
@@ -45,7 +49,7 @@ impl EngineMode {
 
     pub const fn from_switches(system_proxy: bool, tunnel: bool) -> Self {
         match (system_proxy, tunnel) {
-            (false, false) => Self::Off,
+            (false, false) => Self::LocalProxy,
             (true, false) => Self::SystemProxy,
             (false, true) => Self::Tunnel,
             (true, true) => Self::TunnelSystemProxy,
@@ -110,6 +114,9 @@ pub struct RuntimeIdentity {
 pub enum NativeEngineStatus {
     #[default]
     Off,
+    LocalProxy {
+        runtime: RuntimeIdentity,
+    },
     SystemProxy {
         runtime: RuntimeIdentity,
     },
@@ -122,11 +129,20 @@ pub enum NativeEngineStatus {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum EngineState {
     Off,
+    LocalProxyStarting {
+        generation: u64,
+    },
     ProxyStarting {
         generation: u64,
     },
     ProxyActive {
         runtime: RuntimeIdentity,
+    },
+    LocalProxyActive {
+        runtime: RuntimeIdentity,
+    },
+    LocalProxyStopping {
+        generation: u64,
     },
     ProxyStopping {
         generation: u64,
@@ -159,6 +175,7 @@ pub enum EngineState {
 impl EngineState {
     pub fn active_mode(&self) -> EngineMode {
         match self {
+            Self::LocalProxyActive { .. } => EngineMode::LocalProxy,
             Self::ProxyActive { .. } => EngineMode::SystemProxy,
             Self::TunnelActive { .. } => EngineMode::Tunnel,
             Self::TunnelSystemProxyActive { .. } => EngineMode::TunnelSystemProxy,
@@ -208,6 +225,9 @@ impl EngineEvent {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineStartRequest {
     pub context: EngineCommandContext,
+    /// Explicit network ownership intent, bound into the configuration digest.
+    /// A local proxy request cannot be reinterpreted as System Proxy ownership.
+    pub mode: EngineStartMode,
     /// Exact validated profile identity authorized to resolve every credential
     /// slot in this request. It is included in `config_digest`.
     pub credential_audience: CredentialAudience,
@@ -230,6 +250,7 @@ impl fmt::Debug for EngineStartRequest {
         formatter
             .debug_struct("EngineStartRequest")
             .field("context", &self.context)
+            .field("mode", &self.mode)
             .field("credential_audience", &self.credential_audience)
             .field("config_json", &"[REDACTED CONFIG TEMPLATE]")
             .field("config_content_digest", &self.config_content_digest)
@@ -388,7 +409,7 @@ pub struct CredentialPresenceRequest {
 
 /// Maximum number of exact audience/reference bindings admitted by the native
 /// credential vault. Reusing one UUID in two profiles consumes two entries.
-pub const MAX_CREDENTIAL_VAULT_BINDINGS: usize = 512;
+pub use cfw_singbox_config::MAX_CREDENTIAL_VAULT_BINDINGS;
 /// Mirrors the bounded profile repository catalog. Profiles without
 /// credentials remain in the catalog so its digest describes the complete
 /// canonical repository rather than only the currently interesting subset.
@@ -740,6 +761,12 @@ pub type CredentialGarbageCollectionCommitFuture<'a> = Pin<
 /// There is intentionally no overwrite operation and no default or in-memory
 /// production fallback.
 pub trait CredentialVaultProvisioner: Send + Sync + 'static {
+    fn rebind_profile_credentials(
+        &self,
+        _request: CredentialRebindRequest,
+    ) -> CredentialVaultFuture<'_> {
+        Box::pin(async { Err(CredentialVaultError::Unavailable) })
+    }
     fn provision_profile_credentials<'a>(
         &'a self,
         request: CredentialProvisionRequest<'a>,
@@ -788,7 +815,10 @@ impl CutoverPreflightRequest {
         if !matches!(target, EngineMode::SystemProxy | EngineMode::Tunnel) {
             return Err(CutoverPreflightRequestError::ActiveTargetRequired);
         }
-        if system_proxy_request.tunnel_options.is_some() || tunnel_request.tunnel_options.is_none()
+        if system_proxy_request.mode != EngineStartMode::SystemProxy
+            || tunnel_request.mode != EngineStartMode::Tunnel
+            || system_proxy_request.tunnel_options.is_some()
+            || tunnel_request.tunnel_options.is_none()
         {
             return Err(CutoverPreflightRequestError::ProjectionModeMismatch);
         }
@@ -877,7 +907,7 @@ impl CutoverPreflightAttestation {
     pub fn validate(&self) -> bool {
         is_canonical_uuid(&self.attestation_id)
             && is_canonical_uuid(&self.context.installation_id)
-            && self.target != EngineMode::Off
+            && matches!(self.target, EngineMode::SystemProxy | EngineMode::Tunnel)
             && self.context.config_epoch > 0
             && self.context.generation > 0
             && validate_snapshot_digest(&self.system_proxy_config_digest).is_ok()
@@ -1189,6 +1219,14 @@ pub trait EngineBackend: Send + Sync + 'static {
     /// currently proven at the native boundary.
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus>;
 
+    /// Checks a candidate using the native parser and exact credential audience.
+    /// This must not start a runtime or change any OS network setting.
+    fn check_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()>;
+
+    fn start_local_proxy(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity>;
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()>;
+
     fn start_system_proxy(&self, request: EngineStartRequest)
     -> BackendFuture<'_, RuntimeIdentity>;
 
@@ -1358,8 +1396,17 @@ impl NativeServiceMaintenanceResult {
 #[serde(tag = "opcode", content = "payload", rename_all = "snake_case")]
 pub enum NativeBridgeCommand {
     QueryStatus,
+    CheckConfiguration {
+        request: EngineStartRequest,
+    },
     AuthorizeSystemProxy,
     AuthorizeSystemProxyRestoration,
+    StartLocalProxy {
+        request: EngineStartRequest,
+    },
+    StopLocalProxy {
+        context: EngineCommandContext,
+    },
     MaintainCurrentServices {
         action: NativeServiceMaintenanceAction,
     },
@@ -1387,6 +1434,9 @@ pub enum NativeBridgeCommand {
     QueryCredentialPresence {
         request: CredentialPresenceWireRequest,
     },
+    RebindProfileCredentials {
+        request: CredentialRebindRequest,
+    },
     PreflightCutover {
         request: Box<CutoverPreflightRequest>,
     },
@@ -1405,6 +1455,18 @@ impl fmt::Debug for NativeBridgeCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::QueryStatus => formatter.write_str("QueryStatus"),
+            Self::CheckConfiguration { request } => formatter
+                .debug_struct("CheckConfiguration")
+                .field("request", request)
+                .finish(),
+            Self::StartLocalProxy { request } => formatter
+                .debug_struct("StartLocalProxy")
+                .field("request", request)
+                .finish(),
+            Self::StopLocalProxy { context } => formatter
+                .debug_struct("StopLocalProxy")
+                .field("context", context)
+                .finish(),
             Self::AuthorizeSystemProxy => formatter.write_str("AuthorizeSystemProxy"),
             Self::AuthorizeSystemProxyRestoration => {
                 formatter.write_str("AuthorizeSystemProxyRestoration")
@@ -1443,6 +1505,10 @@ impl fmt::Debug for NativeBridgeCommand {
                 .finish(),
             Self::QueryCredentialPresence { request } => formatter
                 .debug_struct("QueryCredentialPresence")
+                .field("request", request)
+                .finish(),
+            Self::RebindProfileCredentials { request } => formatter
+                .debug_struct("RebindProfileCredentials")
                 .field("request", request)
                 .finish(),
             Self::TestProfileDelays { request } => formatter
@@ -1537,6 +1603,7 @@ mod tests {
     #[test]
     fn engine_start_debug_redacts_the_configuration_template() {
         let request = EngineStartRequest {
+            mode: cfw_singbox_config::ProjectionMode::SystemProxy,
             context: EngineCommandContext {
                 installation_id: PROFILE_ID.into(),
                 config_epoch: 1,
@@ -1698,16 +1765,16 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v9_contract_fixtures_decode_in_rust() {
+    fn native_bridge_v10_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/query-request.json"
+            "../../../contracts/native-bridge-v10/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
         let maintenance: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/maintenance-request.json"
+            "../../../contracts/native-bridge-v10/maintenance-request.json"
         ))
         .expect("maintenance request fixture");
         assert!(matches!(
@@ -1718,7 +1785,7 @@ mod tests {
         ));
 
         let maintenance_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/maintenance-response.json"
+            "../../../contracts/native-bridge-v10/maintenance-response.json"
         ))
         .expect("maintenance response fixture");
         let Some(NativeBridgeResult::ServiceMaintenance(maintenance_result)) =
@@ -1733,7 +1800,7 @@ mod tests {
         );
 
         let recovery: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/recovery-maintenance-request.json"
+            "../../../contracts/native-bridge-v10/recovery-maintenance-request.json"
         ))
         .expect("recovery maintenance request fixture");
         assert!(matches!(
@@ -1743,7 +1810,7 @@ mod tests {
             }
         ));
         let recovery_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/recovery-maintenance-response.json"
+            "../../../contracts/native-bridge-v10/recovery-maintenance-response.json"
         ))
         .expect("recovery maintenance response fixture");
         let Some(NativeBridgeResult::ServiceMaintenance(recovery_result)) =
@@ -1762,7 +1829,7 @@ mod tests {
         );
 
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/gc-preview-request.json"
+            "../../../contracts/native-bridge-v10/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1785,7 +1852,7 @@ mod tests {
         );
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/gc-preview-response.json"
+            "../../../contracts/native-bridge-v10/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1799,7 +1866,7 @@ mod tests {
         );
 
         let conflict: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v9/endpoint-conflict-response.json"
+            "../../../contracts/native-bridge-v10/endpoint-conflict-response.json"
         ))
         .expect("endpoint conflict response fixture");
         assert!(conflict.result.is_none());
@@ -2061,7 +2128,7 @@ mod tests {
 
     #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v9/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v10/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(

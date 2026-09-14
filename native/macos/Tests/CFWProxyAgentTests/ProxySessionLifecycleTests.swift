@@ -534,7 +534,9 @@ private struct ProxyFixture {
   let journalStore: FakeJournalStore
 }
 
-private func descriptor(generation: UInt64 = 1) throws -> ConfigurationDescriptor {
+private func descriptor(generation: UInt64 = 1, slot: ConfigurationSlot = .systemProxy) throws
+  -> ConfigurationDescriptor
+{
   guard
     let installationID = UUID(
       uuidString: "11111111-1111-1111-1111-111111111111"
@@ -543,7 +545,7 @@ private func descriptor(generation: UInt64 = 1) throws -> ConfigurationDescripto
     throw ForcedProxyFailure.requested
   }
   return try ConfigurationDescriptor(
-    slot: .systemProxy,
+    slot: slot,
     tunnelOptions: nil,
     credentialAudience: CredentialAudience(
       profileID: installationID,
@@ -620,6 +622,123 @@ private func recoveryLifecycle(
 
 @Suite(.serialized)
 struct ProxySessionLifecycleTests {
+  @Test func localProxyStartsWithoutNetworkAuthorizationAndNeverWritesPreferences() throws {
+    let preferences = FakeSystemProxyPreferences(
+      values: [.httpHost: .string("other-app"), .httpPort: .integer(7890)],
+      authorizationFailure: .authorizationDenied(-60007))
+    let fixture = makeFixture(preferences: preferences)
+    let configuration = try descriptor(slot: .localProxy)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    #expect(start.values.isEmpty)
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+    #expect(fixture.lifecycle.testingSnapshot().mode == .localProxy)
+    #expect(preferences.prepareCount == 0)
+    #expect(preferences.applyCount == 0)
+    #expect(fixture.journalStore.saveCount == 0)
+
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(preferences.restoreCount == 0)
+    #expect(preferences.currentValue(.httpHost) == .string("other-app"))
+    #expect(preferences.currentValue(.httpPort) == .integer(7890))
+    #expect(fixture.lifecycle.testingSnapshot().mode == .off)
+  }
+
+  @Test func localProxyStopRequiresExactModeAndRetainsOwnershipOnEngineFailure() throws {
+    let fixture = makeFixture()
+    let configuration = try descriptor(slot: .localProxy)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    let wrongMode = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: try descriptor()) { wrongMode.record($0) }
+    #expect(wrongMode.wait())
+    #expect(wrongMode.values == [.failure(.staleStopRequest)])
+    #expect(fixture.engine.stopCount == 0)
+    fixture.engine.setStopFails(true)
+    let failedStop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { failedStop.record($0) }
+    #expect(failedStop.wait())
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
+    #expect(fixture.lifecycle.testingSnapshot().mode == .localProxy)
+    #expect(fixture.lease.releaseCount == 0)
+    fixture.engine.setStopFails(false)
+    let retry = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { retry.record($0) }
+    #expect(retry.wait())
+    #expect(retry.values == [.success])
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(fixture.preferences.applyCount == 0)
+    #expect(fixture.preferences.restoreCount == 0)
+  }
+
+  @Test func legacyJournalKeepsItsIdentityAndRecoversBeforeLocalProxyStart() throws {
+    // This is the pre-LocalProxy descriptor wire shape. Its identity is retained,
+    // not recomputed with the new configuration identity schema.
+    let legacyDescriptor = Data(
+      #"{"slot":"systemProxy","credentialAudience":{"profile_id":"11111111-1111-1111-1111-111111111111","profile_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"installationID":"11111111-1111-1111-1111-111111111111","epoch":1,"generation":1,"byteCount":2,"sha256":"0000000000000000000000000000000000000000000000000000000000000000","identitySHA256":"1111111111111111111111111111111111111111111111111111111111111111","credentialSlots":[]}"#
+        .utf8)
+    let oldConfiguration = try JSONDecoder().decode(
+      ConfigurationDescriptor.self, from: legacyDescriptor)
+    let oldJournal = try FakeSystemProxyPreferences.journal(
+      configuration: oldConfiguration, endpoint: readyEndpoint(),
+      originalValues: [.httpHost: .string("original")]
+    ).markingApplied()
+    let services = String(decoding: try JSONEncoder().encode(oldJournal.services), as: UTF8.self)
+    let legacyJournal = Data(
+      "{\"schemaVersion\":1,\"phase\":\"applied\",\"configuration\":\(String(decoding: legacyDescriptor, as: UTF8.self)),\"services\":\(services)}"
+        .utf8)
+    let recovered = try JSONDecoder().decode(ProxyOwnershipJournal.self, from: legacyJournal)
+    #expect(recovered.configuration.identitySHA256.hex == String(repeating: "11", count: 32))
+    #expect(recovered.configuration.slot == .systemProxy)
+    let preferences = FakeSystemProxyPreferences()
+    try preferences.apply(recovered)
+    let store = FakeJournalStore(journal: recovered)
+    let fixture = makeFixture(preferences: preferences, journalStore: store)
+    #expect(preferences.restoreCount == 1)
+    #expect(store.journal == nil)
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor(generation: 2, slot: .localProxy)) {
+      start.record($0)
+    }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+    #expect(store.saveCount == 0)
+    #expect(preferences.applyCount == 1)
+    #expect(preferences.restoreCount == 1)
+  }
+
+  @Test func unresolvedOldOwnershipPreventsLocalProxyStart() throws {
+    let journal = try FakeSystemProxyPreferences.journal(
+      configuration: descriptor(), endpoint: readyEndpoint(), originalValues: [:]
+    ).markingApplied()
+    let preferences = FakeSystemProxyPreferences()
+    preferences.failNextRestore()
+    let store = FakeJournalStore(journal: journal)
+    let fixture = makeFixture(preferences: preferences, journalStore: store)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor(generation: 2, slot: .localProxy)) {
+      start.record($0)
+    }
+    #expect(start.wait())
+    #expect(start.values == [.failure(.lifecycleConflict)])
+    #expect(fixture.engine.startCount == 0)
+    #expect(store.journal == journal)
+  }
+
   @Test func ungrantedAuthorizationStartsNoEngineAndWritesNoPreferences() throws {
     let preferences = FakeSystemProxyPreferences(
       authorizationFailure: .authorizationDenied(-60007))

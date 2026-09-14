@@ -14,9 +14,9 @@ pub const MINOR: u16 = 1;
 pub const MINIMUM_MINOR: u16 = 1;
 pub const SUPPORTED_FEATURE_BITS: u64 = 0;
 pub const MAX_ENVELOPE_BYTES: usize = 1_048_576;
-pub const MAX_CONFIGURATION_BYTES: u32 = 768 * 1_024;
+pub const MAX_CONFIGURATION_BYTES: u32 = cfw_singbox_config::MAX_ENGINE_CONFIG_BYTES as u32;
 pub const MAX_TOTAL_SECRET_BYTES: usize = 256 * 1_024;
-pub const MAX_CREDENTIAL_SLOTS: usize = 256;
+pub const MAX_CREDENTIAL_SLOTS: usize = cfw_singbox_config::MAX_CREDENTIAL_SLOTS;
 pub const MAX_INDIVIDUAL_SECRET_BYTES: usize = 16 * 1_024;
 pub const MAX_READ_ONLY_REQUESTS: u16 = 64;
 pub const MAX_MUTATING_TRANSACTIONS: u8 = 1;
@@ -190,6 +190,7 @@ impl WireValidate for ProtocolVersion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorityMode {
+    LocalProxy,
     SystemProxy,
     Tunnel,
 }
@@ -484,12 +485,17 @@ impl WireValidate for ReadyAttestation {
             AuthorityMode::Tunnel => {
                 self.owner_role == AuthorityRole::Provider && self.packet_pump_limits.is_some()
             }
-            AuthorityMode::SystemProxy => {
+            AuthorityMode::LocalProxy | AuthorityMode::SystemProxy => {
                 self.owner_role == AuthorityRole::ProxyAgent && self.packet_pump_limits.is_none()
             }
         };
         if !role_matches
-            || self.ready_flags != 0b111
+            || self.ready_flags
+                != if self.operation.mode == AuthorityMode::LocalProxy {
+                    0b011
+                } else {
+                    0b111
+                }
             || self.monotonic_timestamp_ms == 0
             || !is_digest(&self.runtime_digest)
         {
@@ -753,7 +759,10 @@ impl Command {
             Self::PrepareStart(value) => value.validate(),
             Self::BindProxyOwner(value) => {
                 value.operation.validate()?;
-                if value.operation.mode == AuthorityMode::SystemProxy {
+                if matches!(
+                    value.operation.mode,
+                    AuthorityMode::LocalProxy | AuthorityMode::SystemProxy
+                ) {
                     Ok(())
                 } else {
                     Err(CodecError::BoundViolation)
@@ -1021,7 +1030,10 @@ fn decode_capability(value: &Value) -> Result<BindProxyOwnerRequest, CodecError>
     exact_keys(value, &["capability", "lease_id", "operation"])?;
     let operation = decode_field::<OperationContext>(value, "operation")?;
     operation.validate()?;
-    if operation.mode != AuthorityMode::SystemProxy {
+    if !matches!(
+        operation.mode,
+        AuthorityMode::LocalProxy | AuthorityMode::SystemProxy
+    ) {
         return Err(CodecError::BoundViolation);
     }
     let bytes = decode_exact_bytes(value, "capability", CAPABILITY_BYTES)?;
@@ -1326,9 +1338,9 @@ mod tests {
     #[test]
     fn protocol_limits_are_exact() {
         assert_eq!(MAX_ENVELOPE_BYTES, 1_048_576);
-        assert_eq!(MAX_CONFIGURATION_BYTES, 768 * 1_024);
+        assert_eq!(MAX_CONFIGURATION_BYTES, 4 * 1024 * 1024);
         assert_eq!(MAX_TOTAL_SECRET_BYTES, 256 * 1_024);
-        assert_eq!(MAX_CREDENTIAL_SLOTS, 256);
+        assert_eq!(MAX_CREDENTIAL_SLOTS, 2048);
         assert_eq!(MAX_INDIVIDUAL_SECRET_BYTES, 16 * 1_024);
         assert_eq!(MAX_READ_ONLY_REQUESTS, 64);
         assert_eq!(MAX_MUTATING_TRANSACTIONS, 1);

@@ -1,9 +1,354 @@
+diff --git a/adapter/experimental.go b/adapter/experimental.go
+index 1bd8d2d928fe8756782a90b4c38acaff19130b5f..80f92944ac2d61354bf2678b2852b4f228796aed 100644
+--- a/adapter/experimental.go
++++ b/adapter/experimental.go
+@@ -143 +143,3 @@ func OutboundTag(detour Outbound) string {
+-		return group.Now()
++		if tag := group.Now(); tag != "" {
++			return tag
++		}
+diff --git a/adapter/outbound/activity.go b/adapter/outbound/activity.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..62322c06922e3ffb7fc7e74a44c21c9d806c8e54
+--- /dev/null
++++ b/adapter/outbound/activity.go
+@@ -0,0 +1,51 @@
++package outbound
++
++import "sync"
++
++type activitySubscription struct{ touch func() }
++type outboundActivity struct {
++	access      sync.RWMutex
++	subscribers map[string]map[*activitySubscription]struct{}
++}
++
++// WatchOutboundActivity belongs to this manager's lifetime. Callbacks run
++// outside its lock; cancelling a watcher is idempotent and releases its tags.
++func (m *Manager) WatchOutboundActivity(tags []string, touch func()) func() {
++	watcher := &activitySubscription{touch: touch}
++	m.activity.access.Lock()
++	if m.activity.subscribers == nil {
++		m.activity.subscribers = make(map[string]map[*activitySubscription]struct{})
++	}
++	for _, tag := range tags {
++		if m.activity.subscribers[tag] == nil {
++			m.activity.subscribers[tag] = make(map[*activitySubscription]struct{})
++		}
++		m.activity.subscribers[tag][watcher] = struct{}{}
++	}
++	m.activity.access.Unlock()
++	var once sync.Once
++	return func() {
++		once.Do(func() {
++			m.activity.access.Lock()
++			defer m.activity.access.Unlock()
++			for _, tag := range tags {
++				delete(m.activity.subscribers[tag], watcher)
++				if len(m.activity.subscribers[tag]) == 0 {
++					delete(m.activity.subscribers, tag)
++				}
++			}
++		})
++	}
++}
++
++func (m *Manager) TouchOutboundActivity(tag string) {
++	m.activity.access.RLock()
++	callbacks := make([]func(), 0, len(m.activity.subscribers[tag]))
++	for watcher := range m.activity.subscribers[tag] {
++		callbacks = append(callbacks, watcher.touch)
++	}
++	m.activity.access.RUnlock()
++	for _, callback := range callbacks {
++		callback()
++	}
++}
+diff --git a/adapter/outbound/activity_test.go b/adapter/outbound/activity_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..97d5004be309e85b87b9bf6dcea9345f3ec2a4f7
+--- /dev/null
++++ b/adapter/outbound/activity_test.go
+@@ -0,0 +1,37 @@
++package outbound
++
++import (
++	"sync"
++	"sync/atomic"
++	"testing"
++)
++
++func TestActivityWatchersAreScopedCancellableAndConcurrent(t *testing.T) {
++	manager := new(Manager)
++	var a, b atomic.Int32
++	stopA := manager.WatchOutboundActivity([]string{"node", "other"}, func() { a.Add(1) })
++	stopB := manager.WatchOutboundActivity([]string{"node"}, func() { b.Add(1) })
++	var workers sync.WaitGroup
++	for i := 0; i < 8; i++ {
++		workers.Go(func() {
++			for j := 0; j < 100; j++ {
++				manager.TouchOutboundActivity("node")
++			}
++		})
++	}
++	workers.Wait()
++	if a.Load() != 800 || b.Load() != 800 {
++		t.Fatal("activity lost or duplicated")
++	}
++	stopA()
++	stopA()
++	manager.TouchOutboundActivity("node")
++	manager.TouchOutboundActivity("other")
++	if a.Load() != 800 || b.Load() != 801 {
++		t.Fatal("watcher cancellation changed another provider")
++	}
++	stopB()
++	if len(manager.activity.subscribers) != 0 {
++		t.Fatal("cancelled watcher retained resources")
++	}
++}
+diff --git a/adapter/outbound/manager.go b/adapter/outbound/manager.go
+index 1bbad69e0ca91b530b6e2992a95792969a6c202a..8c336e859d46ea104ca01766b7672a34c3ee5122 100644
+--- a/adapter/outbound/manager.go
++++ b/adapter/outbound/manager.go
+@@ -21,0 +22 @@ type Manager struct {
++	activity                outboundActivity
+diff --git a/adapter/outbound_activity.go b/adapter/outbound_activity.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb91fc90b431d982c5b8426285664eee8897a335
+--- /dev/null
++++ b/adapter/outbound_activity.go
+@@ -0,0 +1,12 @@
++package adapter
++
++import (
++	"context"
++	"github.com/sagernet/sing/service"
++)
++
++func TouchOutboundActivity(ctx context.Context, tag string) {
++	if tracker, ok := service.FromContext[OutboundManager](ctx).(interface{ TouchOutboundActivity(string) }); ok {
++		tracker.TouchOutboundActivity(tag)
++	}
++}
+diff --git a/common/urltest/status_test.go b/common/urltest/status_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..40f1f487499d6cb4ac64205b219a7b2c7864b861
+--- /dev/null
++++ b/common/urltest/status_test.go
+@@ -0,0 +1,74 @@
++package urltest
++
++import (
++	"context"
++	"errors"
++	M "github.com/sagernet/sing/common/metadata"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type statusDialer struct{ calls atomic.Int32 }
++
++func (d *statusDialer) DialContext(ctx context.Context, network string, address M.Socksaddr) (net.Conn, error) {
++	d.calls.Add(1)
++	return (&net.Dialer{}).DialContext(ctx, network, address.String())
++}
++func (d *statusDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, errors.New("unexpected UDP")
++}
++
++func TestHealthStatusAndCancellationUseTheConfiguredTarget(t *testing.T) {
++	var path atomic.Value
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		path.Store(r.URL.Path)
++		if r.URL.Path == "/wait" {
++			<-r.Context().Done()
++			return
++		}
++		if r.URL.Path == "/unavailable" {
++			w.WriteHeader(503)
++			return
++		}
++		w.WriteHeader(204)
++	}))
++	defer server.Close()
++	dialer := new(statusDialer)
++	for _, check := range []struct {
++		path, expected string
++		success        bool
++	}{
++		{"/configured", "204", true}, {"/configured", "200-299/304", true},
++		{"/unavailable", "204", false}, {"/unavailable", "", true},
++	} {
++		delay, err := URLTestWithStatus(context.Background(), server.URL+check.path, check.expected, dialer)
++		if (err == nil) != check.success || (check.success && delay == 0) {
++			t.Fatalf("%s policy %s: delay=%d error=%v", check.path, check.expected, delay, err)
++		}
++		if path.Load() != check.path {
++			t.Fatal("probe URL silently changed")
++		}
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
++	defer cancel()
++	started := time.Now()
++	if _, err := URLTestWithStatus(ctx, server.URL+"/wait", "204", dialer); !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("cancellation became %v", err)
++	}
++	if time.Since(started) > time.Second {
++		t.Fatal("request ignored its deadline")
++	}
++	before := dialer.calls.Load()
++	for _, expected := range []string{"299-200", "600", "200/", "20", "+20"} {
++		if _, err := URLTestWithStatus(context.Background(), server.URL, expected, dialer); err == nil {
++			t.Fatal("invalid policy accepted")
++		}
++	}
++	if dialer.calls.Load() != before {
++		t.Fatal("invalid policy made a network request")
++	}
++}
+diff --git a/common/urltest/urltest.go b/common/urltest/urltest.go
+index 30ead2e2141e57ed401dc86812c6ed71d9189c56..0ca9280dcc8ebb0a4be60dea46887319ab0a8b22 100644
+--- a/common/urltest/urltest.go
++++ b/common/urltest/urltest.go
+@@ -5,0 +6 @@ import (
++	"errors"
+@@ -8,0 +10,2 @@ import (
++	"strconv"
++	"strings"
+@@ -75,0 +79,46 @@ func (s *HistoryStorage) Close() error {
++// ParseExpectedStatus accepts slash-separated HTTP codes or inclusive ranges.
++// An empty policy accepts any response, preserving the default URL-test contract.
++func ParseExpectedStatus(policy string) (func(int) bool, error) {
++	if len(policy) > 128 {
++		return nil, errors.New("expected HTTP status is too long")
++	}
++	if policy == "" {
++		return func(int) bool { return true }, nil
++	}
++	var allowed [600]bool
++	for _, item := range strings.Split(policy, "/") {
++		parts := strings.Split(item, "-")
++		if len(parts) < 1 || len(parts) > 2 {
++			return nil, errors.New("invalid HTTP status range")
++		}
++		var codes []int
++		for _, part := range parts {
++			code, err := strconv.Atoi(part)
++			if err != nil || len(part) != 3 || code < 100 || code > 599 {
++				return nil, errors.New("invalid expected HTTP status")
++			}
++			codes = append(codes, code)
++		}
++		low, high := codes[0], codes[len(codes)-1]
++		if low > high {
++			return nil, errors.New("reversed HTTP status range")
++		}
++		for code := low; code <= high; code++ {
++			allowed[code] = true
++		}
++	}
++	return func(code int) bool { return code >= 100 && code < len(allowed) && allowed[code] }, nil
++}
++
++func ValidateProbeTarget(link string) error {
++	if link == "" {
++		return nil
++	}
++	parsed, err := url.Parse(link)
++	if err != nil || len(link) > 2048 || strings.IndexFunc(link, func(r rune) bool { return r <= ' ' || r == 127 }) >= 0 ||
++		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || parsed.Port() == "0" {
++		return errors.New("invalid health-check URL")
++	}
++	return nil
++}
++
+@@ -76,0 +126,11 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error)
++	return URLTestWithStatus(ctx, link, "", detour)
++}
++
++func URLTestWithStatus(ctx context.Context, link, expected string, detour N.Dialer) (uint16, error) {
++	if err := ValidateProbeTarget(link); err != nil {
++		return 0, err
++	}
++	accept, err := ParseExpectedStatus(expected)
++	if err != nil {
++		return 0, err
++	}
+@@ -79,2 +139 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error)
+-		_, err := urlTest(ctx, link, detour)
+-		if err != nil {
++		if _, err := urlTest(ctx, link, accept, detour); err != nil {
+@@ -84 +143 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error)
+-	return urlTest(ctx, link, detour)
++	return urlTest(ctx, link, accept, detour)
+@@ -87 +146 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error)
+-func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
++func urlTest(ctx context.Context, link string, accept func(int) bool, detour N.Dialer) (t uint16, err error) {
+@@ -140 +199,4 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
+-	t = uint16(time.Since(start) / time.Millisecond)
++	if !accept(resp.StatusCode) {
++		return 0, errors.New("unexpected health-check HTTP status")
++	}
++	t = uint16(min(max(time.Since(start)/time.Millisecond, 1), 65535))
+diff --git a/constant/proxy.go b/constant/proxy.go
+index 278a46c2f6f99b3b147329c7cdbc2b407d7f7cce..6bf3f60f920f7e30f2c46ff9a62f1f4d95f05874 100644
+--- a/constant/proxy.go
++++ b/constant/proxy.go
+@@ -37,2 +37,4 @@ const (
+-	TypeSelector = "selector"
+-	TypeURLTest  = "urltest"
++	TypeSelector    = "selector"
++	TypeURLTest     = "urltest"
++	TypeFallback    = "fallback"
++	TypeLoadBalance = "loadbalance"
+@@ -94,0 +97,4 @@ func ProxyDisplayName(proxyType string) string {
++	case TypeFallback:
++		return "Fallback"
++	case TypeLoadBalance:
++		return "LoadBalance"
+diff --git a/experimental/clashapi/proxies.go b/experimental/clashapi/proxies.go
+index ef88ff37c5590c22e25092e6abcbf98930b86f07..49642defd006d7f7c00dbbbb7e6b90be0a9b93bf 100644
+--- a/experimental/clashapi/proxies.go
++++ b/experimental/clashapi/proxies.go
+@@ -8 +7,0 @@ import (
+-	"strings"
+@@ -70,0 +70,3 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
++	if metadata, ok := detour.(interface{ Hidden() bool }); ok {
++		info.Put("hidden", metadata.Hidden())
++	}
+@@ -191,2 +193,10 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
+-		if strings.HasPrefix(url, "http://") {
+-			url = ""
++		expected := query.Get("expected")
++		if err := urltest.ValidateProbeTarget(url); err != nil {
++			render.Status(r, http.StatusBadRequest)
++			render.JSON(w, r, ErrBadRequest)
++			return
++		}
++		if _, err := urltest.ParseExpectedStatus(expected); err != nil {
++			render.Status(r, http.StatusBadRequest)
++			render.JSON(w, r, ErrBadRequest)
++			return
+@@ -195 +205 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
+-		if err != nil {
++		if err != nil || timeout < 100 || timeout > 10000 {
+@@ -202 +212 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
+-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(timeout))
++		ctx, cancel := context.WithTimeout(r.Context(), time.Millisecond*time.Duration(timeout))
+@@ -205 +215 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
+-		delay, err := urltest.URLTest(ctx, url, proxy)
++		delay, err := urltest.URLTestWithStatus(ctx, url, expected, proxy)
 diff --git a/experimental/libbox/profile_probe.go b/experimental/libbox/profile_probe.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..01a64685c642e1d65323ecc044b93534634d8909
+index 0000000000000000000000000000000000000000..2a4a0cb1f4f5985ccc9650fe0e333fefa80921c8
 --- /dev/null
 +++ b/experimental/libbox/profile_probe.go
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,167 @@
 +package libbox
 +
 +import (
@@ -39,6 +384,16 @@ index 0000000000000000000000000000000000000000..01a64685c642e1d65323ecc044b93534
 +}
 +
 +func TestProfileProxies(configuration, namesJSON string, timeoutMS int32) (string, error) {
++	return TestProfileProxiesWithTarget(configuration, namesJSON, timeoutMS, "", "")
++}
++
++func TestProfileProxiesWithTarget(configuration, namesJSON string, timeoutMS int32, targetURL, expectedStatus string) (string, error) {
++	if err := urltest.ValidateProbeTarget(targetURL); err != nil {
++		return "", err
++	}
++	if _, err := urltest.ParseExpectedStatus(expectedStatus); err != nil {
++		return "", err
++	}
 +	select {
 +	case profileProbeSlot <- struct{}{}:
 +		defer func() { <-profileProbeSlot }()
@@ -69,7 +424,7 @@ index 0000000000000000000000000000000000000000..01a64685c642e1d65323ecc044b93534
 +	if err != nil {
 +		return "", errors.New("profile probe configuration rejected")
 +	}
-+	return runProfileProbe(ctx, instance, names)
++	return runProfileProbeWithTarget(ctx, instance, names, targetURL, expectedStatus)
 +}
 +
 +func profileProbeOptions(ctx context.Context, configuration string) (option.Options, error) {
@@ -104,7 +459,7 @@ index 0000000000000000000000000000000000000000..01a64685c642e1d65323ecc044b93534
 +		}
 +	}
 +	for _, outbound := range options.Outbounds {
-+		if outbound.Type == "urltest" {
++		if outbound.Type == "urltest" || outbound.Type == "fallback" || outbound.Type == "loadbalance" {
 +			return option.Options{}, errors.New("profile probe cannot start background tests")
 +		}
 +	}
@@ -112,7 +467,11 @@ index 0000000000000000000000000000000000000000..01a64685c642e1d65323ecc044b93534
 +	return options, nil
 +}
 +
-+func runProfileProbe(ctx context.Context, instance *box.Box, names []string) (response string, err error) {
++func runProfileProbe(ctx context.Context, instance *box.Box, names []string) (string, error) {
++	return runProfileProbeWithTarget(ctx, instance, names, "", "")
++}
++
++func runProfileProbeWithTarget(ctx context.Context, instance *box.Box, names []string, targetURL, expectedStatus string) (response string, err error) {
 +	defer func() {
 +		if closeErr := instance.Close(); closeErr != nil {
 +			response = ""
@@ -137,7 +496,7 @@ index 0000000000000000000000000000000000000000..01a64685c642e1d65323ecc044b93534
 +				kind := "not_found"
 +				result.ErrorKind = &kind
 +			} else {
-+				delay, probeErr := urltest.URLTest(ctx, "https://www.gstatic.com/generate_204", dialer)
++				delay, probeErr := urltest.URLTestWithStatus(ctx, targetURL, expectedStatus, dialer)
 +				if probeErr != nil {
 +					kind := "probe_failed"
 +					var networkError net.Error
@@ -388,3 +747,1340 @@ index 0000000000000000000000000000000000000000..f44d9cf68e881dc9c85c1930ad9301c2
 +		t.Fatalf("HTTPS round trip was not measured: %+v", results)
 +	}
 +}
+diff --git a/option/group.go b/option/group.go
+index 02b3a5ecb9d956084946c53cf31e5dddb7520572..3af84d4e2c7cf6755114a5cb19c197c1b065eba5 100644
+--- a/option/group.go
++++ b/option/group.go
+@@ -11,0 +12,4 @@ type URLTestOutboundOptions struct {
++	Timeout                   badoption.Duration `json:"timeout,omitempty"`
++	ExpectedStatus            string             `json:"expected_status,omitempty"`
++	Lazy                      *bool              `json:"lazy,omitempty"`
++	Hidden                    bool               `json:"hidden,omitempty"`
+@@ -15 +19 @@ type URLTestOutboundOptions struct {
+-	Tolerance                 uint16             `json:"tolerance,omitempty"`
++	Tolerance                 *uint16            `json:"tolerance,omitempty"`
+@@ -18,0 +23,27 @@ type URLTestOutboundOptions struct {
++
++// Ordered failover deliberately has no latency tolerance: priority comes from
++// the declared member order, not from the lowest measured delay.
++type FallbackOutboundOptions struct {
++	Timeout                   badoption.Duration `json:"timeout,omitempty"`
++	ExpectedStatus            string             `json:"expected_status,omitempty"`
++	Lazy                      *bool              `json:"lazy,omitempty"`
++	Hidden                    bool               `json:"hidden,omitempty"`
++	Outbounds                 []string           `json:"outbounds"`
++	URL                       string             `json:"url,omitempty"`
++	Interval                  badoption.Duration `json:"interval,omitempty"`
++	IdleTimeout               badoption.Duration `json:"idle_timeout,omitempty"`
++	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
++}
++
++type LoadBalanceOutboundOptions struct {
++	Timeout                   badoption.Duration `json:"timeout,omitempty"`
++	ExpectedStatus            string             `json:"expected_status,omitempty"`
++	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
++	Outbounds                 []string           `json:"outbounds"`
++	URL                       string             `json:"url,omitempty"`
++	Interval                  badoption.Duration `json:"interval,omitempty"`
++	IdleTimeout               badoption.Duration `json:"idle_timeout,omitempty"`
++	Lazy                      *bool              `json:"lazy,omitempty"`
++	Hidden                    bool               `json:"hidden,omitempty"`
++	Strategy                  string             `json:"strategy,omitempty"`
++}
+diff --git a/protocol/group/fallback.go b/protocol/group/fallback.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..834a3a435c142048640b0db185ae435aad992c3a
+--- /dev/null
++++ b/protocol/group/fallback.go
+@@ -0,0 +1,94 @@
++package group
++
++import (
++	"context"
++	"net"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/interrupt"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing/common"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// A connection attempt captures one bounded, priority-ordered candidate list.
++// Existing streams/associations keep their original outbound. Retry ends at the
++// first established connection; application payload is never replayed.
++func (g *URLTestGroup) orderedCandidates(network string) []adapter.Outbound {
++	var healthy, untested []adapter.Outbound
++	for _, detour := range g.outbounds {
++		if !common.Contains(detour.Network(), network) {
++			continue
++		}
++		if g.history.LoadURLTestHistory(RealTag(detour)) != nil {
++			healthy = append(healthy, detour)
++		} else if !g.probed.Load() {
++			untested = append(untested, detour)
++		}
++	}
++	return append(healthy, untested...)
++}
++
++func (s *URLTest) dialCandidates(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	networkName := N.NetworkName(network)
++	if networkName != N.NetworkTCP && networkName != N.NetworkUDP {
++		return nil, E.Extend(N.ErrUnknownNetwork, network)
++	}
++	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
++	defer cancel()
++	var lastErr error
++	for _, detour := range s.connectionCandidates(ctx, networkName, destination) {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		if interrupt.IsExternalConnectionFromContext(ctx) {
++			adapter.TouchOutboundActivity(ctx, detour.Tag())
++		}
++		conn, err := detour.DialContext(ctx, network, destination)
++		if err == nil {
++			s.rememberConnection(ctx, destination, detour.Tag())
++			return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
++		}
++		if ctx.Err() != nil {
++			return nil, ctx.Err()
++		}
++		s.logger.DebugContext(ctx, "fallback outbound ", detour.Tag(), ": ", err)
++		s.group.history.DeleteURLTestHistory(RealTag(detour))
++		lastErr = err
++	}
++	if lastErr != nil {
++		return nil, E.Cause(lastErr, "health-checked members failed")
++	}
++	return nil, E.New("no healthy outbound supports ", networkName)
++}
++
++func (s *URLTest) listenPacketCandidates(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
++	defer cancel()
++	var lastErr error
++	for _, detour := range s.connectionCandidates(ctx, N.NetworkUDP, destination) {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		if interrupt.IsExternalConnectionFromContext(ctx) {
++			adapter.TouchOutboundActivity(ctx, detour.Tag())
++		}
++		conn, err := detour.ListenPacket(ctx, destination)
++		if err == nil {
++			s.rememberConnection(ctx, destination, detour.Tag())
++			return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
++		}
++		if ctx.Err() != nil {
++			return nil, ctx.Err()
++		}
++		s.logger.DebugContext(ctx, "fallback UDP outbound ", detour.Tag(), ": ", err)
++		s.group.history.DeleteURLTestHistory(RealTag(detour))
++		lastErr = err
++	}
++	if lastErr != nil {
++		return nil, E.Cause(lastErr, "health-checked UDP members failed")
++	}
++	return nil, E.New("no healthy outbound supports UDP")
++}
+diff --git a/protocol/group/fallback_test.go b/protocol/group/fallback_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6cca06b8bb5f08bf358b1bc3dbfbab7bf7cd2460
+--- /dev/null
++++ b/protocol/group/fallback_test.go
+@@ -0,0 +1,189 @@
++package group
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/interrupt"
++	"github.com/sagernet/sing-box/common/urltest"
++	"github.com/sagernet/sing-box/log"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++func TestFallbackPriorityRecoveryAndAllFailed(t *testing.T) {
++	history := urltest.NewHistoryStorage()
++	g := &URLTestGroup{ordered: true, history: history,
++		outbounds: []adapter.Outbound{selectionTestOutbound{name: "primary"}, selectionTestOutbound{name: "backup"}}, interruptGroup: interrupt.NewGroup()}
++	g.probed.Store(true)
++	healthy := func(tag string, delay uint16) {
++		history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now(), Delay: delay})
++	}
++	expect := func(tag string) {
++		t.Helper()
++		g.performUpdateCheck()
++		proxy := &URLTest{ordered: true, group: g}
++		if actual := proxy.Now(); actual != tag {
++			t.Fatalf("selected %q, want %q", actual, tag)
++		}
++		for _, network := range []string{"tcp", "udp"} {
++			selected, available := g.Select(network)
++			if tag == "" {
++				if selected != nil || available {
++					t.Fatal("all-failed group retained a healthy appearance")
++				}
++				continue
++			}
++			if selected == nil || selected.Tag() != tag || !available {
++				t.Fatalf("%s selection does not match %s", network, tag)
++			}
++		}
++	}
++	healthy("primary", 600)
++	healthy("backup", 1)
++	expect("primary")
++	history.DeleteURLTestHistory("primary")
++	expect("backup")
++	healthy("primary", 650)
++	expect("primary")
++	history.DeleteURLTestHistory("primary")
++	history.DeleteURLTestHistory("backup")
++	expect("")
++}
++
++type fallbackDialTestOutbound struct {
++	selectionTestOutbound
++	call func(context.Context) (net.Conn, error)
++}
++
++func (s fallbackDialTestOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	return s.call(ctx)
++}
++
++func TestFallbackRetriesBeforePayloadAndKeepsEstablishedConnectionOnRecovery(t *testing.T) {
++	var attempts []string
++	client, peer := net.Pipe()
++	defer peer.Close()
++	primary := &fallbackDialTestOutbound{selectionTestOutbound{name: "primary"}, func(context.Context) (net.Conn, error) {
++		attempts = append(attempts, "primary")
++		return nil, errors.New("offline")
++	}}
++	backup := &fallbackDialTestOutbound{selectionTestOutbound{name: "backup"}, func(context.Context) (net.Conn, error) {
++		attempts = append(attempts, "backup")
++		return client, nil
++	}}
++	history := urltest.NewHistoryStorage()
++	for _, name := range []string{"primary", "backup"} {
++		history.StoreURLTestHistory(name, &adapter.URLTestHistory{Time: time.Now(), Delay: 10})
++	}
++	g := &URLTestGroup{ordered: true, history: history, outbounds: []adapter.Outbound{primary, backup}, interruptGroup: interrupt.NewGroup()}
++	g.probed.Store(true)
++	proxy := &URLTest{ordered: true, group: g, logger: log.NewNOPFactory().Logger()}
++	ctx := interrupt.ContextWithIsExternalConnection(context.Background())
++	conn, err := proxy.DialContext(ctx, "tcp", M.ParseSocksaddr("192.0.2.1:80"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	if len(attempts) != 2 || attempts[0] != "primary" || attempts[1] != "backup" {
++		t.Fatalf("unexpected order: %v", attempts)
++	}
++	g.performUpdateCheck()
++	if proxy.Now() != "backup" {
++		t.Fatal("failed primary remained selected")
++	}
++	history.StoreURLTestHistory("primary", &adapter.URLTestHistory{Time: time.Now(), Delay: 300})
++	g.performUpdateCheck()
++	if proxy.Now() != "primary" {
++		t.Fatal("priority did not recover")
++	}
++	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan error, 1)
++	go func() { _, err := peer.Write([]byte("alive")); done <- err }()
++	body := make([]byte, 5)
++	if _, err := io.ReadFull(conn, body); err != nil {
++		t.Fatal("existing stream interrupted:", err)
++	}
++	if string(body) != "alive" {
++		t.Fatal("existing stream changed")
++	}
++	if err := <-done; err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestFallbackCallerCancellationDoesNotTryMoreNodesOrEraseHealth(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	var attempts int
++	first := &fallbackDialTestOutbound{selectionTestOutbound{name: "primary"}, func(context.Context) (net.Conn, error) { attempts++; cancel(); return nil, context.Canceled }}
++	second := &fallbackDialTestOutbound{selectionTestOutbound{name: "backup"}, func(context.Context) (net.Conn, error) {
++		t.Fatal("canceled request reached backup")
++		return nil, context.Canceled
++	}}
++	history := urltest.NewHistoryStorage()
++	history.StoreURLTestHistory("primary", &adapter.URLTestHistory{Time: time.Now(), Delay: 10})
++	g := &URLTestGroup{ordered: true, history: history, outbounds: []adapter.Outbound{first, second}, interruptGroup: interrupt.NewGroup()}
++	proxy := &URLTest{ordered: true, group: g, logger: log.NewNOPFactory().Logger()}
++	_, err := proxy.DialContext(ctx, "tcp", M.ParseSocksaddr("192.0.2.1:80"))
++	if !errors.Is(err, context.Canceled) || attempts != 1 || history.LoadURLTestHistory("primary") == nil {
++		t.Fatal("cancellation altered node health or retry scope")
++	}
++}
++
++type healthProbeTestManager struct {
++	adapter.OutboundManager
++	node adapter.Outbound
++}
++
++func (m healthProbeTestManager) Outbound(tag string) (adapter.Outbound, bool) {
++	return m.node, tag == m.node.Tag()
++}
++
++func TestGroupHealthChecksEndOnCallerCancellationAndClose(t *testing.T) {
++	for _, closeGroup := range []bool{false, true} {
++		t.Run(map[bool]string{false: "caller", true: "close"}[closeGroup], func(t *testing.T) {
++			started := make(chan struct{})
++			node := &fallbackDialTestOutbound{selectionTestOutbound{name: "node"}, func(ctx context.Context) (net.Conn, error) { close(started); <-ctx.Done(); return nil, ctx.Err() }}
++			manager := healthProbeTestManager{node: node}
++			g, err := NewURLTestGroup(context.Background(), manager, log.NewNOPFactory().Logger(), []adapter.Outbound{node}, "http://example.com/probe", time.Minute, 0, time.Minute, false)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer g.Close()
++			g.history.StoreURLTestHistory("node", &adapter.URLTestHistory{Time: time.Now().Add(-time.Hour), Delay: 10})
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			done := make(chan error, 1)
++			go func() { _, err := g.URLTest(ctx); done <- err }()
++			select {
++			case <-started:
++			case <-time.After(time.Second):
++				t.Fatal("health probe did not start")
++			}
++			if closeGroup {
++				if err := g.Close(); err != nil {
++					t.Fatal(err)
++				}
++			} else {
++				cancel()
++			}
++			select {
++			case err := <-done:
++				if !errors.Is(err, context.Canceled) {
++					t.Fatalf("cancellation became %v", err)
++				}
++			case <-time.After(time.Second):
++				t.Fatal("canceled health probe outlived its owner")
++			}
++			if g.history.LoadURLTestHistory("node") == nil {
++				t.Fatal("owner cancellation incorrectly marked the node down")
++			}
++		})
++	}
++}
+diff --git a/protocol/group/health_check.go b/protocol/group/health_check.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..61f5fad1c0990ce041428cf5b0c5cf98512499fb
+--- /dev/null
++++ b/protocol/group/health_check.go
+@@ -0,0 +1,116 @@
++package group
++
++import (
++	"context"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/urltest"
++	"github.com/sagernet/sing/common/batch"
++	"maps"
++	"sync"
++	"time"
++)
++
++func (g *URLTestGroup) CheckOutbounds(force bool) {
++	_, _ = g.urlTest(g.ctx, force)
++}
++
++type healthCheckRun struct {
++	done   chan struct{}
++	result map[string]uint16
++	err    error
++}
++
++func (g *URLTestGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
++	return g.urlTest(ctx, true)
++}
++
++func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (result map[string]uint16, err error) {
++	if err := g.ctx.Err(); err != nil {
++		return nil, err
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	g.checkAccess.Lock()
++	if current := g.checking; current != nil {
++		g.checkAccess.Unlock()
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-g.ctx.Done():
++			return nil, g.ctx.Err()
++		case <-current.done:
++			return maps.Clone(current.result), current.err
++		}
++	}
++	current := &healthCheckRun{done: make(chan struct{})}
++	g.checking = current
++	g.checkAccess.Unlock()
++	defer func() {
++		g.checkAccess.Lock()
++		current.result, current.err = maps.Clone(result), err
++		g.checking = nil
++		close(current.done)
++		g.checkAccess.Unlock()
++	}()
++	result = make(map[string]uint16)
++	ctx, cancel := context.WithCancel(ctx)
++	stop := context.AfterFunc(g.ctx, cancel)
++	defer stop()
++	defer cancel()
++	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
++	checked := make(map[string]bool)
++	var resultAccess sync.Mutex
++	for _, detour := range g.outbounds {
++		tag := detour.Tag()
++		realTag := RealTag(detour)
++		if checked[realTag] {
++			continue
++		}
++		history := g.history.LoadURLTestHistory(realTag)
++		if !force && history != nil && time.Since(history.Time) < g.interval {
++			resultAccess.Lock()
++			result[tag] = history.Delay
++			resultAccess.Unlock()
++			continue
++		}
++		checked[realTag] = true
++		p, loaded := g.outbound.Outbound(realTag)
++		if !loaded {
++			continue
++		}
++		b.Go(realTag, func() (any, error) {
++			testCtx, cancel := context.WithTimeout(ctx, g.probeTimeout)
++			defer cancel()
++			t, err := urltest.URLTestWithStatus(testCtx, g.link, g.expectedStatus, p)
++			if err != nil {
++				if ctx.Err() != nil {
++					return nil, ctx.Err()
++				}
++				g.logger.Debug("outbound ", tag, " unavailable: ", err)
++				g.history.DeleteURLTestHistory(realTag)
++				if g.sharedHistory != nil {
++					g.sharedHistory.DeleteURLTestHistory(realTag)
++				}
++			} else {
++				g.logger.Debug("outbound ", tag, " available: ", t, "ms")
++				observed := &adapter.URLTestHistory{Time: time.Now(), Delay: t}
++				g.history.StoreURLTestHistory(realTag, observed)
++				if g.sharedHistory != nil {
++					g.sharedHistory.StoreURLTestHistory(realTag, observed)
++				}
++				resultAccess.Lock()
++				result[tag] = t
++				resultAccess.Unlock()
++			}
++			return nil, nil
++		})
++	}
++	b.Wait()
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	g.probed.Store(true)
++	g.performUpdateCheck()
++	return result, nil
++}
+diff --git a/protocol/group/health_policy_test.go b/protocol/group/health_policy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7483e0eb053d4138822ef8f185d2cacca00d4140
+--- /dev/null
++++ b/protocol/group/health_policy_test.go
+@@ -0,0 +1,90 @@
++package group
++
++import (
++	"context"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/urltest"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing/service"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestHealthPoliciesDoNotBorrowAnotherURLsSuccess(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/ok" {
++			w.WriteHeader(204)
++		} else {
++			w.WriteHeader(503)
++		}
++	}))
++	defer server.Close()
++	node := &fallbackDialTestOutbound{selectionTestOutbound{name: "node"}, func(ctx context.Context) (net.Conn, error) {
++		return (&net.Dialer{}).DialContext(ctx, "tcp", server.Listener.Addr().String())
++	}}
++	manager := healthProbeTestManager{node: node}
++	ctx := service.ContextWithPtr(context.Background(), urltest.NewHistoryStorage())
++	first, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), []adapter.Outbound{node}, server.URL+"/ok", time.Minute, 0, time.Minute, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer first.Close()
++	first.expectedStatus = "204"
++	if result, err := first.URLTest(ctx); err != nil || len(result) != 1 {
++		t.Fatalf("first: %v %v", result, err)
++	}
++	second, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), []adapter.Outbound{node}, server.URL+"/bad", time.Minute, 0, time.Minute, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer second.Close()
++	second.expectedStatus = "204"
++	result, err := second.urlTest(ctx, false)
++	if err != nil || len(result) != 0 || second.history.LoadURLTestHistory("node") != nil {
++		t.Fatal("provider reused a different URL's success")
++	}
++	if first.history.LoadURLTestHistory("node") == nil {
++		t.Fatal("one provider's failure erased another policy")
++	}
++}
++
++func TestOverlappingHealthChecksCoalesceAndReturnObservedResults(t *testing.T) {
++	started, release := make(chan struct{}), make(chan struct{})
++	var once sync.Once
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		once.Do(func() { close(started) })
++		<-release
++		w.WriteHeader(204)
++	}))
++	defer server.Close()
++	node := &fallbackDialTestOutbound{selectionTestOutbound{name: "node"}, func(ctx context.Context) (net.Conn, error) {
++		return (&net.Dialer{}).DialContext(ctx, "tcp", server.Listener.Addr().String())
++	}}
++	g, err := NewURLTestGroup(context.Background(), healthProbeTestManager{node: node}, log.NewNOPFactory().Logger(), []adapter.Outbound{node}, server.URL, time.Minute, 0, time.Minute, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer g.Close()
++	first := make(chan map[string]uint16, 1)
++	go func() {
++		result, err := g.URLTest(context.Background())
++		if err != nil {
++			t.Error(err)
++		}
++		first <- result
++	}()
++	<-started
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
++	defer cancel()
++	if _, err := g.URLTest(ctx); err == nil {
++		t.Fatal("waiting caller cancellation became empty success")
++	}
++	close(release)
++	if result := <-first; len(result) != 1 {
++		t.Fatal("coalesced run lost its result")
++	}
++}
+diff --git a/protocol/group/loadbalance.go b/protocol/group/loadbalance.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..179035d2cf00b0795202898c8adf2ebce7d43a6f
+--- /dev/null
++++ b/protocol/group/loadbalance.go
+@@ -0,0 +1,138 @@
++package group
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/binary"
++	"sort"
++	"strings"
++	"sync"
++	"sync/atomic"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/cache"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	"golang.org/x/net/publicsuffix"
++)
++
++const maxStickySessions = 1024
++
++type loadBalancePolicy struct {
++	strategy string
++	cursor   atomic.Uint64
++	// Serialize the cache's value access as well as mutation. The upstream LRU
++	// protects its index, but Load returns a value after releasing its index lock.
++	access   sync.Mutex
++	sessions *cache.LruCache[string, string]
++}
++
++func NewLoadBalance(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.LoadBalanceOutboundOptions) (adapter.Outbound, error) {
++	if options.InterruptExistConnections {
++		return nil, E.New("load-balance keeps established sessions on their original outbound")
++	}
++	strategy := options.Strategy
++	if strategy == "" {
++		strategy = "consistent-hashing"
++	}
++	if strategy != "consistent-hashing" && strategy != "sticky-sessions" && strategy != "round-robin" {
++		return nil, E.New("unsupported load-balance strategy")
++	}
++	proxy, err := newHealthCheckGroup(ctx, router, logger, tag, option.URLTestOutboundOptions{
++		Outbounds: options.Outbounds, URL: options.URL, Interval: options.Interval,
++		IdleTimeout: options.IdleTimeout, Lazy: options.Lazy, Hidden: options.Hidden, Timeout: options.Timeout, ExpectedStatus: options.ExpectedStatus,
++	}, C.TypeLoadBalance)
++	if err != nil {
++		return nil, err
++	}
++	proxy.balance = &loadBalancePolicy{strategy: strategy,
++		sessions: cache.New[string, string](cache.WithSize[string, string](maxStickySessions), cache.WithAge[string, string](600))}
++	return proxy, nil
++}
++
++func balanceDestination(destination M.Socksaddr) string {
++	if !destination.IsDomain() {
++		return destination.Addr.Unmap().String()
++	}
++	host := strings.TrimSuffix(strings.ToLower(destination.Fqdn), ".")
++	if domain, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
++		return domain
++	}
++	return host
++}
++
++func balanceKey(ctx context.Context, destination M.Socksaddr, sticky bool) string {
++	key := balanceDestination(destination)
++	if sticky {
++		source := ""
++		if metadata := adapter.ContextFrom(ctx); metadata != nil && metadata.Source.Addr.IsValid() {
++			source = metadata.Source.Addr.Unmap().String()
++		}
++		key = source + "\x00" + key
++	}
++	return key
++}
++
++func (s *URLTest) connectionCandidates(ctx context.Context, network string, destination M.Socksaddr) []adapter.Outbound {
++	candidates := s.group.orderedCandidates(network)
++	if s.balance == nil || len(candidates) == 0 {
++		return candidates
++	}
++	p := s.balance
++	if p.strategy == "round-robin" {
++		first := int((p.cursor.Add(1) - 1) % uint64(len(candidates)))
++		return append(candidates[first:], candidates[:first]...)
++	}
++	key := balanceKey(ctx, destination, p.strategy == "sticky-sessions")
++	// Rendezvous hashing depends on member identities, not their list positions.
++	// Adding/removing a member does not reshuffle unrelated destinations.
++	type scored struct {
++		outbound adapter.Outbound
++		score    uint64
++	}
++	scores := make([]scored, len(candidates))
++	for i, node := range candidates {
++		digest := sha256.Sum256([]byte(key + "\x00" + node.Tag()))
++		scores[i] = scored{node, binary.BigEndian.Uint64(digest[:8])}
++	}
++	sort.Slice(scores, func(i, j int) bool {
++		if scores[i].score == scores[j].score {
++			return scores[i].outbound.Tag() < scores[j].outbound.Tag()
++		}
++		return scores[i].score > scores[j].score
++	})
++	for i, node := range scores {
++		candidates[i] = node.outbound
++	}
++	if p.strategy == "sticky-sessions" {
++		p.access.Lock()
++		selected, exists := p.sessions.Load(key)
++		p.access.Unlock()
++		if exists {
++			for i, node := range candidates {
++				if node.Tag() == selected {
++					copy(candidates[1:i+1], candidates[:i])
++					candidates[0] = node
++					break
++				}
++			}
++		}
++	}
++	return candidates
++}
++
++func (s *URLTest) rememberConnection(ctx context.Context, destination M.Socksaddr, tag string) {
++	if s.balance == nil || s.balance.strategy != "sticky-sessions" {
++		return
++	}
++	p := s.balance
++	key := balanceKey(ctx, destination, true)
++	p.access.Lock()
++	defer p.access.Unlock()
++	if current, exists := p.sessions.Load(key); !exists || current != tag {
++		p.sessions.Store(key, tag)
++	}
++}
+diff --git a/protocol/group/loadbalance_test.go b/protocol/group/loadbalance_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4793bb20548b06132e8d088955db846f7ed37d8b
+--- /dev/null
++++ b/protocol/group/loadbalance_test.go
+@@ -0,0 +1,143 @@
++package group
++
++import (
++	"context"
++	"fmt"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/interrupt"
++	"github.com/sagernet/sing-box/common/urltest"
++	"github.com/sagernet/sing-box/option"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++func balanceFixture(t *testing.T, strategy string) *URLTest {
++	t.Helper()
++	outbound, err := NewLoadBalance(context.Background(), nil, nil, "balanced", option.LoadBalanceOutboundOptions{Outbounds: []string{"A", "B", "C"}, Strategy: strategy})
++	if err != nil {
++		t.Fatal(err)
++	}
++	proxy := outbound.(*URLTest)
++	history := urltest.NewHistoryStorage()
++	proxy.group = &URLTestGroup{balanced: true, history: history, interruptGroup: interrupt.NewGroup()}
++	for _, tag := range []string{"A", "B", "C"} {
++		proxy.group.outbounds = append(proxy.group.outbounds, selectionTestOutbound{name: tag})
++		history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now(), Delay: 20})
++	}
++	proxy.group.probed.Store(true)
++	return proxy
++}
++
++func TestConsistentHashingIsStableAcrossPortsNetworksOrderAndSubdomains(t *testing.T) {
++	p := balanceFixture(t, "consistent-hashing")
++	ctx := context.Background()
++	choice := p.connectionCandidates(ctx, "tcp", M.ParseSocksaddr("a.example.co.uk:443"))[0].Tag()
++	for _, target := range []string{"b.example.co.uk:80", "EXAMPLE.CO.UK.:8443", "example.co.uk:53"} {
++		for _, network := range []string{"tcp", "udp"} {
++			if got := p.connectionCandidates(ctx, network, M.ParseSocksaddr(target))[0].Tag(); got != choice {
++				t.Fatalf("%s/%s changed selection", target, network)
++			}
++		}
++	}
++	p.group.outbounds[0], p.group.outbounds[2] = p.group.outbounds[2], p.group.outbounds[0]
++	if got := p.connectionCandidates(ctx, "tcp", M.ParseSocksaddr("a.example.co.uk:443"))[0].Tag(); got != choice {
++		t.Fatal("reordering shuffled destinations")
++	}
++	counts := map[string]int{}
++	for i := 0; i < 1024; i++ {
++		counts[p.connectionCandidates(ctx, "tcp", M.ParseSocksaddr(fmt.Sprintf("site-%d.example:443", i)))[0].Tag()]++
++	}
++	for _, tag := range []string{"A", "B", "C"} {
++		if counts[tag] < 200 {
++			t.Fatalf("imbalanced sample: %v", counts)
++		}
++	}
++	if p.Now() != "" {
++		t.Fatal("a load-balancer must not claim one current node for every destination")
++	}
++	if RealTag(p) != "balanced" {
++		t.Fatal("a nested load-balancer lost its health-test target")
++	}
++}
++
++func TestStickySessionsRetainSelectionUntilExpiryOrFailureAndRemainBounded(t *testing.T) {
++	p := balanceFixture(t, "sticky-sessions")
++	destination := M.ParseSocksaddr("video.example.com:443")
++	ctx := adapter.WithContext(context.Background(), &adapter.InboundContext{Source: M.ParseSocksaddr("192.168.1.10:1234")})
++	other := adapter.WithContext(context.Background(), &adapter.InboundContext{Source: M.ParseSocksaddr("192.168.1.11:1234")})
++	if balanceKey(ctx, destination, true) == balanceKey(other, destination, true) {
++		t.Fatal("source address is absent from sticky key")
++	}
++	initial := p.connectionCandidates(ctx, "tcp", destination)[0].Tag()
++	retained := "A"
++	if initial == retained {
++		retained = "B"
++	}
++	p.rememberConnection(ctx, destination, retained)
++	if got := p.connectionCandidates(ctx, "udp", destination)[0].Tag(); got != retained {
++		t.Fatal("an established selection was not retained for the same source and site")
++	}
++	p.balance.access.Lock()
++	expired, _ := p.balance.sessions.Load(balanceKey(ctx, destination, true))
++	p.balance.sessions.StoreWithExpire(balanceKey(ctx, destination, true), expired, time.Now().Add(-time.Second))
++	p.balance.access.Unlock()
++	if got := p.connectionCandidates(ctx, "tcp", destination)[0].Tag(); got != initial {
++		t.Fatal("expired sticky entry remained active")
++	}
++	p.rememberConnection(ctx, destination, retained)
++	p.group.history.DeleteURLTestHistory(retained)
++	if got := p.connectionCandidates(ctx, "tcp", destination)[0].Tag(); got == retained {
++		t.Fatal("sticky entry pinned a failed node")
++	}
++	for i := 0; i < maxStickySessions+100; i++ {
++		p.rememberConnection(ctx, M.ParseSocksaddr(fmt.Sprintf("site-%d.example:443", i)), "A")
++	}
++	p.balance.access.Lock()
++	count := 0
++	p.balance.sessions.Range(func(string, string) { count++ })
++	p.balance.access.Unlock()
++	if count > maxStickySessions {
++		t.Fatal("unbounded sticky cache")
++	}
++}
++
++func TestLoadBalanceConcurrencyRoundRobinAndAllFailed(t *testing.T) {
++	for _, strategy := range []string{"consistent-hashing", "sticky-sessions", "round-robin"} {
++		p := balanceFixture(t, strategy)
++		var workers sync.WaitGroup
++		for i := 0; i < 8; i++ {
++			workers.Add(1)
++			go func(i int) {
++				defer workers.Done()
++				ctx := context.Background()
++				for j := 0; j < 1000; j++ {
++					destination := M.ParseSocksaddr(fmt.Sprintf("test-%d-%d.example:443", i, j))
++					chosen := p.connectionCandidates(ctx, "tcp", destination)
++					if len(chosen) != 3 {
++						t.Error("lost candidates")
++						return
++					}
++					p.rememberConnection(ctx, destination, chosen[0].Tag())
++				}
++			}(i)
++		}
++		workers.Wait()
++		for _, tag := range []string{"A", "B", "C"} {
++			p.group.history.DeleteURLTestHistory(tag)
++		}
++		if len(p.connectionCandidates(context.Background(), "tcp", M.ParseSocksaddr("example.com:443"))) != 0 {
++			t.Fatal("failed nodes remained eligible")
++		}
++	}
++	p := balanceFixture(t, "round-robin")
++	counts := map[string]int{}
++	for i := 0; i < 12; i++ {
++		counts[p.connectionCandidates(context.Background(), "tcp", M.ParseSocksaddr("example.com:443"))[0].Tag()]++
++	}
++	if counts["A"] != 4 || counts["B"] != 4 || counts["C"] != 4 {
++		t.Fatalf("round-robin: %v", counts)
++	}
++}
+diff --git a/protocol/group/selector.go b/protocol/group/selector.go
+index f3f7377b61aacfc9ef880946f13614ebeac5d0dd..742b42b21db022f7db85ed62af9001d73a66aa63 100644
+--- a/protocol/group/selector.go
++++ b/protocol/group/selector.go
+@@ -144 +144,5 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination
+-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
++	selected := s.selected.Load()
++	if interrupt.IsExternalConnectionFromContext(ctx) {
++		adapter.TouchOutboundActivity(ctx, selected.Tag())
++	}
++	conn, err := selected.DialContext(ctx, network, destination)
+@@ -152 +156,5 @@ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
+-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
++	selected := s.selected.Load()
++	if interrupt.IsExternalConnectionFromContext(ctx) {
++		adapter.TouchOutboundActivity(ctx, selected.Tag())
++	}
++	conn, err := selected.ListenPacket(ctx, destination)
+@@ -161,0 +170 @@ func (s *Selector) NewConnectionEx(ctx context.Context, conn net.Conn, metadata
++	adapter.TouchOutboundActivity(ctx, selected.Tag())
+@@ -171,0 +181 @@ func (s *Selector) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn,
++	adapter.TouchOutboundActivity(ctx, selected.Tag())
+@@ -189 +199,3 @@ func RealTag(detour adapter.Outbound) string {
+-		return group.Now()
++		if tag := group.Now(); tag != "" {
++			return tag
++		}
+diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
+index 730040f7b9076a169c6a9ab6d1e3b56af6d7afe3..c324f8147fc8d17e1a879364dc107ceeaf07d9e9 100644
+--- a/protocol/group/urltest.go
++++ b/protocol/group/urltest.go
+@@ -19 +18,0 @@ import (
+-	"github.com/sagernet/sing/common/batch"
+@@ -29,0 +29,2 @@ func RegisterURLTest(registry *outbound.Registry) {
++	outbound.Register[option.FallbackOutboundOptions](registry, C.TypeFallback, NewFallback)
++	outbound.Register[option.LoadBalanceOutboundOptions](registry, C.TypeLoadBalance, NewLoadBalance)
+@@ -34,0 +36,4 @@ type URLTest struct {
++	balance    *loadBalancePolicy
++	continuous bool
++	hidden     bool
++	ordered    bool
+@@ -41,0 +47,2 @@ type URLTest struct {
++	probeTimeout                 time.Duration
++	expectedStatus               string
+@@ -49,0 +57,29 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
++	return newHealthCheckGroup(ctx, router, logger, tag, options, C.TypeURLTest)
++}
++
++func NewFallback(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.FallbackOutboundOptions) (adapter.Outbound, error) {
++	return newHealthCheckGroup(ctx, router, logger, tag, option.URLTestOutboundOptions{
++		Outbounds: options.Outbounds, URL: options.URL, Interval: options.Interval,
++		IdleTimeout: options.IdleTimeout, InterruptExistConnections: options.InterruptExistConnections,
++		Lazy: options.Lazy, Hidden: options.Hidden, Timeout: options.Timeout, ExpectedStatus: options.ExpectedStatus,
++	}, C.TypeFallback)
++}
++
++func newHealthCheckGroup(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions, kind string) (*URLTest, error) {
++	if err := urltest.ValidateProbeTarget(options.URL); err != nil {
++		return nil, err
++	}
++	if _, err := urltest.ParseExpectedStatus(options.ExpectedStatus); err != nil {
++		return nil, err
++	}
++	timeout := time.Duration(options.Timeout)
++	if timeout == 0 {
++		timeout = C.TCPTimeout
++	} else if timeout < 100*time.Millisecond || timeout > 10*time.Second {
++		return nil, E.New("health timeout must be 100ms..10s")
++	}
++	ordered := kind == C.TypeFallback
++	tolerance := uint16(50)
++	if options.Tolerance != nil {
++		tolerance = *options.Tolerance
++	}
+@@ -51,7 +87,11 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+-		Adapter:                      outbound.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
+-		ctx:                          ctx,
+-		outbound:                     service.FromContext[adapter.OutboundManager](ctx),
+-		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
+-		logger:                       logger,
+-		tags:                         options.Outbounds,
+-		link:                         options.URL,
++		continuous:   options.Lazy != nil && !*options.Lazy,
++		hidden:       options.Hidden,
++		ordered:      ordered,
++		Adapter:      outbound.NewAdapter(kind, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
++		ctx:          ctx,
++		outbound:     service.FromContext[adapter.OutboundManager](ctx),
++		connection:   service.FromContext[adapter.ConnectionManager](ctx),
++		logger:       logger,
++		tags:         options.Outbounds,
++		link:         options.URL,
++		probeTimeout: timeout, expectedStatus: options.ExpectedStatus,
+@@ -59 +99 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
+-		tolerance:                    options.Tolerance,
++		tolerance:                    tolerance,
+@@ -81,0 +122,9 @@ func (s *URLTest) Start() error {
++	group.ordered = s.ordered
++	group.probeTimeout, group.expectedStatus = s.probeTimeout, s.expectedStatus
++	if s.hidden {
++		if watcher, ok := s.outbound.(interface{ WatchOutboundActivity([]string, func()) func() }); ok {
++			group.activityCancel = watcher.WatchOutboundActivity(s.tags, group.Touch)
++		}
++	}
++	group.balanced = s.balance != nil
++	group.continuous = s.continuous
+@@ -85,0 +135,2 @@ func (s *URLTest) Start() error {
++func (s *URLTest) Hidden() bool { return s.hidden }
++
+@@ -87,0 +139,3 @@ func (s *URLTest) PostStart() error {
++	if s.continuous {
++		s.group.Touch()
++	}
+@@ -98,4 +152,20 @@ func (s *URLTest) Now() string {
+-	if s.group.selectedOutboundTCP != nil {
+-		return s.group.selectedOutboundTCP.Tag()
+-	} else if s.group.selectedOutboundUDP != nil {
+-		return s.group.selectedOutboundUDP.Tag()
++	if s.group == nil || s.balance != nil {
++		return ""
++	}
++	if s.ordered {
++		if chosen, _ := s.group.Select(N.NetworkTCP); chosen != nil {
++			return chosen.Tag()
++		}
++		if chosen, _ := s.group.Select(N.NetworkUDP); chosen != nil {
++			return chosen.Tag()
++		}
++		return ""
++	}
++	selection := s.group.selection.Load()
++	if selection == nil {
++		return ""
++	}
++	if selection.tcp != nil {
++		return selection.tcp.Tag()
++	} else if selection.udp != nil {
++		return selection.udp.Tag()
+@@ -119,0 +190,3 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
++	if s.ordered || s.balance != nil {
++		return s.dialCandidates(ctx, network, destination)
++	}
+@@ -123 +196 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
+-		outbound = s.group.selectedOutboundTCP
++		outbound = s.group.selected(N.NetworkTCP)
+@@ -125 +198 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
+-		outbound = s.group.selectedOutboundUDP
++		outbound = s.group.selected(N.NetworkUDP)
+@@ -134,0 +208,3 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
++	if interrupt.IsExternalConnectionFromContext(ctx) {
++		adapter.TouchOutboundActivity(ctx, outbound.Tag())
++	}
+@@ -146 +222,4 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
+-	outbound := s.group.selectedOutboundUDP
++	if s.ordered || s.balance != nil {
++		return s.listenPacketCandidates(ctx, destination)
++	}
++	outbound := s.group.selected(N.NetworkUDP)
+@@ -152,0 +232,3 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
++	if interrupt.IsExternalConnectionFromContext(ctx) {
++		adapter.TouchOutboundActivity(ctx, outbound.Tag())
++	}
+@@ -174,2 +256,10 @@ func (s *URLTest) NewDirectRouteConnection(metadata adapter.InboundContext, rout
+-	selected := s.group.selectedOutboundTCP
+-	if selected == nil {
++	var selected adapter.Outbound
++	if s.balance != nil {
++		candidates := s.connectionCandidates(adapter.WithContext(s.ctx, &metadata), metadata.Network, metadata.Destination)
++		if len(candidates) > 0 {
++			selected = candidates[0]
++		}
++	} else {
++		selected = s.group.selected(N.NetworkTCP)
++	}
++	if s.balance == nil && (s.ordered || selected == nil) {
+@@ -184 +274,9 @@ func (s *URLTest) NewDirectRouteConnection(metadata adapter.InboundContext, rout
+-	return selected.(adapter.DirectRouteOutbound).NewDirectRouteConnection(metadata, routeContext, timeout)
++	direct, supported := selected.(adapter.DirectRouteOutbound)
++	if !supported {
++		return nil, E.New("direct route is not supported by outbound: ", selected.Tag())
++	}
++	route, err := direct.NewDirectRouteConnection(metadata, routeContext, timeout)
++	if err == nil {
++		s.rememberConnection(adapter.WithContext(s.ctx, &metadata), metadata.Destination, selected.Tag())
++	}
++	return route, err
+@@ -187,0 +286,5 @@ type URLTestGroup struct {
++	balanced                     bool
++	continuous                   bool
++	ordered                      bool
++	probed                       atomic.Bool
++	cancel                       context.CancelFunc
+@@ -194,0 +298,2 @@ type URLTestGroup struct {
++	probeTimeout                 time.Duration
++	expectedStatus               string
+@@ -199,3 +304,5 @@ type URLTestGroup struct {
+-	checking                     atomic.Bool
+-	selectedOutboundTCP          adapter.Outbound
+-	selectedOutboundUDP          adapter.Outbound
++	sharedHistory                adapter.URLTestHistoryStorage
++	activityCancel               func()
++	checkAccess                  sync.Mutex
++	checking                     *healthCheckRun
++	selection                    atomic.Pointer[urlTestSelection]
+@@ -215,3 +321,0 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
+-	if tolerance == 0 {
+-		tolerance = 50
+-	}
+@@ -231,0 +336 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
++	ctx, cancel := context.WithCancel(ctx)
+@@ -232,0 +338 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
++		cancel:                       cancel,
+@@ -237,0 +344 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
++		probeTimeout:                 C.TCPTimeout,
+@@ -241 +348,2 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
+-		history:                      history,
++		history:                      urltest.NewHistoryStorage(),
++		sharedHistory:                history,
+@@ -257,0 +366,2 @@ func (g *URLTestGroup) Touch() {
++	g.access.Lock()
++	defer g.access.Unlock()
+@@ -261,2 +371 @@ func (g *URLTestGroup) Touch() {
+-	g.access.Lock()
+-	defer g.access.Unlock()
++	g.lastActive.Store(time.Now())
+@@ -264 +372,0 @@ func (g *URLTestGroup) Touch() {
+-		g.lastActive.Store(time.Now())
+@@ -273,0 +382,3 @@ func (g *URLTestGroup) Close() error {
++	if g.activityCancel != nil {
++		g.activityCancel()
++	}
+@@ -275,0 +387,4 @@ func (g *URLTestGroup) Close() error {
++	g.started = false
++	if g.cancel != nil {
++		g.cancel()
++	}
+@@ -288,8 +403,4 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+-	var minDelay uint16
+-	var minOutbound adapter.Outbound
+-	switch network {
+-	case N.NetworkTCP:
+-		if g.selectedOutboundTCP != nil {
+-			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundTCP)); history != nil {
+-				minOutbound = g.selectedOutboundTCP
+-				minDelay = history.Delay
++	if g.ordered {
++		for _, detour := range g.outbounds {
++			if common.Contains(detour.Network(), network) && g.history.LoadURLTestHistory(RealTag(detour)) != nil {
++				return detour, true
+@@ -298,5 +409,5 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+-	case N.NetworkUDP:
+-		if g.selectedOutboundUDP != nil {
+-			if history := g.history.LoadURLTestHistory(RealTag(g.selectedOutboundUDP)); history != nil {
+-				minOutbound = g.selectedOutboundUDP
+-				minDelay = history.Delay
++		if !g.probed.Load() {
++			for _, detour := range g.outbounds {
++				if common.Contains(detour.Network(), network) {
++					return detour, false
++				}
+@@ -304,0 +416,9 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
++		return nil, false
++	}
++	var minDelay uint16
++	var minOutbound adapter.Outbound
++	if selected := g.selected(network); selected != nil {
++		if history := g.history.LoadURLTestHistory(RealTag(selected)); history != nil {
++			minOutbound = selected
++			minDelay = history.Delay
++		}
+@@ -314 +434 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+-		if minDelay == 0 || minDelay > history.Delay+g.tolerance {
++		if minDelay == 0 || uint32(minDelay) > uint32(history.Delay)+uint32(g.tolerance) {
+@@ -342 +462 @@ func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{})
+-		if time.Since(g.lastActive.Load()) > g.idleTimeout {
++		if !g.continuous && time.Since(g.lastActive.Load()) > g.idleTimeout {
+@@ -357,6 +477,5 @@ func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{})
+-func (g *URLTestGroup) CheckOutbounds(force bool) {
+-	_, _ = g.urlTest(g.ctx, force)
+-}
+-
+-func (g *URLTestGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
+-	return g.urlTest(ctx, false)
++// Publish TCP and UDP choices together. Interface values contain two words
++// and must never be read concurrently with unsynchronized assignment.
++type urlTestSelection struct {
++	tcp adapter.Outbound
++	udp adapter.Outbound
+@@ -365,43 +484,12 @@ func (g *URLTestGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
+-func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint16, error) {
+-	result := make(map[string]uint16)
+-	if g.checking.Swap(true) {
+-		return result, nil
+-	}
+-	defer g.checking.Store(false)
+-	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
+-	checked := make(map[string]bool)
+-	var resultAccess sync.Mutex
+-	for _, detour := range g.outbounds {
+-		tag := detour.Tag()
+-		realTag := RealTag(detour)
+-		if checked[realTag] {
+-			continue
+-		}
+-		history := g.history.LoadURLTestHistory(realTag)
+-		if !force && history != nil && time.Since(history.Time) < g.interval {
+-			continue
+-		}
+-		checked[realTag] = true
+-		p, loaded := g.outbound.Outbound(realTag)
+-		if !loaded {
+-			continue
+-		}
+-		b.Go(realTag, func() (any, error) {
+-			testCtx, cancel := context.WithTimeout(g.ctx, C.TCPTimeout)
+-			defer cancel()
+-			t, err := urltest.URLTest(testCtx, g.link, p)
+-			if err != nil {
+-				g.logger.Debug("outbound ", tag, " unavailable: ", err)
+-				g.history.DeleteURLTestHistory(realTag)
+-			} else {
+-				g.logger.Debug("outbound ", tag, " available: ", t, "ms")
+-				g.history.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
+-					Time:  time.Now(),
+-					Delay: t,
+-				})
+-				resultAccess.Lock()
+-				result[tag] = t
+-				resultAccess.Unlock()
+-			}
+-			return nil, nil
+-		})
++func (g *URLTestGroup) selected(network string) adapter.Outbound {
++	selection := g.selection.Load()
++	if selection == nil {
++		return nil
++	}
++	switch network {
++	case N.NetworkUDP:
++		return selection.udp
++	case N.NetworkTCP:
++		return selection.tcp
++	default:
++		return nil
+@@ -409,3 +496,0 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
+-	b.Wait()
+-	g.performUpdateCheck()
+-	return result, nil
+@@ -415,6 +500,2 @@ func (g *URLTestGroup) performUpdateCheck() {
+-	var updated bool
+-	if outbound, exists := g.Select(N.NetworkTCP); outbound != nil && (g.selectedOutboundTCP == nil || (exists && outbound != g.selectedOutboundTCP)) {
+-		if g.selectedOutboundTCP != nil {
+-			updated = true
+-		}
+-		g.selectedOutboundTCP = outbound
++	if g.balanced {
++		return
+@@ -422,3 +503,7 @@ func (g *URLTestGroup) performUpdateCheck() {
+-	if outbound, exists := g.Select(N.NetworkUDP); outbound != nil && (g.selectedOutboundUDP == nil || (exists && outbound != g.selectedOutboundUDP)) {
+-		if g.selectedOutboundUDP != nil {
+-			updated = true
++	if g.ordered {
++		tcp, _ := g.Select(N.NetworkTCP)
++		udp, _ := g.Select(N.NetworkUDP)
++		next := &urlTestSelection{tcp: tcp, udp: udp}
++		previous := g.selection.Swap(next)
++		if previous != nil && (previous.tcp != tcp || previous.udp != udp) {
++			g.interruptGroup.Interrupt(g.interruptExternalConnections)
+@@ -426 +511,14 @@ func (g *URLTestGroup) performUpdateCheck() {
+-		g.selectedOutboundUDP = outbound
++		return
++	}
++	var next urlTestSelection
++	if previous := g.selection.Load(); previous != nil {
++		next = *previous
++	}
++	var updated bool
++	if outbound, exists := g.Select(N.NetworkTCP); outbound != nil && (next.tcp == nil || (exists && outbound != next.tcp)) {
++		updated = updated || next.tcp != nil
++		next.tcp = outbound
++	}
++	if outbound, exists := g.Select(N.NetworkUDP); outbound != nil && (next.udp == nil || (exists && outbound != next.udp)) {
++		updated = updated || next.udp != nil
++		next.udp = outbound
+@@ -427,0 +526 @@ func (g *URLTestGroup) performUpdateCheck() {
++	g.selection.Store(&next)
+diff --git a/protocol/group/urltest_policy_test.go b/protocol/group/urltest_policy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d87342eaa6698a5b4c84c61da467b3c24e9769d1
+--- /dev/null
++++ b/protocol/group/urltest_policy_test.go
+@@ -0,0 +1,87 @@
++package group
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/interrupt"
++	"github.com/sagernet/sing-box/common/urltest"
++	"github.com/sagernet/sing-box/option"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestURLTestPreservesExplicitZeroTolerance(t *testing.T) {
++	for _, test := range []struct {
++		input    string
++		expected uint16
++	}{
++		{input: "{\"outbounds\":[\"node\"]}", expected: 50},
++		{input: "{\"outbounds\":[\"node\"],\"tolerance\":0}", expected: 0},
++		{input: "{\"outbounds\":[\"node\"],\"tolerance\":150}", expected: 150},
++	} {
++		var options option.URLTestOutboundOptions
++		if err := json.Unmarshal([]byte(test.input), &options); err != nil {
++			t.Fatal(err)
++		}
++		outbound, err := NewURLTest(context.Background(), nil, nil, "auto", options)
++		if err != nil {
++			t.Fatal(err)
++		}
++		settings := outbound.(*URLTest)
++		group, err := NewURLTestGroup(context.Background(), nil, nil, nil, "https://example.com", time.Minute, settings.tolerance, 2*time.Minute, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if group.tolerance != test.expected {
++			t.Fatalf("tolerance=%d, want %d", group.tolerance, test.expected)
++		}
++	}
++}
++
++func TestURLTestToleranceCannotOverflowToPreferASlowerNode(t *testing.T) {
++	history := urltest.NewHistoryStorage()
++	history.StoreURLTestHistory("fast", &adapter.URLTestHistory{Time: time.Now(), Delay: 1000})
++	history.StoreURLTestHistory("slow", &adapter.URLTestHistory{Time: time.Now(), Delay: 65500})
++	g := &URLTestGroup{history: history, tolerance: 100, outbounds: []adapter.Outbound{selectionTestOutbound{name: "fast"}, selectionTestOutbound{name: "slow"}}}
++	selected, ok := g.Select("tcp")
++	if !ok || selected.Tag() != "fast" {
++		t.Fatal("latency tolerance overflow selected the slower node")
++	}
++}
++
++type selectionTestOutbound struct {
++	adapter.Outbound
++	name string
++}
++
++func (s selectionTestOutbound) Tag() string       { return s.name }
++func (s selectionTestOutbound) Network() []string { return []string{"tcp", "udp"} }
++
++func TestURLTestConcurrentSelectionPublication(t *testing.T) {
++	history := urltest.NewHistoryStorage()
++	group := &URLTestGroup{history: history, outbounds: []adapter.Outbound{selectionTestOutbound{name: "A"}, selectionTestOutbound{name: "B"}}, interruptGroup: interrupt.NewGroup()}
++	proxy := &URLTest{group: group}
++	var readers sync.WaitGroup
++	for i := 0; i < 8; i++ {
++		readers.Add(1)
++		go func() {
++			defer readers.Done()
++			for j := 0; j < 10000; j++ {
++				name := proxy.Now()
++				if name != "" && name != "A" && name != "B" {
++					t.Error("torn selection")
++				}
++				group.Select("tcp")
++				group.Select("udp")
++			}
++		}()
++	}
++	for i := 0; i < 10000; i++ {
++		history.StoreURLTestHistory("A", &adapter.URLTestHistory{Time: time.Now(), Delay: uint16(10 + i%2*20)})
++		history.StoreURLTestHistory("B", &adapter.URLTestHistory{Time: time.Now(), Delay: 20})
++		group.performUpdateCheck()
++	}
++	readers.Wait()
++}
+diff --git a/route/conn.go b/route/conn.go
+index 9fdc6cda8c9bb85981004682274263bc715d7bf4..c270c980d23f7b3144586cb9bc838fc81e548032 100644
+--- a/route/conn.go
++++ b/route/conn.go
+@@ -95,0 +96,3 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
++	if outbound, ok := this.(adapter.Outbound); ok {
++		adapter.TouchOutboundActivity(ctx, outbound.Tag())
++	}
+@@ -145,0 +149,3 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
++	if outbound, ok := this.(adapter.Outbound); ok {
++		adapter.TouchOutboundActivity(ctx, outbound.Tag())
++	}

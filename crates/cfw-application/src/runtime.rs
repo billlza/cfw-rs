@@ -13,6 +13,7 @@ use crate::{EngineCoordinatorError, EngineOperation, EngineRestartSpec};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum NativeLeaseKind {
+    LocalProxy,
     SystemProxy,
     TunnelInstallation,
     TunnelRuntime,
@@ -97,8 +98,8 @@ pub(crate) async fn reconcile_active_runtime(
     operation_timeout: Duration,
 ) -> Result<(), EngineCoordinatorError> {
     let (expected_mode, expected_owner, expected_runtime) = match &state.snapshot.state {
-        EngineState::ProxyActive { runtime } => (
-            EngineMode::SystemProxy,
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => (
+            state.snapshot.state.active_mode(),
             EngineOwner::ProxyAgent,
             runtime.clone(),
         ),
@@ -128,7 +129,8 @@ pub(crate) async fn reconcile_active_runtime(
     };
 
     let observed_runtime = match (&observation, expected_mode) {
-        (NativeEngineStatus::SystemProxy { runtime }, EngineMode::SystemProxy)
+        (NativeEngineStatus::LocalProxy { runtime }, EngineMode::LocalProxy)
+        | (NativeEngineStatus::SystemProxy { runtime }, EngineMode::SystemProxy)
         | (
             NativeEngineStatus::Tunnel { runtime },
             EngineMode::Tunnel | EngineMode::TunnelSystemProxy,

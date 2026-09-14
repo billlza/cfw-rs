@@ -862,6 +862,7 @@ mod tests {
         )
         .expect("audience");
         let proxy = EngineStartRequest {
+            mode: cfw_singbox_config::ProjectionMode::SystemProxy,
             context: context.clone(),
             credential_audience: credential_audience.clone(),
             config_json: "{}".into(),
@@ -871,6 +872,7 @@ mod tests {
             tunnel_options: None,
         };
         let tunnel = EngineStartRequest {
+            mode: cfw_singbox_config::ProjectionMode::Tunnel,
             context,
             credential_audience,
             config_json: "{}".into(),

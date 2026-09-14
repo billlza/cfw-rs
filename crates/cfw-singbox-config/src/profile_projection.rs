@@ -11,7 +11,16 @@ use crate::{ConfigError, CredentialSlot, CredentialTarget};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DomainResolverTags<'a> {
     pub(crate) server: &'a str,
-    pub(crate) fallback_server: &'a str,
+    pub(crate) fallback_servers: &'a [String],
+}
+
+impl DomainResolverTags<'_> {
+    fn value(self) -> Value {
+        let tags = std::iter::once(self.server.to_owned())
+            .chain(self.fallback_servers.iter().cloned())
+            .collect::<Vec<_>>();
+        crate::dns_policy::resolver_value(&tags)
+    }
 }
 
 #[derive(Debug)]
@@ -32,6 +41,28 @@ impl ProfileDocument {
         &self,
         bootstrap_resolver: DomainResolverTags<'_>,
     ) -> Result<RuntimeOutboundProjection, ConfigError> {
+        let proxy_tags = self
+            .dns
+            .as_ref()
+            .and_then(|dns| dns.proxy_servers.as_ref())
+            .map(|pool| crate::dns_policy::resolver_tags("cfw-proxy-server-dns", pool.len()));
+        let bootstrap_resolver =
+            proxy_tags
+                .as_ref()
+                .map_or(bootstrap_resolver, |tags| DomainResolverTags {
+                    server: &tags[0],
+                    fallback_servers: &tags[1..],
+                });
+        let direct_resolver = self.dns.as_ref().map(|dns| match &dns.direct_servers {
+            Some(_) if dns.direct_follow_policy && !dns.nameserver_policy.is_empty() => {
+                json!({"policy":"cfw-direct"})
+            }
+            Some(pool) => crate::dns_policy::resolver_value(&crate::dns_policy::resolver_tags(
+                "cfw-direct-dns",
+                pool.len(),
+            )),
+            None => json!({"policy":"default"}),
+        });
         let mut outbounds = Vec::with_capacity(self.outbounds.len() + 1);
         let mut endpoints = Vec::new();
         let mut slots = Vec::new();
@@ -55,6 +86,20 @@ impl ProfileDocument {
                 .is_some_and(|server| self.hosts.contains_key(&server.to_ascii_lowercase()))
             {
                 projected["domain_resolver"] = json!({"server": crate::dns_policy::HOSTS_DNS_TAG});
+            } else if self
+                .dns
+                .as_ref()
+                .is_some_and(|dns| !dns.proxy_server_policy.is_empty())
+                && outbound
+                    .server()
+                    .is_some_and(|server| server.parse::<IpAddr>().is_err())
+            {
+                projected["domain_resolver"] = json!({"policy":"cfw-proxy-endpoint"});
+            } else if let (Some(dns), Some(server)) = (&self.dns, outbound.server())
+                && server.parse::<IpAddr>().is_err()
+                && let Some(resolver) = dns.implicit_endpoint_resolver(server)?
+            {
+                projected["domain_resolver"] = resolver;
             }
             if endpoint {
                 endpoints.push(projected);
@@ -65,6 +110,16 @@ impl ProfileDocument {
         }
 
         let profile_final = self.effective_final_outbound_tag().to_owned();
+        if let Some(providers) = &self.providers {
+            for (index, provider) in providers.proxies.iter().enumerate() {
+                if let Some(health) = &provider.health_check {
+                    let tag = self.unused_tag(&format!("cfw-provider-health-{index}"));
+                    outbounds.push(json!({"type":"urltest", "tag":tag, "outbounds":provider.members.iter().map(|member|&member.tag).collect::<Vec<_>>(),
+                        "url":health.url, "interval":format!("{}s",health.interval_seconds), "idle_timeout":format!("{}s",health.interval_seconds.max(1800)),
+                        "lazy":health.lazy, "hidden":true, "timeout":format!("{}ms",health.timeout_ms), "expected_status":health.expected_status.as_deref().unwrap_or_default(), "tolerance":0, "interrupt_exist_connections":false}));
+                }
+            }
+        }
         let remote_tags = self
             .outbounds
             .iter()
@@ -108,7 +163,9 @@ impl ProfileDocument {
             .or_else(|| {
                 self.outbounds.iter().find_map(|outbound| match outbound {
                     ProfileOutbound::Selector { tag, .. }
-                    | ProfileOutbound::UrlTest { tag, .. } => Some(tag.clone()),
+                    | ProfileOutbound::UrlTest { tag, .. }
+                    | ProfileOutbound::Fallback { tag, .. }
+                    | ProfileOutbound::LoadBalance { tag, .. } => Some(tag.clone()),
                     _ => None,
                 })
             })
@@ -120,6 +177,13 @@ impl ProfileDocument {
             (!has_explicit_final && matches!(self.outbounds[0], ProfileOutbound::WireGuard { .. }))
                 .then(|| profile_final.clone())
         });
+        if let Some(resolver) = direct_resolver {
+            for outbound in &mut outbounds {
+                if outbound["type"] == "direct" {
+                    outbound["domain_resolver"] = resolver.clone();
+                }
+            }
+        }
         Ok(RuntimeOutboundProjection {
             outbounds,
             endpoints,
@@ -191,7 +255,7 @@ impl ProfileOutbound {
                 }
                 object.insert("peers".into(), json!([peer]));
                 if server.parse::<IpAddr>().is_err() {
-                    object.insert("domain_resolver".into(), json!({"server": bootstrap_resolver.server, "fallback_server": bootstrap_resolver.fallback_server}));
+                    object.insert("domain_resolver".into(), bootstrap_resolver.value());
                 }
                 (object, slots)
             }
@@ -215,14 +279,52 @@ impl ProfileOutbound {
                 outbounds,
                 url,
                 interval_seconds,
-                tolerance_ms,
                 idle_timeout_seconds,
+                lazy,
+                hidden,
+                ..
+            }
+            | Self::Fallback {
+                tag,
+                outbounds,
+                url,
+                interval_seconds,
+                idle_timeout_seconds,
+                lazy,
+                hidden,
+            }
+            | Self::LoadBalance {
+                tag,
+                outbounds,
+                url,
+                interval_seconds,
+                idle_timeout_seconds,
+                lazy,
+                hidden,
+                ..
             } => {
-                let mut object = base_outbound("urltest", tag);
+                let mut object = match self {
+                    Self::UrlTest { tolerance_ms, .. } => {
+                        let mut object = base_outbound("urltest", tag);
+                        object.insert("tolerance".into(), json!(tolerance_ms));
+                        object
+                    }
+                    Self::LoadBalance { strategy, .. } => {
+                        let mut object = base_outbound("loadbalance", tag);
+                        object.insert("strategy".into(), json!(strategy));
+                        object
+                    }
+                    _ => base_outbound("fallback", tag),
+                };
                 object.insert("outbounds".into(), json!(outbounds));
                 object.insert("url".into(), json!(url));
+                if let Some(lazy) = lazy {
+                    object.insert("lazy".into(), json!(lazy));
+                }
+                if let Some(hidden) = hidden {
+                    object.insert("hidden".into(), json!(hidden));
+                }
                 object.insert("interval".into(), json!(format!("{interval_seconds}s")));
-                object.insert("tolerance".into(), json!(tolerance_ms));
                 object.insert(
                     "idle_timeout".into(),
                     json!(format!("{idle_timeout_seconds}s")),
@@ -257,6 +359,35 @@ impl ProfileOutbound {
                         CredentialTarget::Socks5Password,
                         index,
                     )?);
+                }
+                (object, slots)
+            }
+            Self::Http {
+                tag,
+                server,
+                server_port,
+                authentication,
+                tls,
+            } => {
+                let mut object =
+                    remote_outbound("http", tag, server, *server_port, bootstrap_resolver);
+                insert_tls_transport(&mut object, tls.as_ref(), None)?;
+                let mut slots = Vec::new();
+                if let Some(authentication) = authentication {
+                    object.insert("username".into(), Value::String(String::new()));
+                    slots.push(CredentialSlot::new(
+                        authentication.username_credential_ref.clone(),
+                        CredentialTarget::HttpProxyUsername,
+                        index,
+                    )?);
+                    if let Some(password) = &authentication.password_credential_ref {
+                        object.insert("password".into(), Value::String(String::new()));
+                        slots.push(CredentialSlot::new(
+                            password.clone(),
+                            CredentialTarget::HttpProxyPassword,
+                            index,
+                        )?);
+                    }
                 }
                 (object, slots)
             }
@@ -501,13 +632,7 @@ fn remote_outbound(
     object.insert("server".into(), Value::String(server.to_owned()));
     object.insert("server_port".into(), json!(port));
     if server.parse::<IpAddr>().is_err() {
-        object.insert(
-            "domain_resolver".into(),
-            json!({
-                "server": bootstrap_resolver.server,
-                "fallback_server": bootstrap_resolver.fallback_server,
-            }),
-        );
+        object.insert("domain_resolver".into(), bootstrap_resolver.value());
     }
     object
 }
@@ -544,6 +669,15 @@ pub(crate) fn project_tls(tls: &OutboundTls) -> Result<Value, ConfigError> {
     let mut object = Map::new();
     object.insert("enabled".into(), Value::Bool(tls.enabled));
     object.insert("server_name".into(), Value::String(tls.server_name.clone()));
+    if !tls.certificate_sha256.is_empty() {
+        object.insert("certificate_sha256".into(), json!(tls.certificate_sha256));
+    }
+    if !tls.certificate_public_key_sha256.is_empty() {
+        object.insert(
+            "certificate_public_key_sha256".into(),
+            json!(tls.certificate_public_key_sha256),
+        );
+    }
     if tls.enabled {
         object.insert("min_version".into(), serde_json::to_value(tls.min_version)?);
     }

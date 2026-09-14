@@ -53,7 +53,7 @@ private actor RecordingSystemProxyStartPreparer: SystemProxyStartPreparing {
     configuration: Data,
     descriptor: ConfigurationDescriptor
   ) throws -> HostPreparedSystemProxyStart {
-    guard !configuration.isEmpty, descriptor.slot == .systemProxy else {
+    guard !configuration.isEmpty, descriptor.slot.isProxyAgent else {
       throw AppleNetworkError.invalidConfigurationSlot
     }
     prepareCalls += 1
@@ -63,7 +63,7 @@ private actor RecordingSystemProxyStartPreparer: SystemProxyStartPreparing {
         installationID: AuthorityIdentifier(descriptor.installationID),
         epoch: descriptor.epoch,
         generation: descriptor.generation),
-      mode: .systemProxy,
+      mode: descriptor.slot.authorityMode,
       configSHA256: descriptor.sha256,
       identitySHA256: descriptor.identitySHA256,
       ownerUID: 501,
@@ -89,18 +89,24 @@ private actor RecordingSystemProxyStartPreparer: SystemProxyStartPreparing {
 }
 
 private actor StartableProxyAgent: ProxyAgentTransporting {
-  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+  func testProfileProxies(
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
+  ) async throws
     -> [ProfileProxyDelay]
   {
     throw ProxyAgentHostError.malformedResponse
   }
 
-  func authorizeSystemProxy(restorationOnly: Bool) async throws {}
+  private(set) var authorizationCalls = 0
+  func authorizeSystemProxy(restorationOnly: Bool) async throws { authorizationCalls += 1 }
   private let descriptor: ConfigurationDescriptor
   private let registrationError: ProxyAgentHostError?
   private let blocksSnapshot: Bool
   private var registered: Bool
   private var snapshotWait: CheckedContinuation<Void, Never>?
+  private var runtimeFailed = false
+  private var failureOmitsDescriptor = false
   private(set) var ensureCalls = 0
   private(set) var snapshotCalls = 0
   private(set) var startCalls = 0
@@ -171,9 +177,21 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
       }
     }
     guard registered else { throw ProxyAgentHostError.registrationUnavailable }
-    return startCalls > 0 && stopCalls == 0
-      ? .proxyActive(configuration: descriptor, sequence: 1)
-      : .off
+    guard startCalls > 0 && stopCalls == 0 else { return .off }
+    if runtimeFailed {
+      return try EngineSnapshot(
+        mode: descriptor.slot.engineMode,
+        state: .failed(
+          EngineFailure(
+            code: "runtime-failed", message: "Runtime stopped unexpectedly.", isRetryable: false)),
+        configuration: failureOmitsDescriptor ? nil : descriptor, sequence: 2)
+    }
+    return .proxyActive(configuration: descriptor, sequence: 1)
+  }
+
+  func simulateRuntimeFailure(omittingDescriptor: Bool = false) {
+    runtimeFailed = true
+    failureOmitsDescriptor = omittingDescriptor
   }
 
   func validateConfiguration(_ configuration: Data, descriptor: ConfigurationDescriptor) throws {}
@@ -198,7 +216,10 @@ private enum FailedStartRetryFault: CaseIterable, Equatable, Sendable {
 }
 
 private actor FailedStartProxyAgent: ProxyAgentTransporting {
-  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+  func testProfileProxies(
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
+  ) async throws
     -> [ProfileProxyDelay]
   {
     throw ProxyAgentHostError.malformedResponse
@@ -409,6 +430,11 @@ private actor StartableTunnelHost: TunnelHostBridging {
     recoveryStatus
   }
 
+  func simulateRuntimeFailure() {
+    started = false
+    failedOwnerPresent = true
+  }
+
   func hasManagedTunnelConfiguration() -> Bool { false }
   func managedTunnelConfiguration() -> ConfigurationDescriptor? { nil }
   func pendingPreferenceMutationConfiguration() -> ConfigurationDescriptor? {
@@ -605,7 +631,7 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
     beginCalls += 1
     cleanupEvents?.append("begin-stop")
     if let stopContext { return stopContext }
-    let mode: AuthorityMode = descriptor.slot == .systemProxy ? .systemProxy : .tunnel
+    let mode = descriptor.slot.authorityMode
     let operation = try OperationContext(
       operationID: AuthorityIdentifier(UUID()),
       root: RootContext(
@@ -727,11 +753,21 @@ private struct IdentityDocument: Encodable {
 
 private func startRequest(
   tunnelOptions: TunnelNetworkOptions?,
+  mode: NativeStartMode? = nil,
   generation: UInt64 = 7,
   credentialSlots: [CredentialSlot] = [],
-  configuration: Data = Data(
-    #"{"outbounds":[{"tag":"direct","type":"direct"}],"route":{"final":"direct"}}"#.utf8)
+  configuration: Data? = nil
 ) throws -> EngineStartRequest {
+  let mode =
+    mode
+    ?? (tunnelOptions == nil
+      ? .systemProxy : (tunnelOptions?.systemProxyPort == nil ? .tunnel : .tunnelSystemProxy))
+  let configuration =
+    configuration
+    ?? Data(
+      (mode == .localProxy
+        ? #"{"inbounds":[{"type":"mixed","tag":"cfw-system-proxy","listen":"127.0.0.1","listen_port":7891}],"outbounds":[{"tag":"direct","type":"direct"}],"route":{"final":"direct"}}"#
+        : #"{"outbounds":[{"tag":"direct","type":"direct"}],"route":{"final":"direct"}}"#).utf8)
   let context = try EngineCommandContext(
     installationID: #require(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
     configEpoch: 2,
@@ -744,12 +780,13 @@ private func startRequest(
     configurationSHA256: contentDigest.hex,
     credentialAudience: audience,
     credentialSlots: credentialSlots,
-    mode: tunnelOptions == nil ? "system_proxy" : "tunnel",
+    mode: mode == .localProxy ? "local_proxy" : (mode == .systemProxy ? "system_proxy" : "tunnel"),
     networkOptions: tunnelOptions,
     schemaVersion: NativeProtocolConstants.schemaVersion)
   let encoder = JSONEncoder()
   encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
   return try EngineStartRequest(
+    mode: mode,
     context: context,
     credentialAudience: audience,
     configJSON: String(decoding: configuration, as: UTF8.self),
@@ -780,7 +817,7 @@ private func recoveredStop(
   for descriptor: ConfigurationDescriptor,
   ownerUID: UInt32 = 501
 ) throws -> NativeRecoveredStop {
-  let mode: AuthorityMode = descriptor.slot == .systemProxy ? .systemProxy : .tunnel
+  let mode = descriptor.slot.authorityMode
   let operation = try OperationContext(
     operationID: AuthorityIdentifier(UUID()),
     root: RootContext(
@@ -838,6 +875,216 @@ private func failureCode(
 
 @Suite(.serialized)
 struct NativeBridgeStartCommandIntegrationTests {
+  @Test func failedTunnelOwnerUsesTheSameExactExplicitStopBarrier() async throws {
+    let request = try startRequest(tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(
+      descriptor: descriptor,
+      failedStartSnapshot: EngineFailure(
+        code: "runtime-failed", message: "Runtime exited.", isRetryable: false))
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .tunnel))
+    let lease = RecordingEngineLease(observation: ownership)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel, observation: ownership, engineLease: lease)
+    _ = try await coordinator.execute(.startTunnel(request))
+    await tunnel.simulateRuntimeFailure()
+    #expect(await failureCode(coordinator, .queryStatus) == .unavailable)
+    _ = try await coordinator.execute(.stopTunnel(request.context))
+    #expect((await tunnel.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 1, complete: 1))
+    guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
+      Issue.record("Failed Tunnel cleanup did not reach proven Off")
+      return
+    }
+  }
+
+  @Test(arguments: [NativeStartMode.localProxy, .systemProxy])
+  func failedProxyWithoutAnExactDescriptorCannotBeStoppedByGuessing(mode: NativeStartMode)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: nil, mode: mode)
+    let descriptor = try request.descriptor(slot: mode.slot)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: mode.slot.authorityMode))
+    let lease = RecordingEngineLease(observation: ownership)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(
+      mode == .localProxy ? .startLocalProxy(request) : .startSystemProxy(request))
+    await proxy.simulateRuntimeFailure(omittingDescriptor: true)
+    #expect(
+      await failureCode(
+        coordinator,
+        mode == .localProxy ? .stopLocalProxy(request.context) : .stopSystemProxy(request.context))
+        == .unavailable)
+    #expect((await proxy.counters()).stop == 0)
+    #expect(await lease.counters() == (begin: 0, complete: 0))
+  }
+
+  @Test(arguments: [NativeStartMode.localProxy, .systemProxy])
+  func failedProxyOwnerCanStopExactlyWithoutEverBeingReportedActive(mode: NativeStartMode)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: nil, mode: mode)
+    let descriptor = try request.descriptor(slot: mode.slot)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: mode.slot.authorityMode))
+    let lease = RecordingEngineLease(observation: ownership)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel, observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(
+      mode == .localProxy ? .startLocalProxy(request) : .startSystemProxy(request))
+    await proxy.simulateRuntimeFailure()
+    #expect(await failureCode(coordinator, .queryStatus) == .unavailable)
+    let stale = try EngineCommandContext(
+      installationID: request.context.installationID, configEpoch: request.context.configEpoch,
+      generation: request.context.generation + 1)
+    #expect(
+      await failureCode(
+        coordinator, mode == .localProxy ? .stopLocalProxy(stale) : .stopSystemProxy(stale))
+        == .identityRejected)
+    #expect((await proxy.counters()).stop == 0)
+    #expect(await lease.counters() == (begin: 0, complete: 0))
+    _ = try await coordinator.execute(
+      mode == .localProxy ? .stopLocalProxy(request.context) : .stopSystemProxy(request.context))
+    #expect((await proxy.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 1, complete: 1))
+    guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
+      Issue.record("Failed owner cleanup did not reach the proven Off barrier")
+      return
+    }
+  }
+
+  @Test func localProxyStartAndStatusRemainDistinctWithoutNetworkAuthorization() async throws {
+    let request = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    let descriptor = try request.descriptor(slot: .localProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let preparer = RecordingSystemProxyStartPreparer()
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .localProxy))
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel, observation: ownership, systemProxyPreparer: preparer)
+    guard case .runtime(let runtime) = try await coordinator.execute(.startLocalProxy(request))
+    else {
+      Issue.record("Local Proxy did not return its runtime")
+      return
+    }
+    #expect(runtime.owner == .proxyAgent)
+    #expect(runtime.configDigest == request.configDigest.hex)
+    guard case .status(.localProxy(let observed)) = try await coordinator.execute(.queryStatus)
+    else {
+      Issue.record("Local Proxy was projected as another mode")
+      return
+    }
+    #expect(observed == runtime)
+    #expect(await proxy.authorizationCalls == 0)
+    #expect((await tunnel.counters()).install == 0)
+    #expect((await tunnel.counters()).start == 0)
+    #expect(await preparer.counters() == (prepare: 1, cancel: 0))
+    #expect(await proxy.authorizedContexts().first?.operation.mode == .localProxy)
+    let systemRequest = try startRequest(
+      tunnelOptions: nil, configuration: Data(request.configJSON.utf8))
+    #expect(systemRequest.configContentDigest == request.configContentDigest)
+    #expect(systemRequest.credentialAudience == request.credentialAudience)
+    #expect(systemRequest.configDigest != request.configDigest)
+  }
+
+  @Test func localAndSystemProxyEntryPointsRejectEachOthersRequestsBeforeMutation() async throws {
+    let local = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    let system = try startRequest(tunnelOptions: nil)
+    let descriptor = try local.descriptor(slot: .localProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let preparer = RecordingSystemProxyStartPreparer()
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      systemProxyPreparer: preparer)
+    #expect(await failureCode(coordinator, .startSystemProxy(local)) == .configurationRejected)
+    #expect(await failureCode(coordinator, .startLocalProxy(system)) == .configurationRejected)
+    #expect((await proxy.counters()).ensure == 0)
+    #expect((await proxy.counters()).start == 0)
+    #expect(await preparer.counters() == (prepare: 0, cancel: 0))
+    #expect((await tunnel.counters()).install == 0)
+  }
+
+  @Test func localProxyStopRejectsWrongModeAndRetriesOnlyUnprovenAuthorityCompletion() async throws
+  {
+    let request = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    let descriptor = try request.descriptor(slot: .localProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .localProxy))
+    let lease = RecordingEngineLease(observation: ownership, completeFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel, observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startLocalProxy(request))
+    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) != nil)
+    #expect((await proxy.counters()).stop == 0)
+    #expect(await lease.counters() == (begin: 0, complete: 0))
+    #expect(await failureCode(coordinator, .stopLocalProxy(request.context)) == .unavailable)
+    #expect((await proxy.counters()).stop == 1)
+    _ = try await coordinator.execute(.stopLocalProxy(request.context))
+    #expect((await proxy.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 1, complete: 2))
+    guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
+      Issue.record("Local Proxy stop did not reach proven Off")
+      return
+    }
+  }
+
+  @Test func localProxyWireRequiresExplicitModeAndBindsModeToTheEntryPoint() throws {
+    let request = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    let original = NativeRequestEnvelope(command: .startLocalProxy(request))
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = try encoder.encode(original)
+    #expect(try NativeBridgeProtocolCodec.decodeRequest(data) == original)
+    let text = String(decoding: data, as: UTF8.self)
+    for changed in [
+      text.replacingOccurrences(of: "\"mode\":\"local_proxy\",", with: ""),
+      text.replacingOccurrences(of: "\"mode\":\"local_proxy\"", with: "\"mode\":\"system_proxy\""),
+      text.replacingOccurrences(of: "start_local_proxy", with: "start_system_proxy"),
+    ] {
+      #expect(changed != text)
+      #expect(throws: (any Error).self) {
+        try NativeBridgeProtocolCodec.decodeRequest(Data(changed.utf8))
+      }
+    }
+    #expect(throws: NativeBridgeProtocolError.invalidCommand) {
+      try request.descriptor(slot: .systemProxy)
+    }
+    #expect(!NativeStartMode.localProxy.admits(try TunnelNetworkOptions(ipv6Enabled: false)))
+    #expect(!NativeStartMode.tunnelSystemProxy.admits(try TunnelNetworkOptions(ipv6Enabled: false)))
+  }
+
+  @Test func localProxyRejectsConfigurationThatCouldChangeSystemNetworking() throws {
+    let request = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    for changed in [
+      request.configJSON.replacingOccurrences(
+        of: "\"listen\":\"127.0.0.1\"", with: "\"listen\":\"0.0.0.0\""),
+      request.configJSON.replacingOccurrences(of: "\"type\":\"mixed\"", with: "\"type\":\"tun\""),
+      request.configJSON.replacingOccurrences(
+        of: "\"type\":\"mixed\"", with: "\"type\":\"mixed\",\"set_system_proxy\":true"),
+      request.configJSON.replacingOccurrences(
+        of: "\"inbounds\":[", with: "\"inbounds\":[{\"type\":\"tun\"},"),
+    ] {
+      #expect(throws: NativeBridgeProtocolError.invalidConfiguration) {
+        try startRequest(tunnelOptions: nil, mode: .localProxy, configuration: Data(changed.utf8))
+      }
+    }
+  }
+
   @Test func tunnelConsentDoesNotReadCredentialsOrStartTheOwner() async throws {
     let reference = CredentialReference(id: UUID(), kind: .trojanPassword)
     let slot = try CredentialSlot(

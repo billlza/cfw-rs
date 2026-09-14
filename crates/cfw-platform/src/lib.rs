@@ -13,7 +13,11 @@ mod legacy_observation;
 mod legacy_proxy;
 mod legacy_service;
 mod login_item;
+mod network_context;
 mod network_observation;
+pub use network_context::{
+    NetworkContext, NetworkKind, current_network_context, request_wifi_name_access,
+};
 mod release_security;
 
 #[cfg(target_os = "macos")]

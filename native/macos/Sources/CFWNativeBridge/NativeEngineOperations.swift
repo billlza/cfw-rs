@@ -7,14 +7,26 @@ extension NativeBridgeCoordinator {
   func startSystemProxy(_ request: EngineStartRequest) async throws
     -> NativeRuntimeIdentity
   {
+    try await startProxy(request, expectedMode: .systemProxy)
+  }
+
+  func startLocalProxy(_ request: EngineStartRequest) async throws -> NativeRuntimeIdentity {
+    try await startProxy(request, expectedMode: .localProxy)
+  }
+
+  private func startProxy(_ request: EngineStartRequest, expectedMode: NativeStartMode) async throws
+    -> NativeRuntimeIdentity
+  {
     let mutationID = try await beginMutation()
     defer { endMutation(mutationID) }
     try Task.checkCancellation()
     try requireNoPendingStopBeforeStart()
-    guard request.tunnelOptions == nil else {
+    guard request.mode == expectedMode, expectedMode.slot.isProxyAgent,
+      request.tunnelOptions == nil
+    else {
       throw NativeBridgeExecutionError.failure(
         .configurationRejected,
-        "System Proxy start contains Tunnel network options."
+        "Proxy start mode does not match the requested entry point."
       )
     }
     do {
@@ -23,7 +35,8 @@ extension NativeBridgeCoordinator {
       throw Self.map(error)
     }
     try Task.checkCancellation()
-    let descriptor = try request.descriptor(slot: .systemProxy)
+    let descriptor = try request.descriptor(slot: expectedMode.slot)
+    let owner = NativeStopOwner(mode: descriptor.slot.authorityMode)
     var configuration = Data(request.configJSON.utf8)
     defer {
       configuration.resetBytes(in: configuration.startIndex..<configuration.endIndex)
@@ -45,6 +58,7 @@ extension NativeBridgeCoordinator {
         prepared,
         after: error,
         context: "credential preflight failed",
+        owner: owner,
         descriptor: descriptor,
         commandContext: request.context)
     }
@@ -59,14 +73,14 @@ extension NativeBridgeCoordinator {
         try await systemProxyPreparer.cancelSystemProxyStart(prepared)
       } catch {
         try await rollbackStartedOwner(
-          .systemProxy,
+          owner,
           descriptor: descriptor,
           commandContext: request.context,
           after: originalError,
           cancellationFailure: error)
       }
       let transaction = NativeStopTransaction(
-        owner: .systemProxy,
+        owner: owner,
         commandContext: request.context,
         descriptor: descriptor)
       try await proveFailedStartOff(transaction)
@@ -75,8 +89,15 @@ extension NativeBridgeCoordinator {
     do {
       try Task.checkCancellation()
       let status = try await queryStatus()
-      guard case .systemProxy(let runtime) = status,
-        runtime.context == request.context,
+      let runtime: NativeRuntimeIdentity
+      switch (expectedMode, status) {
+      case (.localProxy, .localProxy(let identity)), (.systemProxy, .systemProxy(let identity)):
+        runtime = identity
+      default:
+        throw NativeBridgeExecutionError.failure(
+          .identityRejected, "ProxyAgent reported the wrong mode.")
+      }
+      guard runtime.context == request.context,
         runtime.configDigest == request.configDigest.hex,
         runtime.ready
       else {
@@ -89,7 +110,7 @@ extension NativeBridgeCoordinator {
       return runtime
     } catch {
       try await rollbackStartedOwner(
-        .systemProxy,
+        owner,
         descriptor: descriptor,
         commandContext: request.context,
         after: error)
@@ -100,6 +121,7 @@ extension NativeBridgeCoordinator {
     _ prepared: HostPreparedSystemProxyStart,
     after originalError: Error,
     context: String,
+    owner: NativeStopOwner,
     descriptor: ConfigurationDescriptor,
     commandContext: EngineCommandContext
   ) async throws -> Never {
@@ -113,7 +135,7 @@ extension NativeBridgeCoordinator {
     }
     try await proveFailedStartOff(
       NativeStopTransaction(
-        owner: .systemProxy,
+        owner: owner,
         commandContext: commandContext,
         descriptor: descriptor)
     )
@@ -121,15 +143,23 @@ extension NativeBridgeCoordinator {
   }
 
   func stopSystemProxy(_ context: EngineCommandContext) async throws {
+    try await stopProxy(context, owner: .systemProxy)
+  }
+
+  func stopLocalProxy(_ context: EngineCommandContext) async throws {
+    try await stopProxy(context, owner: .localProxy)
+  }
+
+  private func stopProxy(_ context: EngineCommandContext, owner: NativeStopOwner) async throws {
     let mutationID = try await beginMutation()
     defer { endMutation(mutationID) }
-    if try await acknowledgeCompletedStartCleanup(.systemProxy, context: context) {
+    if try await acknowledgeCompletedStartCleanup(owner, context: context) {
       return
     }
-    if try await resumePendingFailedStartOff(.systemProxy, context: context) {
+    if try await resumePendingFailedStartOff(owner, context: context) {
       return
     }
-    try await prepareExplicitStop(.systemProxy, context: context)
+    try await prepareExplicitStop(owner, context: context)
     try await drivePendingStop()
   }
 
@@ -415,8 +445,21 @@ extension NativeBridgeCoordinator {
     } catch {
       throw Self.map(error)
     }
-    let expectedMode: EngineMode = owner == .systemProxy ? .systemProxy : .tunnel
-    guard let descriptor = try Self.activeDescriptor(snapshot, expectedMode: expectedMode),
+    let expectedMode = owner.engineMode
+    let stopDescriptor: ConfigurationDescriptor?
+    if snapshot.state.kind == .failed,
+      snapshot.mode == expectedMode,
+      let descriptor = snapshot.configuration,
+      descriptor.slot.engineMode == expectedMode
+    {
+      // Failed is never readiness. An explicit Stop may still clean this exact
+      // retained owner; beginStop subsequently binds its content/identity digests
+      // and generation to the Authority lease before any owner teardown.
+      stopDescriptor = descriptor
+    } else {
+      stopDescriptor = try Self.activeDescriptor(snapshot, expectedMode: expectedMode)
+    }
+    guard let descriptor = stopDescriptor,
       Self.matches(descriptor, context: context)
     else {
       throw NativeBridgeExecutionError.failure(
@@ -867,14 +910,14 @@ extension NativeBridgeCoordinator {
 
   private func ownerSnapshot(_ owner: NativeStopOwner) async throws -> EngineSnapshot {
     switch owner {
-    case .systemProxy: try await proxy.snapshot()
+    case .localProxy, .systemProxy: try await proxy.snapshot()
     case .tunnel: try await tunnel.snapshot()
     }
   }
 
   private func stopOwner(_ transaction: NativeStopTransaction) async throws {
     switch transaction.owner {
-    case .systemProxy:
+    case .localProxy, .systemProxy:
       try await proxy.stop(configuration: transaction.descriptor)
     case .tunnel:
       try await tunnel.stopTunnel(expectedConfiguration: transaction.descriptor)

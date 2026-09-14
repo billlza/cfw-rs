@@ -365,7 +365,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     guard binding.role == attestation.ownerRole,
       binding.operation == attestation.operation,
       attestation.runtimeDigest == attestation.operation.identitySHA256,
-      attestation.readyFlags == .all
+      attestation.readyFlags == .required(for: attestation.operation.mode)
     else { throw failure(.staleOperation, attestation.operation, role: attestation.ownerRole) }
     if state == .active {
       guard current.state == .active,

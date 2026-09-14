@@ -18,6 +18,70 @@ fn test_store(name: &str) -> (PathBuf, SettingsStore) {
 }
 
 #[test]
+fn runtime_settings_compare_and_swap_preserves_ui_preferences_and_rejects_stale_writes() {
+    let (root, store) = test_store("runtime-cas");
+    store.write(&UiPreferences::default()).unwrap();
+    let before = store
+        .runtime_settings::<std::collections::BTreeMap<String, u16>>()
+        .unwrap();
+    assert!(before.revision.is_none());
+    let value = std::collections::BTreeMap::from([("port".to_owned(), 8890)]);
+    store
+        .compare_and_swap_runtime_settings(None, &value)
+        .unwrap();
+    let observed = store
+        .runtime_settings::<std::collections::BTreeMap<String, u16>>()
+        .unwrap();
+    assert_eq!(observed.settings, value);
+    assert!(observed.revision.is_some());
+    assert!(matches!(
+        store.compare_and_swap_runtime_settings(None, &before.settings),
+        Err(SettingsStoreError::RuntimeSettingsChanged)
+    ));
+    assert_eq!(
+        store
+            .runtime_settings::<std::collections::BTreeMap<String, u16>>()
+            .unwrap()
+            .settings,
+        value
+    );
+    assert_eq!(store.read_or_default().unwrap(), UiPreferences::default());
+    store
+        .compare_and_swap_runtime_settings(observed.revision.as_deref(), &before.settings)
+        .unwrap();
+    assert!(
+        store
+            .runtime_settings::<std::collections::BTreeMap<String, u16>>()
+            .unwrap()
+            .settings
+            .is_empty()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn corrupt_runtime_settings_never_become_defaults() {
+    let (root, store) = test_store("runtime-corrupt");
+    store
+        .compare_and_swap_runtime_settings(
+            None,
+            &std::collections::BTreeMap::from([("port", 8890)]),
+        )
+        .unwrap();
+    fs::write(
+        store.paths().app_home.join("cfw-runtime-settings.json"),
+        b"{broken}",
+    )
+    .unwrap();
+    assert!(
+        store
+            .runtime_settings::<std::collections::BTreeMap<String, u16>>()
+            .is_err()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn native_profile_staging_never_reuses_the_legacy_profile_directory() {
     let paths = MacOsAppPaths::from_app_home("/tmp/cfw-profile-path-contract");
     assert_eq!(

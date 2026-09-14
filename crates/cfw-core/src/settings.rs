@@ -31,6 +31,8 @@ const RETIREMENT_MARKER_BYTES: &[u8] = b"{\"schema_version\":1,\"completed\":tru
 
 #[derive(Debug, Error)]
 pub enum SettingsStoreError {
+    #[error("runtime settings changed while the update was prepared")]
+    RuntimeSettingsChanged,
     #[error("HOME is not available; cannot resolve Clash for Mac data directory")]
     MissingHome,
     #[error("settings I/O failed: {0}")]

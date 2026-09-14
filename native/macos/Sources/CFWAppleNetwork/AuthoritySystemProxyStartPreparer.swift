@@ -70,7 +70,7 @@ public struct AuthorityBackedSystemProxyStartPreparer: SystemProxyStartPreparing
     configuration: Data,
     descriptor: ConfigurationDescriptor
   ) async throws -> HostPreparedSystemProxyStart {
-    guard descriptor.slot == .systemProxy, descriptor.tunnelOptions == nil else {
+    guard descriptor.slot.isProxyAgent, descriptor.tunnelOptions == nil else {
       throw AppleNetworkError.invalidConfigurationSlot
     }
     _ = try await enrollment.enroll(descriptor.installationID)
@@ -91,7 +91,7 @@ public struct AuthorityBackedSystemProxyStartPreparer: SystemProxyStartPreparing
     let operation = try OperationContext(
       operationID: AuthorityIdentifier(UUID()),
       root: root,
-      mode: .systemProxy,
+      mode: descriptor.slot.authorityMode,
       configSHA256: descriptor.sha256,
       identitySHA256: descriptor.identitySHA256,
       ownerUID: ownerUID,

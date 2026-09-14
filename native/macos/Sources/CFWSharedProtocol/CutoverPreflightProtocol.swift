@@ -10,7 +10,9 @@ public struct CutoverPreflightRequest: Codable, Equatable, Sendable {
     systemProxyRequest: EngineStartRequest,
     tunnelRequest: EngineStartRequest
   ) throws {
-    guard target != .off,
+    guard target == .systemProxy || target == .tunnel,
+      systemProxyRequest.mode == .systemProxy,
+      tunnelRequest.mode.slot == .tunnel,
       systemProxyRequest.tunnelOptions == nil,
       tunnelRequest.tunnelOptions != nil,
       systemProxyRequest.context == tunnelRequest.context,
@@ -69,7 +71,7 @@ public struct CutoverPreflightAttestation: Codable, Equatable, Sendable {
     credentialReferences: [CredentialReference],
     validForMillis: UInt32
   ) throws {
-    guard target != .off, validForMillis > 0,
+    guard target == .systemProxy || target == .tunnel, validForMillis > 0,
       validForMillis <= Self.maximumValidityMilliseconds
     else {
       throw NativeBridgeProtocolError.invalidCommand

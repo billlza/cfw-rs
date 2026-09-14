@@ -1,21 +1,8 @@
 //! Engine and settings switches restored from 0.3.5.
 //!
-//! Two rules shape every command here.
-//!
-//! * The System Proxy and TUN switches are Authority-mediated. They own no
-//!   network state of their own: each one is translated into an engine mode and
-//!   handed to [`crate::engine::apply_admitted_engine_mode`], the single transition path
-//!   that takes the maintenance lease, the legacy-retirement gate, the
-//!   capability check and the app-owned engine settings. Nothing in this module
-//!   writes a system proxy, a DNS server, a route, or a network preference, and
-//!   nothing here can reach a privileged helper: that surface no longer exists.
-//! * A switch that the running engine cannot honour without a fresh projection
-//!   fails closed with an explicit reason instead of being persisted as an
-//!   intent the product would never apply. The 0.4.0 projection pins the mixed
-//!   inbound to loopback and the engine log level to `info`, and the
-//!   clash-compatible controller of a sing-box engine only accepts `mode`
-//!   patches, so LAN exposure, bind address changes, log-level changes and
-//!   profile mixin are rejected rather than silently dropped.
+//! Network mode switches and runtime preferences share the serialized engine
+//! path. Online settings changes replace a validated projection and restore the
+//! previous runtime if start or commit fails. UI-only preferences remain local.
 
 use cfw_core::{SettingsStore, UiPreferences};
 #[cfg(test)]
@@ -35,11 +22,6 @@ use crate::legacy::LegacyRetirementGate;
 use crate::window_state::WindowBoundsManager;
 use crate::{commands::ManagedProfiles, settings_store};
 
-/// Loopback host the projected mixed inbound listens on. Changing it requires a
-/// new projection, which this release does not produce.
-const PROJECTED_LISTEN_ADDRESS: &str = "127.0.0.1";
-/// Engine log level the projection pins.
-const PROJECTED_LOG_LEVEL: &str = "info";
 /// Upper bound on a restore-DNS request, matching the legacy settings reader.
 const MAX_RESTORE_DNS_SERVERS: usize = 32;
 
@@ -152,8 +134,7 @@ fn tunnel_authority_state(state: &EngineState) -> &'static str {
 }
 
 /// System Proxy switch. `enabled` selects the ProxyAgent mode; disabling it
-/// stops the engine only when System Proxy is the mode that is actually desired,
-/// so it can never tear down a running Packet Tunnel.
+/// removes that OS integration while preserving the local core or Packet Tunnel.
 #[tauri::command]
 pub(crate) async fn set_system_proxy_enabled(
     engine: State<'_, ManagedEngine>,
@@ -181,6 +162,42 @@ pub(crate) async fn set_tun_enabled(
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
     apply_switch(&engine, &retirement, &profiles, EngineMode::Tunnel, enabled).await
+}
+
+/// Starts a local listener without OS integration, or explicitly stops every
+/// app-owned runtime. A delayed enable cannot undo a more recent stop.
+#[tauri::command]
+pub(crate) async fn set_core_enabled(
+    engine: State<'_, ManagedEngine>,
+    retirement: State<'_, LegacyRetirementGate>,
+    profiles: State<'_, ManagedProfiles>,
+    enabled: bool,
+) -> Result<EngineStatusPayload, String> {
+    let observed = engine.coordinator.snapshot();
+    let requested = if enabled {
+        EngineMode::LocalProxy
+    } else {
+        EngineMode::Off
+    };
+    let lease = engine
+        .begin_mode_change(requested)
+        .await
+        .map_err(|error| error.to_string())?;
+    let current = engine.coordinator.snapshot();
+    if enabled && current != observed {
+        return Err(
+            "engine state changed while this start was queued; retry against the current state"
+                .into(),
+        );
+    }
+    let target = if !enabled {
+        EngineMode::Off
+    } else if current.desired_mode == EngineMode::Off {
+        EngineMode::LocalProxy
+    } else {
+        current.desired_mode
+    };
+    apply_admitted_engine_mode(&engine, &retirement, &profiles, target, lease).await
 }
 
 async fn apply_switch(
@@ -220,14 +237,34 @@ pub(crate) async fn set_proxy_mode(
     mode: String,
 ) -> Result<(), String> {
     let normalized = normalize_proxy_mode(&mode)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .patch_configs(cfw_controller::ConfigPatch {
-            mode: Some(normalized.to_owned()),
-            ..cfw_controller::ConfigPatch::default()
+    let (_, lease) = engine
+        .begin_current_mode_change()
+        .await
+        .map_err(|error| error.to_string())?;
+    let client = controller_client(&engine).map_err(|error| error.to_ipc())?;
+    let (result, lease) = lease
+        .run_to_completion(async move {
+            client
+                .patch_configs(cfw_controller::ConfigPatch {
+                    mode: Some(normalized.to_owned()),
+                    ..cfw_controller::ConfigPatch::default()
+                })
+                .await
+                .map_err(ipc_error)?;
+            let observed = client.configs().await.map_err(ipc_error)?;
+            if !observed
+                .mode
+                .as_deref()
+                .is_some_and(|mode| mode.eq_ignore_ascii_case(normalized))
+            {
+                return Err("routing mode change was not confirmed by the running engine".into());
+            }
+            Ok(())
         })
         .await
-        .map_err(ipc_error)
+        .map_err(|_| "routing mode task ended without a response".to_owned())?;
+    drop(lease);
+    result
 }
 
 fn normalize_proxy_mode(mode: &str) -> Result<&'static str, String> {
@@ -241,55 +278,56 @@ fn normalize_proxy_mode(mode: &str) -> Result<&'static str, String> {
     }
 }
 
-/// LAN exposure of the local listener.
-///
-/// The projection binds the mixed inbound to loopback, and the running engine
-/// cannot be rebound through its controller, so only the state the product
-/// actually provides is accepted.
+/// Scalar entrypoints retain the common runtime settings transaction.
 #[tauri::command]
-pub(crate) fn set_allow_lan(enabled: bool) -> Result<UiSettingsSnapshot, String> {
-    if enabled {
-        return Err(format!(
-            "allow-lan cannot be honoured: the projected mixed inbound is bound to {PROJECTED_LISTEN_ADDRESS} and the engine cannot be rebound while running, so nothing was changed"
-        ));
-    }
-    settings_snapshot()
+pub(crate) async fn set_allow_lan(
+    engine: State<'_, ManagedEngine>,
+    retirement: State<'_, LegacyRetirementGate>,
+    profiles: State<'_, ManagedProfiles>,
+    enabled: bool,
+) -> Result<super::runtime_settings::RuntimeSettingsView, String> {
+    super::runtime_settings::update(&engine, &retirement, &profiles, move |settings| {
+        settings.allow_lan = enabled;
+        settings.validate().map_err(|error| error.to_string())
+    })
+    .await
 }
 
-/// Bind address of the local listener. Only the projected loopback address is
-/// accepted; anything else would need a projection this release does not build.
 #[tauri::command]
-pub(crate) fn set_bind_address(address: String) -> Result<UiSettingsSnapshot, String> {
-    let trimmed = address.trim();
-    if trimmed.is_empty() {
-        return Err("bind-address must not be empty".into());
-    }
-    if !matches!(trimmed, PROJECTED_LISTEN_ADDRESS | "localhost") {
-        return Err(format!(
-            "bind-address {trimmed} cannot be honoured: the projected mixed inbound is bound to {PROJECTED_LISTEN_ADDRESS}, so nothing was changed"
-        ));
-    }
-    settings_snapshot()
+pub(crate) async fn set_bind_address(
+    engine: State<'_, ManagedEngine>,
+    retirement: State<'_, LegacyRetirementGate>,
+    profiles: State<'_, ManagedProfiles>,
+    address: String,
+) -> Result<super::runtime_settings::RuntimeSettingsView, String> {
+    let address = address
+        .trim()
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|_| "LAN listener address must be a numeric IPv4 address")?;
+    super::runtime_settings::update(&engine, &retirement, &profiles, move |settings| {
+        let lan = settings
+            .lan_proxy
+            .as_mut()
+            .ok_or("configure LAN sharing and trusted source ranges first")?;
+        lan.listen = address;
+        settings.validate().map_err(|error| error.to_string())
+    })
+    .await
 }
 
-/// Engine log level. The projection pins `info`, and the controller of a
-/// sing-box engine accepts no log-level patch, so any other level is refused
-/// instead of being accepted and ignored.
 #[tauri::command]
-pub(crate) fn set_log_level(level: String) -> Result<(), String> {
-    let normalized = level.trim().to_ascii_lowercase();
-    if !matches!(
-        normalized.as_str(),
-        "trace" | "debug" | "info" | "warning" | "warn" | "error" | "silent"
-    ) {
-        return Err(format!("unsupported engine log level: {level}"));
-    }
-    if normalized == PROJECTED_LOG_LEVEL {
-        return Ok(());
-    }
-    Err(format!(
-        "engine log level {normalized} cannot be honoured: the projected configuration pins {PROJECTED_LOG_LEVEL} and the engine controller accepts no log-level change, so nothing was changed"
-    ))
+pub(crate) async fn set_log_level(
+    engine: State<'_, ManagedEngine>,
+    retirement: State<'_, LegacyRetirementGate>,
+    profiles: State<'_, ManagedProfiles>,
+    level: String,
+) -> Result<super::runtime_settings::RuntimeSettingsView, String> {
+    let level = super::runtime_settings::log_level(&level)?;
+    super::runtime_settings::update(&engine, &retirement, &profiles, move |settings| {
+        settings.log_level = level;
+        Ok(())
+    })
+    .await
 }
 
 /// Profile mixin. Merging arbitrary user documents into the engine
@@ -463,7 +501,7 @@ mod tests {
                 EngineMode::SystemProxy,
                 false,
             ),
-            Some(EngineMode::Off)
+            Some(EngineMode::LocalProxy)
         );
         assert_eq!(
             switch_transition(
@@ -796,20 +834,18 @@ mod tests {
     }
 
     #[test]
-    fn projection_bound_switches_fail_closed_instead_of_pretending() {
-        let allow_lan = set_allow_lan(true).expect_err("LAN exposure must be refused");
-        assert!(allow_lan.contains("nothing was changed"));
-        let bind = set_bind_address("0.0.0.0".into()).expect_err("wildcard bind must be refused");
-        assert!(bind.contains("nothing was changed"));
-        assert!(set_bind_address("   ".into()).is_err());
-        let mixin = set_mixin_enabled(true).expect_err("mixin must be refused");
+    fn runtime_levels_are_supported_while_untyped_mixin_remains_rejected() {
+        let mixin = set_mixin_enabled(true).expect_err("untyped mixin must be refused");
         assert!(mixin.contains("nothing was changed"));
-
-        set_log_level("info".into()).expect("the projected level is a no-op");
-        set_log_level(" INFO ".into()).expect("the projected level is normalized");
-        let level = set_log_level("debug".into()).expect_err("other levels must be refused");
-        assert!(level.contains("nothing was changed"));
-        assert!(set_log_level("verbose".into()).is_err());
+        assert_eq!(
+            super::super::runtime_settings::log_level(" INFO ").unwrap(),
+            cfw_singbox_config::EngineLogLevel::Info
+        );
+        assert_eq!(
+            super::super::runtime_settings::log_level("debug").unwrap(),
+            cfw_singbox_config::EngineLogLevel::Debug
+        );
+        assert!(super::super::runtime_settings::log_level("verbose").is_err());
     }
 
     #[test]
@@ -854,8 +890,8 @@ mod tests {
     /// needles below cannot match this test's own text.
     fn production_source() -> &'static str {
         include_str!("toggles.rs")
-            .split("#[cfg(test)]")
-            .next()
+            .rsplit_once("\n#[cfg(test)]\nmod tests")
+            .map(|(production, _)| production)
             .expect("module source has a production section")
     }
 

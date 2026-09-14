@@ -30,6 +30,17 @@ struct SourceDocument {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum SourceOutbound {
+    Http {
+        tag: String,
+        server: String,
+        server_port: u16,
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        tls: Option<SourceTls>,
+    },
     Socks {
         tag: String,
         server: String,
@@ -187,6 +198,10 @@ struct SourceHysteria2Obfs {
 #[serde(deny_unknown_fields)]
 struct SourceTls {
     #[serde(default)]
+    certificate_sha256: Vec<String>,
+    #[serde(default)]
+    certificate_public_key_sha256: Vec<String>,
+    #[serde(default)]
     enabled: bool,
     #[serde(default)]
     server_name: String,
@@ -318,6 +333,25 @@ fn convert_outbound(
     source: SourceOutbound,
 ) -> Result<Value, String> {
     match source {
+        SourceOutbound::Http {
+            tag,
+            server,
+            server_port,
+            username,
+            password,
+            tls,
+        } => {
+            let mut outbound = collector.http_proxy_outbound(
+                tag,
+                server.clone(),
+                server_port,
+                username,
+                password,
+                None,
+            )?;
+            insert_optional_tls(&mut outbound, tls, &server)?;
+            Ok(outbound)
+        }
         SourceOutbound::Socks {
             tag,
             server,
@@ -723,6 +757,12 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
     if !tls.min_version.is_empty() {
         value["min_version"] = json!(tls.min_version);
     }
+    if !tls.certificate_sha256.is_empty() {
+        value["certificate_sha256"] = json!(tls.certificate_sha256);
+    }
+    if !tls.certificate_public_key_sha256.is_empty() {
+        value["certificate_public_key_sha256"] = json!(tls.certificate_public_key_sha256);
+    }
     if !tls.curve_preferences.is_empty() {
         value["curve_preferences"] = json!(tls.curve_preferences);
     }
@@ -735,6 +775,8 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
 impl SourceTls {
     fn has_disabled_semantics(&self) -> bool {
         !self.server_name.is_empty()
+            || !self.certificate_sha256.is_empty()
+            || !self.certificate_public_key_sha256.is_empty()
             || self.insecure
             || self.disable_sni
             || !matches!(self.alpn, StringList::Empty)

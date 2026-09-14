@@ -2,6 +2,23 @@
 
 ## 0.4.0 - Unreleased
 
+### Everyday proxy use and compatibility
+
+- Run the local core independently of System Proxy and TUN; keep an explicit full stop.
+- Import, update and select profiles while connected, validating candidates and
+  restoring the previous runtime after failed replacement or catalog commit.
+- Add HTTP/inline providers, rule resources, ordered fallback and session-stable
+  balancing, with bounded updates and health checks.
+- Add domain-aware DNS policies, encrypted bootstrap and independent node/direct
+  resolvers, preserving routing intent, certificate validation and valid negative answers.
+- Make port, log level, TUN MTU and explicitly scoped LAN access editable and persistent.
+- Support 1024 remote nodes with bounded groups, credentials, paging and probe work.
+- Add HTTP/HTTPS CONNECT and distinct certificate/SPKI pins with name/time checks.
+- Add configurable global shortcuts and opt-in ordered network rules; manual Stop
+  takes precedence over older automatic work.
+- Restore action handlers and ordering for newly streamed connection rows; split
+  dashboard, import and policy modules for maintainability.
+
 ### Network operation and imported policy
 
 - Require the production libbox adapter at compilation so a signed application

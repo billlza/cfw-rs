@@ -110,6 +110,11 @@ impl DnsEvidenceSnapshotReceipt {
 fn product_state(snapshot: &EngineSnapshot, ipv6_enabled: bool) -> ProductStateObservation {
     let (phase, owner, ready) = match &snapshot.state {
         EngineState::Off => ("off", None, false),
+        EngineState::LocalProxyStarting { .. } => ("local_proxy_starting", None, false),
+        EngineState::LocalProxyStopping { .. } => ("local_proxy_stopping", None, false),
+        EngineState::LocalProxyActive { runtime } => {
+            ("local_proxy_active", Some(runtime.owner), runtime.ready)
+        }
         EngineState::ProxyStarting { .. } => ("proxy_starting", None, false),
         EngineState::ProxyActive { runtime } => {
             ("proxy_active", Some(runtime.owner), runtime.ready)

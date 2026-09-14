@@ -53,7 +53,8 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
   }
 
   func testProfileProxies(
-    _ configuration: Data, proxies: Data, timeoutMS: UInt16,
+    _ configuration: Data, proxies: Data, timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String,
     withReply reply: @escaping (Data?, NSError?) -> Void
   ) {
     let response = ProxyXPCReply(reply)
@@ -65,6 +66,7 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
       else { throw NativeBridgeProtocolError.invalidConfiguration }
       names = try JSONDecoder().decode([String].self, from: proxies)
       try ProfileDelayTestRequest.validateTargets(names, timeoutMS: timeoutMS)
+      try ProfileDelayTestRequest.validateTargetURL(targetURL, expectedStatus: expectedStatus)
     } catch {
       response.finish(data: nil, error: ProfileProbeServiceFailure.invalidRequest.error)
       return
@@ -86,7 +88,8 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
       }
       do {
         let result = try profileProbe.test(
-          configuration: bytes, proxies: names, timeoutMS: timeoutMS)
+          configuration: bytes, proxies: names, timeoutMS: timeoutMS, targetURL: targetURL,
+          expectedStatus: expectedStatus)
         response.finish(data: try JSONEncoder().encode(result), error: nil)
       } catch {
         response.finish(data: nil, error: ProfileProbeServiceFailure.executionFailed.error)
@@ -159,7 +162,7 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
           reply: reply
         )
       }
-    case .startSystemProxy:
+    case .startLocalProxy, .startSystemProxy:
       respond(
         requestID: request.requestID,
         failure: EngineFailure(
@@ -226,8 +229,10 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
       reply.finish(data: nil, error: protocolError())
       return
     }
-    guard request.command.kind == .startSystemProxy,
+    guard request.command.kind == .startLocalProxy || request.command.kind == .startSystemProxy,
       let descriptor = request.command.configuration,
+      descriptor.slot.isProxyAgent,
+      context.operation.mode == descriptor.slot.authorityMode,
       capabilityBytes.count == AuthorityV1Limits.capabilityBytes,
       context.operation.root.installationID.rawValue == descriptor.installationID,
       context.operation.root.epoch == descriptor.epoch,

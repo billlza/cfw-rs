@@ -70,6 +70,26 @@ extension NativeBridgeCoordinator {
     }
   }
 
+  func rebindProfileCredentials(_ request: CredentialRebindRequest) throws
+    -> NativeCredentialReceipt
+  {
+    let operationID = try beginOperation()
+    defer { endOperation(operationID) }
+    try Task.checkCancellation()
+    do {
+      var material = try credentialVault.resolve(
+        audience: request.previousAudience, slots: request.slots)
+      defer { material.erase() }
+      let references = Set(request.slots.map(\.reference)).sorted(
+        by: CredentialReference.canonicalPrecedes)
+      let receipt = try credentialVault.provision(
+        audience: request.audience, requiredReferences: references, material: material)
+      return NativeCredentialReceipt(
+        audience: CredentialAudience(
+          profileID: receipt.profileID, profileDigest: receipt.profileDigest))
+    } catch { throw Self.map(error) }
+  }
+
   func previewCredentialGarbageCollection(
     _ request: CredentialGarbageCollectionRequest
   ) async throws -> CredentialGarbageCollectionPreview {
@@ -176,6 +196,23 @@ extension NativeBridgeCoordinator {
     )
   }
 
+  /// Candidate validation cannot recover preferences or modify a running owner.
+  /// Recovery remains an explicit lifecycle operation with its own evidence.
+  func validateCandidateConfiguration(_ request: EngineStartRequest) async throws {
+    let operationID = try beginOperation()
+    defer { endOperation(operationID) }
+    try Task.checkCancellation()
+    guard pendingStop == nil, pendingStartCleanup == nil, pendingFailedStartOff == nil,
+      pendingTunnelInstallation == nil,
+      try await tunnel.pendingPreferenceMutationConfiguration() == nil
+    else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven, "Resolve pending network recovery before validating a candidate.")
+    }
+    try await checkConfiguration(request)
+    try Task.checkCancellation()
+  }
+
   func checkConfiguration(_ request: EngineStartRequest) async throws {
     var material: CredentialMaterial
     do {
@@ -207,7 +244,7 @@ extension NativeBridgeCoordinator {
       configuration.removeAll(keepingCapacity: false)
     }
     let descriptor = try request.descriptor(
-      slot: request.tunnelOptions == nil ? .systemProxy : .tunnel
+      slot: request.mode.slot
     )
     do {
       try await proxy.validateConfiguration(configuration, descriptor: descriptor)

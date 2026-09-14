@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use cfw_singbox_config::{ProviderCatalog, ProviderFilter, ProviderGroup};
 use serde_json::json;
 
 use super::{MAX_OUTBOUNDS, OutboundCollector, ProxyFields, YamlValue};
@@ -10,11 +11,17 @@ struct Group {
     tag: String,
     members: Vec<String>,
     algorithm: GroupAlgorithm,
+    providers: Vec<String>,
+    filter: ProviderFilter,
 }
 
 enum GroupAlgorithm {
     Select,
-    UrlTest {
+    Automatic {
+        kind: String,
+        strategy: Option<String>,
+        lazy: Option<bool>,
+        hidden: Option<bool>,
         url: String,
         interval_seconds: u32,
         tolerance_ms: u16,
@@ -25,20 +32,8 @@ pub(super) fn import_policy(
     root: &mut ProxyFields,
     collector: &mut OutboundCollector,
     mut names: BTreeMap<String, String>,
+    providers: &mut ProviderCatalog,
 ) -> Result<(), String> {
-    for key in ["proxy-providers", "rule-providers"] {
-        if let Some(value) = root.take(key) {
-            let empty = match value {
-                YamlValue::Mapping(mapping) => mapping.into_entries().is_empty(),
-                _ => false,
-            };
-            if !empty {
-                return Err(format!(
-                    "Clash {key} requires provider import support; no partial profile was saved"
-                ));
-            }
-        }
-    }
     let mut groups = Vec::new();
     if let Some(value) = root.take("proxy-groups") {
         let YamlValue::Sequence(entries) = value else {
@@ -58,9 +53,10 @@ pub(super) fn import_policy(
                     "proxy-groups[{index}] has a duplicate or reserved name"
                 ));
             }
-            let algorithm = match fields.require_string("type")?.as_str() {
+            let group_type = fields.require_string("type")?;
+            let algorithm = match group_type.as_str() {
                 "select" => GroupAlgorithm::Select,
-                "url-test" => {
+                "url-test" | "fallback" | "load-balance" => {
                     let url = fields.require_string("url")?;
                     let interval_seconds = fields
                         .require_string("interval")?
@@ -74,12 +70,32 @@ pub(super) fn import_policy(
                         .transpose()
                         .map_err(|_| format!("proxy-groups[{index}] tolerance must be an integer"))?
                         .unwrap_or(0);
-                    if fields.take_bool("lazy")? == Some(false) {
+                    let lazy = fields.take_bool("lazy")?;
+                    let hidden = fields.take_bool("hidden")?;
+                    let strategy = if group_type == "load-balance" {
+                        Some(
+                            fields
+                                .take_string("strategy")?
+                                .unwrap_or_else(|| "consistent-hashing".into()),
+                        )
+                    } else {
+                        None
+                    };
+                    if group_type != "url-test" && tolerance_ms != 0 {
                         return Err(format!(
-                            "proxy-groups[{index}] requires continuous idle probing, which the runtime does not support"
+                            "proxy-groups[{index}] fallback has no latency tolerance"
                         ));
                     }
-                    GroupAlgorithm::UrlTest {
+                    GroupAlgorithm::Automatic {
+                        kind: match group_type.as_str() {
+                            "url-test" => "urltest",
+                            "fallback" => "fallback",
+                            _ => "loadbalance",
+                        }
+                        .into(),
+                        strategy,
+                        lazy,
+                        hidden,
                         url,
                         interval_seconds,
                         tolerance_ms,
@@ -91,9 +107,20 @@ pub(super) fn import_policy(
                     ));
                 }
             };
-            let members = fields
-                .take_string_list("proxies")?
-                .ok_or_else(|| format!("proxy-groups[{index}] has no proxies list"))?;
+            let members = fields.take_string_list("proxies")?.unwrap_or_default();
+            let mut provider_names = fields.take_string_list("use")?.unwrap_or_default();
+            if fields.take_bool("include-all-providers")? == Some(true) {
+                for provider in &providers.proxies {
+                    if !provider_names.contains(&provider.name) {
+                        provider_names.push(provider.name.clone());
+                    }
+                }
+            }
+            let filter = ProviderFilter {
+                include: fields.take_string("filter")?,
+                exclude: fields.take_string("exclude-filter")?,
+            };
+            filter.accepts("").map_err(|error| error.to_string())?;
             if fields.take_bool("disable-udp")? == Some(true) {
                 return Err(format!(
                     "proxy-groups[{index}] requires unsupported group UDP filtering"
@@ -109,6 +136,8 @@ pub(super) fn import_policy(
                 tag,
                 members,
                 algorithm,
+                providers: provider_names,
+                filter,
             });
         }
     }
@@ -118,19 +147,50 @@ pub(super) fn import_policy(
             .iter()
             .map(|name| resolve_target(name, collector, &mut names))
             .collect::<Result<Vec<_>, _>>()?;
+        let binding = ProviderGroup {
+            group: group.tag.clone(),
+            local_members: members,
+            providers: group.providers,
+            filter: group.filter,
+        };
+        let members = providers
+            .group_members(&binding)
+            .map_err(|error| error.to_string())?;
+        if !binding.providers.is_empty() {
+            providers.groups.push(binding);
+        }
         let outbound = match group.algorithm {
             GroupAlgorithm::Select => {
                 json!({"type": "selector", "tag": group.tag, "outbounds": members})
             }
-            GroupAlgorithm::UrlTest {
+            GroupAlgorithm::Automatic {
+                kind,
+                strategy,
+                lazy,
+                hidden,
                 url,
                 interval_seconds,
                 tolerance_ms,
-            } => json!({
-                "type": "urltest", "tag": group.tag, "outbounds": members,
-                "url": url, "interval_seconds": interval_seconds, "tolerance_ms": tolerance_ms,
-                "idle_timeout_seconds": interval_seconds.max(1800),
-            }),
+            } => {
+                let mut outbound = json!({
+                    "type": kind, "tag": group.tag, "outbounds": members,
+                    "url": url, "interval_seconds": interval_seconds,
+                    "idle_timeout_seconds": interval_seconds.max(1800),
+                });
+                if kind == "urltest" {
+                    outbound["tolerance_ms"] = json!(tolerance_ms);
+                }
+                if let Some(strategy) = strategy {
+                    outbound["strategy"] = json!(strategy);
+                }
+                if let Some(lazy) = lazy {
+                    outbound["lazy"] = json!(lazy);
+                }
+                if let Some(hidden) = hidden {
+                    outbound["hidden"] = json!(hidden);
+                }
+                outbound
+            }
         };
         collector.outbounds.push(outbound);
     }
@@ -187,6 +247,7 @@ pub(super) fn import_policy(
                 "PROCESS-NAME" => "process_name",
                 "PROCESS-PATH" => "process_path",
                 "GEOIP" => "geo_ip",
+                "RULE-SET" => "rule_set",
                 _ => {
                     return Err(format!(
                         "rules[{index}] uses an unsupported rule type; no partial profile was saved"

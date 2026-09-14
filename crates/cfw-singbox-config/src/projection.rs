@@ -1,6 +1,8 @@
+pub use crate::engine_settings::{AuthenticatedDnsServer, DEFAULT_MIXED_PORT, EngineSettings};
+
 use std::collections::BTreeSet;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -8,30 +10,20 @@ use serde_json::{Map, Value, json};
 use crate::{
     ConfigError, CredentialAudience, CredentialSlot, DirectIpv4HostRoutes,
     MINIMUM_REMOTE_TLS_VERSION, ValidatedSingBoxProfile,
-    controller::{ClashApiEndpoint, DEFAULT_CLASH_API_PORT},
+    controller::ClashApiEndpoint,
     credentials::validate_slots,
     profile_projection::DomainResolverTags,
     sha256_hex,
     validation::{DnsProjection, canonicalize},
 };
 
-const BOOTSTRAP_DNS_PRIMARY_TAG: &str = "cfw-bootstrap-dns-0";
-const BOOTSTRAP_DNS_FALLBACK_TAG: &str = "cfw-bootstrap-dns-1";
 const AUTHENTICATED_DNS_PRIMARY_TAG: &str = "cfw-authenticated-dns-0";
 const AUTHENTICATED_DNS_SECONDARY_TAG: &str = "cfw-authenticated-dns-1";
-
-/// Preferred loopback TCP port for the application-owned mixed inbound.
-///
-/// The application shell may choose a different bounded port before it
-/// projects a runtime configuration. Keeping the preferred value in the
-/// projection crate prevents the selection policy and default settings from
-/// drifting apart.
-pub const DEFAULT_MIXED_PORT: u16 = 7890;
 
 /// Schema of the configuration identity document shared with the macOS engine
 /// owner protocol. This changes whenever fields that cross that boundary gain
 /// new closed vocabulary.
-pub const CONFIGURATION_IDENTITY_SCHEMA_VERSION: u16 = 6;
+pub const CONFIGURATION_IDENTITY_SCHEMA_VERSION: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelAddressPlan {
@@ -52,75 +44,10 @@ pub const TUNNEL_ADDRESS_PLAN: TunnelAddressPlan = TunnelAddressPlan {
     ipv6_dns_peer: "2001:2:0:64::2",
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthenticatedDnsServer {
-    /// Numeric address avoids a resolver dependency before the encrypted DNS
-    /// transport exists.
-    pub address: IpAddr,
-    /// TLS identity verified independently from the numeric dial address.
-    pub server_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineSettings {
-    pub mixed_port: u16,
-    /// Loopback port of the application-owned clash-compatible controller. The
-    /// address and the secret are not settings: see [`crate::ClashApiEndpoint`].
-    pub controller_port: u16,
-    pub enable_ipv6: bool,
-    pub bypass_private_networks: bool,
-    pub tunnel_mtu: u16,
-    /// Numeric resolvers dialled directly by libbox only while resolving a
-    /// domain-named proxy endpoint. Exactly two are retained so engine startup
-    /// never depends on the host resolver and fallback remains bounded.
-    pub bootstrap_dns_servers: [IpAddr; 2],
-    /// HTTPS resolvers used for all ordinary engine DNS in both modes,
-    /// including every hijacked Tunnel query. Their connections are detoured
-    /// through the selected outbound and never use the direct bootstrap role.
-    pub authenticated_dns_servers: [AuthenticatedDnsServer; 2],
-}
-
-impl Default for EngineSettings {
-    fn default() -> Self {
-        Self {
-            mixed_port: DEFAULT_MIXED_PORT,
-            controller_port: DEFAULT_CLASH_API_PORT,
-            enable_ipv6: true,
-            bypass_private_networks: true,
-            tunnel_mtu: 1_500,
-            // Independent operators with strong connectivity in mainland
-            // China. Callers can replace both numeric endpoints from trusted
-            // pre-activation network state; domains are impossible by type.
-            bootstrap_dns_servers: [
-                IpAddr::V4(Ipv4Addr::new(223, 6, 6, 6)),
-                IpAddr::V4(Ipv4Addr::new(119, 29, 29, 29)),
-            ],
-            authenticated_dns_servers: [
-                AuthenticatedDnsServer {
-                    address: IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)),
-                    server_name: "dns.alidns.com".to_owned(),
-                },
-                AuthenticatedDnsServer {
-                    address: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-                    server_name: "cloudflare-dns.com".to_owned(),
-                },
-            ],
-        }
-    }
-}
-
-impl EngineSettings {
-    /// Resolves the application-owned controller endpoint these settings open.
-    ///
-    /// The port comes from settings and is bounded; the loopback address and the
-    /// per-run secret are owned by the application.
-    pub fn clash_api_endpoint(&self) -> Result<ClashApiEndpoint, ConfigError> {
-        ClashApiEndpoint::resolve(self.controller_port, self.mixed_port)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProjectionMode {
+    LocalProxy,
     SystemProxy,
     Tunnel,
     TunnelSystemProxy,
@@ -176,7 +103,10 @@ impl ProjectedConfig {
         }
         if let Some(Value::Array(outbounds)) = root.get_mut("outbounds") {
             for outbound in outbounds {
-                if outbound["type"] == "urltest" {
+                if matches!(
+                    outbound["type"].as_str(),
+                    Some("urltest" | "fallback" | "loadbalance")
+                ) {
                     *outbound = json!({
                         "type": "selector",
                         "tag": outbound["tag"],
@@ -229,6 +159,7 @@ impl ValidatedSingBoxProfile {
         mode: ProjectionMode,
         settings: &EngineSettings,
     ) -> Result<ProjectedConfig, ConfigError> {
+        settings.validate_listener_settings()?;
         let credential_audience = CredentialAudience::new(profile_id, self.digest())?;
         if !(1_280..=9_000).contains(&settings.tunnel_mtu) {
             return Err(ConfigError::InvalidTunnelMtu(settings.tunnel_mtu));
@@ -236,22 +167,31 @@ impl ValidatedSingBoxProfile {
         if self.release_packet_evidence_case.is_some() && mode != ProjectionMode::Tunnel {
             return Err(ConfigError::InvalidReleasePacketEvidenceMode);
         }
+        let default_bootstrap = settings
+            .bootstrap_dns_servers
+            .iter()
+            .copied()
+            .map(crate::dns_policy::BootstrapDnsServer::Address)
+            .collect::<Vec<_>>();
         let bootstrap_servers = self
             .document
             .dns
             .as_ref()
-            .and_then(|dns| dns.bootstrap_servers.as_ref())
-            .unwrap_or(&settings.bootstrap_dns_servers);
+            .and_then(|dns| dns.bootstrap_servers.as_deref())
+            .unwrap_or(&default_bootstrap);
         if self.dns_projection == DnsProjection::Ordinary {
-            validate_bootstrap_dns_servers(bootstrap_servers, settings.enable_ipv6)?;
+            crate::dns_policy::validate_bootstrap_pool(bootstrap_servers)?;
         }
         let direct_ipv4_hosts = self
             .release_packet_evidence_case
             .map_or_else(DirectIpv4HostRoutes::none, |case| case.direct_ipv4_hosts());
 
+        let bootstrap_tags =
+            crate::dns_policy::resolver_tags("cfw-bootstrap-dns", bootstrap_servers.len());
+        let bootstrap_resolver = crate::dns_policy::resolver_value(&bootstrap_tags);
         let runtime_outbounds = self.document.runtime_outbounds(DomainResolverTags {
-            server: BOOTSTRAP_DNS_PRIMARY_TAG,
-            fallback_server: BOOTSTRAP_DNS_FALLBACK_TAG,
+            server: &bootstrap_tags[0],
+            fallback_servers: &bootstrap_tags[1..],
         })?;
         let selected_outbound = runtime_outbounds.selected_outbound.clone();
         let direct_outbound = runtime_outbounds.direct_outbound.clone();
@@ -261,7 +201,13 @@ impl ValidatedSingBoxProfile {
         let credential_slots = runtime_outbounds.credential_slots;
         let clash_api = settings.clash_api_endpoint()?;
         let mut root = Map::new();
-        root.insert("log".into(), json!({ "level": "info", "timestamp": true }));
+        root.insert(
+            "log".into(),
+            json!({ "level": settings.log_level, "timestamp": true }),
+        );
+        if settings.log_level == crate::EngineLogLevel::Silent {
+            root.insert("log".into(), json!({"disabled":true}));
+        }
         // `experimental` is forbidden in imported profiles; the clash-compatible
         // controller exists only because the application injects it here, bound
         // to loopback and to this run's secret.
@@ -274,39 +220,39 @@ impl ValidatedSingBoxProfile {
             );
         }
 
+        let mut profile_dns_rules = None;
+        let mut profile_dns_policies = Vec::new();
+        let mut profile_dns_rule_sets = Vec::new();
         let (mut dns_servers, dns_rule_server, dns_final_server, default_domain_resolver) =
             match self.dns_projection {
                 DnsProjection::Ordinary => {
                     let mut servers = bootstrap_servers
                         .iter()
                         .enumerate()
-                        .map(|(index, address)| {
-                            json!({
-                                "type": "udp",
-                                "tag": format!("cfw-bootstrap-dns-{index}"),
-                                "server": address.to_string(),
-                                "server_port": 53
-                            })
+                        .map(|(index, server)| {
+                            server.project(
+                                &format!("cfw-bootstrap-dns-{index}"),
+                                settings.enable_ipv6,
+                            )
                         })
-                        .collect::<Vec<_>>();
-                    if let Some(dns) = &self.document.dns {
-                        let tags = ["cfw-profile-dns-0", "cfw-profile-dns-1"];
-                        for (index, server) in dns.servers.iter().enumerate() {
-                            if server.address().is_ipv6() && !settings.enable_ipv6 {
-                                return Err(ConfigError::UnsupportedPolicyShape {
-                                    path: "$.dns".into(),
-                                    reason: "IPv6 resolver requires IPv6 to be enabled".into(),
-                                });
-                            }
-                            servers.push(server.project(tags[index], &selected_outbound)?);
-                        }
-                        let last = tags[dns.servers.len() - 1];
-                        let resolver = if dns.servers.len() == 1 {
-                            json!({"server": tags[0]})
-                        } else {
-                            json!({"server": tags[0], "fallback_server": last})
-                        };
-                        (servers, tags[0], last, resolver)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if self.document.dns.is_some() {
+                        let projected = crate::dns_policy::project_profile_dns(
+                            &self.document,
+                            &selected_outbound,
+                            &bootstrap_resolver,
+                            settings.enable_ipv6,
+                        )?;
+                        servers.extend(projected.servers);
+                        profile_dns_rules = Some(projected.rules);
+                        profile_dns_policies = projected.policies;
+                        profile_dns_rule_sets = projected.rule_sets;
+                        (
+                            servers,
+                            "cfw-profile-dns-0".to_owned(),
+                            projected.final_server,
+                            projected.default_resolver,
+                        )
                     } else {
                         validate_authenticated_dns_servers(settings)?;
                         servers.extend(settings.authenticated_dns_servers.iter().enumerate().map(
@@ -329,8 +275,8 @@ impl ValidatedSingBoxProfile {
                         ));
                         (
                             servers,
-                            AUTHENTICATED_DNS_PRIMARY_TAG,
-                            AUTHENTICATED_DNS_SECONDARY_TAG,
+                            AUTHENTICATED_DNS_PRIMARY_TAG.to_owned(),
+                            AUTHENTICATED_DNS_SECONDARY_TAG.to_owned(),
                             json!({
                                 "server": AUTHENTICATED_DNS_PRIMARY_TAG,
                                 "fallback_server": AUTHENTICATED_DNS_SECONDARY_TAG,
@@ -351,8 +297,8 @@ impl ValidatedSingBoxProfile {
                             "server_port": endpoint.port,
                             "detour": selected_outbound.as_str(),
                         })],
-                        endpoint.tag,
-                        endpoint.tag,
+                        endpoint.tag.to_owned(),
+                        endpoint.tag.to_owned(),
                         json!({ "server": endpoint.tag }),
                     )
                 }
@@ -369,7 +315,7 @@ impl ValidatedSingBoxProfile {
         }
 
         let inbound = match mode {
-            ProjectionMode::SystemProxy => {
+            ProjectionMode::LocalProxy | ProjectionMode::SystemProxy => {
                 if settings.mixed_port == 0 {
                     return Err(ConfigError::InvalidMixedPort);
                 }
@@ -416,23 +362,37 @@ impl ValidatedSingBoxProfile {
                 "listen_port": settings.mixed_port,
             }));
         }
+        if let Some(lan) = &settings.lan_proxy {
+            inbounds.push(crate::lan::inbound(lan));
+        }
         root.insert("inbounds".into(), Value::Array(inbounds));
+        let dns_ipv6 = settings.enable_ipv6
+            && self
+                .document
+                .dns
+                .as_ref()
+                .is_none_or(|policy| policy.ipv6 != Some(false));
         root.insert(
             "dns".into(),
             json!({
                 "servers": dns_servers,
-                "rules": if self.dns_projection == DnsProjection::Ordinary && self.document.dns.as_ref().is_some_and(|dns| dns.servers.len() == 1) { Vec::<Value>::new() } else { vec![json!({
-                    // The pinned source patch retries both rejected responses
-                    // and bounded transport errors against the final server.
-                    // Upstream 1.13 alone does not.
-                    "ip_accept_any": true,
+
+                // A private/direct answer must never seed another DNS role.
+                "independent_cache": true,
+                "rules": profile_dns_rules.unwrap_or_else(|| vec![json!({
+                    "domain_regex": ".*",
+                    "retry_on_error": true,
                     "action": "route",
                     "server": dns_rule_server
-                })] },
+                })]),
                 "final": dns_final_server,
-                "strategy": if settings.enable_ipv6 { "prefer_ipv4" } else { "ipv4_only" }
+                "strategy": if dns_ipv6 { "prefer_ipv4" } else { "ipv4_only" }
             }),
         );
+        if !profile_dns_policies.is_empty() {
+            root.get_mut("dns").expect("DNS configuration")["policies"] =
+                json!(profile_dns_policies);
+        }
         let fake_ip = self.dns_projection == DnsProjection::Ordinary
             && crate::dns_policy::augment_dns(
                 &self.document,
@@ -458,7 +418,15 @@ impl ValidatedSingBoxProfile {
             route.insert("final".into(), Value::String(final_tag));
         }
         route.insert("default_domain_resolver".into(), default_domain_resolver);
-        let (mut rules, rule_sets) = self.document.project_rules(&selected_outbound);
+        let (mut rules, mut rule_sets) = self.document.project_rules(&selected_outbound);
+        for resource in profile_dns_rule_sets {
+            if !rule_sets
+                .iter()
+                .any(|existing| existing["tag"] == resource["tag"])
+            {
+                rule_sets.push(resource);
+            }
+        }
         rules.splice(
             0..0,
             [
@@ -466,8 +434,20 @@ impl ValidatedSingBoxProfile {
                 json!({"clash_mode": "Global", "action": "route", "outbound": global_outbound}),
             ],
         );
+        crate::dns_policy::add_connection_dns_rules(
+            &self.document,
+            &mut rules,
+            &direct_outbound,
+            route
+                .get("final")
+                .and_then(Value::as_str)
+                .unwrap_or(&selected_outbound),
+        );
         if mode.has_tunnel() {
             rules.insert(0, json!({ "port": 53, "action": "hijack-dns" }));
+        }
+        if let Some(lan) = &settings.lan_proxy {
+            rules.insert(0, crate::lan::access_rule(lan));
         }
         if !rules.is_empty() {
             route.insert("rules".into(), Value::Array(rules));
@@ -501,7 +481,7 @@ impl ValidatedSingBoxProfile {
         }
         let configuration_digest = sha256_hex(json.as_bytes());
         let mut network_options = match mode {
-            ProjectionMode::SystemProxy => Value::Null,
+            ProjectionMode::LocalProxy | ProjectionMode::SystemProxy => Value::Null,
             ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => json!({
                 "bypass_private_networks": settings.bypass_private_networks,
                 "direct_ipv4_hosts": direct_ipv4_hosts,
@@ -517,6 +497,7 @@ impl ValidatedSingBoxProfile {
             "credential_audience": credential_audience,
             "credential_slots": credential_slots,
             "mode": match mode {
+                ProjectionMode::LocalProxy => "local_proxy",
                 ProjectionMode::SystemProxy => "system_proxy",
                 ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => "tunnel",
             },
@@ -535,31 +516,6 @@ impl ValidatedSingBoxProfile {
             digest,
         })
     }
-}
-
-fn validate_bootstrap_dns_servers(
-    servers: &[IpAddr; 2],
-    enable_ipv6: bool,
-) -> Result<(), ConfigError> {
-    let unique = servers.iter().copied().collect::<BTreeSet<_>>();
-    if unique.len() != servers.len() {
-        return Err(ConfigError::InvalidBootstrapDnsServers(
-            "the two numeric endpoints must be distinct".to_owned(),
-        ));
-    }
-    for &address in servers {
-        if !enable_ipv6 && address.is_ipv6() {
-            return Err(ConfigError::InvalidBootstrapDnsServers(format!(
-                "IPv6 endpoint {address} is unavailable while IPv6 is disabled"
-            )));
-        }
-        if dns_address_is_unusable(address) {
-            return Err(ConfigError::InvalidBootstrapDnsServers(format!(
-                "endpoint {address} is loopback, link-local, multicast, documentation, or reserved for the tunnel"
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn validate_authenticated_dns_servers(settings: &EngineSettings) -> Result<(), ConfigError> {

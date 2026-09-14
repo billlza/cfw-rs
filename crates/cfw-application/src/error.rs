@@ -8,6 +8,9 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineOperation {
     QueryStatus,
+    CheckConfiguration,
+    StartLocalProxy,
+    StopLocalProxy,
     StartSystemProxy,
     StopSystemProxy,
     InstallTunnel,
@@ -21,6 +24,9 @@ impl std::fmt::Display for EngineOperation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::QueryStatus => "query_status",
+            Self::CheckConfiguration => "check_configuration",
+            Self::StartLocalProxy => "start_local_proxy",
+            Self::StopLocalProxy => "stop_local_proxy",
             Self::StartSystemProxy => "start_system_proxy",
             Self::StopSystemProxy => "stop_system_proxy",
             Self::InstallTunnel => "install_tunnel",
@@ -61,6 +67,21 @@ pub enum RecoveredRuntimeMismatch {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum EngineCoordinatorError {
+    #[error("profile preparation failed: {0}")]
+    ProfilePreparation(String),
+    #[error("profile commit failed: {0}")]
+    ProfileCommit(String),
+    #[error("{source}; the previous runtime was restored")]
+    ProfileChangeRolledBack { source: Box<EngineCoordinatorError> },
+    #[error("{source}; restoring the previous runtime also failed: {rollback}")]
+    ProfileChangeRollbackFailed {
+        source: Box<EngineCoordinatorError>,
+        rollback: Box<EngineCoordinatorError>,
+    },
+    #[error(
+        "{source}; exact runtime cleanup is required before the previous configuration can be restored"
+    )]
+    ProfileChangeRecoveryRequired { source: Box<EngineCoordinatorError> },
     #[error("engine coordinator is no longer running")]
     CoordinatorClosed,
     #[error("engine coordinator command queue is full")]

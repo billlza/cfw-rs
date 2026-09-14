@@ -14,6 +14,8 @@ test("subscription URLs and node links use distinct native import boundaries", (
   assert.equal(isSubscriptionSource("https://subscription.example/list?token=synthetic"), true);
   assert.equal(isSubscriptionSource("HTTPS://subscription.example/list"), true);
   assert.equal(isSubscriptionSource("http://subscription.example/list"), true, "native HTTPS policy must reject HTTP");
+  assert.equal(isSubscriptionSource("https://alice:secret@proxy.example:443#Office"), false);
+  assert.equal(isSubscriptionSource("http://proxy.example:8080#Anonymous"), false);
   for (const source of ["socks://user:password@proxy.example:1080", "socks5://proxy.example:1080", "trojan://password@proxy.example:443", "file:///private/source", "not-a-link"]) {
     assert.equal(isSubscriptionSource(source), false, "local parser must not fetch non-HTTP sources");
   }
@@ -58,6 +60,8 @@ test("file read failures remain observable and source limits match native admiss
   const failure = new Error("source read was aborted");
   await assert.rejects(readProfileSourceFile({ name: "source.txt", size: 1, arrayBuffer: async () => { throw failure; } }), (error) => error === failure);
   const native = readFileSync(new URL("../../src/subscription_import.rs", import.meta.url), "utf8");
-  assert.match(native, /MAX_SUBSCRIPTION_DOCUMENT_BYTES: usize = 512 \* 1024;/u);
-  assert.equal(MAX_PROFILE_SOURCE_BYTES, 512 * 1024);
+  assert.match(native, /MAX_SUBSCRIPTION_DOCUMENT_BYTES: usize =\s*cfw_singbox_config::MAX_SUBSCRIPTION_SOURCE_BYTES;/u);
+  const capacity = readFileSync(new URL("../../../../crates/cfw-singbox-config/src/capacity.rs", import.meta.url), "utf8");
+  assert.match(capacity, /MAX_SUBSCRIPTION_SOURCE_BYTES: usize = 4 \* 1024 \* 1024;/u);
+  assert.equal(MAX_PROFILE_SOURCE_BYTES, 4 * 1024 * 1024);
 });

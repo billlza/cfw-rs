@@ -2660,3 +2660,21 @@ pre {
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* Keep network settings usable in a short window without changing other dialogs. */
+.runtime-settings-dialog { max-height: calc(100vh - 48px); overflow-y: auto; }
+.runtime-settings-dialog input[type="checkbox"] { width: auto; margin: 0 8px 0 0; }
+.runtime-settings-dialog select { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--border-color, #ddd); border-radius: 8px; }
+.proxy-pagination { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 16px; padding: 16px 0; }
+.proxy-pagination button { padding: 8px 14px; border: 1px solid var(--line, #ddd); border-radius: 6px; color: inherit; background: var(--panel, #f6f6f6); }
+.proxy-pagination button:disabled { opacity: .45; }
+.glass-dialog.automation-settings-dialog { max-height: calc(100vh - 60px); overflow: auto; width: min(720px, calc(100vw - 40px)); }
+.glass-dialog.runtime-settings-dialog { width: min(480px, calc(100vw - 40px)); }
+.glass-dialog.runtime-settings-dialog h2, .glass-dialog.automation-settings-dialog h2 { margin: 0; font-size: 18px; }
+.glass-dialog label:has(> input[type="checkbox"]) { display: flex; align-items: center; }
+.glass-dialog textarea { width: 100%; min-height: 64px; padding: 8px; border: 1px solid rgba(0, 0, 0, .12); border-radius: 8px; background: rgba(255, 255, 255, .72); font: inherit; resize: vertical; }
+.automation-rule-list { display: grid; gap: 10px; margin-bottom: 16px; }
+.automation-rule-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line, #ddd); }
+.automation-rule-row select, .automation-rule-row button { min-height: 34px; border-radius: 5px; padding: 4px 8px; }
+.automation-rule-row input { flex: 1; min-width: 160px; width: 160px; }
+.automation-settings-dialog input[type="checkbox"] { width: auto; margin-right: 8px; }

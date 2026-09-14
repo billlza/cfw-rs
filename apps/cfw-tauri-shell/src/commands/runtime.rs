@@ -94,13 +94,20 @@ pub(crate) async fn apply_active_profile(
 /// Returns the engine configuration the selected profile projects, with the
 /// app-owned controller secret redacted.
 #[tauri::command]
-pub(crate) fn read_runtime_config_text(
+pub(crate) async fn read_runtime_config_text(
     engine: State<'_, ManagedEngine>,
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<String, String> {
-    let selected = require_selected_profile(&profiles)?;
+    let selected = super::profiles::read_repository(profiles.repository(), |repository| {
+        repository
+            .load_selected()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no active profile is selected".to_owned())
+    })
+    .await?;
     let settings = engine.engine_settings()?;
     let mode = match engine.coordinator.snapshot().desired_mode {
+        EngineMode::LocalProxy => ProjectionMode::LocalProxy,
         EngineMode::Tunnel => ProjectionMode::Tunnel,
         EngineMode::TunnelSystemProxy => ProjectionMode::TunnelSystemProxy,
         // With the engine off there is no live configuration; the System Proxy
@@ -156,10 +163,12 @@ fn project_for_mode(
     mode: EngineMode,
 ) -> Result<usize, String> {
     let modes: &[ProjectionMode] = match mode {
+        EngineMode::LocalProxy => &[ProjectionMode::LocalProxy],
         EngineMode::SystemProxy => &[ProjectionMode::SystemProxy],
         EngineMode::Tunnel => &[ProjectionMode::Tunnel],
         EngineMode::TunnelSystemProxy => &[ProjectionMode::TunnelSystemProxy],
         EngineMode::Off => &[
+            ProjectionMode::LocalProxy,
             ProjectionMode::SystemProxy,
             ProjectionMode::Tunnel,
             ProjectionMode::TunnelSystemProxy,

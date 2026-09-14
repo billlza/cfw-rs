@@ -49,8 +49,15 @@ pub(crate) struct PrepareCutoverCommand {
     pub(crate) response: oneshot::Sender<Result<CutoverPreflightRequest, EngineCoordinatorError>>,
 }
 
+pub(crate) struct ChangeProfileCommand {
+    pub(crate) settings: EngineSettings,
+    pub(crate) prepare: crate::profile_change::Preparation,
+    pub(crate) response: oneshot::Sender<Result<EngineSnapshot, EngineCoordinatorError>>,
+}
+
 pub(crate) enum Command {
     SetMode(Box<SetModeCommand>),
+    ChangeProfile(Box<ChangeProfileCommand>),
     PrepareCutover(Box<PrepareCutoverCommand>),
     RestartSpec {
         response: oneshot::Sender<Result<Option<EngineRestartSpec>, EngineCoordinatorError>>,
@@ -152,6 +159,9 @@ pub(crate) async fn run_coordinator(
                         Command::PrepareCutover(command) => {
                             let _response_dropped = command.response.send(Err(failure.error.clone()));
                         }
+                        Command::ChangeProfile(command) => {
+                            let _response_dropped = command.response.send(Err(failure.error.clone()));
+                        }
                         Command::RestartSpec { response } => {
                             let _response_dropped = response.send(Ok(state.restart_spec.clone()));
                         }
@@ -232,6 +242,20 @@ pub(crate) async fn run_coordinator(
                                 snapshot,
                             ));
                         }
+                        let _response_dropped = response.send(result);
+                    }
+                    Command::ChangeProfile(command) => {
+                        let ChangeProfileCommand { settings, prepare, response } = *command;
+                        let context = crate::runtime::TransitionContext {
+                            backend: backend.as_ref(),
+                            snapshots: &snapshots,
+                            session: &session,
+                            generation_store: generation_store.as_deref(),
+                            operation_timeout: options.operation_timeout,
+                            authorization_timeout: options.authorization_timeout,
+                            status_query_timeout: options.status_query_timeout,
+                        };
+                        let result = crate::profile_change::apply(context, &mut state, settings, prepare).await;
                         let _response_dropped = response.send(result);
                     }
                     Command::PrepareCutover(command) => {

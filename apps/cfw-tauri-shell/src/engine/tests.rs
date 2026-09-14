@@ -24,6 +24,30 @@ use super::{
 use crate::engine::endpoints::{CANDIDATE_COUNT, EndpointCandidateCursor};
 use cfw_application::{EngineControllerAccess, EngineModeCoordinator};
 
+#[test]
+fn a_delayed_integration_disable_cannot_restart_a_core_the_user_stopped() {
+    let observed = EngineSnapshot {
+        desired_mode: EngineMode::SystemProxy,
+        ..EngineSnapshot::default()
+    };
+    let stopped = EngineSnapshot {
+        generation: 8,
+        ..EngineSnapshot::default()
+    };
+    assert_eq!(
+        super::serialized_switch_transition(&observed, &stopped, EngineMode::SystemProxy, false),
+        Ok(None)
+    );
+    assert_eq!(
+        super::switch_transition(&stopped, EngineMode::SystemProxy, false),
+        None
+    );
+    assert_eq!(
+        super::switch_transition(&stopped, EngineMode::Tunnel, false),
+        None
+    );
+}
+
 #[tokio::test]
 async fn maintenance_rejects_queued_off_change_and_blocks_every_renderer_mode() {
     let gate = EngineMaintenanceGate::default();
@@ -156,6 +180,57 @@ async fn mode_change_queue_is_bounded_and_cancelled_waiters_release_capacity() {
         .reserve_if_idle()
         .expect("cancelled waiters release their registrations");
     drop(maintenance);
+}
+
+#[tokio::test]
+async fn an_explicit_off_supersedes_a_debounced_automatic_start_even_when_already_off() {
+    let gate = EngineMaintenanceGate::default();
+    let observed = gate.intent_revision().unwrap();
+    let stop = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off))
+        .await
+        .unwrap();
+    drop(stop);
+    let result = gate
+        .begin_mode_change_if_current(
+            EngineModeChangeIntent::Set(EngineMode::Tunnel),
+            Some(observed),
+        )
+        .await;
+    assert!(matches!(result, Err(EngineMaintenanceError::StaleIntent)));
+}
+
+#[tokio::test]
+async fn an_off_queued_after_an_automatic_start_cancels_the_older_automatic_intent() {
+    let gate = EngineMaintenanceGate::default();
+    let first = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::LocalProxy))
+        .await
+        .unwrap();
+    let automatic = gate.begin_mode_change_if_current(
+        EngineModeChangeIntent::Set(EngineMode::Tunnel),
+        Some(gate.intent_revision().unwrap()),
+    );
+    tokio::pin!(automatic);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(15), &mut automatic)
+            .await
+            .is_err()
+    );
+    let stop = gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off));
+    tokio::pin!(stop);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(15), &mut stop)
+            .await
+            .is_err()
+    );
+    drop(first);
+    assert!(matches!(
+        automatic.await,
+        Err(EngineMaintenanceError::StaleIntent)
+    ));
+    drop(stop.await.unwrap());
+    assert!(gate.reserve_if_idle().is_ok());
 }
 
 #[tokio::test]
@@ -413,6 +488,27 @@ impl EndpointRetryBackend {
 }
 
 impl EngineBackend for EndpointRetryBackend {
+    fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn start_local_proxy(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
+        Box::pin(async move {
+            let result = self.start_system_proxy(request).await;
+            let mut status = self.status.lock().expect("status lock");
+            if let NativeEngineStatus::SystemProxy { runtime } = &*status {
+                *status = NativeEngineStatus::LocalProxy {
+                    runtime: runtime.clone(),
+                };
+            }
+            result
+        })
+    }
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
+        self.stop_system_proxy(context)
+    }
+
     fn authorize_tunnel_configuration(
         &self,
         _request: EngineStartRequest,
@@ -610,3 +706,6 @@ async fn mode_retry_loop_stops_after_the_last_bounded_endpoint() {
     assert!(starts.windows(2).all(|pair| pair[1].1 == pair[0].1 + 1));
     assert_eq!(coordinator.snapshot().state, EngineState::Off);
 }
+
+#[path = "tests/runtime_settings.rs"]
+mod runtime_settings;

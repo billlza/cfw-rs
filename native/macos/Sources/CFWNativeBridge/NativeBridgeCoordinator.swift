@@ -69,8 +69,25 @@ struct NativeAuthorityStopContext: Equatable, Sendable {
 }
 
 enum NativeStopOwner: Equatable, Sendable {
+  case localProxy
   case systemProxy
   case tunnel
+
+  init(mode: AuthorityMode) {
+    switch mode {
+    case .localProxy: self = .localProxy
+    case .systemProxy: self = .systemProxy
+    case .tunnel: self = .tunnel
+    }
+  }
+
+  var engineMode: EngineMode {
+    switch self {
+    case .localProxy: .localProxy
+    case .systemProxy: .systemProxy
+    case .tunnel: .tunnel
+    }
+  }
 }
 
 /// Exact, non-secret Host recovery view of a durable Authority lease that is
@@ -84,7 +101,7 @@ struct NativeRecoveredStop: Equatable, Sendable {
   let authorityContext: NativeAuthorityStopContext
 
   init(operation: OperationContext, leaseID: AuthorityIdentifier) throws {
-    owner = operation.mode == .systemProxy ? .systemProxy : .tunnel
+    owner = NativeStopOwner(mode: operation.mode)
     commandContext = try EngineCommandContext(
       installationID: operation.root.installationID.rawValue,
       configEpoch: operation.root.epoch,
@@ -302,8 +319,16 @@ actor NativeBridgeCoordinator {
       }
     case .maintainCurrentServices(let action):
       return .serviceMaintenance(try await maintainCurrentServices(action))
+    case .checkConfiguration(let request):
+      try await validateCandidateConfiguration(request)
+      return .acknowledged
     case .startSystemProxy(let request):
       return .runtime(try await startSystemProxy(request))
+    case .startLocalProxy(let request):
+      return .runtime(try await startLocalProxy(request))
+    case .stopLocalProxy(let context):
+      try await stopLocalProxy(context)
+      return .acknowledged
     case .stopSystemProxy(let context):
       try await stopSystemProxy(context)
       return .acknowledged
@@ -322,6 +347,8 @@ actor NativeBridgeCoordinator {
       return .acknowledged
     case .provisionCredentials(let request):
       return .credentialReceipt(try await provisionCredentials(request))
+    case .rebindProfileCredentials(let request):
+      return .credentialReceipt(try rebindProfileCredentials(request))
     case .queryCredentialPresence(let request):
       return .credentialPresence(try await queryCredentialPresence(request))
     case .preflightCutover(let request):
@@ -385,9 +412,10 @@ actor NativeBridgeCoordinator {
       tunnelObservationValue,
       component: "Packet Tunnel"
     )
+    let proxyMode: EngineMode = proxySnapshot.mode == .localProxy ? .localProxy : .systemProxy
     let proxyDescriptor = try Self.activeDescriptor(
       proxySnapshot,
-      expectedMode: .systemProxy
+      expectedMode: proxyMode
     )
     let tunnelDescriptor = try Self.activeDescriptor(
       tunnelSnapshot,
@@ -419,10 +447,11 @@ actor NativeBridgeCoordinator {
       // effective SystemConfiguration owner state. Any mismatch fails closed.
       try Self.requireActiveAgreement(
         descriptor: proxyDescriptor,
-        mode: .systemProxy,
+        mode: proxyMode,
         ownership: ownership
       )
-      return .systemProxy(try Self.runtime(descriptor: proxyDescriptor, proxy: true))
+      let runtime = try Self.runtime(descriptor: proxyDescriptor, proxy: true)
+      return proxyMode == .localProxy ? .localProxy(runtime) : .systemProxy(runtime)
     }
     if let tunnelDescriptor {
       guard Self.isStableOff(proxySnapshot) else {
@@ -488,7 +517,7 @@ actor NativeBridgeCoordinator {
     else { return false }
     let operation = recovered.authorityContext.operation
     return operation.mode == lease.mode
-      && recovered.owner == (lease.mode == .systemProxy ? .systemProxy : .tunnel)
+      && recovered.owner == NativeStopOwner(mode: lease.mode)
       && recovered.commandContext.installationID == lease.installationID
       && recovered.commandContext.configEpoch == lease.epoch
       && recovered.commandContext.generation == lease.generation

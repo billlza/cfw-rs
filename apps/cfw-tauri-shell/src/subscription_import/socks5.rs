@@ -130,7 +130,7 @@ fn decode_authentication(userinfo: &str) -> Result<(String, String), String> {
     Ok((username.to_owned(), password.to_owned()))
 }
 
-fn validate_percent_encoding(value: &str) -> Result<(), String> {
+pub(super) fn validate_percent_encoding(value: &str) -> Result<(), String> {
     let mut bytes = value.bytes();
     while let Some(byte) = bytes.next() {
         if byte == b'%'

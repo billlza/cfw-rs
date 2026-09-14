@@ -345,6 +345,9 @@ fn verify_active_replacement_proxy_postcondition(
         (EngineMode::Off, _) => {
             Err("an Off target cannot own an Active replacement retirement proof".into())
         }
+        (EngineMode::LocalProxy, _) => {
+            Err("a target without OS network integration cannot own an Active replacement retirement proof".into())
+        }
         (EngineMode::TunnelSystemProxy, _) => {
             Err("legacy retirement requires a single replacement integration".into())
         }

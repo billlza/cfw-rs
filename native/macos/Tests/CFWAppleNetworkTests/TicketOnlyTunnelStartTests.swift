@@ -178,6 +178,38 @@ struct TicketOnlyTunnelStartTests {
     #expect(!stringValues.contains { $0.contains("{") || $0.contains("password") })
   }
 
+  @Test func legacyProviderPreferencesRemainReadableWithoutChangingTheirIdentity() throws {
+    let descriptor = try tunnelDescriptor(identity: String(repeating: "12", count: 32))
+    var values = try descriptor.providerConfiguration()
+    #expect(values["schemaVersion"] as? String == "7")
+    values["schemaVersion"] = "6"
+    let tunnelProtocol = NETunnelProviderProtocol()
+    tunnelProtocol.providerConfiguration = values
+    let manager = NETunnelProviderManager()
+    manager.protocolConfiguration = tunnelProtocol
+    #expect(try manager.configurationDescriptor() == descriptor)
+    #expect(
+      try manager.configurationDescriptor().identitySHA256.hex == String(repeating: "12", count: 32)
+    )
+    #expect(tunnelProtocol.providerConfiguration?["schemaVersion"] as? String == "6")
+
+    for version in ["5", "06", "8"] {
+      var invalid = values
+      invalid["schemaVersion"] = version
+      tunnelProtocol.providerConfiguration = invalid
+      manager.protocolConfiguration = tunnelProtocol
+      #expect(throws: AppleNetworkError.providerResponseMismatch) {
+        try manager.configurationDescriptor()
+      }
+    }
+    values["unexpected"] = "not-a-legacy-field"
+    tunnelProtocol.providerConfiguration = values
+    manager.protocolConfiguration = tunnelProtocol
+    #expect(throws: AppleNetworkError.providerResponseMismatch) {
+      try manager.configurationDescriptor()
+    }
+  }
+
   @Test func startOptionsCarryOnlyTheOpaqueTicket() throws {
     let bytes = Data(repeating: 0x7, count: AuthorityV1Limits.ticketBytes)
     let options = NetworkExtensionHostBridge.ticketStartOptions(bytes)

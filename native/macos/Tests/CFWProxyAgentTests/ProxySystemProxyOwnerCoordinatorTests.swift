@@ -351,9 +351,11 @@ private final class FakeSystemProxyPreferences: SystemProxyPreferences, @uncheck
 
 // MARK: - Builders
 
-private func proxyDescriptor() throws -> ConfigurationDescriptor {
+private func proxyDescriptor(slot: ConfigurationSlot = .systemProxy) throws
+  -> ConfigurationDescriptor
+{
   try ConfigurationDescriptor(
-    slot: .systemProxy,
+    slot: slot,
     tunnelOptions: nil,
     credentialAudience: CredentialAudience(
       profileID: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
@@ -372,7 +374,7 @@ private func matchingLease(_ descriptor: ConfigurationDescriptor) throws -> Leas
     root: RootContext(
       installationID: AuthorityIdentifier(descriptor.installationID),
       epoch: descriptor.epoch, generation: descriptor.generation),
-    mode: .systemProxy,
+    mode: descriptor.slot.authorityMode,
     configSHA256: descriptor.sha256,
     identitySHA256: descriptor.identitySHA256,
     ownerUID: 501,
@@ -388,7 +390,7 @@ private func mismatchedLease(_ descriptor: ConfigurationDescriptor) throws -> Le
     root: RootContext(
       installationID: AuthorityIdentifier(descriptor.installationID),
       epoch: descriptor.epoch, generation: descriptor.generation),
-    mode: .systemProxy,
+    mode: descriptor.slot.authorityMode,
     configSHA256: SHA256Digest(hex: String(repeating: "22", count: 32)),
     identitySHA256: descriptor.identitySHA256,
     ownerUID: 501,
@@ -424,6 +426,7 @@ private struct CoordinatorFixture {
 }
 
 private func makeFixture(
+  slot: ConfigurationSlot = .systemProxy,
   bindThrows: AuthorityDomainError? = nil,
   readyThrows: Bool = false,
   effectiveApplied: Bool = true,
@@ -438,7 +441,7 @@ private func makeFixture(
   clockValue: UInt64 = 777
 ) throws -> CoordinatorFixture {
   let orderLog = OrderLog()
-  let descriptor = try proxyDescriptor()
+  let descriptor = try proxyDescriptor(slot: slot)
   let engine = FakeProxyEngine(orderLog: orderLog, stopFailures: engineStopFailures)
   let preferences = FakeSystemProxyPreferences(
     orderLog: orderLog,
@@ -480,6 +483,83 @@ private func makeFixture(
 
 @Suite(.serialized)
 struct ProxySystemProxyOwnerCoordinatorTests {
+  @Test(arguments: [ConfigurationSlot.localProxy, .systemProxy])
+  func engineCrashKeepsAuthorityOwnershipUntilExplicitStop(slot: ConfigurationSlot) throws {
+    let fixture = try makeFixture(slot: slot)
+    let start = CoordinatorRecorder()
+    fixture.coordinator.start(
+      configuration: fixture.descriptor, authorization: try fixture.authorization()
+    ) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    fixture.engine.emit(.failed(ProxyEngineFailure(code: "crash", message: "Runtime exited.")))
+    let stopped = CoordinatorRecorder()
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { stopped.record($0) }
+    #expect(stopped.wait())
+    #expect(stopped.values == [.success])
+    #expect(fixture.authority.stoppedAttestations.count == 1)
+    #expect(fixture.authority.stoppedAttestations.first?.operation == fixture.lease.operation)
+    #expect(fixture.preferences.restoreCount == (slot == .systemProxy ? 1 : 0))
+  }
+
+  @Test func localProxyAttestsOnlyListenerReadinessAndStopsThroughTheAuthority() throws {
+    let fixture = try makeFixture(slot: .localProxy, effectiveApplied: false)
+    let start = CoordinatorRecorder()
+    fixture.coordinator.start(
+      configuration: fixture.descriptor, authorization: try fixture.authorization()
+    ) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    #expect(fixture.authority.readyAttestations.isEmpty)
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+    #expect(fixture.orderLog.values == ["bind", "engine.start"])
+    let ready = try #require(fixture.authority.readyAttestations.first)
+    #expect(ready.operation.mode == .localProxy)
+    #expect(ready.readyFlags == [.libboxStarted, .transportReady])
+    #expect(!ready.readyFlags.contains(.operatingSystemStateReady))
+    let stop = CoordinatorRecorder()
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(fixture.authority.stoppedAttestations.count == 1)
+    #expect(fixture.authority.stoppedAttestations.first?.operation == fixture.lease.operation)
+    #expect(fixture.preferences.restoreCount == 0)
+  }
+
+  @Test func localProxyCannotStartWithoutAnExactOwnerCapability() throws {
+    let fixture = try makeFixture(
+      slot: .localProxy, bindThrows: AuthorityDomainError(code: .ticketInvalid))
+    let start = CoordinatorRecorder()
+    fixture.coordinator.start(
+      configuration: fixture.descriptor, authorization: try fixture.authorization()
+    ) { start.record($0) }
+    #expect(start.wait())
+    #expect(fixture.orderLog.values == ["bind"])
+    #expect(fixture.authority.readyAttestations.isEmpty)
+    #expect(fixture.authority.stoppedAttestations.isEmpty)
+  }
+
+  @Test func localProxyRevocationStillClosesTheListenerAndAttestsStopped() throws {
+    let fixture = try makeFixture(slot: .localProxy)
+    let start = CoordinatorRecorder()
+    fixture.coordinator.start(
+      configuration: fixture.descriptor, authorization: try fixture.authorization()
+    ) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    fixture.revocation.revoke()
+    let stop = CoordinatorRecorder()
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.authority.stoppedAttestations.count == 1)
+    #expect(fixture.preferences.restoreCount == 0)
+  }
+
   @Test func consumedAuthorizationFailsClosedBeforeAnyMutation() throws {
     let fixture = try makeFixture()
     let authorization = try fixture.authorization()

@@ -87,6 +87,27 @@ fn sensitive_provision_envelope(
 }
 
 impl CredentialVaultProvisioner for NativeFrameworkBridge {
+    fn rebind_profile_credentials(
+        &self,
+        request: cfw_engine_api::CredentialRebindRequest,
+    ) -> CredentialVaultFuture<'_> {
+        Box::pin(async move {
+            let audience = request.audience().clone();
+            match self
+                .invoke(NativeBridgeCommand::RebindProfileCredentials { request })
+                .await
+                .map_err(map_vault_error)?
+            {
+                NativeBridgeResult::CredentialReceipt(receipt)
+                    if receipt.profile_id == audience.profile_id()
+                        && receipt.profile_digest == audience.profile_digest() =>
+                {
+                    Ok(receipt)
+                }
+                _ => Err(CredentialVaultError::IdentityRejected),
+            }
+        })
+    }
     fn provision_profile_credentials<'a>(
         &'a self,
         request: CredentialProvisionRequest<'a>,

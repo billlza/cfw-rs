@@ -1653,13 +1653,16 @@ extension ConfigurationDescriptor {
 }
 
 extension NETunnelProviderManager {
-  fileprivate func configurationDescriptor() throws -> ConfigurationDescriptor {
+  /// Reads persisted preferences for observation/recovery. Version 6 used the same
+  /// descriptor fields before Local Proxy was introduced. Preserve its original
+  /// identity while new preference writes and Provider starts require version 7.
+  func configurationDescriptor() throws -> ConfigurationDescriptor {
     guard
       let configuration = (protocolConfiguration as? NETunnelProviderProtocol)?
         .providerConfiguration,
       let schemaVersionValue = configuration["schemaVersion"] as? String,
       let schemaVersion = UInt16(schemaVersionValue),
-      schemaVersion == NativeProtocolConstants.schemaVersion,
+      schemaVersion == 6 || schemaVersion == NativeProtocolConstants.schemaVersion,
       let slotRawValue = configuration["slot"] as? String,
       let slot = ConfigurationSlot(rawValue: slotRawValue),
       slot == .tunnel,
@@ -1705,9 +1708,11 @@ extension NETunnelProviderManager {
       identitySHA256: SHA256Digest(hex: identityDigest),
       credentialSlots: credentialSlots
     )
+    var canonical = try descriptor.providerConfiguration()
+    canonical["schemaVersion"] = String(schemaVersion)
     guard
       NSDictionary(dictionary: configuration).isEqual(
-        to: try descriptor.providerConfiguration()
+        to: canonical
       )
     else {
       throw AppleNetworkError.providerResponseMismatch

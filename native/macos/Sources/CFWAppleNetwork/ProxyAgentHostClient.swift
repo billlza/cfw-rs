@@ -137,7 +137,10 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
 }
 
 public protocol ProxyAgentTransporting: Sendable {
-  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+  func testProfileProxies(
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
+  ) async throws
     -> [ProfileProxyDelay]
   func authorizeSystemProxy(restorationOnly: Bool) async throws
   func registrationStatus() async -> ProxyAgentRegistrationStatus
@@ -497,7 +500,12 @@ public actor AuthenticatedProxyAgentTransport:
     authorization: HostPreparedSystemProxyStart
   ) async throws {
     try descriptor.validateConfigurationBytes(configuration)
-    let command = try NativeCommand(kind: .startSystemProxy, configuration: descriptor)
+    guard descriptor.slot.isProxyAgent,
+      authorization.context.operation.mode == descriptor.slot.authorityMode
+    else { throw ProxyAgentHostError.responseMismatch }
+    let command = try NativeCommand(
+      kind: descriptor.slot == .localProxy ? .startLocalProxy : .startSystemProxy,
+      configuration: descriptor)
     let request = RequestEnvelope(command: command)
     let requestData = try ProtocolCodec.encode(request)
     let contextData = try AuthorityV1Codec.encodeCanonical(authorization.context)
@@ -663,9 +671,11 @@ public actor AuthenticatedProxyAgentTransport:
   }
 
   public func testProfileProxies(
-    configuration: Data, proxies: [String], timeoutMS: UInt16
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
   ) async throws -> [ProfileProxyDelay] {
     try ProfileDelayTestRequest.validateTargets(proxies, timeoutMS: timeoutMS)
+    try ProfileDelayTestRequest.validateTargetURL(targetURL, expectedStatus: expectedStatus)
     guard !configuration.isEmpty,
       configuration.count <= Int(NativeProtocolConstants.maximumConfigurationBytes)
     else { throw ProxyAgentHostError.malformedResponse }
@@ -689,7 +699,10 @@ public actor AuthenticatedProxyAgentTransport:
             .failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable")))
           return
         }
-        proxy.testProfileProxies(configuration, proxies: names, timeoutMS: timeoutMS) {
+        proxy.testProfileProxies(
+          configuration, proxies: names, timeoutMS: timeoutMS, targetURL: targetURL,
+          expectedStatus: expectedStatus
+        ) {
           data, error in
           if let error {
             if error.domain == ProfileProbeServiceFailure.domain,

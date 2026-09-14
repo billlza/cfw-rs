@@ -61,6 +61,7 @@ private func modernProtocolStartRequest(
     )
   )
   return try EngineStartRequest(
+    mode: .systemProxy,
     context: EngineCommandContext(
       installationID: UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!,
       configEpoch: 1,

@@ -162,7 +162,7 @@ extension NativeBridgeCoordinator {
     if snapshot.state.kind == .off, snapshot.mode == .off, snapshot.configuration == nil {
       return nil
     }
-    let expectedState: EngineStateKind = expectedMode == .systemProxy ? .proxyActive : .tunnelActive
+    let expectedState: EngineStateKind = expectedMode == .tunnel ? .tunnelActive : .proxyActive
     if snapshot.state.kind == expectedState, snapshot.mode == expectedMode,
       let configuration = snapshot.configuration
     {

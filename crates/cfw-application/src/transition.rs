@@ -53,6 +53,9 @@ pub(crate) async fn transition(
         return Err(quarantine.clone());
     }
     let projected = match target {
+        EngineMode::LocalProxy => {
+            profile.project(profile_id, ProjectionMode::LocalProxy, settings)?
+        }
         EngineMode::SystemProxy => {
             profile.project(profile_id, ProjectionMode::SystemProxy, settings)?
         }
@@ -64,7 +67,9 @@ pub(crate) async fn transition(
     };
 
     let is_same_active_runtime = match &state.snapshot.state {
-        EngineState::ProxyActive { runtime } if target == EngineMode::SystemProxy => {
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
+            if target == state.snapshot.state.active_mode() =>
+        {
             runtime.config_digest == projected.digest() && runtime.ready
         }
         EngineState::TunnelActive { runtime }
@@ -103,19 +108,37 @@ pub(crate) async fn transition(
     let request = start_request(&projected, settings, context.clone());
 
     match target {
-        EngineMode::SystemProxy => {
+        EngineMode::LocalProxy | EngineMode::SystemProxy => {
+            let local = target == EngineMode::LocalProxy;
+            let operation = if local {
+                EngineOperation::StartLocalProxy
+            } else {
+                EngineOperation::StartSystemProxy
+            };
             state.native_lease = Some(NativeLease {
-                kind: NativeLeaseKind::SystemProxy,
+                kind: if local {
+                    NativeLeaseKind::LocalProxy
+                } else {
+                    NativeLeaseKind::SystemProxy
+                },
                 context: context.clone(),
             });
-            state.snapshot.state = EngineState::ProxyStarting { generation };
+            state.snapshot.state = if local {
+                EngineState::LocalProxyStarting { generation }
+            } else {
+                EngineState::ProxyStarting { generation }
+            };
             state.snapshot.config_digest = Some(request.config_digest.clone());
             publish(state, snapshots);
 
             let runtime = match call_backend(
                 operation_timeout,
-                EngineOperation::StartSystemProxy,
-                backend.start_system_proxy(request.clone()),
+                operation,
+                if local {
+                    backend.start_local_proxy(request.clone())
+                } else {
+                    backend.start_system_proxy(request.clone())
+                },
             )
             .await
             {
@@ -125,7 +148,7 @@ pub(crate) async fn transition(
                         backend,
                         state,
                         snapshots,
-                        EngineOperation::StartSystemProxy,
+                        operation,
                         source,
                         operation_timeout,
                         status_query_timeout,
@@ -149,7 +172,11 @@ pub(crate) async fn transition(
                 )
                 .await;
             }
-            state.snapshot.state = EngineState::ProxyActive { runtime };
+            state.snapshot.state = if local {
+                EngineState::LocalProxyActive { runtime }
+            } else {
+                EngineState::ProxyActive { runtime }
+            };
         }
         EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
             state.native_lease = Some(NativeLease {
@@ -289,17 +316,33 @@ pub(crate) async fn stop_owned_runtime(
     };
 
     let (operation, result) = match lease.kind {
-        NativeLeaseKind::SystemProxy => {
-            state.snapshot.state = EngineState::ProxyStopping {
-                generation: lease.context.generation,
+        NativeLeaseKind::LocalProxy | NativeLeaseKind::SystemProxy => {
+            let local = matches!(lease.kind, NativeLeaseKind::LocalProxy);
+            let operation = if local {
+                EngineOperation::StopLocalProxy
+            } else {
+                EngineOperation::StopSystemProxy
+            };
+            state.snapshot.state = if local {
+                EngineState::LocalProxyStopping {
+                    generation: lease.context.generation,
+                }
+            } else {
+                EngineState::ProxyStopping {
+                    generation: lease.context.generation,
+                }
             };
             publish(state, snapshots);
             (
-                EngineOperation::StopSystemProxy,
+                operation,
                 call_backend(
                     operation_timeout,
-                    EngineOperation::StopSystemProxy,
-                    backend.stop_system_proxy(lease.context.clone()),
+                    operation,
+                    if local {
+                        backend.stop_local_proxy(lease.context.clone())
+                    } else {
+                        backend.stop_system_proxy(lease.context.clone())
+                    },
                 )
                 .await,
             )
@@ -372,7 +415,7 @@ async fn fail_backend(
     let endpoint_conflict = matches!(
         (operation, source.kind),
         (
-            EngineOperation::StartSystemProxy,
+            EngineOperation::StartLocalProxy | EngineOperation::StartSystemProxy,
             BackendErrorKind::MixedEndpointInUse | BackendErrorKind::ControllerEndpointInUse
         ) | (
             EngineOperation::StartTunnel,
@@ -381,7 +424,7 @@ async fn fail_backend(
     ) && (source.kind != BackendErrorKind::MixedEndpointInUse
         || matches!(
             target,
-            EngineMode::SystemProxy | EngineMode::TunnelSystemProxy
+            EngineMode::LocalProxy | EngineMode::SystemProxy | EngineMode::TunnelSystemProxy
         ));
     let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
         Ok(()) => {

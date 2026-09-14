@@ -48,6 +48,12 @@ pub(super) struct YamlScalar {
 }
 
 impl YamlScalar {
+    pub(super) fn string(text: String) -> Self {
+        Self {
+            text,
+            resolvable: false,
+        }
+    }
     /// The exact source text of the scalar.
     pub(super) fn text(&self) -> &str {
         &self.text
@@ -78,8 +84,81 @@ pub(super) struct YamlMapping {
 }
 
 impl YamlMapping {
+    pub(super) fn get(&self, key: &str) -> Option<&YamlValue> {
+        self.entries
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+    pub(super) fn get_mut(&mut self, key: &str) -> Option<&mut YamlValue> {
+        self.entries
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+    pub(super) fn set(&mut self, key: &str, value: YamlValue) {
+        if let Some(stored) = self.get_mut(key) {
+            *stored = value;
+        } else {
+            self.entries.push((key.into(), value));
+        }
+    }
     pub(super) fn into_entries(self) -> Vec<(String, YamlValue)> {
         self.entries
+    }
+}
+
+impl YamlValue {
+    /// A flow-style YAML value, preserving scalar spelling. In particular,
+    /// plain `True` used as a password must never become the string `true`.
+    fn render(&self) -> String {
+        match self {
+            Self::Scalar(value) if value.as_bool().is_some() => value.text.clone(),
+            Self::Scalar(value) if value.is_null() => "null".into(),
+            Self::Scalar(value) => serde_json::to_string(value.text()).expect("string encoding"),
+            Self::Sequence(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Self::render)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Mapping(mapping) => format!(
+                "{{{}}}",
+                mapping
+                    .entries
+                    .iter()
+                    .map(|(key, value)| format!(
+                        "{}: {}",
+                        serde_json::to_string(key).expect("string encoding"),
+                        value.render()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    pub(super) fn render_document(&self) -> Result<String, String> {
+        let Self::Mapping(mapping) = self else {
+            return Err("provider profile root must be a mapping".into());
+        };
+        Ok(mapping
+            .entries
+            .iter()
+            .map(|(key, value)| {
+                let key = if key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                {
+                    key.clone()
+                } else {
+                    serde_json::to_string(key).expect("string encoding")
+                };
+                format!("{key}: {}\n", value.render())
+            })
+            .collect())
     }
 }
 

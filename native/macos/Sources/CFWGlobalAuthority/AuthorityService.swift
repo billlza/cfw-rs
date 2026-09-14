@@ -445,7 +445,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
         throw error
       }
 
-    case .systemProxy:
+    case .localProxy, .systemProxy:
       let issued = clock.nowMilliseconds()
       let expiry = try addLifetime(to: issued)
       guard secretPayload == nil else {
@@ -529,7 +529,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
           operation: request.operation, leaseID: request.leaseID,
           leaseOwnerUID: peer.euid,
           connectionNonce: lease.ownerConnectionNonce,
-          role: .proxyAgent, mode: .systemProxy))
+          role: .proxyAgent, mode: request.operation.mode))
       try persist(&candidate)
       reducer = candidate
       proxyCapability = nil
@@ -779,7 +779,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   ) -> GlobalOffProof {
     let cleanup: AuthorityCleanupObservation =
       switch mode {
-      case .systemProxy:
+      case .localProxy, .systemProxy:
         .systemProxy(listenerClosed: true, systemConfigurationRestored: true)
       case .tunnel:
         .tunnel(libboxStopped: true, packetPumpClosed: true)

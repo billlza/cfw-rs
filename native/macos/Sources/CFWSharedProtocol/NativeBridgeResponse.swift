@@ -62,6 +62,7 @@ public struct NativeRuntimeIdentity: Codable, Equatable, Sendable {
 
 public enum NativeEngineStatus: Equatable, Sendable {
   case off
+  case localProxy(NativeRuntimeIdentity)
   case systemProxy(NativeRuntimeIdentity)
   case tunnel(NativeRuntimeIdentity)
 }
@@ -74,6 +75,7 @@ extension NativeEngineStatus: Codable {
 
   private enum Status: String, Codable {
     case off
+    case localProxy = "local_proxy"
     case systemProxy = "system_proxy"
     case tunnel
   }
@@ -82,6 +84,8 @@ extension NativeEngineStatus: Codable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     switch try container.decode(Status.self, forKey: .status) {
     case .off: self = .off
+    case .localProxy:
+      self = .localProxy(try container.decode(NativeRuntimeIdentity.self, forKey: .runtime))
     case .systemProxy:
       self = .systemProxy(try container.decode(NativeRuntimeIdentity.self, forKey: .runtime))
     case .tunnel:
@@ -96,6 +100,9 @@ extension NativeEngineStatus: Codable {
       try container.encode(Status.off, forKey: .status)
     case .systemProxy(let runtime):
       try container.encode(Status.systemProxy, forKey: .status)
+      try container.encode(runtime, forKey: .runtime)
+    case .localProxy(let runtime):
+      try container.encode(Status.localProxy, forKey: .status)
       try container.encode(runtime, forKey: .runtime)
     case .tunnel(let runtime):
       try container.encode(Status.tunnel, forKey: .status)

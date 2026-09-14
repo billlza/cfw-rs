@@ -17,6 +17,9 @@ use crate::{CoordinatorOptions, EngineModeCoordinator};
 
 #[derive(Default)]
 pub(super) struct FakeBackend {
+    pub(super) configuration_check_error: Mutex<Option<BackendErrorKind>>,
+    pub(super) configuration_check_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) fail_proxy_start_once: Mutex<bool>,
     operations: Mutex<Vec<&'static str>>,
     proxy_requests: Mutex<Vec<EngineStartRequest>>,
     proxy_stop_contexts: Mutex<Vec<EngineCommandContext>>,
@@ -160,6 +163,48 @@ impl EngineGenerationStore for MemoryGenerationStore {
 }
 
 impl EngineBackend for FakeBackend {
+    fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push("check_configuration");
+            let gate = self
+                .configuration_check_gate
+                .lock()
+                .expect("check gate lock")
+                .clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            if let Some(kind) = *self
+                .configuration_check_error
+                .lock()
+                .expect("check error lock")
+            {
+                return Err(BackendError::new(kind, "candidate rejected"));
+            }
+            Ok(())
+        })
+    }
+    fn start_local_proxy(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
+        assert_eq!(request.mode, cfw_engine_api::EngineStartMode::LocalProxy);
+        Box::pin(async move {
+            let result = self.start_system_proxy(request).await;
+            let mut status = self.native_status.lock().expect("native status lock");
+            if let NativeEngineStatus::SystemProxy { runtime } = &*status {
+                *status = NativeEngineStatus::LocalProxy {
+                    runtime: runtime.clone(),
+                };
+            }
+            result
+        })
+    }
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
+        self.stop_system_proxy(context)
+    }
+
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
         Box::pin(async move {
             self.query_count.fetch_add(1, Ordering::AcqRel);
@@ -196,6 +241,17 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("proxy requests lock")
                 .push(request.clone());
+            if std::mem::take(
+                &mut *self
+                    .fail_proxy_start_once
+                    .lock()
+                    .expect("one-shot failure lock"),
+            ) {
+                return Err(BackendError::new(
+                    BackendErrorKind::ConfigurationRejected,
+                    "candidate start failed",
+                ));
+            }
             if *self.hang_proxy_start.lock().expect("hang start lock") {
                 std::future::pending::<()>().await;
             }

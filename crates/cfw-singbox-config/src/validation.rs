@@ -8,11 +8,11 @@ use crate::{
     profile::ProfileDocument,
 };
 
-pub const MAX_PROFILE_BYTES: usize = 384 * 1024;
-pub const MAX_ENGINE_CONFIG_BYTES: usize = 384 * 1024;
+pub use crate::capacity::{MAX_ENGINE_CONFIG_BYTES, MAX_PROFILE_BYTES};
 pub const MAX_PROFILE_NODES: usize = 100_000;
 
-const ALLOWED_PROFILE_KEYS: &[&str] = &["outbounds", "route", "detours", "dns", "hosts"];
+const ALLOWED_PROFILE_KEYS: &[&str] =
+    &["outbounds", "route", "detours", "dns", "hosts", "providers"];
 
 const FORBIDDEN_PROFILE_KEYS: &[&str] = &[
     "inbounds",
@@ -48,7 +48,7 @@ const CREDENTIAL_KEYS: &[&str] = &[
     "uuid",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ValidatedSingBoxProfile {
     pub(crate) canonical_json: String,
     pub(crate) document: ProfileDocument,
@@ -56,6 +56,15 @@ pub struct ValidatedSingBoxProfile {
     proxy_selections: std::collections::BTreeMap<String, String>,
     pub(crate) dns_projection: DnsProjection,
     pub(crate) release_packet_evidence_case: Option<ReleasePacketEvidenceCase>,
+}
+
+impl std::fmt::Debug for ValidatedSingBoxProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatedSingBoxProfile")
+            .field("digest", &self.digest)
+            .field("outbound_count", &self.document.outbounds.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +198,88 @@ impl ValidatedSingBoxProfile {
             .insert(group.to_owned(), selected.to_owned());
         Ok(profile)
     }
+
+    /// Retain valid manual choices. Removed groups or members use the new
+    /// document's default and are explicitly reported for the update receipt.
+    pub fn inherit_proxy_selections(
+        &self,
+        previous: &Self,
+    ) -> Result<(Self, Vec<String>), ConfigError> {
+        let mut profile = self.clone();
+        let mut reset_groups = Vec::new();
+        for (group, selected) in previous.proxy_selections() {
+            let supported = profile.document.outbounds.iter().any(|outbound| {
+                matches!(
+                    outbound,
+                    crate::profile::ProfileOutbound::Selector { tag, outbounds, .. }
+                        if tag == group && outbounds.contains(selected)
+                )
+            });
+            if supported {
+                profile = profile.with_selected_outbound(group, selected)?;
+            } else {
+                reset_groups.push(group.clone());
+            }
+        }
+        Ok((profile, reset_groups))
+    }
+
+    /// Editing routing/DNS may bind existing secrets to a new profile digest,
+    /// but cannot silently send those secrets to a changed remote transport.
+    pub fn can_rebind_credentials_from(&self, previous: &Self) -> bool {
+        self.document.outbounds.iter().all(|outbound| {
+            outbound.credential_refs().is_empty()
+                || previous
+                    .document
+                    .outbounds
+                    .iter()
+                    .any(|old| old == outbound)
+        })
+    }
+
+    /// Provider replacement can add fresh references while retaining unchanged
+    /// local nodes. Reusing an old reference on a changed transport is rejected.
+    pub fn retained_credential_references(
+        &self,
+        previous: &Self,
+    ) -> Result<Vec<CredentialRef>, ConfigError> {
+        let old = previous
+            .credential_references()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let nodes = previous
+            .document
+            .outbounds
+            .iter()
+            .map(|node| (node.tag(), node))
+            .collect::<BTreeMap<_, _>>();
+        let mut retained = std::collections::BTreeSet::new();
+        for outbound in &self.document.outbounds {
+            let references = outbound.credential_refs();
+            if references.iter().any(|reference| old.contains(*reference)) {
+                if !nodes
+                    .get(outbound.tag())
+                    .is_some_and(|node| *node == outbound)
+                {
+                    return Err(ConfigError::UnsupportedPolicyShape { path:"$.outbounds".into(), reason:"an existing credential cannot be reused by a changed transport; import fresh credentials for that node".into() });
+                }
+                retained.extend(references.into_iter().cloned());
+            }
+        }
+        Ok(retained.into_iter().collect())
+    }
+
+    pub fn credential_references_for_outbounds(
+        &self,
+        tags: &std::collections::BTreeSet<String>,
+    ) -> Vec<CredentialRef> {
+        self.document
+            .outbounds
+            .iter()
+            .filter(|outbound| tags.contains(outbound.tag()))
+            .flat_map(|outbound| outbound.credential_refs().into_iter().cloned())
+            .collect()
+    }
 }
 
 fn reject_forbidden_keys(
@@ -222,12 +313,19 @@ fn reject_forbidden_keys(
                     });
                 }
                 let group_probe_url = key == "url"
-                    && map.get("type").and_then(Value::as_str) == Some("urltest")
+                    && matches!(
+                        map.get("type").and_then(Value::as_str),
+                        Some("urltest" | "fallback" | "loadbalance")
+                    )
                     && path
                         .strip_prefix("$.outbounds[")
                         .and_then(|index| index.strip_suffix(']'))
                         .is_some_and(|index| index.parse::<usize>().is_ok());
-                if is_forbidden_profile_key(key) && !group_probe_url && !policy_tag {
+                let provider_url = key == "url"
+                    && (path.starts_with("$.providers.proxies[")
+                        || path.starts_with("$.providers.rules["));
+                if is_forbidden_profile_key(key) && !group_probe_url && !policy_tag && !provider_url
+                {
                     return Err(ConfigError::ForbiddenKey {
                         path: path.to_string(),
                         key: key.clone(),

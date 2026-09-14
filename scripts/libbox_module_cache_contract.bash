@@ -10,8 +10,13 @@ LIBBOX_GOMOBILE_BIND_PACKAGES=(
 )
 
 LIBBOX_RACE_TEST_PACKAGES=(
+  "./common/tls"
+  "./common/urltest"
+  "./adapter/outbound"
+  "./protocol/group"
   "./protocol/socks"
   "./dns"
+  "./dns/transport/hosts"
   "./option"
 )
 
@@ -34,10 +39,16 @@ LIBBOX_COMPILE_TEST_PACKAGES=(
 )
 
 LIBBOX_VET_PACKAGES=(
+  "./common/tls"
+  "./common/urltest"
+  "./adapter/outbound"
+  "./protocol/group"
   "./protocol/socks"
   "."
   "./adapter"
   "./dns"
+  "./dns/transport/hosts"
+  "./route"
   "./option"
   "./common/dialer"
   "./daemon"

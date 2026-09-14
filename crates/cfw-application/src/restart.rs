@@ -20,6 +20,9 @@ pub struct EngineRestartSpec {
 }
 
 impl EngineRestartSpec {
+    pub(crate) fn replace_saved_selections(&mut self, profile: ValidatedSingBoxProfile) {
+        self.profile = profile;
+    }
     pub(crate) fn accepted(
         mode: EngineMode,
         profile_id: String,
@@ -73,7 +76,8 @@ impl EngineRestartSpec {
         }
         match (&snapshot.state, self.mode) {
             (EngineState::Off, EngineMode::Off) => self.config_digest.is_none(),
-            (EngineState::ProxyActive { runtime }, EngineMode::SystemProxy) => {
+            (EngineState::LocalProxyActive { runtime }, EngineMode::LocalProxy)
+            | (EngineState::ProxyActive { runtime }, EngineMode::SystemProxy) => {
                 runtime.ready
                     && runtime.owner == EngineOwner::ProxyAgent
                     && runtime.context.generation == self.generation

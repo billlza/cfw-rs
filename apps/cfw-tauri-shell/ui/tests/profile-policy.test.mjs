@@ -4,13 +4,15 @@ import test from "node:test";
 import { savedProfilePolicy } from "../src/profile-policy.js";
 
 test("automatic groups remain automatic while offline and do not invent a selected or healthy node", () => {
+  for (const [type, label] of [["urltest", "URLTest"], ["fallback", "Fallback"]]) {
   const view = savedProfilePolicy({ id: "profile", name: "Auto", proxy_selections: { Auto: "Node" }, body: JSON.stringify({ outbounds: [
     { type: "socks5", tag: "Node" },
-    { type: "urltest", tag: "Auto", outbounds: ["Node"] },
+    { type, tag: "Auto", outbounds: ["Node"] },
   ] }) });
-  assert.equal(view.groups[0].type, "URLTest");
+  assert.equal(view.groups[0].type, label);
   assert.equal(view.groups[0].now, null);
   assert.equal(view.groups[0].options[0].delay, null);
+  }
 });
 
 test("saved nodes and rules remain visible without inventing live state or exposing credentials", () => {

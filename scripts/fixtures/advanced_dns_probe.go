@@ -48,11 +48,16 @@ func dnsCertificate() (tls.Certificate, *x509.CertPool) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: private}, roots
 }
 
-func dnsFixture(kind, address string, certificate tls.Certificate) (int, func()) {
+func dnsFixture(kind, address string, certificate tls.Certificate, handlers ...func([]byte) []byte) (int, func()) {
+	require(len(handlers) <= 1, "one DNS response handler")
+	answerQuery := dnsAnswer
+	if len(handlers) == 1 {
+		answerQuery = handlers[0]
+	}
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13}
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, request *dns.Msg) {
 		var answer dns.Msg
-		require(answer.Unpack(dnsAnswer(checked(request.Pack()))) == nil, "DNS answer decode")
+		require(answer.Unpack(answerQuery(checked(request.Pack()))) == nil, "DNS answer decode")
 		require(w.WriteMsg(&answer) == nil, "DNS answer write")
 	})
 	if kind == "udp" || kind == "tcp" || kind == "tls" {
@@ -121,7 +126,7 @@ func dnsFixture(kind, address string, certificate tls.Certificate) (int, func())
 						body := make([]byte, size)
 						_, err = io.ReadFull(stream, body)
 						require(err == nil, "DoQ body")
-						answer := dnsAnswer(body)
+						answer := answerQuery(body)
 						require(binary.Write(stream, binary.BigEndian, uint16(len(answer))) == nil, "DoQ response length")
 						_, err = stream.Write(answer)
 						require(err == nil, "DoQ response")
@@ -142,7 +147,7 @@ func dnsFixture(kind, address string, certificate tls.Certificate) (int, func())
 		}
 		require(len(payload) <= 4096, "DoH body bound")
 		w.Header().Set("Content-Type", "application/dns-message")
-		_, err := w.Write(dnsAnswer(payload))
+		_, err := w.Write(answerQuery(payload))
 		require(err == nil, "DoH response")
 	})
 	if kind == "https" {

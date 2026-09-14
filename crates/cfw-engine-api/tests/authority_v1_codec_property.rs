@@ -237,7 +237,9 @@ fn build_command(choices: &CaseChoices) -> Command {
         4 => {
             let (owner_role, packet_pump_limits) = match mode {
                 AuthorityMode::Tunnel => (AuthorityRole::Provider, Some(packet_pump_limits())),
-                AuthorityMode::SystemProxy => (AuthorityRole::ProxyAgent, None),
+                AuthorityMode::LocalProxy | AuthorityMode::SystemProxy => {
+                    (AuthorityRole::ProxyAgent, None)
+                }
             };
             Command::AttestReady(ReadyAttestation {
                 lease_id,
@@ -245,7 +247,11 @@ fn build_command(choices: &CaseChoices) -> Command {
                 operation,
                 owner_role,
                 packet_pump_limits,
-                ready_flags: 0b111,
+                ready_flags: if mode == AuthorityMode::LocalProxy {
+                    0b011
+                } else {
+                    0b111
+                },
                 runtime_digest: digest_from(choices.entropy, 6),
             })
         }
@@ -652,7 +658,7 @@ fn canonical_bounded_protocol_round_trips_and_rejects_malformed() {
         covered_commands.insert(choices.command_index);
         match mode_for(&choices) {
             AuthorityMode::Tunnel => tunnel_cases += 1,
-            AuthorityMode::SystemProxy => proxy_cases += 1,
+            AuthorityMode::LocalProxy | AuthorityMode::SystemProxy => proxy_cases += 1,
         }
         successful_cases += 1;
     }

@@ -235,6 +235,15 @@ pub trait NativeBridge: Send + Sync + 'static {
     /// observation. Simultaneous owners or unverified native state are errors.
     fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus>;
 
+    fn check_configuration(&self, request: EngineStartRequest) -> NativeBridgeFuture<'_, ()>;
+
+    fn start_local_proxy(
+        &self,
+        request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity>;
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()>;
+
     fn start_system_proxy(
         &self,
         request: EngineStartRequest,
@@ -279,8 +288,34 @@ impl<B> AppleNetworkBackend<B> {
 }
 
 impl<B: NativeBridge> EngineBackend for AppleNetworkBackend<B> {
+    fn check_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.bridge
+                .check_configuration(request)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
         Box::pin(async move { self.bridge.query_status().await.map_err(map_bridge_error) })
+    }
+
+    fn start_local_proxy(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
+        Box::pin(async move {
+            self.bridge
+                .start_local_proxy(request)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.bridge
+                .stop_local_proxy(context)
+                .await
+                .map_err(map_bridge_error)
+        })
     }
 
     fn start_system_proxy(
@@ -385,6 +420,20 @@ impl MissingNativeBridge {
 }
 
 impl NativeBridge for MissingNativeBridge {
+    fn check_configuration(&self, _request: EngineStartRequest) -> NativeBridgeFuture<'_, ()> {
+        Self::unavailable()
+    }
+    fn start_local_proxy(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+        Self::unavailable()
+    }
+
+    fn stop_local_proxy(&self, _context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+        Self::unavailable()
+    }
+
     fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
         Self::unavailable()
     }
@@ -455,6 +504,19 @@ mod tests {
     }
 
     impl NativeBridge for RecordingBridge {
+        fn check_configuration(&self, _request: EngineStartRequest) -> NativeBridgeFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn start_local_proxy(
+            &self,
+            request: EngineStartRequest,
+        ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+            self.start_system_proxy(request)
+        }
+
+        fn stop_local_proxy(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+            self.stop_system_proxy(context)
+        }
         fn authorize_tunnel_configuration(
             &self,
             request: EngineStartRequest,
@@ -572,6 +634,7 @@ mod tests {
 
     fn tunnel_request() -> EngineStartRequest {
         EngineStartRequest {
+            mode: cfw_engine_api::EngineStartMode::Tunnel,
             context: context(),
             credential_audience: cfw_engine_api::CredentialAudience::new(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

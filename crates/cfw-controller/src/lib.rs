@@ -320,12 +320,23 @@ impl ControllerClient {
         url: &str,
         timeout_ms: u16,
     ) -> Result<u32, ControllerError> {
+        self.proxy_delay_matching(proxy, url, timeout_ms, "").await
+    }
+
+    pub async fn proxy_delay_matching(
+        &self,
+        proxy: &str,
+        url: &str,
+        timeout_ms: u16,
+        expected_status: &str,
+    ) -> Result<u32, ControllerError> {
         self.proxy_delay_at(
             &format!(
-                "/proxies/{}/delay?url={}&timeout={}",
+                "/proxies/{}/delay?url={}&timeout={}&expected={}",
                 urlencoding::encode(proxy),
                 urlencoding::encode(url),
-                timeout_ms
+                timeout_ms,
+                urlencoding::encode(expected_status)
             ),
             timeout_ms,
         )
@@ -623,6 +634,9 @@ impl From<ProxiesResponse> for ProxiesSnapshot {
         let mut proxies = Vec::new();
 
         for (name, entry) in response.proxies {
+            if entry.hidden {
+                continue;
+            }
             if let Some(options) = entry.all.clone() {
                 groups.push(ProxyGroup {
                     name,
@@ -655,6 +669,7 @@ struct ProxiesResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct ProxyEntry {
+    hidden: bool,
     #[serde(rename = "type")]
     kind: String,
     all: Option<Vec<String>>,
@@ -667,6 +682,7 @@ impl Default for ProxyEntry {
     fn default() -> Self {
         Self {
             kind: "Unknown".into(),
+            hidden: false,
             all: None,
             now: None,
             udp: None,

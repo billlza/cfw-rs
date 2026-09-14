@@ -572,7 +572,9 @@ pub(crate) async fn recover_legacy_cutover(
     let active_digest = match journal.target {
         EngineMode::SystemProxy => journal.system_proxy_digest.as_str(),
         EngineMode::Tunnel => journal.tunnel_digest.as_str(),
-        EngineMode::Off | cfw_engine_api::EngineMode::TunnelSystemProxy => {
+        EngineMode::Off
+        | EngineMode::LocalProxy
+        | cfw_engine_api::EngineMode::TunnelSystemProxy => {
             unreachable!("journal rejects unsupported replacement modes")
         }
     };
@@ -670,7 +672,9 @@ pub(crate) async fn recover_legacy_cutover(
     let active_digest = match journal.target {
         EngineMode::SystemProxy => journal.system_proxy_digest.as_str(),
         EngineMode::Tunnel => journal.tunnel_digest.as_str(),
-        EngineMode::Off | cfw_engine_api::EngineMode::TunnelSystemProxy => {
+        EngineMode::Off
+        | EngineMode::LocalProxy
+        | cfw_engine_api::EngineMode::TunnelSystemProxy => {
             unreachable!("journal rejects unsupported replacement modes")
         }
     };
@@ -892,7 +896,7 @@ fn target_digest(request: &cfw_engine_api::CutoverPreflightRequest) -> &str {
     match request.target() {
         EngineMode::SystemProxy => &request.system_proxy_request().config_digest,
         EngineMode::Tunnel => &request.tunnel_request().config_digest,
-        EngineMode::Off | EngineMode::TunnelSystemProxy => {
+        EngineMode::Off | EngineMode::LocalProxy | EngineMode::TunnelSystemProxy => {
             unreachable!("cutover requests reject unsupported replacement modes")
         }
     }
@@ -923,7 +927,9 @@ fn require_replacement_active(
                 EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
                     cfw_engine_api::EngineOwner::PacketTunnelSystemExtension
                 }
-                EngineMode::Off => unreachable!("active target cannot be Off"),
+                EngineMode::Off | EngineMode::LocalProxy => {
+                    unreachable!("validated replacement target requires an OS integration")
+                }
             }
         && &runtime.context == expected_context
         && runtime.config_digest == expected_digest

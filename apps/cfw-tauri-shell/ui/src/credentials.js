@@ -7,13 +7,15 @@
 /// to send; secrets pass through it and are never stored in application state.
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const MAX_CREDENTIALS = 256;
-const MAX_VAULT_REFERENCES = 512;
+const MAX_CREDENTIALS = 2048;
+const MAX_VAULT_REFERENCES = 8192;
 const MAX_CREDENTIAL_SECRET_BYTES = 16 * 1024;
 
 export const CREDENTIAL_KINDS = Object.freeze([
   "socks5_username",
   "socks5_password",
+  "http_proxy_username",
+  "http_proxy_password",
   "shadowsocks_password",
   "vmess_uuid",
   "vless_uuid",
@@ -31,6 +33,8 @@ const KINDS = new Set(CREDENTIAL_KINDS);
 const CREDENTIAL_LABELS = Object.freeze({
   socks5_username: "SOCKS5 Username",
   socks5_password: "SOCKS5 Password",
+  http_proxy_username: "HTTP Proxy Username",
+  http_proxy_password: "HTTP Proxy Password",
   anytls_password: "AnyTLS Password",
   tuic_uuid: "TUIC UUID",
   tuic_password: "TUIC Password",
@@ -126,6 +130,10 @@ export function credentialProvisionBatch(requirements, secrets) {
     }
     if ((reference.kind === "socks5_username" || reference.kind === "socks5_password") && bytes > 255) {
       throw new TypeError(`${credentialLabel(reference.kind)} is larger than 255 UTF-8 bytes`);
+    }
+    if ((reference.kind === "http_proxy_username" && (bytes > 1024 || secret.includes(":")))
+      || (reference.kind === "http_proxy_password" && bytes > 4096)) {
+      throw new TypeError(`${credentialLabel(reference.kind)} is invalid`);
     }
     if (reference.kind === "wireguard_private_key" || reference.kind === "wireguard_pre_shared_key") {
       if (!/^[A-Za-z0-9+/]{43}=$/u.test(secret)) {

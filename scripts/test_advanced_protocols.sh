@@ -34,13 +34,23 @@ export GOPATH="$protocol_toolchains/go-workspace"
 export GOMODCACHE="$GOPATH/pkg/mod"
 export GOCACHE="$protocol_cache"
 configure_offline_go_environment
+export CC="$(/usr/bin/xcrun --find clang)"
+export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 protocol_go="$protocol_toolchains/go-$GO_VERSION/bin/go"
 cd "$protocol_source"
 "$protocol_go" test -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" ./protocol/group ./protocol/socks
 "$protocol_go" vet -tags "$LIBBOX_BUILD_TAGS" \
   "$repo_root/scripts/fixtures/advanced_protocol_probe.go" \
-  "$repo_root/scripts/fixtures/advanced_dns_probe.go"
+  "$repo_root/scripts/fixtures/advanced_dns_probe.go" \
+  "$repo_root/scripts/fixtures/advanced_group_probe.go" \
+  "$repo_root/scripts/fixtures/advanced_dns_bootstrap.go" \
+  "$repo_root/scripts/fixtures/advanced_lan_probe.go" \
+  "$repo_root/scripts/fixtures/advanced_http_probe.go"
 "$protocol_go" run -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" \
   "$repo_root/scripts/fixtures/advanced_protocol_probe.go" \
   "$repo_root/scripts/fixtures/advanced_dns_probe.go" \
+  "$repo_root/scripts/fixtures/advanced_group_probe.go" \
+  "$repo_root/scripts/fixtures/advanced_dns_bootstrap.go" \
+  "$repo_root/scripts/fixtures/advanced_lan_probe.go" \
+  "$repo_root/scripts/fixtures/advanced_http_probe.go" \
   "$repo_root/target/debug/examples/project-profile" "$protocol_address"

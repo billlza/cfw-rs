@@ -7,7 +7,7 @@
 use std::fmt;
 
 use cfw_engine_api::{
-    CredentialProvision, CredentialProvisionRequest, CredentialVaultError,
+    CredentialProvision, CredentialProvisionRequest, CredentialRebindRequest, CredentialVaultError,
     CredentialVaultProvisioner, CredentialVaultReceipt,
 };
 use cfw_singbox_config::{CredentialSecret, ValidatedSingBoxProfile};
@@ -19,6 +19,31 @@ pub(super) enum ImportedCredentialProvisionAttemptError {
     InvalidRequest(String),
     Vault(CredentialVaultError),
     ReceiptAudienceMismatch,
+}
+
+/// Rebinding is immutable too. Only an unknown native outcome permits a single
+/// exact replay; both successful paths must attest the requested audience.
+pub(super) async fn rebind_with_exact_replay(
+    vault: &impl CredentialVaultProvisioner,
+    request: CredentialRebindRequest,
+) -> Result<(), String> {
+    let audience = request.audience().clone();
+    let receipt = match vault.rebind_profile_credentials(request.clone()).await {
+        Ok(receipt) => receipt,
+        Err(CredentialVaultError::OutcomeUnknown) => vault
+            .rebind_profile_credentials(request)
+            .await
+            .map_err(|error| {
+                format!("credential rebind remains unconfirmed after one exact replay: {error}")
+            })?,
+        Err(error) => return Err(format!("credential rebind failed: {error}")),
+    };
+    if receipt.profile_id != audience.profile_id()
+        || receipt.profile_digest != audience.profile_digest()
+    {
+        return Err("credential rebind returned a different profile audience".into());
+    }
+    Ok(())
 }
 
 impl ImportedCredentialProvisionAttemptError {

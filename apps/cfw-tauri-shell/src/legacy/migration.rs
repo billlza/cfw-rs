@@ -136,6 +136,7 @@ pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
                     cfw_engine_api::EngineMode::SystemProxy => &journal.system_proxy_digest,
                     cfw_engine_api::EngineMode::Tunnel => &journal.tunnel_digest,
                     cfw_engine_api::EngineMode::Off
+                    | cfw_engine_api::EngineMode::LocalProxy
                     | cfw_engine_api::EngineMode::TunnelSystemProxy => {
                         unreachable!("journal rejects unsupported replacement modes")
                     }

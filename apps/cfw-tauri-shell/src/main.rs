@@ -1,5 +1,7 @@
+mod automation;
 mod bootstrap;
 mod commands;
+use automation::{read_automation_settings, request_wifi_name_access, write_automation_settings};
 mod engine;
 mod launch;
 mod legacy;
@@ -37,14 +39,16 @@ use commands::{
     preview_legacy_cfw_profile_migration, profile_credential_presence,
     profile_credential_requirements, profile_qrcode_svg, profiles_snapshot, providers_snapshot,
     provision_profile_credentials, read_profile_text, read_runtime_config_text,
-    read_settings_snapshot, refresh_tray_menu, reset_settings_snapshot, reveal_home_directory,
-    reveal_logs_directory, reveal_profile, rules_snapshot, save_profile_text, select_profile,
-    select_proxy, set_allow_lan, set_bind_address, set_launch_at_login_enabled, set_log_level,
+    read_runtime_settings_snapshot, read_settings_snapshot, refresh_tray_menu,
+    reset_settings_snapshot, reveal_home_directory, reveal_logs_directory, reveal_profile,
+    rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
+    set_bind_address, set_core_enabled, set_launch_at_login_enabled, set_log_level,
     set_mixin_enabled, set_proxy_mode, set_system_proxy_enabled, set_tun_enabled,
     start_connections_stream, start_log_stream, stop_connections_stream, stop_log_stream,
     system_proxy_state, test_proxy_delays, toggle_devtools, tun_runtime_state,
-    update_all_proxy_providers, update_all_rule_providers, update_geoip_database, update_profile,
-    update_profile_info, update_proxy_provider, update_rule_provider, write_settings_snapshot,
+    update_all_providers, update_all_proxy_providers, update_all_rule_providers,
+    update_geoip_database, update_profile, update_profile_info, update_proxy_provider,
+    update_rule_provider, write_runtime_settings_snapshot, write_settings_snapshot,
 };
 use engine::{
     build_managed_engine, engine_snapshot, prepare_legacy_cutover, start_engine_event_forwarder,
@@ -82,6 +86,7 @@ fn migration_handoff_command_allowed(command: &str) -> bool {
             | "quit_app"
             | "force_quit_app"
             | "read_settings_snapshot"
+            | "read_runtime_settings_snapshot"
             | "profiles_snapshot"
             | "profile_credential_requirements"
             | "profile_credential_presence"
@@ -177,7 +182,9 @@ fn main() {
         .manage(LegacyRetirementGate::default())
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
+        .manage(commands::ManagedProviders::default())
         .manage(TrayMenuState::default())
+        .manage(automation::ManagedAutomation::default())
         .manage(WindowBoundsManager::default())
         .manage(UpdaterSecurityState::default());
     // The explicit handoff instance must coexist with the still-running 0.3.5
@@ -199,6 +206,11 @@ fn main() {
         boot_payload,
         quit_app,
         read_settings_snapshot,
+        read_runtime_settings_snapshot,
+        write_runtime_settings_snapshot,
+        read_automation_settings,
+        write_automation_settings,
+        request_wifi_name_access,
         write_settings_snapshot,
         legacy_retirement_status,
         begin_migration_handoff,
@@ -227,6 +239,7 @@ fn main() {
         health_check_proxy_provider,
         health_check_all_proxy_providers,
         update_proxy_provider,
+        update_all_providers,
         update_all_proxy_providers,
         update_rule_provider,
         update_all_rule_providers,
@@ -253,6 +266,7 @@ fn main() {
         update_geoip_database,
         preview_legacy_cfw_profile_migration,
         commit_legacy_cfw_profile_migration,
+        set_core_enabled,
         set_system_proxy_enabled,
         system_proxy_state,
         set_tun_enabled,
@@ -320,6 +334,11 @@ fn main() {
                     .map_err(std::io::Error::other)?;
             } else {
                 build_tray(app.handle())?;
+                if let Err(error) = automation::initialize(app.handle()) {
+                    emit_startup_error(app.handle(), "automation_initialization_failed", error);
+                }
+                commands::start_provider_refresh(app.handle().clone())
+                    .map_err(std::io::Error::other)?;
                 if let Err(error) = initialize_window_bounds(app.handle()) {
                     emit_startup_error(app.handle(), "window_bounds_restore_failed", error);
                 }
@@ -391,6 +410,7 @@ mod tests {
             "apply_active_profile",
             "write_settings_snapshot",
             "select_profile",
+            "set_core_enabled",
             "set_system_proxy_enabled",
             "set_tun_enabled",
             "check_for_updates",

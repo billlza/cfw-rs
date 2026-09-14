@@ -3,14 +3,25 @@
 //! The application owns listeners, logging, experimental APIs, and privileged
 //! selectors. Imported profiles may only describe routing and outbound policy.
 
+mod capacity;
 mod controller;
+pub use capacity::{
+    MAX_CREDENTIAL_VAULT_BINDINGS, MAX_GROUP_MEMBERSHIPS, MAX_PROXY_GROUPS, MAX_PROXY_NODES,
+    MAX_SUBSCRIPTION_SOURCE_BYTES,
+};
 mod credentials;
 mod dns_policy;
+mod domain_pattern;
+mod engine_settings;
+mod lan;
+pub use engine_settings::{EngineLogLevel, LanProxySettings, RuntimePreferences};
 mod error;
 mod profile;
 mod profile_projection;
 mod profile_validation;
 mod projection;
+mod providers;
+pub use domain_pattern::DomainPattern;
 mod release_dns;
 mod release_packet;
 mod routing;
@@ -48,3 +59,10 @@ pub use validation::{
 
 #[cfg(test)]
 mod tests;
+
+pub use providers::{
+    CompiledProviderFilter, MAX_PROVIDER_RULES, MAX_PROVIDERS, ProviderCatalog, ProviderFilter,
+    ProviderGroup, ProviderHealthCheck, ProviderMember, ProviderRule, ProviderRuleBehavior,
+    ProviderRuleFormat, ProviderSource, ProxyProvider, RuleProvider, validate_expected_status,
+};
+pub use routing::RuleKind;

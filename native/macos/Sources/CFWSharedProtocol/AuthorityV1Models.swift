@@ -6,9 +6,9 @@ public enum AuthorityV1Limits {
   public static let minimumMinor: UInt16 = 1
   public static let supportedFeatureBits: UInt64 = 0
   public static let maximumEnvelopeBytes = 1_048_576
-  public static let maximumConfigurationBytes = 768 * 1_024
+  public static let maximumConfigurationBytes = EngineCapacity.maximumConfigurationBytes
   public static let maximumTotalSecretBytes = 256 * 1_024
-  public static let maximumCredentialSlots = 256
+  public static let maximumCredentialSlots = EngineCapacity.maximumCredentialSlots
   public static let maximumIndividualSecretBytes = 16 * 1_024
   public static let maximumReadOnlyRequests = 64
   public static let maximumMutatingTransactions = 1
@@ -118,8 +118,11 @@ public struct AuthorityProtocolVersion: Codable, Equatable, Sendable {
 }
 
 public enum AuthorityMode: String, Codable, CaseIterable, Sendable {
+  case localProxy = "local_proxy"
   case systemProxy = "system_proxy"
   case tunnel
+
+  public var isProxyAgent: Bool { self == .localProxy || self == .systemProxy }
 }
 
 public enum AuthorityRole: String, Codable, CaseIterable, Hashable, Sendable {
@@ -443,6 +446,10 @@ public struct ReadyFlags: OptionSet, Codable, Equatable, Sendable {
   public static let transportReady = Self(rawValue: 1 << 1)
   public static let operatingSystemStateReady = Self(rawValue: 1 << 2)
   public static let all: Self = [.libboxStarted, .transportReady, .operatingSystemStateReady]
+
+  public static func required(for mode: AuthorityMode) -> Self {
+    mode == .localProxy ? [.libboxStarted, .transportReady] : .all
+  }
 }
 
 public struct PacketPumpLimits: Codable, Equatable, Sendable {
@@ -489,7 +496,7 @@ public struct ReadyAttestation: Codable, Equatable, Sendable {
     readyFlags: ReadyFlags, packetPumpLimits: PacketPumpLimits?,
     monotonicTimestamp: UInt64
   ) throws {
-    guard ownerRole != .host, readyFlags == .all, monotonicTimestamp > 0,
+    guard ownerRole != .host, readyFlags == .required(for: operation.mode), monotonicTimestamp > 0,
       (operation.mode == .tunnel) == (packetPumpLimits != nil),
       operation.mode == .tunnel ? ownerRole == .provider : ownerRole == .proxyAgent
     else { throw AuthorityV1ValidationError.invalidAttestation }
@@ -691,7 +698,7 @@ public final class PreparedStart: @unchecked Sendable {
     expiresMonotonic: UInt64, preferenceDescriptorSHA256: SHA256Digest
   ) throws {
     guard (operation.mode == .tunnel) == (ticket != nil),
-      (operation.mode == .systemProxy) == (ownerCapability != nil),
+      operation.mode.isProxyAgent == (ownerCapability != nil),
       (ticket != nil) != (ownerCapability != nil), expiresMonotonic > 0,
       preferenceDescriptorSHA256 == operation.identitySHA256
     else { throw AuthorityV1ValidationError.invalidState }
@@ -725,7 +732,7 @@ public struct ProxyOwnerContext: Codable, Equatable, Sendable {
   public let leaseID: AuthorityIdentifier
 
   public init(operation: OperationContext, leaseID: AuthorityIdentifier) throws {
-    guard operation.mode == .systemProxy else {
+    guard operation.mode.isProxyAgent else {
       throw AuthorityV1ValidationError.invalidContext
     }
     self.operation = operation

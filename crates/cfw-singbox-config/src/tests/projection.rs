@@ -132,7 +132,8 @@ fn projections_have_exactly_one_application_owned_inbound() {
         assert_ne!(server["server"], TUNNEL_ADDRESS_PLAN.ipv4_dns_peer);
         assert_ne!(server["server"], TUNNEL_ADDRESS_PLAN.ipv6_dns_peer);
     }
-    assert_eq!(dns["rules"][0]["ip_accept_any"], true);
+    assert_eq!(dns["rules"][0]["domain_regex"], ".*");
+    assert_eq!(dns["rules"][0]["retry_on_error"], true);
     assert_eq!(dns["rules"][0]["server"], "cfw-authenticated-dns-0");
     assert_eq!(
         tunnel_json["route"]["default_domain_resolver"],
@@ -1124,14 +1125,14 @@ fn rust_tunnel_address_plan_matches_the_cross_language_contract() {
 #[test]
 fn configuration_identity_schema_matches_the_engine_owner_contract() {
     let contract: EngineOwnerSchemaContract = serde_json::from_str(include_str!(
-        "../../../../contracts/engine-owner-v6/schema-policy.json"
+        "../../../../contracts/engine-owner-v7/schema-policy.json"
     ))
     .expect("engine owner schema contract");
     assert_eq!(
         contract.configuration_identity_schema_version,
         CONFIGURATION_IDENTITY_SCHEMA_VERSION
     );
-    assert_eq!(contract.engine_owner_schema_version, 6);
+    assert_eq!(contract.engine_owner_schema_version, 7);
 
     let projected = ValidatedSingBoxProfile::direct()
         .project(

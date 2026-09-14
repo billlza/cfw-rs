@@ -1,9 +1,9 @@
-import CFWSharedProtocol
 import CryptoKit
 import Foundation
 import Testing
 
 @testable import CFWGlobalAuthority
+@testable import CFWSharedProtocol
 
 private final class ServiceJournal: AuthorityJournalCommitting, @unchecked Sendable {
   private let lock = NSLock()
@@ -313,4 +313,78 @@ func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
   #expect(objects.journal.states.first?.epoch == 0)
   #expect(objects.journal.states.first?.generation == 0)
   #expect(objects.journal.states.last?.transition == .prepare)
+}
+
+@Test func localProxyCapabilityBindsModeAndRequiresExactStoppedProof() throws {
+  let objects = try serviceObjects()
+  let host = try servicePeer()
+  let owner = try servicePeer(.proxyAgent)
+  let ownerID = UUID()
+  let bytes = Data(#"{"outbounds":[]}"#.utf8)
+  let digest = try serviceDigest(bytes)
+  let operation = try OperationContext(
+    operationID: AuthorityIdentifier(UUID()),
+    root: RootContext(installationID: AuthorityIdentifier(UUID()), epoch: 1, generation: 1),
+    mode: .localProxy, configSHA256: digest, identitySHA256: digest,
+    ownerUID: 501, authorityRevision: 1)
+  let configuration = try AuthorityConfigurationDescriptor(
+    byteCount: UInt32(bytes.count), configSHA256: digest, identitySHA256: digest,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: digest),
+    credentialSlots: [], tunnelOptions: nil)
+  let prepared = try objects.core.prepare(
+    PrepareStartRequest(operation: operation, expectedRevision: 1, configuration: configuration),
+    configuration: bytes, secretPayload: nil, peer: host)
+  defer { prepared.erase() }
+  #expect(prepared.ticket == nil)
+  let capability = try #require(prepared.ownerCapability)
+  let substituted = try OperationContext(
+    operationID: operation.operationID, root: operation.root, mode: .systemProxy,
+    configSHA256: operation.configSHA256, identitySHA256: operation.identitySHA256,
+    ownerUID: operation.ownerUID, authorityRevision: operation.authorityRevision)
+  let wrongCapability = try capability.withUnsafeBytes { try OwnerCapability(copying: Data($0)) }
+  #expect(throws: AuthorityDomainError(code: .ticketInvalid)) {
+    try objects.core.bindProxyOwner(
+      BindProxyOwnerRequest(
+        operation: substituted, leaseID: prepared.leaseID, capability: wrongCapability),
+      peer: owner, peerID: ownerID)
+  }
+  let lease = try objects.core.bindProxyOwner(
+    BindProxyOwnerRequest(operation: operation, leaseID: prepared.leaseID, capability: capability),
+    peer: owner, peerID: ownerID)
+  #expect(lease.operation.mode == .localProxy)
+  #expect(throws: AuthorityV1ValidationError.invalidAttestation) {
+    try ReadyAttestation(
+      operation: operation, leaseID: lease.leaseID, runtimeDigest: digest, ownerRole: .proxyAgent,
+      readyFlags: .all, packetPumpLimits: nil, monotonicTimestamp: 1001)
+  }
+  _ = try objects.core.attestReady(
+    ReadyAttestation(
+      operation: operation, leaseID: lease.leaseID, runtimeDigest: digest, ownerRole: .proxyAgent,
+      readyFlags: [.libboxStarted, .transportReady], packetPumpLimits: nil, monotonicTimestamp: 1001
+    ),
+    peer: owner, peerID: ownerID)
+  let active = try objects.core.snapshot(peer: host)
+  #expect(active.state == .active)
+  let stopping = try objects.core.beginStop(
+    BeginStopRequest(
+      operation: operation, leaseID: lease.leaseID, expectedRevision: active.revision),
+    peer: host)
+  #expect(throws: AuthorityDomainError(code: .cleanupUnproven)) {
+    try objects.core.completeStop(
+      CompleteStopRequest(
+        operation: operation, leaseID: lease.leaseID, expectedRevision: stopping.revision),
+      peer: host)
+  }
+  _ = try objects.core.attestStopped(
+    StoppedAttestation(
+      operation: operation, leaseID: lease.leaseID,
+      libboxStopped: true, transportClosed: true, osRestored: true, monotonicTimestamp: 1002),
+    peer: owner, peerID: ownerID)
+  let stopped = try objects.core.snapshot(peer: host)
+  _ = try objects.core.completeStop(
+    CompleteStopRequest(
+      operation: operation, leaseID: lease.leaseID, expectedRevision: stopped.revision),
+    peer: host)
+  #expect(try objects.core.snapshot(peer: host).state == .off)
+  #expect(objects.journal.states.contains { $0.mode == .localProxy && $0.state == .active })
 }

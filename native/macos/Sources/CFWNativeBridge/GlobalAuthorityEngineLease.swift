@@ -206,8 +206,7 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
     _ operation: OperationContext,
     descriptor: ConfigurationDescriptor
   ) -> Bool {
-    let expectedMode: AuthorityMode =
-      descriptor.slot == .systemProxy ? .systemProxy : .tunnel
+    let expectedMode = descriptor.slot.authorityMode
     return operation.mode == expectedMode
       && operation.root.installationID.rawValue == descriptor.installationID
       && operation.root.epoch == descriptor.epoch

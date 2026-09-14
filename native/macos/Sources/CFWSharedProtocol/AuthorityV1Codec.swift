@@ -262,7 +262,7 @@ extension AuthorityV1Codec {
     case .prepareStart(let value): return try tagged("prepare_start", value)
     case .bindProxyOwner(let value):
       try value.operation.validateAuthorityV1()
-      guard value.operation.mode == .systemProxy else {
+      guard value.operation.mode.isProxyAgent else {
         throw AuthorityV1ValidationError.invalidCapability
       }
       return ["kind": "bind_proxy_owner", "payload": try capabilityPayload(value)]
@@ -330,7 +330,7 @@ extension AuthorityV1Codec {
   {
     try exactKeys(payload, ["capability", "lease_id", "operation"])
     let operation = try decodeObject(OperationContext.self, payload["operation"] as Any)
-    guard operation.mode == .systemProxy else {
+    guard operation.mode.isProxyAgent else {
       throw AuthorityV1ValidationError.invalidCapability
     }
     return BindProxyOwnerRequest(

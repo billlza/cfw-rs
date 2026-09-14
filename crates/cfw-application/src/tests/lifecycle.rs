@@ -301,7 +301,8 @@ async fn unavailable_lineage_stops_reported_runtimes_instead_of_adopting_them() 
         ),
     ] {
         let expected_context = match &status {
-            NativeEngineStatus::SystemProxy { runtime }
+            NativeEngineStatus::LocalProxy { runtime }
+            | NativeEngineStatus::SystemProxy { runtime }
             | NativeEngineStatus::Tunnel { runtime } => runtime.context.clone(),
             NativeEngineStatus::Off => unreachable!("test status is active"),
         };
@@ -843,6 +844,21 @@ async fn backend_errors_do_not_fallback_to_another_mode() {
     struct FailingBackend;
 
     impl EngineBackend for FailingBackend {
+        fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn start_local_proxy(
+            &self,
+            request: EngineStartRequest,
+        ) -> BackendFuture<'_, RuntimeIdentity> {
+            self.start_system_proxy(request)
+        }
+
+        fn stop_local_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
+            self.stop_system_proxy(context)
+        }
+
         fn query_status(&self) -> BackendFuture<'_, cfw_engine_api::NativeEngineStatus> {
             Box::pin(async { Ok(cfw_engine_api::NativeEngineStatus::Off) })
         }

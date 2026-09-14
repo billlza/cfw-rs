@@ -1,61 +1,91 @@
 diff --git a/adapter/dns.go b/adapter/dns.go
-index 23fbc9def440275f8e597d8a40f178004f1f4a95..fbb417ebf52b12eadf8c042a369e9c0f4e152246 100644
+index 23fbc9def440275f8e597d8a40f178004f1f4a95..eae4011975be12fa79ce531df40d3a2c7217b521 100644
 --- a/adapter/dns.go
 +++ b/adapter/dns.go
-@@ -31,12 +31,13 @@ type DNSClient interface {
- }
- 
- type DNSQueryOptions struct {
+@@ -25,0 +26,4 @@ type DNSRouter interface {
++type DNSPolicyValidator interface {
++	ValidateDNSPolicy(string) error
++}
++
+@@ -34,6 +38,9 @@ type DNSQueryOptions struct {
 -	Transport      DNSTransport
 -	Strategy       C.DomainStrategy
 -	LookupStrategy C.DomainStrategy
 -	DisableCache   bool
 -	RewriteTTL     *uint32
 -	ClientSubnet   netip.Prefix
-+	Transport         DNSTransport
-+	FallbackTransport DNSTransport
-+	Strategy          C.DomainStrategy
-+	LookupStrategy    C.DomainStrategy
-+	DisableCache      bool
-+	RewriteTTL        *uint32
-+	ClientSubnet      netip.Prefix
- }
- 
- func DNSQueryOptionsFrom(ctx context.Context, options *option.DomainResolveOptions) (*DNSQueryOptions, error) {
-@@ -48,12 +49,20 @@ func DNSQueryOptionsFrom(ctx context.Context, options *option.DomainResolveOptio
- 	if !loaded {
- 		return nil, E.New("domain resolver not found: " + options.Server)
- 	}
-+	var fallbackTransport DNSTransport
-+	if options.FallbackServer != "" {
-+		fallbackTransport, loaded = transportManager.Transport(options.FallbackServer)
-+		if !loaded {
-+			return nil, E.New("domain resolver fallback not found: " + options.FallbackServer)
++	Policy             string
++	Transport          DNSTransport
++	FallbackTransport  DNSTransport // compatibility for callers of the original two-resolver API
++	FallbackTransports []DNSTransport
++	Strategy           C.DomainStrategy
++	LookupStrategy     C.DomainStrategy
++	DisableCache       bool
++	RewriteTTL         *uint32
++	ClientSubnet       netip.Prefix
+@@ -46,0 +54,14 @@ func DNSQueryOptionsFrom(ctx context.Context, options *option.DomainResolveOptio
++	if options.Policy != "" {
++		validator, ok := service.FromContext[DNSRouter](ctx).(DNSPolicyValidator)
++		if !ok {
++			return nil, E.New("named DNS policies are unavailable")
 +		}
++		if err := validator.ValidateDNSPolicy(options.Policy); err != nil {
++			return nil, err
++		}
++		return &DNSQueryOptions{
++			Policy: options.Policy, Strategy: C.DomainStrategy(options.Strategy),
++			DisableCache: options.DisableCache, RewriteTTL: options.RewriteTTL,
++			ClientSubnet: options.ClientSubnet.Build(netip.Prefix{}),
++		}, nil
 +	}
- 	return &DNSQueryOptions{
+@@ -50,0 +72,4 @@ func DNSQueryOptionsFrom(ctx context.Context, options *option.DomainResolveOptio
++	fallbackTransports, err := ResolveDNSFallbacks(transportManager, options.FallbackTags())
++	if err != nil {
++		return nil, err
++	}
+@@ -52,5 +77,6 @@ func DNSQueryOptionsFrom(ctx context.Context, options *option.DomainResolveOptio
 -		Transport:    transport,
 -		Strategy:     C.DomainStrategy(options.Strategy),
 -		DisableCache: options.DisableCache,
 -		RewriteTTL:   options.RewriteTTL,
 -		ClientSubnet: options.ClientSubnet.Build(netip.Prefix{}),
-+		Transport:         transport,
-+		FallbackTransport: fallbackTransport,
-+		Strategy:          C.DomainStrategy(options.Strategy),
-+		DisableCache:      options.DisableCache,
-+		RewriteTTL:        options.RewriteTTL,
-+		ClientSubnet:      options.ClientSubnet.Build(netip.Prefix{}),
- 	}, nil
- }
- 
++		Transport:          transport,
++		FallbackTransports: fallbackTransports,
++		Strategy:           C.DomainStrategy(options.Strategy),
++		DisableCache:       options.DisableCache,
++		RewriteTTL:         options.RewriteTTL,
++		ClientSubnet:       options.ClientSubnet.Build(netip.Prefix{}),
+@@ -95,0 +122,17 @@ type DNSTransportManager interface {
++
++// ResolveDNSFallbacks is shared by eager and deferred dialers. An unavailable
++// explicit resolver is configuration failure, never implicit system DNS.
++func ResolveDNSFallbacks(manager DNSTransportManager, tags []string) ([]DNSTransport, error) {
++	if len(tags) > 7 {
++		return nil, E.New("at most seven DNS fallbacks are supported")
++	}
++	transports := make([]DNSTransport, 0, len(tags))
++	for _, tag := range tags {
++		transport, loaded := manager.Transport(tag)
++		if !loaded {
++			return nil, E.New("domain resolver fallback not found: " + tag)
++		}
++		transports = append(transports, transport)
++	}
++	return transports, nil
++}
+diff --git a/adapter/inbound.go b/adapter/inbound.go
+index f047199e43b0f7e2fafd66d73ca0ae06f55503ac..f10ef67f789ac884ded49f518344f49f4c8767df 100644
+--- a/adapter/inbound.go
++++ b/adapter/inbound.go
+@@ -43,0 +44,3 @@ type InboundContext struct {
++	// Internal DNS sockets already have an explicitly bootstrapped destination.
++	// They use route selection, not inbound sniffing, resolution or DNS hijacking.
++	InternalDNS bool
 diff --git a/adapter/network.go b/adapter/network.go
-index 14fe46c8b6139d68ce22fe535402f80d5405941f..da679fe0d74e16382ccfec816a39a3377808e30b 100644
+index 14fe46c8b6139d68ce22fe535402f80d5405941f..ceb69578eecb18185a2edbb61ceca894dd216f6b 100644
 --- a/adapter/network.go
 +++ b/adapter/network.go
-@@ -35,14 +35,15 @@ type NetworkManager interface {
- }
- 
- type NetworkOptions struct {
+@@ -38,8 +38,9 @@ type NetworkOptions struct {
 -	BindInterface        string
 -	RoutingMark          uint32
 -	DomainResolver       string
@@ -64,101 +94,97 @@ index 14fe46c8b6139d68ce22fe535402f80d5405941f..da679fe0d74e16382ccfec816a39a337
 -	NetworkType          []C.InterfaceType
 -	FallbackNetworkType  []C.InterfaceType
 -	FallbackDelay        time.Duration
-+	BindInterface          string
-+	RoutingMark            uint32
-+	DomainResolver         string
-+	DomainResolverFallback string
-+	DomainResolveOptions   DNSQueryOptions
-+	NetworkStrategy        *C.NetworkStrategy
-+	NetworkType            []C.InterfaceType
-+	FallbackNetworkType    []C.InterfaceType
-+	FallbackDelay          time.Duration
- }
- 
- type InterfaceUpdateListener interface {
++	BindInterface           string
++	RoutingMark             uint32
++	DomainResolver          string
++	DomainResolverFallbacks []string
++	DomainResolveOptions    DNSQueryOptions
++	NetworkStrategy         *C.NetworkStrategy
++	NetworkType             []C.InterfaceType
++	FallbackNetworkType     []C.InterfaceType
++	FallbackDelay           time.Duration
+diff --git a/adapter/router.go b/adapter/router.go
+index 3d5310c4ee60f8a19b1b86d3c2e1b673624e3c04..58bfb264de374177a05a0ac6549b75cbce1ac5fd 100644
+--- a/adapter/router.go
++++ b/adapter/router.go
+@@ -32,0 +33,7 @@ type Router interface {
++// DNSConnectionRouter routes a DNS transport socket using the ordinary route
++// rules. It returns the selected outbound's real socket, without relay pipes.
++type DNSConnectionRouter interface {
++	DialDNSConnection(context.Context, string, M.Socksaddr, string) (net.Conn, error)
++	ListenDNSPacket(context.Context, M.Socksaddr, string) (net.PacketConn, error)
++}
++
 diff --git a/common/dialer/dialer.go b/common/dialer/dialer.go
-index 2ba559f9e0173b0f697141c46653bceca63e6c7d..3c0677cfb5a0b1580397cd1656987d3dc845cae9 100644
+index 2ba559f9e0173b0f697141c46653bceca63e6c7d..ca90913b0fe6051254254dbb42dd68e2c65d6367 100644
 --- a/common/dialer/dialer.go
 +++ b/common/dialer/dialer.go
-@@ -63,17 +63,27 @@ func NewWithOptions(options Options) (N.Dialer, error) {
- 		}
- 		var (
- 			server               string
-+			fallbackServer       string
- 			dnsQueryOptions      adapter.DNSQueryOptions
- 			resolveFallbackDelay time.Duration
- 		)
- 		if dialOptions.DomainResolver != nil && dialOptions.DomainResolver.Server != "" {
+@@ -57 +57 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+-	if options.RemoteIsDomain && (dialOptions.Detour == "" || options.ResolverOnDetour || dialOptions.DomainResolver != nil && dialOptions.DomainResolver.Server != "") {
++	if options.RemoteIsDomain && (dialOptions.Detour == "" || options.ResolverOnDetour || dialOptions.DomainResolver != nil && (dialOptions.DomainResolver.Server != "" || dialOptions.DomainResolver.Policy != "")) {
+@@ -65,0 +66 @@ func NewWithOptions(options Options) (N.Dialer, error) {
++			fallbackServers      []string
+@@ -69,3 +70,9 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+-		if dialOptions.DomainResolver != nil && dialOptions.DomainResolver.Server != "" {
 -			var transport adapter.DNSTransport
+-			if !options.DirectResolver {
++		if dialOptions.DomainResolver != nil && (dialOptions.DomainResolver.Server != "" || dialOptions.DomainResolver.Policy != "") {
 +			var (
-+				transport         adapter.DNSTransport
-+				fallbackTransport adapter.DNSTransport
++				transport          adapter.DNSTransport
++				fallbackTransports []adapter.DNSTransport
 +			)
- 			if !options.DirectResolver {
- 				var loaded bool
- 				transport, loaded = dnsTransport.Transport(dialOptions.DomainResolver.Server)
- 				if !loaded {
- 					return nil, E.New("domain resolver not found: " + dialOptions.DomainResolver.Server)
- 				}
-+				if dialOptions.DomainResolver.FallbackServer != "" {
-+					fallbackTransport, loaded = dnsTransport.Transport(dialOptions.DomainResolver.FallbackServer)
-+					if !loaded {
-+						return nil, E.New("domain resolver fallback not found: " + dialOptions.DomainResolver.FallbackServer)
-+					}
++			if options.DirectResolver && dialOptions.DomainResolver.Policy != "" {
++				return nil, E.New("DNS endpoint bootstrap requires an explicit resolver, not a policy cycle")
++			}
++			if !options.DirectResolver && dialOptions.DomainResolver.Policy == "" {
+@@ -76,0 +84,4 @@ func NewWithOptions(options Options) (N.Dialer, error) {
++				fallbackTransports, err = adapter.ResolveDNSFallbacks(dnsTransport, dialOptions.DomainResolver.FallbackTags())
++				if err != nil {
++					return nil, err
 +				}
- 			}
- 			var strategy C.DomainStrategy
- 			if dialOptions.DomainResolver.Strategy != option.DomainStrategy(C.DomainStrategyAsIS) {
-@@ -86,12 +96,14 @@ func NewWithOptions(options Options) (N.Dialer, error) {
- 				deprecated.Report(options.Context, deprecated.OptionLegacyDomainStrategyOptions)
- 			}
- 			server = dialOptions.DomainResolver.Server
-+			fallbackServer = dialOptions.DomainResolver.FallbackServer
- 			dnsQueryOptions = adapter.DNSQueryOptions{
+@@ -88,0 +100 @@ func NewWithOptions(options Options) (N.Dialer, error) {
++			fallbackServers = dialOptions.DomainResolver.FallbackTags()
+@@ -90,5 +102,7 @@ func NewWithOptions(options Options) (N.Dialer, error) {
 -				Transport:    transport,
 -				Strategy:     strategy,
 -				DisableCache: dialOptions.DomainResolver.DisableCache,
 -				RewriteTTL:   dialOptions.DomainResolver.RewriteTTL,
 -				ClientSubnet: dialOptions.DomainResolver.ClientSubnet.Build(netip.Prefix{}),
-+				Transport:         transport,
-+				FallbackTransport: fallbackTransport,
-+				Strategy:          strategy,
-+				DisableCache:      dialOptions.DomainResolver.DisableCache,
-+				RewriteTTL:        dialOptions.DomainResolver.RewriteTTL,
-+				ClientSubnet:      dialOptions.DomainResolver.ClientSubnet.Build(netip.Prefix{}),
- 			}
- 			resolveFallbackDelay = time.Duration(dialOptions.FallbackDelay)
- 		} else if options.DirectResolver {
-@@ -104,6 +116,13 @@ func NewWithOptions(options Options) (N.Dialer, error) {
- 					return nil, E.New("default domain resolver not found: " + defaultOptions.DomainResolver)
- 				}
- 				dnsQueryOptions.Transport = transport
-+				if defaultOptions.DomainResolverFallback != "" {
-+					fallbackTransport, loaded := dnsTransport.Transport(defaultOptions.DomainResolverFallback)
-+					if !loaded {
-+						return nil, E.New("default domain resolver fallback not found: " + defaultOptions.DomainResolverFallback)
-+					}
-+					dnsQueryOptions.FallbackTransport = fallbackTransport
++				Policy:             dialOptions.DomainResolver.Policy,
++				Transport:          transport,
++				FallbackTransports: fallbackTransports,
++				Strategy:           strategy,
++				DisableCache:       dialOptions.DomainResolver.DisableCache,
++				RewriteTTL:         dialOptions.DomainResolver.RewriteTTL,
++				ClientSubnet:       dialOptions.DomainResolver.ClientSubnet.Build(netip.Prefix{}),
+@@ -100 +114,3 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+-			if defaultOptions.DomainResolver != "" {
++			if defaultOptions.DomainResolveOptions.Policy != "" {
++				dnsQueryOptions = defaultOptions.DomainResolveOptions
++			} else if defaultOptions.DomainResolver != "" {
+@@ -106,0 +123,5 @@ func NewWithOptions(options Options) (N.Dialer, error) {
++				fallbackServers = defaultOptions.DomainResolverFallbacks
++				dnsQueryOptions.FallbackTransports, err = adapter.ResolveDNSFallbacks(dnsTransport, fallbackServers)
++				if err != nil {
++					return nil, err
 +				}
- 				resolveFallbackDelay = time.Duration(dialOptions.FallbackDelay)
- 			} else {
- 				transports := dnsTransport.Transports()
-@@ -128,6 +147,7 @@ func NewWithOptions(options Options) (N.Dialer, error) {
- 			dialer,
- 			dialOptions.Detour == "" && !dialOptions.TCPFastOpen,
- 			server,
-+			fallbackServer,
- 			dnsQueryOptions,
- 			resolveFallbackDelay,
- 		)
+@@ -125,0 +147,9 @@ func NewWithOptions(options Options) (N.Dialer, error) {
++		if dnsQueryOptions.Policy != "" {
++			validator, ok := service.FromContext[adapter.DNSRouter](options.Context).(adapter.DNSPolicyValidator)
++			if !ok {
++				return nil, E.New("named DNS policies are unavailable")
++			}
++			if err := validator.ValidateDNSPolicy(dnsQueryOptions.Policy); err != nil {
++				return nil, err
++			}
++		}
+@@ -130,0 +161 @@ func NewWithOptions(options Options) (N.Dialer, error) {
++			fallbackServers,
 diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
-index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..9c13cbd5c59f4d0880017645473b8f901a8b1f82 100644
+index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..66eaeaae2f4679a9f74bbeb3b9fb5674237e4ec3 100644
 --- a/common/dialer/resolve.go
 +++ b/common/dialer/resolve.go
-@@ -32,40 +32,43 @@ type ParallelInterfaceResolveDialer interface {
- }
- 
- type resolveDialer struct {
+@@ -35,9 +35,10 @@ type resolveDialer struct {
 -	transport     adapter.DNSTransportManager
 -	router        adapter.DNSRouter
 -	dialer        N.Dialer
@@ -168,23 +194,20 @@ index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..9c13cbd5c59f4d0880017645473b8f90
 -	initErr       error
 -	queryOptions  adapter.DNSQueryOptions
 -	fallbackDelay time.Duration
-+	transport      adapter.DNSTransportManager
-+	router         adapter.DNSRouter
-+	dialer         N.Dialer
-+	parallel       bool
-+	server         string
-+	fallbackServer string
-+	initOnce       sync.Once
-+	initErr        error
-+	queryOptions   adapter.DNSQueryOptions
-+	fallbackDelay  time.Duration
- }
- 
++	transport       adapter.DNSTransportManager
++	router          adapter.DNSRouter
++	dialer          N.Dialer
++	parallel        bool
++	server          string
++	fallbackServers []string
++	initOnce        sync.Once
++	initErr         error
++	queryOptions    adapter.DNSQueryOptions
++	fallbackDelay   time.Duration
+@@ -46 +47 @@ type resolveDialer struct {
 -func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, server string, queryOptions adapter.DNSQueryOptions, fallbackDelay time.Duration) ResolveDialer {
-+func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, server string, fallbackServer string, queryOptions adapter.DNSQueryOptions, fallbackDelay time.Duration) ResolveDialer {
- 	if parallelDialer, isParallel := dialer.(ParallelInterfaceDialer); isParallel {
- 		return &resolveParallelNetworkDialer{
- 			resolveDialer{
++func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, server string, fallbackServers []string, queryOptions adapter.DNSQueryOptions, fallbackDelay time.Duration) ResolveDialer {
+@@ -50,7 +51,8 @@ func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, serve
 -				transport:     service.FromContext[adapter.DNSTransportManager](ctx),
 -				router:        service.FromContext[adapter.DNSRouter](ctx),
 -				dialer:        dialer,
@@ -192,19 +215,15 @@ index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..9c13cbd5c59f4d0880017645473b8f90
 -				server:        server,
 -				queryOptions:  queryOptions,
 -				fallbackDelay: fallbackDelay,
-+				transport:      service.FromContext[adapter.DNSTransportManager](ctx),
-+				router:         service.FromContext[adapter.DNSRouter](ctx),
-+				dialer:         dialer,
-+				parallel:       parallel,
-+				server:         server,
-+				fallbackServer: fallbackServer,
-+				queryOptions:   queryOptions,
-+				fallbackDelay:  fallbackDelay,
- 			},
- 			parallelDialer,
- 		}
- 	}
- 	return &resolveDialer{
++				transport:       service.FromContext[adapter.DNSTransportManager](ctx),
++				router:          service.FromContext[adapter.DNSRouter](ctx),
++				dialer:          dialer,
++				parallel:        parallel,
++				server:          server,
++				fallbackServers: fallbackServers,
++				queryOptions:    queryOptions,
++				fallbackDelay:   fallbackDelay,
+@@ -62,7 +64,8 @@ func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, serve
 -		transport:     service.FromContext[adapter.DNSTransportManager](ctx),
 -		router:        service.FromContext[adapter.DNSRouter](ctx),
 -		dialer:        dialer,
@@ -212,50 +231,705 @@ index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..9c13cbd5c59f4d0880017645473b8f90
 -		server:        server,
 -		queryOptions:  queryOptions,
 -		fallbackDelay: fallbackDelay,
-+		transport:      service.FromContext[adapter.DNSTransportManager](ctx),
-+		router:         service.FromContext[adapter.DNSRouter](ctx),
-+		dialer:         dialer,
-+		parallel:       parallel,
-+		server:         server,
-+		fallbackServer: fallbackServer,
-+		queryOptions:   queryOptions,
-+		fallbackDelay:  fallbackDelay,
- 	}
- }
- 
-@@ -89,6 +92,15 @@ func (d *resolveDialer) initServer() {
- 		return
- 	}
- 	d.queryOptions.Transport = transport
-+	if d.fallbackServer == "" {
-+		return
++		transport:       service.FromContext[adapter.DNSTransportManager](ctx),
++		router:          service.FromContext[adapter.DNSRouter](ctx),
++		dialer:          dialer,
++		parallel:        parallel,
++		server:          server,
++		fallbackServers: fallbackServers,
++		queryOptions:    queryOptions,
++		fallbackDelay:   fallbackDelay,
+@@ -91,0 +95 @@ func (d *resolveDialer) initServer() {
++	d.queryOptions.FallbackTransports, d.initErr = adapter.ResolveDNSFallbacks(d.transport, d.fallbackServers)
+diff --git a/dns/client.go b/dns/client.go
+index 6655506b6b1271e993be777a850ebaaf643caf6a..7724e849bfe7842e63e51f2a988d31e73875be55 100644
+--- a/dns/client.go
++++ b/dns/client.go
+@@ -27,0 +28 @@ var (
++	ErrHostsNotFound          = E.New("domain is absent from the local hosts source")
+@@ -184,0 +186,3 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
++			if responseIsRejected(response, responseChecker) {
++				return response, ErrResponseRejectedCached
++			}
+@@ -253,10 +257 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
+-		var rejected bool
+-		// TODO: add accept_any rule and support to check response instead of addresses
+-		if response.Rcode != dns.RcodeSuccess && response.Rcode != dns.RcodeNameError {
+-			rejected = true
+-		} else if len(response.Answer) == 0 {
+-			rejected = !responseChecker(nil)
+-		} else {
+-			rejected = !responseChecker(MessageToAddresses(response))
+-		}
+-		if rejected {
++		if responseIsRejected(response, responseChecker) {
+@@ -430 +425 @@ func (c *Client) lookupToExchange(ctx context.Context, transport adapter.DNSTran
+-		cachedAddresses, err := c.questionCache(question, transport)
++		cachedAddresses, err := c.questionCache(question, transport, responseChecker)
+@@ -451 +446 @@ func (c *Client) lookupToExchange(ctx context.Context, transport adapter.DNSTran
+-func (c *Client) questionCache(question dns.Question, transport adapter.DNSTransport) ([]netip.Addr, error) {
++func (c *Client) questionCache(question dns.Question, transport adapter.DNSTransport, responseChecker func([]netip.Addr) bool) ([]netip.Addr, error) {
+@@ -458,0 +454,3 @@ func (c *Client) questionCache(question dns.Question, transport adapter.DNSTrans
++	if responseIsRejected(response, responseChecker) {
++		return nil, ErrResponseRejectedCached
 +	}
-+	fallbackTransport, loaded := d.transport.Transport(d.fallbackServer)
-+	if !loaded {
-+		d.initErr = E.New("domain resolver fallback not found: " + d.fallbackServer)
-+		return
+diff --git a/dns/hosts_miss_test.go b/dns/hosts_miss_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf4f4730a8355df761b3b7b6459d5d84b7d98d06
+--- /dev/null
++++ b/dns/hosts_miss_test.go
+@@ -0,0 +1,19 @@
++package dns
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"testing"
++)
++
++func TestHostsMissDoesNotHideAJointIOFailure(t *testing.T) {
++	if !onlyHostsMiss(fmt.Errorf("lookup: %w", errors.Join(ErrHostsNotFound, ErrHostsNotFound))) {
++		t.Fatal("wrapped hosts absence rejected")
 +	}
-+	d.queryOptions.FallbackTransport = fallbackTransport
- }
- 
- func (d *resolveDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	for _, err := range []error{nil, os.ErrPermission, errors.Join(ErrHostsNotFound, os.ErrPermission)} {
++		if onlyHostsMiss(err) {
++			t.Fatal("non-miss error admitted fallback")
++		}
++	}
++}
+diff --git a/dns/policy.go b/dns/policy.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f7505d2dfe8733811e14362c2597c1ea0d1f091
+--- /dev/null
++++ b/dns/policy.go
+@@ -0,0 +1,98 @@
++package dns
++
++import (
++	"github.com/sagernet/sing-box/adapter"
++	R "github.com/sagernet/sing-box/route/rule"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++type dnsPolicy struct {
++	rules []adapter.DNSRule
++	final string
++}
++
++func (r *Router) ValidateDNSPolicy(policy string) error {
++	return r.validatePolicy(adapter.DNSQueryOptions{Policy: policy})
++}
++
++func routerInitializePolicies(r *Router) error {
++	if len(r.policyOptions) > 8 {
++		return E.New("at most eight named DNS policies are supported")
++	}
++	r.policies = make(map[string]dnsPolicy, len(r.policyOptions))
++	for _, source := range r.policyOptions {
++		if source.Tag == "" || source.Tag == "default" || len(source.Tag) > 128 || source.Final == "" || len(source.Rules) > 4096 {
++			return E.New("invalid named DNS policy")
++		}
++		if _, exists := r.policies[source.Tag]; exists {
++			return E.New("duplicate DNS policy: ", source.Tag)
++		}
++		policy := dnsPolicy{final: source.Final}
++		for index, sourceRule := range source.Rules {
++			rule, err := R.NewDNSRule(r.ctx, r.logger, sourceRule, true)
++			if err != nil {
++				return E.Cause(err, "parse DNS policy ", source.Tag, " rule[", index, "]")
++			}
++			policy.rules = append(policy.rules, rule)
++		}
++		r.policies[source.Tag] = policy
++	}
++	r.policyOptions = nil
++	return nil
++}
++
++func (r *Router) startPolicies() error {
++	for tag, policy := range r.policies {
++		if _, found := r.transport.Transport(policy.final); !found {
++			return E.New("DNS policy ", tag, " final server not found: ", policy.final)
++		}
++		for index, rule := range policy.rules {
++			if err := rule.Start(); err != nil {
++				return E.Cause(err, "start DNS policy ", tag, " rule[", index, "]")
++			}
++		}
++	}
++	return nil
++}
++
++func (r *Router) closePolicies() error {
++	var errs []error
++	for tag, policy := range r.policies {
++		for index, rule := range policy.rules {
++			if err := rule.Close(); err != nil {
++				errs = append(errs, E.Cause(err, "close DNS policy ", tag, " rule[", index, "]"))
++			}
++		}
++	}
++	return E.Errors(errs...)
++}
++
++func (r *Router) validatePolicy(options adapter.DNSQueryOptions) error {
++	if options.Policy == "" {
++		return nil
++	}
++	if options.Transport != nil || options.FallbackTransport != nil || len(options.FallbackTransports) != 0 {
++		return E.New("DNS policy cannot be combined with explicit resolver transports")
++	}
++	if options.Policy != "default" {
++		policy, found := r.policies[options.Policy]
++		if !found {
++			return E.New("DNS policy not found: ", options.Policy)
++		}
++		if _, found := r.transport.Transport(policy.final); !found {
++			return E.New("DNS policy final server is unavailable: ", policy.final)
++		}
++	}
++	return nil
++}
++
++// validatePolicy runs before either query path reaches this method. A missing
++// final transport after startup is an unavailable configuration, never default DNS.
++func (r *Router) policyRules(tag string) ([]adapter.DNSRule, adapter.DNSTransport) {
++	if tag == "" || tag == "default" {
++		return r.rules, r.transport.Default()
++	}
++	policy := r.policies[tag]
++	transport, _ := r.transport.Transport(policy.final)
++	return policy.rules, transport
++}
+diff --git a/dns/policy_test.go b/dns/policy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..56a53696e7cb760461f4005dd65702c0ffa1958f
+--- /dev/null
++++ b/dns/policy_test.go
+@@ -0,0 +1,120 @@
++package dns_test
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++
++	mdns "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++)
++
++func TestNamedDNSPoliciesComposeAndKeepFailuresInTheirOwnRole(t *testing.T) {
++	mainPort, mainQueries := startPolicyTCPWithTTL(t, false, "203.0.113.10", 60)
++	directPort, _ := startPolicyTCPWithTTL(t, false, "203.0.113.20", 60)
++	policyPort, _ := startPolicyTCPWithTTL(t, false, "203.0.113.30", 60)
++	closedPort, _ := startPolicyTCP(t, true, "")
++	var servers []any
++	for index, port := range []int{mainPort, directPort, policyPort, closedPort} {
++		servers = append(servers, map[string]any{"type": "tcp", "tag": fmt.Sprint(index), "server": "127.0.0.1", "server_port": port})
++	}
++	router, transports := startPolicyBox(t, map[string]any{
++		"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++		"dns": map[string]any{"servers": servers, "final": "0", "policies": []any{
++			map[string]any{"tag": "direct", "final": "1", "rules": []any{map[string]any{"domain_suffix": "internal.example", "action": "route", "server": "2"}}},
++			map[string]any{"tag": "failed", "final": "3"},
++		}},
++	})
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	for _, item := range []struct{ name, policy, address string }{
++		{"site.example", "default", "203.0.113.10"},
++		{"site.example", "direct", "203.0.113.20"},
++		{"internal.example", "direct", "203.0.113.30"},
++		{"sub.internal.example", "direct", "203.0.113.30"},
++	} {
++		addresses, err := router.Lookup(ctx, item.name, adapter.DNSQueryOptions{Policy: item.policy, Strategy: C.DomainStrategyIPv4Only})
++		if err != nil || len(addresses) != 1 || addresses[0] != netip.MustParseAddr(item.address) {
++			t.Fatalf("%s/%s: %v %v", item.policy, item.name, addresses, err)
++		}
++	}
++	query := new(mdns.Msg)
++	query.SetQuestion("must-not-leak.example.", mdns.TypeA)
++	if _, err := router.Exchange(ctx, query, adapter.DNSQueryOptions{Policy: "failed"}); err == nil {
++		t.Fatal("failed role returned success")
++	}
++	if _, err := router.Exchange(ctx, query, adapter.DNSQueryOptions{Policy: "missing"}); err == nil {
++		t.Fatal("unknown policy became default DNS")
++	}
++	explicit, _ := transports.Transport("0")
++	if _, err := router.Exchange(ctx, query, adapter.DNSQueryOptions{Policy: "direct", Transport: explicit}); err == nil {
++		t.Fatal("conflicting policy and explicit resolver accepted")
++	}
++	if _, seen := mainQueries.Load("must-not-leak.example."); seen {
++		t.Fatal("failed named policy leaked to the ordinary resolver")
++	}
++}
++
++func TestDNSGeoIPAcceptAllRejectsMixedAnswersInEitherOrder(t *testing.T) {
++	for _, answer := range [][]string{{"203.0.113.1", "198.51.100.1"}, {"198.51.100.1", "203.0.113.1"}, {"203.0.113.1", "203.0.113.2"}} {
++		t.Run(answer[0]+"/"+answer[1], func(t *testing.T) {
++			listener, err := net.Listen("tcp", "127.0.0.1:0")
++			if err != nil {
++				t.Fatal(err)
++			}
++			server := &mdns.Server{Listener: listener, Net: "tcp", Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) {
++				r := new(mdns.Msg)
++				r.SetReply(q)
++				for _, address := range answer {
++					record, err := mdns.NewRR(q.Question[0].Name + " 60 IN A " + address)
++					if err != nil {
++						t.Error(err)
++						return
++					}
++					r.Answer = append(r.Answer, record)
++				}
++				if err := w.WriteMsg(r); err != nil {
++					t.Error(err)
++				}
++			})}
++			go func() {
++				if err := server.ActivateAndServe(); err != nil {
++					t.Error(err)
++				}
++			}()
++			t.Cleanup(func() {
++				if err := server.Shutdown(); err != nil {
++					t.Error(err)
++				}
++			})
++			fallbackPort, fallbackQueries := startPolicyTCP(t, false, "192.0.2.1")
++			router, transports := startPolicyBox(t, map[string]any{
++				"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++				"route": map[string]any{"rule_set": []any{map[string]any{"type": "inline", "tag": "country", "rules": []any{map[string]any{"ip_cidr": "203.0.113.0/24"}}}}},
++				"dns": map[string]any{"independent_cache": true, "final": "fallback", "servers": []any{
++					map[string]any{"type": "tcp", "tag": "main", "server": "127.0.0.1", "server_port": listener.Addr().(*net.TCPAddr).Port},
++					map[string]any{"type": "tcp", "tag": "fallback", "server": "127.0.0.1", "server_port": fallbackPort},
++				}, "rules": []any{map[string]any{"rule_set": []string{"country"}, "action": "route", "server": "main", "retry_on_error": true, "response_ip_accept_all": true}}},
++			})
++			query := new(mdns.Msg)
++			query.SetQuestion("mixed.example.", mdns.TypeA)
++			main, _ := transports.Transport("main")
++			if _, err := router.Exchange(context.Background(), query, adapter.DNSQueryOptions{Transport: main}); err != nil {
++				t.Fatal(err)
++			}
++			response, err := router.Exchange(context.Background(), query, adapter.DNSQueryOptions{})
++			if err != nil {
++				t.Fatal(err)
++			}
++			_, queriedFallback := fallbackQueries.Load("mixed.example.")
++			wantFallback := answer[0] == "198.51.100.1" || answer[1] == "198.51.100.1"
++			if queriedFallback != wantFallback {
++				t.Fatalf("fallback=%v expected=%v response=%v", queriedFallback, wantFallback, response)
++			}
++		})
++	}
++}
+diff --git a/dns/response_policy.go b/dns/response_policy.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e30f181944183e81cce3e167128fcaa5ec1652ff
+--- /dev/null
++++ b/dns/response_policy.go
+@@ -0,0 +1,51 @@
++package dns
++
++import (
++	"github.com/miekg/dns"
++	"net/netip"
++)
++
++// Recheck cached and fresh answers identically. Domain policies and live rule
++// resources can change which addresses are acceptable without changing the
++// resolver's tag. Valid negative answers must not become a retry or DNS leak.
++func responseIsRejected(response *dns.Msg, checker func([]netip.Addr) bool) bool {
++	if checker == nil {
++		return false
++	}
++	if response.Rcode == dns.RcodeNameError {
++		return false
++	}
++	if response.Rcode != dns.RcodeSuccess {
++		return true
++	}
++	if len(response.Answer) == 0 {
++		if _, hasSOA := extractNegativeTTL(response); hasSOA {
++			return false
++		}
++	}
++	return !checker(MessageToAddresses(response))
++}
++
++// A/AAAA can return joined errors. A terminal negative only suppresses retries
++// when every branch is negative; it must not hide an independent I/O failure.
++func onlyNegativeDNSResult(err error) bool {
++	if code, ok := err.(RcodeError); ok {
++		return int(code) == dns.RcodeNameError
++	}
++	if joined, ok := err.(interface{ Unwrap() []error }); ok {
++		children := joined.Unwrap()
++		if len(children) == 0 {
++			return false
++		}
++		for _, child := range children {
++			if !onlyNegativeDNSResult(child) {
++				return false
++			}
++		}
++		return true
++	}
++	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
++		return onlyNegativeDNSResult(wrapped.Unwrap())
++	}
++	return false
++}
+diff --git a/dns/response_policy_test.go b/dns/response_policy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b82cafeb68bed894b0d7d46b4c1ebb4a84536fb7
+--- /dev/null
++++ b/dns/response_policy_test.go
+@@ -0,0 +1,30 @@
++package dns
++
++import (
++	"context"
++	"errors"
++	"github.com/miekg/dns"
++	"net/netip"
++	"testing"
++)
++
++func TestNegativeDNSResultsRemainTerminalWithResponseFilters(t *testing.T) {
++	for _, response := range []*dns.Msg{
++		{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeNameError}},
++		{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeSuccess}, Ns: []dns.RR{&dns.SOA{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeSOA, Ttl: 30}, Minttl: 30}}},
++	} {
++		if responseIsRejected(response, func([]netip.Addr) bool { return false }) {
++			t.Fatal("valid negative response retried because it had no allowed IP")
++		}
++	}
++	nx := RcodeError(dns.RcodeNameError)
++	if shouldContinueDNSRule(context.Background(), true, nx, 1) {
++		t.Fatal("negative lookup continued to another DNS rule")
++	}
++	if !onlyNegativeDNSResult(errors.Join(nx, nx)) {
++		t.Fatal("joined negative lookups were retried")
++	}
++	if onlyNegativeDNSResult(errors.Join(nx, errors.New("I/O failure"))) {
++		t.Fatal("mixed lookup errors hid the I/O failure")
++	}
++}
+diff --git a/dns/routed_dialer.go b/dns/routed_dialer.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..585badf6f59e5883be3cdb9f944ebaa70638d3e0
+--- /dev/null
++++ b/dns/routed_dialer.go
+@@ -0,0 +1,84 @@
++package dns
++
++import (
++	"context"
++	"net"
++	"net/netip"
++	"reflect"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/dialer"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++)
++
++type routedDialer struct {
++	router  adapter.DNSConnectionRouter
++	domain  string
++	timeout time.Duration
++}
++type dnsRoutingDepth struct{}
++
++func newRoutedDialer(ctx context.Context, options option.RemoteDNSServerOptions) (N.Dialer, error) {
++	remaining := options.DialerOptions
++	remaining.DomainResolver = nil
++	remaining.ConnectTimeout = 0
++	if options.Legacy || !reflect.ValueOf(remaining).IsZero() {
++		return nil, E.New("routed DNS accepts bootstrap and timeout, not detour or socket overrides")
++	}
++	router, ok := service.FromContext[adapter.Router](ctx).(adapter.DNSConnectionRouter)
++	if !ok {
++		return nil, E.New("DNS route selection is unavailable")
++	}
++	timeout := time.Duration(options.ConnectTimeout)
++	if timeout == 0 {
++		timeout = 5 * time.Second
++	}
++	if timeout < time.Millisecond || timeout > 30*time.Second {
++		return nil, E.New("routed DNS connect timeout is outside 1ms..30s")
++	}
++	routed := &routedDialer{router: router, timeout: timeout}
++	var base N.Dialer = routed
++	if options.ServerIsDomain() {
++		routed.domain = options.Server
++		resolver := options.DomainResolver
++		if resolver == nil || resolver.Server == "" || resolver.Policy != "" {
++			return nil, E.New("routed DNS domain endpoints require explicit bootstrap servers")
++		}
++		query := adapter.DNSQueryOptions{Strategy: C.DomainStrategy(resolver.Strategy), DisableCache: resolver.DisableCache, RewriteTTL: resolver.RewriteTTL, ClientSubnet: resolver.ClientSubnet.Build(netip.Prefix{})}
++		base = dialer.NewResolveDialer(ctx, base, false, resolver.Server, resolver.FallbackTags(), query, 0)
++	}
++	return base, nil
++}
++
++func (d *routedDialer) context(ctx context.Context) (context.Context, context.CancelFunc, error) {
++	depth, _ := ctx.Value(dnsRoutingDepth{}).(int)
++	if depth >= 4 {
++		return nil, nil, E.New("DNS routing dependency cycle")
++	}
++	ctx, cancel := context.WithTimeout(context.WithValue(ctx, dnsRoutingDepth{}, depth+1), d.timeout)
++	return ctx, cancel, nil
++}
++
++func (d *routedDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	ctx, cancel, err := d.context(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer cancel()
++	return d.router.DialDNSConnection(ctx, network, destination, d.domain)
++}
++
++func (d *routedDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	ctx, cancel, err := d.context(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer cancel()
++	return d.router.ListenDNSPacket(ctx, destination, d.domain)
++}
+diff --git a/dns/routed_dialer_test.go b/dns/routed_dialer_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e37530b4884e48ec52aa1e79e88493b7fcf3182
+--- /dev/null
++++ b/dns/routed_dialer_test.go
+@@ -0,0 +1,161 @@
++package dns_test
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	mdns "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/adapter"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++)
++
++func unusedDNSProbePort(t *testing.T) int {
++	t.Helper()
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	port := listener.Addr().(*net.TCPAddr).Port
++	if err := listener.Close(); err != nil {
++		t.Fatal(err)
++	}
++	return port
++}
++
++func TestRoutedDNSUsesActualSOCKSTransportsAndRetainsUDPAfterDialCancellation(t *testing.T) {
++	proxyPort := unusedDNSProbePort(t)
++	startPolicyBoxContext(t, map[string]any{
++		"log":       map[string]any{"disabled": true},
++		"inbounds":  []any{map[string]any{"type": "socks", "listen": "127.0.0.1", "listen_port": proxyPort}},
++		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++	})
++	closedProxy := unusedDNSProbePort(t)
++	for _, network := range []string{"tcp", "udp"} {
++		t.Run(network, func(t *testing.T) {
++			var server mdns.Server
++			server.Net = network
++			server.Handler = mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) {
++				r := new(mdns.Msg)
++				r.SetReply(q)
++				rr, err := mdns.NewRR(q.Question[0].Name + " 0 IN A 203.0.113.25")
++				if err != nil {
++					t.Error(err)
++					return
++				}
++				r.Answer = append(r.Answer, rr)
++				if err := w.WriteMsg(r); err != nil {
++					t.Error(err)
++				}
++			})
++			var port int
++			var err error
++			if network == "tcp" {
++				server.Listener, err = net.Listen("tcp", "127.0.0.1:0")
++				if err == nil {
++					port = server.Listener.Addr().(*net.TCPAddr).Port
++				}
++			} else {
++				server.PacketConn, err = net.ListenPacket("udp", "127.0.0.1:0")
++				if err == nil {
++					port = server.PacketConn.LocalAddr().(*net.UDPAddr).Port
++				}
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			go func() {
++				if err := server.ActivateAndServe(); err != nil {
++					t.Error(err)
++				}
++			}()
++			t.Cleanup(func() {
++				if err := server.Shutdown(); err != nil {
++					t.Error(err)
++				}
++			})
++			config := func(target string) map[string]any {
++				return map[string]any{
++					"log":       map[string]any{"disabled": true},
++					"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}, map[string]any{"type": "socks", "tag": "proxy", "server": "127.0.0.1", "server_port": proxyPort}, map[string]any{"type": "socks", "tag": "closed", "server": "127.0.0.1", "server_port": closedProxy}},
++					"route": map[string]any{"final": "direct", "rules": []any{
++						map[string]any{"port": port, "action": "hijack-dns"},
++						map[string]any{"action": "resolve"},
++						map[string]any{"port": port, "action": "route", "outbound": target},
++					}},
++					"dns": map[string]any{"final": "routed", "servers": []any{map[string]any{"type": network, "tag": "routed", "server": "127.0.0.1", "server_port": port, "respect_rules": true}}},
++				}
++			}
++			router, _ := startPolicyBox(t, config("proxy"))
++			for index := 0; index < 3; index++ {
++				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++				query := new(mdns.Msg)
++				query.SetQuestion(fmt.Sprintf("packet-%d.example.", index), mdns.TypeA)
++				response, err := router.Exchange(ctx, query, adapter.DNSQueryOptions{})
++				cancel()
++				if err != nil || len(response.Answer) != 1 {
++					t.Fatalf("routed query %d: %v", index, err)
++				}
++			}
++			failed, _ := startPolicyBox(t, config("closed"))
++			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++			defer cancel()
++			query := new(mdns.Msg)
++			query.SetQuestion("must-not-go-direct.example.", mdns.TypeA)
++			if _, err := failed.Exchange(ctx, query, adapter.DNSQueryOptions{}); err == nil {
++				t.Fatal("unreachable routed proxy silently used DIRECT")
++			}
++		})
++	}
++}
++
++func TestDirectOutboundResolvesUsingNamedPolicyBeforeDialing(t *testing.T) {
++	port, seen := startPolicyTCP(t, false, "127.0.0.1")
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { listener.Close() })
++	served := make(chan error, 1)
++	go func() {
++		conn, err := listener.Accept()
++		if err == nil {
++			defer conn.Close()
++			_, err = conn.Write([]byte("policy socket"))
++		}
++		served <- err
++	}()
++	ctx := startPolicyBoxContext(t, map[string]any{
++		"log":       map[string]any{"disabled": true},
++		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct", "domain_resolver": map[string]any{"policy": "direct"}}},
++		"dns":       map[string]any{"final": "closed", "servers": []any{map[string]any{"type": "tcp", "tag": "closed", "server": "127.0.0.1", "server_port": unusedDNSProbePort(t)}, map[string]any{"type": "tcp", "tag": "internal", "server": "127.0.0.1", "server_port": port}}, "policies": []any{map[string]any{"tag": "direct", "final": "internal"}}},
++	})
++	outbound, found := service.FromContext[adapter.OutboundManager](ctx).Outbound("direct")
++	if !found {
++		t.Fatal("direct outbound missing")
++	}
++	queryContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	conn, err := outbound.DialContext(queryContext, "tcp", M.Socksaddr{Fqdn: "policy.example", Port: uint16(listener.Addr().(*net.TCPAddr).Port)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	content, err := io.ReadAll(conn)
++	if err != nil || string(content) != "policy socket" {
++		t.Fatalf("policy did not reach real socket: %q %v", content, err)
++	}
++	if err := <-served; err != nil {
++		t.Fatal(err)
++	}
++	if _, found := seen.Load("policy.example."); !found {
++		t.Fatal("named policy resolver was skipped")
++	}
++}
 diff --git a/dns/router.go b/dns/router.go
-index 4f18959b7cc37bf8091dcbdc81d9723ed4342190..1e2051574584c2c53cf006e33078a72569162ce8 100644
+index 4f18959b7cc37bf8091dcbdc81d9723ed4342190..a762ef430ff963bdc4aaf151884ea2b7ed509098 100644
 --- a/dns/router.go
 +++ b/dns/router.go
-@@ -207,6 +207,8 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int,
- 	return transport, nil, -1
- }
- 
-+const maxDNSAttempts = 2
+@@ -31,0 +32,2 @@ type Router struct {
++	systemHostsTag        string
++	systemHosts           adapter.DNSTransport
+@@ -37,0 +40,2 @@ type Router struct {
++	policyOptions         []option.DNSPolicy
++	policies              map[string]dnsPolicy
+@@ -44,0 +49 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
++		systemHostsTag:        options.SystemHosts,
+@@ -49,0 +55 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
++		policyOptions:         options.Policies,
+@@ -55 +61 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
+-		IndependentCache: options.DNSClientOptions.IndependentCache,
++		IndependentCache: options.DNSClientOptions.IndependentCache || len(options.Policies) != 0,
+@@ -84 +90 @@ func (r *Router) Initialize(rules []option.DNSRule) error {
+-	return nil
++	return routerInitializePolicies(r)
+@@ -90,0 +97,10 @@ func (r *Router) Start(stage adapter.StartStage) error {
++		if err := r.startPolicies(); err != nil {
++			return err
++		}
++		if r.systemHostsTag != "" {
++			transport, found := r.transport.Transport(r.systemHostsTag)
++			if !found || transport.Type() != C.DNSTypeHosts {
++				return E.New("system_hosts must reference a hosts transport")
++			}
++			r.systemHosts = transport
++		}
+@@ -117 +133 @@ func (r *Router) Close() error {
+-	return err
++	return E.Errors(err, r.closePolicies())
+@@ -120,0 +137 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int,
++	rules, final := r.policyRules(options.Policy)
+@@ -129,2 +146,2 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int,
+-	for ; currentRuleIndex < len(r.rules); currentRuleIndex++ {
+-		currentRule := r.rules[currentRuleIndex]
++	for ; currentRuleIndex < len(rules); currentRuleIndex++ {
++		currentRule := rules[currentRuleIndex]
+@@ -198 +215 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int,
+-	transport := r.transport.Default()
++	transport := final
+@@ -209,0 +227,2 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int,
++const maxDNSAttempts = 8
 +
- func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*mDNS.Msg, error) {
- 	if len(message.Question) != 1 {
- 		r.logger.WarnContext(ctx, "bad question size: ", len(message.Question))
-@@ -222,9 +224,11 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
- 	}
- 	r.logger.DebugContext(ctx, "exchange ", FormatQuestion(message.Question[0].String()))
- 	var (
+@@ -210,0 +230,3 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
++	if err := r.validatePolicy(options); err != nil {
++		return nil, err
++	}
+@@ -225,3 +247,5 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -		response  *mDNS.Msg
 -		transport adapter.DNSTransport
 -		err       error
@@ -264,146 +938,161 @@ index 4f18959b7cc37bf8091dcbdc81d9723ed4342190..1e2051574584c2c53cf006e33078a725
 +		attemptErrors [maxDNSAttempts]error
 +		attemptCount  int
 +		err           error
- 	)
- 	var metadata *adapter.InboundContext
- 	ctx, metadata = adapter.ExtendContext(ctx)
-@@ -251,6 +255,24 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
- 			options.Strategy = r.defaultDomainStrategy
- 		}
- 		response, err = r.client.Exchange(ctx, transport, message, options, nil)
-+		if shouldUseExplicitDNSFallback(ctx, options.FallbackTransport, err) {
-+			primaryError := dnsAttemptError(transport, err)
-+			transport = options.FallbackTransport
+@@ -239,0 +264,12 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
++	if r.systemHosts != nil && options.Transport != r.systemHosts && (metadata.QueryType == mDNS.TypeA || metadata.QueryType == mDNS.TypeAAAA) {
++		hostOptions := options
++		hostOptions.DisableCache = true
++		if hostOptions.Strategy == C.DomainStrategyAsIS {
++			hostOptions.Strategy = r.defaultDomainStrategy
++		}
++		response, err = r.client.Exchange(ctx, r.systemHosts, message, hostOptions, nil)
++		if !onlyHostsMiss(err) {
++			transport = r.systemHosts
++			goto response
++		}
++	}
+@@ -253,0 +290,31 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
++		if options.FallbackTransport != nil || len(options.FallbackTransports) != 0 {
++			err = exchangePoolError(response, err)
++		}
++		errorsByAttempt := []error{}
++		if err != nil {
++			errorsByAttempt = append(errorsByAttempt, dnsAttemptError(transport, err))
++		}
++		fallbacks := options.FallbackTransports
++		if options.FallbackTransport != nil {
++			fallbacks = append([]adapter.DNSTransport{options.FallbackTransport}, fallbacks...)
++		}
++		if len(fallbacks) >= maxDNSAttempts {
++			return nil, E.New("DNS fallback attempt limit exceeded")
++		}
++		for _, fallback := range fallbacks {
++			if !shouldUseExplicitDNSFallback(ctx, fallback, err) {
++				break
++			}
++			transport = fallback
 +			options.Transport = transport
 +			options.FallbackTransport = nil
-+			if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
-+				if options.Strategy == C.DomainStrategyAsIS {
-+					options.Strategy = legacyTransport.LegacyStrategy()
-+				}
-+				if !options.ClientSubnet.IsValid() {
-+					options.ClientSubnet = legacyTransport.LegacyClientSubnet()
-+				}
-+			}
++			options.FallbackTransports = nil
 +			response, err = r.client.Exchange(ctx, transport, message, options, nil)
++			err = exchangePoolError(response, err)
 +			if err != nil {
-+				err = E.Errors(primaryError, dnsAttemptError(transport, err))
++				errorsByAttempt = append(errorsByAttempt, dnsAttemptError(transport, err))
 +			}
 +		}
- 	} else {
- 		var (
- 			rule      adapter.DNSRule
-@@ -286,13 +308,11 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
- 				dnsOptions.Strategy = r.defaultDomainStrategy
- 			}
- 			response, err = r.client.Exchange(dnsCtx, transport, message, dnsOptions, responseCheck)
++		if err != nil {
++			err = E.Errors(errorsByAttempt...)
++		}
+@@ -289 +356,4 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -			var rejected bool
++			if ruleRetriesDNSFailure(rule) || attemptCount > 0 {
++				err = exchangePoolError(response, err)
++			}
 +			attemptCount++
- 			if err != nil {
- 				if errors.Is(err, ErrResponseRejectedCached) {
+@@ -292 +361,0 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -					rejected = true
- 					r.logger.DebugContext(ctx, E.Cause(err, "response rejected for ", FormatQuestion(message.Question[0].String())), " (cached)")
- 				} else if errors.Is(err, ErrResponseRejected) {
+@@ -295 +363,0 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -					rejected = true
- 					r.logger.DebugContext(ctx, E.Cause(err, "response rejected for ", FormatQuestion(message.Question[0].String())))
- 				} else if len(message.Question) > 0 {
- 					r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for ", FormatQuestion(message.Question[0].String())))
-@@ -300,13 +320,18 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
- 					r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for <empty query>"))
- 				}
- 			}
+@@ -303 +371,2 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 -			if responseCheck != nil && rejected {
-+			if shouldContinueDNSRule(ctx, responseCheck != nil, err, attemptCount) {
++			if shouldContinueDNSRule(ctx, responseCheck != nil || ruleRetriesDNSFailure(rule), err, attemptCount) {
 +				attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
- 				continue
- 			}
- 			break
- 		}
- 	}
- 	if err != nil {
+@@ -308,0 +378 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
++response:
+@@ -309,0 +380,4 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 +		if attemptCount > 1 {
 +			attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
 +			err = E.Errors(attemptErrors[:attemptCount]...)
 +		}
- 		return nil, err
- 	}
- 	if r.dnsReverseMapping != nil && len(message.Question) > 0 && response != nil && len(response.Answer) > 0 {
-@@ -327,6 +352,9 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
- func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
- 	var (
- 		responseAddrs []netip.Addr
+@@ -327,0 +402,3 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
++	if err := r.validatePolicy(options); err != nil {
++		return nil, err
++	}
+@@ -329,0 +407,3 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 +		transport     adapter.DNSTransport
 +		attemptErrors [maxDNSAttempts]error
 +		attemptCount  int
- 		err           error
- 	)
- 	printResult := func() {
-@@ -351,7 +379,7 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
- 	metadata.Destination = M.Socksaddr{}
- 	metadata.Domain = FqdnToDomain(domain)
- 	if options.Transport != nil {
+@@ -352,0 +433,12 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
++	if r.systemHosts != nil && options.Transport != r.systemHosts {
++		hostOptions := options
++		hostOptions.DisableCache = true
++		if hostOptions.Strategy == C.DomainStrategyAsIS {
++			hostOptions.Strategy = r.defaultDomainStrategy
++		}
++		responseAddrs, err = r.client.Lookup(ctx, r.systemHosts, domain, hostOptions, nil)
++		if !onlyHostsMiss(err) {
++			transport = r.systemHosts
++			goto response
++		}
++	}
+@@ -354 +446 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -		transport := options.Transport
 +		transport = options.Transport
- 		if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
- 			if options.Strategy == C.DomainStrategyAsIS {
- 				options.Strategy = legacyTransport.LegacyStrategy()
-@@ -364,9 +392,26 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
- 			options.Strategy = r.defaultDomainStrategy
- 		}
- 		responseAddrs, err = r.client.Lookup(ctx, transport, domain, options, nil)
-+		if shouldUseExplicitDNSFallback(ctx, options.FallbackTransport, err) {
-+			primaryError := dnsAttemptError(transport, err)
-+			transport = options.FallbackTransport
+@@ -366,0 +459,27 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
++		errorsByAttempt := []error{}
++		if err != nil {
++			errorsByAttempt = append(errorsByAttempt, dnsAttemptError(transport, err))
++		}
++		fallbacks := options.FallbackTransports
++		if options.FallbackTransport != nil {
++			fallbacks = append([]adapter.DNSTransport{options.FallbackTransport}, fallbacks...)
++		}
++		if len(fallbacks) >= maxDNSAttempts {
++			return nil, E.New("DNS fallback attempt limit exceeded")
++		}
++		for _, fallback := range fallbacks {
++			if !shouldUseExplicitDNSFallback(ctx, fallback, err) {
++				break
++			}
++			transport = fallback
 +			options.Transport = transport
 +			options.FallbackTransport = nil
-+			if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
-+				if options.Strategy == C.DomainStrategyAsIS {
-+					options.Strategy = legacyTransport.LegacyStrategy()
-+				}
-+				if !options.ClientSubnet.IsValid() {
-+					options.ClientSubnet = legacyTransport.LegacyClientSubnet()
-+				}
-+			}
++			options.FallbackTransports = nil
 +			responseAddrs, err = r.client.Lookup(ctx, transport, domain, options, nil)
 +			if err != nil {
-+				err = E.Errors(primaryError, dnsAttemptError(transport, err))
++				errorsByAttempt = append(errorsByAttempt, dnsAttemptError(transport, err))
 +			}
 +		}
- 	} else {
- 		var (
++		if err != nil {
++			err = E.Errors(errorsByAttempt...)
++		}
+@@ -369 +487,0 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -			transport adapter.DNSTransport
- 			rule      adapter.DNSRule
- 			ruleIndex int
- 		)
-@@ -402,12 +447,18 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
- 				dnsOptions.Strategy = r.defaultDomainStrategy
- 			}
- 			responseAddrs, err = r.client.Lookup(dnsCtx, transport, domain, dnsOptions, responseCheck)
+@@ -405 +523,2 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 -			if responseCheck == nil || err == nil {
 +			attemptCount++
-+			if !shouldContinueDNSRule(ctx, responseCheck != nil, err, attemptCount) {
- 				break
- 			}
++			if !shouldContinueDNSRule(ctx, responseCheck != nil || ruleRetriesDNSFailure(rule), err, attemptCount) {
+@@ -407,0 +527 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 +			attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
- 			printResult()
- 		}
- 	}
+@@ -410,0 +531,4 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 +	if err != nil && attemptCount > 1 {
 +		attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
 +		err = E.Errors(attemptErrors[:attemptCount]...)
 +	}
- response:
- 	printResult()
- 	if len(responseAddrs) > 0 {
-@@ -416,6 +467,21 @@ response:
- 	return responseAddrs, err
- }
- 
+@@ -418,0 +543,32 @@ response:
++// Only explicit retry actions or address-response filters admit the next
++// ordered rule. A terminal policy still cannot fall through to another pool.
++func ruleRetriesDNSFailure(rule adapter.DNSRule) bool {
++	if rule == nil {
++		return false
++	}
++	action, ok := rule.Action().(*R.RuleActionDNSRoute)
++	return ok && action.RetryOnError
++}
++
++func exchangePoolError(response *mDNS.Msg, err error) error {
++	if err == nil && response != nil && response.Rcode != mDNS.RcodeSuccess && response.Rcode != mDNS.RcodeNameError {
++		return RcodeError(response.Rcode)
++	}
++	return err
++}
++
 +func shouldContinueDNSRule(ctx context.Context, hasResponseCheck bool, err error, attemptCount int) bool {
-+	return hasResponseCheck && err != nil && attemptCount < maxDNSAttempts && ctx.Err() == nil
++	return hasResponseCheck && err != nil && !onlyNegativeDNSResult(err) && attemptCount < maxDNSAttempts && ctx.Err() == nil
 +}
 +
 +func shouldUseExplicitDNSFallback(ctx context.Context, fallback adapter.DNSTransport, err error) bool {
-+	return fallback != nil && err != nil && ctx.Err() == nil
++	return fallback != nil && err != nil && !onlyNegativeDNSResult(err) && ctx.Err() == nil
 +}
 +
 +func dnsAttemptError(transport adapter.DNSTransport, err error) error {
@@ -413,15 +1102,48 @@ index 4f18959b7cc37bf8091dcbdc81d9723ed4342190..1e2051574584c2c53cf006e33078a725
 +	return E.Cause(err, "DNS server ", transport.Tag())
 +}
 +
- func isAddressQuery(message *mDNS.Msg) bool {
- 	for _, question := range message.Question {
- 		if question.Qtype == mDNS.TypeA || question.Qtype == mDNS.TypeAAAA || question.Qtype == mDNS.TypeHTTPS {
+@@ -433,0 +590,10 @@ func addressLimitResponseCheck(rule adapter.DNSRule, metadata *adapter.InboundCo
++		if action, ok := rule.Action().(*R.RuleActionDNSRoute); ok && action.ResponseIPAcceptAll {
++			for _, address := range responseAddrs {
++				checkMetadata := responseMetadata
++				checkMetadata.DestinationAddresses = []netip.Addr{address}
++				if !rule.MatchAddressLimit(&checkMetadata) {
++					return false
++				}
++			}
++			return len(responseAddrs) != 0
++		}
+@@ -460,0 +627,24 @@ func (r *Router) ResetNetwork() {
++
++// Only an actual local lookup miss permits resolver fallback. A joined error
++// containing a hosts-file I/O failure must remain terminal.
++func onlyHostsMiss(err error) bool {
++	if err == ErrHostsNotFound {
++		return true
++	}
++	if multi, ok := err.(interface{ Unwrap() []error }); ok {
++		causes := multi.Unwrap()
++		if len(causes) == 0 {
++			return false
++		}
++		for _, cause := range causes {
++			if !onlyHostsMiss(cause) {
++				return false
++			}
++		}
++		return true
++	}
++	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
++		return onlyHostsMiss(wrapped.Unwrap())
++	}
++	return false
++}
 diff --git a/dns/router_retry_test.go b/dns/router_retry_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c09f075e5a9ca48580c2be79a6f6331666592a3
+index 0000000000000000000000000000000000000000..f6ed53772bd8ea11e551cd9a211295a1d603c651
 --- /dev/null
 +++ b/dns/router_retry_test.go
-@@ -0,0 +1,618 @@
+@@ -0,0 +1,607 @@
 +package dns
 +
 +import (
@@ -767,40 +1489,29 @@ index 0000000000000000000000000000000000000000..5c09f075e5a9ca48580c2be79a6f6331
 +	})
 +}
 +
-+func TestDNSRuleFallbackHasAGlobalTwoAttemptBudget(t *testing.T) {
-+	primaryError := errors.New("primary unavailable")
-+	secondaryError := errors.New("secondary unavailable")
-+	thirdError := errors.New("third server unavailable")
-+
-+	t.Run("exchange", func(t *testing.T) {
++func TestDNSRuleFallbackHasAGlobalEightAttemptBudget(t *testing.T) {
++	for _, lookup := range []bool{false, true} {
 +		client := newFallbackDNSClient()
-+		client.exchangeErrorSequences["primary"] = []error{primaryError, secondaryError, thirdError}
++		unavailable := errors.New("resolver unavailable")
++		client.exchangeErrors["primary"] = unavailable
++		client.lookupErrors["primary"] = unavailable
 +		router := newFallbackRouter(client)
-+		router.rules = []adapter.DNSRule{new(fallbackDNSRule), new(fallbackDNSRule), new(fallbackDNSRule)}
-+
-+		_, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
-+		if !errors.Is(err, primaryError) || !errors.Is(err, secondaryError) || errors.Is(err, thirdError) {
-+			t.Fatalf("expected exactly the first two retained errors, got %v", err)
++		for i := 0; i < maxDNSAttempts+2; i++ {
++			router.rules = append(router.rules, new(fallbackDNSRule))
 +		}
-+		if client.exchangeCalls["primary"] != maxDNSAttempts || client.exchangeCalls["secondary"] != 0 {
-+			t.Fatalf("three eligible rules exceeded the global budget: %#v", client.exchangeCalls)
++		var err error
++		var count int
++		if lookup {
++			_, err = router.Lookup(context.Background(), "example.test", adapter.DNSQueryOptions{})
++			count = client.lookupCalls["primary"]
++		} else {
++			_, err = router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++			count = client.exchangeCalls["primary"]
 +		}
-+	})
-+
-+	t.Run("lookup", func(t *testing.T) {
-+		client := newFallbackDNSClient()
-+		client.lookupErrorSequences["primary"] = []error{primaryError, secondaryError, thirdError}
-+		router := newFallbackRouter(client)
-+		router.rules = []adapter.DNSRule{new(fallbackDNSRule), new(fallbackDNSRule), new(fallbackDNSRule)}
-+
-+		_, err := router.Lookup(context.Background(), "example.test", adapter.DNSQueryOptions{})
-+		if !errors.Is(err, primaryError) || !errors.Is(err, secondaryError) || errors.Is(err, thirdError) {
-+			t.Fatalf("expected exactly the first two retained errors, got %v", err)
++		if !errors.Is(err, unavailable) || count != maxDNSAttempts {
++			t.Fatalf("bounded errors were not retained: count=%d err=%v", count, err)
 +		}
-+		if client.lookupCalls["primary"] != maxDNSAttempts || client.lookupCalls["secondary"] != 0 {
-+			t.Fatalf("three eligible rules exceeded the global budget: %#v", client.lookupCalls)
-+		}
-+	})
++	}
 +}
 +
 +func TestDNSFallbackDependenciesAreOrderedAndValidated(t *testing.T) {
@@ -1040,36 +1751,889 @@ index 0000000000000000000000000000000000000000..5c09f075e5a9ca48580c2be79a6f6331
 +	message.SetQuestion("example.test.", questionType)
 +	return message
 +}
+diff --git a/dns/runtime_policy_test.go b/dns/runtime_policy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5ab8368ae7dd9feef4335504d851fbc7ef28605
+--- /dev/null
++++ b/dns/runtime_policy_test.go
+@@ -0,0 +1,554 @@
++package dns_test
++
++import (
++	"context"
++	"crypto/x509"
++	"encoding/json"
++	"encoding/pem"
++	"fmt"
++	mdns "github.com/miekg/dns"
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/include"
++	"github.com/sagernet/sing-box/option"
++	SJSON "github.com/sagernet/sing/common/json"
++	"github.com/sagernet/sing/service"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++func startPolicyBox(t *testing.T, config map[string]any) (adapter.DNSRouter, adapter.DNSTransportManager) {
++	ctx := startPolicyBoxContext(t, config)
++	return service.FromContext[adapter.DNSRouter](ctx), service.FromContext[adapter.DNSTransportManager](ctx)
++}
++func startPolicyBoxContext(t *testing.T, config map[string]any) context.Context {
++	t.Helper()
++	ctx := service.ContextWithDefaultRegistry(include.Context(context.Background()))
++	data, err := json.Marshal(config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var opts option.Options
++	if err = SJSON.UnmarshalContext(ctx, data, &opts); err != nil {
++		t.Fatal(err)
++	}
++	instance, err := box.New(box.Options{Options: opts, Context: ctx})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = instance.Start(); err != nil {
++		instance.Close()
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := instance.Close(); err != nil {
++			t.Error(err)
++		}
++	})
++	return ctx
++}
++func startPolicyTCP(t *testing.T, fail bool, answer string) (int, *sync.Map) {
++	return startPolicyTCPWithTTL(t, fail, answer, 0)
++}
++func startPolicyTCPWithTTL(t *testing.T, fail bool, answer string, ttl uint32) (int, *sync.Map) {
++	t.Helper()
++	seen := new(sync.Map)
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := &mdns.Server{Listener: listener, Net: "tcp", Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, m *mdns.Msg) {
++		seen.Store(m.Question[0].Name, true)
++		if fail {
++			w.Close()
++			return
++		}
++		r := new(mdns.Msg)
++		r.SetReply(m)
++		var answerText string
++		switch m.Question[0].Qtype {
++		case mdns.TypeA:
++			answerText = "A " + answer
++		case mdns.TypeTXT:
++			answerText = "TXT \"policy-ok\""
++		case mdns.TypeMX:
++			answerText = "MX 10 mail.example."
++		case mdns.TypeHTTPS:
++			answerText = "HTTPS 1 . alpn=\"h3\" ipv4hint=127.0.0.1"
++		}
++		if answerText != "" {
++			rr, err := mdns.NewRR(fmt.Sprintf("%s %d IN %s", m.Question[0].Name, ttl, answerText))
++			if err != nil {
++				t.Error(err)
++				w.Close()
++				return
++			}
++			r.Answer = []mdns.RR{rr}
++		}
++		w.WriteMsg(r)
++	})}
++	go server.ActivateAndServe()
++	t.Cleanup(func() { server.Shutdown() })
++	return listener.Addr().(*net.TCPAddr).Port, seen
++}
++func policyTCP(tag string, port int) map[string]any {
++	return map[string]any{"type": "tcp", "tag": tag, "server": "127.0.0.1", "server_port": port, "connect_timeout": "200ms"}
++}
++func policyQuestion(name string) *mdns.Msg { return new(mdns.Msg).SetQuestion(name+".", mdns.TypeA) }
++func localPolicySOCKS(t *testing.T) int {
++	t.Helper()
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { listener.Close() })
++	go func() {
++		for {
++			conn, err := listener.Accept()
++			if err != nil {
++				return
++			}
++			go func() {
++				defer conn.Close()
++				conn.SetDeadline(time.Now().Add(5 * time.Second))
++				g := make([]byte, 2)
++				if _, err := io.ReadFull(conn, g); err != nil {
++					return
++				}
++				m := make([]byte, int(g[1]))
++				if _, err := io.ReadFull(conn, m); err != nil {
++					return
++				}
++				conn.Write([]byte{5, 0})
++				h := make([]byte, 4)
++				if _, err := io.ReadFull(conn, h); err != nil {
++					return
++				}
++				if h[1] != 1 {
++					return
++				}
++				var host string
++				switch h[3] {
++				case 1:
++					b := make([]byte, 4)
++					if _, err := io.ReadFull(conn, b); err != nil {
++						return
++					}
++					host = net.IP(b).String()
++				case 3:
++					b := make([]byte, 1)
++					if _, err := io.ReadFull(conn, b); err != nil {
++						return
++					}
++					n := make([]byte, int(b[0]))
++					if _, err := io.ReadFull(conn, n); err != nil {
++						return
++					}
++					host = string(n)
++				case 4:
++					b := make([]byte, 16)
++					if _, err := io.ReadFull(conn, b); err != nil {
++						return
++					}
++					host = net.IP(b).String()
++				default:
++					return
++				}
++				p := make([]byte, 2)
++				if _, err := io.ReadFull(conn, p); err != nil {
++					return
++				}
++				remote, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(int(p[0])<<8|int(p[1]))), time.Second)
++				if err != nil {
++					return
++				}
++				defer remote.Close()
++				conn.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 0})
++				go io.Copy(remote, conn)
++				io.Copy(conn, remote)
++			}()
++		}
++	}()
++	return listener.Addr().(*net.TCPAddr).Port
++}
++func TestRuntimeThreeResolversAndCancellation(t *testing.T) {
++	first, _ := startPolicyTCP(t, true, "")
++	second, _ := startPolicyTCP(t, true, "")
++	third, seen := startPolicyTCP(t, false, "192.0.2.44")
++	finalFailure, _ := startPolicyTCP(t, true, "")
++	config := map[string]any{"log": map[string]any{"disabled": true}, "dns": map[string]any{"servers": []any{policyTCP("first", first), policyTCP("second", second), policyTCP("third", third), policyTCP("last-failure", finalFailure)}, "final": "third"}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}, "route": map[string]any{"default_domain_resolver": map[string]any{"server": "first", "fallback_servers": []string{"second", "third"}}}}
++	router, manager := startPolicyBox(t, config)
++	primary, _ := manager.Transport("first")
++	secondary, _ := manager.Transport("second")
++	last, _ := manager.Transport("third")
++	opts := adapter.DNSQueryOptions{Transport: primary, FallbackTransports: []adapter.DNSTransport{secondary, last}}
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	response, err := router.Exchange(ctx, policyQuestion("third-success.example"), opts)
++	if err != nil || len(response.Answer) != 1 {
++		t.Fatalf("third resolver: %v", err)
++	}
++	if _, ok := seen.Load("third-success.example."); !ok {
++		t.Fatal("third was not reached")
++	}
++	addresses, err := router.Lookup(ctx, "third-lookup.example", opts)
++	if err != nil || len(addresses) != 1 {
++		t.Fatalf("lookup: %v", err)
++	}
++	bad, _ := manager.Transport("last-failure")
++	opts.FallbackTransports = []adapter.DNSTransport{secondary, bad}
++	_, err = router.Exchange(ctx, policyQuestion("all-fail.example"), opts)
++	if err == nil || !strings.Contains(err.Error(), "first") || !strings.Contains(err.Error(), "second") || !strings.Contains(err.Error(), "last-failure") {
++		t.Fatalf("lost error context: %v", err)
++	}
++	cancelled, stop := context.WithCancel(context.Background())
++	stop()
++	opts.FallbackTransports = []adapter.DNSTransport{secondary, last}
++	_, err = router.Exchange(cancelled, policyQuestion("cancelled.example"), opts)
++	if err == nil {
++		t.Fatal("cancelled query succeeded")
++	}
++	if _, ok := seen.Load("cancelled.example."); ok {
++		t.Fatal("cancel reached third")
++	}
++}
++func TestRuntimeDomainDoHUsesBootstrapAndChecksTLS(t *testing.T) {
++	bootstrap, seen := startPolicyTCP(t, false, "127.0.0.1")
++	doh := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		data, err := io.ReadAll(r.Body)
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		m := new(mdns.Msg)
++		if err = m.Unpack(data); err != nil {
++			t.Error(err)
++			return
++		}
++		response := new(mdns.Msg)
++		response.SetReply(m)
++		rr, _ := mdns.NewRR(m.Question[0].Name + " 0 IN A 192.0.2.77")
++		response.Answer = []mdns.RR{rr}
++		data, _ = response.Pack()
++		w.Header().Set("Content-Type", "application/dns-message")
++		w.Write(data)
++	}))
++	defer doh.Close()
++	cert, _ := x509.ParseCertificate(doh.TLS.Certificates[0].Certificate[0])
++	certificate := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}))
++	for _, wrong := range []bool{false, true} {
++		t.Run(fmt.Sprintf("wrong=%v", wrong), func(t *testing.T) {
++			name := cert.DNSNames[0]
++			if wrong {
++				name = "wrong.invalid"
++			}
++			endpoint := map[string]any{"type": "https", "tag": "secure", "server": "resolver.example", "server_port": doh.Listener.Addr().(*net.TCPAddr).Port, "path": "/dns-query", "domain_resolver": map[string]any{"server": "bootstrap"}, "tls": map[string]any{"enabled": true, "server_name": name, "certificate": []string{certificate}}}
++			config := map[string]any{"log": map[string]any{"disabled": true}, "dns": map[string]any{"servers": []any{policyTCP("bootstrap", bootstrap), endpoint}, "final": "secure"}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}, "route": map[string]any{"default_domain_resolver": map[string]any{"server": "secure"}}}
++			if wrong {
++				backup := make(map[string]any)
++				for key, value := range endpoint {
++					backup[key] = value
++				}
++				backup["tag"] = "backup"
++				dnsConfig := config["dns"].(map[string]any)
++				dnsConfig["servers"] = append(dnsConfig["servers"].([]any), backup)
++				dnsConfig["rules"] = []any{map[string]any{"ip_accept_any": true, "action": "route", "server": "secure"}}
++				dnsConfig["final"] = "backup"
++			}
++			router, _ := startPolicyBox(t, config)
++			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++			defer cancel()
++			response, err := router.Exchange(ctx, policyQuestion("doh-test.example"), adapter.DNSQueryOptions{})
++			if wrong {
++				if err == nil {
++					t.Fatal("wrong TLS identity succeeded")
++				}
++			} else if err != nil || len(response.Answer) != 1 {
++				t.Fatalf("valid DoH failed: %v", err)
++			}
++			if _, ok := seen.Load("resolver.example."); !ok {
++				t.Fatal("bootstrap not used")
++			}
++		})
++	}
++}
++func TestRuntimeCFMProjectedMixedAndTunnelDNSPolicies(t *testing.T) {
++	dir := os.Getenv("CFW_DNS_PROJECTED_FIXTURE_DIR")
++	if dir == "" {
++		t.Skip("Rust projection fixtures not supplied")
++	}
++	for _, file := range []string{"mixed.json", "tunnel.json", "named.json"} {
++		t.Run(file, func(t *testing.T) {
++			data, err := os.ReadFile(filepath.Join(dir, file))
++			if err != nil {
++				t.Fatal(err)
++			}
++			var config map[string]any
++			if err = json.Unmarshal(data, &config); err != nil {
++				t.Fatal(err)
++			}
++			delete(config, "experimental")
++			config["log"] = map[string]any{"disabled": true}
++			proxyPort := localPolicySOCKS(t)
++			observed := map[string]*sync.Map{}
++			dns := config["dns"].(map[string]any)
++			for _, raw := range dns["servers"].([]any) {
++				server := raw.(map[string]any)
++				tag := server["tag"].(string)
++				port, seen := startPolicyTCP(t, tag == "cfw-profile-dns-0" || tag == "cfw-profile-dns-1", "127.0.0.1")
++				observed[tag] = seen
++				server["server"] = "127.0.0.1"
++				server["type"] = "tcp"
++				server["server_port"] = port
++			}
++			config["outbounds"].([]any)[0].(map[string]any)["server_port"] = proxyPort
++			if file == "tunnel.json" {
++				delete(config, "inbounds")
++			} else {
++				listener, err := net.Listen("tcp", "127.0.0.1:0")
++				if err != nil {
++					t.Fatal(err)
++				}
++				port := listener.Addr().(*net.TCPAddr).Port
++				listener.Close()
++				config["inbounds"].([]any)[0].(map[string]any)["listen_port"] = port
++			}
++			router, _ := startPolicyBox(t, config)
++			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++			defer cancel()
++			for _, name := range []string{"special.example.org", "child.example.org", "ordinary.example.net"} {
++				response, err := router.Exchange(ctx, policyQuestion(name), adapter.DNSQueryOptions{})
++				if err != nil || len(response.Answer) != 1 {
++					t.Fatalf("%s: %v", name, err)
++				}
++			}
++			for _, qtype := range []uint16{mdns.TypeTXT, mdns.TypeHTTPS, mdns.TypeMX} {
++				name := fmt.Sprintf("pool-%d.example.net.", qtype)
++				message := new(mdns.Msg).SetQuestion(name, qtype)
++				response, err := router.Exchange(ctx, message, adapter.DNSQueryOptions{})
++				if err != nil || response.Rcode != mdns.RcodeSuccess || len(response.Answer) != 1 {
++					t.Fatalf("type %d: %v", qtype, err)
++				}
++				for _, tag := range []string{"cfw-profile-dns-0", "cfw-profile-dns-1", "cfw-profile-dns-2"} {
++					if _, ok := observed[tag].Load(name); !ok {
++						t.Errorf("type %d skipped resolver %s", qtype, tag)
++					}
++				}
++			}
++			for tag, name := range map[string]string{"cfw-policy-dns-1-0": "special.example.org.", "cfw-policy-dns-0-0": "child.example.org.", "cfw-profile-dns-2": "ordinary.example.net.", "cfw-proxy-server-dns-0": "node.example.com."} {
++				if _, ok := observed[tag].Load(name); !ok {
++					t.Errorf("%s missing from %s", name, tag)
++				}
++			}
++			if file != "tunnel.json" {
++				target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("policy-ok")) }))
++				defer target.Close()
++				_, targetPort, _ := net.SplitHostPort(target.Listener.Addr().String())
++				port := config["inbounds"].([]any)[0].(map[string]any)["listen_port"].(int)
++				proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
++				transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
++				defer transport.CloseIdleConnections()
++				client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
++				names := []string{"special.example.org", "direct.example.com"}
++				if file == "named.json" {
++					names = append(names, "direct.example.org")
++				}
++				for _, name := range names {
++					response, err := client.Get("http://" + net.JoinHostPort(name, targetPort))
++					if err != nil {
++						t.Fatal(err)
++					}
++					body, _ := io.ReadAll(response.Body)
++					response.Body.Close()
++					if string(body) != "policy-ok" {
++						t.Fatal("wrong response")
++					}
++				}
++				if file == "named.json" {
++					if _, seen := observed["cfw-policy-dns-0-0"].Load("direct.example.org."); !seen {
++						t.Fatal("direct follow-policy skipped the matching domain policy")
++					}
++					if _, seen := observed["cfw-direct-dns-0"].Load("direct.example.org."); seen {
++						t.Fatal("direct follow-policy ignored its domain policy")
++					}
++				}
++				if _, ok := observed["cfw-direct-dns-0"].Load("direct.example.com."); !ok {
++					t.Fatal("direct resolver unused")
++				}
++				for tag, seen := range observed {
++					if tag == "cfw-direct-dns-0" {
++						continue
++					}
++					if _, ok := seen.Load("direct.example.com."); ok {
++						t.Fatalf("direct query leaked to %s", tag)
++					}
++				}
++			}
++		})
++	}
++}
++
++func TestRuntimeCFMFilteredResponsesAndPolicyFailureIsolation(t *testing.T) {
++	dir := os.Getenv("CFW_DNS_PROJECTED_FIXTURE_DIR")
++	if dir == "" {
++		t.Skip("Rust projection fixtures not supplied")
++	}
++	data, err := os.ReadFile(filepath.Join(dir, "filter.json"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	var config map[string]any
++	if err = json.Unmarshal(data, &config); err != nil {
++		t.Fatal(err)
++	}
++	delete(config, "experimental")
++	delete(config, "inbounds")
++	config["log"] = map[string]any{"disabled": true}
++	proxyPort := localPolicySOCKS(t)
++	observed := map[string]*sync.Map{}
++	for _, raw := range config["dns"].(map[string]any)["servers"].([]any) {
++		server := raw.(map[string]any)
++		tag := server["tag"].(string)
++		answer := "127.0.0.1"
++		if tag == "cfw-profile-dns-0" {
++			answer = "240.0.0.1"
++		}
++		port, seen := startPolicyTCP(t, tag == "cfw-policy-dns-1-0", answer)
++		observed[tag] = seen
++		server["server"] = "127.0.0.1"
++		server["type"] = "tcp"
++		server["server_port"] = port
++	}
++	config["outbounds"].([]any)[0].(map[string]any)["server_port"] = proxyPort
++	router, _ := startPolicyBox(t, config)
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	for _, name := range []string{"filtered.example.net", "force.fallback.example"} {
++		response, err := router.Exchange(ctx, policyQuestion(name), adapter.DNSQueryOptions{})
++		if err != nil || len(response.Answer) != 1 {
++			t.Fatalf("filter %s: %v", name, err)
++		}
++		if response.Answer[0].(*mdns.A).A.String() != "127.0.0.1" {
++			t.Fatal("rejected primary response escaped")
++		}
++		if _, ok := observed["cfw-fallback-dns-0"].Load(name + "."); !ok {
++			t.Fatal("fallback resolver was not reached")
++		}
++	}
++	for _, qtype := range []uint16{mdns.TypeTXT, mdns.TypeMX} {
++		name := fmt.Sprintf("non-address-filter-%d.example.net.", qtype)
++		response, err := router.Exchange(ctx, new(mdns.Msg).SetQuestion(name, qtype), adapter.DNSQueryOptions{})
++		if err != nil || len(response.Answer) != 1 {
++			t.Fatalf("non-address filter: %v", err)
++		}
++		if _, ok := observed["cfw-profile-dns-0"].Load(name); !ok {
++			t.Fatal("non-address query bypassed the primary")
++		}
++		if _, ok := observed["cfw-fallback-dns-0"].Load(name); ok {
++			t.Fatal("IP filter incorrectly affected a non-address answer")
++		}
++	}
++	if _, ok := observed["cfw-profile-dns-0"].Load("force.fallback.example."); ok {
++		t.Fatal("forced fallback domain queried ordinary DNS")
++	}
++	_, err = router.Exchange(ctx, policyQuestion("special.example.org"), adapter.DNSQueryOptions{})
++	if err == nil {
++		t.Fatal("failed domain policy fell through to another pool")
++	}
++	for _, tag := range []string{"cfw-profile-dns-0", "cfw-fallback-dns-0", "cfw-bootstrap-dns-0"} {
++		if _, ok := observed[tag].Load("special.example.org."); ok {
++			t.Fatalf("failed policy escaped to %s", tag)
++		}
++	}
++}
++
++func TestRuntimeDeadlinePreventsLaterResolvers(t *testing.T) {
++	entered := make(chan struct{}, 1)
++	release := make(chan struct{})
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := &mdns.Server{Listener: listener, Net: "tcp", Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, m *mdns.Msg) {
++		select {
++		case entered <- struct{}{}:
++		default:
++		}
++		<-release
++		w.Close()
++	})}
++	go server.ActivateAndServe()
++	defer func() { close(release); server.Shutdown() }()
++	last, seen := startPolicyTCP(t, false, "192.0.2.9")
++	config := map[string]any{"log": map[string]any{"disabled": true}, "dns": map[string]any{"servers": []any{policyTCP("stalled", listener.Addr().(*net.TCPAddr).Port), policyTCP("last", last)}, "final": "last"}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}, "route": map[string]any{"default_domain_resolver": "last"}}
++	router, manager := startPolicyBox(t, config)
++	primary, _ := manager.Transport("stalled")
++	fallback, _ := manager.Transport("last")
++	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
++	defer cancel()
++	started := time.Now()
++	_, err = router.Exchange(ctx, policyQuestion("deadline.example"), adapter.DNSQueryOptions{Transport: primary, FallbackTransports: []adapter.DNSTransport{fallback}})
++	if err == nil || time.Since(started) > time.Second {
++		t.Fatalf("unbounded deadline: %v", err)
++	}
++	select {
++	case <-entered:
++	default:
++		t.Fatal("stalled server was not reached")
++	}
++	if _, ok := seen.Load("deadline.example."); ok {
++		t.Fatal("expired request queried fallback")
++	}
++}
++
++func TestRuntimeDNSPoolRetriesSERVFAILButPreservesNegativeAnswers(t *testing.T) {
++	for _, rcode := range []int{mdns.RcodeServerFailure, mdns.RcodeRefused, mdns.RcodeNameError} {
++		t.Run(mdns.RcodeToString[rcode], func(t *testing.T) {
++			listener, err := net.Listen("tcp", "127.0.0.1:0")
++			if err != nil {
++				t.Fatal(err)
++			}
++			server := &mdns.Server{Listener: listener, Net: "tcp", Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, request *mdns.Msg) {
++				response := new(mdns.Msg).SetRcode(request, rcode)
++				if err := w.WriteMsg(response); err != nil {
++					t.Error(err)
++				}
++			})}
++			go server.ActivateAndServe()
++			t.Cleanup(func() { server.Shutdown() })
++			port, observed := startPolicyTCP(t, false, "127.0.0.1")
++			config := map[string]any{
++				"log":       map[string]any{"disabled": true},
++				"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++				"dns": map[string]any{"servers": []any{policyTCP("first", listener.Addr().(*net.TCPAddr).Port), policyTCP("last", port)}, "final": "last",
++					"rules": []any{map[string]any{"domain_suffix": "test", "action": "route", "server": "first", "retry_on_error": true}, map[string]any{"domain_suffix": "test", "action": "route", "server": "last"}}},
++				"route": map[string]any{"default_domain_resolver": "last"},
++			}
++			router, _ := startPolicyBox(t, config)
++			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++			defer cancel()
++			response, err := router.Exchange(ctx, new(mdns.Msg).SetQuestion("rcode.test.", mdns.TypeTXT), adapter.DNSQueryOptions{})
++			if err != nil {
++				t.Fatal(err)
++			}
++			_, usedFallback := observed.Load("rcode.test.")
++			if rcode == mdns.RcodeNameError {
++				if response.Rcode != mdns.RcodeNameError || usedFallback {
++					t.Fatal("NXDOMAIN was changed or retried")
++				}
++			} else if !usedFallback || response.Rcode != mdns.RcodeSuccess || len(response.Answer) != 1 {
++				t.Fatal("server failure did not reach the next configured resolver")
++			}
++		})
++	}
++}
+diff --git a/dns/system_hosts_test.go b/dns/system_hosts_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fefae72002e480d8e6efee3f7bc3c59b7f086a7d
+--- /dev/null
++++ b/dns/system_hosts_test.go
+@@ -0,0 +1,99 @@
++package dns_test
++
++import (
++	"context"
++	"fmt"
++	mdns "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"net/netip"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestSystemHostsPrecedesExplicitResolverAndRemotePolicyWithoutHidingIOFailure(t *testing.T) {
++	port, seen := startPolicyTCP(t, false, "203.0.113.7")
++	hostsPath := filepath.Join(t.TempDir(), "hosts")
++	if err := os.WriteFile(hostsPath, []byte("127.0.0.1 local.example\n::1 local.example\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	config := func(path string) map[string]any {
++		return map[string]any{
++			"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++			"dns": map[string]any{"system_hosts": "system", "servers": []any{
++				map[string]any{"type": "hosts", "tag": "system", "path": []string{path}, "strict": true, "fallback_on_missing": true},
++				map[string]any{"type": "tcp", "tag": "remote", "server": "127.0.0.1", "server_port": port},
++			}, "final": "remote", "strategy": "ipv4_only"},
++		}
++	}
++	router, transports := startPolicyBox(t, config(hostsPath))
++	remote, ok := transports.Transport("remote")
++	if !ok {
++		t.Fatal("remote resolver missing")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	addresses, err := router.Lookup(ctx, "local.example", adapter.DNSQueryOptions{Transport: remote, Strategy: C.DomainStrategyIPv4Only})
++	if err != nil || len(addresses) != 1 || addresses[0] != netip.MustParseAddr("127.0.0.1") {
++		t.Fatalf("hosts lookup: %v %v", addresses, err)
++	}
++	if _, found := seen.Load("local.example."); found {
++		t.Fatal("hosts name leaked to an explicit upstream")
++	}
++	query := new(mdns.Msg)
++	query.SetQuestion("local.example.", mdns.TypeAAAA)
++	response, err := router.Exchange(ctx, query, adapter.DNSQueryOptions{})
++	if err != nil || len(response.Answer) != 0 {
++		t.Fatal("system hosts bypassed disabled IPv6")
++	}
++	query.SetQuestion("remote.example.", mdns.TypeA)
++	response, err = router.Exchange(ctx, query, adapter.DNSQueryOptions{})
++	if err != nil || len(response.Answer) != 1 {
++		t.Fatalf("absent local host did not reach DNS: %v", err)
++	}
++	if _, found := seen.Load("remote.example."); !found {
++		t.Fatal("ordinary DNS was skipped")
++	}
++
++	broken, _ := startPolicyBox(t, config(filepath.Join(t.TempDir(), "missing-hosts")))
++	query.SetQuestion("must-not-leak.example.", mdns.TypeA)
++	if _, err := broken.Exchange(ctx, query, adapter.DNSQueryOptions{}); err == nil {
++		t.Fatal("unreadable hosts became successful DNS fallback")
++	}
++	if _, found := seen.Load("must-not-leak.example."); found {
++		t.Fatal("hosts I/O failure leaked to DNS")
++	}
++}
++
++func TestLocalHostsMissDoesNotConsumeTheEightRemoteAttemptBudget(t *testing.T) {
++	port, _ := startPolicyTCP(t, false, "203.0.113.9")
++	closed, _ := startPolicyTCP(t, true, "")
++	hostsPath := filepath.Join(t.TempDir(), "hosts")
++	if err := os.WriteFile(hostsPath, []byte("127.0.0.1 localhost\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	servers := []any{map[string]any{"type": "hosts", "tag": "system", "path": []string{hostsPath}, "strict": true, "fallback_on_missing": true}}
++	var rules []any
++	for i := 0; i < 8; i++ {
++		selectedPort := closed
++		if i == 7 {
++			selectedPort = port
++		}
++		tag := fmt.Sprintf("resolver-%d", i)
++		servers = append(servers, map[string]any{"type": "tcp", "tag": tag, "server": "127.0.0.1", "server_port": selectedPort})
++		if i < 7 {
++			rules = append(rules, map[string]any{"query_type": []string{"A"}, "action": "route", "server": tag, "retry_on_error": true})
++		}
++	}
++	router, _ := startPolicyBox(t, map[string]any{"log": map[string]any{"disabled": true}, "outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}}, "dns": map[string]any{"system_hosts": "system", "servers": servers, "rules": rules, "final": "resolver-7", "strategy": "ipv4_only"}})
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	query := new(mdns.Msg)
++	query.SetQuestion("budget.example.", mdns.TypeA)
++	response, err := router.Exchange(ctx, query, adapter.DNSQueryOptions{})
++	if err != nil || len(response.Answer) != 1 {
++		t.Fatalf("eighth remote attempt was lost after local miss: %v", err)
++	}
++}
+diff --git a/dns/transport/hosts/hosts.go b/dns/transport/hosts/hosts.go
+index f0e70a9a3c2f879a64175fabc00737928d9e3e89..4538ecd82f983071ce24bbf52f51a01f82f9eea1 100644
+--- a/dns/transport/hosts/hosts.go
++++ b/dns/transport/hosts/hosts.go
+@@ -26,2 +26,4 @@ type Transport struct {
+-	files      []*File
+-	predefined map[string][]netip.Addr
++	files             []*File
++	predefined        map[string][]netip.Addr
++	strict            bool
++	fallbackOnMissing bool
+@@ -49,2 +51,3 @@ func NewTransport(ctx context.Context, logger log.ContextLogger, tag string, opt
+-		files:            files,
+-		predefined:       predefined,
++		strict:           options.Strict, fallbackOnMissing: options.FallbackOnMissing,
++		files:      files,
++		predefined: predefined,
+@@ -73 +76,10 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
+-			addresses := file.Lookup(domain)
++			var addresses []netip.Addr
++			if t.strict {
++				var err error
++				addresses, err = file.LookupChecked(domain)
++				if err != nil {
++					return nil, err
++				}
++			} else {
++				addresses = file.Lookup(domain)
++			}
+@@ -78,0 +91,3 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
++	if t.fallbackOnMissing {
++		return nil, dns.ErrHostsNotFound
++	}
+diff --git a/dns/transport/hosts/hosts_file.go b/dns/transport/hosts/hosts_file.go
+index ec384882a86299d2aa7f736650efa704f247a53f..3bf5f9b043eed86f40c543d871876991c4d3fabb 100644
+--- a/dns/transport/hosts/hosts_file.go
++++ b/dns/transport/hosts/hosts_file.go
+@@ -5,0 +6 @@ import (
++	"fmt"
+@@ -19,6 +20,8 @@ type File struct {
+-	path    string
+-	access  sync.Mutex
+-	byName  map[string][]netip.Addr
+-	expire  time.Time
+-	modTime time.Time
+-	size    int64
++	path        string
++	access      sync.Mutex
++	byName      map[string][]netip.Addr
++	expire      time.Time
++	modTime     time.Time
++	size        int64
++	lastError   error
++	initialized bool
+@@ -40 +43,17 @@ func (f *File) Lookup(name string) []netip.Addr {
+-func (f *File) update() {
++// LookupChecked distinguishes an absent name from an unreadable or oversized
++// hosts file. Product-owned system hosts use this path; failures cannot leak a
++// query to a different resolver by masquerading as an empty hosts table.
++func (f *File) LookupChecked(name string) ([]netip.Addr, error) {
++	f.access.Lock()
++	defer f.access.Unlock()
++	if err := f.update(); err != nil {
++		return nil, err
++	}
++	return f.byName[dns.CanonicalName(name)], nil
++}
++
++const maxHostsFileBytes = 512 * 1024
++const maxHostsNames = 8192
++const maxHostsAddressesPerName = 128
++
++func (f *File) update() (err error) {
+@@ -42,2 +61,2 @@ func (f *File) update() {
+-	if now.Before(f.expire) && len(f.byName) > 0 {
+-		return
++	if f.initialized && now.Before(f.expire) {
++		return f.lastError
+@@ -44,0 +64 @@ func (f *File) update() {
++	defer func() { f.initialized = true; f.lastError = err; f.expire = now.Add(cacheMaxAge) }()
+@@ -47 +67 @@ func (f *File) update() {
+-		return
++		return fmt.Errorf("read hosts metadata: %w", err)
+@@ -49,3 +69,5 @@ func (f *File) update() {
+-	if f.modTime.Equal(stat.ModTime()) && f.size == stat.Size() {
+-		f.expire = now.Add(cacheMaxAge)
+-		return
++	if !stat.Mode().IsRegular() || stat.Size() > maxHostsFileBytes {
++		return errors.New("hosts source must be a regular file within 512 KiB")
++	}
++	if f.byName != nil && f.modTime.Equal(stat.ModTime()) && f.size == stat.Size() {
++		return nil
+@@ -53 +74,0 @@ func (f *File) update() {
+-	byName := make(map[string][]netip.Addr)
+@@ -56 +77 @@ func (f *File) update() {
+-		return
++		return fmt.Errorf("open hosts source: %w", err)
+@@ -59,24 +80,8 @@ func (f *File) update() {
+-	reader := bufio.NewReader(file)
+-	var (
+-		prefix   []byte
+-		line     []byte
+-		isPrefix bool
+-	)
+-	for {
+-		line, isPrefix, err = reader.ReadLine()
+-		if err != nil {
+-			if errors.Is(err, io.EOF) {
+-				break
+-			}
+-			return
+-		}
+-		if isPrefix {
+-			prefix = append(prefix, line...)
+-			continue
+-		} else if len(prefix) > 0 {
+-			line = append(prefix, line...)
+-			prefix = nil
+-		}
+-		commentIndex := strings.IndexRune(string(line), '#')
+-		if commentIndex != -1 {
+-			line = line[:commentIndex]
++	byName := make(map[string][]netip.Addr)
++	bounded := &io.LimitedReader{R: file, N: maxHostsFileBytes + 1}
++	reader := bufio.NewScanner(bounded)
++	reader.Buffer(make([]byte, 4096), maxHostsFileBytes+1)
++	for reader.Scan() {
++		line := reader.Text()
++		if index := strings.IndexByte(line, '#'); index >= 0 {
++			line = line[:index]
+@@ -84 +89 @@ func (f *File) update() {
+-		fields := strings.Fields(string(line))
++		fields := strings.Fields(line)
+@@ -88,3 +93,2 @@ func (f *File) update() {
+-		var addr netip.Addr
+-		addr, err = netip.ParseAddr(fields[0])
+-		if err != nil {
++		address, parseErr := netip.ParseAddr(fields[0])
++		if parseErr != nil {
+@@ -91,0 +96,13 @@ func (f *File) update() {
++		} // The hosts format ignores invalid address lines.
++		for _, name := range fields[1:] {
++			canonical := dns.CanonicalName(name)
++			if len(canonical) > 255 {
++				return errors.New("hosts name exceeds 255 bytes")
++			}
++			if len(byName[canonical]) >= maxHostsAddressesPerName {
++				return errors.New("hosts name exceeds 128 addresses")
++			}
++			byName[canonical] = append(byName[canonical], address)
++			if len(byName) > maxHostsNames {
++				return errors.New("hosts source exceeds 8192 names")
++			}
+@@ -93,4 +109,0 @@ func (f *File) update() {
+-		for index := 1; index < len(fields); index++ {
+-			canonicalName := dns.CanonicalName(fields[index])
+-			byName[canonicalName] = append(byName[canonicalName], addr)
+-		}
+@@ -98,4 +111,8 @@ func (f *File) update() {
+-	f.expire = now.Add(cacheMaxAge)
+-	f.modTime = stat.ModTime()
+-	f.size = stat.Size()
+-	f.byName = byName
++	if bounded.N == 0 {
++		return errors.New("hosts source exceeds 512 KiB")
++	}
++	if err := reader.Err(); err != nil {
++		return fmt.Errorf("read hosts source: %w", err)
++	}
++	f.modTime, f.size, f.byName = stat.ModTime(), stat.Size(), byName
++	return nil
 diff --git a/dns/transport_adapter.go b/dns/transport_adapter.go
-index 4734570978fec974c9806654099ee3bc32d75476..7f83d0daebb7aedb1dd76c2078c984350e167ce7 100644
+index 4734570978fec974c9806654099ee3bc32d75476..b53373b11a29f232c19c613adff3cb9504e846f8 100644
 --- a/dns/transport_adapter.go
 +++ b/dns/transport_adapter.go
-@@ -30,6 +30,9 @@ func NewTransportAdapterWithLocalOptions(transportType string, transportTag stri
- 	var dependencies []string
- 	if localOptions.DomainResolver != nil && localOptions.DomainResolver.Server != "" {
- 		dependencies = append(dependencies, localOptions.DomainResolver.Server)
-+		if localOptions.DomainResolver.FallbackServer != "" {
-+			dependencies = append(dependencies, localOptions.DomainResolver.FallbackServer)
-+		}
- 	}
- 	return TransportAdapter{
- 		transportType: transportType,
-@@ -44,6 +47,9 @@ func NewTransportAdapterWithRemoteOptions(transportType string, transportTag str
- 	var dependencies []string
- 	if remoteOptions.DomainResolver != nil && remoteOptions.DomainResolver.Server != "" {
- 		dependencies = append(dependencies, remoteOptions.DomainResolver.Server)
-+		if remoteOptions.DomainResolver.FallbackServer != "" {
-+			dependencies = append(dependencies, remoteOptions.DomainResolver.FallbackServer)
-+		}
- 	}
- 	if remoteOptions.LegacyAddressResolver != "" {
- 		dependencies = append(dependencies, remoteOptions.LegacyAddressResolver)
+@@ -32,0 +33 @@ func NewTransportAdapterWithLocalOptions(transportType string, transportTag stri
++		dependencies = append(dependencies, localOptions.DomainResolver.FallbackTags()...)
+@@ -46,0 +48 @@ func NewTransportAdapterWithRemoteOptions(transportType string, transportTag str
++		dependencies = append(dependencies, remoteOptions.DomainResolver.FallbackTags()...)
+diff --git a/dns/transport_dialer.go b/dns/transport_dialer.go
+index b3ee8082ab4bbbbc3140861cbf41dd66911d0ae1..905fef8c233eaf89a7c16c698ab2800d4220918e 100644
+--- a/dns/transport_dialer.go
++++ b/dns/transport_dialer.go
+@@ -31,0 +32,3 @@ func NewRemoteDialer(ctx context.Context, options option.RemoteDNSServerOptions)
++	if options.RespectRules {
++		return newRoutedDialer(ctx, options)
++	}
+diff --git a/option/dns.go b/option/dns.go
+index b5ccf20804e890ddc7a6736aa100cc41854581a3..f60d8705fe70c57e9fcd0ddd696466b341eab5dd 100644
+--- a/option/dns.go
++++ b/option/dns.go
+@@ -21,0 +22,2 @@ type RawDNSOptions struct {
++	SystemHosts    string             `json:"system_hosts,omitempty"`
++	Policies       []DNSPolicy        `json:"policies,omitempty"`
+@@ -28,0 +31,8 @@ type RawDNSOptions struct {
++// A named chain selects DNS servers for a connection role without bypassing
++// that role's domain and response filters. The default chain remains unchanged.
++type DNSPolicy struct {
++	Tag   string    `json:"tag"`
++	Rules []DNSRule `json:"rules,omitempty"`
++	Final string    `json:"final"`
++}
++
+@@ -364,2 +374,4 @@ type HostsDNSServerOptions struct {
+-	Path       badoption.Listable[string]                                `json:"path,omitempty"`
+-	Predefined *badjson.TypedMap[string, badoption.Listable[netip.Addr]] `json:"predefined,omitempty"`
++	Strict            bool                                                      `json:"strict,omitempty"`
++	FallbackOnMissing bool                                                      `json:"fallback_on_missing,omitempty"`
++	Path              badoption.Listable[string]                                `json:"path,omitempty"`
++	Predefined        *badjson.TypedMap[string, badoption.Listable[netip.Addr]] `json:"predefined,omitempty"`
+@@ -381,0 +394 @@ type RemoteDNSServerOptions struct {
++	RespectRules bool `json:"respect_rules,omitempty"`
 diff --git a/option/domain_resolver_fallback_test.go b/option/domain_resolver_fallback_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..646272557f9f54541d88184a1a6b5ee988316116
+index 0000000000000000000000000000000000000000..e0497c3eb969d7008adedec40570dbfce8323f57
 --- /dev/null
 +++ b/option/domain_resolver_fallback_test.go
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,81 @@
 +package option
 +
 +import (
@@ -1106,87 +2670,262 @@ index 0000000000000000000000000000000000000000..646272557f9f54541d88184a1a6b5ee9
 +		t.Fatalf("legacy single resolver changed: options=%#v err=%v", options, err)
 +	}
 +}
++
++func TestDomainResolverMultipleFallbacksAreBoundedAndUnambiguous(t *testing.T) {
++	for _, input := range []string{
++		`{"server":"one","fallback_servers":["two","three"]}`,
++		`{"server":"one","fallback_server":"two"}`,
++	} {
++		var options DomainResolveOptions
++		if err := json.Unmarshal([]byte(input), &options); err != nil {
++			t.Fatal(err)
++		}
++		result, err := json.Marshal(options)
++		if err != nil || string(result) != input {
++			t.Fatalf("lost ordered resolvers: %s %v", result, err)
++		}
++	}
++	for _, input := range []string{
++		`{"server":"one","fallback_servers":["one"]}`,
++		`{"server":"one","fallback_servers":[""]}`,
++		`{"server":"one","fallback_servers":["two","two"]}`,
++		`{"server":"one","fallback_server":"two","fallback_servers":["three"]}`,
++		`{"server":"one","fallback_servers":["2","3","4","5","6","7","8","9"]}`,
++	} {
++		var options DomainResolveOptions
++		if err := json.Unmarshal([]byte(input), &options); err == nil {
++			t.Fatalf("accepted invalid fallback graph: %s", input)
++		}
++	}
++}
++
++func TestDomainResolverPolicyIsExclusiveAndRoundTrips(t *testing.T) {
++	var options DomainResolveOptions
++	input := `{"policy":"direct"}`
++	if err := json.Unmarshal([]byte(input), &options); err != nil {
++		t.Fatal(err)
++	}
++	encoded, err := json.Marshal(options)
++	if err != nil || string(encoded) != input {
++		t.Fatalf("policy round trip: %s %v", encoded, err)
++	}
++	for _, input := range []string{`{"policy":"direct","server":"main"}`, `{"policy":"direct","fallback_server":"main"}`, `{"policy":"direct","fallback_servers":["main"]}`} {
++		if err := json.Unmarshal([]byte(input), &options); err == nil {
++			t.Fatalf("ambiguous policy accepted: %s", input)
++		}
++	}
++}
 diff --git a/option/outbound.go b/option/outbound.go
-index 6676a3e92362955ffe3dcb102f2b02efb9edb49a..3064f24c8067512b21a414ba78a7f432c261f478 100644
+index 6676a3e92362955ffe3dcb102f2b02efb9edb49a..04eb9f84ba7717f7892f575036b3c112abadcaab 100644
 --- a/option/outbound.go
 +++ b/option/outbound.go
-@@ -93,11 +93,12 @@ type DialerOptions struct {
- }
- 
- type _DomainResolveOptions struct {
+@@ -96,5 +96,8 @@ type _DomainResolveOptions struct {
 -	Server       string                `json:"server"`
 -	Strategy     DomainStrategy        `json:"strategy,omitempty"`
 -	DisableCache bool                  `json:"disable_cache,omitempty"`
 -	RewriteTTL   *uint32               `json:"rewrite_ttl,omitempty"`
 -	ClientSubnet *badoption.Prefixable `json:"client_subnet,omitempty"`
-+	Server         string                `json:"server"`
-+	FallbackServer string                `json:"fallback_server,omitempty"`
-+	Strategy       DomainStrategy        `json:"strategy,omitempty"`
-+	DisableCache   bool                  `json:"disable_cache,omitempty"`
-+	RewriteTTL     *uint32               `json:"rewrite_ttl,omitempty"`
-+	ClientSubnet   *badoption.Prefixable `json:"client_subnet,omitempty"`
- }
- 
- type DomainResolveOptions _DomainResolveOptions
-@@ -105,7 +106,8 @@ type DomainResolveOptions _DomainResolveOptions
- func (o DomainResolveOptions) MarshalJSON() ([]byte, error) {
- 	if o.Server == "" {
- 		return []byte("{}"), nil
++	Server          string                `json:"server,omitempty"`
++	Policy          string                `json:"policy,omitempty"`
++	FallbackServer  string                `json:"fallback_server,omitempty"`
++	FallbackServers []string              `json:"fallback_servers,omitempty"`
++	Strategy        DomainStrategy        `json:"strategy,omitempty"`
++	DisableCache    bool                  `json:"disable_cache,omitempty"`
++	RewriteTTL      *uint32               `json:"rewrite_ttl,omitempty"`
++	ClientSubnet    *badoption.Prefixable `json:"client_subnet,omitempty"`
+@@ -106 +109,3 @@ func (o DomainResolveOptions) MarshalJSON() ([]byte, error) {
+-	if o.Server == "" {
++	if o.Policy != "" {
++		return json.Marshal((_DomainResolveOptions)(o))
++	} else if o.Server == "" {
+@@ -108 +113,2 @@ func (o DomainResolveOptions) MarshalJSON() ([]byte, error) {
 -	} else if o.Strategy == DomainStrategy(C.DomainStrategyAsIS) &&
-+	} else if o.FallbackServer == "" &&
++	} else if o.FallbackServer == "" && len(o.FallbackServers) == 0 &&
 +		o.Strategy == DomainStrategy(C.DomainStrategyAsIS) &&
- 		!o.DisableCache &&
- 		o.RewriteTTL == nil &&
- 		o.ClientSubnet == nil {
-@@ -116,6 +118,7 @@ func (o DomainResolveOptions) MarshalJSON() ([]byte, error) {
- }
- 
- func (o *DomainResolveOptions) UnmarshalJSON(bytes []byte) error {
-+	*o = DomainResolveOptions{}
- 	var stringValue string
- 	err := json.Unmarshal(bytes, &stringValue)
- 	if err == nil {
-@@ -129,6 +132,9 @@ func (o *DomainResolveOptions) UnmarshalJSON(bytes []byte) error {
- 	if o.Server == "" {
- 		return E.New("empty domain_resolver.server")
- 	}
-+	if o.FallbackServer == o.Server {
-+		return E.New("domain_resolver.fallback_server must differ from server")
+@@ -117,0 +124,7 @@ func (o DomainResolveOptions) MarshalJSON() ([]byte, error) {
++func (o DomainResolveOptions) FallbackTags() []string {
++	if o.FallbackServer != "" {
++		return []string{o.FallbackServer}
 +	}
- 	return nil
- }
- 
++	return o.FallbackServers
++}
++
+@@ -118,0 +132 @@ func (o *DomainResolveOptions) UnmarshalJSON(bytes []byte) error {
++	*o = DomainResolveOptions{}
+@@ -128,0 +143,9 @@ func (o *DomainResolveOptions) UnmarshalJSON(bytes []byte) error {
++	if o.Policy != "" {
++		if o.Server != "" || o.FallbackServer != "" || len(o.FallbackServers) != 0 {
++			return E.New("domain_resolver.policy cannot be combined with explicit servers")
++		}
++		if len(o.Policy) > 128 {
++			return E.New("domain_resolver.policy exceeds 128 bytes")
++		}
++		return nil
++	}
+@@ -131,0 +155,13 @@ func (o *DomainResolveOptions) UnmarshalJSON(bytes []byte) error {
++	if o.FallbackServer != "" && len(o.FallbackServers) != 0 {
++		return E.New("domain_resolver cannot combine fallback_server and fallback_servers")
++	}
++	if len(o.FallbackServers) > 7 {
++		return E.New("domain_resolver supports at most eight total resolvers")
++	}
++	seen := map[string]bool{o.Server: true}
++	for _, server := range o.FallbackTags() {
++		if server == "" || seen[server] {
++			return E.New("domain_resolver fallback servers must be nonempty and distinct")
++		}
++		seen[server] = true
++	}
+diff --git a/option/rule_action.go b/option/rule_action.go
+index 431082552061c7eab9b57cea4d5cbaa88559105e..8c805b4ef326a1b6ba6e3339aacf6601037f1d12 100644
+--- a/option/rule_action.go
++++ b/option/rule_action.go
+@@ -190,5 +190,7 @@ type DNSRouteActionOptions struct {
+-	Server       string                `json:"server,omitempty"`
+-	Strategy     DomainStrategy        `json:"strategy,omitempty"`
+-	DisableCache bool                  `json:"disable_cache,omitempty"`
+-	RewriteTTL   *uint32               `json:"rewrite_ttl,omitempty"`
+-	ClientSubnet *badoption.Prefixable `json:"client_subnet,omitempty"`
++	ResponseIPAcceptAll bool                  `json:"response_ip_accept_all,omitempty"`
++	RetryOnError        bool                  `json:"retry_on_error,omitempty"`
++	Server              string                `json:"server,omitempty"`
++	Strategy            DomainStrategy        `json:"strategy,omitempty"`
++	DisableCache        bool                  `json:"disable_cache,omitempty"`
++	RewriteTTL          *uint32               `json:"rewrite_ttl,omitempty"`
++	ClientSubnet        *badoption.Prefixable `json:"client_subnet,omitempty"`
 diff --git a/protocol/tailscale/dns_transport.go b/protocol/tailscale/dns_transport.go
-index 9edbfbc46f760919f49aa7e19f76180724f61e03..19f4caf9bceb731ff6a19af3b6a5bb38e2883edb 100644
+index 9edbfbc46f760919f49aa7e19f76180724f61e03..2ed42976e0dde9c6a6a2be801e2affb26cdd0de6 100644
 --- a/protocol/tailscale/dns_transport.go
 +++ b/protocol/tailscale/dns_transport.go
-@@ -170,9 +170,9 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
- 	}
- 	if len(resolver.BootstrapResolution) > 0 {
- 		bootstrapTransport := transport.NewUDPRaw(t.logger, t.TransportAdapter, myDialer, M.SocksaddrFrom(resolver.BootstrapResolution[0], 53))
+@@ -173 +173 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
 -		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
-+		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", "", adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
- 	} else {
++		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", nil, adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
+@@ -175 +175 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
 -		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", t.endpoint.queryOptions, 0)
-+		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", "", t.endpoint.queryOptions, 0)
- 	}
- 	if isHTTPScheme {
- 		serverAddr := M.ParseSocksaddrHostPortStr(serverURL.Hostname(), serverURL.Port())
++		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", nil, t.endpoint.queryOptions, 0)
+diff --git a/route/dns_dialer.go b/route/dns_dialer.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b65fe879b8bd4b6e4bcdef012a02edab42fa1e39
+--- /dev/null
++++ b/route/dns_dialer.go
+@@ -0,0 +1,72 @@
++package route
++
++import (
++	"context"
++	"net"
++
++	"github.com/sagernet/sing-box/adapter"
++	R "github.com/sagernet/sing-box/route/rule"
++	"github.com/sagernet/sing/common"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++var _ adapter.DNSConnectionRouter = (*Router)(nil)
++
++func (r *Router) dnsOutbound(ctx context.Context, network string, destination M.Socksaddr, domain string) (context.Context, adapter.Outbound, M.Socksaddr, error) {
++	if !destination.IsIP() {
++		return ctx, nil, destination, E.New("routed DNS requires a bootstrapped numeric destination")
++	}
++	metadata := adapter.InboundContext{InternalDNS: true, Inbound: "internal-dns", Network: network, Destination: destination, Domain: domain}
++	ctx = adapter.WithContext(ctx, &metadata)
++	rule, _, _, _, err := r.matchRule(ctx, &metadata, false, false, nil, nil)
++	if err != nil {
++		return ctx, nil, destination, err
++	}
++	outbound := r.outbound.Default()
++	if rule != nil {
++		switch action := rule.Action().(type) {
++		case *R.RuleActionRoute:
++			var loaded bool
++			outbound, loaded = r.outbound.Outbound(action.Outbound)
++			if !loaded {
++				return ctx, nil, destination, E.New("DNS route outbound not found: ", action.Outbound)
++			}
++		case *R.RuleActionBypass:
++			var loaded bool
++			outbound, loaded = r.outbound.Outbound(action.Outbound)
++			if !loaded {
++				return ctx, nil, destination, E.New("DNS bypass outbound not found: ", action.Outbound)
++			}
++		case *R.RuleActionReject:
++			return ctx, nil, destination, action.Error(ctx)
++		default:
++			return ctx, nil, destination, E.New("DNS socket matched an unsupported route action")
++		}
++	}
++	if outbound == nil || !common.Contains(outbound.Network(), network) {
++		return ctx, nil, destination, E.New("selected DNS outbound does not support ", network)
++	}
++	if metadata.Destination.IsDomain() {
++		return ctx, nil, destination, E.New("DNS route cannot override its bootstrapped destination with a domain")
++	}
++	return ctx, outbound, metadata.Destination, nil
++}
++
++func (r *Router) DialDNSConnection(ctx context.Context, network string, destination M.Socksaddr, domain string) (net.Conn, error) {
++	network = N.NetworkName(network)
++	ctx, outbound, destination, err := r.dnsOutbound(ctx, network, destination, domain)
++	if err != nil {
++		return nil, err
++	}
++	return outbound.DialContext(ctx, network, destination)
++}
++
++func (r *Router) ListenDNSPacket(ctx context.Context, destination M.Socksaddr, domain string) (net.PacketConn, error) {
++	ctx, outbound, destination, err := r.dnsOutbound(ctx, N.NetworkUDP, destination, domain)
++	if err != nil {
++		return nil, err
++	}
++	return outbound.ListenPacket(ctx, destination)
++}
 diff --git a/route/network.go b/route/network.go
-index 03e94879bf834e14905d71d26d66fc152718c24c..408f30e6a3d504d309c62de3f40db1583394f4dd 100644
+index 03e94879bf834e14905d71d26d66fc152718c24c..690199c8b36f570f060dc85019db4d5e80ab4d0c 100644
 --- a/route/network.go
 +++ b/route/network.go
-@@ -74,9 +74,10 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
- 		interfaceFinder:     control.NewDefaultInterfaceFinder(),
- 		autoDetectInterface: options.AutoDetectInterface,
- 		defaultOptions: adapter.NetworkOptions{
+@@ -77,3 +77,4 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
 -			BindInterface:  options.DefaultInterface,
 -			RoutingMark:    uint32(options.DefaultMark),
 -			DomainResolver: defaultDomainResolver.Server,
-+			BindInterface:          options.DefaultInterface,
-+			RoutingMark:            uint32(options.DefaultMark),
-+			DomainResolver:         defaultDomainResolver.Server,
-+			DomainResolverFallback: defaultDomainResolver.FallbackServer,
- 			DomainResolveOptions: adapter.DNSQueryOptions{
- 				Strategy:     C.DomainStrategy(defaultDomainResolver.Strategy),
- 				DisableCache: defaultDomainResolver.DisableCache,
++			BindInterface:           options.DefaultInterface,
++			RoutingMark:             uint32(options.DefaultMark),
++			DomainResolver:          defaultDomainResolver.Server,
++			DomainResolverFallbacks: defaultDomainResolver.FallbackTags(),
+@@ -80,0 +82 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
++				Policy:       defaultDomainResolver.Policy,
+diff --git a/route/route.go b/route/route.go
+index 5fadff0a47d105368e6d8ee05d8382aa6214a33c..bde43fbcca2c04646a9ad39d08811655f6f10c3b 100644
+--- a/route/route.go
++++ b/route/route.go
+@@ -410 +410,3 @@ func (r *Router) matchRule(
+-	r.searchProcessInfo(ctx, metadata)
++	if !metadata.InternalDNS {
++		r.searchProcessInfo(ctx, metadata)
++	}
+@@ -440,0 +443,6 @@ match:
++		if metadata.InternalDNS {
++			switch currentRule.Action().Type() {
++			case C.RuleActionTypeSniff, C.RuleActionTypeResolve, C.RuleActionTypeHijackDNS:
++				continue
++			}
++		}
+diff --git a/route/rule/rule_action.go b/route/rule/rule_action.go
+index cac814e765e39cc13acd0dae9f0fd72028aa6d20..92056e2aa68386226b029027fc5bf068f0a97958 100644
+--- a/route/rule/rule_action.go
++++ b/route/rule/rule_action.go
+@@ -127 +127,3 @@ func NewDNSRuleAction(logger logger.ContextLogger, action option.DNSRuleAction)
+-			Server: action.RouteOptions.Server,
++			Server:              action.RouteOptions.Server,
++			RetryOnError:        action.RouteOptions.RetryOnError,
++			ResponseIPAcceptAll: action.RouteOptions.ResponseIPAcceptAll,
+@@ -260 +262,3 @@ type RuleActionDNSRoute struct {
+-	Server string
++	ResponseIPAcceptAll bool
++	RetryOnError        bool
++	Server              string
+@@ -270,0 +275,3 @@ func (r *RuleActionDNSRoute) String() string {
++	if r.RetryOnError {
++		descriptions = append(descriptions, "retry-on-error")
++	}

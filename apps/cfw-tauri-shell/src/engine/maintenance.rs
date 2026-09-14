@@ -21,6 +21,7 @@ pub(super) struct EngineMaintenanceGate {
 struct EngineMaintenanceInner {
     active_mode_changes: usize,
     maintenance_active: bool,
+    intent_revision: u64,
 }
 
 pub(crate) struct EngineModeChangeLease {
@@ -46,6 +47,7 @@ pub(crate) enum EngineMaintenanceError {
     AlreadyActive,
     ModeChangeActive,
     QueueFull,
+    StaleIntent,
 }
 
 impl std::fmt::Display for EngineMaintenanceError {
@@ -57,6 +59,7 @@ impl std::fmt::Display for EngineMaintenanceError {
             }
             Self::ModeChangeActive => "a network mode change is already in progress",
             Self::QueueFull => "the bounded network mode change queue is full",
+            Self::StaleIntent => "a newer network operation superseded this automatic request",
         })
     }
 }
@@ -66,7 +69,22 @@ impl EngineMaintenanceGate {
         &self,
         intent: EngineModeChangeIntent,
     ) -> Result<EngineModeChangeLease, EngineMaintenanceError> {
-        let registration = {
+        self.begin_mode_change_if_current(intent, None).await
+    }
+
+    pub(super) fn intent_revision(&self) -> Result<u64, EngineMaintenanceError> {
+        self.inner
+            .lock()
+            .map(|inner| inner.intent_revision)
+            .map_err(|_| EngineMaintenanceError::StateLock)
+    }
+
+    pub(super) async fn begin_mode_change_if_current(
+        &self,
+        intent: EngineModeChangeIntent,
+        expected: Option<u64>,
+    ) -> Result<EngineModeChangeLease, EngineMaintenanceError> {
+        let (registration, revision) = {
             let mut inner = self
                 .inner
                 .lock()
@@ -77,10 +95,20 @@ impl EngineMaintenanceGate {
             if inner.active_mode_changes >= MAX_PENDING_MODE_CHANGES {
                 return Err(EngineMaintenanceError::QueueFull);
             }
-            inner.active_mode_changes += 1;
-            EngineModeChangeRegistration {
-                inner: self.inner.clone(),
+            if expected.is_some_and(|revision| revision != inner.intent_revision) {
+                return Err(EngineMaintenanceError::StaleIntent);
             }
+            inner.intent_revision = inner
+                .intent_revision
+                .checked_add(1)
+                .ok_or(EngineMaintenanceError::StateLock)?;
+            inner.active_mode_changes += 1;
+            (
+                EngineModeChangeRegistration {
+                    inner: self.inner.clone(),
+                },
+                inner.intent_revision,
+            )
         };
 
         // Register before awaiting the fair single-flight lock. Maintenance
@@ -88,6 +116,9 @@ impl EngineMaintenanceGate {
         // If this future is cancelled while waiting, `registration` drops and
         // removes the pending count instead of leaking a permanent busy state.
         let serial = self.mode_serial.clone().lock_owned().await;
+        if expected.is_some() && self.intent_revision()? != revision {
+            return Err(EngineMaintenanceError::StaleIntent);
+        }
         Ok(EngineModeChangeLease {
             _intent: intent,
             _serial: serial,

@@ -12,6 +12,11 @@ source "$repo_root/scripts/go_release_environment.sh"
 source "$repo_root/scripts/libbox_source_contract.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+# shellcheck source=scripts/release_cargo_inputs.sh
+source "$repo_root/scripts/release_cargo_inputs.sh"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$repo_root/scripts/release_tool_environment.sh"
+cfw_select_release_apple_toolchain
 libbox_load_module_cache_contract "$repo_root"
 
 [[ $# -eq 0 ]] || {
@@ -26,6 +31,10 @@ source_input="${SING_BOX_SOURCE:-}"
 source_root="$(cd "$source_input" && pwd -P)"
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 go_bin="$toolchain_root/go-$GO_VERSION/bin/go"
+[[ -x "${CFW_RELEASE_CARGO_EXECUTABLE:-}" ]] || {
+  echo "error: select the closed release Cargo executable before source validation" >&2
+  exit 1
+}
 
 SING_BOX_SOURCE="$source_root" "$repo_root/scripts/prepare_libbox_modules.sh"
 libbox_validate_patched_source "$repo_root" "$source_root"
@@ -44,6 +53,21 @@ go_build_cache="$(mktemp -d "$cache_parent/cfw-go-tests.XXXXXX")"
 trap '/bin/rm -rf -- "$go_build_cache"' EXIT
 export GOCACHE="$go_build_cache"
 configure_offline_go_environment
+export CC="$(/usr/bin/xcrun --find clang)"
+export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+
+# These fixtures come from the actual Rust projection. Always supply them to
+# the Go integration tests so a missing fixture cannot turn into skipped DNS
+# policy coverage in the release lane. They contain synthetic endpoints only.
+export CFW_DNS_PROJECTED_FIXTURE_DIR="$go_build_cache/dns-projections"
+cfw_run_with_release_cargo_runtime "$repo_root" "$CFW_RELEASE_CARGO_EXECUTABLE" \
+  test --locked --offline -p cfw-singbox-config --lib tests::dns_policy
+for fixture in mixed.json tunnel.json filter.json named.json; do
+  [[ -s "$CFW_DNS_PROJECTED_FIXTURE_DIR/$fixture" ]] || {
+    echo "error: Rust DNS projection fixture is missing: $fixture" >&2
+    exit 1
+  }
+done
 
 (
   cd "$source_root"

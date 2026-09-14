@@ -5,8 +5,8 @@ import Security
 
 public enum CredentialVaultConstants {
   public static let schemaVersion: UInt16 = 2
-  public static let maximumEntries = 512
-  public static let maximumDocumentBytes = 1_048_576
+  public static let maximumEntries = EngineCapacity.maximumVaultBindings
+  public static let maximumDocumentBytes = EngineCapacity.maximumBridgeBytes
 }
 
 public enum CredentialVaultError: Error, Equatable, Sendable {

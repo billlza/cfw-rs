@@ -555,7 +555,7 @@ libbox_validate_patched_source() {
     echo "error: pinned endpoint, profile probe, or SOCKS lifecycle patch cannot be reversed cleanly" >&2
     return 1
   fi
-  if ! libbox_git "$source_root" apply --whitespace=error-all --reverse --check "$dns_failover_patch_path"; then
+  if ! libbox_git "$source_root" apply --whitespace=error-all --unidiff-zero --reverse --check "$dns_failover_patch_path"; then
     echo "error: pinned DNS failover patch cannot be reversed cleanly" >&2
     return 1
   fi

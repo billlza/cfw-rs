@@ -273,7 +273,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     completion: ProxyOperationCompletion
   ) {
     defer { configuration.erase() }
-    guard descriptor.slot == .systemProxy else {
+    guard descriptor.slot.isProxyAgent else {
       completion.finish(.failure(.invalidConfigurationSlot))
       return
     }
@@ -294,16 +294,19 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     lastStoppedConfiguration = nil
     lastFailedConfiguration = nil
 
-    do {
-      try dependencies.preferences.requireAuthorization()
-    } catch SystemProxyPreferencesError.authorizationDenied {
-      failStartWithoutOwnedSession(
-        .authorizationRequired, configuration: descriptor, completion: completion)
-      return
-    } catch {
-      failStartWithoutOwnedSession(
-        .preferences(error.localizedDescription), configuration: descriptor, completion: completion)
-      return
+    if descriptor.slot == .systemProxy {
+      do {
+        try dependencies.preferences.requireAuthorization()
+      } catch SystemProxyPreferencesError.authorizationDenied {
+        failStartWithoutOwnedSession(
+          .authorizationRequired, configuration: descriptor, completion: completion)
+        return
+      } catch {
+        failStartWithoutOwnedSession(
+          .preferences(error.localizedDescription), configuration: descriptor,
+          completion: completion)
+        return
+      }
     }
     let prepared: PreparedProxyOwnership
     do {
@@ -392,7 +395,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       else {
         return
       }
-      activateSystemProxy(session: session, endpoint: endpoint)
+      if session.configuration.slot == .localProxy {
+        completeActivation(session)
+      } else {
+        activateSystemProxy(session: session, endpoint: endpoint)
+      }
     case .failed(let failure):
       guard session.engine != nil else {
         return
@@ -449,15 +456,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       }
       session.journal = appliedJournal
 
-      lifecycle = .active(session.id)
-      sequence &+= 1
-      currentSnapshot = .proxyActive(
-        configuration: session.configuration,
-        sequence: sequence
-      )
-      let completion = startCompletion
-      startCompletion = nil
-      completion?.finish(.success(()))
+      completeActivation(session)
     } catch let error as ProxySessionLifecycleError {
       failOwnedSession(session, originalError: error)
     } catch {
@@ -466,6 +465,15 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         originalError: .preferences(String(describing: error))
       )
     }
+  }
+
+  private func completeActivation(_ session: Session) {
+    lifecycle = .active(session.id)
+    sequence &+= 1
+    currentSnapshot = .proxyActive(configuration: session.configuration, sequence: sequence)
+    let completion = startCompletion
+    startCompletion = nil
+    completion?.finish(.success(()))
   }
 
   private func handleEngineFailure(
@@ -541,7 +549,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     expectedConfiguration: ConfigurationDescriptor,
     completion: ProxyOperationCompletion
   ) {
-    guard expectedConfiguration.slot == .systemProxy else {
+    guard expectedConfiguration.slot.isProxyAgent else {
       completion.finish(.failure(.invalidConfigurationSlot))
       return
     }

@@ -1587,6 +1587,24 @@ mod tests {
 
     #[test]
     fn ambiguous_ready_write_failure_retains_the_exclusive_file_lock() {
+        // Other tests spawn processes. Between fork and exec, their inherited
+        // open descriptions can retain flock even after this thread drops its
+        // descriptor (CLOEXEC closes only at exec). Verify the same lock/drop
+        // contract in a process that runs this test alone.
+        if std::env::var_os("CFM_HANDOFF_LOCK_TEST_CHILD").is_none() {
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "legacy::handoff_ticket::tests::ambiguous_ready_write_failure_retains_the_exclusive_file_lock", "--nocapture"])
+                .env("CFM_HANDOFF_LOCK_TEST_CHILD", "1")
+                .output()
+                .expect("isolated file-lock test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let fixture = tempfile::NamedTempFile::new().expect("fixture");
         let locked = fixture.reopen().expect("locked descriptor");
         assert_eq!(

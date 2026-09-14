@@ -146,37 +146,35 @@ pub(crate) fn build_managed_profiles(
 }
 
 #[tauri::command]
-pub(crate) fn profiles_snapshot(
+pub(crate) async fn profiles_snapshot(
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<Vec<UiProfileRecord>, String> {
-    profiles
-        .repository
-        .snapshot()
-        .map(snapshot_records)
-        .map_err(|error| error.to_string())
-}
-
-pub(super) async fn select_saved_proxy(
-    engine: &ManagedEngine,
-    profiles: &ManagedProfiles,
-    profile_id: String,
-    group: String,
-    selected: String,
-) -> Result<(), String> {
-    let maintenance = engine
-        .reserve_profile_mutation()
-        .map_err(|error| error.to_string())?;
-    let repository = profiles.repository().clone();
-    // A dropped IPC waiter cannot release the maintenance guard while the
-    // blocking profile transaction still owns it.
-    tauri::async_runtime::spawn_blocking(move || {
-        let _maintenance = maintenance;
-        persist_saved_proxy_selection(&repository, &profile_id, &group, &selected)
+    read_repository(profiles.repository(), |repository| {
+        repository
+            .snapshot()
+            .map(snapshot_records)
+            .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("saved proxy selection task failed: {error}"))?
 }
 
+/// Online transactions retain the repository lock through native validation.
+/// File-lock waits must run outside the WebView and coordinator executor.
+pub(super) async fn read_repository<T, F>(
+    repository: &ProfileRepository,
+    read: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&ProfileRepository) -> Result<T, String> + Send + 'static,
+{
+    let repository = repository.clone();
+    tauri::async_runtime::spawn_blocking(move || read(&repository))
+        .await
+        .map_err(|error| format!("profile read task failed: {error}"))?
+}
+
+#[cfg(test)]
 fn persist_saved_proxy_selection(
     repository: &ProfileRepository,
     profile_id: &str,
@@ -201,11 +199,14 @@ fn persist_saved_proxy_selection(
 }
 
 #[tauri::command]
-pub(crate) fn profile_credential_requirements(
+pub(crate) async fn profile_credential_requirements(
     profiles: State<'_, ManagedProfiles>,
     id: String,
 ) -> Result<Vec<CredentialRef>, String> {
-    credential_requirements(profiles.repository(), &id).map_err(|error| error.to_string())
+    read_repository(profiles.repository(), move |repository| {
+        credential_requirements(repository, &id).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -213,11 +214,14 @@ pub(crate) async fn profile_credential_presence(
     profiles: State<'_, ManagedProfiles>,
     id: String,
 ) -> Result<Vec<CredentialPresence>, String> {
-    let stored = profiles
-        .repository
-        .load(&id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("profile does not exist: {id}"))?;
+    let read_id = id.clone();
+    let stored = read_repository(profiles.repository(), move |repository| {
+        repository
+            .load(&read_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("profile does not exist: {read_id}"))
+    })
+    .await?;
     let request =
         CredentialPresenceRequest::new(&id, &stored.profile).map_err(|error| error.to_string())?;
     let vault = profiles.credential_vault.clone();
@@ -294,34 +298,19 @@ pub(crate) async fn preview_credential_gc(
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
-    let snapshot = profiles
-        .repository
-        .credential_snapshot()
-        .map_err(|error| error.to_string())?;
-    let request = credential_gc_request(snapshot)?;
-    let live = request
-        .catalog()
-        .iter()
-        .flat_map(CredentialProfileCatalogEntry::bindings)
-        .collect::<BTreeSet<_>>();
-    let preview = profiles
-        .credential_vault
-        .preview_credential_garbage_collection(request.clone())
-        .await
-        .map_err(|error| error.to_string())?;
-    // Reuse the commit constructor as the single canonical validation for the
-    // native revision, snapshot identity, orphan order, uniqueness and count.
-    CredentialGarbageCollectionCommitRequest::new(request, &preview)
-        .map_err(|error| error.to_string())?;
-    if preview
-        .orphan_bindings
-        .iter()
-        .any(|binding| live.contains(binding))
-    {
-        return Err(
-            "credential garbage-collection preview marks a live reference as orphaned".into(),
-        );
-    }
+    let Some(preview) =
+        prepare_credential_gc(profiles.repository(), profiles.credential_vault()).await?
+    else {
+        *profiles
+            .credential_gc_preview
+            .lock()
+            .map_err(|_| "credential garbage-collection preview state is unavailable")? = None;
+        return Ok(UiCredentialGcPreview {
+            preview_id: uuid::Uuid::new_v4().to_string(),
+            orphan_references: Vec::new(),
+            orphan_count: 0,
+        });
+    };
     let preview_id = uuid::Uuid::new_v4().hyphenated().to_string();
     let response = UiCredentialGcPreview {
         preview_id: preview_id.clone(),
@@ -373,27 +362,13 @@ pub(crate) async fn commit_credential_gc(
         take_gc_authority(&mut stored, &preview_id, Instant::now())?
     };
 
-    // This guard retains the cross-process repository lock across the native
-    // CAS. No import, selection, or deletion can enter after this re-read.
-    let locked = profiles
-        .repository
-        .lock_credential_snapshot()
-        .map_err(|error| error.to_string())?;
-    let current = locked.snapshot();
-    let request = credential_gc_request(current.clone())?;
-    let commit = CredentialGarbageCollectionCommitRequest::new(request, &authority.preview)
-        .map_err(|error| error.to_string())?;
-    let receipt = profiles
-        .credential_vault
-        .commit_credential_garbage_collection(commit)
-        .await
-        .map_err(|error| error.to_string())?;
-    if receipt.deleted_count != authority.preview.orphan_count {
-        return Err("credential garbage-collection receipt does not match the preview".into());
-    }
-    Ok(UiCredentialGcReceipt {
-        removed_count: receipt.deleted_count,
-    })
+    let removed_count = complete_credential_gc(
+        profiles.repository(),
+        profiles.credential_vault(),
+        &authority.preview,
+    )
+    .await?;
+    Ok(UiCredentialGcReceipt { removed_count })
 }
 
 fn credential_gc_request(
@@ -409,13 +384,11 @@ fn credential_gc_request(
         .map_err(|error| error.to_string())
 }
 
-/// Removes only bindings absent from a fresh repository snapshot. The preview
-/// is validated before a second snapshot is locked across the native CAS, so
-/// this is safe to run automatically before and after a subscription update.
-pub(super) async fn collect_orphaned_credentials_now(
+/// A missing vault is empty only when the current catalog has no live bindings.
+async fn prepare_credential_gc(
     repository: &ProfileRepository,
     vault: &impl CredentialVaultProvisioner,
-) -> Result<u32, String> {
+) -> Result<Option<CredentialGarbageCollectionPreview>, String> {
     let snapshot = repository
         .credential_snapshot()
         .map_err(|error| error.to_string())?;
@@ -430,7 +403,7 @@ pub(super) async fn collect_orphaned_credentials_now(
         .await
     {
         Ok(preview) => preview,
-        Err(CredentialVaultError::MissingVault) if live.is_empty() => return Ok(0),
+        Err(CredentialVaultError::MissingVault) if live.is_empty() => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     CredentialGarbageCollectionCommitRequest::new(request, &preview)
@@ -444,15 +417,24 @@ pub(super) async fn collect_orphaned_credentials_now(
             "credential garbage-collection preview marks a live reference as orphaned".into(),
         );
     }
+    Ok(Some(preview))
+}
+
+/// The caller consumes explicit preview authority first. Keep the cross-process
+/// repository lock through native CAS and validate the exact deletion receipt.
+async fn complete_credential_gc(
+    repository: &ProfileRepository,
+    vault: &impl CredentialVaultProvisioner,
+    preview: &CredentialGarbageCollectionPreview,
+) -> Result<u32, String> {
     if preview.orphan_count == 0 {
         return Ok(0);
     }
-
     let locked = repository
         .lock_credential_snapshot()
         .map_err(|error| error.to_string())?;
     let request = credential_gc_request(locked.snapshot().clone())?;
-    let commit = CredentialGarbageCollectionCommitRequest::new(request, &preview)
+    let commit = CredentialGarbageCollectionCommitRequest::new(request, preview)
         .map_err(|error| error.to_string())?;
     let receipt = vault
         .commit_credential_garbage_collection(commit)
@@ -476,19 +458,35 @@ fn credential_requirements(
 }
 
 #[tauri::command]
-pub(crate) fn select_profile(
+pub(crate) async fn select_profile(
     engine: State<'_, ManagedEngine>,
+    retirement: State<'_, crate::legacy::LegacyRetirementGate>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
 ) -> Result<UiProfileRecord, String> {
-    let _maintenance = engine
-        .reserve_profile_mutation()
-        .map_err(|error| error.to_string())?;
-    profiles
-        .repository
-        .select(&id)
-        .map(|record| UiProfileRecord::from_record(record, true))
-        .map_err(|error| error.to_string())
+    let repository = profiles.repository().clone();
+    crate::engine::apply_profile_change(&engine, &retirement, move |_settings| async move {
+        let mutation = repository
+            .begin_credential_profile_mutation()
+            .map_err(|error| error.to_string())?;
+        let stored = mutation.profile(&id).map_err(|error| error.to_string())?;
+        let previous = mutation
+            .selected_profile()
+            .map_err(|error| error.to_string())?;
+        Ok(cfw_application::ProfileChange {
+            profile_id: id.clone(),
+            profile: stored.profile,
+            activate: true,
+            previous_profile: previous.map(|prior| (prior.record.id, prior.profile)),
+            commit: Box::new(move || {
+                mutation
+                    .commit_selection(&id)
+                    .map(|record| UiProfileRecord::from_record(record, true))
+                    .map_err(|error| error.to_string())
+            }),
+        })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -498,7 +496,7 @@ pub(crate) fn delete_profile(
     id: String,
 ) -> Result<bool, String> {
     let _maintenance = engine
-        .reserve_profile_mutation()
+        .reserve_maintenance()
         .map_err(|error| error.to_string())?;
     profiles
         .repository
@@ -810,8 +808,43 @@ mod tests {
         assert!(expired.is_none(), "expired authority is destroyed");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn repository_reads_wait_off_executor_while_an_online_transaction_holds_the_lock() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let transaction = repository.begin_credential_profile_mutation().unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(async move {
+            read_repository(&repository, move |repository| {
+                let _ = entered.send(());
+                repository.snapshot().map_err(|error| error.to_string())
+            })
+            .await
+        });
+        waiting.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!reader.is_finished());
+        drop(transaction);
+        let result = tokio::time::timeout(Duration::from_secs(2), reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(result.profiles.is_empty());
+    }
+
+    async fn execute_previewed_credential_gc(
+        repository: &ProfileRepository,
+        vault: &impl CredentialVaultProvisioner,
+    ) -> Result<u32, String> {
+        let Some(preview) = prepare_credential_gc(repository, vault).await? else {
+            return Ok(0);
+        };
+        complete_credential_gc(repository, vault, &preview).await
+    }
+
     #[tokio::test]
-    async fn automatic_credential_cleanup_revalidates_and_commits_exact_orphans() {
+    async fn explicit_credential_cleanup_revalidates_and_commits_exact_orphans() {
         let temporary = TempDir::new().expect("temporary repository");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let vault = OrphanGcVault {
@@ -825,9 +858,9 @@ mod tests {
         };
 
         assert_eq!(
-            collect_orphaned_credentials_now(&repository, &vault)
+            execute_previewed_credential_gc(&repository, &vault)
                 .await
-                .expect("automatic cleanup"),
+                .expect("previewed cleanup"),
             1
         );
         assert_eq!(vault.preview_count.load(Ordering::SeqCst), 1);
@@ -835,7 +868,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_credential_cleanup_accepts_a_missing_empty_vault() {
+    async fn explicit_credential_cleanup_accepts_a_missing_empty_vault() {
         let temporary = TempDir::new().expect("temporary repository");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let vault = OrphanGcVault {
@@ -849,7 +882,7 @@ mod tests {
         };
 
         assert_eq!(
-            collect_orphaned_credentials_now(&repository, &vault)
+            execute_previewed_credential_gc(&repository, &vault)
                 .await
                 .expect("an absent vault with no live bindings is already clean"),
             0
@@ -859,7 +892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_credential_cleanup_rejects_a_missing_vault_with_live_bindings() {
+    async fn explicit_credential_cleanup_rejects_a_missing_vault_with_live_bindings() {
         let temporary = TempDir::new().expect("temporary repository");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let profile = ValidatedSingBoxProfile::parse(
@@ -879,7 +912,7 @@ mod tests {
             mutate_repository_before_commit: None,
         };
 
-        let error = collect_orphaned_credentials_now(&repository, &vault)
+        let error = execute_previewed_credential_gc(&repository, &vault)
             .await
             .expect_err("live references require an existing vault");
         assert_eq!(error, CredentialVaultError::MissingVault.to_string());
@@ -888,7 +921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_credential_cleanup_never_commits_a_live_binding_preview() {
+    async fn explicit_credential_cleanup_never_commits_a_live_binding_preview() {
         let temporary = TempDir::new().expect("temporary repository");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let profile = ValidatedSingBoxProfile::parse(
@@ -913,7 +946,7 @@ mod tests {
             mutate_repository_before_commit: None,
         };
 
-        let error = collect_orphaned_credentials_now(&repository, &vault)
+        let error = execute_previewed_credential_gc(&repository, &vault)
             .await
             .expect_err("live binding preview must fail closed");
         assert!(error.contains("marks a live reference as orphaned"));
@@ -921,7 +954,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_credential_cleanup_rejects_a_stale_repository_snapshot() {
+    async fn explicit_credential_cleanup_rejects_a_stale_repository_snapshot() {
         let temporary = TempDir::new().expect("temporary repository");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let vault = OrphanGcVault {
@@ -934,14 +967,14 @@ mod tests {
             mutate_repository_before_commit: Some(repository.clone()),
         };
 
-        collect_orphaned_credentials_now(&repository, &vault)
+        execute_previewed_credential_gc(&repository, &vault)
             .await
             .expect_err("stale repository snapshot must fail closed");
         assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn automatic_credential_cleanup_rejects_a_mismatched_delete_receipt() {
+    async fn explicit_credential_cleanup_rejects_a_mismatched_delete_receipt() {
         let temporary = TempDir::new().expect("temporary repository");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let vault = OrphanGcVault {
@@ -954,7 +987,7 @@ mod tests {
             mutate_repository_before_commit: None,
         };
 
-        let error = collect_orphaned_credentials_now(&repository, &vault)
+        let error = execute_previewed_credential_gc(&repository, &vault)
             .await
             .expect_err("delete receipt mismatch must fail closed");
         assert!(error.contains("receipt does not match the preview"));
@@ -962,7 +995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_credential_cleanup_skips_commit_for_zero_orphans() {
+    async fn explicit_credential_cleanup_skips_commit_for_zero_orphans() {
         let temporary = TempDir::new().expect("temporary repository");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let vault = OrphanGcVault {
@@ -976,7 +1009,7 @@ mod tests {
         };
 
         assert_eq!(
-            collect_orphaned_credentials_now(&repository, &vault)
+            execute_previewed_credential_gc(&repository, &vault)
                 .await
                 .expect("zero orphan cleanup"),
             0

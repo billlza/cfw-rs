@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use cfw_controller::{
     ConnectionsSnapshot, ControllerClient, ControllerEndpoint, ControllerError, ControllerSnapshot,
-    ControllerVersion, ProviderBatchResult, ProvidersSnapshot, ProxyDelayResult, RulesSnapshot,
-    StructuredLogEntry, require_provider_management,
+    ControllerVersion, ProxyDelayResult, RulesSnapshot, StructuredLogEntry,
 };
 use cfw_engine_api::{EngineOwner, EngineSnapshot, EngineState, RuntimeIdentity};
 use futures_util::StreamExt;
@@ -139,11 +138,11 @@ fn controller_client_cache() -> &'static Mutex<Option<(ControllerEndpoint, Contr
 /// Only an engine this process observes as active and ready has a controller to
 /// talk to. Every other state fails closed: there is no start path, no probe of
 /// an unknown listener, and no fallback here.
-fn running_runtime_identity(
+pub(super) fn running_runtime_identity(
     snapshot: &EngineSnapshot,
 ) -> Result<&RuntimeIdentity, ControllerCommandError> {
     match &snapshot.state {
-        EngineState::ProxyActive { runtime }
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
             if runtime.ready
                 && runtime.owner == EngineOwner::ProxyAgent
                 && runtime.context.generation == snapshot.generation
@@ -224,18 +223,6 @@ pub(crate) async fn controller_version(
 }
 
 #[tauri::command]
-pub(crate) async fn providers_snapshot(
-    engine: State<'_, ManagedEngine>,
-) -> Result<ProvidersSnapshot, String> {
-    require_provider_management().map_err(ipc_error)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .providers()
-        .await
-        .map_err(ipc_error)
-}
-
-#[tauri::command]
 pub(crate) async fn rules_snapshot(
     engine: State<'_, ManagedEngine>,
 ) -> Result<RulesSnapshot, String> {
@@ -254,20 +241,62 @@ pub(crate) async fn select_proxy(
     group: String,
     proxy: String,
 ) -> Result<(), String> {
-    let snapshot = engine.coordinator.snapshot();
-    if snapshot.state == EngineState::Off
-        && snapshot.desired_mode == cfw_engine_api::EngineMode::Off
-    {
-        let profile_id =
-            profile_id.ok_or("saved proxy selection requires the displayed profile identity")?;
-        return super::profiles::select_saved_proxy(&engine, &profiles, profile_id, group, proxy)
-            .await;
-    }
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .select_proxy(&group, &proxy)
+    select_proxy_with_persistence(&engine, &profiles, profile_id, group, proxy).await
+}
+
+pub(crate) async fn select_proxy_with_persistence(
+    engine: &ManagedEngine,
+    profiles: &super::ManagedProfiles,
+    profile_id: Option<String>,
+    group: String,
+    proxy: String,
+) -> Result<(), String> {
+    let observed = engine.coordinator.snapshot();
+    let (_, lease) = engine
+        .begin_current_mode_change()
         .await
-        .map_err(ipc_error)
+        .map_err(|error| error.to_string())?;
+    if engine.coordinator.snapshot() != observed {
+        return Err(
+            "the runtime changed before node selection; refresh the proxy groups and retry".into(),
+        );
+    }
+    let offline = observed.state == EngineState::Off
+        && observed.desired_mode == cfw_engine_api::EngineMode::Off;
+    if offline && profile_id.is_none() {
+        return Err("saved proxy selection requires the displayed profile identity".into());
+    }
+    let client = if offline {
+        None
+    } else {
+        Some(controller_client(engine).map_err(|error| error.to_ipc())?)
+    };
+    let repository = profiles.repository().clone();
+    let coordinator = engine.coordinator.clone();
+    let (result, lease) = lease.run_to_completion(async move {
+        let mutation = repository.begin_credential_profile_mutation().map_err(|error| error.to_string())?;
+        let stored = mutation.selected_profile().map_err(|error| error.to_string())?.ok_or("no active profile is selected")?;
+        if profile_id.as_deref().is_some_and(|id| id != stored.record.id) {
+            return Err("the displayed profile is no longer selected".into());
+        }
+        let selected = stored.profile.with_selected_outbound(&group, &proxy).map_err(|error| error.to_string())?;
+        if let Some(client) = client {
+            let spec = coordinator.restart_spec().await.map_err(|error| error.to_string())?.ok_or("the runtime has no accepted profile source")?;
+            if !spec.matches_ready_snapshot(&coordinator.snapshot()) || spec.profile_id() != stored.record.id || spec.profile().digest() != stored.profile.digest() {
+                return Err("the selected profile does not match the running core".into());
+            }
+            client.select_proxy(&group, &proxy).await.map_err(ipc_error)?;
+            let observed = client.proxies().await.map_err(|error| format!("node selection was sent but could not be confirmed: {}", ipc_error(error)))?;
+            if !observed.groups.iter().any(|value| value.name == group && value.now.as_deref() == Some(proxy.as_str())) {
+                return Err("the controller did not confirm the requested node; the saved selection was unchanged".into());
+            }
+        }
+        mutation.commit_replace_if_unchanged(&stored, None, &selected, stored.source_url.as_deref())
+            .map(|_| ())
+            .map_err(|error| if offline { error.to_string() } else { format!("node selection is active, but could not be saved: {error}") })
+    }).await.map_err(|_| "node selection task ended without a response".to_owned())?;
+    drop(lease);
+    result
 }
 
 #[tauri::command]
@@ -280,6 +309,36 @@ pub(crate) async fn test_proxy_delays(
     timeout_ms: Option<u16>,
     concurrency: Option<usize>,
 ) -> Result<Vec<ProxyDelayResult>, String> {
+    let target_url = resolve_delay_test_url(url).map_err(|error| error.to_ipc())?;
+    probe_saved_nodes(
+        &engine,
+        &profiles,
+        profile_id,
+        proxies,
+        ProbePolicy {
+            url: target_url,
+            timeout_ms: timeout_ms.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS),
+            concurrency: concurrency.unwrap_or(DEFAULT_DELAY_CONCURRENCY),
+            expected_status: String::new(),
+        },
+    )
+    .await
+}
+
+pub(super) struct ProbePolicy {
+    pub url: String,
+    pub timeout_ms: u16,
+    pub concurrency: usize,
+    pub expected_status: String,
+}
+
+pub(super) async fn probe_saved_nodes(
+    engine: &ManagedEngine,
+    profiles: &super::ManagedProfiles,
+    profile_id: Option<String>,
+    proxies: Vec<String>,
+    policy: ProbePolicy,
+) -> Result<Vec<ProxyDelayResult>, String> {
     if proxies.is_empty()
         || proxies.len() > MAX_DELAY_PROXIES
         || proxies
@@ -291,11 +350,13 @@ pub(crate) async fn test_proxy_delays(
         )
         .to_ipc());
     }
-    let target_url = resolve_delay_test_url(url).map_err(|error| error.to_ipc())?;
-    let timeout = timeout_ms.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS);
-    let limit = concurrency
-        .unwrap_or(DEFAULT_DELAY_CONCURRENCY)
-        .clamp(1, MAX_DELAY_CONCURRENCY);
+    let timeout = policy.timeout_ms;
+    if !(100..=10000).contains(&timeout) {
+        return Err("probe timeout must be 100..=10000 milliseconds".into());
+    }
+    let limit = policy.concurrency.clamp(1, MAX_DELAY_CONCURRENCY);
+    cfw_singbox_config::validate_expected_status(&policy.expected_status)
+        .map_err(|error| error.to_string())?;
     let snapshot = engine.coordinator.snapshot();
     if snapshot.state == EngineState::Off
         && snapshot.desired_mode == cfw_engine_api::EngineMode::Off
@@ -303,10 +364,12 @@ pub(crate) async fn test_proxy_delays(
         if proxies.len() > MAX_DELAY_CONCURRENCY || !(100..=10_000).contains(&timeout) {
             return Err("offline latency batch or timeout exceeds its bounds".into());
         }
-        let stored = profiles
-            .repository()
-            .require_selected()
-            .map_err(|error| error.to_string())?;
+        let stored = super::profiles::read_repository(profiles.repository(), |repository| {
+            repository
+                .require_selected()
+                .map_err(|error| error.to_string())
+        })
+        .await?;
         if profile_id.as_deref() != Some(stored.record.id.as_str()) {
             return Err("selected profile changed before the latency test".into());
         }
@@ -326,6 +389,8 @@ pub(crate) async fn test_proxy_delays(
             credential_slots: projected.credential_slots().to_vec(),
             proxies,
             timeout_ms: timeout,
+            target_url: Some(policy.url),
+            expected_status: Some(policy.expected_status),
         };
         return profiles
             .credential_vault()
@@ -354,9 +419,47 @@ pub(crate) async fn test_proxy_delays(
             })
             .map_err(|error| format!("Profile latency test failed: {}", error.message));
     }
-    let client = controller_client(&engine).map_err(|error| error.to_ipc())?;
-    Ok(client
-        .proxy_delays(proxies, target_url, timeout, limit)
+    let client = controller_client(engine).map_err(|error| error.to_ipc())?;
+    let accepted = engine
+        .coordinator
+        .restart_spec()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("the runtime has no accepted profile source")?;
+    if profile_id
+        .as_deref()
+        .is_some_and(|id| id != accepted.profile_id())
+        || !accepted.matches_ready_snapshot(&engine.coordinator.snapshot())
+    {
+        return Err("the displayed profile no longer matches the running core".into());
+    }
+    Ok(futures_util::stream::iter(proxies)
+        .map(|name| {
+            let client = client.clone();
+            let url = policy.url.clone();
+            let status = policy.expected_status.clone();
+            async move {
+                match client
+                    .proxy_delay_matching(&name, &url, timeout, &status)
+                    .await
+                {
+                    Ok(delay) => ProxyDelayResult {
+                        name,
+                        delay: Some(delay),
+                        error_kind: None,
+                        error: None,
+                    },
+                    Err(error) => ProxyDelayResult {
+                        name,
+                        delay: None,
+                        error_kind: Some(cfw_controller::ProxyDelayFailureKind::from(&error)),
+                        error: Some(ipc_error(error)),
+                    },
+                }
+            }
+        })
+        .buffer_unordered(limit)
+        .collect()
         .await)
 }
 
@@ -369,81 +472,6 @@ fn resolve_delay_test_url(url: Option<String>) -> Result<String, ControllerComma
         None | Some(DEFAULT_DELAY_TEST_URL) => Ok(DEFAULT_DELAY_TEST_URL.to_owned()),
         Some(_) => Err(ControllerCommandError::DelayTargetNotAllowed),
     }
-}
-
-#[tauri::command]
-pub(crate) async fn health_check_proxy_provider(
-    engine: State<'_, ManagedEngine>,
-    name: String,
-) -> Result<(), String> {
-    require_provider_management().map_err(ipc_error)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .health_check_proxy_provider(&name)
-        .await
-        .map_err(ipc_error)
-}
-
-#[tauri::command]
-pub(crate) async fn health_check_all_proxy_providers(
-    engine: State<'_, ManagedEngine>,
-) -> Result<ProviderBatchResult, String> {
-    require_provider_management().map_err(ipc_error)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .health_check_all_proxy_providers()
-        .await
-        .map_err(ipc_error)
-}
-
-#[tauri::command]
-pub(crate) async fn update_proxy_provider(
-    engine: State<'_, ManagedEngine>,
-    name: String,
-) -> Result<(), String> {
-    require_provider_management().map_err(ipc_error)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .update_proxy_provider(&name)
-        .await
-        .map_err(ipc_error)
-}
-
-#[tauri::command]
-pub(crate) async fn update_all_proxy_providers(
-    engine: State<'_, ManagedEngine>,
-) -> Result<ProviderBatchResult, String> {
-    require_provider_management().map_err(ipc_error)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .update_all_proxy_providers()
-        .await
-        .map_err(ipc_error)
-}
-
-#[tauri::command]
-pub(crate) async fn update_rule_provider(
-    engine: State<'_, ManagedEngine>,
-    name: String,
-) -> Result<(), String> {
-    require_provider_management().map_err(ipc_error)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .update_rule_provider(&name)
-        .await
-        .map_err(ipc_error)
-}
-
-#[tauri::command]
-pub(crate) async fn update_all_rule_providers(
-    engine: State<'_, ManagedEngine>,
-) -> Result<ProviderBatchResult, String> {
-    require_provider_management().map_err(ipc_error)?;
-    controller_client(&engine)
-        .map_err(|error| error.to_ipc())?
-        .update_all_rule_providers()
-        .await
-        .map_err(ipc_error)
 }
 
 #[tauri::command]

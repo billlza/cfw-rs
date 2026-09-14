@@ -96,7 +96,10 @@ private struct StubLease: NativeEngineLeaseInspecting {
 }
 
 private actor StubProxyAgent: ProxyAgentTransporting, Installed40019ProxySnapshotting {
-  func testProfileProxies(configuration: Data, proxies: [String], timeoutMS: UInt16) async throws
+  func testProfileProxies(
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
+  ) async throws
     -> [ProfileProxyDelay]
   {
     throw ProxyAgentHostError.malformedResponse

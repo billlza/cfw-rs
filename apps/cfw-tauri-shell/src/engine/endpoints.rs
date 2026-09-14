@@ -28,8 +28,10 @@ pub(super) enum EndpointSelectionError {
     Observation(String),
     #[error("an enabled {protocol} proxy has no complete endpoint")]
     IncompleteExternalProxy { protocol: &'static str },
-    #[error("automatic proxy discovery is enabled for an observed network service")]
-    AutomaticProxyDiscovery,
+    #[error(
+        "the configured local proxy port {0} is already reserved; choose a different port or automatic selection"
+    )]
+    ConfiguredPortUnavailable(u16),
     #[error("persisted {role} port {port} is outside the fixed candidate range")]
     InvalidPersistedPort { role: EndpointRole, port: u16 },
     #[error("no bounded loopback TCP port is available for the {role}")]
@@ -41,17 +43,20 @@ pub(super) struct EndpointCandidateCursor {
     settings: EngineSettings,
     mixed_index: usize,
     controller_index: usize,
+    fixed_mixed_port: Option<u16>,
 }
 
-pub(super) fn select_process_engine_settings(
+pub(super) fn select_configured_engine_settings(
     settings: EngineSettings,
+    preferred_port: Option<u16>,
 ) -> Result<(EngineSettings, EndpointCandidateCursor), EndpointSelectionError> {
     let services = MacOsPlatformService
         .observe_network_services()
         .map_err(|error| EndpointSelectionError::Observation(error.to_string()))?;
-    select_settings_with(settings, &services)
+    EndpointCandidateCursor::configured(settings, preferred_port, &services)
 }
 
+#[cfg(test)]
 fn select_settings_with(
     settings: EngineSettings,
     services: &[cfw_platform::NetworkServiceObservation],
@@ -60,6 +65,7 @@ fn select_settings_with(
 }
 
 impl EndpointCandidateCursor {
+    #[cfg(test)]
     fn initial(
         settings: EngineSettings,
         services: &[cfw_platform::NetworkServiceObservation],
@@ -68,18 +74,22 @@ impl EndpointCandidateCursor {
             settings,
             mixed_index: 0,
             controller_index: 0,
+            fixed_mixed_port: None,
         };
         cursor.refresh_from_observation(services)?;
         Ok((cursor.settings.clone(), cursor))
     }
 
     pub(super) fn from_persisted(settings: EngineSettings) -> Result<Self, EndpointSelectionError> {
-        let mixed_index = candidate_index(DEFAULT_MIXED_PORT, settings.mixed_port).ok_or(
-            EndpointSelectionError::InvalidPersistedPort {
+        if settings.mixed_port < 1024 {
+            return Err(EndpointSelectionError::InvalidPersistedPort {
                 role: EndpointRole::Mixed,
                 port: settings.mixed_port,
-            },
-        )?;
+            });
+        }
+        let mixed_index = candidate_index(DEFAULT_MIXED_PORT, settings.mixed_port);
+        let fixed_mixed_port = mixed_index.is_none().then_some(settings.mixed_port);
+        let mixed_index = mixed_index.unwrap_or(0);
         let controller_index = candidate_index(DEFAULT_CLASH_API_PORT, settings.controller_port)
             .ok_or(EndpointSelectionError::InvalidPersistedPort {
                 role: EndpointRole::Controller,
@@ -89,7 +99,42 @@ impl EndpointCandidateCursor {
             settings,
             mixed_index,
             controller_index,
+            fixed_mixed_port,
         })
+    }
+
+    pub(super) fn with_runtime_preferences(
+        &self,
+        settings: EngineSettings,
+        preferred_port: Option<u16>,
+    ) -> Result<(EngineSettings, Self), EndpointSelectionError> {
+        if settings.mixed_port == self.settings.mixed_port && preferred_port.is_some()
+            || preferred_port == self.fixed_mixed_port
+        {
+            let mut next = self.clone();
+            next.settings = settings;
+            next.fixed_mixed_port = preferred_port;
+            return Ok((next.settings.clone(), next));
+        }
+        let services = MacOsPlatformService
+            .observe_network_services()
+            .map_err(|error| EndpointSelectionError::Observation(error.to_string()))?;
+        Self::configured(settings, preferred_port, &services)
+    }
+
+    fn configured(
+        settings: EngineSettings,
+        preferred_port: Option<u16>,
+        services: &[cfw_platform::NetworkServiceObservation],
+    ) -> Result<(EngineSettings, Self), EndpointSelectionError> {
+        let mut cursor = Self {
+            settings,
+            mixed_index: 0,
+            controller_index: 0,
+            fixed_mixed_port: preferred_port,
+        };
+        cursor.refresh_from_observation(services)?;
+        Ok((cursor.settings.clone(), cursor))
     }
 
     pub(super) fn advance(
@@ -110,6 +155,9 @@ impl EndpointCandidateCursor {
         let mut next = self.clone();
         match role {
             EndpointRole::Mixed => {
+                if let Some(port) = self.fixed_mixed_port {
+                    return Err(EndpointSelectionError::ConfiguredPortUnavailable(port));
+                }
                 next.mixed_index =
                     next.mixed_index
                         .checked_add(1)
@@ -133,16 +181,26 @@ impl EndpointCandidateCursor {
         &mut self,
         services: &[cfw_platform::NetworkServiceObservation],
     ) -> Result<(), EndpointSelectionError> {
-        let reserved = reserved_external_proxy_ports(services)?;
+        let mut reserved = reserved_external_proxy_ports(services)?;
+        if let Some(lan) = &self.settings.lan_proxy {
+            reserved.insert(lan.port);
+        }
         let mixed_candidates = candidate_ports(DEFAULT_MIXED_PORT);
         let controller_candidates = candidate_ports(DEFAULT_CLASH_API_PORT);
-        self.mixed_index = select_index(
-            EndpointRole::Mixed,
-            &mixed_candidates,
-            self.mixed_index,
-            &reserved,
-        )?;
-        self.settings.mixed_port = mixed_candidates[self.mixed_index];
+        if let Some(port) = self.fixed_mixed_port {
+            if port < 1024 || reserved.contains(&port) {
+                return Err(EndpointSelectionError::ConfiguredPortUnavailable(port));
+            }
+            self.settings.mixed_port = port;
+        } else {
+            self.mixed_index = select_index(
+                EndpointRole::Mixed,
+                &mixed_candidates,
+                self.mixed_index,
+                &reserved,
+            )?;
+            self.settings.mixed_port = mixed_candidates[self.mixed_index];
+        }
         let mut controller_reserved = reserved;
         controller_reserved.insert(self.settings.mixed_port);
         self.controller_index = select_index(
@@ -175,9 +233,9 @@ fn reserved_external_proxy_ports(
 ) -> Result<BTreeSet<u16>, EndpointSelectionError> {
     let mut reserved = BTreeSet::new();
     for service in services {
-        if service.pac_enabled || service.wpad_enabled {
-            return Err(EndpointSelectionError::AutomaticProxyDiscovery);
-        }
+        // PAC/WPAD is an OS proxy policy, not a claim on a local TCP port.
+        // Reserve observable fixed endpoints here; the native bind result
+        // remains authoritative for collisions hidden behind automatic policy.
         for (protocol, observation) in [
             ("HTTP", &service.web),
             ("HTTPS", &service.secure_web),
@@ -308,24 +366,20 @@ mod tests {
     }
 
     #[test]
-    fn automatic_proxy_discovery_fails_closed() {
-        let mut pac = service(NetworkProxyProtocolObservation::default());
-        pac.pac_enabled = true;
-        let error = select_settings_with(EngineSettings::default(), &[pac])
-            .expect_err("PAC can reserve an unobserved loopback endpoint");
-        assert!(matches!(
-            error,
-            EndpointSelectionError::AutomaticProxyDiscovery
-        ));
-
-        let mut wpad = service(NetworkProxyProtocolObservation::default());
-        wpad.wpad_enabled = true;
-        let error = select_settings_with(EngineSettings::default(), &[wpad])
-            .expect_err("WPAD can reserve an unobserved loopback endpoint");
-        assert!(matches!(
-            error,
-            EndpointSelectionError::AutomaticProxyDiscovery
-        ));
+    fn automatic_proxy_policy_does_not_block_local_endpoint_selection() {
+        for is_pac in [true, false] {
+            let mut source = service(NetworkProxyProtocolObservation {
+                enabled: true,
+                server: Some("127.0.0.1".into()),
+                port: Some(DEFAULT_MIXED_PORT),
+            });
+            source.pac_enabled = is_pac;
+            source.wpad_enabled = !is_pac;
+            let (settings, cursor) =
+                select_settings_with(EngineSettings::default(), &[source]).unwrap();
+            assert_eq!(settings.mixed_port, DEFAULT_MIXED_PORT + 1);
+            assert_eq!(cursor.settings, settings);
+        }
     }
 
     #[test]
@@ -411,19 +465,46 @@ mod tests {
     }
 
     #[test]
-    fn persisted_ports_must_belong_to_both_fixed_candidate_ranges() {
+    fn persisted_privileged_ports_are_rejected() {
         let settings = EngineSettings {
-            mixed_port: DEFAULT_MIXED_PORT + CANDIDATE_COUNT as u16,
+            mixed_port: 80,
             ..EngineSettings::default()
         };
         let error = EndpointCandidateCursor::from_persisted(settings)
-            .expect_err("out-of-range persisted mixed endpoint");
+            .expect_err("privileged persisted mixed endpoint");
         assert!(matches!(
             error,
             EndpointSelectionError::InvalidPersistedPort {
                 role: EndpointRole::Mixed,
                 ..
             }
+        ));
+    }
+    #[test]
+    fn configured_ports_stay_exact_and_keep_the_controller_separate() {
+        let (settings, cursor) =
+            EndpointCandidateCursor::configured(EngineSettings::default(), Some(9090), &[])
+                .unwrap();
+        assert_eq!(settings.mixed_port, 9090);
+        assert_eq!(settings.controller_port, 9091);
+        assert!(matches!(
+            cursor.advance_with_services(EndpointRole::Mixed, &[]),
+            Err(EndpointSelectionError::ConfiguredPortUnavailable(9090))
+        ));
+        let recovered = EndpointCandidateCursor::from_persisted(EngineSettings {
+            mixed_port: 8890,
+            ..EngineSettings::default()
+        })
+        .unwrap();
+        assert_eq!(recovered.fixed_mixed_port, Some(8890));
+        let services = [service(NetworkProxyProtocolObservation {
+            enabled: true,
+            server: Some("127.0.0.1".into()),
+            port: Some(8890),
+        })];
+        assert!(matches!(
+            EndpointCandidateCursor::configured(EngineSettings::default(), Some(8890), &services),
+            Err(EndpointSelectionError::ConfiguredPortUnavailable(8890))
         ));
     }
 }

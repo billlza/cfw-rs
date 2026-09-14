@@ -9,6 +9,7 @@ mod coordinator_actor;
 mod coordinator_startup;
 mod cutover;
 mod error;
+mod profile_change;
 mod restart;
 mod runtime;
 mod transition;
@@ -16,6 +17,7 @@ mod transition;
 pub use controller::EngineControllerAccess;
 pub use coordinator::{CoordinatorOptions, CoordinatorTask, EngineModeCoordinator};
 pub use error::{EngineCoordinatorError, EngineOperation, RecoveredRuntimeMismatch};
+pub use profile_change::ProfileChange;
 pub use restart::EngineRestartSpec;
 
 #[cfg(test)]

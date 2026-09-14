@@ -46,6 +46,10 @@ enum ConfigurationCredentialSlots {
       }
     case .socks5Username:
       outbound["username"] as? String
+    case .httpProxyUsername:
+      outbound["type"] as? String == "http" ? outbound["username"] as? String : nil
+    case .httpProxyPassword:
+      outbound["type"] as? String == "http" ? outbound["password"] as? String : nil
     case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
       .tuicPassword, .socks5Password:
       outbound["password"] as? String

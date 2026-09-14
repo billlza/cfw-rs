@@ -52,6 +52,9 @@ export const UI_COMMANDS = Object.freeze([
   "read_profile_text",
   "read_runtime_config_text",
   "read_settings_snapshot",
+  "read_runtime_settings_snapshot",
+  "read_automation_settings",
+  "request_wifi_name_access",
   "recover_legacy_cutover",
   "refresh_tray_menu",
   "reset_settings_snapshot",
@@ -64,6 +67,7 @@ export const UI_COMMANDS = Object.freeze([
   "select_proxy",
   "set_launch_at_login_enabled",
   "set_proxy_mode",
+  "set_core_enabled",
   "set_system_proxy_enabled",
   "set_tun_enabled",
   "start_connections_stream",
@@ -71,13 +75,14 @@ export const UI_COMMANDS = Object.freeze([
   "stop_connections_stream",
   "stop_log_stream",
   "test_proxy_delays",
-  "update_all_proxy_providers",
-  "update_all_rule_providers",
+  "update_all_providers",
   "update_profile",
   "update_profile_info",
   "update_proxy_provider",
   "update_rule_provider",
   "write_settings_snapshot",
+  "write_runtime_settings_snapshot",
+  "write_automation_settings",
 ]);
 
 /// Every event this dashboard subscribes to. `tauri://drag-drop` is emitted by
@@ -147,6 +152,9 @@ export function formatRuntime(seconds) {
 
 const ENGINE_STATE_LABELS = Object.freeze({
   off: "Off",
+  local_proxy_starting: "LocalProxyStarting",
+  local_proxy_active: "LocalProxyActive",
+  local_proxy_stopping: "LocalProxyStopping",
   proxy_starting: "ProxyStarting",
   proxy_active: "ProxyActive",
   proxy_stopping: "ProxyStopping",
@@ -161,6 +169,9 @@ const ENGINE_STATE_LABELS = Object.freeze({
 
 const ENGINE_STATE_TEXT = Object.freeze({
   Off: "Off",
+  LocalProxyStarting: "Starting…",
+  LocalProxyActive: "Local proxy",
+  LocalProxyStopping: "Stopping…",
   ProxyStarting: "Starting…",
   ProxyActive: "On",
   ProxyStopping: "Stopping…",
@@ -182,6 +193,7 @@ export function modeHasTunnel(mode) {
 }
 
 function engineMode(value) {
+  if (value === "local_proxy") return "local-proxy";
   if (value === "system_proxy") return "system-proxy";
   if (value === "tunnel") return "tunnel";
   if (value === "tunnel_system_proxy") return "tunnel-system-proxy";
@@ -240,14 +252,14 @@ export function normalizeEngineStatus(value) {
     ? redactDiagnosticText(value.unavailable_reason.trim()).slice(0, 512)
     : null;
 
-  if (stateTag === "proxy_active") {
+  if (stateTag === "local_proxy_active" || stateTag === "proxy_active") {
     runtimeIdentity = normalizeRuntimeIdentity(
       snapshot.state.runtime,
       "proxy_agent",
       snapshot.generation,
       configDigest,
     );
-    mode = "system-proxy";
+    mode = stateTag === "local_proxy_active" ? "local-proxy" : "system-proxy";
   } else if (stateTag === "tunnel_active" || stateTag === "tunnel_system_proxy_active") {
     runtimeIdentity = normalizeRuntimeIdentity(
       snapshot.state.runtime,
@@ -270,6 +282,7 @@ export function normalizeEngineStatus(value) {
     state: ENGINE_STATE_LABELS[stateTag],
     active: mode !== "off",
     systemProxyActive: modeHasSystemProxy(mode),
+    localProxyAvailable: capabilities.local_proxy === true,
     tunnelActive: modeHasTunnel(mode),
     systemProxyAvailable: capabilities.system_proxy === true,
     tunnelAvailable: capabilities.tunnel === true,

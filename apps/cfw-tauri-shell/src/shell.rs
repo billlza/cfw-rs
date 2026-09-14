@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use cfw_controller::ProxiesSnapshot;
-use cfw_engine_api::EngineEvent;
+use cfw_engine_api::{EngineEvent, EngineMode, EngineSnapshot, EngineState};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
@@ -71,6 +71,16 @@ enum TrayAction {
     OpenPage(MainPage),
     Quit,
     ProxySelection,
+    Engine(TrayEngineAction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrayEngineAction {
+    StartCore,
+    StopCore,
+    SystemProxy(bool),
+    Tunnel(bool),
+    RouteMode(&'static str),
 }
 
 fn tray_action(id: &str) -> TrayAction {
@@ -78,6 +88,15 @@ fn tray_action(id: &str) -> TrayAction {
         TRAY_DASHBOARD_ID => TrayAction::OpenPage(MainPage::General),
         TRAY_ABOUT_ID => TrayAction::OpenPage(MainPage::Feedback),
         TRAY_QUIT_ID => TrayAction::Quit,
+        "core-start" => TrayAction::Engine(TrayEngineAction::StartCore),
+        "core-stop" => TrayAction::Engine(TrayEngineAction::StopCore),
+        "proxy-enable" => TrayAction::Engine(TrayEngineAction::SystemProxy(true)),
+        "proxy-disable" => TrayAction::Engine(TrayEngineAction::SystemProxy(false)),
+        "tun-enable" => TrayAction::Engine(TrayEngineAction::Tunnel(true)),
+        "tun-disable" => TrayAction::Engine(TrayEngineAction::Tunnel(false)),
+        "route-rule" => TrayAction::Engine(TrayEngineAction::RouteMode("rule")),
+        "route-global" => TrayAction::Engine(TrayEngineAction::RouteMode("global")),
+        "route-direct" => TrayAction::Engine(TrayEngineAction::RouteMode("direct")),
         _ => TrayAction::ProxySelection,
     }
 }
@@ -114,6 +133,7 @@ struct TrayProxyGroup {
     name: String,
     now: Option<String>,
     options: Vec<String>,
+    selectable: bool,
 }
 
 /// Bounded, sanitised tray view of a controller proxies snapshot.
@@ -124,6 +144,7 @@ fn tray_proxy_groups(snapshot: ProxiesSnapshot) -> Vec<TrayProxyGroup> {
         .filter(|group| is_tray_label(&group.name))
         .take(MAX_TRAY_GROUPS)
         .map(|group| TrayProxyGroup {
+            selectable: group.kind.eq_ignore_ascii_case("selector"),
             now: group.now.filter(|now| {
                 is_tray_label(now) && group.options.iter().any(|option| option == now)
             }),
@@ -237,7 +258,11 @@ pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
 }
 
 pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let menu = build_tray_menu(app, &[])?;
+    let snapshot = app
+        .state::<crate::engine::ManagedEngine>()
+        .coordinator
+        .snapshot();
+    let menu = build_tray_menu(app, &snapshot, &[], None)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
@@ -247,6 +272,7 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             TrayAction::OpenPage(page) => show_main_page(app, page),
             TrayAction::Quit => request_shell_shutdown(app, 0),
             TrayAction::ProxySelection => handle_tray_proxy_event(app, event.id.as_ref()),
+            TrayAction::Engine(action) => handle_tray_engine_event(app, action),
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -259,6 +285,7 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    start_tray_state_updates(app.clone());
     Ok(())
 }
 
@@ -268,35 +295,107 @@ fn request_shell_shutdown(app: &AppHandle, exit_code: i32) {
     }
 }
 
-fn build_tray_menu(app: &AppHandle, groups: &[TrayProxyGroup]) -> tauri::Result<Menu<Wry>> {
+fn build_tray_menu(
+    app: &AppHandle,
+    snapshot: &EngineSnapshot,
+    groups: &[TrayProxyGroup],
+    route_mode: Option<&str>,
+) -> tauri::Result<Menu<Wry>> {
     let dashboard = MenuItem::with_id(app, TRAY_DASHBOARD_ID, "Dashboard", true, None::<&str>)?;
     let about = MenuItem::with_id(app, TRAY_ABOUT_ID, "About", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
 
     let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(dashboard)];
+    let ready = ready_mode(snapshot);
+    items.push(Box::new(MenuItem::with_id(
+        app,
+        "core-start",
+        "Start local core",
+        snapshot.desired_mode == EngineMode::Off,
+        None::<&str>,
+    )?));
+    items.push(Box::new(MenuItem::with_id(
+        app,
+        "core-stop",
+        "Stop core",
+        snapshot.desired_mode != EngineMode::Off || snapshot.state != EngineState::Off,
+        None::<&str>,
+    )?));
+    for (enabled_id, disabled_id, label, active) in [
+        (
+            "proxy-enable",
+            "proxy-disable",
+            "System Proxy",
+            ready.is_some_and(EngineMode::system_proxy_enabled),
+        ),
+        (
+            "tun-enable",
+            "tun-disable",
+            "TUN Mode",
+            ready.is_some_and(EngineMode::tunnel_enabled),
+        ),
+    ] {
+        items.push(Box::new(CheckMenuItem::with_id(
+            app,
+            if active { disabled_id } else { enabled_id },
+            label,
+            true,
+            active,
+            None::<&str>,
+        )?));
+    }
+    let mut route_items: Vec<Box<dyn IsMenuItem<Wry>>> = Vec::new();
+    for (id, label) in [
+        ("route-rule", "Rule"),
+        ("route-global", "Global"),
+        ("route-direct", "Direct"),
+    ] {
+        route_items.push(Box::new(CheckMenuItem::with_id(
+            app,
+            id,
+            label,
+            ready.is_some(),
+            route_mode.is_some_and(|mode| mode.eq_ignore_ascii_case(label)),
+            None::<&str>,
+        )?));
+    }
+    let route_references = route_items
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<&dyn IsMenuItem<Wry>>>();
+    items.push(Box::new(Submenu::with_items(
+        app,
+        "Routing mode",
+        ready.is_some(),
+        &route_references,
+    )?));
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
     let mut selections = BTreeMap::new();
     let mut next_id = 0_usize;
+    let menu_id = uuid::Uuid::new_v4();
     for group in groups {
         let mut options: Vec<Box<dyn IsMenuItem<Wry>>> = Vec::with_capacity(group.options.len());
         for option in &group.options {
-            let id = format!("{TRAY_PROXY_ID_PREFIX}{next_id}");
+            let id = format!("{TRAY_PROXY_ID_PREFIX}{menu_id}-{next_id}");
             next_id += 1;
             options.push(Box::new(CheckMenuItem::with_id(
                 app,
                 &id,
                 option,
-                true,
+                group.selectable,
                 group.now.as_deref() == Some(option.as_str()),
                 None::<&str>,
             )?));
-            selections.insert(
-                id,
-                TrayProxySelection {
-                    group: group.name.clone(),
-                    proxy: option.clone(),
-                },
-            );
+            if group.selectable {
+                selections.insert(
+                    id,
+                    TrayProxySelection {
+                        group: group.name.clone(),
+                        proxy: option.clone(),
+                    },
+                );
+            }
         }
         let references = options
             .iter()
@@ -326,17 +425,143 @@ fn build_tray_menu(app: &AppHandle, groups: &[TrayProxyGroup]) -> tauri::Result<
 
 /// Rebuilds the tray menu from the running engine's controller.
 ///
-/// This only reads proxy groups and selects one of the options the controller
-/// itself reported; it cannot start, stop, or reconfigure an engine.
+/// Refreshing is read-only. Network menu actions use the same serialized
+/// commands as the dashboard; the menu never owns network state itself.
 pub(crate) async fn refresh_tray_from_controller(app: &AppHandle) -> Result<(), String> {
-    let client = controller_client_for_app(app)?;
-    let proxies = client.proxies().await.map_err(|error| error.to_string())?;
-    let groups = tray_proxy_groups(proxies);
-    let menu = build_tray_menu(app, &groups).map_err(|error| error.to_string())?;
+    let snapshot = app
+        .state::<crate::engine::ManagedEngine>()
+        .coordinator
+        .snapshot();
+    let mut groups = Vec::new();
+    let mut route_mode = None;
+    let mut observation_error = None;
+    if ready_mode(&snapshot).is_some() {
+        match controller_client_for_app(app) {
+            Ok(client) => {
+                let (proxies, configs) = tokio::join!(client.proxies(), client.configs());
+                match (proxies, configs) {
+                    (Ok(proxies), Ok(configs)) => {
+                        groups = tray_proxy_groups(proxies);
+                        route_mode = configs.mode;
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        observation_error = Some(error.to_string());
+                    }
+                }
+            }
+            Err(error) => {
+                observation_error = Some(error);
+            }
+        }
+    }
+    if app
+        .state::<crate::engine::ManagedEngine>()
+        .coordinator
+        .snapshot()
+        != snapshot
+    {
+        return Err("engine changed while the tray was being refreshed".into());
+    }
+    let menu = build_tray_menu(app, &snapshot, &groups, route_mode.as_deref())
+        .map_err(|error| error.to_string())?;
     app.tray_by_id(TRAY_ID)
         .ok_or_else(|| "tray icon is unavailable".to_owned())?
         .set_menu(Some(menu))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    match observation_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn ready_mode(snapshot: &EngineSnapshot) -> Option<EngineMode> {
+    match &snapshot.state {
+        EngineState::LocalProxyActive { runtime }
+        | EngineState::ProxyActive { runtime }
+        | EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime }
+            if runtime.ready
+                && snapshot.desired_mode == snapshot.state.active_mode()
+                && runtime.context.generation == snapshot.generation
+                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str())
+                && runtime.owner
+                    == if snapshot.desired_mode.tunnel_enabled() {
+                        cfw_engine_api::EngineOwner::PacketTunnelSystemExtension
+                    } else {
+                        cfw_engine_api::EngineOwner::ProxyAgent
+                    } =>
+        {
+            Some(snapshot.desired_mode)
+        }
+        _ => None,
+    }
+}
+
+fn start_tray_state_updates(app: AppHandle) {
+    let mut snapshots = app
+        .state::<crate::engine::ManagedEngine>()
+        .coordinator
+        .subscribe();
+    tauri::async_runtime::spawn(async move {
+        while snapshots.changed().await.is_ok() {
+            if refresh_tray_from_controller(&app).await.is_err() {
+                // A ready snapshot can precede the controller identity commit.
+                // One bounded retry also absorbs superseded state notifications.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Err(error) = refresh_tray_from_controller(&app).await {
+                    emit_shell_error(&app, "tray_menu_refresh_failed", error);
+                }
+            }
+        }
+    });
+}
+
+pub(crate) fn handle_tray_engine_event(app: &AppHandle, action: TrayEngineAction) {
+    if app.state::<crate::LaunchContext>().is_migration_handoff() {
+        emit_shell_error(
+            app,
+            "handoff_command_rejected",
+            "network controls are unavailable during migration handoff".into(),
+        );
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = match action {
+            TrayEngineAction::StartCore | TrayEngineAction::StopCore => {
+                crate::commands::set_core_enabled(
+                    app.state(),
+                    app.state(),
+                    app.state(),
+                    action == TrayEngineAction::StartCore,
+                )
+                .await
+                .map(|_| ())
+            }
+            TrayEngineAction::SystemProxy(enabled) => crate::commands::set_system_proxy_enabled(
+                app.state(),
+                app.state(),
+                app.state(),
+                enabled,
+            )
+            .await
+            .map(|_| ()),
+            TrayEngineAction::Tunnel(enabled) => {
+                crate::commands::set_tun_enabled(app.state(), app.state(), app.state(), enabled)
+                    .await
+                    .map(|_| ())
+            }
+            TrayEngineAction::RouteMode(mode) => {
+                crate::commands::set_proxy_mode(app.state(), mode.into()).await
+            }
+        };
+        if let Err(error) = result {
+            emit_shell_error(&app, "tray_network_change_failed", error);
+        }
+        if let Err(error) = refresh_tray_from_controller(&app).await {
+            emit_shell_error(&app, "tray_menu_refresh_failed", error);
+        }
+    });
 }
 
 fn handle_tray_proxy_event(app: &AppHandle, id: &str) {
@@ -349,10 +574,14 @@ fn handle_tray_proxy_event(app: &AppHandle, id: &str) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let selected = async {
-            controller_client_for_app(&app)?
-                .select_proxy(&selection.group, &selection.proxy)
-                .await
-                .map_err(|error| error.to_string())
+            crate::commands::select_proxy_with_persistence(
+                &app.state::<crate::engine::ManagedEngine>(),
+                &app.state::<crate::commands::ManagedProfiles>(),
+                None,
+                selection.group,
+                selection.proxy,
+            )
+            .await
         }
         .await;
         match selected {
@@ -393,6 +622,10 @@ fn show_main_page(app: &AppHandle, page: MainPage) {
     if let Err(error) = result {
         emit_shell_error(app, "window_activation_failed", error);
     }
+}
+
+pub(crate) fn show_dashboard(app: &AppHandle) {
+    show_main_page(app, MainPage::General);
 }
 
 fn show_main_page_result(app: &AppHandle, page: MainPage) -> Result<(), String> {
@@ -533,11 +766,13 @@ mod tests {
                     name: "Proxy".into(),
                     now: Some("HK".into()),
                     options: vec!["HK".into(), "JP".into()],
+                    selectable: true,
                 },
                 TrayProxyGroup {
                     name: "Filtered".into(),
                     now: None,
                     options: vec!["ok".into()],
+                    selectable: true,
                 },
             ]
         );
@@ -591,5 +826,83 @@ mod tests {
     fn stale_selection_marker_is_dropped_when_it_is_not_an_option() {
         let groups = tray_proxy_groups(snapshot(vec![group("Proxy", Some("Gone"), &["HK"])]));
         assert_eq!(groups[0].now, None);
+    }
+
+    #[test]
+    fn tray_network_actions_keep_explicit_intent_and_automatic_groups_are_read_only() {
+        for (id, expected) in [
+            ("core-start", TrayEngineAction::StartCore),
+            ("core-stop", TrayEngineAction::StopCore),
+            ("proxy-enable", TrayEngineAction::SystemProxy(true)),
+            ("proxy-disable", TrayEngineAction::SystemProxy(false)),
+            ("tun-enable", TrayEngineAction::Tunnel(true)),
+            ("tun-disable", TrayEngineAction::Tunnel(false)),
+            ("route-rule", TrayEngineAction::RouteMode("rule")),
+            ("route-global", TrayEngineAction::RouteMode("global")),
+            ("route-direct", TrayEngineAction::RouteMode("direct")),
+        ] {
+            assert_eq!(tray_action(id), TrayAction::Engine(expected));
+        }
+        for kind in ["URLTest", "Fallback", "LoadBalance"] {
+            let mut automatic = group("Auto", Some("HK"), &["HK", "JP"]);
+            automatic.kind = kind.into();
+            let groups = tray_proxy_groups(snapshot(vec![automatic]));
+            assert!(!groups[0].selectable);
+            assert_eq!(groups[0].now.as_deref(), Some("HK"));
+        }
+    }
+
+    #[test]
+    fn tray_never_marks_failed_or_pending_intent_as_connected() {
+        use cfw_engine_api::{EngineCommandContext, EngineOwner, RuntimeIdentity};
+        let runtime = RuntimeIdentity {
+            owner: EngineOwner::ProxyAgent,
+            context: EngineCommandContext {
+                installation_id: "fixture".into(),
+                config_epoch: 1,
+                generation: 2,
+            },
+            config_digest: "ab".repeat(32),
+            ready: true,
+        };
+        let mut snapshot = EngineSnapshot {
+            desired_mode: EngineMode::SystemProxy,
+            state: EngineState::ProxyActive {
+                runtime: runtime.clone(),
+            },
+            generation: 2,
+            config_digest: Some(runtime.config_digest.clone()),
+        };
+        assert_eq!(ready_mode(&snapshot), Some(EngineMode::SystemProxy));
+        for state in [
+            EngineState::Off,
+            EngineState::ProxyStarting { generation: 2 },
+            EngineState::Failed {
+                generation: 2,
+                target: EngineMode::SystemProxy,
+                error: "fixture failure".into(),
+            },
+            EngineState::ProxyActive {
+                runtime: RuntimeIdentity {
+                    ready: false,
+                    ..runtime.clone()
+                },
+            },
+            EngineState::ProxyActive {
+                runtime: RuntimeIdentity {
+                    owner: EngineOwner::PacketTunnelSystemExtension,
+                    ..runtime.clone()
+                },
+            },
+        ] {
+            snapshot.state = state;
+            assert_eq!(ready_mode(&snapshot), None);
+        }
+        snapshot.state = EngineState::ProxyActive { runtime };
+        snapshot.generation += 1;
+        assert_eq!(ready_mode(&snapshot), None);
+        snapshot.generation -= 1;
+        snapshot.config_digest = Some("cd".repeat(32));
+        assert_eq!(ready_mode(&snapshot), None);
     }
 }

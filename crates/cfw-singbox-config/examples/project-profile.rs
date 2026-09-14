@@ -4,7 +4,7 @@
 use std::io::{self, Read};
 
 use cfw_singbox_config::{
-    EngineSettings, MAX_PROFILE_BYTES, ProjectionMode, ValidatedSingBoxProfile,
+    EngineSettings, MAX_PROFILE_BYTES, ProjectionMode, RuntimePreferences, ValidatedSingBoxProfile,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -16,6 +16,8 @@ struct Input {
     profile_id: String,
     #[serde(default)]
     settings: EngineSettings,
+    #[serde(default)]
+    runtime_preferences: Option<RuntimePreferences>,
     #[serde(default)]
     tunnel: bool,
 }
@@ -30,6 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let input: Input = serde_json::from_str(&input)?;
     let profile = ValidatedSingBoxProfile::parse(&input.profile.to_string())?;
+    let settings = match input.runtime_preferences {
+        Some(preferences) => preferences.apply_to(input.settings)?,
+        None => input.settings,
+    };
     let projected = profile.project(
         &input.profile_id,
         if input.tunnel {
@@ -37,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             ProjectionMode::SystemProxy
         },
-        &input.settings,
+        &settings,
     )?;
     println!(
         "{}",

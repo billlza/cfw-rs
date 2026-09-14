@@ -2,13 +2,13 @@ import CryptoKit
 import Foundation
 
 public enum NativeBridgeProtocolConstants {
-  public static let schemaVersion: UInt16 = 9
-  public static let maximumRequestBytes = 1_048_576
-  public static let maximumResponseBytes = 1_048_576
+  public static let schemaVersion: UInt16 = 10
+  public static let maximumRequestBytes = EngineCapacity.maximumBridgeBytes
+  public static let maximumResponseBytes = EngineCapacity.maximumBridgeBytes
   public static let maximumFailureMessageBytes = 1_024
-  public static let maximumCredentialSlots = 256
-  public static let maximumCredentialOutbounds = 128
-  public static let maximumCredentialVaultReferences = 512
+  public static let maximumCredentialSlots = EngineCapacity.maximumCredentialSlots
+  public static let maximumCredentialOutbounds = EngineCapacity.maximumOutbounds
+  public static let maximumCredentialVaultReferences = EngineCapacity.maximumVaultBindings
   public static let maximumCredentialCatalogProfiles = 4_096
 }
 
@@ -118,6 +118,8 @@ public enum CredentialKind: String, Codable, CaseIterable, Sendable {
   case wireguardPreSharedKey = "wireguard_pre_shared_key"
   case socks5Username = "socks5_username"
   case socks5Password = "socks5_password"
+  case httpProxyUsername = "http_proxy_username"
+  case httpProxyPassword = "http_proxy_password"
   case shadowsocksPassword = "shadowsocks_password"
   case vmessUUID = "vmess_uuid"
   case vlessUUID = "vless_uuid"
@@ -138,6 +140,10 @@ extension CredentialKind {
         && key.base64EncodedString() == value
     case .socks5Username, .socks5Password:
       return (1...255).contains(value.utf8.count)
+    case .httpProxyUsername:
+      return (1...1024).contains(value.utf8.count) && !value.contains(":")
+    case .httpProxyPassword:
+      return (1...4096).contains(value.utf8.count)
     case .vmessUUID, .vlessUUID, .tuicUUID:
       guard let parsed = UUID(uuidString: value) else { return false }
       return parsed.uuidString.lowercased() == value
@@ -153,6 +159,8 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
   case wireguardPreSharedKey = "wireguard_pre_shared_key"
   case socks5Username = "socks5_username"
   case socks5Password = "socks5_password"
+  case httpProxyUsername = "http_proxy_username"
+  case httpProxyPassword = "http_proxy_password"
   case shadowsocksPassword = "shadowsocks_password"
   case vmessUUID = "vmess_uuid"
   case vlessUUID = "vless_uuid"
@@ -169,6 +177,8 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
     case .wireguardPreSharedKey: .wireguardPreSharedKey
     case .socks5Username: .socks5Username
     case .socks5Password: .socks5Password
+    case .httpProxyUsername: .httpProxyUsername
+    case .httpProxyPassword: .httpProxyPassword
     case .shadowsocksPassword: .shadowsocksPassword
     case .vmessUUID: .vmessUUID
     case .vlessUUID: .vlessUUID
@@ -185,10 +195,10 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
     switch self {
     case .wireguardPrivateKey: "private_key"
     case .wireguardPreSharedKey: "peers/0/pre_shared_key"
-    case .socks5Username:
+    case .socks5Username, .httpProxyUsername:
       "username"
     case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
-      .tuicPassword, .socks5Password:
+      .tuicPassword, .socks5Password, .httpProxyPassword:
       "password"
     case .vmessUUID, .vlessUUID, .tuicUUID:
       "uuid"
@@ -200,7 +210,8 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
   public var configurationContainer: String {
     switch self {
     case .wireguardPrivateKey, .wireguardPreSharedKey: "endpoints"
-    case .socks5Username, .socks5Password, .shadowsocksPassword,
+    case .socks5Username, .socks5Password, .httpProxyUsername, .httpProxyPassword,
+      .shadowsocksPassword,
       .vmessUUID, .vlessUUID, .trojanPassword, .hysteria2Password,
       .hysteria2ObfsPassword, .anytlsPassword, .tuicUUID, .tuicPassword:
       "outbounds"
@@ -358,7 +369,31 @@ public struct CredentialSlot: Codable, Equatable, Sendable {
   }
 }
 
+public enum NativeStartMode: String, Codable, CaseIterable, Sendable {
+  case localProxy = "local_proxy"
+  case systemProxy = "system_proxy"
+  case tunnel
+  case tunnelSystemProxy = "tunnel_system_proxy"
+
+  public var slot: ConfigurationSlot {
+    switch self {
+    case .localProxy: .localProxy
+    case .systemProxy: .systemProxy
+    case .tunnel, .tunnelSystemProxy: .tunnel
+    }
+  }
+
+  public func admits(_ options: TunnelNetworkOptions?) -> Bool {
+    switch self {
+    case .localProxy, .systemProxy: options == nil
+    case .tunnel: options != nil && options?.systemProxyPort == nil
+    case .tunnelSystemProxy: options?.systemProxyPort != nil
+    }
+  }
+}
+
 public struct EngineStartRequest: Codable, Equatable, Sendable {
+  public let mode: NativeStartMode
   public let context: EngineCommandContext
   public let credentialAudience: CredentialAudience
   public let configJSON: String
@@ -368,6 +403,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
   public let tunnelOptions: TunnelNetworkOptions?
 
   public init(
+    mode: NativeStartMode,
     context: EngineCommandContext,
     credentialAudience: CredentialAudience,
     configJSON: String,
@@ -376,12 +412,20 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     credentialSlots: [CredentialSlot],
     tunnelOptions: TunnelNetworkOptions?
   ) throws {
+    guard mode.admits(tunnelOptions) else {
+      throw NativeBridgeProtocolError.invalidConfiguration
+    }
     guard let configuration = configJSON.data(using: .utf8), !configuration.isEmpty,
       configuration.count <= Int(NativeProtocolConstants.maximumConfigurationBytes),
       let object = try? JSONSerialization.jsonObject(with: configuration),
       let root = object as? [String: Any]
     else {
       throw NativeBridgeProtocolError.invalidConfiguration
+    }
+    if mode == .localProxy {
+      try ConfigurationDescriptor.validateLocalProxyConfiguration(root)
+    } else {
+      try ConfigurationDescriptor.validateLANConfiguration(root)
     }
     let contentDigest = SHA256.hash(data: configuration).hexString
     guard contentDigest == configContentDigest.hex else {
@@ -392,7 +436,9 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
       guard let inbounds = root["inbounds"] as? [[String: Any]] else {
         throw NativeBridgeProtocolError.invalidConfiguration
       }
-      let mixed = inbounds.filter { $0["type"] as? String == "mixed" }
+      let mixed = inbounds.filter {
+        $0["type"] as? String == "mixed" && $0["tag"] as? String != "cfw-lan-proxy"
+      }
       guard mixed.count == 1,
         mixed[0]["tag"] as? String == "cfw-system-proxy",
         mixed[0]["listen"] as? String == "127.0.0.1",
@@ -407,12 +453,13 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
       configurationDigest: configContentDigest,
       credentialAudience: credentialAudience,
       credentialSlots: credentialSlots,
-      mode: tunnelOptions == nil ? .systemProxy : .tunnel,
+      mode: mode.slot.engineMode,
       tunnelOptions: tunnelOptions
     )
     guard expectedIdentity == configDigest else {
       throw NativeBridgeProtocolError.configurationIdentityMismatch
     }
+    self.mode = mode
     self.context = context
     self.credentialAudience = credentialAudience
     self.configJSON = configJSON
@@ -423,6 +470,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
   }
 
   private enum CodingKeys: String, CodingKey {
+    case mode
     case context
     case credentialAudience = "credential_audience"
     case configJSON = "config_json"
@@ -435,6 +483,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     try self.init(
+      mode: container.decode(NativeStartMode.self, forKey: .mode),
       context: container.decode(EngineCommandContext.self, forKey: .context),
       credentialAudience: container.decode(CredentialAudience.self, forKey: .credentialAudience),
       configJSON: container.decode(String.self, forKey: .configJSON),
@@ -449,6 +498,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
 
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(mode, forKey: .mode)
     try container.encode(context, forKey: .context)
     try container.encode(credentialAudience, forKey: .credentialAudience)
     try container.encode(configJSON, forKey: .configJSON)
@@ -459,6 +509,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
   }
 
   public func descriptor(slot: ConfigurationSlot) throws -> ConfigurationDescriptor {
+    guard slot == mode.slot else { throw NativeBridgeProtocolError.invalidCommand }
     let configuration = Data(configJSON.utf8)
     return try ConfigurationDescriptor(
       slot: slot,
@@ -520,7 +571,8 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
         configurationSHA256: configurationDigest.hex,
         credentialAudience: credentialAudience,
         credentialSlots: credentialSlots,
-        mode: mode == .systemProxy ? "system_proxy" : "tunnel",
+        mode: mode == .localProxy
+          ? "local_proxy" : (mode == .systemProxy ? "system_proxy" : "tunnel"),
         networkOptions: tunnelOptions,
         schemaVersion: NativeProtocolConstants.schemaVersion
       )

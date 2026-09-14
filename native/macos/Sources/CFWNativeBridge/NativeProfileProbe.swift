@@ -15,7 +15,8 @@ extension NativeBridgeCoordinator {
       try Task.checkCancellation()
       try await proxy.ensureRegistered()
       return try await proxy.testProfileProxies(
-        configuration: configuration, proxies: request.proxies, timeoutMS: request.timeoutMS)
+        configuration: configuration, proxies: request.proxies, timeoutMS: request.timeoutMS,
+        targetURL: request.targetURL ?? "", expectedStatus: request.expectedStatus ?? "")
     } catch {
       throw Self.map(error)
     }

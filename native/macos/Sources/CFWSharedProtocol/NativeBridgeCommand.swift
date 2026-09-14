@@ -5,6 +5,9 @@ public enum NativeBridgeCommand: Equatable, Sendable {
   case authorizeSystemProxy
   case authorizeSystemProxyRestoration
   case maintainCurrentServices(NativeServiceMaintenanceAction)
+  case checkConfiguration(EngineStartRequest)
+  case startLocalProxy(EngineStartRequest)
+  case stopLocalProxy(EngineCommandContext)
   case startSystemProxy(EngineStartRequest)
   case stopSystemProxy(EngineCommandContext)
   case installTunnel(EngineCommandContext)
@@ -13,6 +16,7 @@ public enum NativeBridgeCommand: Equatable, Sendable {
   case startTunnel(EngineStartRequest)
   case stopTunnel(EngineCommandContext)
   case provisionCredentials(CredentialProvisionRequest)
+  case rebindProfileCredentials(CredentialRebindRequest)
   case queryCredentialPresence(CredentialPresenceRequest)
   case preflightCutover(CutoverPreflightRequest)
   case testProfileDelays(ProfileDelayTestRequest)
@@ -37,6 +41,9 @@ extension NativeBridgeCommand: Codable {
     case authorizeSystemProxy = "authorize_system_proxy"
     case authorizeSystemProxyRestoration = "authorize_system_proxy_restoration"
     case maintainCurrentServices = "maintain_current_services"
+    case checkConfiguration = "check_configuration"
+    case startLocalProxy = "start_local_proxy"
+    case stopLocalProxy = "stop_local_proxy"
     case startSystemProxy = "start_system_proxy"
     case stopSystemProxy = "stop_system_proxy"
     case installTunnel = "install_tunnel"
@@ -45,6 +52,7 @@ extension NativeBridgeCommand: Codable {
     case startTunnel = "start_tunnel"
     case stopTunnel = "stop_tunnel"
     case provisionCredentials = "provision_credentials"
+    case rebindProfileCredentials = "rebind_profile_credentials"
     case queryCredentialPresence = "query_credential_presence"
     case preflightCutover = "preflight_cutover"
     case testProfileDelays = "test_profile_delays"
@@ -72,34 +80,39 @@ extension NativeBridgeCommand: Codable {
       self = .maintainCurrentServices(
         try payload.decode(NativeServiceMaintenanceAction.self, forKey: .action)
       )
-    case .startSystemProxy, .startTunnel, .authorizeTunnelConfiguration:
+    case .checkConfiguration, .startLocalProxy, .startSystemProxy, .startTunnel,
+      .authorizeTunnelConfiguration:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       let request = try payload.decode(EngineStartRequest.self, forKey: .request)
-      if opcode == .startSystemProxy {
-        guard request.tunnelOptions == nil else {
+      if opcode == .checkConfiguration {
+        self = .checkConfiguration(request)
+      } else if opcode == .startLocalProxy || opcode == .startSystemProxy {
+        let expected: NativeStartMode = opcode == .startLocalProxy ? .localProxy : .systemProxy
+        guard request.mode == expected, request.tunnelOptions == nil else {
           throw NativeBridgeProtocolError.invalidCommand
         }
-        self = .startSystemProxy(request)
+        self = opcode == .startLocalProxy ? .startLocalProxy(request) : .startSystemProxy(request)
       } else {
-        guard request.tunnelOptions != nil else {
+        guard request.mode.slot == .tunnel, request.tunnelOptions != nil else {
           throw NativeBridgeProtocolError.invalidCommand
         }
         self =
           opcode == .startTunnel ? .startTunnel(request) : .authorizeTunnelConfiguration(request)
       }
-    case .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
+    case .stopLocalProxy, .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       let context = try payload.decode(EngineCommandContext.self, forKey: .context)
       switch opcode {
+      case .stopLocalProxy: self = .stopLocalProxy(context)
       case .stopSystemProxy: self = .stopSystemProxy(context)
       case .installTunnel: self = .installTunnel(context)
       case .cancelTunnelInstall: self = .cancelTunnelInstall(context)
       case .stopTunnel: self = .stopTunnel(context)
       case .queryStatus, .authorizeSystemProxy, .authorizeSystemProxyRestoration,
         .authorizeTunnelConfiguration,
-        .maintainCurrentServices, .startSystemProxy,
+        .maintainCurrentServices, .checkConfiguration, .startLocalProxy, .startSystemProxy,
         .startTunnel,
-        .provisionCredentials,
+        .provisionCredentials, .rebindProfileCredentials,
         .queryCredentialPresence, .previewCredentialGarbageCollection,
         .commitCredentialGarbageCollection, .preflightCutover, .testProfileDelays:
         throw NativeBridgeProtocolError.invalidCommand
@@ -114,6 +127,10 @@ extension NativeBridgeCommand: Codable {
       self = .queryCredentialPresence(
         try payload.decode(CredentialPresenceRequest.self, forKey: .request)
       )
+    case .rebindProfileCredentials:
+      let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      self = .rebindProfileCredentials(
+        try payload.decode(CredentialRebindRequest.self, forKey: .request))
     case .testProfileDelays:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       self = .testProfileDelays(try payload.decode(ProfileDelayTestRequest.self, forKey: .request))
@@ -148,10 +165,22 @@ extension NativeBridgeCommand: Codable {
       try container.encode(Opcode.maintainCurrentServices, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       try payload.encode(action, forKey: .action)
+    case .checkConfiguration(let request):
+      try container.encode(Opcode.checkConfiguration, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(request, forKey: .request)
     case .startSystemProxy(let request):
       try container.encode(Opcode.startSystemProxy, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       try payload.encode(request, forKey: .request)
+    case .startLocalProxy(let request):
+      try container.encode(Opcode.startLocalProxy, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(request, forKey: .request)
+    case .stopLocalProxy(let context):
+      try container.encode(Opcode.stopLocalProxy, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(context, forKey: .context)
     case .stopSystemProxy(let context):
       try container.encode(Opcode.stopSystemProxy, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
@@ -182,6 +211,10 @@ extension NativeBridgeCommand: Codable {
       try payload.encode(request, forKey: .request)
     case .queryCredentialPresence(let request):
       try container.encode(Opcode.queryCredentialPresence, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(request, forKey: .request)
+    case .rebindProfileCredentials(let request):
+      try container.encode(Opcode.rebindProfileCredentials, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       try payload.encode(request, forKey: .request)
     case .testProfileDelays(let request):

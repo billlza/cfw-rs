@@ -30,9 +30,6 @@ import {
   formatRate,
   formatRelativeUpdated,
   delayFailureLabel,
-  providerActionKey,
-  providerBatchSummary,
-  providerBatchSucceeded,
   latestDelay,
   logEntry,
   withLogRow,
@@ -95,26 +92,70 @@ const SETTINGS_FIELDS = Object.freeze([
   "silent_start",
   "theme",
 ]);
-const PROVIDER_CAPABILITY_UNSUPPORTED_PREFIX = "controller capability `provider management` is unsupported";
-const PROVIDER_CAPABILITY_UNAVAILABLE = "Provider management is unavailable in the pinned sing-box 1.13.15 engine.";
 
 /// Reasons the dashboard shows next to a control the 0.4.0 backend refuses.
 /// Each one states what the product does instead, so a disabled switch is never
 /// unexplained and never silently does nothing.
 const REASONS = Object.freeze({
-  allowLan: "LAN exposure is unavailable: the projected mixed inbound is bound to loopback and a running engine cannot be rebound.",
-  bindAddress: "The mixed inbound address is fixed by the projected configuration and cannot be changed in this build.",
-  logLevel: "The projected configuration pins the engine log level to info and the engine controller accepts no log-level change.",
+  allowLan: "LAN sharing uses a separate listener restricted to explicitly trusted private source networks.",
+  bindAddress: "The local proxy and controller stay on loopback. LAN devices use their own listener address and port.",
+  logLevel: "Changes apply through a validated runtime replacement and are saved for the next launch.",
   mixin: "Mixin is unavailable: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy.",
   geoip: "Country rules use sing-box rule sets, downloaded on first start and refreshed daily while the engine runs. An existing Clash Country.mmdb file is not used.",
   restoreDns: "This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS.",
-  engineNotOff: "Profile changes require the engine to be Off. Turn System Proxy and TUN Mode off first.",
+  engineNotOff: "Stop the core before credential maintenance or legacy migration.",
 });
 
 
 /// Applies a `SettingsSnapshot`. The 0.4.0 preference store holds exactly six
 /// renderer-owned fields; everything the 0.3.5 file used to carry now lives in
 /// the projected engine configuration and is read, never written, from there.
+import { createProviderUI } from "./providers.js";
+import { createRuntimeSettingsUI, RUNTIME_LOG_LEVELS } from "./runtime-settings.js";
+import { createGeneralView } from "./general.js";
+import { createProxyView } from "./proxies.js";
+const proxyView = createProxyView({ state, runtime, escapeHtml, delayFailureLabel, engineStateLabel, engineIsOff });
+const { delayClass, delayLabel, delayConcurrency, cancelDelayTest, visibleProxyNodeNames, orderNamesVisibleFirst, applyDelayToProxyNodes, patchProxyDelayLabels, finalizeDelayTestNames, slugDomId, isManualProxyGroup, freshProxyControllerSnapshotAvailable, displayedProxyGroups, activeProxyGroup, hideTimedOutProxies, renderProxies, modeIcon, changePage: changeProxyPage, revealSelected: revealSelectedProxy } = proxyView;
+
+import { createConnectionsView } from "./connections.js";
+const { renderConnections, scheduleConnectionsPatch, connectionFacets, bindConnectionRowEvents } = createConnectionsView({
+  state, runtime, MAX_CONNECTION_ROWS, safeRegex, escapeHtml, formatBytes, renderPage, bindPageEvents,
+  controllerActionAllowed, captureEngineIdentityToken, engineIdentityTokenIsCurrent, invoke, loadControllerSnapshot, appendLog, errorText,
+});
+
+import { createRulesView } from "./rules.js";
+const { renderRules, changePage: changeRulePage } = createRulesView({state,escapeHtml});
+import { createSettingsView } from "./settings-view.js";
+const { renderSettings, renderNetworkDiagnostics } = createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, FONT_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel });
+
+import { createAutomationSettingsUI } from "./automation-settings.js";
+const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderPage, appendLog,
+  dismissOtherDialogs: () => { runtimeSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; } });
+
+import { createProxyDelayTest } from "./proxy-delay-test.js";
+const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView, invoke, activeProfile, engineIsOff,
+  controllerActionAllowed, captureEngineIdentityToken, engineIdentityTokenIsCurrent, appendLog, renderPage, errorText, delayFailureLabel });
+const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
+
+const runtimeSettingsUI = createRuntimeSettingsUI({ state, invoke, appendLog, renderPage,
+  dismissOtherDialogs: () => { automationSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; },
+  refreshRuntime: async () => {
+    await loadEngineStatus();
+    await loadRuntimeProjection();
+    if (state.engine.active) await loadControllerSnapshotWithRetry(6, 300);
+  },
+});
+
+const { renderProviders, loadProvidersSnapshot, bindProviderButtons, handleProviderAction,
+  providerSelectionChanged } = createProviderUI({ state, invoke, appendLog, renderPage,
+  refreshProfile: async () => {
+    await loadProfilesSnapshot();
+    await loadRuntimeProjection();
+    await loadEngineStatus();
+    if (state.engine.active) await loadControllerSnapshot();
+  },
+});
+
 function applyPersistedSettings(snapshot) {
   const settings = normalizeSettingsSnapshot(snapshot);
   const launchAtLogin = normalizeLaunchAtLoginState(snapshot);
@@ -298,8 +339,9 @@ function applyControllerSnapshot(snapshot) {
   const config = snapshot.config ?? {};
   const mode = config.mode ? config.mode[0].toUpperCase() + config.mode.slice(1).toLowerCase() : null;
   state.mode = ["Global", "Rule", "Direct"].includes(mode) ? mode : null;
-  const allowLan = config["allow-lan"] ?? config.allow_lan;
-  state.toggles.allowLan = typeof allowLan === "boolean" ? allowLan : false;
+  // Clash API describes the loopback inbound. LAN sharing has its own listener
+  // and source policy, whose state comes from the runtime settings transaction.
+  state.toggles.allowLan = state.runtimeSettings?.settings.allow_lan ?? false;
   state.logLevel = config["log-level"] ?? config.log_level ?? null;
 
   const proxyNodes = new Map((snapshot.proxies?.proxies ?? []).map((node) => [node.name, node]));
@@ -326,6 +368,7 @@ function applyControllerSnapshot(snapshot) {
       const measured = state.proxyDelayResults.get(name);
       return {
         name,
+        label: state.savedProfilePolicy?.nodeLabels?.[name] ?? name,
         delay: measured ? measured.delay : delay,
         delayFailure: measured?.delayFailure ?? null,
         dead: Boolean(measured?.delayFailure),
@@ -403,28 +446,6 @@ function applyConnectionsSnapshot(snapshot) {
   state.controllerStatus = "controller live stream";
 }
 
-function applyProvidersSnapshot(snapshot) {
-  if (!snapshot) return false;
-  const proxyProviders = snapshot.proxy_providers ?? [];
-  const ruleProviders = snapshot.rule_providers ?? [];
-  state.providers = proxyProviders.map((provider) => ({
-    name: provider.name,
-    type: provider.kind,
-    vehicle: provider.vehicle_type,
-    updated: provider.updated_at ?? "unknown",
-    health: provider.extra?.healthCheck?.lastResult ?? provider.extra?.healthcheck?.lastResult ?? "Unknown",
-    proxies: provider.proxies?.length ?? 0,
-  }));
-  state.ruleProviders = ruleProviders.map((provider) => ({
-    name: provider.name,
-    type: provider.kind,
-    behavior: provider.behavior ?? provider.vehicle_type,
-    updated: provider.updated_at ?? "unknown",
-    rules: provider.rules?.length ?? 0,
-  }));
-  state.providerCapabilityError = null;
-  return true;
-}
 
 function visibleLogs() {
   const regex = safeRegex(state.logSearch);
@@ -470,52 +491,6 @@ function scheduleLogStreamPatch() {
     if (state.activePage !== "logs") return;
     if (!patchLogStream()) scheduleRender();
   });
-}
-
-function visibleConnections() {
-  const regex = safeRegex(state.connectionSearch);
-  const rows = state.connections.filter((connection) => {
-    const metadata = connection.metadata ?? {};
-    const haystack = [
-      connection.host,
-      connection.rule,
-      ...(connection.chains ?? []),
-      metadata.processPath,
-      metadata.process_path,
-      metadata.sourceIP,
-      metadata.source_ip,
-      metadata.destinationIP,
-      metadata.destination_ip,
-      metadata.network,
-      metadata.type,
-    ].filter(Boolean).join(" ");
-    return !state.connectionSearch || (regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.connectionSearch.toLowerCase()));
-  });
-
-  const sorters = {
-    host: (row) => row.host,
-    speed: (row) => row.uploadSpeedBytes + row.downloadSpeedBytes,
-    upload: (row) => row.uploadBytes,
-    download: (row) => row.downloadBytes,
-    age: (row) => Date.parse(row.start || "") || 0,
-  };
-  const sorter = sorters[state.connectionSort] ?? sorters.age;
-  return [...rows].sort((left, right) => {
-    const leftValue = sorter(left);
-    const rightValue = sorter(right);
-    const result = typeof leftValue === "string"
-      ? leftValue.localeCompare(String(rightValue))
-      : leftValue - rightValue;
-    return state.connectionSortDesc ? -result : result;
-  }).slice(0, MAX_CONNECTION_ROWS);
-}
-
-function visibleRules(source = state.rules) {
-  const regex = safeRegex(state.ruleSearch);
-  return source.filter((rule) => {
-    const haystack = [rule.index, rule.type, rule.payload, rule.proxy, rule.hits].filter(Boolean).join(" ");
-    return !state.ruleSearch || (regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.ruleSearch.toLowerCase()));
-  }).slice(0, 2000);
 }
 
 function renderNav() {
@@ -886,224 +861,6 @@ function renderMigrationBanner() {
   `;
 }
 
-function renderGeneral() {
-  const product = state.payload.product;
-  const appVersion = product.version ?? "—";
-  const update = state.updateInfo;
-  const updateBadge = update?.available && update?.version
-    ? `<button type="button" class="cfw-update-badge" data-action="check-for-updates" title="Update available — click to download">→ v${escapeHtml(String(update.version))}</button>`
-    : "";
-  const engine = state.engine;
-  const projection = state.projection;
-  const statusDot = engine.active ? "cfw-status-dot on" : "cfw-status-dot";
-  const listenAddress = projection.mixedPort
-    ? `${projection.listenAddress ?? "127.0.0.1"}:${projection.mixedPort}`
-    : null;
-  const bind = projection.listenAddress ?? "unavailable";
-  const logLevel = projection.logLevel ?? state.logLevel ?? "info";
-  const engineLabel = state.controllerVersion?.version
-    ? `sing-box · ${state.controllerVersion.version}`
-    : `sing-box · ${engineStateLabel(engine)}`;
-  const tunnelCapability = engineToggleCapability("tunMode");
-  const proxyCapability = engineToggleCapability("systemProxy");
-  const tunnelReason = tunnelCapability.available ? null : tunnelCapability.reason;
-  const proxyReason = proxyCapability.available ? null : proxyCapability.reason;
-  const tunnelRetryDisabled = state.engineMutationBusy || !tunnelCapability.available ? " disabled" : "";
-  const proxyRetryDisabled = state.engineMutationBusy || !proxyCapability.available ? " disabled" : "";
-  const launchAtLogin = launchAtLoginPresentation();
-  const tunnelRecoveryAction = engine.state === "AwaitingApproval"
-    ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>Approve…</button>`
-    : engine.state === "Failed" && modeHasTunnel(engine.desiredMode)
-      ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>Retry</button>`
-      : "";
-  const proxyRecoveryAction = engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)
-    ? `<button class="cfw-text-button" data-action="retry-system-proxy"${proxyRetryDisabled}>Retry</button>`
-    : "";
-  const cancellationDisabled = state.engineMutationBusy || state.migrationHandoff ? " disabled" : "";
-  const tunnelCancellationAction = modeHasTunnel(engine.desiredMode) && !engine.tunnelActive
-    ? `<button class="cfw-text-button" data-action="cancel-tun-mode"${cancellationDisabled}>Cancel request</button>`
-    : "";
-  const proxyCancellationAction = modeHasSystemProxy(engine.desiredMode) && !engine.systemProxyActive
-    ? `<button class="cfw-text-button" data-action="cancel-system-proxy"${cancellationDisabled}>Cancel request</button>`
-    : "";
-  const migrationBanner = renderMigrationBanner();
-  const engineReason = state.engineMutationError ?? engine.availabilityReason;
-  const projectionError = projection.error ?? "no active profile is selected";
-  const projectionNote = projectionError === "no active profile is selected"
-    ? "No profile selected"
-    : "Projection unreadable";
-  return `
-    <div class="cfw-general-view">
-      <section class="cfw-header">
-        <div class="cfw-app-mark">${renderCatLogo()}</div>
-        <div class="cfw-title">
-          <span>Clash for Mac</span>
-          <small>v${escapeHtml(appVersion)}${updateBadge}</small>
-        </div>
-      </section>
-
-      <section class="cfw-content${migrationBanner ? " cfw-content-migration" : ""}">
-        ${migrationBanner}
-        ${engineReason ? renderRowReason(engineReason) : ""}
-        <div class="cfw-row">
-          <div class="cfw-row-left">
-            <span>Port</span>
-            <span class="general-icons">
-              ${generalIconButton("copy-proxy-exports", "terminal", "Copy proxy export commands for Terminal")}
-            </span>
-          </div>
-          <div class="cfw-row-right">
-            <span class="cfw-link-value">${escapeHtml(listenAddress ?? "unavailable")}</span>
-            ${renderRowNote(
-              listenAddress ? "Fixed by the projection" : projectionNote,
-              listenAddress
-                ? `The app-owned mixed inbound is projected at ${listenAddress} and is not a user setting in this build.`
-                : `The projected configuration could not be read: ${projectionError}`,
-            )}
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">
-            <span>Allow LAN</span>
-            <span class="general-icons">
-              ${generalIconButton("allow-lan-info", "info", REASONS.allowLan)}
-              ${generalIconButton("show-network-interfaces", "device-hub", "network interfaces")}
-            </span>
-          </div>
-          <div class="cfw-row-right">
-            <span class="cfw-link-value" title="${escapeHtml(REASONS.bindAddress)}">Bind: ${escapeHtml(bind)}</span>
-            ${renderRowNote("Loopback only", `${REASONS.allowLan} ${REASONS.bindAddress}`)}
-            ${renderInlineSwitch("allowLan", "Allow LAN", { reason: REASONS.allowLan })}
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">Log Level</div>
-          <div class="cfw-row-right">
-            <select class="cfw-select" disabled title="${escapeHtml(REASONS.logLevel)}" aria-label="Engine log level">
-              <option value="${escapeHtml(logLevel)}" selected>${escapeHtml(logLevel)}</option>
-            </select>
-            ${renderRowNote("Pinned by the projection", REASONS.logLevel)}
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">
-            <span>Engine</span>
-            <span class="general-icons">
-              ${generalIconButton("preview-runtime-config", "memory", "Preview the projected configuration this engine runs")}
-              ${generalIconButton("dns-query", "dns", "Resolve a host through the running engine")}
-            </span>
-          </div>
-          <div class="cfw-row-right">
-            <span class="cfw-link-value core-version-link" title="${escapeHtml(projection.controller ? `app-owned controller ${projection.controller}` : "the controller exists only while an engine is running")}">
-              <i class="${statusDot}"></i>
-              <span>${escapeHtml(engineLabel)}</span>
-            </span>
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">Home Directory</div>
-          <div class="cfw-row-right">
-            <button class="cfw-text-button" data-action="open-home-directory">Open Folder</button>
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">GeoIP Database</div>
-          <div class="cfw-row-right">
-            <span class="cfw-link-value">${escapeHtml(state.savedProfilePolicy?.geoipCountries.join(", ") || "No country rules configured")}</span>
-            ${renderRowNote("Automatic updates", REASONS.geoip)}
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">
-            <span>TUN Mode</span>
-            <span class="general-icons">
-              ${generalIconButton("tun-info", "info", "The Packet Tunnel runs as a signed NetworkExtension System Extension and must be approved once in System Settings.")}
-              ${generalIconButton("tun-restore-dns-info", "history", "System DNS after TUN Mode is disabled")}
-            </span>
-          </div>
-          <div class="cfw-row-right">
-            <span class="cfw-link-value">${escapeHtml(tunnelValueLabel(engine))}</span>
-            ${tunnelRecoveryAction}
-            ${tunnelCancellationAction}
-            ${tunnelReason ? renderRowNote("Unavailable", tunnelReason) : ""}
-            ${renderInlineSwitch("tunMode", "TUN Mode", {
-              reason: tunnelReason,
-              disabled: state.engineMutationBusy,
-              allowDisableWhenUnavailable: !state.migrationHandoff,
-            })}
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">
-            <span>Mixin</span>
-            <span class="general-icons">
-              ${generalIconButton("mixin-info", "info", REASONS.mixin)}
-            </span>
-          </div>
-          <div class="cfw-row-right">
-            ${renderRowNote("Unavailable", REASONS.mixin)}
-            ${renderInlineSwitch("mixin", "Mixin", { reason: REASONS.mixin })}
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">System Proxy</div>
-          <div class="cfw-row-right">
-            <span class="cfw-link-value">${escapeHtml(systemProxyValueLabel(engine))}</span>
-            ${proxyRecoveryAction}
-            ${proxyCancellationAction}
-            ${proxyReason ? renderRowNote("Unavailable", proxyReason) : ""}
-            ${renderInlineSwitch("systemProxy", "System Proxy", {
-              reason: proxyReason,
-              disabled: state.engineMutationBusy,
-              allowDisableWhenUnavailable: !state.migrationHandoff,
-            })}
-          </div>
-        </div>
-
-        <div class="cfw-row">
-          <div class="cfw-row-left">Start with macOS</div>
-          <div class="cfw-row-right">${renderInlineSwitch("startAtLogin", "Start with macOS", { reason: launchAtLogin.reason, title: launchAtLogin.hint })}</div>
-        </div>
-      </section>
-    </div>
-  `;
-}
-
-function delayClass(delay, failure = null) {
-  if (failure) return "dead";
-  if (delay === null || delay === undefined) return "pending";
-  if (delay <= 0) return "dead";
-  if (delay < 80) return "fast";
-  if (delay < 180) return "mid";
-  return "slow";
-}
-
-function delayLabel(delay, failure = null) {
-  if (failure) return delayFailureLabel(failure);
-  if (delay === null || delay === undefined) return state.toggles.testingDelays ? "Testing…" : "Not tested";
-  if (delay <= 0) return "Probe failed";
-  return `${delay} ms`;
-}
-
-function delayConcurrency() {
-  if (typeof document !== "undefined" && document.hidden) return 2;
-  const cores = Number(navigator.hardwareConcurrency) || 8;
-  return Math.max(4, Math.min(16, cores));
-}
-
-function cancelDelayTest() {
-  runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1;
-  state.toggles.testingDelays = false;
-  if (runtime.delayBatchInFlight) state.proxyDelayMessage = "Stopping latency test after the current batch…";
-}
 
 function queueLiveStreamChange(lane, running, commands) {
   lane.desiredRunning = running;
@@ -1151,247 +908,6 @@ function setLogStreamRunning(running) {
   });
 }
 
-function visibleProxyNodeNames() {
-  const grid = document.querySelector("[data-proxy-node-grid]");
-  if (!grid) return [];
-  const viewport = grid.getBoundingClientRect();
-  const visible = [];
-  grid.querySelectorAll("[data-proxy-node]").forEach((el) => {
-    const rect = el.getBoundingClientRect();
-    if (rect.bottom >= viewport.top && rect.top <= viewport.bottom) {
-      const name = el.getAttribute("data-proxy-node");
-      if (name) visible.push(name);
-    }
-  });
-  return visible;
-}
-
-function orderNamesVisibleFirst(names) {
-  const visible = new Set(visibleProxyNodeNames());
-  const head = [];
-  const tail = [];
-  for (const name of names) {
-    if (visible.has(name)) head.push(name);
-    else tail.push(name);
-  }
-  return head.length ? [...head, ...tail] : names;
-}
-
-function applyDelayToProxyNodes(name, delay, failure = null) {
-  const value = typeof delay === "number" && Number.isFinite(delay) ? delay : null;
-  state.proxyDelayResults.set(name, { delay: value, delayFailure: failure });
-  displayedProxyGroups().forEach((group) => {
-    group.options.forEach((node) => {
-      if (node.name === name) {
-        node.delay = value;
-        node.delayFailure = failure;
-        node.dead = Boolean(failure) || (typeof value === "number" && value <= 0);
-      }
-    });
-  });
-}
-
-function patchProxyDelayLabels(names) {
-  const nameSet = names ? new Set(names) : null;
-  document.querySelectorAll("[data-proxy-delay]").forEach((el) => {
-    const name = el.getAttribute("data-proxy-delay");
-    if (!name || (nameSet && !nameSet.has(name))) return;
-    let delay = null;
-    let failure = null;
-    for (const group of displayedProxyGroups()) {
-      const node = group.options.find((item) => item.name === name);
-      if (node) {
-        delay = node.delay;
-        failure = node.delayFailure;
-        break;
-      }
-    }
-    el.className = delayClass(delay, failure);
-    el.textContent = delayLabel(delay, failure);
-  });
-  const tool = document.querySelector('[data-action="delay-test"]');
-  if (tool) {
-    tool.classList.toggle("active", Boolean(state.toggles.testingDelays));
-    tool.title = state.toggles.testingDelays ? "Cancel latency test" : "Test latency";
-    tool.disabled = Boolean(runtime.delayBatchInFlight && !state.toggles.testingDelays);
-  }
-}
-
-function finalizeDelayTestNames(names) {
-  names.forEach((name) => {
-    let found = null;
-    for (const group of displayedProxyGroups()) {
-      const node = group.options.find((item) => item.name === name);
-      if (node) {
-        found = node;
-        break;
-      }
-    }
-    if (found && (found.delay === null || found.delay === undefined) && !found.delayFailure) {
-      applyDelayToProxyNodes(name, null, "invalid_response");
-    }
-  });
-  patchProxyDelayLabels(names);
-}
-
-function slugDomId(value) {
-  return String(value).replace(/[^a-z0-9_-]/gi, "-");
-}
-
-function proxyInitial(value) {
-  return String(value).trim().slice(0, 2).toUpperCase() || "?";
-}
-
-function isManualProxyGroup(type) {
-  return ["selector", "relay"].includes(String(type ?? "").toLowerCase());
-}
-
-function freshProxyControllerSnapshotAvailable() {
-  return state.engine.active
-    && state.mode !== null
-    && ["controller live", "controller live stream"].includes(state.controllerStatus);
-}
-
-/** CFW Proxies section toolbar glyphs (Material-style: travel_explore / report / network_check / visibility). */
-function proxyToolIcon(kind) {
-  const common = 'width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"';
-  switch (kind) {
-    case "scroll":
-      // travel_explore — globe + magnifier
-      return `<svg ${common} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/><circle cx="18.5" cy="18.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M20.8 20.8L23 23" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
-    case "report":
-      // report — octagon with !
-      return `<svg ${common} fill="currentColor"><path d="M15.73 3H8.27L3 8.27v7.46L8.27 21h7.46L21 15.73V8.27L15.73 3zM12 17.3c-.72 0-1.3-.58-1.3-1.3s.58-1.3 1.3-1.3 1.3.58 1.3 1.3-.58 1.3-1.3 1.3zm1-4.3h-2V7h2v6z"/></svg>`;
-    case "report-off":
-      return `<svg ${common} fill="currentColor"><path d="M15.73 3H8.27L3 8.27v7.46L8.27 21h7.46L21 15.73V8.27L15.73 3zM12 17.3c-.72 0-1.3-.58-1.3-1.3s.58-1.3 1.3-1.3 1.3.58 1.3 1.3-.58 1.3-1.3 1.3zm1-4.3h-2V7h2v6z" opacity=".38"/></svg>`;
-    case "delay":
-      // network_check — signal arcs + needle
-      return `<svg ${common} fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12a10 10 0 0 1 20 0"/><path d="M5 12a7 7 0 0 1 14 0"/><path d="M8.5 12a3.5 3.5 0 0 1 7 0"/><path d="M12 12V7.5" stroke-width="2"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/></svg>`;
-    case "eye":
-      return `<svg ${common} fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>`;
-    case "eye-off":
-      return `<svg ${common} fill="currentColor"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>`;
-    default:
-      return "";
-  }
-}
-
-function displayedProxyGroups() {
-  return freshProxyControllerSnapshotAvailable() ? state.proxyGroups : state.savedProfilePolicy?.groups ?? [];
-}
-
-function activeProxyGroup() {
-  const groups = displayedProxyGroups();
-  return groups.find((group) => group.name === state.activeProxyGroup)
-    ?? groups.find((group) => isManualProxyGroup(group.type) && /选择|select|proxy|节点/i.test(group.name))
-    ?? groups.find((group) => isManualProxyGroup(group.type) && group.name.toUpperCase() !== "GLOBAL")
-    ?? groups.find((group) => isManualProxyGroup(group.type))
-    ?? groups[0]
-    ?? null;
-}
-
-function hideTimedOutProxies(group) {
-  return state.proxyGroupHideTimeouts.get(group.name) ?? state.toggles.hideUnavailable;
-}
-
-function renderProxies() {
-  const controllerLive = freshProxyControllerSnapshotAvailable();
-  const groups = displayedProxyGroups();
-  const activeGroup = activeProxyGroup();
-  const filter = state.proxyFilter.trim().toLowerCase();
-  const options = activeGroup?.options.length ? activeGroup.options : activeGroup?.observedOption ? [activeGroup.observedOption] : [];
-  const visibleNodes = options.filter((node) => {
-    const matchesFilter = !filter || activeGroup.name.toLowerCase().includes(filter) || node.name.toLowerCase().includes(filter);
-    return matchesFilter && !(hideTimedOutProxies(activeGroup) && node.delayFailure === "timeout");
-  });
-  const manual = Boolean(activeGroup && isManualProxyGroup(activeGroup.type) && (controllerLive || engineIsOff()) && !state.savedProxySelectionBusy);
-  const hideTimedOut = activeGroup ? hideTimedOutProxies(activeGroup) : false;
-  const showProxiesList = state.toggles.showProxiesList !== false;
-  const blinkNode = state.proxyBlinkNode;
-  const emptyMessage = controllerLive && state.proxyGroups.length === 0
-    ? "Active profile has no proxy groups. Switch to a subscription with nodes."
-    : state.savedProfilePolicyError ?? "No saved nodes are available. Select or import a profile.";
-  const modeUnavailableTitle = controllerLive
-    ? "Switch proxy mode"
-    : "Start the engine and wait for a live controller snapshot to switch mode";
-  const modeSwitch = `
-      <div class="mode-switch proxy-mode-header" role="group" aria-label="Proxy mode">
-        ${["Global", "Rule", "Direct"].map((mode) => `
-          <button class="${state.mode === mode ? "selected" : ""}" data-mode="${mode}" title="${modeUnavailableTitle}" ${controllerLive ? "" : "disabled"}>${mode} <span>${modeIcon(mode)}</span></button>
-        `).join("")}
-      </div>`;
-  return `
-    <div class="proxy-layout">
-      ${modeSwitch}
-
-      <div class="cfw-proxy-page">
-        ${!controllerLive && state.savedProfilePolicy ? `<p class="muted">Saved configuration · ${escapeHtml(state.savedProfilePolicy.name)}. Engine: ${escapeHtml(engineStateLabel(state.engine))}. ${engineIsOff() ? "Selections apply on the next start." : escapeHtml(state.engine.availabilityReason ?? "Live status is unavailable.")}</p>` : ""}
-        ${activeGroup ? `
-          <div class="cfw-proxy-head">
-            <div class="cfw-proxy-title">
-              <h2>${escapeHtml(activeGroup.name)}</h2>
-              <span class="proxy-type-badge">${escapeHtml(activeGroup.type?.slice(0, 1) ?? "S")}</span>
-              <b>${escapeHtml(activeGroup.now ?? "")}</b>
-            </div>
-            <div class="cfw-proxy-tools">
-              <input class="proxy-filter" data-proxy-filter placeholder="Filter" value="${escapeHtml(state.proxyFilter)}" aria-label="Filter proxies" />
-              <button class="proxy-tool" data-action="scroll-to-selected-proxy" title="Scroll to selected proxy">${proxyToolIcon("scroll")}</button>
-              <button class="proxy-tool ${hideTimedOut ? "active" : ""}" data-action="toggle-hide-timed-out" title="Show/Hide timed-out proxies">${proxyToolIcon(hideTimedOut ? "report-off" : "report")}</button>
-              <button class="proxy-tool ${state.toggles.testingDelays ? "active" : ""}" data-action="delay-test" title="${state.toggles.testingDelays ? "Cancel latency test" : "Test latency"}" ${runtime.delayBatchInFlight && !state.toggles.testingDelays ? "disabled" : ""}>${proxyToolIcon("delay")}</button>
-              <button class="proxy-tool ${showProxiesList ? "active" : ""}" data-action="toggle-show-proxies" title="Show/hide proxies">${proxyToolIcon(showProxiesList ? "eye" : "eye-off")}</button>
-            </div>
-          </div>
-          ${state.proxyDelayMessage ? `<p role="status" class="muted">${escapeHtml(state.proxyDelayMessage)}</p>` : ""}
-          <div class="cfw-proxy-content">
-            ${showProxiesList ? `
-            <div class="cfw-node-grid" data-proxy-node-grid>
-              ${visibleNodes.map((node) => `
-                <button class="cfw-node-card ${activeGroup.now === node.name ? "selected" : ""} ${blinkNode === node.name ? "blink" : ""} ${manual ? "" : "readonly"}" data-proxy-node="${escapeHtml(node.name)}" ${manual ? `data-group="${escapeHtml(activeGroup.name)}" data-node="${escapeHtml(node.name)}"` : "disabled"} title="${manual ? "Select proxy" : "This group type is chosen by the engine, not by the dashboard"}">
-                  <i></i>
-                  <span>
-                    <strong>${nodePrefix(node.name)}${escapeHtml(node.name)}</strong>
-                    <small>${escapeHtml(node.kind ?? "Proxy")} ${node.udp === false ? "" : "<em>UDP</em>"}</small>
-                  </span>
-                  <b class="${delayClass(node.delay, node.delayFailure)}" data-proxy-delay="${escapeHtml(node.name)}">${delayLabel(node.delay, node.delayFailure)}</b>
-                </button>
-              `).join("")}
-            </div>
-            ` : `<p class="empty proxy-list-hidden">Proxies hidden — click the eye to show this group’s nodes.</p>`}
-            <aside class="cfw-group-rail">
-              ${groups.map((group) => `
-                <button class="${group.name === activeGroup.name ? "active" : ""}" data-proxy-group-tab="${escapeHtml(group.name)}" title="${escapeHtml(group.name)}">${escapeHtml(groupRailLabel(group.name))}</button>
-              `).join("")}
-            </aside>
-          </div>
-        ` : `<p class="empty">${escapeHtml(emptyMessage)}</p>`}
-      </div>
-    </div>
-  `;
-}
-
-function modeIcon(mode) {
-  return { Global: "↗", Rule: "↝", Direct: "→" }[mode] ?? "";
-}
-
-function nodePrefix(name) {
-  const value = String(name ?? "");
-  if (/[\u{1F1E6}-\u{1F1FF}]/u.test(value)) return "";
-  if (/^(DIRECT|REJECT)$/i.test(value)) return "• ";
-  return "";
-}
-
-function groupRailLabel(name) {
-  const value = String(name ?? "").trim();
-  if (!value) return "?";
-  if (/^GLOBAL$/i.test(value)) return "GLOBAL";
-  const withoutFlags = value
-    .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, "")
-    .replace(/[|｜丨&＆/\\()[\]{}【】「」『』·•._\-:：;；,，。!！?？"'“”‘’]+/g, "")
-    .replace(/\s+/g, "");
-  const cjk = [...withoutFlags].filter((char) => /[\u4e00-\u9fffA-Za-z0-9]/.test(char)).join("");
-  return (cjk || withoutFlags || value).slice(0, 6);
-}
-
 /// CFW profile context-menu items, in the 0.3.5 order and chrome.
 ///
 /// `remoteOnly` items need the profile's subscription URL, which a profile list
@@ -1399,18 +915,18 @@ function groupRailLabel(name) {
 /// the URL is known here; when that read fails the item is shown disabled with
 /// the reason instead of being hidden.
 const PROFILE_MENU_ACTIONS = [
-  { id: "select", label: "Select", icon: "check", needsInactive: true, needsEngineOff: true },
+  { id: "select", label: "Select", icon: "check", needsInactive: true },
   { id: "edit", label: "Edit", icon: "edit" },
   { id: "edit-external", label: "Edit externally", icon: "edit" },
-  { id: "update", label: "Update", icon: "refresh", remoteOnly: true, needsEngineOff: true },
+  { id: "update", label: "Update", icon: "refresh", remoteOnly: true },
   { id: "reveal", label: "Show in folder", icon: "folder" },
   { id: "outbounds", label: "Edit outbounds section", icon: "send" },
   { id: "route", label: "Edit route section", icon: "rules" },
-  { id: "copy", label: "Copy", icon: "copy", needsEngineOff: true },
+  { id: "copy", label: "Copy", icon: "copy" },
   { id: "qrcode", label: "QRCode", icon: "qr", remoteOnly: true },
   { id: "credentials", label: "Credentials", icon: "gear", needsEngineOff: true },
-  { id: "settings", label: "Settings", icon: "gear", needsEngineOff: true },
-  { id: "delete", label: "Delete", icon: "trash", danger: true, needsEngineOff: true },
+  { id: "settings", label: "Settings", icon: "gear" },
+  { id: "delete", label: "Delete", icon: "trash", danger: true },
 ];
 
 function profileMenuIcon(kind) {
@@ -1434,23 +950,31 @@ function profileMenuIcon(kind) {
 }
 
 function closeGlassOverlays() {
+  runtimeSettingsUI.close();
+  automationSettingsUI.close();
   state.profileContextMenu = null;
   state.glassDialog = null;
   renderGlassOverlays();
 }
 
-/// Profile mutations require the engine to be safely Off, so the dashboard shows
-/// the same condition the backend enforces instead of letting a click fail.
+/// Destructive credential maintenance still requires a complete core stop.
 function engineIsOff() {
   return state.engine.state === "Off" && state.engine.desiredMode === "off";
 }
 
 function engineToggleCapability(key) {
-  if ((key === "systemProxy" || key === "tunMode") && state.migrationHandoff) {
+  if ((key === "coreRunning" || key === "systemProxy" || key === "tunMode") && state.migrationHandoff) {
     return {
       available: false,
-      label: key === "systemProxy" ? "System Proxy" : "TUN Mode",
+      label: key === "coreRunning" ? "Core" : key === "systemProxy" ? "System Proxy" : "TUN Mode",
       reason: "This window owns legacy CFM maintenance. Use its explicit maintenance or recovery controls.",
+    };
+  }
+  if (key === "coreRunning") {
+    return {
+      available: state.engine.localProxyAvailable === true,
+      label: "Core",
+      reason: state.engine.availabilityReason ?? "The signed ProxyAgent has not reported local proxy capability.",
     };
   }
   if (key === "systemProxy") {
@@ -1490,11 +1014,6 @@ function engineToggleChangeAllowed(key, checked, source) {
 /// identity, never desired mode. Engine Off is an expected state, so the guard
 /// records no warning/error and, most importantly, emits no controller IPC.
 function controllerActionAllowed(action, source = "controller") {
-  if (source === "provider" && state.engine.providerManagementAvailable !== true) {
-    state.providerCapabilityError = PROVIDER_CAPABILITY_UNAVAILABLE;
-    appendLog("info", source, `${action} is unavailable: ${PROVIDER_CAPABILITY_UNAVAILABLE}`);
-    return false;
-  }
   if (state.engine.active) return true;
   state.controllerStatus = "engine off";
   appendLog("info", source, `${action} is unavailable while the engine is Off`);
@@ -1765,26 +1284,11 @@ function invalidateEngineBoundState(active) {
   state.proxyDelayResults.clear();
   state.proxyDelayMessage = null;
   clearControllerBackedState();
-  clearProviderBackedState();
   state.controllerVersion = null;
   state.controllerStatus = active ? "controller loading" : "engine off";
 }
 
-function recordProviderOperationFailure(action, error) {
-  const message = errorText(error);
-  if (message.startsWith(PROVIDER_CAPABILITY_UNSUPPORTED_PREFIX)) {
-    state.providerCapabilityError = message;
-    appendLog("info", "provider", `${action} is unavailable: ${message}`);
-    return;
-  }
-  appendLog("error", "provider", `${action} failed: ${message}`);
-}
 
-/// Reads one profile so the menu knows whether it has a subscription URL.
-///
-/// A profile list never carries that URL because it can bear an access token;
-/// only an explicit single-profile read returns it, which is what opening this
-/// menu is.
 async function resolveProfileSource(id) {
   const profile = state.profiles.find((item) => item.id === id);
   if (!profile) return undefined;
@@ -1807,6 +1311,7 @@ async function openProfileContextMenu(id, clientX, clientY) {
   await resolveProfileSource(id);
   if (state.profileContextMenu?.id === id) renderGlassOverlays();
 }
+
 
 function renderGlassOverlays() {
   const root = document.getElementById("glass-menu-root");
@@ -2061,7 +1566,10 @@ function renderGlassOverlays() {
     }
   }
 
+  parts.push(runtimeSettingsUI.renderDialog());
   root.innerHTML = parts.join("");
+  runtimeSettingsUI.bindDialog();
+  automationSettingsUI.bindDialog();
   positionGlassMenu();
   bindGlassOverlayEvents();
 }
@@ -2118,7 +1626,7 @@ function bindGlassOverlayEvents() {
       if (!name) return;
       try {
         const text = await invoke("read_profile_text", { id });
-        const result = await invoke("import_profile_text", { name, body: text.body });
+        const result = await invokeProfileChange("import_profile_text", { name, body: text.body });
         await loadProfilesSnapshot();
         closeGlassOverlays();
         appendLog("info", "profile", `Copied profile to ${result.name}; select it to make it active`);
@@ -2422,18 +1930,16 @@ async function runProfileMenuAction(action, id) {
       appendLog("info", "profile", `Opened ${profile.name} externally`);
       return;
     case "update": {
-      const wasActive = profile.active;
-      const result = await invoke("update_profile", { id });
+      const result = await invokeProfileChange("update_profile", { id });
       await loadProfilesSnapshot();
       appendLog("info", "profile", `${result.name} subscription updated`);
       if (result.credential_cleanup_pending) {
         appendLog(
           "warning",
           "profile",
-          `${result.name} was updated, but credential cleanup is pending: ${result.credential_cleanup_error}`,
+          `${result.name} updated. Old credentials are retained for recovery.${result.credential_cleanup_error ? ` Cleanup: ${result.credential_cleanup_error}` : ""}`,
         );
       }
-      if (wasActive) await applyActiveProfile("profile update");
       return;
     }
     case "reveal":
@@ -2514,11 +2020,10 @@ async function openCredentialSetup(id) {
 }
 
 function renderProfiles() {
-  const engineOff = engineIsOff();
   const repositoryReason = state.profilesUnavailableReason
     ? `Profile repository unavailable: ${state.profilesUnavailableReason}`
     : null;
-  const mutationReason = repositoryReason ?? (engineOff ? null : REASONS.engineNotOff);
+  const mutationReason = repositoryReason;
   const blocked = mutationReason ? `disabled title="${escapeHtml(mutationReason)}"` : "";
   return `
     <div class="profiles-layout">
@@ -2579,7 +2084,6 @@ function renderProfileInspector() {
   const profile = inspector.profile ?? {};
   const title = `${profile.name ?? inspector.id} · ${inspector.mode}`;
   const sourceUrl = profile.source_url ?? profile.sourceUrl ?? null;
-  const engineOff = engineIsOff();
   let body = "";
   if (inspector.mode === "edit") {
     body = `
@@ -2588,13 +2092,13 @@ function renderProfileInspector() {
         <div><dt>Size</dt><dd>${escapeHtml(formatBytes(profile.bytes ?? 0))}</dd></div>
         <div><dt>Active</dt><dd>${profile.active ? "yes" : "no"}</dd></div>
       </dl>
-      <textarea class="profile-editor" data-profile-editor spellcheck="false" ${engineOff ? "" : "readonly"}>${escapeHtml(profile.body ?? "")}</textarea>
+      <textarea class="profile-editor" data-profile-editor spellcheck="false">${escapeHtml(profile.body ?? "")}</textarea>
       <div class="row-actions">
-        <button class="button" data-action="save-profile-editor" ${engineOff ? "" : `disabled title="${escapeHtml(REASONS.engineNotOff)}"`}>Save JSON</button>
-        ${sourceUrl ? `<button class="button ghost" data-action="update-profile-from-inspector" ${engineOff ? "" : `disabled title="${escapeHtml(REASONS.engineNotOff)}"`}>Update from subscription</button>` : ""}
+        <button class="button" data-action="save-profile-editor">Save JSON</button>
+        ${sourceUrl ? `<button class="button ghost" data-action="update-profile-from-inspector">Update from subscription</button>` : ""}
         <button class="button ghost" data-action="close-profile-inspector">Close</button>
       </div>
-      ${engineOff ? "" : `<p class="muted">${escapeHtml(REASONS.engineNotOff)}</p>`}
+      <p class="muted">Changes are validated before switching the running core. Existing connections may reconnect.</p>
     `;
   } else if (inspector.mode === "qrcode") {
     body = inspector.svg
@@ -2624,88 +2128,6 @@ function renderProfileInspector() {
   `;
 }
 
-function renderProviders() {
-  const updatingAll = state.providerBulkActions.has("update-all-providers");
-  const healthAll = state.providerBulkActions.has("health-check-all");
-  const engineActive = Boolean(state.engine.active);
-  const providerUnavailable = Boolean(state.providerCapabilityError) || !engineActive;
-  const providerUnavailableReason = state.providerCapabilityError ?? "Engine is Off; provider management is unavailable.";
-  return `
-    <div class="providers-layout">
-      <section class="panel toolbar-panel">
-        <div>
-          <p class="label">Providers</p>
-          <h3>Proxy Providers</h3>
-          <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Live provider capabilities reported by the running engine controller."}</p>
-        </div>
-        <div class="toolbar-actions">
-          <button class="button" data-action="update-all-providers" ${updatingAll || providerUnavailable ? "disabled" : ""}>${updatingAll ? "Updating..." : "Update All"}</button>
-          <button class="button ghost" data-action="health-check-all" ${healthAll || providerUnavailable ? "disabled" : ""}>${healthAll ? "Checking..." : "Health Check All"}</button>
-          <button class="button ghost" data-action="open-rules">Rules</button>
-        </div>
-      </section>
-
-      <section class="provider-section">
-        <div class="section-title">Proxy Providers</div>
-        ${state.providers.length ? state.providers.map((provider) => {
-          const updateKey = providerActionKey("proxy-update", provider.name);
-          const healthKey = providerActionKey("proxy-health", provider.name);
-          const updating = state.providerActions.has(updateKey);
-          const checking = state.providerActions.has(healthKey);
-          return `
-            <article class="panel provider-row">
-              <div>
-                <p class="label">${escapeHtml(provider.vehicle)}</p>
-                <h3>${escapeHtml(provider.name)}</h3>
-                <p class="muted">${provider.proxies} proxies · ${escapeHtml(provider.health)} · updated ${escapeHtml(provider.updated)}</p>
-              </div>
-              <div class="row-actions">
-                <button class="button ghost" data-provider-update="${escapeHtml(provider.name)}" ${updating || !engineActive ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
-                <button class="button" data-provider-health="${escapeHtml(provider.name)}" ${checking || !engineActive ? "disabled" : ""}>${checking ? "Checking" : "Health Check"}</button>
-              </div>
-            </article>
-          `;
-        }).join("") : `
-          <article class="panel provider-row empty-state">
-            <div>
-              <p class="label">Controller</p>
-              <h3>${providerUnavailable ? "Proxy provider management unavailable" : "No proxy providers loaded"}</h3>
-              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Driven by the engine controller; no provider rows are invented when the running configuration has none."}</p>
-            </div>
-          </article>
-        `}
-      </section>
-
-      <section class="provider-section">
-        <div class="section-title">Rule Providers</div>
-        ${state.ruleProviders.length ? state.ruleProviders.map((provider) => {
-          const updateKey = providerActionKey("rule-update", provider.name);
-          const updating = state.providerActions.has(updateKey);
-          return `
-            <article class="panel provider-row">
-              <div>
-                <p class="label">${escapeHtml(provider.behavior)}</p>
-                <h3>${escapeHtml(provider.name)}</h3>
-                <p class="muted">${provider.rules.toLocaleString()} rules · updated ${escapeHtml(provider.updated)}</p>
-              </div>
-              <div class="row-actions">
-                <button class="button ghost" data-rule-provider-update="${escapeHtml(provider.name)}" ${updating || !engineActive ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
-              </div>
-            </article>
-          `;
-        }).join("") : `
-          <article class="panel provider-row empty-state">
-            <div>
-              <p class="label">Controller</p>
-              <h3>${providerUnavailable ? "Rule provider management unavailable" : "No rule providers loaded"}</h3>
-              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Live from the engine controller; it stays empty when the running configuration has no rule providers."}</p>
-            </div>
-          </article>
-        `}
-      </section>
-    </div>
-  `;
-}
 
 function renderLogs() {
   const logs = visibleLogs();
@@ -2737,469 +2159,6 @@ function renderLogs() {
       </section>
     </div>
   `;
-}
-
-function connectionProcessLabel(connection) {
-  const path = connection.metadata?.processPath
-    ?? connection.metadata?.process_path
-    ?? connection.processPath
-    ?? "";
-  if (!path) return "—";
-  const parts = String(path).split(/[/\\]/).filter(Boolean);
-  return parts[parts.length - 1] || String(path);
-}
-
-function connectionRowHtml(connection, showProcess) {
-  return `
-    <article class="cfw-conn-item${showProcess ? " with-process" : ""}" data-connection-id="${escapeHtml(connection.id)}">
-      <div class="conn-main">
-        <h3>${escapeHtml(connection.host)}</h3>
-        <div class="conn-chips">
-          <span class="conn1">${escapeHtml(connection.rule || "MATCH")}</span>
-          ${(connection.chains ?? []).slice(0, 4).map((chain, index) => `<span class="conn${(index % 6) + 2}">${escapeHtml(chain)}</span>`).join("")}
-          <span class="conn7">${escapeHtml(connection.metadata?.network ?? connection.metadata?.type ?? "tcp")}</span>
-        </div>
-      </div>
-      ${showProcess ? `<div class="conn-process" title="${escapeHtml(connection.metadata?.processPath ?? connection.metadata?.process_path ?? "")}">${escapeHtml(connectionProcessLabel(connection))}</div>` : ""}
-      <div class="conn-traffic">
-        <b data-conn-up>↑ ${escapeHtml(connection.upload)}</b>
-        <b data-conn-down>↓ ${escapeHtml(connection.download)}</b>
-        <small data-conn-speed>${escapeHtml(connection.speed ?? "0 B/s")}</small>
-      </div>
-      <div class="conn-actions">
-        <button data-connection-detail="${escapeHtml(connection.id)}">Info</button>
-        <button data-close-connection="${escapeHtml(connection.id)}" ${state.closingConnectionIds.has(connection.id) ? "disabled" : ""}>${state.closingConnectionIds.has(connection.id) ? "Closing" : "Close"}</button>
-      </div>
-    </article>
-  `;
-}
-
-function renderConnections() {
-  const connections = visibleConnections();
-  const detail = state.connections.find((connection) => connection.id === state.connectionDetailId);
-  const totalUp = formatBytes(state.connectionStream.uploadTotal);
-  const totalDown = formatBytes(state.connectionStream.downloadTotal);
-  const showProcess = state.toggles.showProcess !== false;
-  runtime.connectionRowEls = null;
-  return `
-    <div class="connections-layout" data-connections-root>
-      <section class="cfw-conn-header">
-        <h1>Connections</h1>
-        <div class="cfw-conn-search">
-          <span>●</span>
-          <input value="${escapeHtml(state.connectionSearch)}" data-connection-search aria-label="Search connections" placeholder="Search connections" />
-          ${state.connectionSearch ? '<button data-action="clear-connection-search">×</button>' : ""}
-        </div>
-        <strong data-conn-totals>Total: ↑ ${totalUp} ↓ ${totalDown}</strong>
-      </section>
-
-      <section class="cfw-conn-controls">
-        ${[
-          ["upload", "↥ ◒"],
-          ["download", "↧ ◒"],
-          ["upload", "↥ ▥"],
-          ["download", "↧ ▥"],
-          ["age", "◷"],
-          ["host", "▭"],
-        ].map(([sort, label]) => `
-          <button class="${state.connectionSort === sort ? "selected" : ""}" data-connection-sort="${sort}">${label}</button>
-        `).join("")}
-        <span></span>
-        <button class="danger" data-action="toggle-connection-stream">${state.connectionPaused ? "Resume" : "Pause"}</button>
-        <button class="danger" data-action="close-all" data-conn-close-all ${state.closingAllConnections ? "disabled" : ""}>${state.closingAllConnections ? "Closing..." : `Close All (${connections.length})`}</button>
-      </section>
-
-      <section class="cfw-conn-scroll" data-conn-scroll>
-        ${connections.map((connection) => connectionRowHtml(connection, showProcess)).join("")}
-      </section>
-      ${detail ? renderConnectionDetail(detail) : ""}
-    </div>
-  `;
-}
-
-function patchConnectionsDom() {
-  const root = document.querySelector("[data-connections-root]");
-  const scroll = document.querySelector("[data-conn-scroll]");
-  if (!root || !scroll || state.activePage !== "connections") {
-    renderPage();
-    return;
-  }
-
-  const connections = visibleConnections();
-  const showProcess = state.toggles.showProcess !== false;
-  const totals = root.querySelector("[data-conn-totals]");
-  if (totals) {
-    totals.textContent = `Total: ↑ ${formatBytes(state.connectionStream.uploadTotal)} ↓ ${formatBytes(state.connectionStream.downloadTotal)}`;
-  }
-  const closeAll = root.querySelector("[data-conn-close-all]");
-  if (closeAll) {
-    closeAll.disabled = Boolean(state.closingAllConnections);
-    closeAll.textContent = state.closingAllConnections
-      ? "Closing..."
-      : `Close All (${connections.length})`;
-  }
-
-  if (!(runtime.connectionRowEls instanceof Map)) {
-    runtime.connectionRowEls = new Map();
-    scroll.querySelectorAll("[data-connection-id]").forEach((el) => {
-      runtime.connectionRowEls.set(el.getAttribute("data-connection-id"), el);
-    });
-  }
-
-  const nextIds = new Set(connections.map((connection) => connection.id));
-  for (const [id, el] of [...runtime.connectionRowEls.entries()]) {
-    if (!nextIds.has(id)) {
-      el.remove();
-      runtime.connectionRowEls.delete(id);
-    }
-  }
-
-  const fragment = document.createDocumentFragment();
-  let appendMode = false;
-  connections.forEach((connection, index) => {
-    let el = runtime.connectionRowEls.get(connection.id);
-    if (!el) {
-      const wrap = document.createElement("div");
-      wrap.innerHTML = connectionRowHtml(connection, showProcess).trim();
-      el = wrap.firstElementChild;
-      runtime.connectionRowEls.set(connection.id, el);
-      appendMode = true;
-      fragment.appendChild(el);
-      return;
-    }
-    const up = el.querySelector("[data-conn-up]");
-    const down = el.querySelector("[data-conn-down]");
-    const speed = el.querySelector("[data-conn-speed]");
-    if (up) up.textContent = `↑ ${connection.upload}`;
-    if (down) down.textContent = `↓ ${connection.download}`;
-    if (speed) speed.textContent = connection.speed ?? "0 B/s";
-    const closeBtn = el.querySelector("[data-close-connection]");
-    if (closeBtn) {
-      const closing = state.closingConnectionIds.has(connection.id);
-      closeBtn.disabled = closing;
-      closeBtn.textContent = closing ? "Closing" : "Close";
-    }
-    const expected = scroll.children[index];
-    if (!appendMode && expected !== el) {
-      scroll.insertBefore(el, expected ?? null);
-    }
-  });
-  if (fragment.childNodes.length) {
-    scroll.appendChild(fragment);
-  }
-
-  const detail = state.connections.find((connection) => connection.id === state.connectionDetailId);
-  const existingDetail = root.querySelector(".modal-backdrop");
-  if (detail && !existingDetail) {
-    root.insertAdjacentHTML("beforeend", renderConnectionDetail(detail));
-    bindPageEvents();
-  } else if (!detail && existingDetail) {
-    existingDetail.remove();
-  }
-}
-
-function scheduleConnectionsPatch() {
-  if (runtime.connectionsPatchFrame !== null) return;
-  runtime.connectionsPatchFrame = window.requestAnimationFrame(() => {
-    runtime.connectionsPatchFrame = null;
-    patchConnectionsDom();
-  });
-}
-
-function connectionFacets(connections) {
-  const topEntries = (items) => [...items.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .slice(0, 6);
-  const rules = new Map();
-  const chains = new Map();
-  connections.forEach((connection) => {
-    if (connection.rule) rules.set(connection.rule, (rules.get(connection.rule) ?? 0) + 1);
-    (connection.chains ?? []).forEach((chain) => {
-      chains.set(chain, (chains.get(chain) ?? 0) + 1);
-    });
-  });
-  return {
-    rules: topEntries(rules),
-    chains: topEntries(chains),
-  };
-}
-
-function renderConnectionDetail(connection) {
-  const metadata = connection.metadata ?? {};
-  const rows = [
-    ["Host", connection.host],
-    ["Rule", connection.rule],
-    ["Chains", (connection.chains ?? []).join(" / ")],
-    ["Upload", connection.upload],
-    ["Download", connection.download],
-    ["Speed", connection.speed],
-    ...Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined && value !== ""),
-  ];
-  return `
-    <div class="modal-backdrop" data-action="close-connection-detail">
-      <section class="connection-info-modal" data-modal-stop>
-        <div class="modal-head">
-          <h2>Connection Info</h2>
-          <button data-action="close-connection-detail">×</button>
-        </div>
-        <dl>
-          ${rows.map(([key, value]) => `
-            <div>
-              <dt>${escapeHtml(key)}</dt>
-              <dd>${escapeHtml(String(value ?? ""))}</dd>
-              <button data-copy-text="${escapeHtml(String(value ?? ""))}">Copy</button>
-            </div>
-          `).join("")}
-        </dl>
-      </section>
-    </div>
-  `;
-}
-
-function renderRules() {
-  const live = state.engine.active;
-  const source = live ? state.rules : state.savedProfilePolicy?.rules ?? [];
-  const rules = visibleRules(source);
-  return `
-    <div class="rules-layout">
-      <section class="panel toolbar-panel">
-        <div>
-          <p class="label">Router</p>
-          <h3>${rules.length} / ${source.length} ${live ? "active" : "saved"} rule entries</h3>
-          <p class="muted">${live ? "Live rules from the running engine." : "Saved profile rules; hit counters become available when the engine reports them."}</p>
-        </div>
-        <div class="search-box">
-          <input value="${escapeHtml(state.ruleSearch)}" data-rule-search aria-label="Search rules" placeholder="Search rules" />
-        </div>
-        <div class="toolbar-actions">
-          <button class="button ghost" data-action="reload-rules">Reload Rules</button>
-        </div>
-      </section>
-
-      <section class="panel table-panel">
-        <div class="connection-table">
-          <div class="table-row rule-head">
-            <span>#</span><span>Type</span><span>Payload</span><span>Proxy</span><span>Hits</span>
-          </div>
-          ${rules.map((rule) => `
-            <div class="table-row rule-row">
-              <span>${escapeHtml(rule.index)}</span>
-              <span>${escapeHtml(rule.type)}</span>
-              <span>${escapeHtml(rule.payload || "-")}</span>
-              <span>${escapeHtml(rule.proxy)}</span>
-              <span>${escapeHtml(rule.hits)}</span>
-            </div>
-          `).join("") || `<p class="empty">${escapeHtml(state.savedProfilePolicyError ?? (live ? "No rules loaded from the controller." : "The selected profile has no explicit rules."))}</p>`}
-        </div>
-      </section>
-    </div>
-  `;
-}
-
-function renderSettingsGroup(title, rows) {
-  return `
-    <section class="panel settings-group">
-      <div class="section-heading">
-        <div>
-          <p class="label">Settings</p>
-          <h3>${escapeHtml(title)}</h3>
-        </div>
-      </div>
-      <div class="settings-list">${rows.join("")}</div>
-    </section>
-  `;
-}
-
-function renderSettingValue(label, value, hint) {
-  return `
-    <div class="setting-row">
-      <span>
-        <b>${escapeHtml(label)}</b>
-        <small>${escapeHtml(hint)}</small>
-      </span>
-      <strong>${escapeHtml(value)}</strong>
-    </div>
-  `;
-}
-
-function renderSettingSelect(label, value, options, hint, dataAttribute, reason = null) {
-  return `
-    <label class="setting-row setting-control-row ${reason ? "disabled" : ""}">
-      <span>
-        <b>${escapeHtml(label)}</b>
-        <small>${escapeHtml(reason ?? hint)}</small>
-      </span>
-      <select class="setting-input" ${dataAttribute} ${reason ? `disabled title="${escapeHtml(reason)}"` : ""}>
-        ${options.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === value ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
-      </select>
-    </label>
-  `;
-}
-
-function renderSettingAction(label, value, hint, action, buttonLabel, reason = null) {
-  return `
-    <div class="setting-row">
-      <span>
-        <b>${escapeHtml(label)}</b>
-        <small>${escapeHtml(reason ?? hint)}</small>
-      </span>
-      <span class="setting-action">
-        <strong>${escapeHtml(value)}</strong>
-        <button class="button ghost" data-action="${escapeHtml(action)}" ${reason ? `disabled title="${escapeHtml(reason)}"` : ""}>${escapeHtml(buttonLabel)}</button>
-      </span>
-    </div>
-  `;
-}
-
-function renderSettings() {
-  const snapshot = state.settingsSnapshot ?? defaultSettingsSnapshot;
-  const persisted = snapshot.settings ?? defaultSettings;
-  const platform = state.platform;
-  const projection = state.projection;
-  const engine = state.engine;
-  const engineOff = engineIsOff();
-  const launchAtLogin = launchAtLoginPresentation();
-  const settingsReason = state.settingsUnavailableReason;
-  const listenAddress = projection.mixedPort
-    ? `${projection.listenAddress ?? "127.0.0.1"}:${projection.mixedPort}`
-    : "unavailable";
-  return `
-    <div class="settings-layout">
-      <section class="panel toolbar-panel settings-toolbar">
-        <div>
-          <p class="label">Preferences</p>
-          <h3>${settingsReason ? "Preferences unavailable" : snapshot.persisted ? "cfw-preferences.json loaded" : "Defaults staged"}</h3>
-          <p class="muted">${escapeHtml(settingsReason ?? `Appearance, startup and update preferences are the only values this app persists${snapshot.persisted ? "" : "; the file is created on save"}.`)}</p>
-        </div>
-        <div class="toolbar-actions">
-          <button class="button ghost danger" data-action="reset-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>Reset All Settings</button>
-          <button class="button" data-action="save-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>Save Settings</button>
-          <button class="button ghost" data-action="reload-settings">Reload From Disk</button>
-          <button class="button ghost" data-action="force-quit-app">Force Quit</button>
-          <button class="button ghost" data-action="quit-app">Quit</button>
-        </div>
-      </section>
-
-      ${renderSettingsGroup("General", [
-        renderToggle("startAtLogin", "Start at Login", launchAtLogin.hint, { reason: launchAtLogin.reason }),
-        renderToggle("silentStart", "Silent Start", "Start hidden in the menu bar without a Dock icon.", { reason: settingsReason }),
-        renderToggle("checkForUpdates", "Check for updates", "Check GitHub for a newer official release at launch.", { reason: settingsReason }),
-        renderToggle("retainWindowBounds", "Retain window bounds", "Restore the dashboard window position between launches.", { reason: settingsReason }),
-        renderSettingAction("Updates", "GitHub Releases", "Check the official release feed now.", "check-for-updates", "Check for Updates"),
-      ])}
-
-      ${renderSettingsGroup("Appearance", [
-        renderSettingSelect("Theme", persisted.theme ?? "system", THEME_OPTIONS, "Applied immediately and persisted.", "data-theme-setting", settingsReason),
-        renderSettingSelect("Font", persisted.font_family ?? "", FONT_OPTIONS, "The preference store accepts these families only.", "data-font-family", settingsReason),
-      ])}
-
-      ${renderSettingsGroup("Engine", [
-        renderSettingValue("Mixed inbound", listenAddress, projection.error
-          ? `The projected configuration could not be read: ${projection.error}`
-          : "Projected by the app; not a user setting in this build."),
-        renderSettingValue("Controller", projection.controller ?? "not running", "App-owned loopback controller of the running engine. Its secret is never shown."),
-        renderSettingValue("Engine state", `${engineStateLabel(engine)} · desired ${engine.desiredMode}`, engine.availabilityReason ?? "Live state of the Authority-mediated engine."),
-        renderSettingValue("Log level", projection.logLevel ?? "info", REASONS.logLevel),
-        renderToggle("allowLan", "Allow LAN", "", { reason: REASONS.allowLan }),
-        renderToggle("mixin", "Mixin", "", { reason: REASONS.mixin }),
-      ])}
-
-      ${renderSettingsGroup("Proxies", [
-        renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed the latency test. Session only: this build persists no view options."),
-        renderSettingValue("Delay test target", "controlled HTTPS", "No delay-test URL preference exists in this build; probes use the fixed HTTPS connectivity target."),
-      ])}
-
-      ${renderSettingsGroup("Connections", [
-        renderToggle("breakOnProxyChange", "Break connections", "Close open connections after a proxy, mode or profile change. Session only."),
-        renderToggle("showProcess", "Show Process", "Show the process name the engine reports for a connection. Session only."),
-      ])}
-
-      ${renderSettingsGroup("Credentials", [
-        renderSettingValue("Profile credentials", "Keychain vault", "A profile references secrets by immutable id only. Open a profile's context menu → Credentials to store missing values."),
-        renderSettingAction(
-          "Unused credentials",
-          "Vault cleanup",
-          "Review Keychain entries that no stored profile references.",
-          "preview-credential-gc",
-          "Review",
-          engineOff ? null : REASONS.engineNotOff,
-        ),
-      ])}
-
-      ${renderSettingsGroup("Legacy maintenance", [
-        renderSettingAction(
-          "Older Clash for Mac",
-          "Optional",
-          "Review cleanup of older CFM components and managed data, or recover an unfinished operation. Normal System Proxy and TUN starts are independent of cleanup.",
-          "open-legacy-maintenance",
-          "Open maintenance",
-        ),
-      ])}
-
-      ${renderSettingsGroup("Paths", [
-        renderSettingAction("Home Directory", "Application Support", "Open the application home directory in Finder.", "open-home-directory", "Open Folder"),
-        renderSettingAction("Logs", "logs", "Open the log directory in Finder.", "reveal-logs", "Open Folder"),
-      ])}
-
-      ${renderSettingsGroup("DNS", [
-        renderSettingAction("System DNS", "never written", REASONS.restoreDns, "tun-restore-dns-info", "Details"),
-      ])}
-
-      ${renderSettingsGroup("Cache", [
-        renderSettingAction("Fake IP Cache", "Controller-backed", "Flush the engine fake-ip cache.", "flush-fake-ip-cache", "Flush"),
-      ])}
-
-      ${platform ? renderSettingsGroup("macOS", [
-        renderSettingValue("Minimum macOS", platform.minimum_macos ?? "15.0", "ARM64-only app baseline."),
-        renderSettingValue("Intel support", platform.intel_supported ? "Enabled" : "Disabled", "Removed to keep the Apple Silicon runtime lean."),
-        renderSettingValue("System proxy", platform.system_proxy_strategy ?? "", "How the system proxy is applied."),
-        renderSettingValue("Tunnel", platform.tun_strategy ?? "", "How the packet tunnel runs."),
-        renderSettingValue("Helper", platform.helper_strategy ?? "", "Privileged helper strategy."),
-        renderSettingValue("launchd", platform.launchd_strategy ?? "", "No product-layer ad-hoc scripts."),
-      ]) : renderSettingsGroup("macOS", [
-        renderSettingValue("Platform design", "Unavailable", "The platform design could not be read."),
-      ])}
-
-      ${renderNetworkDiagnostics()}
-    </div>
-  `;
-}
-
-function renderNetworkDiagnostics() {
-  const diagnostics = state.networkDiagnostics;
-  if (!diagnostics) {
-    return renderSettingsGroup("Network Diagnostics", [
-      renderSettingValue("Services", "Unavailable", "macOS network services could not be observed."),
-    ]);
-  }
-  const services = diagnostics.services ?? [];
-  const proxied = diagnostics.proxied_services ?? [];
-  const unavailable = diagnostics.unavailable ?? [];
-  const rows = [
-    renderSettingValue(
-      "Service order",
-      services.length ? `${services.length} service(s)` : "none",
-      "Read from SystemConfiguration only; no child process is spawned.",
-    ),
-    renderSettingValue(
-      "Services carrying a proxy",
-      proxied.length ? proxied.join(", ") : "none",
-      "Any service with a proxy setting enabled, whoever owns it. Ownership is not reported.",
-    ),
-    ...services.map((service) => renderSettingValue(
-      service.display_name ?? service.service_id ?? "unknown",
-      serviceProxyLabel(service),
-      `set order ${service.order ?? "-"}`,
-    )),
-  ];
-  if (unavailable.length) {
-    rows.push(renderSettingValue(
-      "Unavailable fields",
-      unavailable.join(", "),
-      "Reported unavailable by the backend: the child-process tools that produced them are retired.",
-    ));
-  }
-  return renderSettingsGroup("Network Diagnostics", rows);
 }
 
 function renderFeedback() {
@@ -3431,6 +2390,21 @@ async function applyActiveProfile(context) {
   return applied;
 }
 
+async function invokeProfileChange(command, args) {
+  try {
+    const result = await invoke(command, args);
+    if (result?.reset_proxy_groups?.length) {
+      appendLog("warning", "profile", `Saved nodes were removed from these groups; the new defaults apply: ${result.reset_proxy_groups.join(", ")}`);
+    }
+    return result;
+  } finally {
+    await loadProfilesSnapshot();
+    await loadEngineStatus();
+    if (state.engine.active) await loadControllerSnapshot();
+    await loadRuntimeProjection();
+  }
+}
+
 async function selectProfileById(id) {
   const profile = state.profiles.find((item) => item.id === id);
   if (!profile) throw new Error(`profile not found: ${id}`);
@@ -3438,25 +2412,9 @@ async function selectProfileById(id) {
     appendLog("info", "profile", `${profile.name} is already active`);
     return false;
   }
-  if (!engineIsOff()) throw new Error(REASONS.engineNotOff);
-  const previousActiveProfile = state.profiles.find((item) => item.active)?.id ?? null;
-  await invoke("select_profile", { id });
-  await loadProfilesSnapshot();
-  try {
-    await applyActiveProfile(`selecting ${profile.name}`);
-    return true;
-  } catch (error) {
-    if (previousActiveProfile) {
-      try {
-        await invoke("select_profile", { id: previousActiveProfile });
-      } catch (rollbackError) {
-        appendLog("error", "profile", `Rollback selection failed: ${errorText(rollbackError)}`);
-      }
-    }
-    await loadProfilesSnapshot();
-    appendLog("error", "profile", `Could not switch to ${profile.name}: ${errorText(error)}`);
-    throw error;
-  }
+  await invokeProfileChange("select_profile", { id });
+  appendLog("info", "profile", `${profile.name} selected`);
+  return true;
 }
 
 function bindPageEvents() {
@@ -3498,6 +2456,11 @@ function bindPageEvents() {
     });
   });
 
+  document.querySelectorAll("[data-rule-page]").forEach((button) => button.addEventListener("click", () => { changeRulePage(Number(button.dataset.rulePage)); renderPage(); }));
+  document.querySelectorAll("[data-proxy-page]").forEach((button) => button.addEventListener("click", () => {
+    changeProxyPage(Number(button.dataset.proxyPage));
+    renderPage();
+  }));
   const proxyFilter = document.querySelector("[data-proxy-filter]");
   if (proxyFilter) {
     proxyFilter.addEventListener("input", (event) => {
@@ -3612,61 +2575,8 @@ function bindPageEvents() {
     });
   });
 
-  document.querySelectorAll("[data-provider-update], [data-rule-provider-update]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const proxyProvider = event.currentTarget.dataset.providerUpdate;
-      const ruleProvider = event.currentTarget.dataset.ruleProviderUpdate;
-      const name = proxyProvider ?? ruleProvider;
-      const actionKey = providerActionKey(proxyProvider ? "proxy-update" : "rule-update", name);
-      if (!controllerActionAllowed(`${name} provider update`, "provider")) return;
-      const token = captureEngineIdentityToken();
-      state.providerActions.add(actionKey);
-      renderPage();
-      try {
-        if (proxyProvider) {
-          await invoke("update_proxy_provider", { name: proxyProvider });
-        } else {
-          await invoke("update_rule_provider", { name: ruleProvider });
-        }
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        await loadProvidersSnapshot(token);
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        appendLog("info", "provider", `${name} update requested through the engine controller`);
-      } catch (error) {
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        state.controllerStatus = "controller offline";
-        recordProviderOperationFailure(`${name} update`, error);
-      } finally {
-        if (engineIdentityTokenIsCurrent(token)) state.providerActions.delete(actionKey);
-      }
-      renderPage();
-    });
-  });
-
-  document.querySelectorAll("[data-provider-health]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const name = event.currentTarget.dataset.providerHealth;
-      const actionKey = providerActionKey("proxy-health", name);
-      if (!controllerActionAllowed(`${name} provider health check`, "provider")) return;
-      const token = captureEngineIdentityToken();
-      state.providerActions.add(actionKey);
-      renderPage();
-      try {
-        await invoke("health_check_proxy_provider", { name });
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        await loadProvidersSnapshot(token);
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        appendLog("info", "provider", `${name} health check requested through the engine controller`);
-      } catch (error) {
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        state.controllerStatus = "controller offline";
-        recordProviderOperationFailure(`${name} health check`, error);
-      } finally {
-        if (engineIdentityTokenIsCurrent(token)) state.providerActions.delete(actionKey);
-      }
-      renderPage();
-    });
-  });
+  bindProviderButtons();
+  runtimeSettingsUI.bindPage();
 
   const logSearch = document.querySelector("[data-log-search]");
   if (logSearch) {
@@ -3675,6 +2585,8 @@ function bindPageEvents() {
       patchLogStream();
     });
   }
+
+  bindConnectionRowEvents(document);
 
   const connectionSearch = document.querySelector("[data-connection-search]");
   if (connectionSearch) {
@@ -3731,13 +2643,6 @@ function bindPageEvents() {
     });
   });
 
-  document.querySelectorAll("[data-connection-detail]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      state.connectionDetailId = event.currentTarget.dataset.connectionDetail;
-      renderPage();
-    });
-  });
-
   document.querySelectorAll("[data-modal-stop]").forEach((modal) => {
     modal.addEventListener("click", (event) => event.stopPropagation());
   });
@@ -3762,29 +2667,6 @@ function bindPageEvents() {
     });
   });
 
-  document.querySelectorAll("[data-close-connection]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      const id = event.currentTarget.dataset.closeConnection;
-      if (!controllerActionAllowed(`Closing connection ${id}`, "connection")) return;
-      const token = captureEngineIdentityToken();
-      state.closingConnectionIds.add(id);
-      renderPage();
-      try {
-        await invoke("close_connection", { id });
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        await loadControllerSnapshot(true, token);
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        appendLog("info", "connection", `Connection ${id} closed`);
-      } catch (error) {
-        if (!engineIdentityTokenIsCurrent(token)) return;
-        state.controllerStatus = "controller offline";
-        appendLog("error", "connection", `Controller close failed for ${id}: ${errorText(error)}`);
-      } finally {
-        if (engineIdentityTokenIsCurrent(token)) state.closingConnectionIds.delete(id);
-      }
-      renderPage();
-    });
-  });
 
 }
 
@@ -3879,7 +2761,8 @@ const PERSISTED_TOGGLES = new Set([
 ]);
 
 async function applyToggle(key, checked, source) {
-  const isEngineMutation = key === "systemProxy" || key === "tunMode";
+  if (key === "allowLan") return runtimeSettingsUI.toggleLAN(checked);
+  const isEngineMutation = key === "coreRunning" || key === "systemProxy" || key === "tunMode";
   if (PERSISTED_TOGGLES.has(key) && state.settingsUnavailableReason) {
     throw new Error(state.settingsUnavailableReason);
   }
@@ -3900,19 +2783,25 @@ async function applyToggle(key, checked, source) {
     renderPage();
   }
   try {
-    if (key === "systemProxy") {
+    if (key === "coreRunning") {
+      const status = await invoke("set_core_enabled", { enabled: checked });
+      if (engineRequestId === runtime.engineStatusRequestId) applyEngineStatus(status);
+      else await loadEngineStatus();
+      await loadRuntimeProjection();
+      if (state.engine.active) await loadControllerSnapshotWithRetry(6, 500);
+    } else if (key === "systemProxy") {
       const status = await invoke("set_system_proxy_enabled", { enabled: checked });
       if (engineRequestId === runtime.engineStatusRequestId) applyEngineStatus(status);
       else await loadEngineStatus();
       await loadNetworkDiagnostics();
       await loadRuntimeProjection();
-      if (state.engine.systemProxyActive) await loadControllerSnapshotWithRetry(6, 500);
+      if (state.engine.active) await loadControllerSnapshotWithRetry(6, 500);
     } else if (key === "tunMode") {
       const status = await invoke("set_tun_enabled", { enabled: checked });
       if (engineRequestId === runtime.engineStatusRequestId) applyEngineStatus(status);
       else await loadEngineStatus();
       await loadRuntimeProjection();
-      if (state.engine.tunnelActive) await loadControllerSnapshotWithRetry(12, 500);
+      if (state.engine.active) await loadControllerSnapshotWithRetry(12, 500);
     } else if (key === "startAtLogin") {
       const snapshot = await invoke("set_launch_at_login_enabled", { enabled: checked });
       applyPersistedSettings(snapshot);
@@ -3954,6 +2843,8 @@ async function applyToggle(key, checked, source) {
 }
 
 export async function handleAction(action) {
+  if (action === "open-automation-settings") { await automationSettingsUI.open(); return; }
+  if (action === "open-runtime-settings") { await runtimeSettingsUI.open(); return; }
   if (action === "open-legacy-maintenance") {
     await loadRetirementStatus();
     state.legacyMaintenanceOpen = true;
@@ -4089,6 +2980,7 @@ export async function handleAction(action) {
     state.proxyFilter = "";
     state.proxyGroupHideTimeouts.set(group.name, false);
     state.proxyBlinkNode = selected;
+    revealSelectedProxy(selected);
     renderPage();
     requestAnimationFrame(() => {
       const card = document.querySelector(`[data-proxy-node="${CSS.escape(selected)}"]`);
@@ -4157,127 +3049,7 @@ export async function handleAction(action) {
     }
   }
   if (action === "delay-test") {
-    if (state.toggles.testingDelays) {
-      cancelDelayTest();
-      state.proxyDelayMessage = runtime.delayBatchInFlight ? "Stopping latency test after the current batch…" : "Latency test cancelled.";
-      appendLog("info", "proxy", state.proxyDelayMessage);
-      renderPage();
-      patchProxyDelayLabels();
-      return;
-    }
-    if (runtime.delayBatchInFlight) return;
-    const offline = engineIsOff();
-    if (!offline && !controllerActionAllowed("Delay test", "proxy")) return;
-    const activeGroup = activeProxyGroup();
-    const policyEpoch = runtime.savedProfilePolicyEpoch;
-    const engineToken = captureEngineIdentityToken();
-    const profileId = offline ? state.savedProfilePolicy?.profileId : null;
-    // CFW only latency-tests the current section's `all` list — not every group.
-    const names = orderNamesVisibleFirst(
-      [...new Set((activeGroup?.options ?? []).map((node) => node.name))]
-        .filter((name) => !["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"].includes(String(name).toUpperCase())),
-    );
-    if (!names.length) {
-      appendLog("warning", "proxy", "No proxy nodes available for delay test");
-    } else {
-      const generation = (runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1);
-      const isCurrent = () => generation === runtime.delayTestGeneration
-        && (offline ? engineIsOff() && policyEpoch === runtime.savedProfilePolicyEpoch
-          && profileId === state.savedProfilePolicy?.profileId : engineIdentityTokenIsCurrent(engineToken));
-      state.toggles.testingDelays = true;
-      state.proxyDelayMessage = "Testing latency…";
-      state.toggles.showProxiesList = true;
-      if (activeGroup) {
-        activeGroup.options.forEach((node) => {
-          if (names.includes(node.name)) {
-            state.proxyDelayResults.delete(node.name);
-            node.delay = null;
-            node.delayFailure = null;
-            node.dead = false;
-          }
-        });
-      }
-      renderPage();
-      try {
-        // No delay-test URL preference exists in 0.4.0; the command supplies
-        // the pinned engine's fixed HTTPS connectivity target.
-        const delayByName = new Map();
-        const failureByName = new Map();
-        let offset = 0;
-        while (offset < names.length) {
-          if (!isCurrent()) break;
-          const concurrency = delayConcurrency();
-          const chunk = names.slice(offset, offset + concurrency);
-          offset += chunk.length;
-          runtime.delayBatchInFlight = true;
-          let results;
-          try {
-            results = await invoke("test_proxy_delays", {
-              profileId,
-              proxies: chunk,
-              timeoutMs: 5000,
-              concurrency,
-            });
-          } finally {
-            runtime.delayBatchInFlight = false;
-          }
-          if (!isCurrent()) break;
-          if (!Array.isArray(results)) throw new TypeError("Invalid latency response");
-          const seen = new Set();
-          for (const item of results) {
-            if (!chunk.includes(item.name) || seen.has(item.name)) throw new TypeError("Latency response targets do not match the request");
-            seen.add(item.name);
-            if (Number.isFinite(item.delay) && item.delay > 0) {
-              delayByName.set(item.name, item.delay);
-              applyDelayToProxyNodes(item.name, item.delay);
-            } else {
-              const failure = item.error_kind ?? "invalid_response";
-              failureByName.set(item.name, failure);
-              applyDelayToProxyNodes(item.name, null, failure);
-            }
-          }
-          for (const name of chunk) {
-            if (!seen.has(name) && !delayByName.has(name) && !failureByName.has(name)) {
-              failureByName.set(name, "invalid_response");
-              applyDelayToProxyNodes(name, null, "invalid_response");
-            }
-          }
-          patchProxyDelayLabels(chunk);
-        }
-        if (isCurrent()) {
-          finalizeDelayTestNames(names);
-          const failed = failureByName.size
-            + names.filter((name) => !delayByName.has(name) && !failureByName.has(name)).length;
-          const ok = delayByName.size;
-          const failures = new Map();
-          for (const kind of failureByName.values()) {
-            failures.set(kind, (failures.get(kind) ?? 0) + 1);
-          }
-          const failureSummary = [...failures.entries()]
-            .map(([kind, count]) => `${count} ${delayFailureLabel(kind).toLowerCase()}`)
-            .join(", ");
-          state.proxyDelayMessage = `${ok} passed, ${failed} failed${failureSummary ? ` (${failureSummary})` : ""}.`;
-          appendLog(
-            failed ? "error" : "info",
-            "proxy",
-            `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} failed${failureSummary ? ` (${failureSummary})` : ""}` : ""} · concurrency ${delayConcurrency()}`,
-          );
-        }
-      } catch (error) {
-        if (isCurrent()) {
-          finalizeDelayTestNames(names);
-          state.proxyDelayMessage = `Latency test failed: ${errorText(error)}`;
-          appendLog("error", "proxy", `Delay test failed: ${errorText(error)}`);
-        }
-      } finally {
-        if ((runtime.delayTestGeneration ?? 0) === generation) {
-          state.toggles.testingDelays = false;
-        } else if (!state.toggles.testingDelays && state.proxyDelayMessage?.startsWith("Stopping latency")) {
-          state.proxyDelayMessage = "Latency test cancelled.";
-        }
-        if (state.activePage === "proxies") renderPage();
-      }
-    }
+    await runProxyDelayTest();
   }
   if (action === "reload-proxies") {
     if (!controllerActionAllowed("Reloading proxies", "proxy")) return;
@@ -4379,6 +3151,10 @@ export async function handleAction(action) {
     await applyToggle("systemProxy", true, "explicit retry");
     renderPage();
   }
+  if (action === "toggle-core") {
+    await applyToggle("coreRunning", state.engine.desiredMode === "off", "core");
+    renderPage();
+  }
   if (action === "cancel-system-proxy" || action === "cancel-tun-mode") {
     await applyToggle(action === "cancel-system-proxy" ? "systemProxy" : "tunMode", false, "cancel request");
     renderPage();
@@ -4432,19 +3208,15 @@ export async function handleAction(action) {
     const url = input?.value?.trim();
     if (!url) {
       appendLog("warning", "profile", "A subscription URL or node link is required before import");
-    } else if (!engineIsOff()) {
-      appendLog("warning", "profile", REASONS.engineNotOff);
     } else {
       const subscription = isSubscriptionSource(url);
       const result = subscription
-        ? await invoke("import_profile_url", { url, name: null, activate: true })
-        : await invoke("import_profile_text", { name: null, body: url });
+        ? await invokeProfileChange("import_profile_url", { url, name: null, activate: true })
+        : await invokeProfileChange("import_profile_text", { name: null, body: url });
       input.value = "";
       await loadProfilesSnapshot();
       appendLog("info", "profile", `Profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
-      if (subscription) {
-        await applyActiveProfile(`importing ${result.name}`);
-      } else {
+      if (!subscription) {
         await selectProfileById(result.id);
       }
       await openCredentialSetup(result.id);
@@ -4467,15 +3239,9 @@ export async function handleAction(action) {
       input?.click();
       return;
     }
-    if (!engineIsOff()) {
-      appendLog("warning", "profile", REASONS.engineNotOff);
-      input.value = "";
-      renderPage();
-      return;
-    }
     try {
       const body = await readProfileSourceFile(file);
-      const result = await invoke("import_profile_text", { name: file.name, body });
+      const result = await invokeProfileChange("import_profile_text", { name: file.name, body });
       await loadProfilesSnapshot();
       appendLog("info", "profile", `Local profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
       await selectProfileById(result.id);
@@ -4524,11 +3290,6 @@ export async function handleAction(action) {
     }
   }
   if (action === "update-all-profiles") {
-    if (!engineIsOff()) {
-      appendLog("warning", "profile", REASONS.engineNotOff);
-      renderPage();
-      return;
-    }
     let updated = 0;
     let failed = 0;
     let local = 0;
@@ -4541,14 +3302,14 @@ export async function handleAction(action) {
         continue;
       }
       try {
-        const result = await invoke("update_profile", { id: profile.id });
+        const result = await invokeProfileChange("update_profile", { id: profile.id });
         updated += 1;
         if (result.credential_cleanup_pending) {
           cleanupPending += 1;
           appendLog(
             "warning",
             "profile",
-            `${profile.name} was updated, but credential cleanup is pending: ${result.credential_cleanup_error}`,
+            `${profile.name} updated. Old credentials are retained for recovery.${result.credential_cleanup_error ? ` Cleanup: ${result.credential_cleanup_error}` : ""}`,
           );
         }
       } catch (error) {
@@ -4557,13 +3318,6 @@ export async function handleAction(action) {
       }
     }
     await loadProfilesSnapshot();
-    if (updated && activeProfile().active) {
-      try {
-        await applyActiveProfile("Update All");
-      } catch (error) {
-        appendLog("error", "profile", `Active profile reapply failed: ${errorText(error)}`);
-      }
-    }
     appendLog(
       failed ? "error" : "info",
       "profile",
@@ -4576,10 +3330,9 @@ export async function handleAction(action) {
     if (!editor || !inspector?.profile?.id) {
       appendLog("warning", "profile", "No profile editor is open");
     } else {
-      const result = await invoke("save_profile_text", { id: inspector.profile.id, body: editor.value });
+      const result = await invokeProfileChange("save_profile_text", { id: inspector.profile.id, expectedDigest: inspector.profile.digest, body: editor.value });
       await loadProfilesSnapshot();
       appendLog("info", "profile", `Profile JSON saved: ${formatBytes(result.bytes ?? 0)}`);
-      if (result.active) await applyActiveProfile("editing the profile");
       await openProfileInspector(result.id, "edit");
       await openCredentialSetup(result.id);
     }
@@ -4587,61 +3340,9 @@ export async function handleAction(action) {
   if (action === "close-profile-inspector") {
     state.profileInspector = null;
   }
-  if (action === "update-all-providers") {
-    if (!controllerActionAllowed("Update All", "provider")) return;
-    const token = captureEngineIdentityToken();
-    state.providerBulkActions.add(action);
-    renderPage();
-    try {
-      const [proxyOutcome, ruleOutcome] = await Promise.allSettled([
-        invoke("update_all_proxy_providers"),
-        invoke("update_all_rule_providers"),
-      ]);
-      if (!engineIdentityTokenIsCurrent(token)) return;
-      if (proxyOutcome.status === "rejected") recordProviderOperationFailure("Proxy provider update", proxyOutcome.reason);
-      if (ruleOutcome.status === "rejected") recordProviderOperationFailure("Rule provider update", ruleOutcome.reason);
-      await loadProvidersSnapshot(token);
-      if (!engineIdentityTokenIsCurrent(token)) return;
-      if (proxyOutcome.status === "fulfilled" && ruleOutcome.status === "fulfilled") {
-        const proxySummary = providerBatchSummary("Proxy providers", proxyOutcome.value);
-        const ruleSummary = providerBatchSummary("Rule providers", ruleOutcome.value);
-        const level = providerBatchSucceeded(proxyOutcome.value) && providerBatchSucceeded(ruleOutcome.value) ? "info" : "error";
-        appendLog(level, "provider", `Update All completed · ${proxySummary} · ${ruleSummary}`);
-      } else {
-        appendLog("info", "provider", "Update All did not complete; see the provider result above");
-      }
-    } catch (error) {
-      if (!engineIdentityTokenIsCurrent(token)) return;
-      state.controllerStatus = "controller offline";
-      recordProviderOperationFailure("Update All", error);
-    } finally {
-      if (engineIdentityTokenIsCurrent(token)) {
-        state.providerBulkActions.delete(action);
-        renderPage();
-      }
-    }
-  }
-  if (action === "health-check-all") {
-    if (!controllerActionAllowed("Health Check All", "provider")) return;
-    const token = captureEngineIdentityToken();
-    state.providerBulkActions.add(action);
-    renderPage();
-    try {
-      const proxyProviders = await invoke("health_check_all_proxy_providers");
-      if (!engineIdentityTokenIsCurrent(token)) return;
-      await loadProvidersSnapshot(token);
-      if (!engineIdentityTokenIsCurrent(token)) return;
-      appendLog(providerBatchSucceeded(proxyProviders) ? "info" : "error", "provider", providerBatchSummary("Health Check All", proxyProviders));
-    } catch (error) {
-      if (!engineIdentityTokenIsCurrent(token)) return;
-      state.controllerStatus = "controller offline";
-      recordProviderOperationFailure("Health Check All", error);
-    } finally {
-      if (engineIdentityTokenIsCurrent(token)) {
-        state.providerBulkActions.delete(action);
-        renderPage();
-      }
-    }
+  if (action === "update-all-providers" || action === "health-check-all") {
+    await handleProviderAction(action);
+    return;
   }
   if (action === "flush-fake-ip-cache") {
     if (!controllerActionAllowed("Fake IP cache flush", "cache")) return;
@@ -4835,6 +3536,7 @@ async function reloadPayload() {
   if (!state.migrationHandoff) await loadBootPayload();
   state.lastRefresh = "Just now";
   await loadSettingsSnapshot();
+  await runtimeSettingsUI.load();
   await loadPlatformDesign();
   await loadEngineStatus();
   await loadRetirementStatus();
@@ -4846,7 +3548,6 @@ async function reloadPayload() {
   await loadRuntimeProjection();
   const controllerReady = await loadControllerSnapshotWithRetry();
   if (controllerReady) {
-    await loadProvidersSnapshot();
     if (state.activePage === "rules") await loadRulesSnapshot();
   }
   appendLog("info", "shell", "Dashboard reloaded");
@@ -4915,8 +3616,7 @@ function applyEngineStatus(payload) {
     // Off is an expected steady state. Repeated snapshots still clear any
     // event/request result that arrived between native status reads.
     clearControllerBackedState();
-    clearProviderBackedState();
-    state.controllerVersion = null;
+      state.controllerVersion = null;
     state.controllerStatus = "engine off";
   }
   // Green switches represent verified runtime activity. Pending and failed
@@ -5015,12 +3715,12 @@ async function loadRuntimeProjection() {
   }
   try {
     const document = JSON.parse(await invoke("read_runtime_config_text"));
-    const inbound = (document.inbounds ?? []).find((entry) => entry?.type === "mixed");
+    const inbound = (document.inbounds ?? []).find((entry) => entry?.type === "mixed" && entry?.tag === "cfw-system-proxy");
     state.projection = {
       mixedPort: Number.isInteger(inbound?.listen_port) ? inbound.listen_port : null,
       listenAddress: typeof inbound?.listen === "string" ? inbound.listen : null,
       controller: document.experimental?.clash_api?.external_controller ?? null,
-      logLevel: document.log?.level ?? null,
+      logLevel: document.log?.disabled === true ? "silent" : document.log?.level ?? null,
       error: null,
     };
     return true;
@@ -5053,7 +3753,6 @@ async function loadNetworkDiagnostics() {
 
 function resetControllerStateForInactiveEngine() {
   clearControllerBackedState();
-  clearProviderBackedState();
   state.controllerStatus = "engine off";
 }
 
@@ -5134,39 +3833,6 @@ function clearControllerBackedState() {
   state.closingAllConnections = false;
 }
 
-function clearProviderBackedState() {
-  state.providers = [];
-  state.ruleProviders = [];
-  state.providerCapabilityError = null;
-  state.providerActions.clear();
-  state.providerBulkActions.clear();
-}
-
-async function loadProvidersSnapshot(token = captureEngineIdentityToken()) {
-  if (state.engine.providerManagementAvailable !== true) {
-    clearProviderBackedState();
-    state.providerCapabilityError = PROVIDER_CAPABILITY_UNAVAILABLE;
-    return false;
-  }
-  if (!engineIdentityTokenIsCurrent(token)) {
-    if (!state.engine.active) clearProviderBackedState();
-    return false;
-  }
-  try {
-    const snapshot = await invoke("providers_snapshot");
-    if (!engineIdentityTokenIsCurrent(token)) return false;
-    if (!applyProvidersSnapshot(snapshot)) return false;
-    return true;
-  } catch (error) {
-    if (!engineIdentityTokenIsCurrent(token)) return false;
-    clearProviderBackedState();
-    state.providerCapabilityError = errorText(error);
-    if (!state.providerCapabilityError.startsWith(PROVIDER_CAPABILITY_UNSUPPORTED_PREFIX)) {
-      appendLog("error", "provider", state.providerCapabilityError);
-    }
-    return false;
-  }
-}
 
 async function loadRulesSnapshot(token = captureEngineIdentityToken()) {
   if (!engineIdentityTokenIsCurrent(token)) {
@@ -5239,6 +3905,7 @@ async function loadProfilesSnapshot() {
         throw new TypeError("profile snapshot has an invalid source kind");
       }
     }
+    const previousProfileId = state.profiles.find((profile) => profile.active)?.id ?? null;
     const known = new Map(state.profiles.map((profile) => [profile.id, profile]));
     state.profiles = profiles.map((profile) => ({
       id: profile.id,
@@ -5255,14 +3922,17 @@ async function loadProfilesSnapshot() {
       sourceUrl: known.get(profile.id)?.sourceUrl,
       sourceError: known.get(profile.id)?.sourceError ?? null,
     }));
+    if (previousProfileId !== (state.profiles.find((profile) => profile.active)?.id ?? null)) providerSelectionChanged();
     state.profilesUnavailableReason = null;
     await loadSavedProfilePolicy();
+    await loadProvidersSnapshot();
     if (state.credentialSetup && !state.profiles.some(({ id }) => id === state.credentialSetup.profileId)) {
       state.credentialSetup = null;
     }
     return true;
   } catch (error) {
     state.profiles = [];
+    providerSelectionChanged();
     runtime.savedProfilePolicyEpoch += 1;
     state.savedProfilePolicy = null;
     state.savedProfilePolicyError = errorText(error);
@@ -5296,6 +3966,7 @@ async function bootstrap() {
   await loadBootPayload();
   if (state.migrationHandoff) state.activePage = "general";
   await loadSettingsSnapshot();
+  await runtimeSettingsUI.load();
   await loadPlatformDesign();
   await loadEngineStatus();
   await loadRetirementStatus();
@@ -5305,7 +3976,6 @@ async function bootstrap() {
   renderPage();
   void (async () => {
     if (await loadControllerSnapshotWithRetry()) {
-      await loadProvidersSnapshot();
       if (state.activePage === "rules") await loadRulesSnapshot();
     }
   })().finally(renderPage);
@@ -5441,10 +4111,6 @@ async function bootstrap() {
       }
       return;
     }
-    if (!engineIsOff()) {
-      appendLog("warning", "profile", REASONS.engineNotOff);
-      return;
-    }
     for (const path of profilePaths) {
       await importProfileFromPath(path);
     }
@@ -5487,10 +4153,9 @@ async function bootstrap() {
 
 async function importProfileFromPath(path) {
   try {
-    const result = await invoke("import_profile_file", { path, name: null, activate: true });
+    const result = await invokeProfileChange("import_profile_file", { path, name: null, activate: true });
     await loadProfilesSnapshot();
     appendLog("info", "profile", `Dropped profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
-    await applyActiveProfile("importing a dropped profile");
     await openCredentialSetup(result.id);
     scheduleRender();
   } catch (error) {

@@ -87,7 +87,7 @@ private struct AuthorityLeaseFixture {
   let cursor: ReplayCursor
   let descriptor: ConfigurationDescriptor
 
-  init() throws {
+  init(slot: ConfigurationSlot = .systemProxy) throws {
     let installationID = try #require(
       UUID(uuidString: "11111111-1111-4111-8111-111111111111"))
     let config = try SHA256Digest(hex: String(repeating: "11", count: 32))
@@ -98,7 +98,7 @@ private struct AuthorityLeaseFixture {
         installationID: AuthorityIdentifier(installationID),
         epoch: 2,
         generation: 7),
-      mode: .systemProxy,
+      mode: slot.authorityMode,
       configSHA256: config,
       identitySHA256: identity,
       ownerUID: 501,
@@ -111,7 +111,7 @@ private struct AuthorityLeaseFixture {
       revision: 14,
       previousRecordSHA256: SHA256Digest(hex: String(repeating: "33", count: 32)))
     descriptor = try ConfigurationDescriptor(
-      slot: .systemProxy,
+      slot: slot,
       tunnelOptions: nil,
       credentialAudience: CredentialAudience(
         profileID: installationID,
@@ -159,6 +159,35 @@ private struct AuthorityLeaseFixture {
 
 @Suite(.serialized)
 struct GlobalAuthorityEngineLeaseInspectorTests {
+  @Test(arguments: [ConfigurationSlot.localProxy, .systemProxy])
+  func stopRejectsMismatchedModeGenerationAndDigestsBeforeAuthorityMutation(slot: ConfigurationSlot)
+    async throws
+  {
+    let fixture = try AuthorityLeaseFixture(slot: slot)
+    let snapshot = try fixture.snapshot(
+      state: .active, revision: 14, leaseState: .active, cursor: fixture.cursor)
+    let authority = SequencedAuthorityClient(snapshots: [snapshot])
+    let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
+    let original = fixture.descriptor
+    for changed in ["mode", "generation", "content", "identity"] {
+      let wrongMode: ConfigurationSlot = slot == .localProxy ? .systemProxy : .localProxy
+      let descriptor = try ConfigurationDescriptor(
+        slot: changed == "mode" ? wrongMode : slot, tunnelOptions: nil,
+        credentialAudience: original.credentialAudience, installationID: original.installationID,
+        epoch: original.epoch,
+        generation: changed == "generation" ? original.generation + 1 : original.generation,
+        byteCount: original.byteCount,
+        sha256: changed == "content"
+          ? SHA256Digest(hex: String(repeating: "44", count: 32)) : original.sha256,
+        identitySHA256: changed == "identity"
+          ? SHA256Digest(hex: String(repeating: "55", count: 32)) : original.identitySHA256)
+      await #expect(throws: AuthorityDomainError(code: .staleOperation)) {
+        try await inspector.beginStop(for: descriptor)
+      }
+    }
+    #expect(await authority.counts().begin == 0)
+  }
+
   @Test func exactPreparedCancellationCommitsOffBeforeReportingCleanup() async throws {
     let fixture = try AuthorityLeaseFixture()
     let preparing = try fixture.snapshot(
@@ -264,8 +293,9 @@ struct GlobalAuthorityEngineLeaseInspectorTests {
     #expect(await authority.counts().complete == 0)
   }
 
-  @Test func repeatedBeginStopAcceptsTheExistingStoppingRevision() async throws {
-    let fixture = try AuthorityLeaseFixture()
+  @Test(arguments: [ConfigurationSlot.localProxy, .systemProxy])
+  func repeatedBeginStopAcceptsTheExistingStoppingRevision(slot: ConfigurationSlot) async throws {
+    let fixture = try AuthorityLeaseFixture(slot: slot)
     let snapshot = try fixture.snapshot(
       state: .stopping,
       revision: 14,

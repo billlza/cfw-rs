@@ -91,7 +91,7 @@ fn selected_dns_transports_keep_authentication_and_stay_on_the_selected_route() 
         assert_eq!(runtime["dns"]["final"], "cfw-profile-dns-0");
         assert_eq!(
             runtime["route"]["default_domain_resolver"],
-            json!({"server":"cfw-profile-dns-0"})
+            json!({"policy":"default"})
         );
         assert_eq!(
             runtime["dns"]["servers"].as_array().expect("servers").len(),
@@ -146,7 +146,7 @@ fn dns_fallback_is_explicit_and_ipv6_resolver_cannot_override_disabled_ipv6() {
     assert_eq!(runtime["dns"]["final"], "cfw-profile-dns-1");
     assert_eq!(
         runtime["route"]["default_domain_resolver"],
-        json!({"server":"cfw-profile-dns-0","fallback_server":"cfw-profile-dns-1"})
+        json!({"policy":"default"})
     );
 }
 
@@ -162,6 +162,92 @@ fn automatic_profile() -> Value {
         ],
         "route":{"final":"PROXY"}
     })
+}
+
+#[test]
+fn fallback_groups_preserve_priority_and_do_not_become_lowest_latency_groups() {
+    let mut source = automatic_profile();
+    let group = source["outbounds"][2].as_object_mut().unwrap();
+    group.insert("type".into(), json!("fallback"));
+    group.remove("tolerance_ms");
+    let profile = ValidatedSingBoxProfile::parse(&source.to_string()).unwrap();
+    assert!(profile.routes_through_remote());
+    assert!(
+        profile
+            .with_selected_outbound("automatic", "second")
+            .is_err()
+    );
+    for mode in [
+        ProjectionMode::LocalProxy,
+        ProjectionMode::SystemProxy,
+        ProjectionMode::Tunnel,
+        ProjectionMode::TunnelSystemProxy,
+    ] {
+        let projected = profile
+            .project(PROFILE_ID, mode, &EngineSettings::default())
+            .unwrap();
+        let runtime: Value = serde_json::from_str(projected.as_json()).unwrap();
+        assert_eq!(
+            runtime["outbounds"][2],
+            json!({
+                "type":"fallback", "tag":"automatic", "outbounds":["first","second"],
+                "url":"https://www.gstatic.com/generate_204", "interval":"300s",
+                "idle_timeout":"1800s", "interrupt_exist_connections":false
+            })
+        );
+        let probe: Value = serde_json::from_str(&projected.proxy_probe_json().unwrap()).unwrap();
+        assert_eq!(probe["outbounds"][2]["type"], "selector");
+        assert!(probe["outbounds"][2].get("url").is_none());
+    }
+    for (key, invalid) in [
+        ("outbounds", json!(["first", "first"])),
+        ("outbounds", json!(["missing"])),
+        ("outbounds", json!(["PROXY"])),
+        ("interval_seconds", json!(0)),
+        ("url", json!("file:///tmp/probe")),
+        ("tolerance_ms", json!(50)),
+    ] {
+        let mut invalid_source = source.clone();
+        invalid_source["outbounds"][2][key] = invalid;
+        assert!(
+            ValidatedSingBoxProfile::parse(&invalid_source.to_string()).is_err(),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn load_balance_strategy_and_continuous_probe_policy_survive_projection() {
+    for strategy in ["consistent-hashing", "sticky-sessions", "round-robin"] {
+        let mut source = automatic_profile();
+        let group = source["outbounds"][2].as_object_mut().unwrap();
+        group.insert("type".into(), json!("loadbalance"));
+        group.insert("strategy".into(), json!(strategy));
+        group.insert("lazy".into(), json!(false));
+        group.remove("tolerance_ms");
+        let profile = ValidatedSingBoxProfile::parse(&source.to_string()).unwrap();
+        let projection = profile
+            .project(
+                PROFILE_ID,
+                ProjectionMode::LocalProxy,
+                &EngineSettings::default(),
+            )
+            .unwrap();
+        let runtime: Value = serde_json::from_str(projection.as_json()).unwrap();
+        assert_eq!(runtime["outbounds"][2]["type"], "loadbalance");
+        assert_eq!(runtime["outbounds"][2]["strategy"], strategy);
+        assert_eq!(runtime["outbounds"][2]["lazy"], false);
+        assert!(profile.routes_through_remote());
+        assert!(
+            profile
+                .with_selected_outbound("automatic", "first")
+                .is_err()
+        );
+        let probe: Value = serde_json::from_str(&projection.proxy_probe_json().unwrap()).unwrap();
+        assert_eq!(probe["outbounds"][2]["type"], "selector");
+        source["outbounds"][2]["strategy"] = json!("random");
+        assert!(ValidatedSingBoxProfile::parse(&source.to_string()).is_err());
+    }
 }
 
 #[test]

@@ -2,9 +2,10 @@ import CryptoKit
 import Foundation
 
 public enum NativeProtocolConstants {
-  public static let schemaVersion: UInt16 = 6
-  public static let maximumMessageBytes = 1_048_576
-  public static let maximumConfigurationBytes: UInt64 = 384 * 1_024
+  public static let schemaVersion: UInt16 = 7
+  public static let maximumMessageBytes = EngineCapacity.maximumBridgeBytes
+  public static let maximumConfigurationBytes: UInt64 = UInt64(
+    EngineCapacity.maximumConfigurationBytes)
   public static let maximumFailureMessageBytes = 1_024
   public static let tunnelStartPayloadOptionKey = "cfw.tunnel-start-payload-v1"
   /// The sole `NETunnelProviderSession.startTunnel(options:)` key in the production ticket-only path.
@@ -49,6 +50,7 @@ public struct RequestID: Codable, Hashable, Sendable {
 
 public enum EngineMode: String, Codable, CaseIterable, Sendable {
   case off
+  case localProxy
   case systemProxy
   case tunnel
 }
@@ -158,11 +160,32 @@ public struct EngineState: Codable, Equatable, Sendable {
 }
 
 public enum ConfigurationSlot: String, Codable, CaseIterable, Sendable {
+  case localProxy
   case systemProxy
   case tunnel
 
+  public var engineMode: EngineMode {
+    switch self {
+    case .localProxy: .localProxy
+    case .systemProxy: .systemProxy
+    case .tunnel: .tunnel
+    }
+  }
+
+  public var authorityMode: AuthorityMode {
+    switch self {
+    case .localProxy: .localProxy
+    case .systemProxy: .systemProxy
+    case .tunnel: .tunnel
+    }
+  }
+
+  public var isProxyAgent: Bool { self == .localProxy || self == .systemProxy }
+
   public var fileName: String {
     switch self {
+    case .localProxy:
+      "local-proxy-config.json"
     case .systemProxy:
       "system-proxy-config.json"
     case .tunnel:
@@ -389,8 +412,37 @@ extension ConfigurationDescriptor {
     } catch {
       throw ConfigurationBytesValidationError.invalidJSON
     }
-    guard value is [String: Any] else {
+    guard let root = value as? [String: Any] else {
       throw ConfigurationBytesValidationError.invalidJSON
+    }
+    if slot == .localProxy {
+      try Self.validateLocalProxyConfiguration(root)
+    } else {
+      try Self.validateLANConfiguration(root)
+    }
+  }
+
+  static func validateLocalProxyConfiguration(_ root: [String: Any]) throws {
+    try validateLANConfiguration(root)
+    guard let inbounds = root["inbounds"] as? [[String: Any]], (1...2).contains(inbounds.count),
+      inbounds.allSatisfy({
+        $0["type"] as? String == "mixed"
+          && ["cfw-system-proxy", "cfw-lan-proxy"].contains($0["tag"] as? String ?? "")
+      }),
+      inbounds.filter({ $0["tag"] as? String == "cfw-system-proxy" }).count == 1,
+      let inbound = inbounds.first(where: { $0["tag"] as? String == "cfw-system-proxy" }),
+      inbound["type"] as? String == "mixed",
+      inbound["tag"] as? String == "cfw-system-proxy",
+      inbound["listen"] as? String == "127.0.0.1",
+      let port = inbound["listen_port"] as? NSNumber,
+      CFGetTypeID(port) != CFBooleanGetTypeID(),
+      port.doubleValue.rounded() == port.doubleValue,
+      (1...65535).contains(port.doubleValue)
+    else { throw NativeBridgeProtocolError.invalidConfiguration }
+    if let systemProxy = inbound["set_system_proxy"] {
+      guard let value = systemProxy as? NSNumber,
+        CFGetTypeID(value) == CFBooleanGetTypeID(), !value.boolValue
+      else { throw NativeBridgeProtocolError.invalidConfiguration }
     }
   }
 }
@@ -410,6 +462,10 @@ public struct EngineSnapshot: Codable, Equatable, Sendable {
     switch (mode, state.kind, configuration) {
     case (.off, .off, nil),
       (.off, .failed, _),
+      (.localProxy, .proxyStarting, .some),
+      (.localProxy, .proxyActive, .some),
+      (.localProxy, .proxyStopping, .some),
+      (.localProxy, .failed, _),
       (.systemProxy, .proxyStarting, .some),
       (.systemProxy, .proxyActive, .some),
       (.systemProxy, .proxyStopping, .some),
@@ -422,6 +478,9 @@ public struct EngineSnapshot: Codable, Equatable, Sendable {
       (.tunnel, .failed, _):
       break
     default:
+      throw ProtocolValidationError.invalidState
+    }
+    if mode != .off, let configuration, configuration.slot.engineMode != mode {
       throw ProtocolValidationError.invalidState
     }
     self.mode = mode
@@ -482,7 +541,7 @@ public struct EngineSnapshot: Codable, Equatable, Sendable {
     sequence: UInt64
   ) -> EngineSnapshot {
     EngineSnapshot(
-      validatedMode: .systemProxy,
+      validatedMode: configuration?.slot.engineMode ?? .systemProxy,
       state: .failed(failure),
       configuration: configuration,
       sequence: sequence
@@ -494,7 +553,7 @@ public struct EngineSnapshot: Codable, Equatable, Sendable {
     sequence: UInt64
   ) -> EngineSnapshot {
     EngineSnapshot(
-      validatedMode: .systemProxy,
+      validatedMode: configuration.slot.engineMode,
       state: EngineState(validatedKind: .proxyStarting, failure: nil),
       configuration: configuration,
       sequence: sequence
@@ -506,7 +565,7 @@ public struct EngineSnapshot: Codable, Equatable, Sendable {
     sequence: UInt64
   ) -> EngineSnapshot {
     EngineSnapshot(
-      validatedMode: .systemProxy,
+      validatedMode: configuration.slot.engineMode,
       state: EngineState(validatedKind: .proxyActive, failure: nil),
       configuration: configuration,
       sequence: sequence
@@ -518,7 +577,7 @@ public struct EngineSnapshot: Codable, Equatable, Sendable {
     sequence: UInt64
   ) -> EngineSnapshot {
     EngineSnapshot(
-      validatedMode: .systemProxy,
+      validatedMode: configuration.slot.engineMode,
       state: EngineState(validatedKind: .proxyStopping, failure: nil),
       configuration: configuration,
       sequence: sequence
@@ -577,6 +636,7 @@ public struct EngineSnapshot: Codable, Equatable, Sendable {
 
 public enum NativeCommandKind: String, Codable, Sendable {
   case installTunnel
+  case startLocalProxy
   case startSystemProxy
   case startTunnel
   case validateConfiguration
@@ -593,12 +653,16 @@ public struct NativeCommand: Codable, Equatable, Sendable {
     configuration: ConfigurationDescriptor? = nil
   ) throws {
     let requiresConfiguration =
-      kind == .startSystemProxy || kind == .startTunnel || kind == .validateConfiguration
+      kind == .startLocalProxy || kind == .startSystemProxy || kind == .startTunnel
+      || kind == .validateConfiguration
       || kind == .stop
     guard requiresConfiguration == (configuration != nil) else {
       throw ProtocolValidationError.invalidCommand
     }
     if kind == .startSystemProxy, configuration?.slot != .systemProxy {
+      throw ProtocolValidationError.invalidCommand
+    }
+    if kind == .startLocalProxy, configuration?.slot != .localProxy {
       throw ProtocolValidationError.invalidCommand
     }
     if kind == .startTunnel, configuration?.slot != .tunnel {

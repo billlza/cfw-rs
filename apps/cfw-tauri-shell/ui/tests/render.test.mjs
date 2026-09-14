@@ -231,6 +231,11 @@ const responses = {
     migration_handoff_renderer_ready: null,
   },
   legacy_retirement_status: { state: "cleared" },
+  read_runtime_settings_snapshot: {
+    settings: { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null },
+    revision: null,
+    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, lan_proxy:null },
+  },
   read_settings_snapshot: {
     persisted: true,
     settings: {
@@ -688,8 +693,9 @@ test("Engine Off reload never schedules controller-backed IPC or keeps a stale p
     );
 
     const general = await renderPage("general");
-    assert.match(general, /No profile selected/u);
-    assert.doesNotMatch(general, /127\.0\.0\.1:7890/u);
+    assert.match(general, /Automatic port/u);
+    assert.match(general, /127\.0\.0\.1:7890/u, "configured port is readable without an active profile");
+    assert.equal(state.projection.mixedPort, null, "configured preferences do not masquerade as a live profile projection");
   } finally {
     responses.engine_snapshot = originalEngine;
     responses.legacy_retirement_status = originalRetirement;
@@ -2068,7 +2074,7 @@ test("Engine Off invalidates a pending controller snapshot and live connection/l
   }
 });
 
-test("Engine generation prevents stale provider and rule snapshots from repopulating Off state", async () => {
+test("Provider metadata survives core Stop while live rule snapshots remain generation-bound", async () => {
   const originalEngine = responses.engine_snapshot;
   const originalProviders = responses.providers_snapshot;
   const originalProviderRejection = rejected.providers_snapshot;
@@ -2091,16 +2097,16 @@ test("Engine generation prevents stale provider and rule snapshots from repopula
     providerReload = reloadButton.click();
     await waitForInvocation("providers_snapshot", providerCalls);
 
-    responses.engine_snapshot = OFF_ENGINE;
+    responses.engine_snapshot = { ...OFF_ENGINE, capabilities: { ...OFF_ENGINE.capabilities, provider_management: true } };
     await emit("cfw://engine-event", { type: "snapshot_changed" });
     pendingProviders.resolve({
-      proxy_providers: [{ name: "STALE-PROVIDER", kind: "Proxy", vehicle_type: "HTTP", proxies: [] }],
-      rule_providers: [{ name: "STALE-RULE-PROVIDER", kind: "Rule", vehicle_type: "HTTP", rules: [] }],
+      proxy_providers: [{ name: "SAVED-PROVIDER", kind: "Proxy", vehicle_type: "HTTP", proxies: [] }],
+      rule_providers: [{ name: "SAVED-RULE-PROVIDER", kind: "Rule", vehicle_type: "HTTP", rules: [] }],
     });
     await providerReload;
 
-    assert.deepEqual(state.providers, []);
-    assert.deepEqual(state.ruleProviders, []);
+    assert.deepEqual(state.providers.map(({ name }) => name), ["SAVED-PROVIDER"]);
+    assert.deepEqual(state.ruleProviders.map(({ name }) => name), ["SAVED-RULE-PROVIDER"]);
     assert.equal(state.providerCapabilityError, null);
 
     if (hadProviderRejection) rejected.providers_snapshot = originalProviderRejection;
@@ -2317,24 +2323,26 @@ test("missing rule metadata and unsupported providers render as unavailable", as
   const providers = await renderPage("providers");
   assert.ok(providers.includes("Proxy provider management unavailable"));
   assert.ok(providers.includes("Rule provider management unavailable"));
-  assert.ok(providers.includes("unavailable in the pinned sing-box 1.13.15 engine"));
+  assert.ok(providers.includes("unavailable in this application"));
 });
 
-test("the General page shows the projected inbound and every refused control's reason", async () => {
+test("the General page exposes runtime controls and explains unsupported features", async () => {
   await setEngine(RUNNING_ENGINE);
   const html = await renderPage("general");
   assert.match(html, /127\.0\.0\.1:7890/u);
   assert.match(html, /sing-box · 1\.13\.0/u);
   for (const needle of [
-    "the projected mixed inbound is bound to loopback",
-    "pins the engine log level to info",
+    "trusted private source networks",
+    "validated runtime replacement",
     "Mixin is unavailable",
     "Country rules use sing-box rule sets",
   ]) {
     assert.ok(html.includes(needle), `General page is missing the reason: ${needle}`);
   }
-  // Every projection-bound switch must be disabled, not merely unchecked.
-  assert.equal((html.match(/disabled/gu) ?? []).length >= 4, true);
+  assert.match(html, /data-runtime-log-level aria-label="Engine log level">/u);
+  assert.match(html, /data-action="open-runtime-settings">127/u);
+  assert.doesNotMatch(html, /data-toggle="allowLan"[^>]*disabled/u);
+  assert.match(html, /data-toggle="mixin"[^>]*disabled/u);
 });
 
 test("live stream events do not crash the renderer", async () => {
@@ -2407,7 +2415,7 @@ test("the credential dialog asks for missing values only while the engine is Off
   glassRoot.innerHTML = "";
   await renderPage("general");
   assert.equal(glassRoot.innerHTML.includes("Store credentials"), false);
-  assert.ok(glassRoot.innerHTML.includes("require the engine to be Off"));
+  assert.ok(glassRoot.innerHTML.includes("Stop the core before credential maintenance"));
 
   await setEngine(OFF_ENGINE);
   state.glassDialog = { kind: "credentials", id: PROFILE_ID };
@@ -2483,14 +2491,17 @@ test("missing or unknown profile source metadata is surfaced as a repository err
   }
 });
 
-test("profile mutations are offered only while the engine is Off", async () => {
+test("ordinary profile operations remain available while the core is running", async () => {
   await setEngine(OFF_ENGINE);
   const off = await renderPage("profiles");
   assert.equal(off.includes("require the engine to be Off"), false);
 
   await setEngine(RUNNING_ENGINE);
   const running = await renderPage("profiles");
-  assert.ok(running.includes("require the engine to be Off"));
+  for (const action of ["import-profile", "update-all-profiles", "import-profile-file"]) {
+    assert.match(running, new RegExp(`data-action="${action}"`));
+    assert.doesNotMatch(running, new RegExp(`data-action="${action}"[^>]*disabled`));
+  }
 });
 
 test("SOCKS5 links, local YAML, and dropped text use native conversion and never log source credentials", async () => {
@@ -2561,7 +2572,10 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
     input.value = link;
     before = invocationDetails.length;
     await appModule.handleAction("import-profile");
-    assert.equal(invocationDetails.slice(before).some(({ command }) => command.startsWith("import_profile_")), false);
+    const onlineCalls = invocationDetails.slice(before);
+    assert.equal(onlineCalls.filter(({ command }) => command === "import_profile_text").length, 1);
+    assert.equal(onlineCalls.filter(({ command }) => command === "select_profile").length, 1);
+    assert.equal(onlineCalls.some(({ command }) => command === "apply_active_profile"), false, "online import must not dispatch a second renderer restart");
   } finally {
     querySelectorElements.delete("[data-profile-url]");
     querySelectorElements.delete("[data-profile-file]");

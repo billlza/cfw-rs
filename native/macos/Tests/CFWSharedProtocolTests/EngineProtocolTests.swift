@@ -130,6 +130,21 @@ private func removeEngineProtocolTestDirectory(_ root: URL) {
   }
 }
 
+@Test func localProxyOwnerBoundaryRejectsSystemMutationEvenWithAnExactContentDigest() throws {
+  let configuration = Data(
+    #"{"inbounds":[{"type":"mixed","tag":"cfw-system-proxy","listen":"127.0.0.1","listen_port":7891,"set_system_proxy":true}]}"#
+      .utf8)
+  let digest = try SHA256Digest(
+    hex: SHA256.hash(data: configuration).map { String(format: "%02x", $0) }.joined())
+  let descriptor = try ConfigurationDescriptor(
+    slot: .localProxy, tunnelOptions: nil, credentialAudience: testCredentialAudience(),
+    installationID: UUID(), epoch: 1, generation: 1, byteCount: UInt64(configuration.count),
+    sha256: digest, identitySHA256: digest)
+  #expect(throws: NativeBridgeProtocolError.invalidConfiguration) {
+    try descriptor.validateConfigurationBytes(configuration)
+  }
+}
+
 @Test func requestEnvelopeRoundTripsWithoutLosingTypeInformation() throws {
   let installationID = try #require(
     UUID(uuidString: "11111111-1111-1111-1111-111111111111")
@@ -251,14 +266,14 @@ private func removeEngineProtocolTestDirectory(_ root: URL) {
     from: Data(
       contentsOf:
         root
-        .appendingPathComponent("contracts/engine-owner-v6", isDirectory: true)
+        .appendingPathComponent("contracts/engine-owner-v7", isDirectory: true)
         .appendingPathComponent("schema-policy.json")
     )
   )
   #expect(contract.configurationIdentitySchemaVersion == NativeProtocolConstants.schemaVersion)
   #expect(contract.engineOwnerSchemaVersion == NativeProtocolConstants.schemaVersion)
 
-  for rejected: UInt16 in [5, 99] {
+  for rejected: UInt16 in [5, 6, 99] {
     let json = Data(
       """
       {"schemaVersion":\(rejected),"requestID":{"rawValue":"00000000-0000-0000-0000-000000000001"},"command":{"kind":"snapshot"}}

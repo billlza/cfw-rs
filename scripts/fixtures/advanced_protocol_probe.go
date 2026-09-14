@@ -28,6 +28,7 @@ import (
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/interrupt"
 	btls "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
@@ -68,7 +69,11 @@ func project(projector string, profile object) object {
 }
 
 func projectMode(projector string, profile object, tunnel bool) object {
-	input := checked(json.Marshal(object{"profile": profile, "profile_id": profileID, "tunnel": tunnel}))
+	return projectInput(projector, object{"profile": profile, "profile_id": profileID, "tunnel": tunnel})
+}
+
+func projectInput(projector string, envelopeInput object) object {
+	input := checked(json.Marshal(envelopeInput))
 	command := exec.Command(projector)
 	command.Stdin = bytes.NewReader(input)
 	command.Stderr = os.Stderr
@@ -329,6 +334,96 @@ func groupProbe(projector, address, tcpTarget string) {
 	fmt.Println("PASS automatic URL test selects and forwards through the healthy node")
 }
 
+func fallbackProbe(projector, address, tcpTarget, udpTarget string) {
+	primaryPort, backupPort := localPort(address, "tcp"), localPort(address, "tcp")
+	secret := make([]byte, 32)
+	_, err := rand.Read(secret)
+	require(err == nil, "fallback fixture password")
+	password := base64.StdEncoding.EncodeToString(secret)
+	primary := socksServer(address, "primary", primaryPort, "fixture", password)
+	backup := socksServer(address, "backup", backupPort, "fixture", password)
+	defer func() {
+		if primary != nil {
+			closeChecked(primary)
+		}
+		if backup != nil {
+			closeChecked(backup)
+		}
+	}()
+	listener := checked(net.Listen("tcp", "127.0.0.1:0"))
+	httpServer := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })}
+	done := make(chan error, 1)
+	go func() { done <- httpServer.Serve(listener) }()
+	defer func() {
+		closeChecked(httpServer)
+		require(errors.Is(<-done, http.ErrServerClosed), "fallback HTTP stop")
+	}()
+	node := func(tag string, port int) object {
+		return object{"type": "socks5", "tag": tag, "server": address, "server_port": port,
+			"authentication": object{"username_credential_ref": object{"id": profileID, "kind": "socks5_username"}, "password_credential_ref": object{"id": sharedID, "kind": "socks5_password"}}}
+	}
+	config := project(projector, object{"outbounds": []any{node("Primary", primaryPort), node("Backup", backupPort),
+		object{"type": "fallback", "tag": "Failover", "outbounds": []string{"Primary", "Backup"}, "url": "http://" + listener.Addr().String() + "/probe", "interval_seconds": 30, "idle_timeout_seconds": 60}}, "route": object{"final": "Failover"}})
+	prepareListeners(config, address)
+	for _, value := range config["outbounds"].([]any) {
+		outbound := value.(map[string]any)
+		if outbound["type"] == "socks" {
+			outbound["username"] = "fixture"
+			outbound["password"] = password
+		}
+	}
+	client, serviceContext := startWithContext(config, nil)
+	defer closeChecked(client)
+	outbound, found := client.Outbound().Outbound("Failover")
+	require(found && outbound.Type() == "fallback", "ordered group is a first-class runtime type")
+	policy, ok := outbound.(*group.URLTest)
+	require(ok, "fallback shares the bounded health-check lifecycle")
+	controller := service.FromContext[adapter.ClashServer](serviceContext)
+	require(controller != nil, "fallback live controller")
+	history := controller.HistoryStorage()
+	deadline := time.Now().Add(5 * time.Second)
+	for history.LoadURLTestHistory("Primary") == nil || history.LoadURLTestHistory("Backup") == nil {
+		require(time.Now().Before(deadline), "both fallback services did not become healthy")
+		time.Sleep(10 * time.Millisecond)
+	}
+	require(policy.Now() == "Primary", "priority did not choose primary")
+	tcpExchange(client, "Failover", tcpTarget)
+	udpExchange(client, "Failover", udpTarget, true)
+	closeChecked(primary)
+	primary = nil
+	// This attempt still starts with Primary's last successful observation. The
+	// real failed SOCKS handshake must move it to Backup before any payload.
+	tcpExchange(client, "Failover", tcpTarget)
+	require(policy.Now() == "Backup", "failed primary remained selected")
+	ctx, cancel := context.WithTimeout(interrupt.ContextWithIsExternalConnection(context.Background()), 5*time.Second)
+	defer cancel()
+	association := checked(policy.ListenPacket(ctx, M.ParseSocksaddr(udpTarget)))
+	defer closeChecked(association)
+	primary = socksServer(address, "primary", primaryPort, "fixture", password)
+	deadline = time.Now().Add(5 * time.Second)
+	for policy.Now() != "Primary" {
+		policy.CheckOutbounds()
+		require(time.Now().Before(deadline), "recovered primary was not restored")
+	}
+	require(association.SetDeadline(time.Now().Add(2*time.Second)) == nil, "persistent UDP deadline")
+	_, err = association.WriteTo([]byte("still-backup"), checked(net.ResolveUDPAddr("udp", udpTarget)))
+	require(err == nil, "existing UDP association closed on primary recovery")
+	body := make([]byte, 64)
+	n, _, err := association.ReadFrom(body)
+	require(err == nil && string(body[:n]) == "still-backup", "UDP association did not survive recovery")
+	tcpExchange(client, "Failover", tcpTarget)
+	closeChecked(primary)
+	primary = nil
+	closeChecked(backup)
+	backup = nil
+	conn, err := policy.DialContext(ctx, "tcp", M.ParseSocksaddr(tcpTarget))
+	if conn != nil {
+		closeChecked(conn)
+	}
+	require(err != nil && policy.Now() == "", "all-failed fallback escaped to direct or retained healthy status")
+	fmt.Println("PASS ordered fallback TCP/UDP, real primary failure, recovery, preserved association and all-failed rejection")
+}
+
 type testCertificateStore struct{ pool *x509.CertPool }
 
 func (s testCertificateStore) Name() string                   { return "temporary test CA" }
@@ -435,11 +530,24 @@ func tlsProbe(projector string, scenario tlsCase) {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		panic("usage: advanced_protocol_probe PROJECTOR LOCAL_IPV4")
+	if len(os.Args) != 3 && len(os.Args) != 4 {
+		panic("usage: advanced_protocol_probe PROJECTOR LOCAL_IPV4 [dns-bootstrap|lan]")
 	}
 	projector, address := os.Args[1], os.Args[2]
 	require(net.ParseIP(address) != nil, "local numeric fixture address required")
+	if len(os.Args) == 4 {
+		switch os.Args[3] {
+		case "dns-bootstrap":
+			dnsBootstrapProbe(projector, address)
+		case "lan":
+			lanProbe(projector, address)
+		case "http":
+			httpProxyProbe(projector, address)
+		default:
+			panic("unknown protocol fixture case")
+		}
+		return
+	}
 	tcpTarget, udpTarget, stop := echoServers(address)
 	defer stop()
 	tlsProbe(projector, hybridAccepted)
@@ -449,6 +557,11 @@ func main() {
 	dnsProbe(projector, address)
 	dnsPolicyProbe(projector, address)
 	dnsFallbackProbe(projector, address)
+	dnsBootstrapProbe(projector, address)
+	lanProbe(projector, address)
+	httpProxyProbe(projector, address)
 	groupProbe(projector, address, tcpTarget)
+	fallbackProbe(projector, address, tcpTarget, udpTarget)
+	loadBalanceProbe(projector, address, tcpTarget, udpTarget)
 	wireguardProbe(projector, address, tcpTarget, udpTarget)
 }

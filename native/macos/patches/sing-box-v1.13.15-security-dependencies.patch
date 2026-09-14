@@ -169,3 +169,213 @@ index 14fe3832265a4d86c9c2cfe68ae297e1fb6361f4..0b26dd3ade3195666272f05bd5f6b0ef
 +google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478/go.mod h1:4Hqkh8ycfw05ld/3BWL7rJOSfebL2Q+DVDeRgYgxUU8=
 +google.golang.org/grpc v1.82.1 h1:NnAxzGRA0677vCa4BUkOAnO5+FfQqVl9iUXeD0IqcGE=
 +google.golang.org/grpc v1.82.1/go.mod h1:yzTZ1TB1Z3SG+LIYaI+WiE8D5+PZ3ArnrSp8zF3+/ZA=
+diff --git a/common/tls/pinning.go b/common/tls/pinning.go
+new file mode 100644
+index 00000000..d70a2f7e
+--- /dev/null
++++ b/common/tls/pinning.go
+@@ -0,0 +1,65 @@
++package tls
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"crypto/x509"
++	"errors"
++	"time"
++)
++
++// An explicitly pinned leaf key/certificate is its own trust anchor. It must
++// still be current and identify the configured server. No CA fallback or
++// insecure retry occurs after a pin mismatch.
++func verifyPinnedServer(certPins, keyPins, rawCerts [][]byte, name string, clock func() time.Time) error {
++	if len(rawCerts) == 0 || name == "" || (len(certPins) > 0 && len(keyPins) > 0) {
++		return errors.New("invalid pinned server certificate input")
++	}
++	pins := keyPins
++	if len(certPins) > 0 {
++		pins = certPins
++	}
++	if len(pins) == 0 || len(pins) > 8 {
++		return errors.New("invalid TLS pin count")
++	}
++	for _, pin := range pins {
++		if len(pin) != sha256.Size {
++			return errors.New("invalid TLS pin size")
++		}
++	}
++	leaf, err := x509.ParseCertificate(rawCerts[0])
++	if err != nil {
++		return errors.New("invalid leaf certificate")
++	}
++	now := time.Now()
++	if clock != nil {
++		now = clock()
++	}
++	if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
++		return errors.New("pinned certificate is outside its validity period")
++	}
++	if err = leaf.VerifyHostname(name); err != nil {
++		return errors.New("pinned certificate does not identify the configured server")
++	}
++	if len(leaf.ExtKeyUsage) > 0 {
++		permitsServer := false
++		for _, usage := range leaf.ExtKeyUsage {
++			permitsServer = permitsServer || usage == x509.ExtKeyUsageAny || usage == x509.ExtKeyUsageServerAuth
++		}
++		if !permitsServer {
++			return errors.New("pinned certificate does not permit server authentication")
++		}
++	}
++	var hash [32]byte
++	if len(certPins) > 0 {
++		hash = sha256.Sum256(rawCerts[0])
++	} else {
++		hash = sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
++	}
++	for _, pin := range pins {
++		if bytes.Equal(hash[:], pin) {
++			return nil
++		}
++	}
++	return errors.New("remote certificate does not match a configured TLS pin")
++}
+diff --git a/common/tls/pinning_test.go b/common/tls/pinning_test.go
+new file mode 100644
+index 00000000..df09b2c3
+--- /dev/null
++++ b/common/tls/pinning_test.go
+@@ -0,0 +1,103 @@
++package tls
++
++import (
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"crypto/sha256"
++	"crypto/x509"
++	"math/big"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/logger"
++)
++
++func pinCertificate(t *testing.T, name string, expired bool) ([]byte, []byte) {
++	t.Helper()
++	pub, key, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	before, after := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
++	if expired {
++		before = before.Add(-3 * time.Hour)
++		after = before.Add(time.Hour)
++	}
++	certificate := &x509.Certificate{SerialNumber: big.NewInt(71), DNSNames: []string{name}, NotBefore: before, NotAfter: after,
++		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
++	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, pub, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	spki, err := x509.MarshalPKIXPublicKey(pub)
++	if err != nil {
++		t.Fatal(err)
++	}
++	digest := sha256.Sum256(spki)
++	return der, digest[:]
++}
++
++func TestPinnedServerStillVerifiesNameAndValidity(t *testing.T) {
++	for _, tc := range []struct {
++		name    string
++		expired bool
++		want    bool
++	}{{"proxy.example.com", false, true}, {"wrong.example.com", false, false}, {"proxy.example.com", true, false}} {
++		t.Run(tc.name+"/"+time.Duration(boolInt(tc.expired)).String(), func(t *testing.T) {
++			der, pin := pinCertificate(t, tc.name, tc.expired)
++			cfg, err := NewSTDClient(context.Background(), logger.NOP(), "proxy.example.com", option.OutboundTLSOptions{Enabled: true, ServerName: "proxy.example.com", CertificatePublicKeySHA256: [][]byte{pin}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			std, err := cfg.STDConfig()
++			if err != nil {
++				t.Fatal(err)
++			}
++			verify := std.VerifyPeerCertificate
++			if verify == nil {
++				t.Fatal("pin verifier is missing")
++			}
++			err = verify([][]byte{der}, nil)
++			if (err == nil) != tc.want {
++				t.Fatalf("pinned certificate accepted=%t want=%t", err == nil, tc.want)
++			}
++		})
++	}
++}
++func boolInt(v bool) int {
++	if v {
++		return 1
++	}
++	return 0
++}
++
++func TestCertificateAndKeyPinsDoNotAcceptMismatchesOrMalformedInput(t *testing.T) {
++	der, keyPin := pinCertificate(t, "proxy.example.com", false)
++	certPin := sha256.Sum256(der)
++	for _, tc := range []struct {
++		name           string
++		cert, key, raw [][]byte
++		host           string
++		want           bool
++	}{
++		{"certificate", [][]byte{certPin[:]}, nil, [][]byte{der}, "proxy.example.com", true},
++		{"key", nil, [][]byte{keyPin}, [][]byte{der}, "proxy.example.com", true},
++		{"wrong certificate", [][]byte{make([]byte, 32)}, nil, [][]byte{der}, "proxy.example.com", false},
++		{"wrong key", nil, [][]byte{make([]byte, 32)}, [][]byte{der}, "proxy.example.com", false},
++		{"conflicting kinds", [][]byte{certPin[:]}, [][]byte{keyPin}, [][]byte{der}, "proxy.example.com", false},
++		{"empty chain", nil, [][]byte{keyPin}, nil, "proxy.example.com", false},
++		{"wrong host", [][]byte{certPin[:]}, nil, [][]byte{der}, "wrong.example.com", false},
++		{"short pin", nil, [][]byte{{1}}, [][]byte{der}, "proxy.example.com", false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if err := verifyPinnedServer(tc.cert, tc.key, tc.raw, tc.host, nil); (err == nil) != tc.want {
++				t.Fatalf("accepted=%v want=%v", err == nil, tc.want)
++			}
++		})
++	}
++	if err := verifyPinnedServer([][]byte{certPin[:]}, nil, [][]byte{der}, "proxy.example.com", func() time.Time { return time.Now().Add(2 * time.Hour) }); err == nil {
++		t.Fatal("expired certificate pin accepted")
++	}
++}
+diff --git a/common/tls/std_client.go b/common/tls/std_client.go
+index 56b9e618..f7275504 100644
+--- a/common/tls/std_client.go
++++ b/common/tls/std_client.go
+@@ -114,2 +114,2 @@ func NewSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
+-	if len(options.CertificatePublicKeySHA256) > 0 {
+-		if len(options.Certificate) > 0 || options.CertificatePath != "" {
++	if len(options.CertificatePublicKeySHA256) > 0 || len(options.CertificateSHA256) > 0 {
++		if options.Insecure || options.DisableSNI || len(options.Certificate) > 0 || options.CertificatePath != "" {
+@@ -120 +120 @@ func NewSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
+-			return verifyPublicKeySHA256(options.CertificatePublicKeySHA256, rawCerts, tlsConfig.Time)
++			return verifyPinnedServer(options.CertificateSHA256, options.CertificatePublicKeySHA256, rawCerts, serverName, tlsConfig.Time)
+diff --git a/common/tls/utls_client.go b/common/tls/utls_client.go
+index 1db3e493..fe01e4ee 100644
+--- a/common/tls/utls_client.go
++++ b/common/tls/utls_client.go
+@@ -170,2 +170,2 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+-	if len(options.CertificatePublicKeySHA256) > 0 {
+-		if len(options.Certificate) > 0 || options.CertificatePath != "" {
++	if len(options.CertificatePublicKeySHA256) > 0 || len(options.CertificateSHA256) > 0 {
++		if options.Insecure || options.DisableSNI || len(options.Certificate) > 0 || options.CertificatePath != "" {
+@@ -176 +176 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
+-			return verifyPublicKeySHA256(options.CertificatePublicKeySHA256, rawCerts, tlsConfig.Time)
++			return verifyPinnedServer(options.CertificateSHA256, options.CertificatePublicKeySHA256, rawCerts, serverName, tlsConfig.Time)
+diff --git a/option/tls.go b/option/tls.go
+index 60343a15..d146d6ca 100644
+--- a/option/tls.go
++++ b/option/tls.go
+@@ -97,0 +98 @@ type OutboundTLSOptions struct {
++	CertificateSHA256          badoption.Listable[[]byte]          `json:"certificate_sha256,omitempty"`

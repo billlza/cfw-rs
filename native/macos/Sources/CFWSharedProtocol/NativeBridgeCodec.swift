@@ -54,10 +54,11 @@ private enum NativeBridgeRequestShape {
       try exactKeys(command, ["opcode", "payload"])
       let payload = try object(command["payload"])
       try exactKeys(payload, ["action"])
-    case .startSystemProxy, .startTunnel, .authorizeTunnelConfiguration:
+    case .checkConfiguration, .startLocalProxy, .startSystemProxy, .startTunnel,
+      .authorizeTunnelConfiguration:
       try exactKeys(command, ["opcode", "payload"])
       try validateEngineStartRequest(requestPayload(command))
-    case .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
+    case .stopLocalProxy, .stopSystemProxy, .installTunnel, .cancelTunnelInstall, .stopTunnel:
       try exactKeys(command, ["opcode", "payload"])
       let payload = try object(command["payload"])
       try exactKeys(payload, ["context"])
@@ -82,6 +83,13 @@ private enum NativeBridgeRequestShape {
       try exactKeys(request, ["audience", "references"])
       try validateAudience(request["audience"])
       try validateReferences(request["references"])
+    case .rebindProfileCredentials:
+      try exactKeys(command, ["opcode", "payload"])
+      let request = try requestPayload(command)
+      try exactKeys(request, ["previous_audience", "audience", "slots"])
+      try validateAudience(request["previous_audience"])
+      try validateAudience(request["audience"])
+      try validateCredentialSlots(request["slots"])
     case .testProfileDelays:
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
@@ -137,7 +145,7 @@ private enum NativeBridgeRequestShape {
     try exactKeys(
       request,
       [
-        "context", "credential_audience", "config_json", "config_content_digest",
+        "mode", "context", "credential_audience", "config_json", "config_content_digest",
         "config_digest", "credential_slots", "tunnel_options",
       ]
     )

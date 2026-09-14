@@ -1,21 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+mod tls;
 
 use crate::profile::{
-    MAX_OUTBOUNDS, OutboundTls, ProfileDocument, ProfileOutbound, TlsCurve, TlsMinimumVersion,
-    V2RayPacketEncoding, V2RayTransport, VlessFlow,
+    MAX_OUTBOUNDS, OutboundTls, ProfileDocument, ProfileOutbound, V2RayPacketEncoding,
+    V2RayTransport, VlessFlow,
 };
 use crate::{ConfigError, CredentialKind, CredentialRef};
 
 const MAX_TAG_BYTES: usize = 128;
 const MAX_SERVER_BYTES: usize = 253;
 const MAX_PATH_BYTES: usize = 2_048;
-const MAX_ALPN_ENTRIES: usize = 8;
 const MAX_HYSTERIA2_SERVER_PORT_ITEMS: usize = 64;
 
 impl ProfileDocument {
@@ -23,7 +19,32 @@ impl ProfileDocument {
         if self.outbounds.is_empty() || self.outbounds.len() > MAX_OUTBOUNDS {
             return Err(unsupported_shape(
                 "$.outbounds",
-                "outbound count is outside the accepted 1..=128 range",
+                format!("outbound count is outside the accepted 1..={MAX_OUTBOUNDS} range"),
+            ));
+        }
+        let nodes = self
+            .outbounds
+            .iter()
+            .filter(|outbound| outbound.is_remote())
+            .count();
+        let groups = self
+            .outbounds
+            .iter()
+            .filter(|outbound| outbound.group_members().is_some())
+            .count();
+        let memberships: usize = self
+            .outbounds
+            .iter()
+            .filter_map(ProfileOutbound::group_members)
+            .map(<[String]>::len)
+            .sum();
+        if nodes > crate::MAX_PROXY_NODES
+            || groups > crate::MAX_PROXY_GROUPS
+            || memberships > crate::MAX_GROUP_MEMBERSHIPS
+        {
+            return Err(unsupported_shape(
+                "$.outbounds",
+                "profile exceeds the node, group, or membership capacity",
             ));
         }
 
@@ -63,7 +84,7 @@ impl ProfileDocument {
         }
         self.validate_routing(&tags)?;
         if let Some(dns) = &self.dns {
-            dns.validate()?;
+            dns.validate(self)?;
         }
         crate::dns_policy::validate_hosts(&self.hosts)?;
         Ok(())
@@ -71,7 +92,7 @@ impl ProfileDocument {
 }
 
 impl ProfileOutbound {
-    fn validate(&self, path: &str) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self, path: &str) -> Result<(), ConfigError> {
         validate_tag(self.tag(), &format!("{path}.tag"))?;
         match self {
             Self::Direct { .. } | Self::Block { .. } => Ok(()),
@@ -175,10 +196,27 @@ impl ProfileOutbound {
                 outbounds,
                 url,
                 interval_seconds,
-                tolerance_ms,
+                idle_timeout_seconds,
+                ..
+            }
+            | Self::Fallback {
+                outbounds,
+                url,
+                interval_seconds,
+                idle_timeout_seconds,
+                ..
+            }
+            | Self::LoadBalance {
+                outbounds,
+                url,
+                interval_seconds,
                 idle_timeout_seconds,
                 ..
             } => {
+                let tolerance_ms = match self {
+                    Self::UrlTest { tolerance_ms, .. } => *tolerance_ms,
+                    _ => 0,
+                };
                 if outbounds.is_empty()
                     || outbounds.len() > MAX_OUTBOUNDS
                     || outbounds.iter().collect::<BTreeSet<_>>().len() != outbounds.len()
@@ -205,7 +243,7 @@ impl ProfileOutbound {
                     ));
                 }
                 if !(30..=86_400).contains(interval_seconds)
-                    || *tolerance_ms > 10_000
+                    || tolerance_ms > 10_000
                     || *idle_timeout_seconds < *interval_seconds
                     || *idle_timeout_seconds > 604_800
                 {
@@ -236,6 +274,33 @@ impl ProfileOutbound {
                         path,
                         "authentication.password_credential_ref",
                     )?;
+                }
+                Ok(())
+            }
+            Self::Http {
+                server,
+                server_port,
+                authentication,
+                tls,
+                ..
+            } => {
+                validate_remote_endpoint(server, *server_port, path)?;
+                validate_optional_tls(tls.as_ref(), path)?;
+                if let Some(authentication) = authentication {
+                    validate_reference_kind_at(
+                        &authentication.username_credential_ref,
+                        CredentialKind::HttpProxyUsername,
+                        path,
+                        "authentication.username_credential_ref",
+                    )?;
+                    if let Some(password) = &authentication.password_credential_ref {
+                        validate_reference_kind_at(
+                            password,
+                            CredentialKind::HttpProxyPassword,
+                            path,
+                            "authentication.password_credential_ref",
+                        )?;
+                    }
                 }
                 Ok(())
             }
@@ -534,120 +599,6 @@ fn validate_quic_tls(tls: &OutboundTls, path: &str) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
-}
-
-impl OutboundTls {
-    pub(crate) fn validate(&self, path: &str) -> Result<(), ConfigError> {
-        validate_server_name(&self.server_name, &format!("{path}.tls.server_name"))?;
-        if self.alpn.len() > MAX_ALPN_ENTRIES
-            || self.alpn.iter().any(|alpn| {
-                alpn.is_empty()
-                    || alpn.len() > 32
-                    || alpn.bytes().any(|byte| !byte.is_ascii_graphic())
-            })
-        {
-            return Err(unsupported_shape(
-                format!("{path}.tls.alpn"),
-                "ALPN list is oversized or contains an invalid token",
-            ));
-        }
-        if !self.enabled
-            && (!self.alpn.is_empty()
-                || self.utls.is_some()
-                || self.reality.is_some()
-                || self.ech.is_some()
-                || !self.curve_preferences.is_empty()
-                || self.min_version == TlsMinimumVersion::Tls13)
-        {
-            return Err(unsupported_shape(
-                format!("{path}.tls.enabled"),
-                "TLS options require enabled TLS",
-            ));
-        }
-        if self.curve_preferences.len() > 5
-            || self.curve_preferences.iter().collect::<BTreeSet<_>>().len()
-                != self.curve_preferences.len()
-        {
-            return Err(unsupported_shape(
-                path,
-                "TLS curves must be unique and supported",
-            ));
-        }
-        if !self.curve_preferences.is_empty() && (self.utls.is_some() || self.reality.is_some()) {
-            return Err(unsupported_shape(
-                path,
-                "explicit key-exchange curves require standard TLS; this runtime's uTLS and Reality adapters do not apply them",
-            ));
-        }
-        if self.curve_preferences == [TlsCurve::X25519MLKEM768]
-            && self.min_version != TlsMinimumVersion::Tls13
-        {
-            return Err(unsupported_shape(
-                path,
-                "requiring X25519MLKEM768 also requires TLS 1.3 to prevent a classical TLS 1.2 downgrade",
-            ));
-        }
-        if let Some(ech) = &self.ech {
-            if !ech.enabled
-                || self.reality.is_some()
-                || self.min_version != TlsMinimumVersion::Tls13
-            {
-                return Err(unsupported_shape(
-                    path,
-                    "ECH must be enabled with TLS 1.3 and cannot be combined with Reality",
-                ));
-            }
-            let pem = ech.config.join("\n");
-            let payload = pem
-                .strip_prefix("-----BEGIN ECH CONFIGS-----\n")
-                .and_then(|value| {
-                    value
-                        .trim_end_matches('\n')
-                        .strip_suffix("\n-----END ECH CONFIGS-----")
-                })
-                .ok_or_else(|| {
-                    unsupported_shape(path, "ECH requires an inline ECH CONFIGS PEM block")
-                })?;
-            if pem.len() > 16_384 || ech.config.len() > 256 {
-                return Err(unsupported_shape(path, "ECH config exceeds its size bound"));
-            }
-            let bytes = STANDARD
-                .decode(payload.replace('\n', ""))
-                .map_err(|_| unsupported_shape(path, "ECH config contains invalid base64"))?;
-            if bytes.len() < 6
-                || usize::from(u16::from_be_bytes([bytes[0], bytes[1]])) != bytes.len() - 2
-            {
-                return Err(unsupported_shape(path, "ECHConfigList length is invalid"));
-            }
-        }
-        if self.utls.as_ref().is_some_and(|utls| !utls.enabled) {
-            return Err(unsupported_shape(
-                format!("{path}.tls.utls.enabled"),
-                "uTLS options must be explicitly enabled when present",
-            ));
-        }
-        if let Some(reality) = &self.reality
-            && (!reality.enabled
-                || reality.public_key.len() != 43
-                || !is_valid_reality_public_key(&reality.public_key)
-                || reality.short_id.len() > 16
-                || reality.short_id.len() % 2 != 0
-                || !reality
-                    .short_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        {
-            return Err(unsupported_shape(
-                format!("{path}.tls.reality"),
-                "Reality public_key or short_id is invalid",
-            ));
-        }
-        Ok(())
-    }
-}
-
-fn is_valid_reality_public_key(value: &str) -> bool {
-    matches!(URL_SAFE_NO_PAD.decode(value), Ok(key) if key.len() == 32)
 }
 
 fn validate_hysteria2_server_ports(

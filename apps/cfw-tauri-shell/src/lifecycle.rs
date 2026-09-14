@@ -240,6 +240,12 @@ pub(crate) async fn prepare_handoff_exit(
             }
             lifecycle_lease.active = false;
             app.state::<LiveStreams>().stop_all();
+            if let Err(error) = app
+                .state::<crate::commands::ManagedProviders>()
+                .stop_refresh()
+            {
+                eprintln!("provider refresh shutdown failed: {error}");
+            }
             Ok(())
         }
         Err(error) => Err(format!(
@@ -256,6 +262,12 @@ fn finish_exit(
     app.state::<AppLifecycle>()
         .mark_exit_ready(LIFECYCLE_SHUTDOWN, maintenance)?;
     app.state::<LiveStreams>().stop_all();
+    if let Err(error) = app
+        .state::<crate::commands::ManagedProviders>()
+        .stop_refresh()
+    {
+        eprintln!("provider refresh shutdown failed: {error}");
+    }
     app.exit(exit_code);
     Ok(())
 }

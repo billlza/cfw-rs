@@ -1,10 +1,17 @@
 // Local source admission only. Parsing and credential extraction remain in
 // the native import boundary; source text never enters the renderer store.
-export const MAX_PROFILE_SOURCE_BYTES = 512 * 1024;
+export const MAX_PROFILE_SOURCE_BYTES = 4 * 1024 * 1024;
 export const PROFILE_SOURCE_ACCEPT = ".json,.yaml,.yml,.conf,.txt,application/json,text/yaml,text/plain";
 
 export function isSubscriptionSource(source) {
-  return /^https?:\/\//iu.test(source);
+  if (!/^https?:\/\//iu.test(source)) return false;
+  try {
+    const parsed = new URL(source);
+    // An explicit Basic identity or node label identifies an HTTP proxy link.
+    // Plain HTTPS links remain subscriptions; bare proxy endpoints can be
+    // imported as JSON/YAML or given a #node-name fragment.
+    return !parsed.username && !parsed.password && !parsed.hash;
+  } catch { return true; }
 }
 
 export function isProfileSourcePath(path) {

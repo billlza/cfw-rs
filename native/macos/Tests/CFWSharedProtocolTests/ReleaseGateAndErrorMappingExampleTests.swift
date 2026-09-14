@@ -57,9 +57,9 @@ private func exampleSnapshotEvent() throws -> AuthorityEvent {
 
 @Test func exactProtocolBoundConstantsMatchTheV1Contract() {
   #expect(AuthorityV1Limits.maximumEnvelopeBytes == 1_048_576)
-  #expect(AuthorityV1Limits.maximumConfigurationBytes == 786_432)
+  #expect(AuthorityV1Limits.maximumConfigurationBytes == 4 * 1_024 * 1_024)
   #expect(AuthorityV1Limits.maximumTotalSecretBytes == 262_144)
-  #expect(AuthorityV1Limits.maximumCredentialSlots == 256)
+  #expect(AuthorityV1Limits.maximumCredentialSlots == 2_048)
   #expect(AuthorityV1Limits.maximumIndividualSecretBytes == 16_384)
   #expect(AuthorityV1Limits.maximumReadOnlyRequests == 64)
   #expect(AuthorityV1Limits.maximumMutatingTransactions == 1)
@@ -90,7 +90,7 @@ private func exampleSnapshotEvent() throws -> AuthorityEvent {
     configSHA256: config, identitySHA256: identity,
     credentialAudience: try testCredentialAudience(),
     credentialSlots: [], tunnelOptions: nil)
-  #expect(atLimit.byteCount == 786_432)
+  #expect(atLimit.byteCount == 4 * 1_024 * 1_024)
   #expect(throws: AuthorityV1ValidationError.boundViolation) {
     try AuthorityConfigurationDescriptor(
       byteCount: UInt32(AuthorityV1Limits.maximumConfigurationBytes + 1),
@@ -119,10 +119,13 @@ private func exampleSnapshotEvent() throws -> AuthorityEvent {
   let fullSlots = try (0..<AuthorityV1Limits.maximumCredentialSlots).map { _ in
     try AuthoritySecretSlot(
       reference: CredentialReference(id: UUID(), kind: .trojanPassword),
-      copying: Data(repeating: 1, count: 1_024))
+      copying: Data(
+        repeating: 1,
+        count: AuthorityV1Limits.maximumTotalSecretBytes / AuthorityV1Limits.maximumCredentialSlots)
+    )
   }
   let material = try AuthoritySecretMaterial(slots: fullSlots)
-  #expect(material.slots.count == 256)
+  #expect(material.slots.count == 2_048)
   #expect(material.totalByteCount == 262_144)
   material.erase()
 

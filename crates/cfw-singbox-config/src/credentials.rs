@@ -6,8 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const MAX_CREDENTIAL_SLOTS: usize = 256;
-const MAX_CREDENTIAL_OUTBOUNDS: usize = 128;
+pub use crate::capacity::MAX_CREDENTIAL_SLOTS;
+const MAX_CREDENTIAL_OUTBOUNDS: usize = crate::capacity::MAX_OUTBOUNDS;
 const MAX_CREDENTIAL_SECRET_BYTES: usize = 16 * 1024;
 const MAX_SOCKS5_CREDENTIAL_SECRET_BYTES: usize = 255;
 
@@ -123,6 +123,8 @@ pub enum CredentialKind {
     WireGuardPreSharedKey,
     Socks5Username,
     Socks5Password,
+    HttpProxyUsername,
+    HttpProxyPassword,
     ShadowsocksPassword,
     VmessUuid,
     VlessUuid,
@@ -202,6 +204,8 @@ pub enum CredentialTarget {
     WireGuardPreSharedKey,
     Socks5Username,
     Socks5Password,
+    HttpProxyUsername,
+    HttpProxyPassword,
     ShadowsocksPassword,
     VmessUuid,
     VlessUuid,
@@ -221,6 +225,8 @@ impl CredentialTarget {
             Self::WireGuardPreSharedKey => CredentialKind::WireGuardPreSharedKey,
             Self::Socks5Username => CredentialKind::Socks5Username,
             Self::Socks5Password => CredentialKind::Socks5Password,
+            Self::HttpProxyUsername => CredentialKind::HttpProxyUsername,
+            Self::HttpProxyPassword => CredentialKind::HttpProxyPassword,
             Self::ShadowsocksPassword => CredentialKind::ShadowsocksPassword,
             Self::VmessUuid => CredentialKind::VmessUuid,
             Self::VlessUuid => CredentialKind::VlessUuid,
@@ -237,8 +243,9 @@ impl CredentialTarget {
         match self {
             Self::WireGuardPrivateKey => "private_key",
             Self::WireGuardPreSharedKey => "peers/0/pre_shared_key",
-            Self::Socks5Username => "username",
+            Self::Socks5Username | Self::HttpProxyUsername => "username",
             Self::Socks5Password
+            | Self::HttpProxyPassword
             | Self::ShadowsocksPassword
             | Self::TrojanPassword
             | Self::Hysteria2Password
@@ -253,6 +260,8 @@ impl CredentialTarget {
         match self {
             Self::WireGuardPrivateKey | Self::WireGuardPreSharedKey => "endpoints",
             Self::Socks5Username
+            | Self::HttpProxyUsername
+            | Self::HttpProxyPassword
             | Self::Socks5Password
             | Self::ShadowsocksPassword
             | Self::VmessUuid
@@ -441,6 +450,12 @@ impl<'a> CredentialSecret<'a> {
             kind,
             CredentialKind::Socks5Username | CredentialKind::Socks5Password
         ) && self.0.len() > MAX_SOCKS5_CREDENTIAL_SECRET_BYTES
+        {
+            return Err(InvalidCredentialSecret);
+        }
+        if (kind == CredentialKind::HttpProxyUsername
+            && (self.0.len() > 1024 || self.0.contains(':')))
+            || (kind == CredentialKind::HttpProxyPassword && self.0.len() > 4096)
         {
             return Err(InvalidCredentialSecret);
         }

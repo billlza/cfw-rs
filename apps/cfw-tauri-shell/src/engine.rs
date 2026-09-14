@@ -1,6 +1,8 @@
 mod cutover;
 mod endpoints;
 mod maintenance;
+mod runtime_settings;
+pub(crate) use runtime_settings::change_runtime_preferences;
 #[cfg(feature = "physical-release-evidence")]
 pub mod packet_evidence;
 
@@ -28,7 +30,7 @@ use crate::commands::ManagedProfiles;
 use crate::legacy::{LegacyRetirementGate, load_replacement_engine_settings};
 use crate::settings_store;
 use cutover::CutoverPreparationGate;
-use endpoints::{EndpointCandidateCursor, EndpointRole, select_process_engine_settings};
+use endpoints::{EndpointCandidateCursor, EndpointRole};
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
 use maintenance::{EngineMaintenanceGate, EngineModeChangeIntent, EngineModeChangeLease};
 
@@ -44,11 +46,22 @@ pub(crate) fn switch_transition(
     enabled: bool,
 ) -> Option<EngineMode> {
     let desired = snapshot.desired_mode;
-    let target = match switch {
+    let mut target = match switch {
         EngineMode::SystemProxy => EngineMode::from_switches(enabled, desired.tunnel_enabled()),
         EngineMode::Tunnel => EngineMode::from_switches(desired.system_proxy_enabled(), enabled),
-        EngineMode::Off | EngineMode::TunnelSystemProxy => return None,
+        EngineMode::Off | EngineMode::LocalProxy | EngineMode::TunnelSystemProxy => return None,
     };
+    // Removing the last integration preserves a ready core. Cancelling a
+    // pending/failed start is a stop, and must never start a new local runtime.
+    let ready = matches!(&snapshot.state,
+        EngineState::LocalProxyActive { runtime }
+        | EngineState::ProxyActive { runtime }
+        | EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime } if runtime.ready
+    );
+    if !enabled && target == EngineMode::LocalProxy && !ready {
+        target = EngineMode::Off;
+    }
     if target != desired {
         return Some(target);
     }
@@ -62,7 +75,8 @@ pub(crate) fn switch_transition(
             ..
         } if *failed_target == target => Some(target),
         EngineState::AwaitingApproval { .. } if target.tunnel_enabled() => Some(target),
-        EngineState::ProxyActive { runtime }
+        EngineState::LocalProxyActive { runtime }
+        | EngineState::ProxyActive { runtime }
         | EngineState::TunnelActive { runtime }
         | EngineState::TunnelSystemProxyActive { runtime }
             if !runtime.ready =>
@@ -77,7 +91,7 @@ fn mode_owns_switch(mode: EngineMode, switch: EngineMode) -> bool {
     match switch {
         EngineMode::SystemProxy => mode.system_proxy_enabled(),
         EngineMode::Tunnel => mode.tunnel_enabled(),
-        EngineMode::Off | EngineMode::TunnelSystemProxy => false,
+        EngineMode::Off | EngineMode::LocalProxy | EngineMode::TunnelSystemProxy => false,
     }
 }
 
@@ -93,7 +107,10 @@ pub(crate) fn serialized_switch_transition(
     switch: EngineMode,
     enabled: bool,
 ) -> Result<Option<EngineMode>, &'static str> {
-    if !enabled && !mode_owns_switch(observed.desired_mode, switch) {
+    if !enabled
+        && (!mode_owns_switch(observed.desired_mode, switch)
+            || !mode_owns_switch(current.desired_mode, switch))
+    {
         return Ok(None);
     }
     if enabled && observed != current {
@@ -106,6 +123,7 @@ pub(crate) fn serialized_switch_transition(
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) struct EngineCapabilities {
+    local_proxy: bool,
     system_proxy: bool,
     tunnel: bool,
     provider_management: bool,
@@ -167,6 +185,18 @@ impl StagedEndpointRebind {
 }
 
 impl ManagedEngine {
+    pub(crate) fn mode_intent_revision(&self) -> Result<u64, EngineMaintenanceError> {
+        self.maintenance.intent_revision()
+    }
+    pub(crate) async fn begin_automatic_mode_change(
+        &self,
+        mode: EngineMode,
+        revision: u64,
+    ) -> Result<EngineModeChangeLease, EngineMaintenanceError> {
+        self.maintenance
+            .begin_mode_change_if_current(EngineModeChangeIntent::Set(mode), Some(revision))
+            .await
+    }
     /// The single engine-settings value this process starts modes with, so the
     /// running engine's controller is exactly the one held in memory here.
     pub(crate) fn engine_settings(&self) -> Result<EngineSettings, String> {
@@ -242,7 +272,8 @@ impl ManagedEngine {
             .reserve_if_idle()
             .map_err(|error| match error {
                 EngineMaintenanceError::AlreadyActive
-                | EngineMaintenanceError::ModeChangeActive => ProfileControlError::MaintenanceBusy,
+                | EngineMaintenanceError::ModeChangeActive
+                | EngineMaintenanceError::StaleIntent => ProfileControlError::MaintenanceBusy,
                 EngineMaintenanceError::StateLock | EngineMaintenanceError::QueueFull => {
                     ProfileControlError::StateUnavailable
                 }
@@ -285,6 +316,7 @@ impl ManagedEngine {
     pub(crate) fn require_capability(&self, mode: EngineMode) -> Result<(), String> {
         let available = match mode {
             EngineMode::Off => false,
+            EngineMode::LocalProxy => self.capabilities.local_proxy,
             EngineMode::SystemProxy => self.capabilities.system_proxy,
             EngineMode::Tunnel => self.capabilities.tunnel,
             EngineMode::TunnelSystemProxy => {
@@ -315,9 +347,10 @@ impl ManagedEngine {
         let retirement_reason = retirement.status()?.start_block_reason();
         let capabilities = if retirement_reason.is_some() {
             EngineCapabilities {
+                local_proxy: false,
                 system_proxy: false,
                 tunnel: false,
-                provider_management: false,
+                provider_management: true,
             }
         } else {
             self.capabilities
@@ -346,8 +379,17 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
                 .map_err(|error| format!("persisted engine endpoints are unusable: {error}"))?;
             (settings, cursor)
         }
-        None => select_process_engine_settings(EngineSettings::default())
-            .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))?,
+        None => {
+            let preferences = store
+                .runtime_settings::<cfw_singbox_config::RuntimePreferences>()
+                .map_err(|error| error.to_string())?
+                .settings;
+            let settings = preferences
+                .apply_to(EngineSettings::default())
+                .map_err(|error| error.to_string())?;
+            endpoints::select_configured_engine_settings(settings, preferences.preferred_mixed_port)
+                .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))?
+        }
     };
     let controller = EngineControllerAccess::resolve(settings)
         .map_err(|error| format!("engine settings are unusable: {error}"))?;
@@ -387,12 +429,13 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
     Ok(ManagedEngine {
         coordinator,
         capabilities: EngineCapabilities {
+            local_proxy: native_available && lineage_failure.is_none(),
             system_proxy: native_available && lineage_failure.is_none(),
             tunnel: native_available && lineage_failure.is_none(),
             // The pinned sing-box 1.13.15 schema cannot construct proxy or
             // rule providers. Keep the controller commands as explicit
             // fail-closed backstops, but do not advertise or probe them.
-            provider_management: false,
+            provider_management: true,
         },
         unavailable_reason: lineage_failure.or(native_failure),
         preflight_backend,
@@ -513,6 +556,81 @@ pub(crate) async fn apply_admitted_engine_mode(
     engine.status_payload(retirement)
 }
 
+/// A profile transaction owns the same queue as explicit mode changes. Native
+/// preparation runs in the actor, so status polling cannot mistake bridge Busy
+/// for a crashed active runtime. The owned task survives a dropped UI waiter.
+pub(crate) async fn apply_profile_change<T, F, P>(
+    engine: &ManagedEngine,
+    retirement: &LegacyRetirementGate,
+    prepare: P,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<cfw_application::ProfileChange<T>, String>>
+        + Send
+        + 'static,
+    P: FnOnce(EngineSettings) -> F + Send + 'static,
+{
+    let (mode, lease) = engine
+        .begin_current_mode_change()
+        .await
+        .map_err(|error| error.to_string())?;
+    let start_admission = if mode != EngineMode::Off {
+        crate::legacy::require_network_start_allowed(retirement)
+            .and_then(|()| engine.require_capability(mode))
+    } else {
+        Ok(())
+    };
+    let settings = engine.engine_settings()?;
+    let coordinator = engine.coordinator.clone();
+    let endpoints = engine.endpoints.clone();
+    let authorization = engine.authorization_bridge.clone();
+    let (result, lease) = lease
+        .run_to_completion(async move {
+            let before = coordinator.snapshot();
+            let preparation_settings = settings.clone();
+            let result = coordinator
+                .change_profile(settings, async move {
+                    let candidate = prepare(preparation_settings)
+                        .await
+                        .map_err(EngineCoordinatorError::ProfilePreparation)?;
+                    if candidate.activate && mode != EngineMode::Off {
+                        start_admission.map_err(EngineCoordinatorError::ProfilePreparation)?;
+                        authorize_proxy_transition(
+                            authorization.as_ref(),
+                            mode != EngineMode::SystemProxy,
+                        )
+                        .await
+                        .map_err(EngineCoordinatorError::ProfilePreparation)?;
+                    }
+                    Ok(candidate)
+                })
+                .await;
+            // Failed replacements may have restored a new generation of the old
+            // source. Always refresh controller identity from the resulting state.
+            let after = coordinator.snapshot();
+            let binding = if after == before {
+                Ok(())
+            } else {
+                record_endpoint_runtime(&endpoints, &after)
+            };
+            match (result, binding) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(error), Ok(())) => Err(error.to_string()),
+                (Ok(_), Err(binding)) => Err(format!(
+                    "profile committed, but controller identity refresh failed: {binding}"
+                )),
+                (Err(error), Err(binding)) => Err(format!(
+                    "{error}; controller identity refresh also failed: {binding}"
+                )),
+            }
+        })
+        .await
+        .map_err(|_| "profile transaction task ended without a response".to_owned())?;
+    drop(lease);
+    result
+}
+
 async fn authorize_proxy_transition(
     authorization: &dyn cfw_apple_network::NativeBridge,
     restoration_only: bool,
@@ -597,8 +715,8 @@ fn record_endpoint_runtime(
     let active = match &snapshot.state {
         EngineState::Off if snapshot.desired_mode == EngineMode::Off => None,
         EngineState::AwaitingApproval { .. } if snapshot.desired_mode.tunnel_enabled() => None,
-        EngineState::ProxyActive { runtime }
-            if snapshot.desired_mode == EngineMode::SystemProxy
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
+            if snapshot.desired_mode == snapshot.state.active_mode()
                 && runtime.owner == EngineOwner::ProxyAgent
                 && runtime.ready
                 && runtime.context.generation == snapshot.generation

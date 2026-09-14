@@ -297,6 +297,54 @@ impl EngineModeCoordinator {
         self.snapshots.borrow().clone()
     }
 
+    /// Serializes native preparation, candidate validation, runtime replacement
+    /// and the storage commit with status polling and mode changes. Fetch remote
+    /// input before calling this method. The actor reads the current mode when
+    /// it admits the command, so an earlier explicit stop remains stopped.
+    pub async fn change_profile<T, F>(
+        &self,
+        settings: EngineSettings,
+        prepare: F,
+    ) -> Result<T, EngineCoordinatorError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<crate::ProfileChange<T>, EngineCoordinatorError>>
+            + Send
+            + 'static,
+    {
+        let (value_tx, value_rx) = oneshot::channel();
+        let preparation = Box::pin(async move {
+            let candidate = prepare.await?;
+            Ok(crate::ProfileChange {
+                profile_id: candidate.profile_id,
+                profile: candidate.profile,
+                activate: candidate.activate,
+                previous_profile: candidate.previous_profile,
+                commit: Box::new(move || {
+                    let value = (candidate.commit)()?;
+                    let _waiter_dropped = value_tx.send(value);
+                    Ok(())
+                }),
+            })
+        });
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::ChangeProfile(Box::new(
+                crate::coordinator_actor::ChangeProfileCommand {
+                    settings,
+                    prepare: preparation,
+                    response: response_tx,
+                },
+            )))
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)??;
+        value_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<EngineSnapshot> {
         self.snapshots.clone()
     }

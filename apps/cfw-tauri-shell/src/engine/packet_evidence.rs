@@ -1074,6 +1074,21 @@ mod tests {
     }
 
     impl EngineBackend for FakeBackend {
+        fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn start_local_proxy(
+            &self,
+            _request: EngineStartRequest,
+        ) -> BackendFuture<'_, RuntimeIdentity> {
+            panic!("Local proxy is outside the packet evidence fixture")
+        }
+
+        fn stop_local_proxy(&self, _context: EngineCommandContext) -> BackendFuture<'_, ()> {
+            panic!("Local proxy is outside the packet evidence fixture")
+        }
+
         fn authorize_tunnel_configuration(
             &self,
             _request: EngineStartRequest,

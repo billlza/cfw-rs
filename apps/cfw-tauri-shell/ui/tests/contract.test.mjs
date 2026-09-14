@@ -97,7 +97,7 @@ function dashboardMatches(pattern) {
   return found;
 }
 
-const invoked = dashboardMatches(/invoke\("([a-z0-9_]+)"/gu);
+const invoked = dashboardMatches(/invoke(?:ProfileChange)?\("([a-z0-9_]+)"/gu);
 const listened = dashboardMatches(/listen\("([a-z][a-z0-9:/-]+)"/gu);
 
 test("renderer pages are exactly the shared page contract", () => {
@@ -116,7 +116,7 @@ test("renderer pages are exactly the shared page contract", () => {
 
 test("every command the dashboard invokes exists in generate_handler!", () => {
   const handlers = handlerCommands();
-  assert.equal(handlers.size, 81, "the release command surface is 81 commands");
+  assert.equal(handlers.size, 88, "the release command surface includes runtime and automation preferences");
   const missing = [...invoked.keys()].filter((command) => !handlers.has(command));
   assert.deepEqual(missing, [], `dashboard invokes commands that do not exist: ${missing.join(", ")}`);
 });
@@ -168,7 +168,7 @@ test("no retired command survives anywhere in the dashboard", () => {
 });
 
 test("every rendered action has a handler", () => {
-  const app = dashboardSources.find(({ file }) => file.endsWith("app.js")).source;
+  const app = dashboardSources.map(({ source }) => source).join("\n");
   const rendered = new Set(
     [...app.matchAll(/data-action="([a-z0-9-]+)"/gu)].map((match) => match[1]),
   );
@@ -193,18 +193,16 @@ test("every profile menu item has a handler", () => {
 });
 
 test("direct controller mutations are guarded by verified engine activity", () => {
-  const app = dashboardSources.find(({ file }) => file.endsWith("app.js")).source;
   const guardedCommands = new Map([
     ["set_proxy_mode", 500],
     ["select_proxy", 800],
-    ["update_proxy_provider", 900],
-    ["update_rule_provider", 900],
-    ["health_check_proxy_provider", 700],
     ["close_connection", 700],
     ["dns_query", 700],
   ]);
 
   for (const [command, maximumDistance] of guardedCommands) {
+    const owner = command === "close_connection" ? "connections.js" : "app.js";
+    const app = dashboardSources.find(({ file }) => file.endsWith(`/${owner}`)).source;
     // select_proxy has a separate saved-profile path while Off; the final
     // invocation is the live controller mutation and still requires its guard.
     const invocation = command === "select_proxy"

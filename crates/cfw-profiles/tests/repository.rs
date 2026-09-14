@@ -7,7 +7,7 @@ use std::time::Duration;
 use cfw_profiles::{ProfileError, ProfileRepository, ValidatedSingBoxProfile};
 use uuid::Uuid;
 
-const MAX_STORED_BYTES: usize = 384 * 1024;
+const MAX_STORED_BYTES: usize = cfw_singbox_config::MAX_PROFILE_BYTES + 256 * 1024;
 
 fn repository(name: &str) -> (PathBuf, ProfileRepository) {
     let root = std::env::temp_dir().join(format!(
@@ -26,6 +26,54 @@ fn profile() -> ValidatedSingBoxProfile {
     .expect("valid profile")
 }
 
+#[test]
+fn provider_sources_round_trip_privately_and_participate_in_update_conflict_detection() {
+    use std::collections::BTreeMap;
+    let value = serde_json::json!({"outbounds":[{"type":"socks5","tag":"node","server":"node.example.com","server_port":1080}],
+        "providers":{"proxies":[{"name":"Japan","source":{"interval_seconds":3600},"members":[{"tag":"node","name":"Tokyo"}],"filter":{}}]}});
+    let profile = ValidatedSingBoxProfile::parse(&value.to_string())
+        .unwrap()
+        .with_provider_sources(BTreeMap::from([(
+            "proxy:Japan".into(),
+            "https://resource.example/nodes?token=private-token".into(),
+        )]))
+        .unwrap();
+    let (root, repository) = repository("provider-private-source");
+    let imported = repository.import(Some("Providers"), &profile).unwrap();
+    let stored = repository.load(&imported.id).unwrap().unwrap();
+    assert_eq!(
+        stored.profile.provider_sources(),
+        profile.provider_sources()
+    );
+    assert!(!stored.profile.as_json().contains("private-token"));
+    assert!(
+        !serde_json::to_string(&repository.snapshot().unwrap())
+            .unwrap()
+            .contains("private-token")
+    );
+    let public = ValidatedSingBoxProfile::parse(stored.profile.as_json()).unwrap();
+    assert!(public.provider_sources().is_empty());
+    assert_eq!(public.digest(), profile.digest());
+    let changed = profile
+        .with_provider_sources(BTreeMap::from([(
+            "proxy:Japan".into(),
+            "https://resource.example/new".into(),
+        )]))
+        .unwrap();
+    repository
+        .begin_credential_profile_mutation_if_unchanged(&stored)
+        .unwrap()
+        .commit_replace_if_unchanged(&stored, None, &changed, None)
+        .unwrap();
+    assert!(
+        repository
+            .begin_credential_profile_mutation_if_unchanged(&stored)
+            .is_err(),
+        "same-digest source URL drift must not overwrite the new source"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn credential_profile(reference_id: &str) -> ValidatedSingBoxProfile {
     ValidatedSingBoxProfile::parse(&format!(
         r#"{{"outbounds":[{{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{reference_id}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"proxy.example.com"}}}}]}}"#
@@ -39,6 +87,50 @@ fn stored_path(root: &std::path::Path, id: &str) -> PathBuf {
 
 fn selection_path(root: &std::path::Path) -> PathBuf {
     root.join("profiles").join("selected-profile-v1.json")
+}
+
+#[test]
+fn prepared_online_selection_is_invisible_until_commit_and_drop_keeps_the_prior_profile() {
+    let (root, repository) = repository("online-selection");
+    let first = repository.import(Some("First"), &profile()).unwrap();
+    let second = repository.import(Some("Second"), &profile()).unwrap();
+    repository.select(&first.id).unwrap();
+    let before = fs::read(selection_path(&root)).unwrap();
+    {
+        let mutation = repository.begin_credential_profile_mutation().unwrap();
+        assert_eq!(
+            mutation.selected_profile().unwrap().unwrap().record.id,
+            first.id
+        );
+        assert_eq!(mutation.profile(&second.id).unwrap().record.id, second.id);
+        assert_eq!(fs::read(selection_path(&root)).unwrap(), before);
+    }
+    assert_eq!(repository.require_selected().unwrap().record.id, first.id);
+    repository
+        .begin_credential_profile_mutation()
+        .unwrap()
+        .commit_selection(&second.id)
+        .unwrap();
+    assert_eq!(repository.require_selected().unwrap().record.id, second.id);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_failed_prepared_selection_preserves_the_prior_selection() {
+    let (root, repository) = repository("online-selection-failure");
+    let first = repository.import(Some("First"), &profile()).unwrap();
+    repository.select(&first.id).unwrap();
+    let before = fs::read(selection_path(&root)).unwrap();
+    let missing = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let error = repository
+        .begin_credential_profile_mutation()
+        .unwrap()
+        .commit_selection(missing)
+        .unwrap_err();
+    assert!(matches!(error, ProfileError::SelectedProfileMissing(_)));
+    assert_eq!(fs::read(selection_path(&root)).unwrap(), before);
+    assert_eq!(repository.require_selected().unwrap().record.id, first.id);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

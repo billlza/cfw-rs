@@ -251,58 +251,71 @@ public enum CredentialInjector {
       }
     }
 
-    for slot in slots {
-      let index = Int(slot.outboundIndex)
-      let container = slot.target.configurationContainer
-      guard var outbounds = root[container] as? [Any], index < outbounds.count,
-        var outbound = outbounds[index] as? [String: Any],
-        let entry = supplied[slot.reference.id],
-        let secret = String(data: entry.exposedSecret(), encoding: .utf8)
-      else {
+    // Remove the container before changing its elements. Retaining the root's
+    // array during each slot write would copy the entire subscription per slot.
+    for container in ["outbounds", "endpoints"] {
+      let containerSlots = slots.filter { $0.target.configurationContainer == container }
+      if containerSlots.isEmpty { continue }
+      guard var outbounds = root.removeValue(forKey: container) as? [Any] else {
         throw CredentialMaterialError.invalidConfiguration
       }
-      switch slot.target {
-      case .wireguardPrivateKey:
-        guard outbound["type"] as? String == "wireguard", outbound["private_key"] as? String == ""
+      for slot in containerSlots {
+        let index = Int(slot.outboundIndex)
+        guard index < outbounds.count,
+          var outbound = outbounds[index] as? [String: Any],
+          let entry = supplied[slot.reference.id],
+          let secret = String(data: entry.exposedSecret(), encoding: .utf8)
         else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          throw CredentialMaterialError.invalidConfiguration
         }
-        outbound["private_key"] = secret
-      case .wireguardPreSharedKey:
-        guard outbound["type"] as? String == "wireguard",
-          var peers = outbound["peers"] as? [[String: Any]], peers.count == 1,
-          peers[0]["pre_shared_key"] as? String == ""
-        else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+        if (slot.target == .httpProxyUsername || slot.target == .httpProxyPassword)
+          && outbound["type"] as? String != "http"
+        {
+          throw CredentialMaterialError.invalidConfiguration
         }
-        peers[0]["pre_shared_key"] = secret
-        outbound["peers"] = peers
-      case .socks5Username:
-        guard outbound["username"] as? String == "" else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+        switch slot.target {
+        case .wireguardPrivateKey:
+          guard outbound["type"] as? String == "wireguard", outbound["private_key"] as? String == ""
+          else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["private_key"] = secret
+        case .wireguardPreSharedKey:
+          guard outbound["type"] as? String == "wireguard",
+            var peers = outbound["peers"] as? [[String: Any]], peers.count == 1,
+            peers[0]["pre_shared_key"] as? String == ""
+          else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          peers[0]["pre_shared_key"] = secret
+          outbound["peers"] = peers
+        case .socks5Username, .httpProxyUsername:
+          guard outbound["username"] as? String == "" else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["username"] = secret
+        case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
+          .tuicPassword, .socks5Password, .httpProxyPassword:
+          guard outbound["password"] as? String == "" else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["password"] = secret
+        case .vmessUUID, .vlessUUID, .tuicUUID:
+          guard outbound["uuid"] as? String == "" else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["uuid"] = secret
+        case .hysteria2ObfsPassword:
+          guard var obfs = outbound["obfs"] as? [String: Any],
+            obfs["password"] as? String == ""
+          else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          obfs["password"] = secret
+          outbound["obfs"] = obfs
         }
-        outbound["username"] = secret
-      case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
-        .tuicPassword, .socks5Password:
-        guard outbound["password"] as? String == "" else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
-        }
-        outbound["password"] = secret
-      case .vmessUUID, .vlessUUID, .tuicUUID:
-        guard outbound["uuid"] as? String == "" else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
-        }
-        outbound["uuid"] = secret
-      case .hysteria2ObfsPassword:
-        guard var obfs = outbound["obfs"] as? [String: Any],
-          obfs["password"] as? String == ""
-        else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
-        }
-        obfs["password"] = secret
-        outbound["obfs"] = obfs
+        outbounds[index] = outbound
       }
-      outbounds[index] = outbound
       root[container] = outbounds
     }
     let filled = try JSONSerialization.data(

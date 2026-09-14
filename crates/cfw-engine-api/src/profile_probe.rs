@@ -12,6 +12,10 @@ pub struct ProfileDelayTestRequest {
     pub credential_slots: Vec<CredentialSlot>,
     pub proxies: Vec<String>,
     pub timeout_ms: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_status: Option<String>,
 }
 
 impl fmt::Debug for ProfileDelayTestRequest {

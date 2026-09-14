@@ -410,7 +410,7 @@ async fn run_permutation(perm: &[Step]) -> Result<(), String> {
                         ));
                     }
                     let start_generations: Vec<u64> = match mode {
-                        EngineMode::SystemProxy => backend
+                        EngineMode::LocalProxy | EngineMode::SystemProxy => backend
                             .proxy_requests()
                             .iter()
                             .map(|request| request.context.generation)

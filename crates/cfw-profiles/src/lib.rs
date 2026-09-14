@@ -39,12 +39,13 @@ const MIN_SOURCE_URL_CHARS: usize = "https://a".len();
 /// are capped well below the envelope limit.
 const MAX_SOURCE_URL_BYTES: usize = 2_048;
 const MAX_REPOSITORY_ENTRIES: usize = 4_096;
-const MAX_REPOSITORY_CREDENTIAL_REFERENCES: usize = 512;
+const MAX_REPOSITORY_CREDENTIAL_REFERENCES: usize =
+    cfw_singbox_config::MAX_CREDENTIAL_VAULT_BINDINGS;
 const MAX_REPOSITORY_BYTES: u64 = 256 * 1024 * 1024;
 // Both incoming profiles and their complete on-disk envelopes are bounded.
 // A near-limit input can therefore be rejected after envelope construction
 // rather than causing storage to exceed the documented 384 KiB ceiling.
-const MAX_ENVELOPE_BYTES: usize = MAX_PROFILE_BYTES;
+const MAX_ENVELOPE_BYTES: usize = MAX_PROFILE_BYTES + 256 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ProfileError {

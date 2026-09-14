@@ -68,9 +68,25 @@ private func contractFixture(_ name: String) throws -> Data {
   return try Data(
     contentsOf:
       root
-      .appendingPathComponent("contracts/native-bridge-v9", isDirectory: true)
+      .appendingPathComponent("contracts/native-bridge-v10", isDirectory: true)
       .appendingPathComponent(name)
   )
+}
+
+@Test func nativeCredentialRebindMatchesCrossLanguageFixture() throws {
+  let data = try contractFixture("credential-rebind-request.json")
+  let decoded = try NativeBridgeProtocolCodec.decodeRequest(data)
+  guard case .rebindProfileCredentials(let request) = decoded.command else {
+    Issue.record("wrong rebind opcode")
+    return
+  }
+  #expect(request.previousAudience.profileID == request.audience.profileID)
+  #expect(request.slots.count == 1)
+  #expect(request.slots[0].jsonPointer == "/outbounds/0/password")
+  #expect(request.slots[0].reference.kind == .trojanPassword)
+  #expect(
+    try JSONDecoder().decode(NativeRequestEnvelope.self, from: JSONEncoder().encode(decoded))
+      == decoded)
 }
 
 @Test func nativeCredentialReceiptResponseMatchesCrossLanguageFixture() throws {
@@ -94,7 +110,7 @@ private func contractFixture(_ name: String) throws -> Data {
 @Test func validMinimalQueryRequestIsAccepted() throws {
   let request = try decode(
     """
-    {"schema_version":9,"request_id":"\(requestID)","command":{"opcode":"query_status"}}
+    {"schema_version":10,"request_id":"\(requestID)","command":{"opcode":"query_status"}}
     """
   )
   #expect(request.requestID.uuidString.lowercased() == requestID)
@@ -128,38 +144,48 @@ private func contractFixture(_ name: String) throws -> Data {
   }
 }
 
-@Test func unknownEnvelopeCommandAndNestedKeysAreRejected() {
-  #expect(throws: (any Error).self) {
+@Test func nativeBridgeV9RequestIsRejectedAfterExplicitStartModeWasAdded() {
+  #expect(throws: NativeBridgeProtocolError.unsupportedSchemaVersion(9)) {
     try decode(
       """
-      {"schema_version":9,"request_id":"\(requestID)","command":{"opcode":"query_status"},"unexpected":true}
-      """
-    )
-  }
-  #expect(throws: (any Error).self) {
-    try decode(
-      """
-      {"schema_version":9,"request_id":"\(requestID)","command":{"opcode":"query_status","unexpected":true}}
-      """
-    )
-  }
-  #expect(throws: (any Error).self) {
-    try decode(
-      """
-      {"schema_version":9,"request_id":"\(requestID)","command":{"opcode":"stop_system_proxy","payload":{"context":{"installation_id":"\(installationID)","config_epoch":1,"generation":1,"unexpected":true}}}}
-      """
-    )
-  }
-  #expect(throws: (any Error).self) {
-    try decode(
-      """
-      {"schema_version":9,"request_id":"\(requestID)","command":{"opcode":"preview_credential_garbage_collection","payload":{"request":{"snapshot_digest":"\(String(repeating: "ab", count: 32))","catalog":[{"audience":{"profile_id":"\(requestID)","profile_digest":"\(String(repeating: "ee", count: 32))"},"references":[{"id":"\(credentialID)","kind":"trojan_password","unexpected":true}]}]}}}}
+      {"schema_version":9,"request_id":"\(requestID)","command":{"opcode":"query_status"}}
       """
     )
   }
 }
 
-@Test func nativeBridgeV8ContractFixturesDecodeInSwift() throws {
+@Test func unknownEnvelopeCommandAndNestedKeysAreRejected() {
+  #expect(throws: (any Error).self) {
+    try decode(
+      """
+      {"schema_version":10,"request_id":"\(requestID)","command":{"opcode":"query_status"},"unexpected":true}
+      """
+    )
+  }
+  #expect(throws: (any Error).self) {
+    try decode(
+      """
+      {"schema_version":10,"request_id":"\(requestID)","command":{"opcode":"query_status","unexpected":true}}
+      """
+    )
+  }
+  #expect(throws: (any Error).self) {
+    try decode(
+      """
+      {"schema_version":10,"request_id":"\(requestID)","command":{"opcode":"stop_system_proxy","payload":{"context":{"installation_id":"\(installationID)","config_epoch":1,"generation":1,"unexpected":true}}}}
+      """
+    )
+  }
+  #expect(throws: (any Error).self) {
+    try decode(
+      """
+      {"schema_version":10,"request_id":"\(requestID)","command":{"opcode":"preview_credential_garbage_collection","payload":{"request":{"snapshot_digest":"\(String(repeating: "ab", count: 32))","catalog":[{"audience":{"profile_id":"\(requestID)","profile_digest":"\(String(repeating: "ee", count: 32))"},"references":[{"id":"\(credentialID)","kind":"trojan_password","unexpected":true}]}]}}}}
+      """
+    )
+  }
+}
+
+@Test func nativeBridgeV10ContractFixturesDecodeInSwift() throws {
   let query = try NativeBridgeProtocolCodec.decodeRequest(
     contractFixture("query-request.json")
   )
@@ -253,7 +279,7 @@ private func contractFixture(_ name: String) throws -> Data {
     conflict.failure?.message == NativeBridgeErrorCode.controllerEndpointInUse.stableMessage)
 }
 
-@Test func nativePublicQueryJSONContractIsUnchanged() throws {
+@Test func nativePublicQueryJSONMatchesCurrentCrossLanguageContract() throws {
   let fixture = try contractFixture("query-request.json")
   let request = try NativeBridgeProtocolCodec.decodeRequest(fixture)
   let encoded = try JSONEncoder().encode(request)

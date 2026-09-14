@@ -41,6 +41,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tauri = { version = "=2.11.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "=2.4.3"
+tauri-plugin-global-shortcut = "=2.3.2"
 thiserror.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "net"] }

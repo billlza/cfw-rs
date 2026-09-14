@@ -114,7 +114,7 @@ fn active_mode(state: &EngineState) -> ActiveMode {
 /// Backend operations emitted when starting a given mode from Off.
 fn start_ops(mode: EngineMode) -> Vec<&'static str> {
     match mode {
-        EngineMode::SystemProxy => vec!["start_proxy"],
+        EngineMode::LocalProxy | EngineMode::SystemProxy => vec!["start_proxy"],
         EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
             vec!["install_tunnel", "start_tunnel"]
         }
@@ -290,7 +290,7 @@ async fn property_off_precedes_every_cross_mode_start() {
                 // Idempotent re-request of the current mode (or Off while Off):
                 // no owner is stopped and no new owner is started.
                 let expected_current_mode = match target {
-                    EngineMode::SystemProxy => ActiveMode::Proxy,
+                    EngineMode::LocalProxy | EngineMode::SystemProxy => ActiveMode::Proxy,
                     EngineMode::Tunnel | EngineMode::TunnelSystemProxy => ActiveMode::Tunnel,
                     EngineMode::Off => ActiveMode::Off,
                 };
@@ -397,6 +397,9 @@ async fn property_unproven_off_never_starts_other_mode() {
             match &error {
                 EngineCoordinatorError::GlobalOffUnproven { observed } => {
                     let expected_owner_status = match initial_mode {
+                        EngineMode::LocalProxy => {
+                            matches!(**observed, NativeEngineStatus::LocalProxy { .. })
+                        }
                         EngineMode::SystemProxy => {
                             matches!(**observed, NativeEngineStatus::SystemProxy { .. })
                         }

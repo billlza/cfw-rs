@@ -19,7 +19,7 @@ mod transport;
 
 use transport::{CallbackState, bridge_completion, parse_response};
 
-const MAXIMUM_REQUEST_BYTES: usize = 1_048_576;
+const MAXIMUM_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
 const NATIVE_BRIDGE_OPERATION_BUDGET_MILLISECONDS: u64 = 30_000;
 const NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS: u64 = 300_000;
@@ -381,6 +381,20 @@ impl NativeFrameworkBridge {
 }
 
 impl NativeBridge for NativeFrameworkBridge {
+    fn check_configuration(&self, request: EngineStartRequest) -> NativeBridgeFuture<'_, ()> {
+        Box::pin(async move {
+            match self
+                .invoke(NativeBridgeCommand::CheckConfiguration { request })
+                .await?
+            {
+                NativeBridgeResult::Acknowledged => Ok(()),
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "native configuration check returned the wrong result kind",
+                )),
+            }
+        })
+    }
     fn authorize_system_proxy(&self, restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
         Box::pin(async move {
             match self
@@ -407,6 +421,39 @@ impl NativeBridge for NativeFrameworkBridge {
                 _ => Err(NativeBridgeError::new(
                     NativeBridgeErrorCode::Internal,
                     "native query returned the wrong result kind",
+                )),
+            }
+        })
+    }
+
+    fn start_local_proxy(
+        &self,
+        request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+        Box::pin(async move {
+            match self
+                .invoke(NativeBridgeCommand::StartLocalProxy { request })
+                .await?
+            {
+                NativeBridgeResult::Runtime(runtime) => Ok(runtime),
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "native local proxy start returned the wrong result kind",
+                )),
+            }
+        })
+    }
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+        Box::pin(async move {
+            match self
+                .invoke(NativeBridgeCommand::StopLocalProxy { context })
+                .await?
+            {
+                NativeBridgeResult::Acknowledged => Ok(()),
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "native local proxy stop returned the wrong result kind",
                 )),
             }
         })

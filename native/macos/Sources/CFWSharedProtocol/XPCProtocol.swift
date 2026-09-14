@@ -37,7 +37,8 @@ public enum SystemProxyAuthorizationFailure: Int, Sendable {
   /// Bounded outbound-only application requests. No listener or OS integration
   /// may be created. Credentials remain in the separate in-memory Data argument.
   func testProfileProxies(
-    _ configuration: Data, proxies: Data, timeoutMS: UInt16,
+    _ configuration: Data, proxies: Data, timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String,
     withReply reply: @escaping (Data?, NSError?) -> Void
   )
 

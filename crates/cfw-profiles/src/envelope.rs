@@ -32,6 +32,8 @@ struct ProfileEnvelope {
     source_url: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     proxy_selections: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_sources: BTreeMap<String, String>,
 }
 
 pub(crate) struct DecodedEnvelope {
@@ -71,6 +73,7 @@ pub(crate) fn encode_with_timestamp(
             .transpose()?
             .map(ToOwned::to_owned),
         proxy_selections: profile.proxy_selections().clone(),
+        provider_sources: profile.provider_sources(),
     };
     let bytes = serde_json::to_vec(&envelope)?;
     if bytes.len() > MAX_ENVELOPE_BYTES {
@@ -132,6 +135,7 @@ pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEnvelop
     }
 
     let mut profile = ValidatedSingBoxProfile::parse(&serde_json::to_string(&envelope.profile)?)?;
+    profile = profile.with_provider_sources(envelope.provider_sources.clone())?;
     if profile.digest() != envelope.digest {
         return Err(ProfileError::DigestMismatch {
             id: expected_id.to_string(),

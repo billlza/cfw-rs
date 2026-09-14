@@ -6,21 +6,27 @@ import Foundation
 #endif
 
 public protocol LibboxProfileProbing: Sendable {
-  func test(configuration: Data, proxies: [String], timeoutMS: UInt16) throws -> [ProfileProxyDelay]
+  func test(
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
+  ) throws -> [ProfileProxyDelay]
 }
 
 public struct SourceBuiltLibboxProfileProbe: LibboxProfileProbing {
   public init() {}
 
   public func test(
-    configuration: Data, proxies: [String], timeoutMS: UInt16
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
   ) throws -> [ProfileProxyDelay] {
     try ProfileDelayTestRequest.validateTargets(proxies, timeoutMS: timeoutMS)
+    try ProfileDelayTestRequest.validateTargetURL(targetURL, expectedStatus: expectedStatus)
     let configurationText = try LibboxConfigurationDocument.text(from: configuration)
     #if canImport(Libbox)
       let names = String(decoding: try JSONEncoder().encode(proxies), as: UTF8.self)
       var error: NSError?
-      let response = LibboxTestProfileProxies(configurationText, names, Int32(timeoutMS), &error)
+      let response = LibboxTestProfileProxiesWithTarget(
+        configurationText, names, Int32(timeoutMS), targetURL, expectedStatus, &error)
       if let error {
         throw LibboxRuntimeError.serviceStartFailed(error.localizedDescription)
       }

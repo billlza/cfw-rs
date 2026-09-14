@@ -1,6 +1,6 @@
 //! Validated profile routing policy and its sing-box projection.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ const MAX_RULES: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RuleKind {
+pub enum RuleKind {
     Domain,
     DomainSuffix,
     DomainKeyword,
@@ -26,17 +26,18 @@ pub(crate) enum RuleKind {
     ProcessName,
     ProcessPath,
     GeoIp,
+    RuleSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProfileRule {
     #[serde(rename = "type")]
-    kind: RuleKind,
-    value: String,
-    outbound: String,
+    pub(crate) kind: RuleKind,
+    pub(crate) value: String,
+    pub(crate) outbound: String,
     #[serde(default)]
-    no_resolve: bool,
+    pub(crate) no_resolve: bool,
 }
 
 fn invalid(path: impl Into<String>, reason: &str) -> ConfigError {
@@ -48,14 +49,20 @@ fn invalid(path: impl Into<String>, reason: &str) -> ConfigError {
 
 impl ProfileDocument {
     pub(crate) fn validate_routing(&self, tags: &BTreeSet<&str>) -> Result<(), ConfigError> {
+        let by_tag: BTreeMap<_, _> = self
+            .outbounds
+            .iter()
+            .map(|outbound| (outbound.tag(), outbound))
+            .collect();
+        if let Some(providers) = &self.providers {
+            providers.validate(self, tags)?;
+        }
         for (source, target) in &self.detours {
-            if !self
-                .outbounds
-                .iter()
-                .any(|outbound| outbound.tag() == source && outbound.is_remote())
-                || !self.outbounds.iter().any(|outbound| {
-                    outbound.tag() == target
-                        && (outbound.is_remote() || outbound.group_members().is_some())
+            if !by_tag
+                .get(source.as_str())
+                .is_some_and(|outbound| outbound.is_remote())
+                || !by_tag.get(target.as_str()).is_some_and(|outbound| {
+                    outbound.is_remote() || outbound.group_members().is_some()
                 })
             {
                 return Err(invalid(
@@ -64,7 +71,7 @@ impl ProfileDocument {
                 ));
             }
         }
-        let mut completed = BTreeSet::new();
+        let mut completed = BTreeMap::new();
         for outbound in &self.outbounds {
             if let Some(outbounds) = outbound.group_members()
                 && outbounds
@@ -76,14 +83,43 @@ impl ProfileDocument {
                     "group member must name a declared outbound",
                 ));
             }
-            self.validate_group_path(outbound.tag(), &mut BTreeSet::new(), &mut completed)?;
+            self.validate_group_path(
+                outbound.tag(),
+                &by_tag,
+                &mut BTreeSet::new(),
+                &mut completed,
+            )?;
         }
         if let Some(route) = &self.route {
             if route.rules.len() > MAX_RULES {
                 return Err(invalid("$.route.rules", "routing rule count exceeds 8192"));
             }
+            let mut expanded = 0usize;
             for (index, rule) in route.rules.iter().enumerate() {
                 rule.validate(&format!("$.route.rules[{index}]"), tags)?;
+                expanded += if rule.kind == RuleKind::RuleSet {
+                    self.providers
+                        .as_ref()
+                        .and_then(|catalog| {
+                            catalog
+                                .rules
+                                .iter()
+                                .find(|provider| provider.name == rule.value)
+                        })
+                        .ok_or_else(|| {
+                            invalid("$.route.rules", "rule references an undeclared provider")
+                        })?
+                        .rules
+                        .len()
+                } else {
+                    1
+                };
+                if expanded > MAX_RULES {
+                    return Err(invalid(
+                        "$.route.rules",
+                        "expanded provider routing rule count exceeds 8192",
+                    ));
+                }
             }
         }
         Ok(())
@@ -92,31 +128,44 @@ impl ProfileDocument {
     fn validate_group_path<'a>(
         &'a self,
         tag: &'a str,
+        by_tag: &BTreeMap<&'a str, &'a ProfileOutbound>,
         visiting: &mut BTreeSet<&'a str>,
-        completed: &mut BTreeSet<&'a str>,
-    ) -> Result<(), ConfigError> {
-        if completed.contains(tag) {
-            return Ok(());
+        completed: &mut BTreeMap<&'a str, usize>,
+    ) -> Result<usize, ConfigError> {
+        if let Some(depth) = completed.get(tag) {
+            return Ok(*depth);
+        }
+        if visiting.len() >= 32 {
+            return Err(invalid(
+                "$.outbounds",
+                "outbound dependency depth exceeds 32",
+            ));
         }
         if !visiting.insert(tag) {
             return Err(invalid("$.outbounds", "group references form a cycle"));
         }
-        if let Some(outbounds) = self
-            .outbounds
-            .iter()
-            .find(|item| item.tag() == tag)
-            .and_then(ProfileOutbound::group_members)
+        let mut depth = 1;
+        if let Some(outbounds) = by_tag
+            .get(tag)
+            .and_then(|outbound| outbound.group_members())
         {
             for member in outbounds {
-                self.validate_group_path(member, visiting, completed)?;
+                depth =
+                    depth.max(1 + self.validate_group_path(member, by_tag, visiting, completed)?);
             }
         }
         if let Some(detour) = self.detours.get(tag) {
-            self.validate_group_path(detour, visiting, completed)?;
+            depth = depth.max(1 + self.validate_group_path(detour, by_tag, visiting, completed)?);
+        }
+        if depth > 32 {
+            return Err(invalid(
+                "$.outbounds",
+                "outbound dependency depth exceeds 32",
+            ));
         }
         visiting.remove(tag);
-        completed.insert(tag);
-        Ok(())
+        completed.insert(tag, depth);
+        Ok(depth)
     }
 
     pub(crate) fn selected_route_is_remote(&self) -> bool {
@@ -139,7 +188,11 @@ impl ProfileDocument {
             Some(ProfileOutbound::Selector {
                 outbounds, default, ..
             }) => self.route_is_remote(default.as_deref().unwrap_or(&outbounds[0]), completed),
-            Some(ProfileOutbound::UrlTest { outbounds, .. }) => outbounds
+            Some(
+                ProfileOutbound::UrlTest { outbounds, .. }
+                | ProfileOutbound::Fallback { outbounds, .. }
+                | ProfileOutbound::LoadBalance { outbounds, .. },
+            ) => outbounds
                 .iter()
                 .all(|member| self.route_is_remote(member, completed)),
             Some(outbound) => outbound.is_remote(),
@@ -153,14 +206,48 @@ impl ProfileDocument {
         let mut rules = Vec::new();
         let mut countries = BTreeSet::new();
         if let Some(route) = &self.route {
-            for rule in &route.rules {
-                if !rule.no_resolve && matches!(rule.kind, RuleKind::IpCidr | RuleKind::GeoIp) {
-                    rules.push(json!({"action": "resolve"}));
+            for source_rule in &route.rules {
+                let expanded;
+                let inputs = if source_rule.kind == RuleKind::RuleSet {
+                    let provider = self
+                        .providers
+                        .as_ref()
+                        .and_then(|catalog| {
+                            catalog
+                                .rules
+                                .iter()
+                                .find(|provider| provider.name == source_rule.value)
+                        })
+                        .expect("validated rule provider");
+                    expanded = provider
+                        .rules
+                        .iter()
+                        .map(|condition| ProfileRule {
+                            kind: condition.kind,
+                            value: condition.value.clone(),
+                            outbound: source_rule.outbound.clone(),
+                            no_resolve: source_rule.no_resolve
+                                && matches!(condition.kind, RuleKind::IpCidr | RuleKind::GeoIp),
+                        })
+                        .collect::<Vec<_>>();
+                    expanded.as_slice()
+                } else {
+                    std::slice::from_ref(source_rule)
+                };
+                for rule in inputs {
+                    if !rule.no_resolve
+                        && matches!(
+                            rule.kind,
+                            RuleKind::IpCidr | RuleKind::GeoIp | RuleKind::RuleSet
+                        )
+                    {
+                        rules.push(json!({"action": "resolve"}));
+                    }
+                    if rule.kind == RuleKind::GeoIp && rule.value != "LAN" {
+                        countries.insert(rule.value.to_ascii_lowercase());
+                    }
+                    rules.push(rule.project());
                 }
-                if rule.kind == RuleKind::GeoIp && rule.value != "LAN" {
-                    countries.insert(rule.value.to_ascii_lowercase());
-                }
-                rules.push(rule.project());
             }
         }
         let rule_sets = countries.into_iter().map(|country| json!({
@@ -176,7 +263,7 @@ impl ProfileDocument {
 }
 
 impl ProfileRule {
-    fn validate(&self, path: &str, tags: &BTreeSet<&str>) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self, path: &str, tags: &BTreeSet<&str>) -> Result<(), ConfigError> {
         if !tags.contains(self.outbound.as_str()) {
             return Err(invalid(path, "rule target must name a declared outbound"));
         }
@@ -190,7 +277,12 @@ impl ProfileRule {
                 "rule value is empty, oversized or contains control characters",
             ));
         }
-        if self.no_resolve && !matches!(self.kind, RuleKind::IpCidr | RuleKind::GeoIp) {
+        if self.no_resolve
+            && !matches!(
+                self.kind,
+                RuleKind::IpCidr | RuleKind::GeoIp | RuleKind::RuleSet
+            )
+        {
             return Err(invalid(
                 path,
                 "no_resolve is only valid for destination IP rules",
@@ -220,7 +312,12 @@ impl ProfileRule {
             }
             RuleKind::ProcessName => !self.value.contains('/'),
             RuleKind::ProcessPath => self.value.starts_with('/'),
-            RuleKind::DomainRegex => true,
+            RuleKind::DomainRegex => regex::RegexBuilder::new(&self.value)
+                .size_limit(2 * 1024 * 1024)
+                .nest_limit(32)
+                .build()
+                .is_ok(),
+            RuleKind::RuleSet => true,
         };
         if !valid {
             return Err(invalid(path, "rule value does not match its declared type"));
@@ -228,7 +325,7 @@ impl ProfileRule {
         Ok(())
     }
 
-    fn project(&self) -> Value {
+    pub(crate) fn project(&self) -> Value {
         let key = match self.kind {
             RuleKind::Domain => "domain",
             RuleKind::DomainSuffix => "domain_suffix",
@@ -242,7 +339,7 @@ impl ProfileRule {
             RuleKind::ProcessName => "process_name",
             RuleKind::ProcessPath => "process_path",
             RuleKind::GeoIp if self.value == "LAN" => "ip_is_private",
-            RuleKind::GeoIp => "rule_set",
+            RuleKind::GeoIp | RuleKind::RuleSet => "rule_set",
         };
         let value = match self.kind {
             RuleKind::GeoIp if self.value == "LAN" => Value::Bool(true),

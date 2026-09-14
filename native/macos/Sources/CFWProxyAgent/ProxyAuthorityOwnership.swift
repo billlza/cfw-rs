@@ -351,6 +351,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       guard context.operation.root.installationID.rawValue == descriptor.installationID,
         context.operation.root.epoch == descriptor.epoch,
         context.operation.root.generation == descriptor.generation,
+        context.operation.mode == descriptor.slot.authorityMode,
         context.operation.configSHA256 == descriptor.sha256,
         context.operation.identitySHA256 == descriptor.identitySHA256
       else {
@@ -370,7 +371,8 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     guard lease.state == .starting,
       operation == authorization.context.operation,
       lease.leaseID == authorization.context.leaseID,
-      operation.mode == .systemProxy,
+      operation.mode.isProxyAgent,
+      operation.mode == descriptor.slot.authorityMode,
       operation.configSHA256 == descriptor.sha256,
       operation.identitySHA256 == descriptor.identitySHA256
     else {
@@ -449,14 +451,16 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     do {
       // (3) Readiness is attested only when the effective System Proxy state proves
       // the product endpoint is applied for every proxy protocol.
-      let observation = try await observer.observe(descriptor)
-      guard observation.isFullyApplied else {
-        throw AuthorityDomainError(code: .globalAuthorityUnavailable)
+      if descriptor.slot == .systemProxy {
+        let observation = try await observer.observe(descriptor)
+        guard observation.isFullyApplied else {
+          throw AuthorityDomainError(code: .globalAuthorityUnavailable)
+        }
       }
       let attestation = try ReadyAttestation(
         operation: operation, leaseID: leaseID,
         runtimeDigest: operation.identitySHA256, ownerRole: .proxyAgent,
-        readyFlags: .all, packetPumpLimits: nil,
+        readyFlags: .required(for: operation.mode), packetPumpLimits: nil,
         monotonicTimestamp: monotonicTimestamp())
       try await authority.attestReady(attestation)
       completion(.success(()))

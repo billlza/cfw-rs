@@ -1,9 +1,9 @@
 diff --git a/protocol/socks/client.go b/protocol/socks/client.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..005f4319f5426b37f32c14b7f7cb69551a82063e
+index 0000000000000000000000000000000000000000..b76b64208a34e88820a9e35201ce3813af5fa141
 --- /dev/null
 +++ b/protocol/socks/client.go
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,182 @@
 +package socks
 +
 +import (
@@ -15,6 +15,7 @@ index 0000000000000000000000000000000000000000..005f4319f5426b37f32c14b7f7cb6955
 +	"time"
 +
 +	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing/common/bufio"
 +	M "github.com/sagernet/sing/common/metadata"
 +	N "github.com/sagernet/sing/common/network"
 +	"github.com/sagernet/sing/protocol/socks"
@@ -71,6 +72,17 @@ index 0000000000000000000000000000000000000000..005f4319f5426b37f32c14b7f7cb6955
 +	conn, err := client.DialContext(ctx, network, destination)
 +	if err = finish(err); err != nil {
 +		return nil, err
++	}
++	if N.NetworkName(network) == N.NetworkUDP {
++		// The upstream association changes its default remote address on Read.
++		// A connected UDP dial must keep the requested destination immutable,
++		// including while QUIC reads and writes concurrently. Reuse the packet
++		// adapter so Write always calls WriteTo with the original destination.
++		packet, ok := conn.(net.PacketConn)
++		if !ok {
++			return nil, errors.Join(errors.New("socks5: UDP dial did not return a packet association"), conn.Close())
++		}
++		return bufio.NewBindPacketConn(packet, destination), nil
 +	}
 +	return conn, nil
 +}
@@ -178,27 +190,12 @@ diff --git a/protocol/socks/outbound.go b/protocol/socks/outbound.go
 index 344c798881eacbac2394e05a4d85f8e4c85e7d42..a0ff3b84092cc9b54310d573458ac4ada923cda0 100644
 --- a/protocol/socks/outbound.go
 +++ b/protocol/socks/outbound.go
-@@ -3,6 +3,7 @@ package socks
- import (
- 	"context"
- 	"net"
+@@ -5,0 +6 @@ import (
 +	"time"
- 
- 	"github.com/sagernet/sing-box/adapter"
- 	"github.com/sagernet/sing-box/adapter/outbound"
-@@ -30,7 +31,7 @@ type Outbound struct {
- 	outbound.Adapter
- 	dnsRouter adapter.DNSRouter
- 	logger    logger.ContextLogger
+@@ -33 +34 @@ type Outbound struct {
 -	client    *socks.Client
 +	client    *boundedClient
- 	resolve   bool
- 	uotClient *uot.Client
- }
-@@ -54,8 +55,12 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
- 		Adapter:   outbound.NewAdapterWithDialerOptions(C.TypeSOCKS, tag, options.Network.Build(), options.DialerOptions),
- 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
- 		logger:    logger,
+@@ -57,2 +58,6 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 -		client:    socks.NewClient(outboundDialer, options.ServerOptions.Build(), version, options.Username, options.Password),
 -		resolve:   version == socks.Version4,
 +		client: &boundedClient{
@@ -207,15 +204,12 @@ index 344c798881eacbac2394e05a4d85f8e4c85e7d42..a0ff3b84092cc9b54310d573458ac4ad
 +			timeout: time.Duration(options.ConnectTimeout), direct: options.Detour == "",
 +		},
 +		resolve: version == socks.Version4,
- 	}
- 	uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)
- 	if uotOptions.Enabled {
 diff --git a/protocol/socks/outbound_lifecycle_test.go b/protocol/socks/outbound_lifecycle_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..09e0b0f322f943ab59fbfa91c02a831bbe3083c1
+index 0000000000000000000000000000000000000000..33c368d1f90c01d6bebc623a6180cbc270ee3cc0
 --- /dev/null
 +++ b/protocol/socks/outbound_lifecycle_test.go
-@@ -0,0 +1,655 @@
+@@ -0,0 +1,704 @@
 +package socks
 +
 +import (
@@ -246,22 +240,24 @@ index 0000000000000000000000000000000000000000..09e0b0f322f943ab59fbfa91c02a831b
 +
 +// Real local SOCKS control/data sockets; no external endpoints or OS settings.
 +type socksFixture struct {
-+	tcp        net.Listener
-+	udp        net.PacketConn
-+	stall      string
-+	stallFirst bool
-+	bind       string
-+	zeroPort   bool
-+	dnsReply   bool
-+	rejectAuth bool
-+	reached    chan int
-+	closed     chan int
-+	count      atomic.Int32
-+	access     sync.Mutex
-+	conns      []net.Conn
-+	workers    sync.WaitGroup
-+	stopOnce   sync.Once
-+	closing    bool
++	tcp         net.Listener
++	udp         net.PacketConn
++	stall       string
++	stallFirst  bool
++	bind        string
++	zeroPort    bool
++	dnsReply    bool
++	replyFrom   string
++	observedUDP chan string
++	rejectAuth  bool
++	reached     chan int
++	closed      chan int
++	count       atomic.Int32
++	access      sync.Mutex
++	conns       []net.Conn
++	workers     sync.WaitGroup
++	stopOnce    sync.Once
++	closing     bool
 +}
 +
 +func newSocksFixture(t *testing.T, stall string) *socksFixture {
@@ -316,6 +312,20 @@ index 0000000000000000000000000000000000000000..09e0b0f322f943ab59fbfa91c02a831b
 +				return
 +			}
 +			packet := append([]byte(nil), buffer[:count]...)
++			if f.replyFrom != "" {
++				reader := bytes.NewReader(packet[3:])
++				target, parseErr := M.SocksaddrSerializer.ReadAddrPort(reader)
++				if parseErr != nil {
++					return
++				}
++				f.observedUDP <- target.String()
++				response := bytes.NewBuffer([]byte{0, 0, 0})
++				if M.SocksaddrSerializer.WriteAddrPort(response, M.ParseSocksaddr(f.replyFrom)) != nil {
++					return
++				}
++				response.Write(packet[len(packet)-reader.Len():])
++				packet = response.Bytes()
++			}
 +			if f.dnsReply {
 +				offset, err := socksAddressLength(packet[3:])
 +				if err != nil {
@@ -649,6 +659,39 @@ index 0000000000000000000000000000000000000000..09e0b0f322f943ab59fbfa91c02a831b
 +	}
 +	if f.count.Load() != 2 {
 +		t.Fatalf("expected one failed and one reusable dial; got %d", f.count.Load())
++	}
++}
++
++func TestSOCKSUDPConnectedDestinationDoesNotChangeAfterReceivingAnotherSource(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.replyFrom = "198.51.100.9:53"
++	f.observedUDP = make(chan string, 8)
++	f.start()
++	outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++	destination := M.ParseSocksaddr("203.0.113.1:443")
++	conn, err := outbound.DialContext(context.Background(), "udp", destination)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	for i := 0; i < 2; i++ {
++		if _, err = conn.Write([]byte("fixed-destination")); err != nil {
++			t.Fatal(err)
++		}
++		body := make([]byte, 128)
++		n, readErr := conn.Read(body)
++		if readErr != nil || string(body[:n]) != "fixed-destination" {
++			t.Fatalf("read %q: %v", body[:n], readErr)
++		}
++		if got := <-f.observedUDP; got != destination.String() {
++			t.Fatalf("sent to %s after receiving another source", got)
++		}
++	}
++	if conn.RemoteAddr().String() != destination.String() {
++		t.Fatal("connected remote address changed")
 +	}
 +}
 +

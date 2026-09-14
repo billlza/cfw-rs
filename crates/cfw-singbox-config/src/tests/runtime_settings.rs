@@ -101,6 +101,76 @@ fn new_defaults_preserve_existing_persisted_engine_settings_bytes() {
     let value = serde_json::to_value(EngineSettings::default()).unwrap();
     assert!(value.get("log_level").is_none());
     assert!(value.get("lan_proxy").is_none());
+    assert!(value.get("ipv6_dns_enabled").is_none());
     let restored: EngineSettings = serde_json::from_value(value).unwrap();
     assert_eq!(restored, EngineSettings::default());
+}
+
+#[test]
+fn ipv4_dns_answers_keep_ipv6_tunnel_capture_and_restore_without_a_profile_rewrite() {
+    let preferences = RuntimePreferences {
+        ipv6_dns_enabled: false,
+        ..RuntimePreferences::default()
+    };
+    let settings = preferences.apply_to(EngineSettings::default()).unwrap();
+    assert!(
+        settings.enable_ipv6,
+        "DNS preference must not remove IPv6 route coverage"
+    );
+    for mode in [
+        ProjectionMode::LocalProxy,
+        ProjectionMode::SystemProxy,
+        ProjectionMode::Tunnel,
+        ProjectionMode::TunnelSystemProxy,
+    ] {
+        let projected = ValidatedSingBoxProfile::direct()
+            .project(ID, mode, &settings)
+            .unwrap();
+        let value: Value = serde_json::from_str(projected.as_json()).unwrap();
+        assert_eq!(value["dns"]["strategy"], "ipv4_only");
+        assert_eq!(
+            value["dns"]["rules"][0],
+            json!({
+                "query_type":["AAAA"], "action":"predefined", "rcode":"NOERROR"
+            })
+        );
+        if let Some(tunnel) = value["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["type"] == "tun")
+        {
+            assert!(
+                tunnel["address"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v.as_str().unwrap().contains(':'))
+            );
+        }
+    }
+    let restored = RuntimePreferences::default().apply_to(settings).unwrap();
+    let projected = ValidatedSingBoxProfile::direct()
+        .project(ID, ProjectionMode::Tunnel, &restored)
+        .unwrap();
+    let value: Value = serde_json::from_str(projected.as_json()).unwrap();
+    assert_eq!(value["dns"]["strategy"], "prefer_ipv4");
+    assert_ne!(value["dns"]["rules"][0]["query_type"], json!(["AAAA"]));
+}
+
+#[test]
+fn legacy_runtime_preferences_retain_canonical_bytes_and_ipv6_dns_is_typed() {
+    let legacy = r#"{"preferred_mixed_port":null,"log_level":"info","tunnel_mtu":1500,"allow_lan":false,"lan_proxy":null}"#;
+    let mut preferences: RuntimePreferences = serde_json::from_str(legacy).unwrap();
+    assert!(preferences.ipv6_dns_enabled);
+    assert_eq!(serde_json::to_string(&preferences).unwrap(), legacy);
+    preferences.ipv6_dns_enabled = false;
+    let encoded = serde_json::to_vec(&preferences).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<RuntimePreferences>(&encoded).unwrap(),
+        preferences
+    );
+    let mut invalid = serde_json::to_value(&preferences).unwrap();
+    invalid["ipv6_dns_enabled"] = json!("false");
+    assert!(serde_json::from_value::<RuntimePreferences>(invalid).is_err());
 }

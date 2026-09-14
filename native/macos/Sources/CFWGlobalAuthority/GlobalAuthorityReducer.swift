@@ -513,7 +513,13 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     connectionNonce: SHA256Digest
   ) throws -> UInt64 {
     guard pendingMutation == nil else { throw failure(.busy, attestation.operation) }
-    guard state == .starting || state == .stopping, let current = lease else {
+    // NetworkExtension can stop an active provider directly (for example from
+    // System Settings). Its exact authenticated stop proof must enter Stopping
+    // even when the Host did not issue beginStop. The lease remains held until
+    // the Host independently proves the complete Off barrier.
+    guard state == .starting || state == .active || state == .stopping,
+      let current = lease
+    else {
       throw failure(.staleOperation, attestation.operation)
     }
     try requireExactLease(
@@ -521,7 +527,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       ownerUID: ownerUID, connectionNonce: connectionNonce)
     guard !ownerStopped else { return revision }
     let next = try incrementedRevision()
-    if state == .starting {
+    if state == .starting || state == .active {
       pendingMutation = .transition(current.operation.operationID)
       lease = try replacingLeaseState(.stopping, current)
       retainsCapabilityOrTicket = false

@@ -385,6 +385,56 @@ struct AuthorityLifecycleContractTests {
     #expect(journal.count == 4)
   }
 
+  @Test func activeOwnerCanAttestOSStopWithoutHostDirective() throws {
+    let journal = LifecycleContractJournal()
+    let clock = LifecycleContractClock()
+    let core = GlobalAuthorityServiceCore(
+      reducer: try .unEnrolledOff(), journal: journal,
+      randomness: LifecycleContractRandomness(), clock: clock)
+    let installation = AuthorityIdentifier(UUID())
+    let active = try activateTunnel(core: core, installationID: installation, generation: 1)
+    let stopped = try StoppedAttestation(
+      operation: active.operation, leaseID: active.leaseID,
+      libboxStopped: true, transportClosed: true, osRestored: true,
+      monotonicTimestamp: 3_000)
+    let before = journal.count
+    #expect(throws: AuthorityDomainError(code: .globalAuthorityIdentityRejected)) {
+      try core.attestStopped(stopped, peer: lifecyclePeer(role: .provider), peerID: UUID())
+    }
+    #expect(core.authorityState == .active)
+    #expect(journal.count == before)
+
+    let acknowledgement = try core.attestStopped(
+      stopped, peer: lifecyclePeer(role: .provider), peerID: active.providerPeerID)
+    #expect(core.authorityState == .stopping)
+    #expect(core.ownerHasAttestedStopped)
+    #expect(journal.count == before + 1)
+    #expect(journal.transitions.last == .ownerStopped)
+    let replay = try core.attestStopped(
+      stopped, peer: lifecyclePeer(role: .provider), peerID: active.providerPeerID)
+    #expect(replay.revision == acknowledgement.revision)
+    #expect(journal.count == before + 1)
+
+    clock.set(100_000)
+    let supervisor = AuthorityLivenessSupervisor(core: core)
+    #expect(try supervisor.evaluate() == AuthorityLivenessAction.none)
+    #expect(core.authorityState == .stopping)
+    let next = try tunnelPrepareRequest(
+      installationID: installation, generation: 2, revision: core.currentRevision)
+    #expect(throws: AuthorityDomainError.self) {
+      try core.prepare(
+        next.request, configuration: next.configuration, secretPayload: nil,
+        peer: lifecyclePeer(role: .host))
+    }
+    _ = try core.completeStop(
+      CompleteStopRequest(
+        operation: active.operation, leaseID: active.leaseID,
+        expectedRevision: core.currentRevision), peer: lifecyclePeer(role: .host))
+    #expect(core.authorityState == .off)
+    _ = try activateTunnel(core: core, installationID: installation, generation: 2)
+    #expect(core.authorityState == .active)
+  }
+
   @Test func hostCompleteStopRequiresExactStoppedOwnerProofThenAllowsSecondStart() throws {
     let core = try lifecycleCore()
     let installationID = AuthorityIdentifier(UUID())

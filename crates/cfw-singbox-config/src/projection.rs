@@ -367,6 +367,7 @@ impl ValidatedSingBoxProfile {
         }
         root.insert("inbounds".into(), Value::Array(inbounds));
         let dns_ipv6 = settings.enable_ipv6
+            && settings.ipv6_dns_enabled
             && self
                 .document
                 .dns
@@ -398,12 +399,7 @@ impl ValidatedSingBoxProfile {
                 &self.document,
                 root.get_mut("dns").expect("app-owned DNS settings"),
                 mode.has_tunnel(),
-                settings.enable_ipv6
-                    && self
-                        .document
-                        .dns
-                        .as_ref()
-                        .is_none_or(|dns| dns.ipv6 != Some(false)),
+                dns_ipv6,
             );
 
         let mut route = Map::new();

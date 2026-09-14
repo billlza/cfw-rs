@@ -22,6 +22,7 @@ pub(crate) struct RuntimeSettingsEffective {
     mixed_port: u16,
     log_level: EngineLogLevel,
     tunnel_mtu: u16,
+    ipv6_dns_enabled: bool,
     lan_proxy: Option<LanProxySettings>,
 }
 
@@ -31,6 +32,7 @@ impl From<EngineSettings> for RuntimeSettingsEffective {
             mixed_port: value.mixed_port,
             log_level: value.log_level,
             tunnel_mtu: value.tunnel_mtu,
+            ipv6_dns_enabled: value.ipv6_dns_enabled,
             lan_proxy: value.lan_proxy,
         }
     }

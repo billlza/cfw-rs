@@ -98,6 +98,14 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
         </div>
 
         <div class="cfw-row">
+          <div class="cfw-row-left">IPv6 DNS</div>
+          <div class="cfw-row-right">
+            <button type="button" class="cfw-text-button" data-action="open-runtime-settings"${settingsReason || state.engineMutationBusy ? " disabled" : ""}>${settingsView?.effective.ipv6_dns_enabled === true ? "On" : settingsView?.effective.ipv6_dns_enabled === false ? "IPv4 only" : "unavailable"}</button>
+            ${renderRowNote("DNS answers", "Configure IPv6 DNS answers for the proxy exit. TUN packet capture is unchanged.")}
+          </div>
+        </div>
+
+        <div class="cfw-row">
           <div class="cfw-row-left">
             <span>Engine</span>
             <span class="general-icons">

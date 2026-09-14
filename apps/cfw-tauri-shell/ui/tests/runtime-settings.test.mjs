@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRuntimeSettingsUI, preferencesFromRuntimeDraft, runtimeDraft } from "../src/runtime-settings.js";
 
 const preferences = { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null };
-const response = () => ({ settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,lan_proxy:null} });
+const response = () => ({ settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null} });
 
 test("runtime drafts require an explicit LAN scope and preserve automatic port selection", () => {
   const draft = runtimeDraft(preferences);
@@ -29,6 +29,24 @@ test("opening LAN settings while Off does not start or change the engine", async
   assert.equal(state.runtimeSettingsDialog.draft.allow, true);
   assert.equal(state.toggles.allowLan, false, "opening a form is not applying LAN sharing");
   assert.equal(state.runtimeSettingsDialog.draft.lanSources, "");
+});
+
+test("IPv6 DNS is configurable without silently changing old preferences", () => {
+  const draft = runtimeDraft(preferences);
+  assert.equal(draft.ipv6DNS, true);
+  draft.ipv6DNS = false;
+  assert.equal(preferencesFromRuntimeDraft(draft).ipv6_dns_enabled, false);
+  assert.equal(runtimeDraft({ ...preferences, ipv6_dns_enabled:false }).ipv6DNS, false);
+  draft.ipv6DNS = "false";
+  assert.throws(() => preferencesFromRuntimeDraft(draft), /IPv6 DNS/u);
+});
+
+test("malformed IPv6 DNS observations fail instead of displaying a default", async () => {
+  const state = {toggles:{},engineMutationBusy:false,migrationHandoff:false};
+  const bad = response(); bad.effective.ipv6_dns_enabled = "false";
+  const ui = createRuntimeSettingsUI({state,invoke:async () => bad,appendLog(){},renderPage(){},refreshRuntime(){},dismissOtherDialogs(){}});
+  assert.equal(await ui.load(), false);
+  assert.match(state.runtimeSettingsError, /invalid/u);
 });
 
 test("a rejected settings transaction retains the saved values and refreshes actual runtime state", async () => {

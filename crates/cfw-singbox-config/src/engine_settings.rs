@@ -27,6 +27,11 @@ pub struct EngineSettings {
     /// address and the secret are not settings: see [`crate::ClashApiEndpoint`].
     pub controller_port: u16,
     pub enable_ipv6: bool,
+    /// Whether ordinary DNS answers may advertise IPv6 destinations. This is
+    /// independent of IPv6 packet capture, so an IPv4-only proxy exit never
+    /// requires removing IPv6 from the Tunnel's protected route coverage.
+    #[serde(default = "ipv6_dns_default", skip_serializing_if = "is_true")]
+    pub ipv6_dns_enabled: bool,
     pub bypass_private_networks: bool,
     pub tunnel_mtu: u16,
     #[serde(default, skip_serializing_if = "EngineLogLevel::is_default")]
@@ -50,6 +55,7 @@ impl Default for EngineSettings {
             mixed_port: DEFAULT_MIXED_PORT,
             controller_port: DEFAULT_CLASH_API_PORT,
             enable_ipv6: true,
+            ipv6_dns_enabled: true,
             bypass_private_networks: true,
             tunnel_mtu: 1_500,
             log_level: EngineLogLevel::Info,
@@ -177,6 +183,8 @@ pub struct RuntimePreferences {
     pub preferred_mixed_port: Option<u16>,
     pub log_level: EngineLogLevel,
     pub tunnel_mtu: u16,
+    #[serde(default = "ipv6_dns_default", skip_serializing_if = "is_true")]
+    pub ipv6_dns_enabled: bool,
     pub allow_lan: bool,
     pub lan_proxy: Option<LanProxySettings>,
 }
@@ -187,6 +195,7 @@ impl Default for RuntimePreferences {
             preferred_mixed_port: None,
             log_level: EngineLogLevel::Info,
             tunnel_mtu: 1500,
+            ipv6_dns_enabled: true,
             allow_lan: false,
             lan_proxy: None,
         }
@@ -221,6 +230,7 @@ impl RuntimePreferences {
         }
         settings.log_level = self.log_level;
         settings.tunnel_mtu = self.tunnel_mtu;
+        settings.ipv6_dns_enabled = self.ipv6_dns_enabled;
         settings.lan_proxy = self.lan_proxy.clone().filter(|_| self.allow_lan);
         settings.validate_listener_settings()?;
         // The endpoint allocator chooses a distinct controller after applying
@@ -234,4 +244,12 @@ fn invalid_settings(reason: &str) -> ConfigError {
         path: "$.runtime_settings".into(),
         reason: reason.into(),
     }
+}
+
+const fn ipv6_dns_default() -> bool {
+    true
+}
+
+const fn is_true(value: &bool) -> bool {
+    *value
 }

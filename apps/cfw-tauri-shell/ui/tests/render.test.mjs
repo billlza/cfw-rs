@@ -234,7 +234,7 @@ const responses = {
   read_runtime_settings_snapshot: {
     settings: { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null },
     revision: null,
-    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, lan_proxy:null },
+    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null },
   },
   read_settings_snapshot: {
     persisted: true,

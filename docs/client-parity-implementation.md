@@ -548,3 +548,30 @@ UDP and DNS quality acceptance are still pending. Do not call the installed
 removed and reread; CFW continues to preserve connectivity. Evidence:
 `/Users/bill/cfw-release-history/native-wire-install-40063-20260915/` and
 `target/client-parity-completion-20260914/liveness-*`.
+
+## Installed TUN and DNS follow-up
+
+40064 completed real local proxy HTTPS/download/UDP tests with CFW TUN disabled,
+plus repeated local and automatic/manual start-stop checks. Pure TUN initially
+failed HTTPS. The same upstream endpoint accepted domain and IPv4 HTTPS while
+an explicit IPv6 destination ended with TLS EOF. A temporary profile policy
+suppressing IPv6 DNS answers then passed pure-TUN HTTPS, download and three UDP
+STUN transactions. The OS still installed the CFM IPv6 default route; system
+resolution returned only IPv4 addresses. The temporary profile policy was
+restored through the application transaction, preserving valid credential
+references. These are 40064 observations, not 40065 acceptance.
+
+A system-originated disconnect exposed a separate lifecycle omission:
+`StoppedAttestation` was rejected in Active even after the exact owner had
+stopped. The corrected reducer admits that owner proof into Stopping and still
+requires the independent Host Off barrier before any new lease. The old-source
+regression fails with `stale_operation`; wrong-peer, replay, exclusivity and
+subsequent-start checks pass after the fix. Linked-native regression: 676 tests.
+
+The runtime settings transaction now exposes `ipv6_dns_enabled`. Its default
+retains previous behavior and canonical settings bytes. The flag controls DNS
+answers independently of IPv6 Tunnel capture; it does not rewrite profiles.
+Rust regression: 804 tests, Clippy with warnings denied; UI regression: 133 tests.
+The predecessor's signed bytes remain frozen. 40065 carries these actual native
+and UI changes and still requires its own installation and network acceptance.
+System Proxy authorization and combined-mode acceptance remain unproven.

@@ -37,6 +37,9 @@ pub(super) struct FakeBackend {
     pub(super) awaiting_approval: Mutex<bool>,
     pub(super) fail_proxy_start: Mutex<bool>,
     pub(super) fail_proxy_stop: Mutex<bool>,
+    /// Reproduce the native explicit-stop boundary after an OS-originated stop:
+    /// a released owner has no active descriptor matching the old generation.
+    pub(super) reject_stop_after_native_off: Mutex<bool>,
     pub(super) fail_query: Mutex<bool>,
     pub(super) query_error: Mutex<Option<BackendErrorKind>>,
     /// When true, a successful stop attests the owner stopped (returns `Ok`) but
@@ -54,6 +57,21 @@ pub(super) struct FakeBackend {
 }
 
 impl FakeBackend {
+    fn require_present_stop_owner(&self) -> Result<(), BackendError> {
+        if *self
+            .reject_stop_after_native_off
+            .lock()
+            .expect("stop owner policy lock")
+            && *self.native_status.lock().expect("native status lock") == NativeEngineStatus::Off
+        {
+            return Err(BackendError::new(
+                BackendErrorKind::IdentityRejected,
+                "the native owner stop does not match an active generation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn operations(&self) -> Vec<&'static str> {
         self.operations.lock().expect("operations lock").clone()
     }
@@ -330,6 +348,7 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("proxy stop contexts lock")
                 .push(context);
+            self.require_present_stop_owner()?;
             if *self.fail_proxy_stop.lock().expect("fail stop lock") {
                 return Err(BackendError::new(
                     BackendErrorKind::Internal,
@@ -462,6 +481,7 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("tunnel stop contexts lock")
                 .push(context);
+            self.require_present_stop_owner()?;
             if !*self
                 .stop_leaves_owner_present
                 .lock()

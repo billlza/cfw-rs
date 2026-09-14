@@ -89,8 +89,9 @@ pub(crate) fn validate_runtime(
 ///
 /// The coordinator actor is the only caller, so no transition can interleave
 /// with the query. A failed observation deliberately preserves `native_lease`:
-/// an Off report, identity drift, or transport error is not proof that the
-/// exact runtime ownership has been released.
+/// identity drift or a transport error is not proof of cleanup. A successful
+/// native Off observation is the complete authenticated global stop barrier;
+/// the native layer has already retired that owner and its generation.
 pub(crate) async fn reconcile_active_runtime(
     backend: &dyn EngineBackend,
     state: &mut CoordinatorState,
@@ -127,6 +128,14 @@ pub(crate) async fn reconcile_active_runtime(
             return Err(error);
         }
     };
+
+    if matches!(observation, NativeEngineStatus::Off) {
+        // A system-originated stop can complete below the coordinator. Retain
+        // the unexpected-disconnect error below, but retire our local lease:
+        // replaying Stop against an owner already proven Off is rejected by
+        // the native identity boundary and would prevent every later restart.
+        state.native_lease = None;
+    }
 
     let observed_runtime = match (&observation, expected_mode) {
         (NativeEngineStatus::LocalProxy { runtime }, EngineMode::LocalProxy)

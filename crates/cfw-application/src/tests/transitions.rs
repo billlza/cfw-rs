@@ -264,7 +264,7 @@ async fn combined_start_failure_cleans_up_and_never_reports_proxy_active() {
 }
 
 #[tokio::test]
-async fn periodic_reconciliation_detects_proxy_crash_and_retains_exact_stop_ownership() {
+async fn periodic_reconciliation_records_proxy_disconnect_without_replaying_completed_stop() {
     let backend = Arc::new(FakeBackend::default());
     let coordinator = coordinator(backend.clone());
     let active = coordinator
@@ -276,10 +276,7 @@ async fn periodic_reconciliation_detects_proxy_crash_and_retains_exact_stop_owne
         )
         .await
         .expect("start proxy");
-    let expected_context = match active.state {
-        EngineState::ProxyActive { runtime } => runtime.context,
-        state => panic!("expected active proxy, received {state:?}"),
-    };
+    assert!(matches!(active.state, EngineState::ProxyActive { .. }));
 
     backend.set_native_status(NativeEngineStatus::Off);
     let failed = wait_for_failed(&coordinator).await;
@@ -299,12 +296,12 @@ async fn periodic_reconciliation_detects_proxy_crash_and_retains_exact_stop_owne
             EngineSettings::default(),
         )
         .await
-        .expect("exact proxy ownership is stopped after the failed observation");
-    assert_eq!(backend.proxy_stop_contexts(), vec![expected_context]);
+        .expect("the native authority has already completed the proxy stop");
+    assert!(backend.proxy_stop_contexts().is_empty());
 }
 
 #[tokio::test]
-async fn periodic_reconciliation_detects_tunnel_crash_and_retains_exact_stop_ownership() {
+async fn periodic_reconciliation_records_tunnel_disconnect_without_replaying_completed_stop() {
     let backend = Arc::new(FakeBackend::default());
     let coordinator = coordinator(backend.clone());
     let active = coordinator
@@ -316,10 +313,7 @@ async fn periodic_reconciliation_detects_tunnel_crash_and_retains_exact_stop_own
         )
         .await
         .expect("start tunnel");
-    let expected_context = match active.state {
-        EngineState::TunnelActive { runtime } => runtime.context,
-        state => panic!("expected active tunnel, received {state:?}"),
-    };
+    assert!(matches!(active.state, EngineState::TunnelActive { .. }));
 
     backend.set_native_status(NativeEngineStatus::Off);
     let failed = wait_for_failed(&coordinator).await;
@@ -339,8 +333,67 @@ async fn periodic_reconciliation_detects_tunnel_crash_and_retains_exact_stop_own
             EngineSettings::default(),
         )
         .await
-        .expect("exact tunnel ownership is stopped after the failed observation");
-    assert_eq!(backend.tunnel_stop_contexts(), vec![expected_context]);
+        .expect("the native authority has already completed the tunnel stop");
+    assert!(backend.tunnel_stop_contexts().is_empty());
+}
+
+#[tokio::test]
+async fn authoritative_native_off_allows_reconnect_without_stopping_a_released_owner() {
+    for mode in [
+        EngineMode::Tunnel,
+        EngineMode::TunnelSystemProxy,
+        EngineMode::LocalProxy,
+        EngineMode::SystemProxy,
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        *backend
+            .reject_stop_after_native_off
+            .lock()
+            .expect("stop owner policy lock") = true;
+        let coordinator = coordinator(backend.clone());
+        let active = coordinator
+            .set_mode(
+                mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await
+            .expect("initial native owner is active");
+
+        backend.set_native_status(NativeEngineStatus::Off);
+        let observed = wait_for_failed(&coordinator).await;
+        assert!(matches!(observed.state, EngineState::Failed { target, .. } if target == mode));
+        assert_eq!(observed.generation, active.generation);
+
+        let reconnected = coordinator
+            .set_mode(
+                mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await
+            .expect("authoritative native Off has already released the old owner");
+        assert_eq!(reconnected.state.active_mode(), mode);
+        assert!(reconnected.generation > active.generation);
+        assert!(backend.proxy_stop_contexts().is_empty());
+        assert!(backend.tunnel_stop_contexts().is_empty());
+
+        coordinator
+            .set_mode(
+                EngineMode::Off,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await
+            .expect("the new active owner still uses the ordinary stop barrier");
+        assert_eq!(
+            backend.proxy_stop_contexts().len() + backend.tunnel_stop_contexts().len(),
+            1
+        );
+    }
 }
 
 #[tokio::test]

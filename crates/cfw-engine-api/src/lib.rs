@@ -112,6 +112,10 @@ pub struct RuntimeIdentity {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum NativeEngineStatus {
+    /// The authenticated native authority and independent OS observations agree
+    /// that every app-owned runtime has stopped and its ownership is released.
+    /// Missing services, failed queries and a single owner's local Off snapshot
+    /// must be returned as errors, never converted into this global observation.
     #[default]
     Off,
     LocalProxy {

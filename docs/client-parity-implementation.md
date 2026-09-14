@@ -575,3 +575,30 @@ Rust regression: 804 tests, Clippy with warnings denied; UI regression: 133 test
 The predecessor's signed bytes remain frozen. 40065 carries these actual native
 and UI changes and still requires its own installation and network acceptance.
 System Proxy authorization and combined-mode acceptance remain unproven.
+
+## Installed combined mode and completed-stop reconciliation
+
+40065 passed installed local and pure-TUN TCP/download/UDP, IPv4 DNS answers
+with IPv6 capture retained, and two-node offline latency testing. Combined TUN
+and System Proxy also passed: the OS selected CFM port 7891 for a successful
+Foundation HTTPS request, and the mixed listener passed TCP and UDP. Normal
+Stop proved native Off and restored the previous CFW proxy. This closes the
+earlier uncertainty about whether combined mode requires the standalone
+SystemConfiguration authorization path; it uses NetworkExtension proxy settings.
+
+System-originated Stop reached native Off, but Retry exposed another layer:
+the application retained its local ownership lease after that completed native
+barrier and replayed Stop against an already absent owner. Installed output was
+`stop_tunnel: IdentityRejected`; the old-source regression reproduces it. The
+coordinator now releases that local record only for a successful authoritative
+native Off result. Failed queries and identity mismatches retain ownership.
+The disconnect remains an observable error, and an explicit retry creates a
+new generation. All four modes are covered; 89 application tests passed.
+The full successor source run passed 805 Rust tests, Clippy with warnings denied,
+and 676 linked-native tests. The native tests still reject Off when Authority
+ownership or an independent owner observation cannot establish the full barrier.
+
+40065 evidence is retained in
+`/Users/bill/cfw-release-history/tun-compat-install-40065-20260915/`.
+40066 must establish its own installation and reconnect acceptance before
+handoff. Standalone System Proxy authorization remains unproven.

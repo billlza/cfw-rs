@@ -144,6 +144,40 @@ class PhysicalMachineIdentityTests(unittest.TestCase):
             ):
                 collect_boot_environment_sha256(runner=runner)
 
+    def test_sealed_boot_snapshot_is_distinct_from_update_preparation_volume(self) -> None:
+        fields = {
+            "APFSVolumeGroupID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "VolumeUUID": "11111111-2222-3333-4444-555555555555",
+            "Bootable": True, "FilesystemType": "apfs", "MountPoint": "/",
+            "Sealed": "Broken", "SystemImage": False, "APFSSnapshot": True,
+            "Writable": False, "DeviceNode": "/dev/disk3s1s1",
+        }
+        root = b"/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n"
+
+        def collect(document, mounts):
+            def runner(command, **_kwargs):
+                outputs = {
+                    ("/usr/sbin/diskutil", "info", "-plist", "/"): plistlib.dumps(document),
+                    ("/sbin/mount",): mounts,
+                }
+                return subprocess.CompletedProcess(command, 0, outputs[tuple(command)], b"")
+            return collect_boot_environment_sha256(runner=runner)
+
+        self.assertEqual(collect(fields, root), derive_boot_environment_sha256(
+            volume_uuid=fields["VolumeUUID"], volume_group_uuid=fields["APFSVolumeGroupID"]
+        ))
+        for document, mounts in (
+            (fields, root.replace(b"sealed, ", b"")),
+            (fields, root.replace(b"read-only, ", b"")),
+            (fields, root.replace(b"disk3s1s1", b"disk4s1s1")),
+            (fields, root + root), (fields, b"unavailable\n"),
+            ({**fields, "APFSSnapshot": False}, root),
+            ({**fields, "Writable": True}, root),
+            ({**fields, "Sealed": "unknown"}, root),
+        ):
+            with self.subTest(document=document, mounts=mounts), self.assertRaises(PhysicalMachineIdentityError):
+                collect(document, mounts)
+
     def test_collection_uses_only_fixed_commands_and_outputs_one_digest(self) -> None:
         outputs = {
             ("/usr/bin/uname", "-s"): b"Darwin\n",

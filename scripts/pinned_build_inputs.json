@@ -2176,7 +2176,10 @@
       "\"/usr/sbin/ioreg\"",
       "derive_machine_sha256",
       "collect_boot_environment_sha256",
-      "self_check"
+      "self_check",
+      "_require_sealed_boot_volume",
+      "\"/sbin/mount\"",
+      "\"sealed\", \"local\", \"read-only\""
     ],
     "scripts/harness/physical_collector_request.py": [
       "CONTEXT_DOCUMENT = \"cfw-physical-run-context-v1\"",
@@ -3377,7 +3380,7 @@
     "scripts/release_capability_inventory.py": "3092a7c3425e71d066f3ba75495197b53fef6aeff76a8861390cc47f32e25b5b",
     "scripts/harness/physical_collector_trust_policy.json": "e95c2710371b3ba6f6899cb24fcbdc42038869934b1c89ddca651bd910601355",
     "scripts/harness/raw_artifacts.py": "29de039437f262daa3e0e8b5766f94766e0f518f189e663dda8f85aea581e8ef",
-    "scripts/harness/physical_machine_identity.py": "03d15a92abe4e1e89e6343f3418e2e8d0cda20d21bcda19660066f581fb8fbf7",
+    "scripts/harness/physical_machine_identity.py": "3da5f5b20e917695d0ad66dcdaa154784117d8d5674484788f197ab7ebc48c99",
     "scripts/harness/physical_collector_request.py": "38e374b36705b950e8464ef5e26ecc13ad34a290a52740ae2a4330999d395794",
     "scripts/harness/physical_evidence_aggregator.py": "cb98eed9f96e5e46ccce0c4e83c567f495b26356a0e4eb945d6d5590d6d669c8",
     "scripts/harness/performance_ledger.py": "38e3627baf19f4a81ee0b7f793cfe2e7e4aecb58cd37f2db2bc6d004ae187bd1",

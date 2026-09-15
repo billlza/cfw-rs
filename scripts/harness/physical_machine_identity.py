@@ -176,7 +176,34 @@ def derive_boot_environment_sha256(
     return hashlib.sha256(BOOT_DOMAIN + canonical_json(payload)).hexdigest()
 
 
-def _boot_environment(data: bytes) -> str:
+def _require_sealed_boot_volume(value: dict[str, Any], *, runner: Runner | None) -> None:
+    if value.get("Sealed") == "Yes":
+        return
+    # During update preparation diskutil reports the mutable backing volume's
+    # seal, while macOS continues to boot its previously sealed APFS snapshot.
+    # Bind the independent kernel mount observation to that exact root device.
+    device = value.get("DeviceNode")
+    if (
+        not isinstance(value.get("Sealed"), str)
+        or value["Sealed"] not in {"No", "Broken"}
+        or value.get("APFSSnapshot") is not True
+        or value.get("Writable") is not False
+        or not isinstance(device, str)
+        or re.fullmatch(r"/dev/disk[0-9]+s[0-9]+s[0-9]+", device) is None
+    ):
+        raise PhysicalMachineIdentityError("boot environment Sealed is unsupported")
+    try:
+        output = _run(("/sbin/mount",), runner=runner).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise PhysicalMachineIdentityError("root mount observation is not UTF-8") from error
+    roots = [line for line in output.splitlines() if " on / (" in line]
+    match = re.fullmatch(re.escape(device) + r" on / \(([a-z0-9-]+(?:, [a-z0-9-]+)*)\)", roots[0]) if len(roots) == 1 else None
+    flags = match.group(1).split(", ") if match else []
+    if len(flags) != len(set(flags)) or not {"apfs", "sealed", "local", "read-only"} <= set(flags):
+        raise PhysicalMachineIdentityError("boot snapshot is not the sealed read-only root mount")
+
+
+def _boot_environment(data: bytes, *, runner: Runner | None = None) -> str:
     try:
         value = plistlib.loads(data)
     except (plistlib.InvalidFileException, ValueError) as error:
@@ -188,13 +215,13 @@ def _boot_environment(data: bytes) -> str:
         "Bootable": True,
         "FilesystemType": "apfs",
         "SystemImage": False,
-        "Sealed": "Yes",
     }
     for field, wanted in expected.items():
         if value.get(field) != wanted:
             raise PhysicalMachineIdentityError(
                 f"boot environment {field} is unsupported"
             )
+    _require_sealed_boot_volume(value, runner=runner)
     volume_uuid = value.get("VolumeUUID")
     volume_group_uuid = value.get("APFSVolumeGroupID")
     if not isinstance(volume_uuid, str) or not isinstance(volume_group_uuid, str):
@@ -299,7 +326,7 @@ def collect_machine_sha256(*, runner: Runner | None = None) -> str:
 
 def collect_boot_environment_sha256(*, runner: Runner | None = None) -> str:
     return _boot_environment(
-        _run(("/usr/sbin/diskutil", "info", "-plist", "/"), runner=runner)
+        _run(("/usr/sbin/diskutil", "info", "-plist", "/"), runner=runner), runner=runner
     )
 
 

@@ -83,10 +83,11 @@ export PATH="$gobin:$toolchain_root/go-$GO_VERSION/bin:/usr/bin:/bin:/usr/sbin:/
 # Override any caller value so the release artifact is reproducible.
 export ZERO_AR_DATE=1
 configure_offline_go_environment
+build_source_root="$(prepare_libbox_build_workspace "$source_root" "$go_bin" "$go_build_cache/workspace")"
 export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
 
 (
-  cd "$source_root"
+  cd "$build_source_root"
   expected_gomobile_dir="$GOMODCACHE/github.com/sagernet/gomobile@$GOMOBILE_VERSION"
   expected_gomobile_module="github.com/sagernet/gomobile $GOMOBILE_VERSION $GOMOBILE_MODULE_SUM $expected_gomobile_dir"
   if ! observed_gomobile_module="$(
@@ -123,7 +124,7 @@ export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
     ./experimental/libbox
 )
 
-built_framework="$source_root/Libbox.xcframework"
+built_framework="$build_source_root/Libbox.xcframework"
 if [[ ! -d "$built_framework" || -L "$built_framework" ]]; then
   echo "error: pinned build did not produce $built_framework" >&2
   exit 1

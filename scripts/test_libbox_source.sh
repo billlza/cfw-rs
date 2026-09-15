@@ -53,6 +53,7 @@ go_build_cache="$(mktemp -d "$cache_parent/cfw-go-tests.XXXXXX")"
 trap '/bin/rm -rf -- "$go_build_cache"' EXIT
 export GOCACHE="$go_build_cache"
 configure_offline_go_environment
+build_source_root="$(prepare_libbox_build_workspace "$source_root" "$go_bin" "$go_build_cache/workspace")"
 CC="$(/usr/bin/xcrun --find clang)"
 SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 export CC SDKROOT
@@ -73,8 +74,9 @@ for fixture in mixed.json tunnel.json filter.json named.json; do
 done
 
 (
-  cd "$source_root"
+  cd "$build_source_root"
   "$go_bin" mod verify
+  "$go_bin" test -count=1 -race ./cmd/cfm-build-workspace
   "$go_bin" test -count=1 -race -ldflags="$libbox_test_ldflags" \
     -tags "$LIBBOX_BUILD_TAGS" "${LIBBOX_RACE_TEST_PACKAGES[@]}"
   "$go_bin" test -count=1 -ldflags="$libbox_test_ldflags" \

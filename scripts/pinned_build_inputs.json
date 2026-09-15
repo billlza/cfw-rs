@@ -405,7 +405,7 @@
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "a093762cb632419782a1baf8b555a1c2f66f7d9b95abe06c84b1fac76b2431ea"
+      "sha256": "7279aef88a394ee8caf00505ef797e8c6f798047d99615c62da9dca03d987645"
     },
     {
       "name": "sing-box raw packet tun patch",
@@ -435,11 +435,11 @@
       "name": "sing-box SOCKS lifecycle patch",
       "pathKey": "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
       "sha256Key": "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-      "sha256": "a6767d8673778030f80fb77623d2f80fec023aa82de690c9c73e7a5ca73afa86"
+      "sha256": "1e0e87f417fa683b0a6136fd002651056d1e490215d76bd88fc392fd6c2be829"
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "02a978059d3dc5bc5b84927e2dbf5c66336b755c39784e4232dbef1bac77da38",
+  "combinedDiffSha256": "40efd5359e142d419a0aecfd3f959179864831f4eba0b07aa9c6cd973a4a366c",
   "sourceContract": {
     "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
     "patchedDiffSha256": "5ce0d47a8cce32ae6b3cf487fe34a9f3da61496e2559130c56a5b689bf456033",
@@ -3278,7 +3278,7 @@
     "apps/cfw-tauri-shell/build.rs": "eeff4388e01091393e5e96d1960753163a8ecca089c6aa530b31aed76bb48d0e",
     "apps/cfw-tauri-shell/build_support/native_product_input.rs": "5eeae16e6974d2cdd76fd34cb201360e96cf41a6c2ead12002132b6b83f9b170",
     "scripts/libbox_source_contract.sh": "f8c208e43a4589a563147e23437b6dac0d819a52665d5f965ea922eb74c4db5d",
-    "scripts/build_libbox.sh": "edb0684f7896b7581f832d3200227447fb07051864987223d31c54acd1a72026",
+    "scripts/build_libbox.sh": "f37bc8e6e03eebcf7fdb1e0d56b798c97ed89a5102796a744e3ee13f53752421",
     "scripts/build_native_products.sh": "37d375ff2ed3a7ee394b9de48f8e29a6ef51dbf2cc7443b4866998d95413f16c",
     "scripts/build_ui_with_pinned_node.sh": "5b9df6542382e6475bd829446737537c773d0f92a0a5c424e33f4e70a422edad",
     "scripts/build_unsigned_candidate.sh": "58c9028c05ef97b3f95fbcae5a5334fb44edba7de41b267ad75a9c0680056bd1",
@@ -3429,7 +3429,7 @@
     "scripts/physical_capture/packet_sender.py": "3c7bb07b72f533ed54f4faec3c5a6948622ff116abb7943faef61330a63b4087",
     "scripts/physical_capture/packet_host.py": "7d7ec61c8fe14780614c60bb733be344f0411584ce9e2d66d123fee428d554d2",
     "scripts/harness/packet_capture.py": "d17b1a57f5569f7268ede8174aa739daa366adeda974d7a71fd9ea71f0945b39",
-    "scripts/harness/packet_evidence.py": "885faebc238e128f00df7dc09c7e917628d05a8ef5875b4a40631c2f10fbe14d",
+    "scripts/harness/packet_evidence.py": "85ba0afcdfeb4aabeaae8b80871661992b604016368c80bb9c79b0d1269f8e5b",
     "scripts/publication/common.py": "7b320f7529f5a7b1903d69cb75b0aa064eaf53e9a74e6e744fdd9dc46f9e2659",
     "scripts/publication/draft.py": "b39da4999c38dd2b91e18bab5c8c215b410e4443e27d6d876274bfec65c2602d",
     "scripts/publication/finalize.py": "6bdac077101d35362ad80e69d1c895b449becc973fb828cd1cfa819b75ad2c42",

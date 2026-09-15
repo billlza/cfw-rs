@@ -30,12 +30,18 @@ The active successor is 0.4.0 build 40068. The installed and frozen 40067 are pr
 - Rebuild Tauri CLI 2.11.4 with its checksum-bound compatible lock refresh, including patched rustls. Retain the exact upstream lock identity separately.
 - Rust includes official llvm-tools-preview so rust-objcopy can load its matching LLVM runtime. Exact transitive constraints remain where upstream components require them: generic-array 0.14.7 and the compatible toml 0.8.2 / toml_datetime 0.6.3 / toml_edit 0.20.2 cluster.
 - Error, warning, info and debug log retention is bounded independently at 200 entries each. Routine traffic cannot evict recent errors. Engine events display their local receipt time; rendering remains capped at 200 visible rows.
+- Correct the observed sing 0.9.4 SOCKS UDP address race with a short read/write lock around address state, outside network I/O. Builds use a private source copy with a fixed relative module replacement; the original module cache and materialized engine remain unchanged. The lifecycle patch binds the workspace generator and exact upstream file checksums. Recorded patched go.mod/go.sum identify the materialized seed; the generator deterministically adds the local replacement in the private build copy.
+- Scan both the original versioned dependency graph and the corrected build copy. A local Go replacement must not remove the original module version from vulnerability coverage.
+- Match the complete reference-client gitlink table to the pinned upstream commit, including the new desktop reference. Keep all reference clients uninitialized.
+- Preserve explicit NSError failures while returning Go's required nonnull string zero value for unsupported SSH/SFTP callbacks. Replace two intentional debug-crash pointer conversions with explicit Go panics; debug authorization remains unchanged.
 
 ## Validation and limits
 
 - Local Swift package: 677 tests across 11 suites; Swift format lint passed.
+- Xcode native tests under stable 27.0: 679 Swift Testing cases passed. The four analysis schemes passed without warnings after the callback correction. A compiled callback probe failed on the old implementation and passed on the new one while checking both explicit errors.
 - Earlier Rust workspace validation: 766 tests across 29 suites and Clippy with warnings denied.
 - Final engine port: 15 Go package groups with race detection.
+- Actual local interoperability covered six DNS transports directly and through SOCKS, DNS policy/fallback, HTTP/HTTPS authentication, multihop, automatic selection, ordered fallback, three balancing strategies and userspace WireGuard. The pre-fix run detected the SOCKS UDP race; the corrected run passed with race detection. These fixture listeners do not change the computer's TUN, proxy, DNS or route settings and do not replace physical packet-flow acceptance.
 - UI: 135 tests passed after the log-retention correction; the old implementation failed the two new regressions. UI dependency audit reported zero vulnerabilities.
 - XcodeGen: release build, 71 upstream XCTest tests and four parameterized cases passed; generated CFM projects match the baseline generator. Source-patch boundary tests passed.
 - Source and fail-closed gate contracts: 218 tests passed. Toolchain manifest contracts: 46 tests passed. Candidate/npm identity and CI-lane tests passed.
@@ -49,3 +55,5 @@ The active successor is 0.4.0 build 40068. The installed and frozen 40067 are pr
 The 2026-09-15 14:59 outage remains unassigned. Current CFM HTTPS probes succeeded; a separate direct physical-interface probe through the same configured SOCKS node timed out once after a successful SOCKS handshake. That observation demonstrates an independent upstream-path failure but does not establish the cause of the earlier all-site outage. Older ERROR rows had been evicted by the 200-row mixed log buffer; the retention correction fixes that diagnostic loss for the successor. The ICMP warning alone is not evidence of TCP or UDP failure.
 
 A later live capture recovered 14 complete ERROR rows: ten SOCKS setup deadlines at five seconds and four peer EOFs around three seconds, all through one node ingress across unrelated destinations. The installed engine remained running. A paired probe with longer client waits showed that CFM could complete a request taking 9.3 seconds overall, so the five-second setup deadline is not a blanket HTTP response deadline. No timeout or authentication rule was changed on this evidence.
+
+A subsequent check around 17:00 local time again completed all six paired requests to Google, Apple and GitHub, through the installed CFM and directly through the same physical-interface-bound node. This is evidence of current recovery, not proof that the earlier outage is permanently resolved. The separate UDP race correction has not been established as the cause of those earlier TCP handshake failures.

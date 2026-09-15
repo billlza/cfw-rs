@@ -28,20 +28,28 @@ actual_gitlinks="$(
   libbox_git "$source_root" ls-files --stage |
     awk '$1 == "160000" { print $2 " " $4 }'
 )"
-expected_gitlinks="$SING_BOX_ANDROID_REFERENCE_COMMIT clients/android
-$SING_BOX_APPLE_REFERENCE_COMMIT clients/apple"
+# The pinned commit owns the complete reference-client set. sing-box 1.14 also
+# has a desktop gitlink; compare the index to the immutable tree before copying.
+expected_gitlinks="$(
+  libbox_git "$source_root" ls-tree -r "$SING_BOX_COMMIT" -- |
+    awk '$1 == "160000" { print $3 " " $4 }'
+)"
 if [[ "$actual_gitlinks" != "$expected_gitlinks" ]]; then
   echo "error: sing-box reference gitlinks differ from the pinned commits" >&2
   exit 1
 fi
-for gitlink in clients/android clients/apple; do
+while IFS=' ' read -r reference_commit gitlink; do
+  [[ "$reference_commit" =~ ^[0-9a-f]{40}$ && "$gitlink" == clients/* ]] || {
+    echo "error: unexpected reference gitlink in pinned source" >&2
+    exit 1
+  }
   gitlink_path="$source_root/$gitlink"
   if [[ ! -d "$gitlink_path" || -L "$gitlink_path" ]] ||
     [[ -n "$(find "$gitlink_path" -mindepth 1 -print -quit)" ]]; then
     echo "error: reference gitlink must remain an uninitialized real directory: $gitlink" >&2
     exit 1
   fi
-done
+done <<< "$expected_gitlinks"
 
 output_input="${LIBBOX_PATCHED_SOURCE_OUTPUT:-$repo_root/target/sources/sing-box-$SING_BOX_VERSION-patched}"
 if [[ -e "$output_input" || -L "$output_input" ]]; then

@@ -162,7 +162,7 @@ def create_release_verifier_build(repository: Path) -> ReleaseVerifierBuild:
         "rust-toolchain.toml": (
             "[toolchain]\n"
             "channel = \"1.98.1\"\n"
-            "components = [\"rustfmt\", \"clippy\"]\n"
+            "components = [\"rustfmt\", \"clippy\", \"llvm-tools-preview\"]\n"
             "profile = \"minimal\"\n"
         ),
         "apps/cfw-tauri-shell/tauri.conf.json": (

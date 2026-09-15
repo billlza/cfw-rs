@@ -1224,3 +1224,41 @@ index 5c807d6763354cd7bf4f3ecb33ebb021aad31e07..012097d32930d70ba4ce154f57d38e2e
  	Enabled                    bool                                `json:"enabled,omitempty"`
  	Engine                     string                              `json:"engine,omitempty" enum:"go,apple,windows"`
  	DisableSNI                 bool                                `json:"disable_sni,omitempty"`
+diff --git a/daemon/managed_service.go b/daemon/managed_service.go
+index dfc986cb52cc85d07ca2532a6ac78013adff845b..0388bc0fd8accb2ee9fee52dbf5496fd887aafff 100644
+--- a/daemon/managed_service.go
++++ b/daemon/managed_service.go
+@@ -3,7 +3,6 @@ package daemon
+ import (
+ 	"context"
+ 	"time"
+-	"unsafe"
+ 
+ 	"github.com/sagernet/sing-box/service/oomkiller"
+ 
+@@ -72,7 +71,7 @@ func (s *ManagedService) TriggerDebugCrash(ctx context.Context, request *DebugCr
+ 	switch request.Type {
+ 	case DebugCrashRequest_GO:
+ 		time.AfterFunc(200*time.Millisecond, func() {
+-			*(*int)(unsafe.Pointer(uintptr(0))) = 0
++			panic("intentional Go debug crash")
+ 		})
+ 	case DebugCrashRequest_NATIVE:
+ 		err := s.handler.TriggerNativeCrash()
+diff --git a/experimental/libbox/debug.go b/experimental/libbox/debug.go
+index 75942976f6495100522f0e91d12aa88f348314fd..efc082949acdabfb38466ffc2edd1a95b403da93 100644
+--- a/experimental/libbox/debug.go
++++ b/experimental/libbox/debug.go
+@@ -2,11 +2,10 @@ package libbox
+ 
+ import (
+ 	"time"
+-	"unsafe"
+ )
+ 
+ func TriggerGoPanic() {
+ 	time.AfterFunc(200*time.Millisecond, func() {
+-		*(*int)(unsafe.Pointer(uintptr(0))) = 0
++		panic("intentional Go debug crash")
+ 	})
+ }

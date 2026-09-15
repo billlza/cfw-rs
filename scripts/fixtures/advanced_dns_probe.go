@@ -29,10 +29,22 @@ import (
 func dnsAnswer(query []byte) []byte {
 	var request dns.Msg
 	require(request.Unpack(query) == nil, "DNS request decode")
-	require(len(request.Question) == 1 && (request.Question[0].Name == "probe.invalid." || request.Question[0].Name == "singlelabel.") && request.Question[0].Qtype == dns.TypeA, "unexpected DNS question")
+	require(len(request.Question) == 1, "DNS question count")
+	question := request.Question[0]
+	require((question.Name == "probe.invalid." || question.Name == "singlelabel.") && question.Qclass == dns.ClassINET, "unexpected DNS question")
 	var response dns.Msg
 	response.SetReply(&request)
-	response.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 10}, A: net.ParseIP("203.0.113.7")}}
+	// sing-box 1.14 tests TCP/DoT connection reuse with paired A and AAAA
+	// queries. Answer both exactly; the client round-trip assertions below
+	// still require the requested address and reject unrelated questions.
+	switch question.Qtype {
+	case dns.TypeA:
+		response.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 10}, A: net.ParseIP("203.0.113.7")}}
+	case dns.TypeAAAA:
+		response.Answer = []dns.RR{&dns.AAAA{Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 10}, AAAA: net.ParseIP("2001:db8::7")}}
+	default:
+		panic(fmt.Sprintf("unexpected DNS question type: %d", question.Qtype))
+	}
 	return checked(response.Pack())
 }
 

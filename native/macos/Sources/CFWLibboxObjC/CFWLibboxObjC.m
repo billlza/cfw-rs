@@ -151,7 +151,9 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
   if (error != NULL) {
     *error = CFWUnsupportedOperation(@"lookupSFTPServer");
   }
-  return nil;
+  // The Go (string, error) bridge requires a nonnull string even on failure.
+  // NSError carries the unsupported-operation result back to the caller.
+  return @"";
 }
 
 - (LibboxPlatformUser *)lookupUser:(NSString *)username
@@ -209,7 +211,8 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
   if (error != NULL) {
     *error = CFWUnsupportedOperation(@"readSystemSSHHostKey");
   }
-  return nil;
+  // Preserve the explicit error while satisfying Go's nonnullable string ABI.
+  return @"";
 }
 
 - (LibboxWIFIState *)readWIFIState {

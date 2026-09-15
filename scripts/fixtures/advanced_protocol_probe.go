@@ -30,6 +30,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/interrupt"
 	btls "github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
@@ -378,9 +379,15 @@ func fallbackProbe(projector, address, tcpTarget, udpTarget string) {
 	require(found && outbound.Type() == "fallback", "ordered group is a first-class runtime type")
 	policy, ok := outbound.(*group.URLTest)
 	require(ok, "fallback shares the bounded health-check lifecycle")
-	controller := service.FromContext[adapter.ClashServer](serviceContext)
-	require(controller != nil, "fallback live controller")
-	history := controller.HistoryStorage()
+	history := service.PtrFromContext[urltest.HistoryStorage](serviceContext)
+	require(history != nil, "fallback live URL-test history")
+	api := config["experimental"].(map[string]any)["clash_api"].(map[string]any)
+	apiRequest := checked(http.NewRequest("GET", "http://"+api["external_controller"].(string)+"/version", nil))
+	apiRequest.Header.Set("Authorization", "Bearer "+api["secret"].(string))
+	apiClient := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+	apiResponse := checked(apiClient.Do(apiRequest))
+	closeChecked(apiResponse.Body)
+	require(apiResponse.StatusCode == http.StatusOK, "fallback live controller rejected the authenticated request")
 	deadline := time.Now().Add(5 * time.Second)
 	for history.LoadURLTestHistory("Primary") == nil || history.LoadURLTestHistory("Backup") == nil {
 		require(time.Now().Before(deadline), "both fallback services did not become healthy")
@@ -428,6 +435,7 @@ type testCertificateStore struct{ pool *x509.CertPool }
 
 func (s testCertificateStore) Name() string                   { return "temporary test CA" }
 func (s testCertificateStore) Pool() *x509.CertPool           { return s.pool }
+func (s testCertificateStore) ExclusiveAnchors() bool         { return true }
 func (s testCertificateStore) Start(adapter.StartStage) error { return nil }
 func (s testCertificateStore) Close() error                   { return nil }
 

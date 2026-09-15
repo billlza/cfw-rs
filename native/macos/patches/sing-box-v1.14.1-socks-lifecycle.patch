@@ -932,3 +932,305 @@ index 0000000000000000000000000000000000000000..33c368d1f90c01d6bebc623a6180cbc2
 +		t.Fatal("failed authentication was retried")
 +	}
 +}
+diff --git a/cmd/cfm-build-workspace/main.go b/cmd/cfm-build-workspace/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f01d6ca2e8fb9eac95961da1555ddd5a550130d
+--- /dev/null
++++ b/cmd/cfm-build-workspace/main.go
+@@ -0,0 +1,188 @@
++// Build an isolated workspace with the source-bound sing v0.9.4 packet-address
++// correction. The original source and checksum-verified module cache stay intact.
++package main
++
++import (
++	"crypto/sha256"
++	"errors"
++	"flag"
++	"fmt"
++	"go/format"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++type sourceEdit struct{ before, after string }
++type sourcePatch struct {
++	path, digest string
++	edits        []sourceEdit
++}
++
++var patches = []sourcePatch{
++	{
++		path: "common/bufio/bind.go", digest: "581bcc7042231a0d4e76da58372bde94ad59d59e460b6f84200b193976d4bc9e",
++		edits: []sourceEdit{
++			{"\"net\"", "\"net\"\n\t\"sync\""},
++			{"remoteAddr M.Socksaddr", "remoteAddr M.Socksaddr\n\tremoteAddrAccess sync.RWMutex"},
++			{"c.remoteAddr = M.SocksaddrFromNet(addr)", "c.setRemoteAddr(M.SocksaddrFromNet(addr))"},
++			{"c.remoteAddr = destination", "c.setRemoteAddr(destination)"},
++			{"c.remoteAddr.UDPAddr()", "c.remoteAddress().UDPAddr()"},
++			{"WritePacket(buffer, c.remoteAddr)", "WritePacket(buffer, c.remoteAddress())"},
++			{"return c.remoteAddr", "return c.remoteAddress()"},
++			{"func (c *serverPacketConn) Read(p []byte)", `// Copy the address under a short lock; never hold it across blocking I/O.
++func (c *serverPacketConn) setRemoteAddr(addr M.Socksaddr) {
++	c.remoteAddrAccess.Lock()
++	c.remoteAddr = addr
++	c.remoteAddrAccess.Unlock()
++}
++
++func (c *serverPacketConn) remoteAddress() M.Socksaddr {
++	c.remoteAddrAccess.RLock()
++	defer c.remoteAddrAccess.RUnlock()
++	return c.remoteAddr
++}
++
++func (c *serverPacketConn) Read(p []byte)`},
++		},
++	},
++	{
++		path: "common/bufio/bind_wait.go", digest: "ee1581ff0a07d1858f5edafc5c767e9cc884a2462cf350e55ffacfa65dd59203",
++		edits: []sourceEdit{{"w.remoteAddr = destination", "w.setRemoteAddr(destination)"}},
++	},
++}
++
++func rewrite(patch sourcePatch, input []byte) ([]byte, error) {
++	if fmt.Sprintf("%x", sha256.Sum256(input)) != patch.digest {
++		return nil, fmt.Errorf("%s: sing v0.9.4 source checksum mismatch", patch.path)
++	}
++	source := string(input)
++	for _, edit := range patch.edits {
++		if strings.Count(source, edit.before) != 1 {
++			return nil, fmt.Errorf("%s: source edit is not unique", patch.path)
++		}
++		source = strings.Replace(source, edit.before, edit.after, 1)
++	}
++	return format.Source([]byte(source))
++}
++
++func copySources(source, destination string) error {
++	var copied int64
++	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
++		if walkErr != nil {
++			return walkErr
++		}
++		relative, err := filepath.Rel(source, path)
++		if err != nil {
++			return err
++		}
++		if relative == ".git" {
++			return filepath.SkipDir
++		}
++		target := filepath.Join(destination, relative)
++		if entry.IsDir() {
++			return os.MkdirAll(target, 0o700)
++		}
++		metadata, err := entry.Info()
++		if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 16<<20 {
++			return fmt.Errorf("refuse nonregular or oversized build input: %s", relative)
++		}
++		copied += metadata.Size()
++		if copied > 256<<20 {
++			return errors.New("build source copy exceeds 256 MiB")
++		}
++		content, err := os.ReadFile(path)
++		if err != nil {
++			return err
++		}
++		return os.WriteFile(target, content, 0o600|metadata.Mode().Perm()&0o111)
++	})
++}
++
++func prepare(sourceRoot, moduleRoot, output string) (workspace string, resultErr error) {
++	if !filepath.IsAbs(sourceRoot) || !filepath.IsAbs(moduleRoot) || !filepath.IsAbs(output) {
++		return "", errors.New("source, module and output paths must be absolute")
++	}
++	realSource, err := filepath.EvalSymlinks(sourceRoot)
++	if err != nil || realSource != filepath.Clean(sourceRoot) || strings.HasPrefix(filepath.Clean(output)+string(os.PathSeparator), realSource+string(os.PathSeparator)) {
++		return "", errors.New("build workspace must be outside the real source directory")
++	}
++	realRoot, err := filepath.EvalSymlinks(moduleRoot)
++	if err != nil || realRoot != filepath.Clean(moduleRoot) || filepath.Base(realRoot) != "sing@v0.9.4" {
++		return "", errors.New("module source must be the real sing v0.9.4 directory")
++	}
++	if strings.HasPrefix(filepath.Clean(output)+string(os.PathSeparator), realRoot+string(os.PathSeparator)) {
++		return "", errors.New("build workspace must be outside the verified module directory")
++	}
++	goMod, err := os.ReadFile(filepath.Join(realSource, "go.mod"))
++	if err != nil || !strings.Contains(string(goMod), "\tgithub.com/sagernet/sing v0.9.4\n") || strings.Contains(string(goMod), "replace ") {
++		return "", errors.New("unexpected sing-box module declaration")
++	}
++	// Validate and rewrite both files before creating the isolated workspace.
++	contents := make(map[string][]byte, len(patches))
++	for _, patch := range patches {
++		path := filepath.Join(realRoot, patch.path)
++		metadata, err := os.Lstat(path)
++		if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 65536 {
++			return "", fmt.Errorf("%s: expected a bounded regular source file", patch.path)
++		}
++		input, err := os.ReadFile(path)
++		if err != nil {
++			return "", err
++		}
++		contents[patch.path], err = rewrite(patch, input)
++		if err != nil {
++			return "", err
++		}
++	}
++	if err := os.Mkdir(output, 0o700); err != nil {
++		return "", err
++	}
++	defer func() {
++		if resultErr != nil {
++			resultErr = errors.Join(resultErr, os.RemoveAll(output))
++		}
++	}()
++	if err := copySources(realSource, output); err != nil {
++		return "", err
++	}
++	moduleCopy := filepath.Join(output, "cfw-dependencies", "sing")
++	if err := copySources(realRoot, moduleCopy); err != nil {
++		return "", err
++	}
++	for relative, content := range contents {
++		path := filepath.Join(moduleCopy, relative)
++		if err := os.WriteFile(path, content, 0o600); err != nil {
++			return "", err
++		}
++	}
++	// A fixed relative replacement keeps ephemeral absolute paths out of module
++	// build identities. Both trees, including the dependency license, are copied.
++	goMod = append(goMod, []byte("\nreplace github.com/sagernet/sing v0.9.4 => ./cfw-dependencies/sing\n")...)
++	if err := os.WriteFile(filepath.Join(output, "go.mod"), goMod, 0o600); err != nil {
++		return "", err
++	}
++	return output, nil
++}
++
++func main() {
++	moduleRoot := flag.String("module-source", "", "verified sing v0.9.4 module directory")
++	output := flag.String("output", "", "new private build workspace")
++	flag.Parse()
++	if flag.NArg() != 0 {
++		fmt.Fprintln(os.Stderr, "unexpected build-workspace arguments")
++		os.Exit(1)
++	}
++	sourceRoot, err := os.Getwd()
++	if err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++	path, err := prepare(sourceRoot, *moduleRoot, *output)
++	if err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++	fmt.Println(path)
++}
+diff --git a/cmd/cfm-build-workspace/main_test.go b/cmd/cfm-build-workspace/main_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d94ef7435606a002d179f50fd2eb59f819f18cff
+--- /dev/null
++++ b/cmd/cfm-build-workspace/main_test.go
+@@ -0,0 +1,102 @@
++package main
++
++import (
++	"bytes"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestWorkspacePreservesSourcesAndRejectsDrift(t *testing.T) {
++	cache := os.Getenv("GOMODCACHE")
++	if !filepath.IsAbs(cache) {
++		t.Fatal("test requires the verified absolute module cache")
++	}
++	parent, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	module := filepath.Join(parent, "sing@v0.9.4")
++	source := filepath.Join(parent, "source")
++	if err = os.Mkdir(source, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	goMod := []byte("module github.com/sagernet/sing-box\n\nrequire (\n\tgithub.com/sagernet/sing v0.9.4\n)\n")
++	if err = os.WriteFile(filepath.Join(source, "go.mod"), goMod, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	original := make(map[string][]byte)
++	for _, patch := range patches {
++		input, err := os.ReadFile(filepath.Join(cache, "github.com/sagernet/sing@v0.9.4", patch.path))
++		if err != nil {
++			t.Fatal(err)
++		}
++		path := filepath.Join(module, patch.path)
++		if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++			t.Fatal(err)
++		}
++		if err = os.WriteFile(path, input, 0o600); err != nil {
++			t.Fatal(err)
++		}
++		original[path] = input
++	}
++	output := filepath.Join(t.TempDir(), "workspace")
++	workspace, err := prepare(source, module, output)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data, err := os.ReadFile(filepath.Join(workspace, "go.mod"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.HasSuffix(string(data), "\nreplace github.com/sagernet/sing v0.9.4 => ./cfw-dependencies/sing\n") {
++		t.Fatalf("missing exact relative module replacement: %s", data)
++	}
++	unchanged, err := os.ReadFile(filepath.Join(source, "go.mod"))
++	if err != nil || !bytes.Equal(unchanged, goMod) {
++		t.Fatal("source go.mod was modified", err)
++	}
++	for path, before := range original {
++		after, err := os.ReadFile(path)
++		if err != nil || !bytes.Equal(before, after) {
++			t.Fatal("module cache source was modified", err)
++		}
++		relative, err := filepath.Rel(module, path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		patched, err := os.ReadFile(filepath.Join(output, "cfw-dependencies", "sing", relative))
++		if err != nil || bytes.Equal(before, patched) {
++			t.Fatal("workspace did not contain corrected source", err)
++		}
++	}
++	if _, err = prepare(source, module, output); err == nil {
++		t.Fatal("overwrote existing output")
++	}
++	for _, protected := range []string{source, module} {
++		inside := filepath.Join(protected, "workspace")
++		if _, err = prepare(source, module, inside); err == nil {
++			t.Fatal("accepted a workspace inside verified inputs")
++		}
++		if _, err = os.Stat(inside); !os.IsNotExist(err) {
++			t.Fatal("workspace rejection modified verified inputs", err)
++		}
++	}
++	for _, patch := range patches {
++		path := filepath.Join(module, patch.path)
++		if err = os.WriteFile(path, append(bytes.Clone(original[path]), '\n'), 0o600); err != nil {
++			t.Fatal(err)
++		}
++		rejected := filepath.Join(t.TempDir(), "rejected")
++		if _, err = prepare(source, module, rejected); err == nil {
++			t.Fatal("accepted changed module source", patch.path)
++		}
++		if _, err = os.Stat(rejected); !os.IsNotExist(err) {
++			t.Fatal("source rejection left output", err)
++		}
++		if err = os.WriteFile(path, original[path], 0o600); err != nil {
++			t.Fatal(err)
++		}
++	}
++}

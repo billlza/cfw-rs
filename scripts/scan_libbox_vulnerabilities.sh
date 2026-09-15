@@ -55,15 +55,20 @@ trap '/bin/rm -rf -- "$go_build_cache"' EXIT
 export GOCACHE="$go_build_cache"
 export PATH="$toolchain_root/go-$GO_VERSION/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 configure_offline_go_environment
+build_source_root="$(prepare_libbox_build_workspace "$source_root" "$go_bin" "$go_build_cache/workspace")"
 
-"$scanner" \
-  -C "$source_root" \
+# Scan both graphs: local replacements have no advisory version, so the
+# original pinned graph must remain covered as well as the corrected sources.
+for scan_source in "$source_root" "$build_source_root"; do
+  "$scanner" \
+  -C "$scan_source" \
   -db https://vuln.go.dev \
   -mode source \
   -scan symbol \
   -show verbose \
   -tags "$LIBBOX_BUILD_TAGS" \
   ./experimental/libbox
+done
 cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
 cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
 cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"

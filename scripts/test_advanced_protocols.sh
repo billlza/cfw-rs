@@ -38,8 +38,10 @@ CC="$(/usr/bin/xcrun --find clang)"
 SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 export CC SDKROOT
 protocol_go="$protocol_toolchains/go-$GO_VERSION/bin/go"
-cd "$protocol_source"
-"$protocol_go" test -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" ./protocol/group ./protocol/socks
+protocol_build_source="$(prepare_libbox_build_workspace "$protocol_source" "$protocol_go" "$protocol_cache/workspace")"
+protocol_ldflags="-checklinkname=0 '-extld=$repo_root/scripts/libbox_clang_linker.sh'"
+cd "$protocol_build_source"
+"$protocol_go" test -race -ldflags="$protocol_ldflags" -tags "$LIBBOX_BUILD_TAGS" ./protocol/group ./protocol/socks
 "$protocol_go" vet -tags "$LIBBOX_BUILD_TAGS" \
   "$repo_root/scripts/fixtures/advanced_protocol_probe.go" \
   "$repo_root/scripts/fixtures/advanced_dns_probe.go" \
@@ -47,7 +49,7 @@ cd "$protocol_source"
   "$repo_root/scripts/fixtures/advanced_dns_bootstrap.go" \
   "$repo_root/scripts/fixtures/advanced_lan_probe.go" \
   "$repo_root/scripts/fixtures/advanced_http_probe.go"
-"$protocol_go" run -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" \
+"$protocol_go" run -race -ldflags="$protocol_ldflags" -tags "$LIBBOX_BUILD_TAGS" \
   "$repo_root/scripts/fixtures/advanced_protocol_probe.go" \
   "$repo_root/scripts/fixtures/advanced_dns_probe.go" \
   "$repo_root/scripts/fixtures/advanced_group_probe.go" \

@@ -92,7 +92,7 @@ func loadBalanceProbe(projector, address, tcpTarget, udpTarget string) {
 				observations[tag] = observer
 				return observer, nil
 			})
-			ctx := box.Context(service.ContextWithDefaultRegistry(context.Background()), include.InboundRegistry(), registry, include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry())
+			ctx := box.Context(service.ContextWithDefaultRegistry(context.Background()), include.InboundRegistry(), registry, include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
 			options := checked(sjson.UnmarshalExtendedContext[option.Options](ctx, checked(json.Marshal(config))))
 			client := checked(box.New(box.Options{Context: ctx, Options: options}))
 			require(client.StartWithExternalCleanup() == nil, "balance core startup")

@@ -1498,7 +1498,13 @@ def analyze_repository(repository: Path) -> tuple[Blocker, ...]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--assurance",
+        action="store_true",
+        help="also require activation of the exact cloud collector source closure",
+    )
+    return parser
 
 
 def _collector_activation_blocker() -> Blocker | None:
@@ -1529,7 +1535,7 @@ def _collector_activation_blocker() -> Blocker | None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    _parser().parse_args(argv)
+    arguments = _parser().parse_args(argv)
     try:
         blockers = list(analyze_repository(_repository()))
     except (OSError, PhysicalCaptureReadinessError) as error:
@@ -1538,9 +1544,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    activation_blocker = _collector_activation_blocker()
-    if activation_blocker is not None:
-        blockers.append(activation_blocker)
+    # Ordinary GA checks all producer/source contracts. Deployment of the
+    # separate HSM-backed collector belongs to the optional assurance tier;
+    # its production initialization and transport still require activation.
+    if arguments.assurance:
+        activation_blocker = _collector_activation_blocker()
+        if activation_blocker is not None:
+            blockers.append(activation_blocker)
     if blockers:
         for blocker in sorted(blockers):
             print(
@@ -1552,7 +1562,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print("physical capture source readiness verified")
+    if arguments.assurance:
+        print("physical capture source readiness and collector activation verified")
+    else:
+        print("physical capture source readiness verified; assurance activation not checked")
     return 0
 
 

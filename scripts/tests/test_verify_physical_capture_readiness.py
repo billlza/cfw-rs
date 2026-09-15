@@ -531,7 +531,29 @@ class ReadinessCliAndWiringTests(unittest.TestCase):
             stdout
         ):
             self.assertEqual(readiness.main([]), 0)
-        self.assertEqual(stdout.getvalue(), "physical capture source readiness verified\n")
+        self.assertEqual(
+            stdout.getvalue(),
+            "physical capture source readiness verified; assurance activation not checked\n",
+        )
+
+    def test_ga_source_readiness_does_not_require_cloud_collector_activation(self) -> None:
+        with patch.object(readiness, "analyze_repository", return_value=()), patch.object(
+            readiness, "_collector_activation_blocker"
+        ) as activation, patch.object(
+            readiness, "_repository", return_value=Path("/")
+        ), redirect_stdout(io.StringIO()):
+            self.assertEqual(readiness.main([]), 0)
+        activation.assert_not_called()
+
+    def test_ga_source_readiness_still_rejects_a_broken_packet_producer(self) -> None:
+        blocker = readiness.Blocker("packet_producer_unready", "packet.py", 1, "broken")
+        with patch.object(readiness, "analyze_repository", return_value=(blocker,)), patch.object(
+            readiness, "_collector_activation_blocker"
+        ) as activation, patch.object(
+            readiness, "_repository", return_value=Path("/")
+        ), redirect_stderr(io.StringIO()):
+            self.assertEqual(readiness.main([]), 1)
+        activation.assert_not_called()
 
     def test_cli_reports_unactivated_collector_source_as_a_distinct_blocker(self) -> None:
         blocker = readiness.Blocker(
@@ -546,7 +568,7 @@ class ReadinessCliAndWiringTests(unittest.TestCase):
         ), patch.object(readiness, "_repository", return_value=Path("/")), redirect_stderr(
             stderr
         ):
-            self.assertEqual(readiness.main([]), 1)
+            self.assertEqual(readiness.main(["--assurance"]), 1)
         self.assertIn("collector_source_closure_unactivated", stderr.getvalue())
         self.assertIn("physical_capture_source_not_ready", stderr.getvalue())
 

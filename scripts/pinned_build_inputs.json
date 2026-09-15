@@ -2313,7 +2313,9 @@
       "collector_source_closure_unactivated",
       "physical_capture_source_not_ready",
       "def _collector_activation_blocker()",
-      "def analyze_repository(repository: Path)"
+      "def analyze_repository(repository: Path)",
+      "\"--assurance\"",
+      "if arguments.assurance:"
     ],
     "scripts/verify_build_boundaries.sh": [
       "cfw_run_release_python_script \"$repo_root\"",
@@ -3349,7 +3351,7 @@
     "scripts/release_publication_path_contract.sh": "0f25686c1cb474bfa24d50ec5f227d45a53532a10ca332ad2b995f79d51e017b",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "98c99a441f53122c394ac082e39940ae434a6635ea5c94984690d22ddfbfc8d0",
+    "RELEASE.md": "a33bec56c4c8ba2e422f577b6f6365419e46dbcde7bfde2a0857fa79185b00ad",
     "scripts/updater_signing_launcher.py": "b6240012d2539077dcfa6969e5fb3118486f0469b75c75d4e984075d4c18b974",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "0189ac29728266fbc36e8945f60ea44c6b1f583c96d64e93e57bd36fe8e70cb3",
@@ -3378,10 +3380,10 @@
     "scripts/physical_capture/__init__.py": "f5fe405e071210b80f782a819991cf86c4a42ee286a08f1c77f63b1781cba193",
     "scripts/physical_capture/session.py": "9afa0ae66577d9a104a8a38274fe88fee131a10919a086a80c07e7d410f6a347",
     "scripts/physical_capture/finalize.py": "328727e6615c24ecefec74dbb4bfa7b36c0cbce453a91909026a2ddeb8825a15",
-    "scripts/verify_physical_capture_readiness.py": "4641c4f6cd6cc6086b7e2d3327146a99436dc2731182bd1e0dfcb59db1577c90",
+    "scripts/verify_physical_capture_readiness.py": "77916dcd25a0577e392e116ff9304b6f1a8eeeb92f2a3eaac83e00baa99db172",
     "scripts/verify_build_boundaries.sh": "26b8a6034b28f9b09a1efde01ad05ee04dba23959d5a41a9df52d2263a0408e4",
     "scripts/verify_release_build_allocations.py": "e72e2201db09b2adc8369e8797a07033569c2117896d2f30af160e431e434114",
-    "scripts/verify_release_environment.sh": "faf72a062b8fd026a4533a20207c4fb7f39adc28bd18f746f3e2e854b40265d8",
+    "scripts/verify_release_environment.sh": "14a788b3a8af8d177588279e17d00219784e16bb5bbfa9d4622b1a49303ab793",
     "scripts/physical_capture/performance_operator.py": "52cb974c954e4615d52b3d027651f86609578112e68946026221625f56b0137c",
     "scripts/physical_capture/performance.py": "1e65795da092d18c443ea687bfb9384262ffb2a4c067f27978f65a240108a2c4",
     "scripts/physical_capture/performance_profiles/latency-100ms-loss-1pct-10mbps.pf": "259df2641a9a5c8be89df82303af9a25c38b189115de9d391da98ec7ffeccbaa",

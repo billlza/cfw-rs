@@ -257,10 +257,10 @@ verify_repository_patch(
 )
 
 package = json.loads(Path(package_path).read_text(encoding="utf-8"))
-if package.get("engines", {}).get("node") != ">=24 <25":
-    raise SystemExit("error: UI package must require the Node.js 24 LTS line")
-if node_version.split(".", 1)[0] != "24":
-    raise SystemExit("error: release pin is not a Node.js 24 release")
+node_major = int(node_version.split(".", 1)[0])
+expected_node_range = f">={node_major} <{node_major + 1}"
+if package.get("engines", {}).get("node") != expected_node_range:
+    raise SystemExit("error: UI package Node.js range differs from the release pin")
 
 tauri = json.loads(Path(tauri_path).read_text(encoding="utf-8"))
 if tauri.get("app", {}).get("withGlobalTauri") is not False:

@@ -200,22 +200,24 @@ the earlier missing-link placeholders:
   ProxyAgent, and Provider. Each direction applies an exact public code-signing
   requirement before exporting its typed protocol.
 
-The libbox input is upstream sing-box `v1.13.15` at commit
-`3708fa18766cda1f11b77f6ed9c7bd61688f17df` plus four digest-pinned repository
+The libbox input is upstream sing-box `v1.14.1` at commit
+`1ac1a339cb1223e9c70eae14c44411c75033c02d` plus six digest-pinned repository
 patches: security dependency updates, the public raw-packet adapter, bounded
-DNS failover, and structured loopback endpoint-conflict reporting. The exact
+DNS failover, structured loopback endpoint-conflict reporting, isolated profile
+probes, and SOCKS lifecycle/concurrency corrections. The exact
 combined diff and patched `go.mod`/`go.sum` digests are
 release inputs in `scripts/dependency_pins.env` and
 `native/macos/Dependencies.lock.json`. The previous helper, mihomo, clash-rs,
 downloaded core, and private packet-flow file-descriptor access are not
 fallbacks.
 
-The security patch pins `golang.org/x/mod v0.40.0` and its exact tested `x/*`
-closure to remove `GO-2026-6179` and `GO-2026-6180`. It also pins
-`golang.org/x/crypto v0.56.0` to fix `GO-2026-6354` and `GO-2026-6355`, with
-the module's minimum Go version at `1.26.0`; the compiler remains `1.26.6`.
-No other selected dependency changed for this SSH correction. The release vulnerability
-scan must report zero affected symbols and zero affected imported packages
+The compatible dependency refresh pins `golang.org/x/mod v0.41.0` and
+`golang.org/x/crypto v0.57.0`; both the module's minimum Go version and the
+compiler are `1.27.1`. The SOCKS correction materializes a checksum-bound
+private build workspace containing the corrected `sing v0.9.4` source while
+preserving the original module cache. The release vulnerability scan checks
+both the original versioned dependency graph and the corrected workspace,
+and must report zero affected symbols and zero affected imported packages
 without an ignore. `GO-2026-5932` may remain only as the documented module-level
 `x/crypto/openpgp` report: the package has no fixed version and must remain
 absent from the libbox import graph.

@@ -547,6 +547,13 @@ qualification without it. A product defect discovered by an assurance run is
 handled by the defect policy; unavailable research infrastructure alone is not
 a GA product failure.
 
+The ordinary environment/build preflight runs all physical-capture source
+contracts without requiring a deployed collector revision. Explicit
+`verify_physical_capture_readiness.py --assurance` additionally requires the
+exact activated source closure. Production collector initialization and every
+production cloud transport retain that activation check independently; an
+ordinary source result cannot authorize assurance receipts.
+
 ## Three-stage release order
 
 The implementation must expose three closed stages without skip flags or

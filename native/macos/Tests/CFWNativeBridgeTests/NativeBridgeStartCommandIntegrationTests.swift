@@ -319,6 +319,7 @@ private actor StartableTunnelHost: TunnelHostBridging {
   private let installError: AppleNetworkError?
   private let cleanupEvents: NativeCleanupEventLog?
   private let failedStartSnapshot: EngineFailure?
+  private let reportsAsynchronousStartFailure: Bool
   private let startPendingPreferenceDescriptor: ConfigurationDescriptor?
   private var remainingSnapshotFailures: Int
   private var remainingStopFailures: Int
@@ -342,6 +343,7 @@ private actor StartableTunnelHost: TunnelHostBridging {
     startPendingPreferenceDescriptor: ConfigurationDescriptor? = nil,
     cleanupEvents: NativeCleanupEventLog? = nil,
     failedStartSnapshot: EngineFailure? = nil,
+    reportsAsynchronousStartFailure: Bool = false,
     snapshotFailures: Int = 0,
     stopFailures: Int = 0,
     expectedInjectedConfiguration: Data? = nil,
@@ -360,6 +362,7 @@ private actor StartableTunnelHost: TunnelHostBridging {
     self.startPendingPreferenceDescriptor = startPendingPreferenceDescriptor
     self.cleanupEvents = cleanupEvents
     self.failedStartSnapshot = failedStartSnapshot
+    self.reportsAsynchronousStartFailure = reportsAsynchronousStartFailure
     remainingSnapshotFailures = snapshotFailures
     remainingStopFailures = stopFailures
   }
@@ -407,6 +410,7 @@ private actor StartableTunnelHost: TunnelHostBridging {
       throw startError
     }
     started = true
+    failedOwnerPresent = reportsAsynchronousStartFailure && failedStartSnapshot != nil
   }
 
   func stopTunnel(expectedConfiguration: ConfigurationDescriptor) throws {
@@ -1483,6 +1487,40 @@ struct NativeBridgeStartCommandIntegrationTests {
         await failureCode(coordinator, .stopTunnel(request.context)) == .identityRejected,
         "the exact Tunnel cleanup receipt is one-use")
     }
+  }
+
+  @Test func asynchronousTicketExpiryIsReportedOnlyAfterExactCleanupAndOff() async throws {
+    let request = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let tunnel = StartableTunnelHost(
+      descriptor: descriptor,
+      startPendingPreferenceDescriptor: descriptor,
+      failedStartSnapshot: TunnelStartupFailure.ticketExpired,
+      reportsAsynchronousStartFailure: true)
+    let lease = RecordingEngineLease(
+      observation: AuthorityOwnershipObservation(
+        state: .preparing,
+        lease: agreement(for: descriptor, mode: .tunnel, leaseState: .prepared)),
+      cancelPreparedResult: true)
+    let coordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor), tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      engineLease: lease)
+
+    #expect(await failureCode(coordinator, .startTunnel(request)) == .ticketExpired)
+    let counts = await tunnel.counters()
+    #expect(counts.start == 1)
+    #expect(counts.stop == 1)
+    let compensation = await tunnel.compensationCounts()
+    #expect(compensation.compensate == 1)
+    #expect(compensation.finish == 1)
+    #expect(try await tunnel.snapshot() == .off)
+    guard case .acknowledged = try await coordinator.execute(.stopTunnel(request.context)) else {
+      Issue.record("exact failed-start cleanup receipt was not acknowledged")
+      return
+    }
+    #expect(await failureCode(coordinator, .stopTunnel(request.context)) == .identityRejected)
   }
 
   @Test func staleMutationCompletionCannotReleaseANewerMutation() async throws {

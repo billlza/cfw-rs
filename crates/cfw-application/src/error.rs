@@ -152,6 +152,10 @@ pub enum EngineCoordinatorError {
         operation: EngineOperation,
         conflict: BackendErrorKind,
     },
+    #[error(
+        "the Tunnel start ticket expired while macOS was starting the extension; exact cleanup and independent global Off were proven"
+    )]
+    StartTicketExpiredAfterOff,
     #[error("{validation_error}; cleanup {cleanup_operation} also failed: {cleanup_error}")]
     ValidationAndCleanupFailed {
         validation_error: Box<EngineCoordinatorError>,

@@ -437,6 +437,13 @@ async fn fail_backend(
                         conflict: source.kind,
                     });
                 }
+                Ok(())
+                    if operation == EngineOperation::StartTunnel
+                        && source.kind == BackendErrorKind::TicketExpired =>
+                {
+                    set_off(state, snapshots);
+                    return Err(EngineCoordinatorError::StartTicketExpiredAfterOff);
+                }
                 Ok(()) => backend_error(operation, source),
                 Err(proof_error) => EngineCoordinatorError::StartAndOffProofFailed {
                     start_operation: operation,

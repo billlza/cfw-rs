@@ -590,7 +590,9 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
       return .globalAuthorityUnavailable
     }
     switch domain.code {
-    case .ticketInvalid, .ticketExpired, .ticketAlreadyRedeemed:
+    case .ticketExpired:
+      return .expiredStartTicket
+    case .ticketInvalid, .ticketAlreadyRedeemed:
       return .invalidStartTicket
     default:
       return .globalAuthorityUnavailable

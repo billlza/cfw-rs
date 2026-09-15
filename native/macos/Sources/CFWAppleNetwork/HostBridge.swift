@@ -871,6 +871,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
   private let authorizationDeadline: CallbackDeadlineScheduler
   private let preferenceMutationJournal: PreferenceMutationJournal
   private var inFlightManager: NETunnelProviderManager?
+  private var pendingStartedConfiguration: ConfigurationDescriptor?
 
   public init(
     providerBundleIdentifier: String,
@@ -1045,8 +1046,10 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
       }
       // Use the provider-session API documented for custom provider options.
       // macOS may add its own connection metadata before the Provider callback.
+      pendingStartedConfiguration = try manager.configurationDescriptor()
       try Self.startProviderSession(session, ticketBytes: ticketBytes)
     } catch let startError {
+      pendingStartedConfiguration = nil
       if startError is CancellationError {
         throw startError
       }
@@ -1065,6 +1068,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     guard try manager.configurationDescriptor() == expectedConfiguration else {
       throw AppleNetworkError.staleStopRequest
     }
+    pendingStartedConfiguration = nil
     manager.connection.stopVPNTunnel()
 
     let clock = ContinuousClock()
@@ -1088,6 +1092,29 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     try Task.checkCancellation()
     switch manager.connection.status {
     case .invalid, .disconnected:
+      if let expected = pendingStartedConfiguration,
+        try manager.configurationDescriptor() == expected
+      {
+        let failure: EngineFailure? = try await awaitBoundedCallback(
+          deadline: callbackDeadline,
+          timeoutError: AppleNetworkError.providerMessageTimedOut
+        ) { finish in
+          manager.connection.fetchLastDisconnectError { error in
+            finish(
+              .success(
+                TunnelStartupFailure.matchingFailure(
+                  error.map { $0 as NSError }, configuration: expected)))
+          }
+        }
+        try Task.checkCancellation()
+        if pendingStartedConfiguration == expected,
+          try manager.configurationDescriptor() == expected,
+          manager.connection.status == .disconnected,
+          let failure
+        {
+          return .tunnelFailed(failure, configuration: expected, sequence: 0)
+        }
+      }
       return .off
     case .connecting, .reasserting:
       return .tunnelStarting(
@@ -1172,6 +1199,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
       preferences: self
     )
     inFlightManager = nil
+    pendingStartedConfiguration = nil
     return true
   }
 
@@ -1193,6 +1221,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     }
     try preferenceMutationJournal.clear(operationID: receipt.operationID)
     inFlightManager = nil
+    pendingStartedConfiguration = nil
   }
 
   public func completePreferenceMutation(
@@ -1220,6 +1249,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     }
     try preferenceMutationJournal.clear(operationID: receipt.operationID)
     inFlightManager = nil
+    pendingStartedConfiguration = nil
   }
 
   // MARK: - ManagedTunnelPreferences (durable compensation)

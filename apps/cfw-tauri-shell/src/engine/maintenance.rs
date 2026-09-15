@@ -26,6 +26,7 @@ struct EngineMaintenanceInner {
 
 pub(crate) struct EngineModeChangeLease {
     _intent: EngineModeChangeIntent,
+    revision: u64,
     _serial: OwnedMutexGuard<()>,
     // Declared after the serial guard so Rust drops the guard first. The
     // pending count remains non-zero during ownership handoff to the next
@@ -121,6 +122,7 @@ impl EngineMaintenanceGate {
         }
         Ok(EngineModeChangeLease {
             _intent: intent,
+            revision,
             _serial: serial,
             _registration: registration,
         })
@@ -145,6 +147,24 @@ impl EngineMaintenanceGate {
 }
 
 impl EngineModeChangeLease {
+    /// A queued user operation supersedes an automatic retry even though it
+    /// cannot take the serial permit until this accepted attempt has settled.
+    pub(super) fn retry_guard(
+        &self,
+    ) -> impl Fn() -> Result<(), EngineMaintenanceError> + Send + 'static {
+        let inner = self._registration.inner.clone();
+        let revision = self.revision;
+        move || {
+            let current = inner
+                .lock()
+                .map_err(|_| EngineMaintenanceError::StateLock)?;
+            if current.intent_revision != revision {
+                return Err(EngineMaintenanceError::StaleIntent);
+            }
+            Ok(())
+        }
+    }
+
     /// Detaches an accepted coordinator operation from the renderer's future.
     /// Dropping the returned receiver discards only the response: this task
     /// keeps both the serial permit and maintenance-visible registration until

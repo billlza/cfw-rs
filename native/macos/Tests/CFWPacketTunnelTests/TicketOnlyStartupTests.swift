@@ -621,6 +621,44 @@ struct TicketOnlyStartupTests {
     #expect(fixture.engine.startCount == 0)
   }
 
+  @Test func expiredTicketKeepsItsTypedCauseAndNeverStartsTheEngine() throws {
+    let authority = FailingRedeemAuthorityClient(
+      error: AuthorityDomainError(code: .ticketExpired))
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+    let ticket = try makeTicket()
+
+    fixture.coordinator.start(ticket: ticket, descriptor: fixture.descriptor) { start.record($0) }
+
+    #expect(start.wait())
+    let failure = try #require(start.values.first ?? nil).engineFailure
+    #expect(failure.code == NativeBridgeErrorCode.ticketExpired.rawValue)
+    #expect(authority.redeemCount == 1)
+    #expect(fixture.engine.startCount == 0)
+    #expect(fixture.pump.startCount == 0)
+    #expect(throws: (any Error).self) { try ticket.withUnsafeBytes { _ in () } }
+  }
+
+  @Test func providerOnlyEncodesExpiredTicketsAsFreshRetryEvidence() throws {
+    let descriptor = try tunnelDescriptor()
+    let expired =
+      try #require(
+        PacketTunnelProvider.platformStartError(
+          PacketTunnelProviderError.expiredStartTicket, configuration: descriptor)) as NSError
+    #expect(
+      TunnelStartupFailure.matchingFailure(expired, configuration: descriptor)
+        == TunnelStartupFailure.ticketExpired)
+    let replay = TunnelTicketStartCoordinator.mapRedeemError(
+      AuthorityDomainError(code: .ticketAlreadyRedeemed))
+    #expect(replay == .invalidStartTicket)
+    let invalid =
+      try #require(
+        PacketTunnelProvider.platformStartError(
+          replay, configuration: descriptor)) as NSError
+    #expect(TunnelStartupFailure.matchingFailure(invalid, configuration: descriptor) == nil)
+    #expect(PacketTunnelProvider.platformStartError(nil, configuration: descriptor) == nil)
+  }
+
   @Test func redeemedMismatchWithDescriptorFailsClosed() throws {
     // Build a redeemed operation whose digests do not match the provider descriptor.
     let otherDescriptor = try ConfigurationDescriptor(

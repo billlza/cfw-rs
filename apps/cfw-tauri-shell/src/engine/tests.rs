@@ -467,6 +467,10 @@ fn invalid_active_snapshot_cannot_bind_controller_access() {
 
 struct EndpointRetryBackend {
     conflicts_before_success: usize,
+    tunnel_failures_before_success: usize,
+    tunnel_failure: BackendErrorKind,
+    tunnel_cleanup_error: Option<BackendErrorKind>,
+    tunnel_off_proof_error: bool,
     starts: Mutex<Vec<(u64, u16)>>,
     stops: AtomicUsize,
     status: Mutex<NativeEngineStatus>,
@@ -476,6 +480,10 @@ impl EndpointRetryBackend {
     fn new(conflicts_before_success: usize) -> Self {
         Self {
             conflicts_before_success,
+            tunnel_failures_before_success: 0,
+            tunnel_failure: BackendErrorKind::TicketExpired,
+            tunnel_cleanup_error: None,
+            tunnel_off_proof_error: false,
             starts: Mutex::new(Vec::new()),
             stops: AtomicUsize::new(0),
             status: Mutex::new(NativeEngineStatus::Off),
@@ -513,11 +521,19 @@ impl EngineBackend for EndpointRetryBackend {
         &self,
         _request: EngineStartRequest,
     ) -> BackendFuture<'_, ()> {
-        panic!("Tunnel authorization is outside the endpoint retry fixture")
+        Box::pin(async { Ok(()) })
     }
 
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
-        Box::pin(async move { Ok(self.status.lock().expect("status lock").clone()) })
+        Box::pin(async move {
+            if self.tunnel_off_proof_error && self.stops.load(Ordering::Acquire) > 0 {
+                return Err(BackendError::new(
+                    BackendErrorKind::Unavailable,
+                    "Off cannot be observed",
+                ));
+            }
+            Ok(self.status.lock().expect("status lock").clone())
+        })
     }
 
     fn start_system_proxy(
@@ -576,29 +592,48 @@ impl EngineBackend for EndpointRetryBackend {
         &self,
         _context: EngineCommandContext,
     ) -> BackendFuture<'_, TunnelInstallOutcome> {
-        Box::pin(async {
-            Err(BackendError::new(
-                BackendErrorKind::Internal,
-                "tunnel is outside the endpoint retry fixture",
-            ))
-        })
+        Box::pin(async { Ok(TunnelInstallOutcome::Ready) })
     }
 
     fn cancel_tunnel_install(&self, _context: EngineCommandContext) -> BackendFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn start_tunnel(&self, _request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
-        Box::pin(async {
-            Err(BackendError::new(
-                BackendErrorKind::Internal,
-                "tunnel is outside the endpoint retry fixture",
-            ))
+    fn start_tunnel(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
+        Box::pin(async move {
+            let attempt = {
+                let mut starts = self.starts.lock().expect("starts lock");
+                starts.push((request.context.generation, 0));
+                starts.len()
+            };
+            if attempt <= self.tunnel_failures_before_success {
+                return Err(BackendError::new(
+                    self.tunnel_failure,
+                    "injected Tunnel start failure",
+                ));
+            }
+            let runtime = RuntimeIdentity {
+                owner: EngineOwner::PacketTunnelSystemExtension,
+                context: request.context,
+                config_digest: request.config_digest,
+                ready: true,
+            };
+            *self.status.lock().expect("status lock") = NativeEngineStatus::Tunnel {
+                runtime: runtime.clone(),
+            };
+            Ok(runtime)
         })
     }
 
     fn stop_tunnel(&self, _context: EngineCommandContext) -> BackendFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            self.stops.fetch_add(1, Ordering::AcqRel);
+            if let Some(error) = self.tunnel_cleanup_error {
+                return Err(BackendError::new(error, "injected cleanup failure"));
+            }
+            *self.status.lock().expect("status lock") = NativeEngineStatus::Off;
+            Ok(())
+        })
     }
 }
 
@@ -652,6 +687,7 @@ async fn mode_retry_loop_advances_endpoints_and_generation_after_exact_off() {
         EngineMode::SystemProxy,
         "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         &ValidatedSingBoxProfile::direct(),
+        || Ok(()),
         |conflict| advance_test_mixed_endpoint(&endpoints, conflict),
     )
     .await
@@ -687,6 +723,7 @@ async fn mode_retry_loop_stops_after_the_last_bounded_endpoint() {
         EngineMode::SystemProxy,
         "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         &ValidatedSingBoxProfile::direct(),
+        || Ok(()),
         |conflict| advance_test_mixed_endpoint(&endpoints, conflict),
     )
     .await
@@ -709,3 +746,6 @@ async fn mode_retry_loop_stops_after_the_last_bounded_endpoint() {
 
 #[path = "tests/runtime_settings.rs"]
 mod runtime_settings;
+
+#[path = "tests/ticket_retry.rs"]
+mod ticket_retry;

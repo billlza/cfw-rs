@@ -322,6 +322,9 @@ extension NativeBridgeCoordinator {
       case .cleanupUnproven(let message):
         return .failure(.cleanupUnproven, message)
       case .providerFailure(let failure):
+        if failure.code == NativeBridgeErrorCode.ticketExpired.rawValue {
+          return .failure(.ticketExpired, failure.message)
+        }
         return .failure(
           endpointConflictCode(failure, allowsMixed: false)
             ?? (failure.isRetryable ? .unavailable : .configurationRejected),

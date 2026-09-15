@@ -530,6 +530,7 @@ pub(crate) async fn apply_admitted_engine_mode(
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
     let authorization = engine.authorization_bridge.clone();
+    let retry_guard = mode_lease.retry_guard();
     let completion = mode_lease.run_to_completion(async move {
         // Authorization precedes the runtime transition, including restoration
         // after a long session. The existing runtime stays active while macOS
@@ -541,6 +542,7 @@ pub(crate) async fn apply_admitted_engine_mode(
             mode,
             &profile_id,
             &profile,
+            || retry_guard().map_err(|error| error.to_string()),
             |conflict| {
                 let staged = stage_endpoint_rebind(&endpoints, &coordinator, conflict)?;
                 commit_endpoint_rebind(&endpoints, staged)
@@ -652,8 +654,10 @@ async fn set_mode_with_endpoint_rebind(
     mode: EngineMode,
     profile_id: &str,
     profile: &ValidatedSingBoxProfile,
+    ensure_retry_current: impl Fn() -> Result<(), String>,
     mut rebind: impl FnMut(BackendErrorKind) -> Result<(), String>,
 ) -> Result<EngineSnapshot, String> {
+    let mut ticket_retry_used = false;
     loop {
         let settings = read_engine_settings(endpoints)?;
         match coordinator
@@ -665,7 +669,15 @@ async fn set_mode_with_endpoint_rebind(
                 return Ok(snapshot);
             }
             Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
+                ensure_retry_current()?;
                 rebind(conflict)?;
+            }
+            Err(EngineCoordinatorError::StartTicketExpiredAfterOff) if !ticket_retry_used => {
+                ensure_retry_current()?;
+                ticket_retry_used = true;
+                // The coordinator has already cleaned the failed attempt and
+                // independently proven Off. The next call allocates a fresh
+                // generation/ticket; it never reuses or extends the old ticket.
             }
             Err(error) => return Err(error.to_string()),
         }

@@ -108,6 +108,14 @@ profile mismatch is a release failure.
 4. A post-save failure, cancellation, ticket expiry, start rejection, readiness
    timeout, or revocation shall stop a possibly connecting tunnel and perform
    ownership-sensitive compare-and-restore. Ambiguous cleanup is Quarantined.
+   If macOS starts the Provider after its ticket expires, the Provider shall
+   return a typed error bound to the installation, epoch, generation and
+   configuration identity through the public disconnect-error channel. After
+   exact cleanup and independent global Off, the Host may make at most one
+   automatic attempt with a fresh generation and ticket while the user's
+   intent remains current. Invalid/replayed tickets, unproven cleanup and
+   superseding user intent shall never trigger this retry. Observing a delayed
+   OS failure has a separate bounded deadline; ticket validity is not extended.
 5. Tunnel activation requires agreement among lease, operation context,
    configuration digest, Provider readiness, and effective operating-system
    state. `NEVPNStatus` or `utun` presence alone is not activation proof.

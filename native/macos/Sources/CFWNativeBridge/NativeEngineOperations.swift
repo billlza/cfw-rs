@@ -324,7 +324,10 @@ extension NativeBridgeCoordinator {
     do {
       try Task.checkCancellation()
       let clock = ContinuousClock()
-      let deadline = clock.now.advanced(by: .seconds(10))
+      // Ticket validity remains ten seconds. Observing the OS's asynchronous
+      // disconnect error needs a separate, longer bound so a cold launch that
+      // expires its ticket reports that exact cause before cleanup and retry.
+      let deadline = clock.now.advanced(by: .seconds(20))
       while clock.now < deadline {
         let providerSnapshot: EngineSnapshot
         do {

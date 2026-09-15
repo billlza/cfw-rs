@@ -28,6 +28,74 @@ fn direct() -> ValidatedSingBoxProfile {
     ValidatedSingBoxProfile::direct()
 }
 
+#[tokio::test]
+async fn expired_tunnel_ticket_requires_exact_stop_and_off_before_a_new_generation() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend.tunnel_start_error.lock().expect("start error") =
+        Some(BackendErrorKind::TicketExpired);
+    let coordinator = coordinator(backend.clone());
+    let failed = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("expired ticket");
+    assert_eq!(failed, EngineCoordinatorError::StartTicketExpiredAfterOff);
+    assert_eq!(coordinator.snapshot().state, EngineState::Off);
+    assert_eq!(
+        backend.operations(),
+        vec!["install_tunnel", "start_tunnel", "stop_tunnel"]
+    );
+    let first = backend.tunnel_requests()[0].context.clone();
+    assert_eq!(backend.tunnel_stop_contexts(), vec![first.clone()]);
+
+    *backend.tunnel_start_error.lock().expect("start error") = None;
+    let active = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("fresh ticket starts");
+    assert!(active.generation > first.generation);
+    assert!(matches!(active.state, EngineState::TunnelActive { .. }));
+}
+
+#[tokio::test]
+async fn expired_ticket_with_failed_cleanup_cannot_authorize_a_retry() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend.tunnel_start_error.lock().expect("start error") =
+        Some(BackendErrorKind::TicketExpired);
+    *backend
+        .reject_stop_after_native_off
+        .lock()
+        .expect("stop policy") = true;
+    let coordinator = coordinator(backend.clone());
+    let failed = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("stop identity rejected");
+    assert!(matches!(
+        failed,
+        EngineCoordinatorError::StartAndCleanupFailed { .. }
+    ));
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+    assert_eq!(backend.tunnel_requests().len(), 1);
+}
+
 async fn expect_backend_kind(
     coordinator: &EngineModeCoordinator,
     target: EngineMode,

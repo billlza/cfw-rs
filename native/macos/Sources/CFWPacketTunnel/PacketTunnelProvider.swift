@@ -9,6 +9,7 @@ public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case providerUnavailable
   case globalAuthorityUnavailable
   case invalidStartTicket
+  case expiredStartTicket
   case malformedProviderConfiguration
   case invalidConfigurationSlot
   case lifecycleConflict
@@ -33,6 +34,8 @@ extension PacketTunnelProviderError: LocalizedError {
       return GlobalAuthorityGateError.stableMessage
     case .invalidStartTicket:
       return "Packet tunnel start ticket is missing or invalid."
+    case .expiredStartTicket:
+      return TunnelStartupFailure.ticketExpired.message
     case .malformedProviderConfiguration:
       return "Packet tunnel provider configuration is malformed."
     case .invalidConfigurationSlot:
@@ -84,6 +87,12 @@ extension PacketTunnelProviderError {
           "tunnel-start-ticket-invalid",
           "Packet tunnel start ticket is missing or invalid.",
           false
+        )
+      case .expiredStartTicket:
+        (
+          TunnelStartupFailure.ticketExpired.code,
+          TunnelStartupFailure.ticketExpired.message,
+          true
         )
       case .malformedProviderConfiguration:
         (
@@ -278,8 +287,17 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     startCoordinator.start(
       ticket: ticket,
       descriptor: descriptor,
-      completion: completionHandler
+      completion: { error in
+        completionHandler(Self.platformStartError(error, configuration: descriptor))
+      }
     )
+  }
+
+  static func platformStartError(
+    _ error: Error?, configuration: ConfigurationDescriptor
+  ) -> Error? {
+    guard error as? PacketTunnelProviderError == .expiredStartTicket else { return error }
+    return TunnelStartupFailure.ticketExpiredError(configuration: configuration)
   }
 
   public override func stopTunnel(

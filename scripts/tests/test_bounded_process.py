@@ -18,6 +18,49 @@ from scripts.publication.bounded_process import (
 
 
 class BoundedProcessTests(unittest.TestCase):
+    def test_reaped_group_retirement_preserves_result_without_signalling(self) -> None:
+        real_killpg = os.killpg
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as temporary:
+                probes = []
+                signals = []
+
+                def retiring_group(group: int, requested_signal: int) -> None:
+                    if requested_signal == 0:
+                        probes.append(group)
+                        if len(probes) <= 2:
+                            raise PermissionError("kernel is retiring the reaped group")
+                    else:
+                        signals.append(requested_signal)
+                    real_killpg(group, requested_signal)
+
+                with patch(
+                    "scripts.publication.bounded_process.os.killpg",
+                    side_effect=retiring_group,
+                ):
+                    result = run_bounded_process(
+                        ["/bin/bash", "-p", "-c",
+                         f"printf output; printf diagnostic >&2; exit {exit_code}"],
+                        cwd=Path(temporary).resolve(), environment=self.environment(),
+                        timeout=2, output_limit=1024,
+                    )
+                self.assertEqual(result.returncode, exit_code)
+                self.assertEqual((result.stdout, result.stderr), (b"output", b"diagnostic"))
+                self.assertEqual(signals, [])
+                self.assertGreaterEqual(len(probes), 3)
+
+    def test_descendant_with_closed_pipes_still_fails_and_is_killed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BoundedProcessError) as captured:
+                run_bounded_process(
+                    ["/bin/bash", "-p", "-c",
+                     "/bin/sleep 30 >/dev/null 2>&1 & child=$!; printf '%s\\n' \"$child\"; exit 0"],
+                    cwd=Path(temporary).resolve(), environment=self.environment(),
+                    timeout=2, output_limit=1024,
+                )
+        self.assertEqual(captured.exception.reason, "descendant")
+        self.assert_process_gone(int(captured.exception.stdout.strip()))
+
     def test_bounded_input_is_delivered_without_blocking_output(self) -> None:
         payload = b"input\0bytes\n" * 32768
         with tempfile.TemporaryDirectory() as temporary:

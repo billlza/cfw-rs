@@ -75,8 +75,13 @@ REQUIRED_SOURCE_ASSERTION_STEP = (
 )
 REQUIRED_XCODE_OWNERSHIP_STEP = """      - name: Normalize pinned Xcode ownership
         run: |
-          readonly xcode_application=/Applications/Xcode_27.0.app
-          /bin/test "$DEVELOPER_DIR" = "$xcode_application/Contents/Developer"
+          readonly xcode_alias=/Applications/Xcode_27.0.app
+          /bin/test "$DEVELOPER_DIR" = "$xcode_alias/Contents/Developer"
+          /bin/test -d "$xcode_alias"
+          xcode_application="$(cd "$xcode_alias" && /bin/pwd -P)"
+          readonly xcode_application
+          [[ "$xcode_application" =~ ^/Applications/Xcode[A-Za-z0-9._-]*[.]app$ ]] || exit 1
+          export DEVELOPER_DIR="$xcode_application/Contents/Developer"
           /bin/test -d "$xcode_application"
           /bin/test ! -L "$xcode_application"
           /bin/test -d "$xcode_application/Contents"
@@ -91,7 +96,7 @@ REQUIRED_XCODE_OWNERSHIP_STEP = """      - name: Normalize pinned Xcode ownershi
           /bin/test "$runner_uid" -ne 0
           runner_groups=" $(/usr/bin/id -G) "
           readonly runner_groups
-          [[ "$runner_groups" != *" 0 "* ]]
+          [[ "$runner_groups" != *" 0 "* ]] || exit 1
           xcode_device_inode="$(/usr/bin/stat -f '%d:%i' "$xcode_application")"
           readonly xcode_device_inode
           unexpected_entry="$(
@@ -147,7 +152,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "e10113e967081dcc4bbd4b6eeff5d6d1e5a739b1eabfd773584f9b9e95bacc41"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "0d277ec80d7267f915f32102b4272bd00d883a2129fd7fe2cfee9cf8e6eafca4"
+    "a0a29e6791e00f92af38be160d28bdf53d243592a04a6403d25346b81d0e2d3a"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -376,13 +381,13 @@ def _check_hosted_xcode_ownership(
             "once, immediately after checkout and exact-HEAD verification"
         )
 
-    expected_application = f"/Applications/Xcode_{pins['XCODE_VERSION']}.app"
+    expected_alias = f"/Applications/Xcode_{pins['XCODE_VERSION']}.app"
     expected_identity = (
         f"Xcode {pins['XCODE_VERSION']}\\n"
         f"Build version {pins['XCODE_BUILD_VERSION']}"
     )
     if (
-        f"readonly xcode_application={expected_application}"
+        f"readonly xcode_alias={expected_alias}"
         not in REQUIRED_XCODE_OWNERSHIP_STEP
         or REQUIRED_XCODE_OWNERSHIP_STEP.count(expected_identity) != 2
     ):

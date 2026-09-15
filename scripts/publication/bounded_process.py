@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
+GROUP_EXIT_SETTLE_SECONDS = 0.25
 
 
 class BoundedProcessError(RuntimeError):
@@ -71,6 +72,18 @@ def _terminate_group(process: subprocess.Popen[bytes]) -> None:
                 "bounded command descendants did not exit during cleanup",
             ) from signal_error
         time.sleep(0.01)
+
+
+def _wait_for_group_exit(group: int, deadline: float) -> bool:
+    # A reaped macOS leader can briefly leave a retiring group (including an
+    # EPERM probe) behind. Accept only observed disappearance, never a denied
+    # probe. This bounded wait does not rerun the command or change its result.
+    while _group_exists(group):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+    return True
 
 
 def run_bounded_process(
@@ -216,7 +229,10 @@ def run_bounded_process(
                 stdout=bytes(buffers[process.stdout.fileno()]),
                 stderr=bytes(buffers[process.stderr.fileno()]),
             )
-        if _group_exists(process.pid):
+        if not _wait_for_group_exit(
+            process.pid,
+            min(deadline, time.monotonic() + GROUP_EXIT_SETTLE_SECONDS),
+        ):
             _terminate_group(process)
             raise BoundedProcessError(
                 "descendant",

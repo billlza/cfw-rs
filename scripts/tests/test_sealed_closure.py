@@ -40,9 +40,10 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256), which cannot
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
-# This revision includes all six patches and the real utun interface resolver.
+# This revision includes all six patches, the utun resolver, synchronized SOCKS
+# packet addresses and Go 1.27 debug-crash compatibility.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "02a978059d3dc5bc5b84927e2dbf5c66336b755c39784e4232dbef1bac77da38"
+    "40efd5359e142d419a0aecfd3f959179864831f4eba0b07aa9c6cd973a4a366c"
 )
 
 

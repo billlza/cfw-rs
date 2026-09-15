@@ -34,6 +34,7 @@ The active successor is 0.4.0 build 40068. The installed and frozen 40067 are pr
 - Scan both the original versioned dependency graph and the corrected build copy. A local Go replacement must not remove the original module version from vulnerability coverage.
 - Match the complete reference-client gitlink table to the pinned upstream commit, including the new desktop reference. Keep all reference clients uninitialized.
 - Preserve explicit NSError failures while returning Go's required nonnull string zero value for unsupported SSH/SFTP callbacks. Replace two intentional debug-crash pointer conversions with explicit Go panics; debug authorization remains unchanged.
+- Release command supervision allows at most 250 ms, within the original command deadline, to observe a reaped process group's disappearance. A denied probe never counts as absence; surviving descendants still fail and are killed, and command exit codes remain unchanged. CI resolves the pinned official Xcode alias before checking the real bundle, retaining exact stable-build, signature, ownership and internal-path checks. Conditional shell guards exit explicitly under macOS Bash 3.2.
 
 ## Validation and limits
 

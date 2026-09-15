@@ -35,8 +35,13 @@ jobs:
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
       - name: Normalize pinned Xcode ownership
         run: |
-          readonly xcode_application=/Applications/Xcode_27.0.app
-          /bin/test "$DEVELOPER_DIR" = "$xcode_application/Contents/Developer"
+          readonly xcode_alias=/Applications/Xcode_27.0.app
+          /bin/test "$DEVELOPER_DIR" = "$xcode_alias/Contents/Developer"
+          /bin/test -d "$xcode_alias"
+          xcode_application="$(cd "$xcode_alias" && /bin/pwd -P)"
+          readonly xcode_application
+          [[ "$xcode_application" =~ ^/Applications/Xcode[A-Za-z0-9._-]*[.]app$ ]] || exit 1
+          export DEVELOPER_DIR="$xcode_application/Contents/Developer"
           /bin/test -d "$xcode_application"
           /bin/test ! -L "$xcode_application"
           /bin/test -d "$xcode_application/Contents"
@@ -51,7 +56,7 @@ jobs:
           /bin/test "$runner_uid" -ne 0
           runner_groups=" $(/usr/bin/id -G) "
           readonly runner_groups
-          [[ "$runner_groups" != *" 0 "* ]]
+          [[ "$runner_groups" != *" 0 "* ]] || exit 1
           xcode_device_inode="$(/usr/bin/stat -f '%d:%i' "$xcode_application")"
           readonly xcode_device_inode
           unexpected_entry="$(

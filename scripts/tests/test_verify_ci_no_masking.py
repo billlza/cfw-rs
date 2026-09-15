@@ -584,10 +584,65 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
                 with self.assertRaisesRegex(CiPolicyError, "pinned Xcode ownership"):
                     audit_workflow(workflow_path, pins_path)
 
+    def test_pinned_xcode_alias_resolves_only_inside_the_application_root(self) -> None:
+        # Execute only the path-selection prelude. Signature assessment and
+        # privileged ownership operations are covered by the policy checks.
+        for variant in ("alias", "outside", "linked-contents", "linked-developer"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                applications = root / "Applications"
+                applications.mkdir()
+                parent = root / "Other" if variant == "outside" else applications
+                selected = parent / "Xcode_27.0.0.app"
+                developer = selected / "Contents/Developer"
+                developer.mkdir(parents=True)
+                if variant == "linked-contents":
+                    moved = root / "Contents"
+                    (selected / "Contents").rename(moved)
+                    (selected / "Contents").symlink_to(moved, target_is_directory=True)
+                elif variant == "linked-developer":
+                    moved = root / "Developer"
+                    developer.rename(moved)
+                    developer.symlink_to(moved, target_is_directory=True)
+                alias = applications / "Xcode_27.0.app"
+                alias.symlink_to(selected, target_is_directory=True)
+                prelude = XCODE_OWNERSHIP_STEP.split("        run: |\n", 1)[1]
+                prelude = prelude.split("          /usr/sbin/spctl", 1)[0]
+                prelude = "\n".join(line[10:] for line in prelude.splitlines())
+                prelude = prelude.replace("/Applications", str(applications))
+                result = subprocess.run(
+                    ["/bin/bash", "-p", "-c", "set -euo pipefail\n" + prelude
+                     + "\nprintf '%s\\n' \"$xcode_application\""],
+                    env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty",
+                         "DEVELOPER_DIR": str(alias / "Contents/Developer")},
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                if variant == "alias":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), str(selected))
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + "\n" + prelude)
+
     def test_xcode_normalization_preserves_unselected_bundle_modes(self) -> None:
         self.assertNotIn("/usr/sbin/chmod", XCODE_OWNERSHIP_STEP)
         self.assertNotIn("-perm -0020", XCODE_OWNERSHIP_STEP)
         self.assertEqual(XCODE_OWNERSHIP_STEP.count("-perm -0002"), 2)
+
+    def test_xcode_ownership_rejects_root_group_under_system_bash(self) -> None:
+        guard = next(
+            line.strip() for line in XCODE_OWNERSHIP_STEP.splitlines()
+            if "[[" in line and "runner_groups" in line
+        )
+        for groups, expected in ((" 20 0 80 ", 1), (" 20 80 ", 0)):
+            with self.subTest(groups=groups):
+                result = subprocess.run(
+                    ["/bin/bash", "-p", "-c",
+                     "set -euo pipefail\nrunner_groups=" + shlex.quote(groups)
+                     + "\n" + guard + "\nexit 0"],
+                    env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty"},
+                    capture_output=True, timeout=5, check=False,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_xcode_bundle_is_assessed_before_each_identity_execution(self) -> None:
         assessment = (

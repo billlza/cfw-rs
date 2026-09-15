@@ -53,8 +53,11 @@ go_build_cache="$(mktemp -d "$cache_parent/cfw-go-tests.XXXXXX")"
 trap '/bin/rm -rf -- "$go_build_cache"' EXIT
 export GOCACHE="$go_build_cache"
 configure_offline_go_environment
-export CC="$(/usr/bin/xcrun --find clang)"
-export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+CC="$(/usr/bin/xcrun --find clang)"
+SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+export CC SDKROOT
+libbox_test_ldflags="-checklinkname=0 '-extld=$repo_root/scripts/libbox_clang_linker.sh'"
+readonly libbox_test_ldflags
 
 # These fixtures come from the actual Rust projection. Always supply them to
 # the Go integration tests so a missing fixture cannot turn into skipped DNS
@@ -72,12 +75,12 @@ done
 (
   cd "$source_root"
   "$go_bin" mod verify
-  "$go_bin" test -count=1 -race -ldflags=-checklinkname=0 \
+  "$go_bin" test -count=1 -race -ldflags="$libbox_test_ldflags" \
     -tags "$LIBBOX_BUILD_TAGS" "${LIBBOX_RACE_TEST_PACKAGES[@]}"
-  "$go_bin" test -count=1 -ldflags=-checklinkname=0 \
+  "$go_bin" test -count=1 -ldflags="$libbox_test_ldflags" \
     -tags "$LIBBOX_BUILD_TAGS" \
     "${LIBBOX_TEST_PACKAGES[@]}"
-  "$go_bin" test -run '^$' -ldflags=-checklinkname=0 \
+  "$go_bin" test -run '^$' -ldflags="$libbox_test_ldflags" \
     -tags "$LIBBOX_BUILD_TAGS" "${LIBBOX_COMPILE_TEST_PACKAGES[@]}"
   "$go_bin" vet -tags "$LIBBOX_BUILD_TAGS" \
     "${LIBBOX_VET_PACKAGES[@]}"

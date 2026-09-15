@@ -18,9 +18,9 @@ from scripts import verify_legacy_tombstone_provenance as provenance
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
-    BUILD_NUMBER = "40067"
+    BUILD_NUMBER = "40068"
     DEPLOYMENT_TARGET = "15.0"
-    RUST_VERSION = "1.97.1"
+    RUST_VERSION = "1.98.1"
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

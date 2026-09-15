@@ -14,7 +14,7 @@ source "$repo_root/scripts/ui_dependency_contract.sh"
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 node_root="$toolchain_root/node-$NODE_VERSION"
 node_bin="$node_root/bin/node"
-npm_bin="$node_root/bin/npm"
+npm_bin="$toolchain_root/npm-$NPM_VERSION/bin/npm-cli.js"
 
 mode=build
 if [[ $# -eq 1 && "$1" == "--test" ]]; then
@@ -34,6 +34,7 @@ readonly mode
   exit 1
 }
 cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_npm_toolchain_tree "$repo_root" "$toolchain_root"
 cfw_verify_ui_dependencies_tree "$repo_root" "$toolchain_root" >/dev/null
 if [[ "$("$node_bin" --version)" != "v$NODE_VERSION" ]]; then
   echo "error: pinned Node.js toolchain identity mismatch" >&2
@@ -86,6 +87,7 @@ cd "$repo_root/apps/cfw-tauri-shell"
   NPM_CONFIG_USERCONFIG=/dev/null \
   PATH="$node_root/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   TMPDIR="$build_home/tmp" \
-  "$npm_bin" "${npm_arguments[@]}"
+  "$node_bin" "$npm_bin" "${npm_arguments[@]}"
 cfw_verify_ui_dependencies_tree "$repo_root" "$toolchain_root" >/dev/null
 cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_npm_toolchain_tree "$repo_root" "$toolchain_root"

@@ -316,8 +316,8 @@ def _license_closure(record: dict[str, Any]) -> dict[str, Any]:
                 else "the installed Xcode license is a non-SPDX Apple EULA"
             ),
             "closure_action": (
-                "review the exact hashed Xcode 26.6 License.rtf/PDF once for build and "
-                "application-distribution rights; record LicenseRef-Apple-Xcode-26.6 "
+                "review the exact hashed Xcode 27.0 License.rtf/PDF once for build and "
+                "application-distribution rights; record LicenseRef-Apple-Xcode-27.0 "
                 "with a human-legal-review rationale bound to those files"
             ),
             "legal_question": (
@@ -340,43 +340,53 @@ _SOURCE_CLOSURE_PLANS = {
     "@esbuild/darwin-arm64": {
         "classification": "shared-official-tag-source",
         "upstream": "https://github.com/evanw/esbuild",
-        "reference": "v0.28.1",
+        "reference": "v0.28.2",
         "closure_action": (
-            "bind npm lock integrity, executable SHA-256, upstream v0.28.1 commit, and esbuild "
+            "bind npm lock integrity, executable SHA-256, upstream v0.28.2 commit, and esbuild "
             "metafile proof that the compiler binary is absent from the app"
         ),
         "acceptance": (
-            "bind the tag commit and archive SHA-256, verify package version 0.28.1, and "
+            "bind the tag commit and archive SHA-256, verify package version 0.28.2, and "
             "record the darwin-arm64 binary build provenance"
         ),
     },
     "esbuild": {
         "classification": "shared-official-tag-source",
         "upstream": "https://github.com/evanw/esbuild",
-        "reference": "v0.28.1",
+        "reference": "v0.28.2",
         "closure_action": (
-            "bind npm lock integrity, executable SHA-256, upstream v0.28.1 commit, and esbuild "
+            "bind npm lock integrity, executable SHA-256, upstream v0.28.2 commit, and esbuild "
             "metafile proof that the compiler package is absent from the app"
         ),
         "acceptance": (
-            "bind the tag commit and archive SHA-256, verify package version 0.28.1, and "
+            "bind the tag commit and archive SHA-256, verify package version 0.28.2, and "
             "record the darwin-arm64 binary build provenance"
         ),
     },
     "node": {
         "classification": "official-release-source-archive",
-        "upstream": "https://nodejs.org/dist/v24.18.0/",
-        "reference": "node-v24.18.0.tar.gz",
+        "upstream": "https://nodejs.org/dist/v26.8.2/",
+        "reference": "node-v26.8.2.tar.gz",
         "closure_action": (
             "bind the signed SHASUMS256.txt entry, executable SHA-256, and version output as "
             "external build-tool provenance"
         ),
         "acceptance": "record signer identity, archive SHA-256, extracted tree digest, and version",
     },
+    "npm": {
+        "classification": "official-registry-source-archive",
+        "upstream": "https://registry.npmjs.org/npm/-/npm-12.0.2.tgz",
+        "reference": "npm-12.0.2.tgz",
+        "closure_action": (
+            "bind the npm registry integrity, official archive SHA-256, sealed tree digest, "
+            "and version as external build-tool provenance"
+        ),
+        "acceptance": "bind archive checksum, independent npm tree, Node runtime, and npm version",
+    },
     "go": {
         "classification": "external-build-tool-pinned-binary",
         "upstream": "https://go.dev/dl/",
-        "reference": "go1.26.6.darwin-arm64",
+        "reference": "go1.27.1.darwin-arm64",
         "closure_action": (
             "retain version, executable SHA-256, module verification, and the official release "
             "archive checksum as build provenance; do not add the compiler to corresponding source"
@@ -396,19 +406,19 @@ _SOURCE_CLOSURE_PLANS = {
     "rust": {
         "classification": "official-release-source-archive",
         "upstream": "https://static.rust-lang.org/dist/",
-        "reference": "rustc-1.97.1-src.tar.xz",
+        "reference": "rustc-1.98.1-src.tar.xz",
         "closure_action": (
-            "bind signed Rust 1.97.1 channel metadata, rustc executable SHA-256, verbose version, "
+            "bind signed Rust 1.98.1 channel metadata, rustc executable SHA-256, verbose version, "
             "and source commit as external build-tool provenance"
         ),
         "acceptance": (
-            "bind archive SHA-256 and source commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452"
+            "bind archive SHA-256 and source commit 48a229ceaefd4985c50990b14116b6d856af0985"
         ),
     },
     "swift": {
         "classification": "official-multi-repository-source",
         "upstream": "https://github.com/swiftlang/swift",
-        "reference": "swiftlang-6.3.3.1.3",
+        "reference": "swiftlang-6.4.0.34.1",
         "closure_action": (
             "bind the installed compiler SHA-256 and exact swiftlang/clang build identifiers as an "
             "external Apple toolchain prerequisite; do not package Apple toolchain payloads"
@@ -423,7 +433,7 @@ _SOURCE_CLOSURE_PLANS = {
         "upstream": "https://crates.io/crates/tauri-cli/2.11.4",
         "reference": "tauri-cli-2.11.4.crate",
         "closure_action": (
-            "bind the crates.io checksum, published Cargo.lock checksum, digest-pinned spin lock "
+            "bind the crates.io checksum, published Cargo.lock checksum, digest-pinned dependency lock "
             "update, patched Cargo.lock checksum, cargo-install record, executable SHA-256, and "
             "version as external build-tool provenance"
         ),
@@ -435,7 +445,7 @@ _SOURCE_CLOSURE_PLANS = {
     "xcode": {
         "classification": "apple-proprietary-source-not-redistributable",
         "upstream": "Apple Developer distribution",
-        "reference": "Xcode 26.6 exact build from dependency_pins.env",
+        "reference": "Xcode 27.0 exact build from dependency_pins.env",
         "closure_action": (
             "record an explicit nonredistributable external prerequisite bound to Xcode "
             "version/build, executable SHA-256, code signature, and hashed License.rtf/PDF"

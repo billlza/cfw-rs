@@ -14,6 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
                                   error:(NSError *_Nullable *_Nullable)error;
 - (id<LibboxNetworkInterfaceIterator> _Nullable)getInterfaces:
     (NSError *_Nullable *_Nullable)error;
+- (void)registerMyInterface:(NSString *)name;
 - (void)clearDNSCache;
 @end
 

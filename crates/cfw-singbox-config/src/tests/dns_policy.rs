@@ -266,10 +266,12 @@ fn dns_filters_and_resource_bounds_are_enforced_without_discarding_resolvers() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|rule| rule["server"] == "cfw-profile-dns-0" && rule["type"] == "logical")
+        .find(|rule| rule["server"] == "cfw-profile-dns-0" && rule.get("response_filter").is_some())
         .unwrap();
+    assert_eq!(filter["action"], "evaluate");
+    assert_eq!(filter["response_ip_accept_all"], true);
     assert_eq!(
-        filter["rules"][1],
+        filter["response_filter"]["rules"][1],
         json!({"ip_cidr":["240.0.0.0/4"],"invert":true})
     );
     input["dns"]["fallback_filter"]["ip_cidr"] = json!(["1.1.1.1/99"]);

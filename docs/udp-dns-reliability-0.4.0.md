@@ -1,5 +1,9 @@
 # 0.4.0 UDP / DNS reliability changes
 
+The measurements below describe the earlier sing-box 1.13.15 baseline. The
+1.14.1 successor retains these fixes through the new pinned patch set; see
+[the dependency refresh](dependency-refresh-20260915.md).
+
 Verified on macOS/arm64 on 2026-09-14. These are source and component-build
 results. The installed application remains build 40060; its signed identity and
 the user's current network session have not been changed by this work.

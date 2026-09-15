@@ -246,20 +246,22 @@ _PINNED_INPUTS = (
     "scripts/bootstrap_release_toolchain.sh",
     "scripts/install_pinned_tauri_cli.sh",
     "scripts/tauri_cargo_cache_contract.py",
-    "scripts/tauri-cli-2.11.4-spin-0.9.9.patch",
+    "scripts/tauri-cli-2.11.4-dependency-refresh.patch",
     "scripts/xcodegen-2.46.0-installed-resources.patch",
     "crates/cfw-release-verifier/src/main.rs",
     ".github/workflows/ci.yml",
-    "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
-    "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
-    "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
-    "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
+    "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch",
+    "native/macos/patches/sing-box-v1.14.1-raw-packet-tun.patch",
+    "native/macos/patches/sing-box-v1.14.1-dns-failover.patch",
+    "native/macos/patches/sing-box-v1.14.1-endpoint-conflict.patch",
+    "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
+    "native/macos/patches/sing-box-v1.14.1-socks-lifecycle.patch",
     # Sources the pinned libbox build tags are bound to: the controller block and
     # the projection that injects it require `with_clash_api` in the artifact.
     "crates/cfw-singbox-config/src/controller.rs",
     "crates/cfw-singbox-config/src/projection.rs",
 )
-_SECURITY_PATCH = "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch"
+_SECURITY_PATCH = "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch"
 _PINS_ENV = "scripts/dependency_pins.env"
 
 
@@ -386,7 +388,7 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
             env_path = root / _PINS_ENV
             env_path.write_text(
                 env_path.read_text(encoding="utf-8").replace(
-                    "GO_VERSION=1.26.6", "GO_VERSION=1.26.4"
+                    "GO_VERSION=1.27.1", "GO_VERSION=1.26.4"
                 ),
                 encoding="utf-8",
             )
@@ -522,12 +524,12 @@ jobs:
     steps:
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: actions/setup-node@v5
         with:
-          node-version: "24.18.0"
+          node-version: "26.8.2"
       - name: Assert toolchain
-        run: test "$(xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'
+        run: test "$(xcodebuild -version)" = $'Xcode 27.0\\nBuild version 27A266a'
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
@@ -537,11 +539,11 @@ jobs:
 """
 _PINS = "\n".join(
     [
-        "RUST_VERSION=1.97.1",
-        "PYTHON_VERSION=3.14.6",
-        "NODE_VERSION=24.18.0",
-        "XCODE_VERSION=26.6",
-        "XCODE_BUILD_VERSION=17F113",
+        "RUST_VERSION=1.98.1",
+        "PYTHON_VERSION=3.14.7",
+        "NODE_VERSION=26.8.2",
+        "XCODE_VERSION=27.0",
+        "XCODE_BUILD_VERSION=27A266a",
         "MACOS_DEPLOYMENT_TARGET=15.0",
     ]
 )

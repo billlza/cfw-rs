@@ -9,7 +9,7 @@ repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/../.." && /bin/pwd -P)"
 readonly repo_root
 # shellcheck source=scripts/release_python_launcher.sh
 source "$repo_root/scripts/release_python_launcher.sh"
-readonly lock_patch="$repo_root/scripts/tauri-cli-2.11.4-spin-0.9.9.patch"
+readonly lock_patch="$repo_root/scripts/tauri-cli-2.11.4-dependency-refresh.patch"
 readonly cargo_bin="${CFW_RELEASE_CARGO_EXECUTABLE:-}"
 readonly python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
 readonly inside_parent="$repo_root/target/release-gate-tests"

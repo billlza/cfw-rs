@@ -217,13 +217,13 @@ Apple references:
 
 ## libbox composition and remaining evidence
 
-`Dependencies.lock.json` pins sing-box `v1.13.15` at commit
-`3708fa18766cda1f11b77f6ed9c7bd61688f17df`, Go `1.26.6`, and gomobile
+`Dependencies.lock.json` pins sing-box `v1.14.1` at commit
+`1ac1a339cb1223e9c70eae14c44411c75033c02d`, Go `1.27.1`, and gomobile
 `v0.1.13` at commit `9f03b8f25789099c5c8abef4a02085da783ba923`. The
 materialization step applies four digest-pinned patches in a
 fixed order:
 
-1. `sing-box-v1.13.15-security-dependencies.patch` updates the pinned Go module
+1. `sing-box-v1.14.1-security-dependencies.patch` updates the pinned Go module
    graph, including go-chi `v5.3.0`, `x/crypto v0.56.0`, `x/mod v0.40.0`,
    `x/net v0.58.0`, `x/sync v0.22.0`, `x/sys v0.47.0`, `x/term v0.45.0`,
    `x/text v0.41.0`, `x/tools v0.49.0`, gRPC, and their exact coupled
@@ -231,14 +231,14 @@ fixed order:
    `GO-2026-6179` and `GO-2026-6180` findings without an ignore. The
    `x/crypto v0.56.0` refresh fixes `GO-2026-6354` and `GO-2026-6355` and
    requires the module's minimum Go version to be `1.26.0`; the release
-   compiler remains `1.26.6` and all other selected dependencies are unchanged.
-2. `sing-box-v1.13.15-raw-packet-tun.patch` adds the explicit Darwin raw-packet
+   compiler remains `1.27.1` and all other selected dependencies are unchanged.
+2. `sing-box-v1.14.1-raw-packet-tun.patch` adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and
    presents headerless IP datagrams to sing-tun.
-3. `sing-box-v1.13.15-dns-failover.patch` implements the bounded primary/fallback
+3. `sing-box-v1.14.1-dns-failover.patch` implements the bounded primary/fallback
    resolver contract required by the closed product projection.
-4. `sing-box-v1.13.15-endpoint-conflict.patch` reports only exact mixed-listener
+4. `sing-box-v1.14.1-endpoint-conflict.patch` reports only exact mixed-listener
    and controller `EADDRINUSE` failures as structured conflicts while preserving
    ordinary startup and cleanup failures.
 

@@ -23,11 +23,11 @@ from scripts.verify_ci_no_masking import (
 
 PINS = "\n".join(
     [
-        "RUST_VERSION=1.97.1",
-        "NODE_VERSION=24.18.0",
-        "PYTHON_VERSION=3.14.6",
-        "XCODE_VERSION=26.6",
-        "XCODE_BUILD_VERSION=17F113",
+        "RUST_VERSION=1.98.1",
+        "NODE_VERSION=26.8.2",
+        "PYTHON_VERSION=3.14.7",
+        "XCODE_VERSION=27.0",
+        "XCODE_BUILD_VERSION=27A266a",
         "MACOS_DEPLOYMENT_TARGET=15.0",
     ]
 )
@@ -39,25 +39,25 @@ defaults:
     shell: "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 """ + REQUIRED_SOURCE_ASSERTION_STEP + "\n" + REQUIRED_XCODE_OWNERSHIP_STEP + "\n" + """
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+          toolchain: "1.98.1"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         id: validation-python
         with:
-          python-version: "3.14.6"
+          python-version: "3.14.7"
           architecture: arm64
           update-environment: false
       - name: Bootstrap Node
@@ -137,7 +137,7 @@ EXACT_SOURCE_EXPRESSION = (
     "github.event.pull_request.head.sha || github.sha }}"
 )
 CHECKOUT_STEP = (
-    "      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803\n"
+    "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
     "        with:\n"
     f"          ref: {EXACT_SOURCE_EXPRESSION}\n"
     "          persist-credentials: false\n"
@@ -440,7 +440,7 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_checkout_action_must_remain_commit_pinned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad_checkout = CHECKOUT_STEP.replace(
-                "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+                "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
                 "actions/checkout@v6",
             )
             workflow_path, pins_path = self._write(
@@ -529,7 +529,7 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
         rust_setup = (
             "      - uses: dtolnay/rust-toolchain@stable\n"
             "        with:\n"
-            '          toolchain: "1.97.1"\n'
+            '          toolchain: "1.98.1"\n'
         )
         without_normalization = GOOD_WORKFLOW.replace(
             XCODE_OWNERSHIP_STEP,
@@ -557,7 +557,7 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
 
     def test_pinned_xcode_ownership_policy_cannot_be_weakened(self) -> None:
         mutations = (
-            ("/Applications/Xcode_26.6.app", "/Applications/Xcode.app"),
+            ("/Applications/Xcode_27.0.app", "/Applications/Xcode.app"),
             ("/usr/bin/find -P -x", "/usr/bin/find -L -x"),
             ("/usr/bin/sudo -n", "/usr/bin/sudo"),
             (
@@ -1029,8 +1029,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_expression_condition_on_release_job_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "    runs-on: macos-26",
-                "    if: ${{ github.ref_protected }}\n    runs-on: macos-26",
+                "    runs-on: xcode-27",
+                "    if: ${{ github.ref_protected }}\n    runs-on: xcode-27",
                 1,
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
@@ -1056,7 +1056,7 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
 
     def test_drifted_rust_toolchain_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bad = GOOD_WORKFLOW.replace('toolchain: "1.97.1"', 'toolchain: "1.98.0"')
+            bad = GOOD_WORKFLOW.replace('toolchain: "1.98.1"', 'toolchain: "1.98.0"')
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "Rust toolchain"):
                 audit_workflow(workflow_path, pins_path)

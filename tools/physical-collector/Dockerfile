@@ -1,14 +1,14 @@
-# syntax=docker/dockerfile:1.7
-FROM golang:1.26.6@sha256:0d1d3a794be25f809dd2cb3160d8c73276c4056a9f8242a138e908ddeee7b6b6 AS build
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+FROM golang:1.27.1@sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -mod=readonly -trimpath -ldflags='-s -w -buildid=' -o /out/physical-collector .
+    go build -mod=readonly -buildvcs=false -trimpath -ldflags='-s -w -buildid=' -o /out/physical-collector .
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 COPY --from=build --chown=nonroot:nonroot /out/physical-collector /physical-collector
 USER nonroot:nonroot
 EXPOSE 8080

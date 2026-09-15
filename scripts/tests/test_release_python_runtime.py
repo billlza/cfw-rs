@@ -396,7 +396,7 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
-        self.assertRegex(first.version, r"^6[.][0-9]+[.][0-9]+$")
+        self.assertEqual(first.version, "6.4")
         document = json.loads(first.canonical)
         self.assertEqual(
             document["target"]["triple"],

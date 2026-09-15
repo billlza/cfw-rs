@@ -133,7 +133,9 @@ fn projections_have_exactly_one_application_owned_inbound() {
         assert_ne!(server["server"], TUNNEL_ADDRESS_PLAN.ipv6_dns_peer);
     }
     assert_eq!(dns["rules"][0]["domain_regex"], ".*");
-    assert_eq!(dns["rules"][0]["retry_on_error"], true);
+    assert_eq!(dns["rules"][0]["action"], "evaluate");
+    assert_eq!(dns["rules"][1]["action"], "respond");
+    assert!(!dns.contains_key("independent_cache"));
     assert_eq!(dns["rules"][0]["server"], "cfw-authenticated-dns-0");
     assert_eq!(
         tunnel_json["route"]["default_domain_resolver"],
@@ -377,13 +379,20 @@ fn ordinary_dns_is_authenticated_and_detoured_in_both_modes_while_bootstrap_is_e
                 .as_str()
                 .is_some_and(|tag| tag.starts_with("cfw-authenticated-dns-"))
         );
-        for rule in dns["rules"].as_array().expect("DNS rules") {
-            assert!(
-                rule["server"]
-                    .as_str()
-                    .is_some_and(|tag| tag.starts_with("cfw-authenticated-dns-"))
-            );
-        }
+        let rules = dns["rules"].as_array().expect("DNS rules");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["action"], "evaluate");
+        assert!(
+            rules[0]["server"]
+                .as_str()
+                .is_some_and(|tag| tag.starts_with("cfw-authenticated-dns-"))
+        );
+        assert_eq!(rules[1]["action"], "respond");
+        assert_eq!(
+            rules[1]["rules"][0],
+            serde_json::json!({"domain_regex":".*"})
+        );
+        assert!(dns.get("independent_cache").is_none());
         for key in ["server", "fallback_server"] {
             assert!(
                 config["route"]["default_domain_resolver"][key]

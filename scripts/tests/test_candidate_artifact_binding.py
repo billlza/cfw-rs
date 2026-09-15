@@ -203,8 +203,8 @@ def _ci_identity(repository: Path, version: str = "1.0.0") -> dict:
             "node_darwin_arm64_sha256": "b" * 64,
             "rust_release_toolchain_surface_sha256": "c" * 64,
         },
-        "release_tree_sha256": {name: "d" * 64 for name in binding.RELEASE_TREE_METADATA},
-        "apple_toolchain": {"macos_deployment_target": "15.0", "xcode_build_version": "17F42", "xcode_version": "26.6"},
+        "release_tree_sha256": {name: "d" * 64 for name in binding.RELEASE_TREE_INPUTS},
+        "apple_toolchain": {"macos_deployment_target": "15.0", "xcode_build_version": "17F42", "xcode_version": "27.0"},
         "resolved": {name: version for name in (
             "bash", "cargo", "cargo-audit", "cargo-deny", "cargo-tauri", "git", "go",
             "gomobile", "govulncheck", "node", "npm", "python3", "rust-toolchain-surface",
@@ -226,6 +226,25 @@ class ArtifactCiToolchainReaderTests(unittest.TestCase):
         (self.repository / "scripts/dependency_pins.env").write_bytes(b"NODE_VERSION=1.0.0\n")
         self.identity = _ci_identity(self.repository)
         self.source = {"repositoryCommit": "a" * 40, "releaseSourceSha256": "b" * 64}
+
+    def test_npm_tree_is_required_and_changes_the_complete_artifact_binding(self) -> None:
+        first_digest = binding.toolchain_sha256(self.identity)
+        first = binding.toolchain_manifest_metadata(first_digest, self.identity)
+        self.identity["release_tree_sha256"]["npm"] = "e" * 64
+        changed_digest = binding.toolchain_sha256(self.identity)
+        self.assertNotEqual(first_digest, changed_digest)
+        with self.assertRaisesRegex(binding.CandidateBindingError, "digest does not match"):
+            binding.toolchain_manifest_metadata(first_digest, self.identity)
+        changed = binding.toolchain_manifest_metadata(changed_digest, self.identity)
+        self.assertEqual(set(first), set(changed))
+        self.assertNotEqual(first["toolchainSha256"], changed["toolchainSha256"])
+
+        self.identity["release_tree_sha256"]["npm"] = "not-a-digest"
+        with self.assertRaisesRegex(binding.CandidateBindingError, "release_tree_sha256.npm"):
+            binding.toolchain_manifest_metadata(binding.toolchain_sha256(self.identity), self.identity)
+        del self.identity["release_tree_sha256"]["npm"]
+        with self.assertRaisesRegex(binding.CandidateBindingError, "release-tree set"):
+            binding.toolchain_manifest_metadata(binding.toolchain_sha256(self.identity), self.identity)
 
     def test_exact_full_binding_uses_artifact_entry_and_one_bound_environment(self) -> None:
         environment = {"PATH": "/usr/bin:/bin", "CFW_RELEASE_PYTHON_EXECUTABLE": sys.executable}

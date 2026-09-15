@@ -73,8 +73,8 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
             DEVELOPER_DIRECTORY_PLACEHOLDER,
         )
         self.assertEqual(binding["deployment_target"], "15.0")
-        self.assertEqual(binding["xcode_version"], "26.6")
-        self.assertEqual(binding["xcode_build_version"], "17F113")
+        self.assertEqual(binding["xcode_version"], "27.0")
+        self.assertEqual(binding["xcode_build_version"], "27A266a")
         self.assertEqual(
             binding["clang"]["path"],
             str(self.observed.clang.relative_to(self.developer_directory)),
@@ -96,10 +96,10 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
 
     def test_official_versioned_sdk_alias_is_bound_to_its_real_target(self) -> None:
         sdk = self.observed.binding["sdk"]
-        self.assertEqual(sdk["version"], "26.5")
+        self.assertEqual(sdk["version"], "27.0")
         self.assertEqual(
             sdk["selected_path"],
-            "Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+            "Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk",
         )
         self.assertEqual(
             sdk["resolved_path"],

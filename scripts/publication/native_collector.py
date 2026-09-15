@@ -191,12 +191,14 @@ def _checked_versions(
         repository, pins, release_environment
     )
     node_bin = toolchain_root / f"node-{pins['NODE_VERSION']}" / "bin/node"
+    npm_bin = toolchain_root / f"npm-{pins['NPM_VERSION']}" / "bin/npm-cli.js"
     go_bin = toolchain_root / f"go-{pins['GO_VERSION']}" / "bin/go"
     xcodegen_bin = toolchain_root / f"xcodegen-{pins['XCODEGEN_VERSION']}" / "bin/xcodegen"
     gomobile_bin = toolchain_root / "go-workspace/bin/gomobile"
     tauri_bin = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}" / "bin/cargo-tauri"
     for path, label in (
         (node_bin, "Node.js"),
+        (npm_bin, "npm"),
         (go_bin, "Go"),
         (xcodegen_bin, "XcodeGen"),
         (gomobile_bin, "gomobile"),
@@ -234,6 +236,9 @@ def _checked_versions(
         "node": run([str(node_bin), "--version"], repository, release_environment)
         .decode()
         .strip(),
+        "npm": run([str(node_bin), str(npm_bin), "--version"], repository, release_environment)
+        .decode()
+        .strip(),
         "go": run([str(go_bin), "version"], repository, release_environment)
         .decode()
         .strip(),
@@ -252,13 +257,14 @@ def _checked_versions(
         "rust": f"rustc {pins['RUST_VERSION']} ",
         "xcode": f"Xcode {pins['XCODE_VERSION']}\nBuild version {pins['XCODE_BUILD_VERSION']}",
         "node": f"v{pins['NODE_VERSION']}",
+        "npm": pins["NPM_VERSION"],
         "go": f"go version go{pins['GO_VERSION']} darwin/arm64",
         "xcodegen": f"Version: {pins['XCODEGEN_VERSION']}",
         "tauri-cli": f"tauri-cli {pins['TAURI_CLI_VERSION']}",
     }
     if not actual["rust"].startswith(expected["rust"]):
         raise PublicationError("Rust toolchain does not match the release pin")
-    for name in ("xcode", "node", "go", "xcodegen", "tauri-cli"):
+    for name in ("xcode", "node", "npm", "go", "xcodegen", "tauri-cli"):
         if actual[name] != expected[name]:
             raise PublicationError(f"{name} toolchain does not match the release pin")
     gomobile_identity = run(
@@ -275,6 +281,7 @@ def _checked_versions(
     versions = {
         "rust": pins["RUST_VERSION"],
         "node": pins["NODE_VERSION"],
+        "npm": pins["NPM_VERSION"],
         "go": pins["GO_VERSION"],
         "gomobile": pins["GOMOBILE_VERSION"],
         "swift": swift_identity.version,
@@ -332,6 +339,7 @@ def collect_toolchains(
         .strip()
     ).resolve(strict=True)
     node_root = toolchain_root / f"node-{pins['NODE_VERSION']}"
+    npm_root = toolchain_root / f"npm-{pins['NPM_VERSION']}"
     go_root = toolchain_root / f"go-{pins['GO_VERSION']}"
     tauri_root = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}"
     node_bin = (node_root / "bin/node").resolve(strict=True)
@@ -383,6 +391,7 @@ def collect_toolchains(
             node_root,
             f"LicenseRef-Nodejs-Distribution-{pins['NODE_VERSION']}",
         ),
+        "npm": (npm_root, npm_root, "Artistic-2.0"),
         "go": (go_root, go_root, "BSD-3-Clause"),
         "gomobile": (gomobile_source, gomobile_source, "BSD-3-Clause"),
         "swift": (
@@ -407,6 +416,7 @@ def collect_toolchains(
     provenance_paths = {
         "rust": (rust_sysroot / "bin/rustc",),
         "node": (node_bin,),
+        "npm": (npm_root / "bin/npm-cli.js",),
         "go": (go_bin,),
         "gomobile": (gomobile_bin,),
         "swift": (swift_binary,),

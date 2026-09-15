@@ -412,7 +412,7 @@ class AndroidLanPeerAdmissionTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
+            "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
             source,
         )
         self.assertIn("ARTIFACT_SIZE: Final = 2_359_422", source)

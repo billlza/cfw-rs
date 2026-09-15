@@ -66,6 +66,10 @@ RELEASE_TREE_METADATA = {
     "ui-dependencies": "uiDependenciesTreeSha256",
     "xcodegen": "xcodegenToolchainTreeSha256",
 }
+# npm has its own verified tree. The complete toolchain digest and the sealed
+# UI dependency digest bind it, while application manifests retain their stable
+# constituent projection.
+RELEASE_TREE_INPUTS = frozenset((*RELEASE_TREE_METADATA, "npm"))
 TOOLCHAIN_METADATA_ORDER = (
     "toolchainSha256",
     *(RELEASE_TREE_METADATA[key] for key in sorted(RELEASE_TREE_METADATA)),
@@ -177,8 +181,10 @@ def toolchain_manifest_metadata(
     if toolchain_sha256(identity) != canonical_digest:
         raise CandidateBindingError("toolchain binding digest does not match its identity")
     trees = identity.get("release_tree_sha256")
-    if not isinstance(trees, dict) or set(trees) != set(RELEASE_TREE_METADATA):
+    if not isinstance(trees, dict) or set(trees) != RELEASE_TREE_INPUTS:
         raise CandidateBindingError("toolchain binding has an unexpected release-tree set")
+    for constituent in RELEASE_TREE_INPUTS:
+        _sha256(trees[constituent], f"release_tree_sha256.{constituent}")
     metadata = {"toolchainSha256": canonical_digest}
     for constituent, metadata_key in RELEASE_TREE_METADATA.items():
         metadata[metadata_key] = _sha256(

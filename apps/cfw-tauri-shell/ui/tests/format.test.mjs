@@ -147,6 +147,28 @@ test("log rows are bounded, levelled and redacted before display", () => {
   assert.equal(streamed[0].message, "b");
 });
 
+test("routine traffic cannot evict retained errors and each level stays bounded", () => {
+  const failure = logEntry("error", "engine", "SOCKS connection timed out", "14:59:09");
+  const traffic = Array.from({ length: 1200 }, (_, index) => logEntry("info", "engine", `request-${index}`));
+  const warnings = Array.from({ length: 1200 }, (_, index) => logEntry("warning", "engine", `ICMP-${index}`));
+  const logs = withLogRows(withLogRows([failure], traffic), warnings);
+  assert.equal(logs.filter((line) => line.level === "error").length, 1);
+  assert.equal(logs.find((line) => line.level === "error"), failure);
+  assert.equal(logs.filter((line) => line.level === "info").length, MAX_LOG_ROWS);
+  assert.equal(logs.filter((line) => line.level === "warning").length, MAX_LOG_ROWS);
+  assert.equal(logs[0].message, "ICMP-1199");
+  const newerErrors = Array.from({ length: MAX_LOG_ROWS + 1 }, (_, index) => logEntry("error", "engine", `failure-${index}`));
+  const updated = withLogRows(logs, newerErrors);
+  assert.equal(updated.filter((line) => line.level === "error").length, MAX_LOG_ROWS);
+  assert.equal(updated.some((line) => line === failure), false);
+  assert.ok(updated.length <= MAX_LOG_ROWS * 4);
+});
+
+test("live engine entries receive a readable local receipt time", () => {
+  assert.match(logEntry("info", "engine", "connection opened", "live").time, /^\d{2}:\d{2}:\d{2}$/);
+  assert.equal(logEntry("info", "engine", "connection opened", "14:59:09").time, "14:59:09");
+});
+
 test("the bridge refuses a command or event outside its allowlist", async () => {
   await assert.rejects(() => invoke("start_core"), /may invoke/u);
   await assert.rejects(() => listen("cfw://core-status", () => {}), /may subscribe/u);

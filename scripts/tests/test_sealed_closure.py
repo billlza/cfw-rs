@@ -22,18 +22,18 @@ REPOSITORY = Path(__file__).resolve().parent.parent.parent
 # files itself, so the derived patch closure is bound to the patch bytes in the
 # repository rather than to the pin table the production code already reads.
 PATCH_PATHS = {
-    "socks_lifecycle": "native/macos/patches/sing-box-v1.13.15-socks-lifecycle.patch",
-    "security": "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
-    "raw_packet": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
-    "dns_failover": "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
-    "endpoint_conflict": "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
-    "profile_probe": "native/macos/patches/sing-box-v1.13.15-profile-probe.patch",
+    "socks_lifecycle": "native/macos/patches/sing-box-v1.14.1-socks-lifecycle.patch",
+    "security": "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch",
+    "raw_packet": "native/macos/patches/sing-box-v1.14.1-raw-packet-tun.patch",
+    "dns_failover": "native/macos/patches/sing-box-v1.14.1-dns-failover.patch",
+    "endpoint_conflict": "native/macos/patches/sing-box-v1.14.1-endpoint-conflict.patch",
+    "profile_probe": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
 }
 # Authoritative digest of the raw-packet TUN patch with cleanup ownership retained
 # until Close succeeds. Kept as a literal because hashing the file alone would
 # still pass if the patch regressed and the pins were recomputed to match.
 EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "a7e9ed8316ea913f24d6174fe9cd0f5180366c4f53c49572063cc6ba8ce4d708"
+    "a550daa7b955f838b5b9b8983b41b789ccb9aedcc97b9a53f96f6affbe3f06e9"
 )
 # The combined diff is the full-object-ID digest of the whole working-tree diff
 # of the patched sing-box checkout
@@ -42,7 +42,7 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # only form of this assertion that still fails when a pin drifts.
 # This revision includes all six patches and the real utun interface resolver.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "a35bb3246ba23617b506f3d37f559acd57c3e169aa5f94061aee279adb67f7b8"
+    "02a978059d3dc5bc5b84927e2dbf5c66336b755c39784e4232dbef1bac77da38"
 )
 
 
@@ -146,11 +146,11 @@ def _request(**overrides) -> dict:
 class DeriveSupplyChainTests(unittest.TestCase):
     def test_binds_repository_toolchain_and_patched_source(self) -> None:
         supply_chain = derive_supply_chain(REPOSITORY)
-        self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.97.1")
-        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.26.6")
+        self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.98.1")
+        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.27.1")
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
-            "3708fa18766cda1f11b77f6ed9c7bd61688f17df",
+            "1ac1a339cb1223e9c70eae14c44411c75033c02d",
         )
         patched_source = supply_chain["patched_source"]
 

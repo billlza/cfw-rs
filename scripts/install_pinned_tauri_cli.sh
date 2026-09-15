@@ -1,10 +1,10 @@
 #!/bin/bash -p
 # Install the pinned Tauri CLI from its checksum-bound crates.io source archive.
 #
-# Tauri CLI 2.11.4's published Cargo.lock selects yanked spin 0.9.8. Cargo
-# correctly warns when installing that lock directly. This bootstrap boundary
-# applies the repository's digest-pinned, one-package lock update to spin 0.9.9,
-# then installs from the resulting local source with --locked. Product builds
+# Refresh the published lock to compatible patched dependencies, including the
+# rustls security fix and the replacement for yanked spin 0.9.8. This bootstrap
+# applies the repository's digest-pinned lock update, then installs from the
+# resulting local source with --locked. Product builds
 # remain offline and never invoke this script implicitly.
 set -euo pipefail
 unset CDPATH
@@ -321,8 +321,8 @@ readonly cargo_lock="$source_root/Cargo.lock"
 printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
   shasum -a 256 --check
 
-# The exact upstream lock digest was verified above, so the two zero-context
-# scalar replacements cannot be redirected onto a different published lock.
+# The exact upstream lock digest was verified above, so this dependency
+# update cannot be redirected onto a different published lock.
 # Bound Git discovery to this staging root: TMPDIR may itself be inside a
 # release worktree, where an unbounded `git apply` silently skips Cargo.lock.
 GIT_CEILING_DIRECTORIES="$staging" \

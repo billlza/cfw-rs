@@ -632,10 +632,10 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
                     f"Xcode {self.pins['XCODE_VERSION']}; "
                     f"Build version {self.pins['XCODE_BUILD_VERSION']}"
                 )
+            if len(argv) == 3 and argv[1].endswith("/bin/npm-cli.js"):
+                return self.pins["NPM_VERSION"]
             if argv[0].endswith("/node"):
                 return f"v{self.pins['NODE_VERSION']}"
-            if argv[0].endswith("/npm"):
-                return "fixture npm"
             if argv[0].endswith("/go"):
                 return f"go version go{self.pins['GO_VERSION']} darwin/arm64"
             raise AssertionError(argv)
@@ -667,6 +667,12 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
         self.assertIn(["/bin/bash", "--version"], calls)
         self.assertIn(["/bin/zsh", "--version"], calls)
         self.assertIn([ci_lanes.APPLE_XCODEBUILD, "-version"], calls)
+        self.assertEqual(resolved["npm"], self.pins["NPM_VERSION"])
+        self.assertTrue(any(
+            len(call) == 3 and call[0].endswith("/bin/node")
+            and call[1].endswith(f"/npm-{self.pins['NPM_VERSION']}/bin/npm-cli.js")
+            and call[2] == "--version" for call in calls
+        ))
         resolve_swift.assert_called_once_with(
             self.repository,
             environment,

@@ -20,7 +20,7 @@ from scripts.release_rust_toolchain import (
 )
 
 
-CHANNEL = "1.97.1"
+CHANNEL = "1.98.1"
 
 
 class RustToolchainFixture:
@@ -34,9 +34,10 @@ class RustToolchainFixture:
         payloads = {
             EXPECTED_COMPONENTS[0]: "bin/cargo",
             EXPECTED_COMPONENTS[1]: "bin/clippy-driver",
-            EXPECTED_COMPONENTS[2]: "bin/rust-std-fixture",
-            EXPECTED_COMPONENTS[3]: "bin/rustc",
-            EXPECTED_COMPONENTS[4]: "bin/rustfmt",
+            EXPECTED_COMPONENTS[2]: "bin/llvm-objcopy",
+            EXPECTED_COMPONENTS[3]: "bin/rust-std-fixture",
+            EXPECTED_COMPONENTS[4]: "bin/rustc",
+            EXPECTED_COMPONENTS[5]: "bin/rustfmt",
         }
         for component, relative in payloads.items():
             payload = self.root / relative
@@ -61,7 +62,7 @@ class RustToolchainFixture:
         (self.repository / "rust-toolchain.toml").write_text(
             "[toolchain]\n"
             f'channel = "{CHANNEL}"\n'
-            'components = ["rustfmt", "clippy"]\n'
+            'components = ["rustfmt", "clippy", "llvm-tools-preview"]\n'
             'profile = "minimal"\n',
             encoding="utf-8",
         )
@@ -141,7 +142,7 @@ class ReleaseRustToolchainTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         components = fixture.root / "lib/rustlib/components"
         components.write_text(
-            "\n".join((*EXPECTED_COMPONENTS, "llvm-tools-preview-aarch64-apple-darwin"))
+            "\n".join((*EXPECTED_COMPONENTS, "rust-analyzer-aarch64-apple-darwin"))
             + "\n",
             encoding="utf-8",
         )
@@ -217,7 +218,7 @@ class ReleaseRustToolchainTests(unittest.TestCase):
         declaration = fixture.repository / "rust-toolchain.toml"
         declaration.write_text(
             declaration.read_text(encoding="utf-8").replace(
-                'components = ["rustfmt", "clippy"]', 'components = ["clippy"]'
+                'components = ["rustfmt", "clippy", "llvm-tools-preview"]', 'components = ["clippy"]'
             ),
             encoding="utf-8",
         )
@@ -315,7 +316,7 @@ class ReleaseRustToolchainSelectionTests(unittest.TestCase):
         for home, channel in (
             (Path("relative-home"), CHANNEL),
             (self.home / ".." / "home", CHANNEL),
-            (self.home, "../1.97.1"),
+            (self.home, "../1.98.1"),
         ):
             with self.subTest(home=home, channel=channel), self.assertRaises(
                 ReleaseRustToolchainError
@@ -324,13 +325,13 @@ class ReleaseRustToolchainSelectionTests(unittest.TestCase):
 
     def test_private_exact_surface_works_when_global_has_optional_components(self) -> None:
         self.copy_private_toolchain()
-        optional_component = "llvm-tools-preview-aarch64-apple-darwin"
-        optional_payload = self.global_root / "lib/rustlib/aarch64-apple-darwin/bin/llvm-ar"
+        optional_component = "rust-analyzer-aarch64-apple-darwin"
+        optional_payload = self.global_root / "lib/rustlib/aarch64-apple-darwin/bin/rust-analyzer"
         optional_payload.parent.mkdir(parents=True)
-        optional_payload.write_bytes(b"optional LLVM tool fixture\n")
+        optional_payload.write_bytes(b"optional analyzer fixture\n")
         optional_payload.chmod(0o755)
         (self.global_root / "lib/rustlib" / f"manifest-{optional_component}").write_text(
-            "file:lib/rustlib/aarch64-apple-darwin/bin/llvm-ar\n", encoding="utf-8"
+            "file:lib/rustlib/aarch64-apple-darwin/bin/rust-analyzer\n", encoding="utf-8"
         )
         components = self.global_root / "lib/rustlib/components"
         components.write_text(

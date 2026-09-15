@@ -74,10 +74,46 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
   [self.delegate clearDNSCache];
 }
 
+- (BOOL)cancelNotification:(NSString *)identifier
+                   typeID:(int32_t)typeID
+                    error:(NSError **)error {
+  (void)identifier;
+  (void)typeID;
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"cancelNotification");
+  }
+  return NO;
+}
+
+- (BOOL)checkPlatformShell:(NSError **)error {
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"checkPlatformShell");
+  }
+  return NO;
+}
+
 - (BOOL)closeDefaultInterfaceMonitor:
             (id<LibboxInterfaceUpdateListener>)listener
                                   error:(NSError **)error {
   return [self.delegate closeDefaultInterfaceMonitor:listener error:error];
+}
+
+- (BOOL)closeNeighborMonitor:(id<LibboxNeighborUpdateListener>)listener
+                      error:(NSError **)error {
+  (void)listener;
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"closeNeighborMonitor");
+  }
+  return NO;
+}
+
+- (id<LibboxBridgeSession>)createBridge:(LibboxBridgeOptions *)options
+                                error:(NSError **)error {
+  (void)options;
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"createBridge");
+  }
+  return nil;
 }
 
 - (LibboxConnectionOwner *)
@@ -111,6 +147,22 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
   return nil;
 }
 
+- (NSString *)lookupSFTPServer:(NSError **)error {
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"lookupSFTPServer");
+  }
+  return nil;
+}
+
+- (LibboxPlatformUser *)lookupUser:(NSString *)username
+                            error:(NSError **)error {
+  (void)username;
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"lookupUser");
+  }
+  return nil;
+}
+
 - (BOOL)openRawPacketTun:(id<LibboxTunOptions>)options
                     ret0_:(int32_t *)descriptor
                     error:(NSError **)error {
@@ -121,6 +173,25 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
     return NO;
   }
   return [self.delegate takeRawPacketDescriptor:descriptor error:error];
+}
+
+- (id<LibboxShellSession>)openShellSession:(LibboxPlatformUser *)user
+                                  command:(NSString *)command
+                                  environ:(id<LibboxStringIterator>)environ
+                                     term:(NSString *)term
+                                     rows:(int32_t)rows
+                                     cols:(int32_t)cols
+                                    error:(NSError **)error {
+  (void)user;
+  (void)command;
+  (void)environ;
+  (void)term;
+  (void)rows;
+  (void)cols;
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"openShellSession");
+  }
+  return nil;
 }
 
 - (BOOL)openTun:(id<LibboxTunOptions>)options
@@ -134,8 +205,19 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
   return NO;
 }
 
+- (NSString *)readSystemSSHHostKey:(NSError **)error {
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"readSystemSSHHostKey");
+  }
+  return nil;
+}
+
 - (LibboxWIFIState *)readWIFIState {
   return nil;
+}
+
+- (void)registerMyInterface:(NSString *)name {
+  [self.delegate registerMyInterface:name];
 }
 
 - (BOOL)sendNotification:(LibboxNotification *)notification
@@ -153,8 +235,19 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
   return [self.delegate startDefaultInterfaceMonitor:listener error:error];
 }
 
-- (id<LibboxStringIterator>)systemCertificates {
-  return nil;
+- (BOOL)startNeighborMonitor:(id<LibboxNeighborUpdateListener>)listener
+                      error:(NSError **)error {
+  (void)listener;
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"startNeighborMonitor");
+  }
+  return NO;
+}
+
+- (NSString *)tailscaleHostname {
+  // An empty name explicitly requests the upstream system-hostname default.
+  // CFM's typed configuration does not currently admit Tailscale endpoints.
+  return @"";
 }
 
 - (BOOL)underNetworkExtension {
@@ -162,6 +255,14 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
 }
 
 - (BOOL)usePlatformAutoDetectInterfaceControl {
+  return NO;
+}
+
+- (BOOL)usePlatformBridge {
+  return NO;
+}
+
+- (BOOL)usePlatformShell {
   return NO;
 }
 
@@ -176,6 +277,14 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
 - (LibboxSystemProxyStatus *)getSystemProxyStatus:(NSError **)error {
   (void)error;
   return [[LibboxSystemProxyStatus alloc] init];
+}
+
+- (BOOL)connectSSHAgent:(int32_t *)descriptor error:(NSError **)error {
+  (void)descriptor;
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"connectSSHAgent");
+  }
+  return NO;
 }
 
 - (BOOL)serviceReload:(NSError **)error {
@@ -196,6 +305,13 @@ static NSError *CFWUnsupportedOperation(NSString *operation) {
   (void)enabled;
   if (error != NULL) {
     *error = CFWUnsupportedOperation(@"setSystemProxyEnabled");
+  }
+  return NO;
+}
+
+- (BOOL)triggerNativeCrash:(NSError **)error {
+  if (error != NULL) {
+    *error = CFWUnsupportedOperation(@"triggerNativeCrash");
   }
   return NO;
 }

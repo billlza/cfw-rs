@@ -18,16 +18,16 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
   MACOSX_DEPLOYMENT_TARGET: "15.0"
 
 jobs:
   rust-and-ui:
     name: Rust, UI, and script quality gates
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -35,7 +35,7 @@ jobs:
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
       - name: Normalize pinned Xcode ownership
         run: |
-          readonly xcode_application=/Applications/Xcode_26.6.app
+          readonly xcode_application=/Applications/Xcode_27.0.app
           /bin/test "$DEVELOPER_DIR" = "$xcode_application/Contents/Developer"
           /bin/test -d "$xcode_application"
           /bin/test ! -L "$xcode_application"
@@ -44,7 +44,7 @@ jobs:
           /bin/test -d "$xcode_application/Contents/Developer"
           /bin/test ! -L "$xcode_application/Contents/Developer"
           /usr/sbin/spctl --assess --type execute "$xcode_application"
-          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 27.0\nBuild version 27A266a'
 
           runner_uid="$(/usr/bin/id -u)"
           readonly runner_uid
@@ -73,15 +73,15 @@ jobs:
           readonly remaining_unsafe_entry
           /bin/test -z "$remaining_unsafe_entry"
           /usr/sbin/spctl --assess --type execute "$xcode_application"
-          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 27.0\nBuild version 27A266a'
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: "1.97.1"
-          components: clippy,rustfmt
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+          toolchain: "1.98.1"
+          components: clippy,rustfmt,llvm-tools-preview
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         id: validation-python
         with:
-          python-version: "3.14.6"
+          python-version: "3.14.7"
           architecture: arm64
           update-environment: false
       - name: Prepare lock-verified Cargo workspace sources
@@ -139,23 +139,23 @@ jobs:
 
   supply-chain:
     name: macOS Rust supply-chain policy
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: "1.97.1"
-          components: clippy,rustfmt
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+          toolchain: "1.98.1"
+          components: clippy,rustfmt,llvm-tools-preview
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         id: validation-python
         with:
-          python-version: "3.14.6"
+          python-version: "3.14.7"
           architecture: arm64
           update-environment: false
       - name: Prepare lock-verified Cargo workspace sources
@@ -169,23 +169,23 @@ jobs:
 
   native-and-package:
     name: libbox, Network Extension, and app skeleton gates
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: "1.97.1"
-          components: clippy,rustfmt
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+          toolchain: "1.98.1"
+          components: clippy,rustfmt,llvm-tools-preview
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         id: validation-python
         with:
-          python-version: "3.14.6"
+          python-version: "3.14.7"
           architecture: arm64
           update-environment: false
       - name: Prepare lock-verified Cargo workspace sources
@@ -196,7 +196,7 @@ jobs:
         run: |
           source scripts/dependency_pins.env
           ./scripts/assert_apple_silicon.sh
-          test "$(/usr/bin/xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
+          test "$(/usr/bin/xcodebuild -version)" = $'Xcode 27.0\nBuild version 27A266a'
           swift_identity_stderr="$(/usr/bin/mktemp "$RUNNER_TEMP/swift-target-info.XXXXXX")"
           cleanup_swift_identity_stderr() {
             /bin/rm -f -- "$swift_identity_stderr"

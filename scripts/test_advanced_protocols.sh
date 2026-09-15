@@ -34,8 +34,9 @@ export GOPATH="$protocol_toolchains/go-workspace"
 export GOMODCACHE="$GOPATH/pkg/mod"
 export GOCACHE="$protocol_cache"
 configure_offline_go_environment
-export CC="$(/usr/bin/xcrun --find clang)"
-export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+CC="$(/usr/bin/xcrun --find clang)"
+SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+export CC SDKROOT
 protocol_go="$protocol_toolchains/go-$GO_VERSION/bin/go"
 cd "$protocol_source"
 "$protocol_go" test -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" ./protocol/group ./protocol/socks

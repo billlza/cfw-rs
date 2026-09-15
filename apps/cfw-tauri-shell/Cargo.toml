@@ -40,7 +40,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tauri = { version = "=2.11.5", features = ["tray-icon"] }
-tauri-plugin-single-instance = "=2.4.3"
+tauri-plugin-single-instance = "=2.4.4"
 tauri-plugin-global-shortcut = "=2.3.2"
 thiserror.workspace = true
 tempfile.workspace = true
@@ -51,7 +51,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
-cc = "=1.4.0"
+cc = "=1.4.6"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
@@ -59,7 +59,7 @@ tauri-build = { version = "=2.6.3", features = [] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "=0.10.1"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
 security-framework = { version = "=3.7.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]

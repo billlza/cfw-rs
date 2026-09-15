@@ -66,6 +66,18 @@ cfw_verify_node_toolchain_tree() {
     "version=$NODE_VERSION"
 }
 
+cfw_verify_npm_toolchain_tree() {
+  local contract_repository="$1"
+  local contract_toolchain_root="$2"
+  cfw_verify_release_toolchain_manifest \
+    "$contract_repository" \
+    "$contract_toolchain_root/npm-$NPM_VERSION" \
+    "$contract_toolchain_root/npm-$NPM_VERSION.manifest.json" \
+    "artifactKind=pinned-npm-toolchain-v1" \
+    "sourceArchiveSha256=$NPM_ARCHIVE_SHA256" \
+    "version=$NPM_VERSION"
+}
+
 cfw_verify_tauri_toolchain_tree() {
   local contract_repository="$1"
   local contract_toolchain_root="$2"
@@ -99,10 +111,16 @@ cfw_verify_xcodegen_toolchain_tree() {
     "$contract_repository" \
     "$contract_toolchain_root/xcodegen-$XCODEGEN_VERSION" \
     "$contract_toolchain_root/xcodegen-$XCODEGEN_VERSION.manifest.json" \
-    "artifactKind=pinned-xcodegen-toolchain-v2" \
+    "artifactKind=pinned-xcodegen-toolchain-v3" \
     "buildPolicy=isolated-resolved-swiftpm-v1" \
     "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
     "packageResolvedSha256=$XCODEGEN_PACKAGE_RESOLVED_SHA256" \
+    "upstreamPackageResolvedSha256=$XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256" \
+    "dependencyPatchSha256=$XCODEGEN_DEPENDENCY_PATCH_SHA256" \
+    "aexmlCommit=$XCODEGEN_AEXML_COMMIT" \
+    "aexmlUpstreamManifestSha256=$XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256" \
+    "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256" \
+    "aexmlPatchedManifestSha256=$XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256" \
     "patchSha256=$XCODEGEN_PATCH_SHA256" \
     "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256" \
     "platform=darwin-arm64" \
@@ -113,14 +131,32 @@ cfw_verify_xcodegen_toolchain_tree() {
     "xcodeVersion=$XCODE_VERSION"
 }
 
+cfw_verify_go_release_tools_source() {
+  local contract_repository="$1"
+  local module_root="$contract_repository/tools/go-release-tools"
+  [[ -d "$module_root" && ! -L "$module_root" &&
+    -f "$module_root/go.mod" && ! -L "$module_root/go.mod" &&
+    -f "$module_root/go.sum" && ! -L "$module_root/go.sum" ]] || {
+    echo "error: pinned Go release-tool module files are unavailable" >&2
+    return 1
+  }
+  printf '%s  %s\n' \
+    "$GO_RELEASE_TOOLS_GO_MOD_SHA256" "$module_root/go.mod" \
+    "$GO_RELEASE_TOOLS_GO_SUM_SHA256" "$module_root/go.sum" |
+    /usr/bin/shasum -a 256 --check >/dev/null
+}
+
 cfw_verify_go_release_tools_tree() {
   local contract_repository="$1"
   local contract_toolchain_root="$2"
+  cfw_verify_go_release_tools_source "$contract_repository" || return 1
   cfw_verify_release_toolchain_manifest \
     "$contract_repository" \
     "$contract_toolchain_root/go-workspace/bin" \
     "$contract_toolchain_root/go-workspace-bin.manifest.json" \
-    "artifactKind=pinned-go-release-tools-v1" \
+    "artifactKind=pinned-go-release-tools-v2" \
+    "toolsGoModSha256=$GO_RELEASE_TOOLS_GO_MOD_SHA256" \
+    "toolsGoSumSha256=$GO_RELEASE_TOOLS_GO_SUM_SHA256" \
     "goVersion=$GO_VERSION" \
     "gomobileModuleSum=$GOMOBILE_MODULE_SUM" \
     "gomobileVersion=$GOMOBILE_VERSION" \
@@ -163,6 +199,9 @@ cfw_release_toolchain_tree_sha256() {
       ;;
     "node-$NODE_VERSION.manifest.json")
       cfw_verify_node_toolchain_tree "$contract_repository" "$contract_toolchain_root"
+      ;;
+    "npm-$NPM_VERSION.manifest.json")
+      cfw_verify_npm_toolchain_tree "$contract_repository" "$contract_toolchain_root"
       ;;
     "xcodegen-$XCODEGEN_VERSION.manifest.json")
       cfw_verify_xcodegen_toolchain_tree "$contract_repository" "$contract_toolchain_root"

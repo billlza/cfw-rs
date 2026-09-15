@@ -4,21 +4,35 @@
   "dependencyPinsPath": "scripts/dependency_pins.env",
   "nativeLockPath": "native/macos/Dependencies.lock.json",
   "tools": {
-    "PYTHON_VERSION": "3.14.6",
-    "RUST_VERSION": "1.97.1",
-    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": "472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae",
+    "PYTHON_VERSION": "3.14.7",
+    "RUST_VERSION": "1.98.1",
+    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": "ee3c88a73088d81cb3234b4b7dedd42c3d28c01e845e6d01b8e49c104d3f3e03",
     "CARGO_AUDIT_VERSION": "0.22.2",
     "CARGO_DENY_VERSION": "0.20.2",
     "XCODEGEN_VERSION": "2.46.0",
     "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
     "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
-    "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
-    "NODE_VERSION": "24.18.0",
-    "GO_VERSION": "1.26.6",
+    "XCODEGEN_PACKAGE_RESOLVED_SHA256": "c71eacb628f5fb50d8cd266b5fbc1bbe8df48b880fc91570ca79f5f6deaab961",
+    "NODE_VERSION": "26.8.2",
+    "GO_VERSION": "1.27.1",
     "GOMOBILE_VERSION": "v0.1.13",
     "GOVULNCHECK_VERSION": "v1.6.0",
     "TAURI_CLI_VERSION": "2.11.4",
-    "SING_BOX_VERSION": "v1.13.15"
+    "SING_BOX_VERSION": "v1.14.1",
+    "NPM_VERSION": "12.0.2",
+    "NPM_ARCHIVE_SHA256": "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1",
+    "GO_RELEASE_TOOLS_GO_MOD_SHA256": "d3b33745ba03310f6064ef401a937ab29a1e34ec4829953cf8a454857e71da40",
+    "GO_RELEASE_TOOLS_GO_SUM_SHA256": "6c37e1d4a75699211d3a482cf561098b84427252f2c059244f7f29b0fb1d0906",
+    "XCODE_VERSION": "27.0",
+    "XCODE_BUILD_VERSION": "27A266a",
+    "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
+    "XCODEGEN_DEPENDENCY_PATCH_PATH": "scripts/xcodegen-2.46.0-dependency-refresh.patch",
+    "XCODEGEN_DEPENDENCY_PATCH_SHA256": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
+    "XCODEGEN_AEXML_COMMIT": "db806756c989760b35108146381535aec231092b",
+    "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "357362479c2c2f0dc7359705b4668f0eb6e67e8ad80eeedc37f711a7a373e80b",
+    "XCODEGEN_AEXML_PATCH_PATH": "scripts/aexml-4.7.0-supported-watchos.patch",
+    "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
+    "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6"
   },
   "runtimeTools": {
     "adb": {
@@ -29,7 +43,7 @@
       "verificationPhase": "android-lan-peer-admission",
       "sourceBinding": {
         "path": "scripts/physical_capture/android_lan_peer.py",
-        "sha256": "bed9e81cd7e11eb4251a3324acee88e8e9195d0f8ac33f59f9c755fff25148b2",
+        "sha256": "bee7d226ea09a23bdf2cc806f36d045f4732fbb3e6a5546a5bf04be28d5c04a7",
         "size": 137417,
         "mode": "0644",
         "pathConstant": "ADB",
@@ -40,11 +54,11 @@
   },
   "packetEvidenceEndpoint": {
     "goVersionKey": "GO_VERSION",
-    "goVersion": "1.26.6",
+    "goVersion": "1.27.1",
     "goos": "linux",
     "goarch": "amd64",
     "cgoEnabled": "0",
-    "binarySha256": "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c",
+    "binarySha256": "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0",
     "transportPort": 44333,
     "dnsPort": 53,
     "readmePath": "tools/packet-evidence-endpoint/README.md",
@@ -53,21 +67,22 @@
       "CGO_ENABLED=0",
       "GOOS=linux",
       "GOARCH=amd64",
-      "target/toolchains/go-1.26.6/bin/go",
+      "target/toolchains/go-1.27.1/bin/go",
       "-C tools/packet-evidence-endpoint",
+      "-buildvcs=false",
       "-trimpath",
       "-ldflags='-s -w -buildid='",
       "-o ../../target/packet-evidence-endpoint-linux-amd64",
-      "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
+      "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0"
     ],
     "sourceFiles": [
       {
         "path": "tools/packet-evidence-endpoint/go.mod",
-        "sha256": "92e9f578ccd29c84906396e1b469b728a132895f38ac4e947bb222034ba73fbe"
+        "sha256": "7dbf43cc50fc0a826f0923f309a00ddc1af3c47dba000d1e29e149be8b635c6d"
       },
       {
         "path": "tools/packet-evidence-endpoint/install-endpoint.sh",
-        "sha256": "14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8"
+        "sha256": "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3"
       },
       {
         "path": "tools/packet-evidence-endpoint/main.go",
@@ -91,11 +106,11 @@
       },
       {
         "path": "tools/packet-evidence-endpoint/README.md",
-        "sha256": "5d5914f5546730a4f20ad5e9d7e92bc47cf3c173443ba1563895828bbb117f2a"
+        "sha256": "aa8daeea87e12a1898c11067990d08e5bf71e938e9c639a38261c2e4658984da"
       },
       {
         "path": "scripts/physical_capture/packet_endpoints.json",
-        "sha256": "35f1e9bfc73baae302f7b26e24adf86df57a01c61f3c71133ae7cba23e64a5cb"
+        "sha256": "c1c6dd34a5b5ea1d36cd83430d2213b6cd613cc3dfad6ef2ca2f8e2b9184651d"
       },
       {
         "path": "scripts/physical_capture/packet_known_hosts",
@@ -107,7 +122,7 @@
     "schema": "cfw-packet-lan-peer-build-input-v1",
     "goToolchain": {
       "versionKey": "GO_VERSION",
-      "version": "1.26.6",
+      "version": "1.27.1",
       "goos": "linux",
       "goarch": "arm64",
       "cgoEnabled": "0"
@@ -115,7 +130,7 @@
     "source": {
       "root": "tools/packet-lan-peer",
       "treeAlgorithm": "sha256-tree-v2",
-      "treeSha256": "8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4",
+      "treeSha256": "c40181aa8a78325877bf2b091a5be9a091f223be09f443297bcf8e052df7abb9",
       "rootMode": "0755",
       "files": [
         {
@@ -126,7 +141,7 @@
         },
         {
           "path": "go.mod",
-          "sha256": "af5ff7973354844d111edb9d303d6543d8aa6dc0afc6ecf439225acc15e1d1fd",
+          "sha256": "5dbd54a17b7a97a17e71fe82ea46d0b36f0325ba3b6043ca43d14a8836effcee",
           "size": 70,
           "mode": "0644"
         },
@@ -146,8 +161,8 @@
     },
     "artifact": {
       "path": "target/packet-lan-peer-linux-arm64",
-      "sha256": "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
-      "size": 2359422,
+      "sha256": "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+      "size": 2293884,
       "fileType": "regular",
       "linkCount": 1,
       "hostOwner": "effective-uid",
@@ -199,7 +214,7 @@
     },
     "verifyScript": {
       "path": "scripts/verify_packet_lan_peer.sh",
-      "sha256": "eb7c518d3209ccf6486847e9f9042f58796b2192d5fdd733f3b991f640d7309e",
+      "sha256": "d8bb6f9a057764a87949bedbd805ee662b89179085c0e88e54007e24c286a1b9",
       "size": 7357,
       "mode": "0755",
       "requiredFragments": [
@@ -208,8 +223,8 @@
         "cfw_verify_go_toolchain_tree \"$repo_root\" \"$toolchain_root\"",
         "source_root=\"$repo_root/tools/packet-lan-peer\"",
         "artifact=\"$repo_root/target/packet-lan-peer-linux-arm64\"",
-        "expected_artifact_sha256=268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
-        "expected_artifact_size=2359422",
+        "expected_artifact_sha256=d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+        "expected_artifact_size=2293884",
         "expected_artifact_mode=555",
         "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
         "GOTOOLCHAIN=local",
@@ -235,14 +250,14 @@
   },
   "physicalCollectorModule": {
     "goVersionKey": "GO_VERSION",
-    "goVersion": "1.26.6",
+    "goVersion": "1.27.1",
     "goModPath": "tools/physical-collector/go.mod",
-    "goModSha256": "24b0294d6fe42b5baab92bc58ed47a69275323bb02ca75b087605a5aabf2b2d0",
+    "goModSha256": "fd4dce001fb12c0ba2cd289bbdaa1f649fc085861362ad1300c56643f17c5a6f",
     "goSumPath": "tools/physical-collector/go.sum",
-    "goSumSha256": "5c71b0dca9d0be45b65ab07b1a7386475f72d454c9638d60c36494a75fbc35ec",
+    "goSumSha256": "f5dc5ed58b07c6dc0dc772a33592361db55edf8010377ccf8d874f8bb5900e5c",
     "requiredModuleFragments": [
-      "google.golang.org/grpc v1.82.1",
-      "golang.org/x/text v0.39.0"
+      "google.golang.org/grpc v1.83.2",
+      "golang.org/x/text v0.42.0"
     ]
   },
   "xcodegen": {
@@ -261,10 +276,16 @@
       "/usr/bin/git -C \"$payload/source\" apply --reverse --check \"$xcodegen_patch\"",
       "USER=cfw-release",
       "LOGNAME=cfw-release",
-      "/usr/bin/strip -S \"$build_root/release/xcodegen\"",
+      "/usr/bin/strip -S \"$xcodegen_bin_dir/xcodegen\"",
       "patchSha256=$XCODEGEN_PATCH_SHA256",
       "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
-      "XcodeGenResourceProbe.xcodeproj/project.pbxproj"
+      "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
+      "$XCODEGEN_DEPENDENCY_PATCH_PATH",
+      "$XCODEGEN_DEPENDENCY_PATCH_SHA256",
+      "cfw_patch_xcodegen_aexml \"$repo_root\" \"$build_root/checkouts\"",
+      "source \"$repo_root/scripts/xcodegen_dependency_contract.sh\"",
+      "upstreamPackageResolvedSha256=$XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256",
+      "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256"
     ]
   },
   "gomobileCommitKey": "GOMOBILE_COMMIT",
@@ -285,9 +306,9 @@
     "upstreamCargoLockSha256": "2ff3db9b36027ca10712cbebdb326f2b299f95093672eb66d7cab6a406619cc5",
     "lockPatchPathKey": "TAURI_CLI_LOCK_PATCH_PATH",
     "lockPatchSha256Key": "TAURI_CLI_LOCK_PATCH_SHA256",
-    "lockPatchSha256": "965269f4cb086d1347c436e77f9aa4033c168fe1c26e66898bc26fe1a2eeb532",
+    "lockPatchSha256": "18a97d0690554f8e0be23e26022689bc319c193b0b2b5d448b05704344d99b5a",
     "patchedCargoLockSha256Key": "TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
-    "patchedCargoLockSha256": "ceb5a88c860e4238175e6ac4fe3f598c5c9e8f3e37c5d9928ac866a4be199b1b",
+    "patchedCargoLockSha256": "08de9da18f37bd4a9836120241e266cedd2eb008bc9293ed675bb313ad975189",
     "spinVersionKey": "TAURI_CLI_SPIN_VERSION",
     "spinVersion": "0.9.9",
     "spinCrateSha256Key": "TAURI_CLI_SPIN_CRATE_SHA256",
@@ -298,7 +319,7 @@
     "ciWorkflowPath": ".github/workflows/ci.yml",
     "requiredCiFragment": "install-tauri-cli",
     "installerPath": "scripts/install_pinned_tauri_cli.sh",
-    "installerSha256": "7bc439d444cb7dc00c6c60fd7ee9003124ae635d331d71df7c528f75d6158ce7",
+    "installerSha256": "b649c88ae4fe0af5a815bc2bcdf93c6a122b18c5ff237e91c540ca8a8c893a8f",
     "requiredInstallerFragments": [
       "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
       "$TAURI_CLI_CRATE_SHA256",
@@ -378,60 +399,60 @@
     ]
   },
   "singBoxCommitKey": "SING_BOX_COMMIT",
-  "singBoxCommit": "3708fa18766cda1f11b77f6ed9c7bd61688f17df",
+  "singBoxCommit": "1ac1a339cb1223e9c70eae14c44411c75033c02d",
   "patches": [
     {
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "183b05a26e3ccdded66085f66f643d96d43b6b660375b6eb83aaac3f078309d9"
+      "sha256": "a093762cb632419782a1baf8b555a1c2f66f7d9b95abe06c84b1fac76b2431ea"
     },
     {
       "name": "sing-box raw packet tun patch",
       "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
       "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
-      "sha256": "a7e9ed8316ea913f24d6174fe9cd0f5180366c4f53c49572063cc6ba8ce4d708"
+      "sha256": "a550daa7b955f838b5b9b8983b41b789ccb9aedcc97b9a53f96f6affbe3f06e9"
     },
     {
       "name": "sing-box DNS failover patch",
       "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
       "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-      "sha256": "5ce5c4b7cdce7356b64c7f877a030ec088d64b6a065e1d1ce58e555e59dcc003"
+      "sha256": "b702db8c212448d09fd968ca50efec8205291be5c99be354b0fb59aeac1a6823"
     },
     {
       "name": "sing-box endpoint conflict patch",
       "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
       "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-      "sha256": "5a956c63025b4692db43d2c77ac46de1ae573e0afcc866de9b59704a273b0c02"
+      "sha256": "9e15e2d1dfd1c46deead734d40e6c6f021cfc400cdc9effaeb13420485b03565"
     },
     {
       "name": "sing-box profile probe patch",
       "pathKey": "SING_BOX_PROFILE_PROBE_PATCH_PATH",
       "sha256Key": "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
-      "sha256": "ca0e5b2f496b154b68a55bbc9cd19d3e3a7b33a56bdda8ee64007632f514609d"
+      "sha256": "2450102e3133f61b124ef2032a9dc96d12a04e32ebab56f5a5ab5eb053d26b34"
     },
     {
       "name": "sing-box SOCKS lifecycle patch",
       "pathKey": "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
       "sha256Key": "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-      "sha256": "10a9bc2e34d33165ec4782f574aa68a472b83c62eca6022494a40c4679198ed9"
+      "sha256": "a6767d8673778030f80fb77623d2f80fec023aa82de690c9c73e7a5ca73afa86"
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "a04afe84d6156a07df36602d69802222c966585693a57f11bb44a0d25248a604",
+  "combinedDiffSha256": "02a978059d3dc5bc5b84927e2dbf5c66336b755c39784e4232dbef1bac77da38",
   "sourceContract": {
     "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
-    "patchedDiffSha256": "be2135a824401a684adef165f9b64e0e485e219a4999dcc0c42564e411fea828",
+    "patchedDiffSha256": "5ce0d47a8cce32ae6b3cf487fe34a9f3da61496e2559130c56a5b689bf456033",
     "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
-    "patchedGoModSha256": "6eb58d717d4516a1121cacb44bdb7e51c1d71107607a32d75e8678af4f1eac48",
+    "patchedGoModSha256": "1cdccddd3b0170e0a6eb89c94abde9563a4209a98a931d6201d7df0d406bc617",
     "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
-    "patchedGoSumSha256": "410d956f93d3e770691cd2a14b4a827d609aa31507f09a5e5ecb3a5716370818"
+    "patchedGoSumSha256": "2ff58229b24d2a8a7bc465efc0cc0567619ce969bc08f695445580bfdf3edacd"
   },
   "libboxModuleCacheContract": {
     "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
     "path": "scripts/libbox_module_cache_contract.bash",
     "sha256Key": "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
-    "sha256": "e9b654eef3b1f5f14abded42fe518d4a53603a87120babd1e3e6cb61ce26170e"
+    "sha256": "c8390c0c251bfe81aa84306a8a9764130c300f608d0f161fd726958fb9b877a2"
   },
   "verifiedGoModuleInputKeys": [
     "GOMOBILE_MODULE_SUM",
@@ -538,7 +559,7 @@
     ],
     "apps/cfw-tauri-shell/build_support/native_product_input.rs": [
       "const UNSIGNED_RELATIVE_ROOT: &str = \"unsigned/native-products\";",
-      "const GA_PRE_SIGN_RELATIVE_ROOT: &str = \"ga-preflight/40067/native-products\";",
+      "const GA_PRE_SIGN_RELATIVE_ROOT: &str = \"ga-preflight/40068/native-products\";",
       "pub enum NativeProductContext {",
       "pub struct CandidateNativeProducts {",
       "pub fn resolve(",
@@ -593,7 +614,8 @@
       "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
       "profileProbePatchSha256=$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
       "socksLifecyclePatchSha256=$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
+      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
+      "scripts/libbox_clang_linker.sh"
     ],
     "scripts/build_native_products.sh": [
       "unset CDPATH",
@@ -1041,14 +1063,14 @@
       "direct {match.group(1)} command bypasses the closed Apple driver gate"
     ],
     ".github/workflows/ci.yml": [
-      "DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer",
+      "DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer",
       "shell: \"/bin/bash --noprofile --norc -p -e -o pipefail {0}\"",
-      "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+      "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
       "github.event.pull_request.head.sha || github.sha",
       "persist-credentials: false",
       "Assert exact CI source and workflow identity ${{ github.workflow_sha }}",
       "Normalize pinned Xcode ownership",
-      "readonly xcode_application=/Applications/Xcode_26.6.app",
+      "readonly xcode_application=/Applications/Xcode_27.0.app",
       "/usr/bin/find -P -x \"$xcode_application\"",
       "/usr/bin/sudo -n /usr/bin/find -P -x \"$xcode_application\"",
       "-exec /usr/sbin/chown -h 0:0 {} +",
@@ -1056,7 +1078,7 @@
       "[[ \"$runner_groups\" != *\" 0 \"* ]]",
       "\\( ! -uid 0 -o ! -gid 0 -o -perm -0002 \\)",
       "/usr/sbin/spctl --assess --type execute \"$xcode_application\"",
-      "python-version: \"3.14.6\"",
+      "python-version: \"3.14.7\"",
       "architecture: arm64",
       "update-environment: false",
       "run_release_ci_gate.sh",
@@ -1561,7 +1583,7 @@
     "scripts/release_build_identity.py": [
       "canonical_build_version(",
       "class ReleaseIdentity:",
-      "ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, \"40067\")",
+      "ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, \"40068\")",
       "FROZEN_GA_REPOSITORY_RELATIVE = Path(",
       "def frozen_ga_repository(",
       "MAX_BUNDLE_IDENTITY_PLIST_BYTES = 1024 * 1024",
@@ -1856,7 +1878,7 @@
       "start",
       "recover",
       "dmg-set.seal.json",
-      "readonly ga_root=\"$artifact_repository/target/candidates/0.4.0/ga/40067\"",
+      "readonly ga_root=\"$artifact_repository/target/candidates/0.4.0/ga/40068\"",
       "--context canonical-native-content",
       "verify_release_prepackage_evidence \"$app_path\"",
       "dmg_root=\"$package_root/dmg\"",
@@ -1889,7 +1911,10 @@
       "cfw_require_supported_python",
       "cfw_verify_release_toolchain_manifest",
       "-I -S -B -W error",
-      "--exact-metadata"
+      "--exact-metadata",
+      "cfw_verify_go_release_tools_source",
+      "toolsGoModSha256=$GO_RELEASE_TOOLS_GO_MOD_SHA256",
+      "toolsGoSumSha256=$GO_RELEASE_TOOLS_GO_SUM_SHA256"
     ],
     "scripts/release_publication_gate.sh": [
       "--seal-assets",
@@ -1899,7 +1924,7 @@
       "scripts/release_artifact_set_cli.py",
       "seal-release",
       "verify-release",
-      "readonly publication_ga_root=\"$publication_artifact_repository/target/candidates/0.4.0/ga/40067\"",
+      "readonly publication_ga_root=\"$publication_artifact_repository/target/candidates/0.4.0/ga/40068\"",
       "--print-frozen-artifact-repository",
       "signing-output/signed-native-products",
       "scripts/github_hosted_ci_receipt.py",
@@ -1912,8 +1937,8 @@
     ],
     "scripts/release_publication_path_contract.sh": [
       "cfw_require_fixed_publication_app_path",
-      "target/candidates/0.4.0/ga/40067/signed/Clash for Mac.app",
-      "publication gate accepts only the fixed 0.4.0/40067 GA app"
+      "target/candidates/0.4.0/ga/40068/signed/Clash for Mac.app",
+      "publication gate accepts only the fixed 0.4.0/40068 GA app"
     ],
     "scripts/release_workspace_secret_gate.sh": [
       "release_workspace_secret_gate_main",
@@ -1979,7 +2004,7 @@
       "scripts/prepare_publication_evidence.sh prepare",
       "sha256-tree-v2",
       "scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID",
-      "target/candidates/0.4.0/ga/40067/stage-inputs/local-ci-lanes.json",
+      "target/candidates/0.4.0/ga/40068/stage-inputs/local-ci-lanes.json",
       "scripts/build_signed_candidate.sh --resume-signing",
       "scripts/build_signed_candidate.sh --recover-notarization-id UUID",
       "scripts/release_publication_gate.sh --seal-prepackage",
@@ -1988,7 +2013,7 @@
       "scripts/run_ga_runtime_acceptance.sh verify",
       "scripts/release_publication_gate.sh --seal-ga-acceptance",
       "scripts/release_publication_gate.sh --seal-publication",
-      "target/candidates/0.4.0/ga/40067/stage-inputs/publication"
+      "target/candidates/0.4.0/ga/40068/stage-inputs/publication"
     ],
     "scripts/updater_signing_launcher.py": [
       "com.bill.clashformac.release.updater",
@@ -2510,7 +2535,7 @@
     ],
     "scripts/validated_candidate_evidence.py": [
       "RETIRED_MESSAGE = (",
-      "use the single frozen GA 40067",
+      "use the single frozen GA 40068",
       "prepackage, ga-acceptance, and publication stages",
       "raise SystemExit(f\"error: {RETIRED_MESSAGE}\")"
     ],
@@ -2539,13 +2564,13 @@
     "scripts/physical_capture/packet.py": [
       "PACKET_ENDPOINT_TRANSPORT_PORT: Final = 44333",
       "PACKET_ENDPOINT_DNS_PORT: Final = 53",
-      "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c",
+      "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0",
       "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996",
-      "14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8",
+      "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3",
       "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62",
       "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411",
       "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba",
-      "35f1e9bfc73baae302f7b26e24adf86df57a01c61f3c71133ae7cba23e64a5cb",
+      "c1c6dd34a5b5ea1d36cd83430d2213b6cd613cc3dfad6ef2ca2f8e2b9184651d",
       "endpoint_binary_sha256",
       "endpoint_service_unit_sha256",
       "endpoint_install_script_sha256",
@@ -2747,7 +2772,7 @@
       "source \"$repo_root/scripts/release_bundle_codesign.sh\"",
       "cfw_seal_release_tool_environment production",
       "--transaction-owned",
-      "target/candidates/0.4.0/ga/40067",
+      "target/candidates/0.4.0/ga/40068",
       "CFW_SIGNING_ATTEMPT_WORK",
       "cfw_codesign_distribution_bundle --force --options runtime --timestamp",
       "readonly authority_designated_requirement='designated => anchor apple generic and identifier \"com.bill.clashformac.global-authority\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"YKUPL7Z869\"'",
@@ -3216,45 +3241,68 @@
       "publication.json",
       "completed.json",
       "reconciliation intent changed"
+    ],
+    "scripts/libbox_clang_linker.sh": [
+      "DEVELOPER_DIR",
+      "-lobjc",
+      "exec"
+    ],
+    "tools/go-release-tools/go.mod": [
+      "go 1.27.1",
+      "github.com/sagernet/gomobile v0.1.13",
+      "golang.org/x/vuln v1.6.0"
+    ],
+    "tools/go-release-tools/go.sum": [
+      "h1:foTOGKJetah9VwaJl1XJx5TswIAVg8NfYmHOhrOc95I=",
+      "h1:FeMO9Rm/HwyduOztbvKcOw+zvDEPr4I4aQNSfevFcKY="
+    ],
+    "scripts/xcodegen-2.46.0-dependency-refresh.patch": [
+      "hostBuildTool",
+      "6.2.2",
+      "testDuplicateYAMLKeysAreRejected"
+    ],
+    "scripts/aexml-4.7.0-supported-watchos.patch": [
+      ".watchOS(.v9)"
+    ],
+    "scripts/xcodegen_dependency_contract.sh": [
+      "cfw_patch_xcodegen_aexml",
+      "rev-parse HEAD",
+      "--porcelain --untracked-files=all",
+      "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256",
+      "apply --check",
+      "apply --reverse --check",
+      "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256"
     ]
   },
   "artifactSourceSha256": {
     "apps/cfw-tauri-shell/build.rs": "eeff4388e01091393e5e96d1960753163a8ecca089c6aa530b31aed76bb48d0e",
-    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "984f10e78b430c1534405368f7a288cc8f486865f251a0a2f60ec5cd0b330a98",
-    "scripts/ga_runtime_acceptance_cli.py": "3e66925c25ed096a7a37b580ef050479bda99430e8d5158fa837e33ad785a7fd",
-    "scripts/hash_native_build_inputs.py": "7e7d327c3a1c3edd6a7c33cdf544d22d349ce40646e4c5ed26651e060f5bb0fa",
-    "scripts/physical_capture/__init__.py": "f5fe405e071210b80f782a819991cf86c4a42ee286a08f1c77f63b1781cba193",
-    "scripts/prepare_publication_evidence.py": "204204877eb7e0dce49d0deda0599df7c11bb859d3363f48ba3ad3df23a53327",
-    "scripts/publication/build_tool_preparation.py": "02575ee719cdd4185f1a7866af3b653ff451e0bad6567fc8a3cabbc5f1f87601",
-    "scripts/publication/draft.py": "b39da4999c38dd2b91e18bab5c8c215b410e4443e27d6d876274bfec65c2602d",
-    "scripts/publication/finalize.py": "6bdac077101d35362ad80e69d1c895b449becc973fb828cd1cfa819b75ad2c42",
-    "scripts/publication/ga_release_contract.py": "e97247184434eb5c8ce21832c66286f015638b189399a0aca4657c85cbc018c5",
-    "scripts/publication/npm_collector.py": "781b2f63000b4dd4a258cd1fbdfb0808975751a9fea29b3a6a6093f782b48e9e",
-    "scripts/publication_evidence.py": "5fc8339201fb5b5a59676318ca6b10d77b53f764e8ede47b22e72de289b220d1",
-    "scripts/release_artifact_set_cli.py": "e53e44e432eb5fc839ef8aacdff40b70e2bd07a29b60bb7cc948714f665bb735",
+    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "5eeae16e6974d2cdd76fd34cb201360e96cf41a6c2ead12002132b6b83f9b170",
     "scripts/libbox_source_contract.sh": "f8c208e43a4589a563147e23437b6dac0d819a52665d5f965ea922eb74c4db5d",
-    "scripts/build_libbox.sh": "dc2ae35d7c68c8e468c9ccae9415eb9c933b35af0202a6a7cc879d8545a4def3",
+    "scripts/build_libbox.sh": "edb0684f7896b7581f832d3200227447fb07051864987223d31c54acd1a72026",
     "scripts/build_native_products.sh": "37d375ff2ed3a7ee394b9de48f8e29a6ef51dbf2cc7443b4866998d95413f16c",
-    "scripts/build_ui_with_pinned_node.sh": "a1248e1fe39e8d463de9d922c4b91a1044c23a36ef1687933317883906ea9b03",
+    "scripts/build_ui_with_pinned_node.sh": "5b9df6542382e6475bd829446737537c773d0f92a0a5c424e33f4e70a422edad",
     "scripts/build_unsigned_candidate.sh": "58c9028c05ef97b3f95fbcae5a5334fb44edba7de41b267ad75a9c0680056bd1",
-    "scripts/build_signed_candidate.sh": "3abf2ac5c959e6a31a3d88fbe7d938016482da04afca5dcb1c97717c5456dadb",
+    "scripts/build_signed_candidate.sh": "1c7749411554dd0ca0691df2323059dc78b155d3179edcf2c428fe5e1da4a518",
     "scripts/release_tool_environment.sh": "4f8142a46b4499bfb8d8a366991bf6a0f9a78577ae661520876939baa94dd94b",
-    "scripts/publication/ci_lanes.py": "da30c6e047f6effc1d6ee265ec8f66c2cce29929e38fc0bf2e0668981ba84d5c",
+    "scripts/publication/ci_lanes.py": "a37f9681ca137b786fcb74ee63a99fad74ad967fcec0f32c0fede31e1b204fbd",
     "scripts/publication/release_environment.py": "b754473d623ec8f4f1ddd06f34d9d7571e98aab2da8467f6127e9862168b03d8",
-    "scripts/publication/release_toolchains.py": "afcb92185b2dac89667c4b2fc4e9f10ed0755bc743d882852b9132104f990084",
+    "scripts/publication/release_toolchains.py": "febc6ad04ccb0ee8a6ef6ce94921b82f5b5e6d5e8e1a87cf77ae438b89c966c0",
     "scripts/publication/graph_model.py": "779440a6ec49dc84e3085a070de2c0612ce93af65e28348da89cc52aa1cfa1ad",
-    "scripts/candidate_artifact_binding.py": "760ace90555750e40c846ba9438eecda83675904ac202a242303e167c0ffd657",
+    "scripts/candidate_artifact_binding.py": "0baffb212f283e3021442f7480a26f5f36b6abdd14e245259ee9dd2e2fdb8f62",
     "scripts/publication/cargo_collector.py": "06f3a6612d17eb5277e3e21e7fdeb7eacdcce0e12375773a9ebb1d2e9091a74f",
+    "scripts/publication/build_tool_preparation.py": "02575ee719cdd4185f1a7866af3b653ff451e0bad6567fc8a3cabbc5f1f87601",
+    "scripts/publication/npm_collector.py": "781b2f63000b4dd4a258cd1fbdfb0808975751a9fea29b3a6a6093f782b48e9e",
     "scripts/publication/go_collector.py": "4b50df2bce8b509923491d6022f5ff55c64bc147f02dcea5861b90ded5bbbb6a",
-    "scripts/publication/native_collector.py": "1c339deaf83c555eaf6c21112a575a30361e296c5ef680701b4592fdc30895b3",
+    "scripts/publication/native_collector.py": "cf2d6e693c51f36825683b1c25071a41599fbe17ff4a886d549d2096c1e263db",
     "scripts/publication/graph_collectors.py": "41a9165dae362424a943aa326956239ba51b1ad1180e3bad706bc510bc26e79b",
-    "scripts/publication/preparer.py": "1d824d86d4e7d224e23b8115561cc20111d93b0dceb910802345d0031e1d5d41",
+    "scripts/publication/preparer.py": "1cc1998298fe4b5d78d31b3ba540b6b0a0fa053a5043381885c5f656aa5095e6",
     "scripts/publication/release_app_verifier.py": "9a3bfe85c25ab72b59316be896c4ad77e4d3d0f45475abf84bfa157724c5bdab",
     "scripts/publication/source_preparation.py": "f4f59ea1b99530fea8e127ae81caf3a5b071a6c31acf8ef519cadda8890cdd2d",
     "scripts/publication/artifact_preparation.py": "65c584801ce49328313cc675d863a2722c11e8386a23922d6ced60f3fded480a",
     "scripts/prepare_publication_evidence.sh": "79c45634e64965e0b9ca6bb25fd2a0afa96689a0ef0d760099de1bc40604b1a6",
-    "scripts/verify_ci_no_masking.py": "8917a0c8d24f5d5e6ba0db7dec46362bb0771f0a7ef820653ffa8758f1f452f8",
-    ".github/workflows/ci.yml": "b0881faa331b4072b1d0e9d957fe5db99920aef0e7ee8d6284accb6531d3a724",
+    "scripts/prepare_publication_evidence.py": "204204877eb7e0dce49d0deda0599df7c11bb859d3363f48ba3ad3df23a53327",
+    "scripts/verify_ci_no_masking.py": "306fab12e91a788de2a0bcbd6e53ffef3a094bb9d17a15d810d5f1db415cc6fd",
+    ".github/workflows/ci.yml": "0d277ec80d7267f915f32102b4272bd00d883a2129fd7fe2cfee9cf8e6eafca4",
     "scripts/dormant_app_install.py": "1d42adb1d595c03619218332011efa6a41be1734b76f1618eb043da4f91448ed",
     "scripts/current_service_transaction.py": "0bdf48f5219225be59cf7d2d7981ee77b48448d984bd97fc63ee04957189caf6",
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
@@ -3263,19 +3311,20 @@
     "scripts/run_notarization_transaction.sh": "8ee5288ff7e441cf34c0295b0f8debe78c057c9cde1b1393c9f7ef77b401de0e",
     "scripts/dmg_notarization_transaction.py": "9f472927720d153df58fb4b3c9df41c064565ab1b63c689fd463accdfd5fd6e6",
     "scripts/release_artifact_set.py": "e2419beb95953c8418e04b0a0c7d19c5cc4adbee81635e3ecb2fc11391039f37",
-    "scripts/release_apple_toolchain.py": "ccde3f60dfde9a8e07a06cd9906bc847445662eca1d0de357d5e2b774d51f192",
+    "scripts/release_apple_toolchain.py": "eaa3c72835dee721a52f3fea81a6dbcfb7f8d8bf683b7a7e5f52083dbe6c2597",
     "scripts/repository_source_identity.py": "4ec65526cff04c985bcc4a3bc7e071a7dd2bd2e3ad51db3fcb905718a95dfb19",
     "scripts/release_git.py": "1cfdf6620923863f20f46f20830e0ded8240401117ef4d1464007be8ffee656e",
     "scripts/hash_artifact.py": "fd524dc2d44bbb00cfeadfe3052ed3c8c7871c632d8b8ad704c728a0d3b17f66",
+    "scripts/hash_native_build_inputs.py": "7e7d327c3a1c3edd6a7c33cdf544d22d349ce40646e4c5ed26651e060f5bb0fa",
     "scripts/release_cargo_inputs.py": "46cc74cd18e2c92a9300da62dadf765e647419cb03213f1188ab19e0c37de0f8",
     "scripts/release_cargo_inputs.sh": "548f5279e951c90492aba0e6cf8162705d8bad140d899a4eb963aabbea58f7aa",
     "scripts/release_python_launcher.sh": "80c2be4bc813785a9be4e3abed1f360a5c09a72a95ff96629a9fd568bd1600e2",
     "scripts/release_python_runtime.py": "4e79a54f1a9dde39398404afdee70fef09c7dfec5ca1ac752057246be6df4fa9",
-    "scripts/release_build_identity.py": "10db463dfa682676dcebb5a13934f00d687c726f63fd20b4a2e7f14b9e390ef0",
+    "scripts/release_build_identity.py": "c05a17f9ac4c22d01b1d4465fb686840dab50b9a4764c86a9dff2bef8229ee71",
     "scripts/release_regular_file.py": "9b623ad7d818abb35400e33a92bd408d200451aa20b8bbaf06319f73571190f0",
     "scripts/release_bundle_codesign.sh": "98b4c8e66b76dc4fe5d638ab79e36473304850feca36c035fe41a5169d4d4555",
     "scripts/release_policy_tool_directory.sh": "7f8e7653b7cfc0f61d73cac3b881a4b74c1e44a7313ef0141e2da8db5bc9851c",
-    "scripts/release_rust_toolchain.py": "3bb1f1b6a3d6ca085c5adbf7eb19d2e1c2a6155cd5a41afb6418ff31739d0cdb",
+    "scripts/release_rust_toolchain.py": "91e99325a1adb141c7572f1f784965136c63fcf3a4496b55afe7c68f4ba8d93e",
     "scripts/publication/bounded_process.py": "a8038b691817b1f2092541ac16c4e170f0210be451ff94a23c8b1a4958363071",
     "scripts/publication/durable_file.py": "4fda8f5a128560b2a449ed1c76cf19b7c0fb599d9a174b8b57f970f271b444ba",
     "scripts/run_release_ci_gate.sh": "e10113e967081dcc4bbd4b6eeff5d6d1e5a739b1eabfd773584f9b9e95bacc41",
@@ -3285,19 +3334,20 @@
     "scripts/run_current_service_transaction.sh": "dcb5f02b4c01f9d9adc8462989d05156c2abfebc215af7202302df98257e9922",
     "scripts/run_dormant_app_install.sh": "2810d681f746ebfc43ca4da38c72cf1cbdcda8e86a50a18b854faaa0a239e512",
     "scripts/run_publication_evidence.sh": "d9452b85fbc2fe63318eb37c092011c8a0af88a17632f245eb3cf48cb223ca8e",
+    "scripts/publication_evidence.py": "5fc8339201fb5b5a59676318ca6b10d77b53f764e8ede47b22e72de289b220d1",
     "scripts/run_production_release_evidence.sh": "cce06b289819275bd33ff4a65e45ed3a4a60d2f32e511f46cfb6f4821b98c2db",
     "scripts/run_sealed_evidence_manifest.sh": "9a156621cd5c5e6ba44ab5408c3c8d1049b838c9038235a098f0f85ceff53da9",
     "scripts/run_verify_remote_release.sh": "57701f480360bec33ff66ad89cec4ae34e08c953ead08cd4555bce71a1062692",
     "scripts/verify_remote_release.py": "c27f446e8bc9970d9b9f6acfd3cd926a7123a6d74ee50bc7ca61176a895b5193",
-    "scripts/make_dmg.sh": "5456b1cc93cda41e00f68d98028036def7ec9f09286df44f3bfa14c2b83a2b0c",
-    "scripts/make_updater_manifest.sh": "33a6b8adfc53a244d123c1b8090b341da614e46c8a952df2c9c68d523e1b45b6",
-    "scripts/release_toolchain_contract.sh": "8679ced1eceff62e80d30a717278a021dce364c89307bb64b20488e6df090b7b",
-    "scripts/release_publication_gate.sh": "260640690ead8a3a67fe605e0dfbc6fe850a3e38f78f7f16690647ad7fab9a26",
-    "scripts/release_publication_path_contract.sh": "4a5563537791e8839638134d81d80223618c48a4c783537461c1b41dc0e5e52d",
+    "scripts/make_dmg.sh": "ea11ad12120f3d2ea2c6752f7ab22724d2b76d15c5451b4541448c8c87ddf764",
+    "scripts/make_updater_manifest.sh": "79846e8a917d8382bf89a08f119a846b1f42895d12d064491b6014133930ffc8",
+    "scripts/release_toolchain_contract.sh": "90ed2c39ef2c0d8c354e20b8d66d99ed9cef9aeed73c3bfa0931a642c017c2cb",
+    "scripts/release_publication_gate.sh": "0a44717ea8165238ffd8c5e34b5e5fbfa4c506bb116bbb650fa79bacfeb965ba",
+    "scripts/release_publication_path_contract.sh": "0f25686c1cb474bfa24d50ec5f227d45a53532a10ca332ad2b995f79d51e017b",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "007465e2e63bc48035ef0776e1b8a7991f49e196b9d9456744eafda2c6375235",
-    "scripts/updater_signing_launcher.py": "36464710b78d8e279003457368acf99828a38e3cbe5dee197bb63d53e2276a27",
+    "RELEASE.md": "98c99a441f53122c394ac082e39940ae434a6635ea5c94984690d22ddfbfc8d0",
+    "scripts/updater_signing_launcher.py": "b6240012d2539077dcfa6969e5fb3118486f0469b75c75d4e984075d4c18b974",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "0189ac29728266fbc36e8945f60ea44c6b1f583c96d64e93e57bd36fe8e70cb3",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
@@ -3322,29 +3372,31 @@
     "scripts/physical_capture/cloud_run.py": "7fcfcd271698c52100f159f0b3f67360b865fa65e91549e2283580c449e67823",
     "scripts/physical_capture/collector.py": "28caea5b6554cf9764dc86ead48b5f981644ad982818eeb70442b04da1b05976",
     "scripts/physical_capture/archive.py": "9602974bd07b7e989d395841f3fdb383c270d9aa99492e83669320dc171fc79b",
+    "scripts/physical_capture/__init__.py": "f5fe405e071210b80f782a819991cf86c4a42ee286a08f1c77f63b1781cba193",
     "scripts/physical_capture/session.py": "9afa0ae66577d9a104a8a38274fe88fee131a10919a086a80c07e7d410f6a347",
     "scripts/physical_capture/finalize.py": "328727e6615c24ecefec74dbb4bfa7b36c0cbce453a91909026a2ddeb8825a15",
     "scripts/verify_physical_capture_readiness.py": "4641c4f6cd6cc6086b7e2d3327146a99436dc2731182bd1e0dfcb59db1577c90",
-    "scripts/verify_build_boundaries.sh": "365ac72128bebedf908ae0edd4b972497de91abfd557ff8e68ca57c2b1ec5700",
-    "scripts/verify_release_build_allocations.py": "5ddcecbaad8692d235e3cc8675140eb86e7d2aa5f2ed0c7d0e78e5937afefeea",
+    "scripts/verify_build_boundaries.sh": "26b8a6034b28f9b09a1efde01ad05ee04dba23959d5a41a9df52d2263a0408e4",
+    "scripts/verify_release_build_allocations.py": "e72e2201db09b2adc8369e8797a07033569c2117896d2f30af160e431e434114",
     "scripts/verify_release_environment.sh": "faf72a062b8fd026a4533a20207c4fb7f39adc28bd18f746f3e2e854b40265d8",
     "scripts/physical_capture/performance_operator.py": "52cb974c954e4615d52b3d027651f86609578112e68946026221625f56b0137c",
     "scripts/physical_capture/performance.py": "1e65795da092d18c443ea687bfb9384262ffb2a4c067f27978f65a240108a2c4",
     "scripts/physical_capture/performance_profiles/latency-100ms-loss-1pct-10mbps.pf": "259df2641a9a5c8be89df82303af9a25c38b189115de9d391da98ec7ffeccbaa",
     "scripts/physical_capture/performance_profiles/latency-300ms-loss-5pct-1mbps.pf": "85097feae3cff0695299e222f576660f310c09b458c20c6fc4573a14f85e1a29",
     "scripts/physical_capture/performance_profiles/outage-30s.pf": "071121d49e606b00862d36c7829711260c5d69421c64e3161359f854f9bcd7c6",
-    "scripts/publication/orchestrator.py": "da1d95c4e4452fdd5f37107bfcba74af065d4b38ab436f1ecc49319c5b2e052f",
+    "scripts/publication/orchestrator.py": "70910050086b787185fc668de8905abfb17554f1bfb2af7c0e4766164c0df6cb",
+    "scripts/publication/ga_release_contract.py": "ea3b1857041708f85772d82de3580e232eb02d2606d796eb016c2028d78c6f50",
     "scripts/macos_durability.py": "60dc9f319c89617aad0c9f6fc6760b03f506266722029f7f7435fabb2238d528",
     "scripts/production_release_evidence.py": "4c028f54a3fefff889484aab9defc7bc46c2cba9c0706b2f1bb41a14634d2826",
     "scripts/publication/sealed_manifest.py": "57f9652ff59f323c01be11d6752534b3c4d8caa668febfd010a41bbfabd0fb0a",
     "scripts/evidence_manifest.py": "b4c52bb3b431275f9bed781a28a4b589e46db79e2a0a15116732c70b5e1ded46",
     "scripts/publication/sealed_closure.py": "6fe148e7b10d0243fce0330740febff1766504714539fb84b6d9fd199da6119b",
     "scripts/publication/final_candidate.py": "c755ba8a68fb457768c4d22995dbd6774f657eed457e29cefc382e1f9225bd59",
-    "scripts/validated_candidate_evidence.py": "42c685b670f240a51de9cbfae59e3f00b5594ad90361ccf1de3c6403f42a2f39",
+    "scripts/validated_candidate_evidence.py": "d3b01734d31c760ff490508bd50930ef30548a4b4c921de301700c07247fc40c",
     "scripts/sealed_evidence_manifest.py": "f024d80654bf27fc534fa17215d1fd00e134314182d9a28bdef77827873ec363",
-    "scripts/physical_capture/packet.py": "eec2b6cfea3037015ff0a0fc612446b03aeabad5354c10b04b2e3521f03bb580",
-    "scripts/verify_release_app.sh": "d3f1e89514711f5be45d9fa2e0433af20f6d4f0fd590c64e6475d30c9aeb7493",
-    "scripts/candidate_freeze.py": "2493968f27c85a1c1851a5999990dde05e42977ed201e77d0f0ad671b4ca4a2d",
+    "scripts/physical_capture/packet.py": "2cf1c0ccd2a61d8ff5fe6b15a026d0a3bcfd1ec8c8fc049906381b82c951bbca",
+    "scripts/verify_release_app.sh": "6e09158605d29da861069d0c0f3b8a7d1c9fa5928b97fb93d63e144fa897cff1",
+    "scripts/candidate_freeze.py": "1e78551e21b421fa25e434016906665f14ba5ecb3fa59c87337b794d2e2fd4c5",
     "scripts/release_signing_plan.py": "8a32ce3302081bd17090828bdb2f629898089bd4f39955cd5d6f28e6a2c21d27",
     "scripts/release_signing_preflight.py": "3913448110a6149a7af609299adbc0657efdef452463e1c769ce49a2b77b012d",
     "scripts/release_profile_entitlements.py": "fc578cb37401d8d13cf7f88f5c77bd234ff322752ffaf3ac5e3527fe454186d0",
@@ -3352,31 +3404,35 @@
     "scripts/release_entitlement_contract.py": "e29d7346f41d6fa8ff0394bf3f7e8bd42d1e12de5a07d58f595e5d99c0ea337e",
     "scripts/host_release_entitlements.py": "dec7d82b0050ae292c99602e575dbde03995a047ac81b5f1ea074fab09231003",
     "scripts/updater_key_possession_proof.py": "90656f85b350b82affa67a7f7948118c8c7aa5726cd6395badd53e4527b8c11f",
-    "scripts/signing_attempt_transaction.py": "29adcbadea0b28a66843f0e60a4670db4391809d1ecac9198db4094130af5c20",
-    "scripts/run_ga_signing_attempt.sh": "0361ffa029590c05a73e4e75efbb371a271057bc7a0e0bf69e3c5e9fb49e4205",
+    "scripts/signing_attempt_transaction.py": "6d9c7a8dd351de67c7ff166b415477f204dd7447c874bc3cfcb0d1096ccdcb66",
+    "scripts/run_ga_signing_attempt.sh": "07768da3ae507e84914e31948b62873312647275024e8906d8169ca6ebcad900",
     "scripts/promote_signed_native_manifest.py": "ac4c59c8b590d9567b3190c59bd3994a7caba60407125c874cff2dcd716276c7",
     "scripts/verify_legacy_tombstone_provenance.py": "6cb33669fc41ed7f1874dd32c1e1251383c11cf87bda9ec92a7a7b2d0146da47",
     "scripts/verify_signing_transformation.py": "1f1618f26a7fe1b9e6820918aeb9c867d59cb4acdcb194cfe1a17cfe24fb8a02",
-    "scripts/github_hosted_ci_receipt.py": "669250e4c8ef9f37798485dac892bd2e2068807bb5baf7f9c0df89bf6cdaa7fd",
+    "scripts/github_hosted_ci_receipt.py": "5da07b13b449e9e232dff846eabc37a9b22849fea6ae5d48aee35b7c415881b7",
     "scripts/ga_acceptance_environment.py": "e5c656e24a3d3f11a196c7620c4ce318fc092fba90bf8f5e295544e242c3e5ea",
-    "scripts/ga_acceptance_journal_export.py": "66db58b0a44e86d74b52311aec101b800a5300e278025261b524c5db930672e3",
-    "scripts/ga_runtime_acceptance.py": "628ca7646735e9851863136901e9657eb582637bb8157fcf7681c1e721ecffd5",
-    "scripts/run_ga_acceptance_journal_export.sh": "09814281ef06e22a2b5c63b56cfc77c7bb9f548ca272b2e0c21dddc3abce1946",
+    "scripts/ga_acceptance_journal_export.py": "3b6683e4107efd65da359cfb71bf72acf5fd31c7d35cea6c8af8516cd068be19",
+    "scripts/ga_runtime_acceptance.py": "d77ad7ef73594c9a2f70f0ae8090d668de557853d7f74c51fbe0828f0abe37b2",
+    "scripts/ga_runtime_acceptance_cli.py": "3e66925c25ed096a7a37b580ef050479bda99430e8d5158fa837e33ad785a7fd",
+    "scripts/release_artifact_set_cli.py": "e53e44e432eb5fc839ef8aacdff40b70e2bd07a29b60bb7cc948714f665bb735",
     "scripts/run_ga_runtime_acceptance.sh": "2d1caafb53431e4970f41502e8ae1157d9580cb0c047d6ae9a4930cdb8d2a5be",
+    "scripts/run_ga_acceptance_journal_export.sh": "09814281ef06e22a2b5c63b56cfc77c7bb9f548ca272b2e0c21dddc3abce1946",
     "scripts/publication/release_contract.py": "2d6c21f1ab6e9cc1e4da862f1f7741d823a03b9c301b25f8fe726146dc0563be",
     "scripts/publication/closure.py": "867874701f5ed6c8003a39f8d82cd84a785611fa24088b702d7a88962c713fbe",
     "scripts/release_app_verifier_output.py": "a512b890c6bf4857cd18d282f3168bacc0abc35f864ae0072a948633b2c9552c",
     "scripts/harness/lifecycle_matrix.py": "8373b1185a899e25fe6080c90056dc913fe643ae81d00ed1309d25f9ab2d5b0c",
     "scripts/physical_capture/identity.py": "b00724920a0df600b4609743244a3c9283fa153c43270540dc34c947826fd036",
-    "scripts/run_release_app_verifier.sh": "f4b0bd32a837bb224bafc6193d16b28220e08171f6841d1be7fc6175a929ac6f",
+    "scripts/run_release_app_verifier.sh": "5f33c9196eeb8e38c73e8d0040c18e672f564e003eb81d1cf2c2f12cb4f11b87",
     "scripts/build_legacy_tombstone.sh": "292133d76c9ad233aac92ecc2ea19b426c6a77fedfbfacf592757b8766ece17e",
-    "scripts/verify_native_product_graph.py": "d816a69f8801142e258e2dd660840927385e1eeabbec5eece2dbf07747bd9b25",
+    "scripts/verify_native_product_graph.py": "a92a6f0f355a021e9d60bb62426ad7f03bd3c7603472b1ad4fc839407018b340",
     "scripts/verify_notary_log.py": "3eccd50eed209e716d868332844783f915c1f559d1c117ce3f27df4ef44a571c",
     "scripts/physical_capture/packet_sender.py": "3c7bb07b72f533ed54f4faec3c5a6948622ff116abb7943faef61330a63b4087",
     "scripts/physical_capture/packet_host.py": "7d7ec61c8fe14780614c60bb733be344f0411584ce9e2d66d123fee428d554d2",
     "scripts/harness/packet_capture.py": "d17b1a57f5569f7268ede8174aa739daa366adeda974d7a71fd9ea71f0945b39",
     "scripts/harness/packet_evidence.py": "885faebc238e128f00df7dc09c7e917628d05a8ef5875b4a40631c2f10fbe14d",
     "scripts/publication/common.py": "7b320f7529f5a7b1903d69cb75b0aa064eaf53e9a74e6e744fdd9dc46f9e2659",
+    "scripts/publication/draft.py": "b39da4999c38dd2b91e18bab5c8c215b410e4443e27d6d876274bfec65c2602d",
+    "scripts/publication/finalize.py": "6bdac077101d35362ad80e69d1c895b449becc973fb828cd1cfa819b75ad2c42",
     "scripts/publication/verify.py": "e4278141ed8713f045519581c5cb15c503cf184056c500f40d6be8daa83a6f7c",
     "scripts/publication/source_archive.py": "4a3e73c95aea8991e80f1872636db0a4b707427146ae01bd2e7c30d3af55cd71",
     "scripts/publication/sbom.py": "4687ce76a284e0d4ddaa4fca6d08b1f75db3e6829c776caf9dec8c04f0e96b9d",
@@ -3386,6 +3442,12 @@
     "scripts/verify_production_boundary_removal.py": "e32545944c88bdc1ac09ad5432ea18e5fb85460f38087b9b30341794c23f5159",
     "scripts/publication/__init__.py": "5fc6024921e18d7ea6ea3f9f02a00a102c4ab5e89166f881cd8d001b24919271",
     "scripts/release_executor_source.py": "904947d837abfc5df40c08544c0584ab564665203b32d34aec77f81dd1894528",
-    "scripts/signing_reconciliation.py": "da6c4b0e8789784dab808cc6fd2b4be258c797617d746fbfc110aae7c83f8979"
+    "scripts/signing_reconciliation.py": "da6c4b0e8789784dab808cc6fd2b4be258c797617d746fbfc110aae7c83f8979",
+    "scripts/libbox_clang_linker.sh": "b232757885c1add728893b02683f3df7c5438a0b4608e83367a2780c85a91803",
+    "tools/go-release-tools/go.mod": "d3b33745ba03310f6064ef401a937ab29a1e34ec4829953cf8a454857e71da40",
+    "tools/go-release-tools/go.sum": "6c37e1d4a75699211d3a482cf561098b84427252f2c059244f7f29b0fb1d0906",
+    "scripts/xcodegen-2.46.0-dependency-refresh.patch": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
+    "scripts/aexml-4.7.0-supported-watchos.patch": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
+    "scripts/xcodegen_dependency_contract.sh": "0ef7d7447bd9aebf32c0073be65bcfe65f0bcefdfdcddebffdb60311647ff7d2"
   }
 }

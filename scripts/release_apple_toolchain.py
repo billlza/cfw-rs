@@ -35,7 +35,7 @@ APPLE_TOOLCHAIN_SCHEMA_VERSION = 1
 APPLE_XCODEBUILD = Path("/usr/bin/xcodebuild")
 APPLE_XCRUN = Path("/usr/bin/xcrun")
 MAX_IDENTITY_OUTPUT_BYTES = 4096
-# Xcode 26.6 on the hosted release runner is the reviewed Universal build.
+# Keep resource bounds for the universal Xcode distribution used by release CI.
 # Its two-slice clang is materially larger than the arm64-only distribution,
 # while ld remains small.  Keep separate hard resource bounds so admitting the
 # reviewed compiler does not unnecessarily widen every linker-input read.

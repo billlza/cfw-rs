@@ -30,6 +30,7 @@ EXPECTED_COMPONENTS = tuple(
         {
             f"cargo-{TARGET}",
             f"clippy-preview-{TARGET}",
+            f"llvm-tools-preview-{TARGET}",
             f"rust-std-{TARGET}",
             f"rustc-{TARGET}",
             f"rustfmt-preview-{TARGET}",
@@ -282,7 +283,7 @@ def _declaration(repository: Path) -> str:
             "channel": document.get("toolchain", {}).get("channel")
             if isinstance(document.get("toolchain"), dict)
             else None,
-            "components": ["rustfmt", "clippy"],
+            "components": ["rustfmt", "clippy", "llvm-tools-preview"],
             "profile": "minimal",
         }
     }

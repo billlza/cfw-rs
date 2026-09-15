@@ -21,7 +21,7 @@ verify_sha256() {
 }
 
 verify_sha256 \
-  c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c \
+  ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0 \
   /tmp/packet-evidence-endpoint-linux-amd64
 verify_sha256 \
   7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996 \
@@ -77,7 +77,7 @@ verify_sha256 \
 /usr/bin/systemctl is-active --quiet packet-evidence-endpoint.service
 
 verify_sha256 \
-  c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c \
+  ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0 \
   /usr/local/libexec/cfw-packet-evidence-endpoint
 verify_sha256 \
   7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996 \

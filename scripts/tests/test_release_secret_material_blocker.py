@@ -191,7 +191,7 @@ class ScanByPathAndNameTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
             worktree = _create_registered_release_worktree(Path(root))
-            managed = worktree / "target/toolchains/node-24.18.0"
+            managed = worktree / "target/toolchains/node-26.8.2"
             corepack = managed / "bin/corepack"
             corepack_target = managed / "lib/node_modules/corepack/dist/corepack.js"
             corepack_target.parent.mkdir(parents=True)

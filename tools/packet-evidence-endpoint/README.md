@@ -31,9 +31,10 @@ CGO_ENABLED=0 \
 GOOS=linux \
 GOARCH=amd64 \
 GOCACHE="$PWD/target/toolchains/go-build-cache" \
-target/toolchains/go-1.26.6/bin/go \
+target/toolchains/go-1.27.1/bin/go \
   -C tools/packet-evidence-endpoint \
   build \
+  -buildvcs=false \
   -trimpath \
   -ldflags='-s -w -buildid=' \
   -o ../../target/packet-evidence-endpoint-linux-amd64 \
@@ -41,7 +42,7 @@ target/toolchains/go-1.26.6/bin/go \
 ```
 
 The reviewed Linux/amd64 artifact from those exact inputs has SHA-256
-`c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c`.
+`ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0`.
 
 The reviewed endpoint policy must bind the resulting SHA-256, each GCE
 instance identity, the exact external IPv4/IPv6 addresses, the SSH host-key

@@ -366,10 +366,16 @@ class ExecutionBeforeVersionTests(unittest.TestCase):
             root = self.toolchain_root / f"xcodegen-{self.pins['XCODEGEN_VERSION']}"
             binary = root / "bin/xcodegen"
             metadata = [
-                "artifactKind=pinned-xcodegen-toolchain-v2",
+                "artifactKind=pinned-xcodegen-toolchain-v3",
                 "buildPolicy=isolated-resolved-swiftpm-v1",
                 f"macosDeploymentTarget={self.pins['MACOS_DEPLOYMENT_TARGET']}",
                 f"packageResolvedSha256={self.pins['XCODEGEN_PACKAGE_RESOLVED_SHA256']}",
+                f"upstreamPackageResolvedSha256={self.pins['XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256']}",
+                f"dependencyPatchSha256={self.pins['XCODEGEN_DEPENDENCY_PATCH_SHA256']}",
+                f"aexmlCommit={self.pins['XCODEGEN_AEXML_COMMIT']}",
+                f"aexmlUpstreamManifestSha256={self.pins['XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256']}",
+                f"aexmlPatchSha256={self.pins['XCODEGEN_AEXML_PATCH_SHA256']}",
+                f"aexmlPatchedManifestSha256={self.pins['XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256']}",
                 f"patchSha256={self.pins['XCODEGEN_PATCH_SHA256']}",
                 f"patchedSettingsBuilderSha256={self.pins['XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256']}",
                 "platform=darwin-arm64",
@@ -1842,10 +1848,10 @@ LIBBOX_VET_PACKAGES=(".")
             "USER=cfw-release",
             "LOGNAME=cfw-release",
             "-Xswiftc -warnings-as-errors",
-            '/usr/bin/strip -S "$build_root/release/xcodegen"',
+            '/usr/bin/strip -S "$xcodegen_bin_dir/xcodegen"',
             "isolated XcodeGen build emitted a warning",
             "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
-            "artifactKind=pinned-xcodegen-toolchain-v2",
+            "artifactKind=pinned-xcodegen-toolchain-v3",
             "buildPolicy=isolated-resolved-swiftpm-v1",
             "packageResolvedSha256=$XCODEGEN_PACKAGE_RESOLVED_SHA256",
             "patchSha256=$XCODEGEN_PATCH_SHA256",
@@ -1948,6 +1954,8 @@ class PublicationToolchainBindingTests(unittest.TestCase):
     def _ui_dependencies(self) -> Path:
         node_manifest = self.root / f"node-{self.pins['NODE_VERSION']}.manifest.json"
         node_tree_sha256 = json.loads(node_manifest.read_text(encoding="utf-8"))["sha256"]
+        npm_manifest = self.root / f"npm-{self.pins['NPM_VERSION']}.manifest.json"
+        npm_tree_sha256 = json.loads(npm_manifest.read_text(encoding="utf-8"))["sha256"]
         package_lock = REPOSITORY / "apps/cfw-tauri-shell/package-lock.json"
         package_lock_sha256 = hashlib.sha256(package_lock.read_bytes()).hexdigest()
         manifest = self.root / "ui-node-modules.manifest.json"
@@ -1962,11 +1970,15 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                 "--algorithm",
                 "sha256-tree-v2",
                 "--metadata",
-                "artifactKind=pinned-ui-dependencies-v1",
+                "artifactKind=pinned-ui-dependencies-v2",
                 "--metadata",
                 f"nodeToolchainTreeSha256={node_tree_sha256}",
                 "--metadata",
                 f"nodeVersion={self.pins['NODE_VERSION']}",
+                "--metadata",
+                f"npmToolchainTreeSha256={npm_tree_sha256}",
+                "--metadata",
+                f"npmVersion={self.pins['NPM_VERSION']}",
                 "--metadata",
                 f"packageLockSha256={package_lock_sha256}",
                 "--metadata",
@@ -2004,15 +2016,30 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                     f"version={self.pins['NODE_VERSION']}",
                 ],
             ),
+            "npm": self._tree(
+                f"npm-{self.pins['NPM_VERSION']}",
+                f"npm-{self.pins['NPM_VERSION']}.manifest.json",
+                [
+                    "artifactKind=pinned-npm-toolchain-v1",
+                    f"sourceArchiveSha256={self.pins['NPM_ARCHIVE_SHA256']}",
+                    f"version={self.pins['NPM_VERSION']}",
+                ],
+            ),
             "ui-dependencies": self._ui_dependencies(),
             "xcodegen": self._tree(
                 f"xcodegen-{self.pins['XCODEGEN_VERSION']}",
                 f"xcodegen-{self.pins['XCODEGEN_VERSION']}.manifest.json",
                 [
-                    "artifactKind=pinned-xcodegen-toolchain-v2",
+                    "artifactKind=pinned-xcodegen-toolchain-v3",
                     "buildPolicy=isolated-resolved-swiftpm-v1",
                     f"macosDeploymentTarget={self.pins['MACOS_DEPLOYMENT_TARGET']}",
                     f"packageResolvedSha256={self.pins['XCODEGEN_PACKAGE_RESOLVED_SHA256']}",
+                    f"upstreamPackageResolvedSha256={self.pins['XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256']}",
+                    f"dependencyPatchSha256={self.pins['XCODEGEN_DEPENDENCY_PATCH_SHA256']}",
+                    f"aexmlCommit={self.pins['XCODEGEN_AEXML_COMMIT']}",
+                    f"aexmlUpstreamManifestSha256={self.pins['XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256']}",
+                    f"aexmlPatchSha256={self.pins['XCODEGEN_AEXML_PATCH_SHA256']}",
+                    f"aexmlPatchedManifestSha256={self.pins['XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256']}",
                     f"patchSha256={self.pins['XCODEGEN_PATCH_SHA256']}",
                     f"patchedSettingsBuilderSha256={self.pins['XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256']}",
                     "platform=darwin-arm64",
@@ -2050,7 +2077,9 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                 "go-workspace/bin",
                 "go-workspace-bin.manifest.json",
                 [
-                    "artifactKind=pinned-go-release-tools-v1",
+                    "artifactKind=pinned-go-release-tools-v2",
+                    f"toolsGoModSha256={self.pins['GO_RELEASE_TOOLS_GO_MOD_SHA256']}",
+                    f"toolsGoSumSha256={self.pins['GO_RELEASE_TOOLS_GO_SUM_SHA256']}",
                     f"goVersion={self.pins['GO_VERSION']}",
                     f"gomobileModuleSum={self.pins['GOMOBILE_MODULE_SUM']}",
                     f"gomobileVersion={self.pins['GOMOBILE_VERSION']}",

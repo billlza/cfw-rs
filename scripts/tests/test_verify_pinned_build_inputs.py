@@ -30,7 +30,7 @@ SHIPPED_ARTIFACT_SOURCE_SHA256 = SHIPPED_PINNED_MANIFEST[
     "artifactSourceSha256"
 ]
 PACKET_ENDPOINT_BINARY_SHA = (
-    "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
+    "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0"
 )
 PACKET_ENDPOINT_PATHS = (
     "tools/packet-evidence-endpoint/go.mod",
@@ -49,15 +49,16 @@ PACKET_ENDPOINT_BUILD_FRAGMENTS = [
     "CGO_ENABLED=0",
     "GOOS=linux",
     "GOARCH=amd64",
-    "target/toolchains/go-1.26.6/bin/go",
+    "target/toolchains/go-1.27.1/bin/go",
     "-C tools/packet-evidence-endpoint",
+    "-buildvcs=false",
     "-trimpath",
     "-ldflags='-s -w -buildid='",
     "-o ../../target/packet-evidence-endpoint-linux-amd64",
     PACKET_ENDPOINT_BINARY_SHA,
 ]
 PACKET_LAN_PEER_ARTIFACT_SHA = (
-    "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c"
+    "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90"
 )
 ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
 ADB_RUNTIME_TOOL_VERSION = "37.0.0-14910828"
@@ -70,7 +71,7 @@ SYNTHETIC_ANDROID_ADMISSION_SOURCE = (
     REPO_ROOT / ANDROID_LAN_PEER_SOURCE_PATH
 ).read_bytes()
 PACKET_LAN_PEER_SOURCE_TREE_SHA = (
-    "8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4"
+    "c40181aa8a78325877bf2b091a5be9a091f223be09f443297bcf8e052df7abb9"
 )
 PACKET_LAN_PEER_SOURCE_ENTRIES = (
     (
@@ -80,7 +81,7 @@ PACKET_LAN_PEER_SOURCE_ENTRIES = (
     ),
     (
         "go.mod",
-        "af5ff7973354844d111edb9d303d6543d8aa6dc0afc6ecf439225acc15e1d1fd",
+        "5dbd54a17b7a97a17e71fe82ea46d0b36f0325ba3b6043ca43d14a8836effcee",
         70,
     ),
     (
@@ -121,8 +122,8 @@ PACKET_LAN_PEER_VERIFY_FRAGMENTS = [
     'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
     'source_root="$repo_root/tools/packet-lan-peer"',
     'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
-    "expected_artifact_size=2359422",
+    "expected_artifact_sha256=d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+    "expected_artifact_size=2293884",
     "expected_artifact_mode=555",
     "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
     "GOTOOLCHAIN=local",
@@ -149,8 +150,8 @@ PHYSICAL_COLLECTOR_PATHS = (
     "tools/physical-collector/go.sum",
 )
 PHYSICAL_COLLECTOR_MODULE_FRAGMENTS = [
-    "google.golang.org/grpc v1.82.1",
-    "golang.org/x/text v0.39.0",
+    "google.golang.org/grpc v1.83.2",
+    "golang.org/x/text v0.42.0",
 ]
 
 
@@ -198,7 +199,7 @@ TAURI_CACHE_CONTRACT_SHA = _sha(TAURI_CACHE_CONTRACT_BODY)
 LIBBOX_MODULE_CACHE_CONTRACT_SHA = _sha(LIBBOX_MODULE_CACHE_CONTRACT_BODY)
 XCODEGEN_PATCH_SHA = _sha(XCODEGEN_PATCH_BODY)
 XCODEGEN_PATCHED_SETTINGS_SHA = _sha(b"synthetic patched SettingsBuilder.swift")
-COMMIT = "3708fa18766cda1f11b77f6ed9c7bd61688f17df"
+COMMIT = "1ac1a339cb1223e9c70eae14c44411c75033c02d"
 ANDROID_REFERENCE_COMMIT = "124a7c13038fcc389e3efbe61504fe6ab14724d9"
 APPLE_REFERENCE_COMMIT = "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"
 GOMOBILE_COMMIT = "9f03b8f25789099c5c8abef4a02085da783ba923"
@@ -209,7 +210,7 @@ XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
     "socks": "native/macos/patches/socks-lifecycle.patch",
-    "probe": "native/macos/patches/sing-box-v1.13.15-profile-probe.patch",
+    "probe": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
     "security": "native/macos/patches/security.patch",
     "raw": "native/macos/patches/raw-packet.patch",
     "dns": "native/macos/patches/dns-failover.patch",
@@ -526,10 +527,10 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         id: validation-python
         with:
-          python-version: "3.14.6"
+          python-version: "3.14.7"
           architecture: arm64
           update-environment: false
       - run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-policy-tools
@@ -546,7 +547,7 @@ GIT_CEILING_DIRECTORIES="$toolchain_root"
 /usr/bin/git -C "$payload/source" apply --reverse --check "$xcodegen_patch"
 USER=cfw-release
 LOGNAME=cfw-release
-/usr/bin/strip -S "$build_root/release/xcodegen"
+/usr/bin/strip -S "$xcodegen_bin_dir/xcodegen"
 echo "patchSha256=$XCODEGEN_PATCH_SHA256"
 echo "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256"
 echo "XcodeGenResourceProbe.xcodeproj/project.pbxproj"
@@ -558,22 +559,30 @@ class Fixture:
 
     def __init__(self) -> None:
         self.env: dict[str, str] = {
-            "PYTHON_VERSION": "3.14.6",
-            "RUST_VERSION": "1.97.1",
+            "PYTHON_VERSION": "3.14.7",
+            "RUST_VERSION": "1.98.1",
             "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
-                "472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae"
+                "ee3c88a73088d81cb3234b4b7dedd42c3d28c01e845e6d01b8e49c104d3f3e03"
             ),
             "CARGO_AUDIT_VERSION": "0.22.2",
             "CARGO_DENY_VERSION": "0.20.2",
             "XCODEGEN_VERSION": "2.46.0",
             "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
             "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
-            "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
+            "XCODEGEN_PACKAGE_RESOLVED_SHA256": "c71eacb628f5fb50d8cd266b5fbc1bbe8df48b880fc91570ca79f5f6deaab961",
+            "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
+            "XCODEGEN_DEPENDENCY_PATCH_PATH": "scripts/xcodegen-2.46.0-dependency-refresh.patch",
+            "XCODEGEN_DEPENDENCY_PATCH_SHA256": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
+            "XCODEGEN_AEXML_COMMIT": "db806756c989760b35108146381535aec231092b",
+            "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "357362479c2c2f0dc7359705b4668f0eb6e67e8ad80eeedc37f711a7a373e80b",
+            "XCODEGEN_AEXML_PATCH_PATH": "scripts/aexml-4.7.0-supported-watchos.patch",
+            "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
+            "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6",
             "XCODEGEN_PATCH_PATH": XCODEGEN_PATCH_PATH,
             "XCODEGEN_PATCH_SHA256": XCODEGEN_PATCH_SHA,
             "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": XCODEGEN_PATCHED_SETTINGS_SHA,
-            "NODE_VERSION": "24.18.0",
-            "GO_VERSION": "1.26.6",
+            "NODE_VERSION": "26.8.2",
+            "GO_VERSION": "1.27.1",
             "TAURI_CLI_VERSION": "2.11.4",
             "TAURI_CLI_CRATE_SHA256": TAURI_CRATE_SHA,
             "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": TAURI_UPSTREAM_LOCK_SHA,
@@ -588,7 +597,7 @@ class Fixture:
             "GOMOBILE_MODULE_SUM": "h1:foTOGKJetah9VwaJl1XJx5TswIAVg8NfYmHOhrOc95I=",
             "GOVULNCHECK_VERSION": "v1.6.0",
             "GOVULNCHECK_MODULE_SUM": "h1:FeMO9Rm/HwyduOztbvKcOw+zvDEPr4I4aQNSfevFcKY=",
-            "SING_BOX_VERSION": "v1.13.15",
+            "SING_BOX_VERSION": "v1.14.1",
             "SING_BOX_COMMIT": COMMIT,
             "SING_BOX_ANDROID_REFERENCE_COMMIT": ANDROID_REFERENCE_COMMIT,
             "SING_BOX_APPLE_REFERENCE_COMMIT": APPLE_REFERENCE_COMMIT,
@@ -651,23 +660,31 @@ class Fixture:
             "dependencyPinsPath": "scripts/dependency_pins.env",
             "nativeLockPath": "native/macos/Dependencies.lock.json",
             "tools": {
-                "PYTHON_VERSION": "3.14.6",
-                "RUST_VERSION": "1.97.1",
+                "PYTHON_VERSION": "3.14.7",
+                "RUST_VERSION": "1.98.1",
                 "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
-                    "472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae"
+                    "ee3c88a73088d81cb3234b4b7dedd42c3d28c01e845e6d01b8e49c104d3f3e03"
                 ),
                 "CARGO_AUDIT_VERSION": "0.22.2",
                 "CARGO_DENY_VERSION": "0.20.2",
                 "XCODEGEN_VERSION": "2.46.0",
                 "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
                 "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
-                "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
-                "NODE_VERSION": "24.18.0",
-                "GO_VERSION": "1.26.6",
+                "XCODEGEN_PACKAGE_RESOLVED_SHA256": "c71eacb628f5fb50d8cd266b5fbc1bbe8df48b880fc91570ca79f5f6deaab961",
+                "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
+                "XCODEGEN_DEPENDENCY_PATCH_PATH": "scripts/xcodegen-2.46.0-dependency-refresh.patch",
+                "XCODEGEN_DEPENDENCY_PATCH_SHA256": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
+                "XCODEGEN_AEXML_COMMIT": "db806756c989760b35108146381535aec231092b",
+                "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "357362479c2c2f0dc7359705b4668f0eb6e67e8ad80eeedc37f711a7a373e80b",
+                "XCODEGEN_AEXML_PATCH_PATH": "scripts/aexml-4.7.0-supported-watchos.patch",
+                "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
+                "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6",
+                "NODE_VERSION": "26.8.2",
+                "GO_VERSION": "1.27.1",
                 "GOMOBILE_VERSION": "v0.1.13",
                 "GOVULNCHECK_VERSION": "v1.6.0",
                 "TAURI_CLI_VERSION": "2.11.4",
-                "SING_BOX_VERSION": "v1.13.15",
+                "SING_BOX_VERSION": "v1.14.1",
             },
             "runtimeTools": {
                 "adb": {
@@ -689,7 +706,7 @@ class Fixture:
             },
             "packetEvidenceEndpoint": {
                 "goVersionKey": "GO_VERSION",
-                "goVersion": "1.26.6",
+                "goVersion": "1.27.1",
                 "goos": "linux",
                 "goarch": "amd64",
                 "cgoEnabled": "0",
@@ -707,7 +724,7 @@ class Fixture:
                 "schema": "cfw-packet-lan-peer-build-input-v1",
                 "goToolchain": {
                     "versionKey": "GO_VERSION",
-                    "version": "1.26.6",
+                    "version": "1.27.1",
                     "goos": "linux",
                     "goarch": "arm64",
                     "cgoEnabled": "0",
@@ -768,7 +785,7 @@ class Fixture:
                 "verifyScript": {
                     "path": "scripts/verify_packet_lan_peer.sh",
                     "sha256": (
-                        "eb7c518d3209ccf6486847e9f9042f58796b2192d5fdd733f3b991f640d7309e"
+                        "d8bb6f9a057764a87949bedbd805ee662b89179085c0e88e54007e24c286a1b9"
                     ),
                     "size": 7357,
                     "mode": "0755",
@@ -777,7 +794,7 @@ class Fixture:
             },
             "physicalCollectorModule": {
                 "goVersionKey": "GO_VERSION",
-                "goVersion": "1.26.6",
+                "goVersion": "1.27.1",
                 "goModPath": "tools/physical-collector/go.mod",
                 "goModSha256": _sha(
                     self.physical_collector_files["tools/physical-collector/go.mod"]
@@ -806,7 +823,7 @@ class Fixture:
                     '/usr/bin/git -C "$payload/source" apply --reverse --check "$xcodegen_patch"',
                     "USER=cfw-release",
                     "LOGNAME=cfw-release",
-                    '/usr/bin/strip -S "$build_root/release/xcodegen"',
+                    '/usr/bin/strip -S "$xcodegen_bin_dir/xcodegen"',
                     "patchSha256=$XCODEGEN_PATCH_SHA256",
                     "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
                     "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
@@ -1042,11 +1059,11 @@ class Fixture:
             ),
         }
         self.lock = {
-            "go": "1.26.6",
+            "go": "1.27.1",
             "gomobile": "v0.1.13",
             "singBox": {
                 "commit": COMMIT,
-                "tag": "v1.13.15",
+                "tag": "v1.14.1",
                 "androidReferenceCommit": ANDROID_REFERENCE_COMMIT,
                 "securityPatch": {
                     "path": PATCH_PATHS["security"],
@@ -1099,6 +1116,13 @@ class Fixture:
             for relative in self.manifest["artifactBindings"]
             if relative not in special_artifact_files
         }
+        for key in (
+            "NPM_VERSION", "NPM_ARCHIVE_SHA256",
+            "GO_RELEASE_TOOLS_GO_MOD_SHA256", "GO_RELEASE_TOOLS_GO_SUM_SHA256",
+            "XCODE_VERSION", "XCODE_BUILD_VERSION",
+        ):
+            self.env[key] = SHIPPED_PINNED_MANIFEST["tools"][key]
+            self.manifest["tools"][key] = self.env[key]
         self._extra_env_text = ""
 
     def env_text(self) -> str:
@@ -2633,7 +2657,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             root = fixture.write(Path(temporary))
             lock = root / "native/macos/Dependencies.lock.json"
             body = lock.read_text(encoding="utf-8")
-            lock.write_text('{"go":"1.26.6",' + body[1:], encoding="utf-8")
+            lock.write_text('{"go":"1.27.1",' + body[1:], encoding="utf-8")
             with self.assertRaisesRegex(PinnedInputError, "duplicate JSON field 'go'"):
                 self._verify_written_fixture(fixture, root)
 
@@ -2782,12 +2806,12 @@ class PinnedBuildInputsTests(unittest.TestCase):
 
     def test_ci_unsigned_python_must_match_the_dependency_pin(self) -> None:
         fixture = Fixture()
-        fixture.env["PYTHON_VERSION"] = "3.14.6"
-        fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.6"
+        fixture.env["PYTHON_VERSION"] = "3.14.7"
+        fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.7"
         self._verify_fixture(fixture)
 
         fixture.ci_workflow = fixture.ci_workflow.replace(
-            'python-version: "3.14.6"', 'python-version: "3.14.7"'
+            'python-version: "3.14.7"', 'python-version: "3.14.8"'
         )
         self._assert_fails(
             fixture,
@@ -2796,17 +2820,17 @@ class PinnedBuildInputsTests(unittest.TestCase):
 
     def test_release_workflow_cannot_add_an_unreviewed_job(self) -> None:
         fixture = Fixture()
-        fixture.env["PYTHON_VERSION"] = "3.14.6"
-        fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.6"
+        fixture.env["PYTHON_VERSION"] = "3.14.7"
+        fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.7"
         fixture.ci_workflow += """
   release-two:
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         id: validation-python
         with:
-          python-version: "3.14.6"
+          python-version: "3.14.7"
           architecture: arm64
           update-environment: false
       - run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test

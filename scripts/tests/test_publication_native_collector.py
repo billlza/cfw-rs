@@ -56,8 +56,8 @@ class NativeCollectorTests(unittest.TestCase):
                 executable.parent.mkdir(parents=True, exist_ok=True)
                 executable.write_text("fixture\n", encoding="utf-8")
             pins = {
-                "XCODE_VERSION": "26.6",
-                "XCODE_BUILD_VERSION": "17F113",
+                "XCODE_VERSION": "27.0",
+                "XCODE_BUILD_VERSION": "27A266a",
                 "MACOS_DEPLOYMENT_TARGET": "15.0",
             }
             environment = {"DEVELOPER_DIR": str(developer)}
@@ -66,7 +66,7 @@ class NativeCollectorTests(unittest.TestCase):
             def run(argv, _repository, _environment):
                 calls.append(list(argv))
                 if argv == ["/usr/bin/xcodebuild", "-version"]:
-                    return b"Xcode 26.6\nBuild version 17F113\n"
+                    return b"Xcode 27.0\nBuild version 27A266a\n"
                 if argv == ["/usr/bin/xcrun", "--find", "swift"]:
                     return f"{swift}\n".encode()
                 if argv == ["/usr/bin/xcrun", "--find", "xcodebuild"]:
@@ -93,7 +93,7 @@ class NativeCollectorTests(unittest.TestCase):
         self.assertEqual(
             observed,
             (
-                "Xcode 26.6\nBuild version 17F113",
+                "Xcode 27.0\nBuild version 27A266a",
                 structured.canonical,
                 str(swift.resolve(strict=False)),
                 str(xcodebuild.resolve(strict=False)),
@@ -106,19 +106,21 @@ class NativeCollectorTests(unittest.TestCase):
             root = Path(temporary)
             toolchain_root = root / "toolchains"
             pins = {
-                "RUST_VERSION": "1.97.1",
-                "NODE_VERSION": "24.18.0",
+                "RUST_VERSION": "1.98.1",
+                "NODE_VERSION": "26.8.2",
+                "NPM_VERSION": "12.0.2",
                 "GO_VERSION": "1.26.1",
                 "XCODEGEN_VERSION": "2.45.3",
                 "GOMOBILE_VERSION": "v0.0.0-fixture",
                 "GOMOBILE_MODULE_SUM": "h1:fixture",
                 "TAURI_CLI_VERSION": "2.9.6",
-                "XCODE_VERSION": "26.6",
-                "XCODE_BUILD_VERSION": "17F113",
+                "XCODE_VERSION": "27.0",
+                "XCODE_BUILD_VERSION": "27A266a",
                 "MACOS_DEPLOYMENT_TARGET": "15.0",
             }
             executables = {
-                toolchain_root / "node-24.18.0/bin/node",
+                toolchain_root / "node-26.8.2/bin/node",
+                toolchain_root / "npm-12.0.2/bin/npm-cli.js",
                 toolchain_root / "go-1.26.1/bin/go",
                 toolchain_root / "xcodegen-2.45.3/bin/xcodegen",
                 toolchain_root / "go-workspace/bin/gomobile",
@@ -140,11 +142,13 @@ class NativeCollectorTests(unittest.TestCase):
                 calls.append(list(argv))
                 executable = argv[0]
                 if argv == [str(rustc), "--version"]:
-                    return b"rustc 1.97.1 (fixture)\n"
+                    return b"rustc 1.98.1 (fixture)\n"
                 if argv == ["/usr/bin/xcodebuild", "-version"]:
-                    return b"Xcode 26.6\nBuild version 17F113\n"
+                    return b"Xcode 27.0\nBuild version 27A266a\n"
                 if executable.endswith("/node"):
-                    return b"v24.18.0\n"
+                    if len(argv) == 3 and argv[1].endswith("/npm-cli.js"):
+                        return b"12.0.2\n"
+                    return b"v26.8.2\n"
                 if executable.endswith("/go") and argv[1:] == ["version"]:
                     return b"go version go1.26.1 darwin/arm64\n"
                 if executable.endswith("/xcodegen"):

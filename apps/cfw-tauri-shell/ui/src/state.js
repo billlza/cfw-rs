@@ -216,6 +216,7 @@ export const navInitials = {
 };
 
 export const primaryNavIds = new Set(PAGES.map((page) => page.id));
+// Maximum visible rows and retained rows per level (four normalized levels).
 export const MAX_LOG_ROWS = 200;
 export const MAX_CONNECTION_ROWS = 500;
 export const runtime = {

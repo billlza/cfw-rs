@@ -11,6 +11,8 @@ source "$repo_root/scripts/dependency_pins.env"
 source "$repo_root/scripts/go_release_environment.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+# shellcheck source=scripts/xcodegen_dependency_contract.sh
+source "$repo_root/scripts/xcodegen_dependency_contract.sh"
 python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
 if [[ ! -x "$python_bin" ]]; then
   echo "error: closed release Python is required" >&2
@@ -31,11 +33,13 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-toolchain_root="$repo_root/target/toolchains"
+toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 go_root="$toolchain_root/go-$GO_VERSION"
 go_manifest="$toolchain_root/go-$GO_VERSION.manifest.json"
 node_root="$toolchain_root/node-$NODE_VERSION"
 node_manifest="$toolchain_root/node-$NODE_VERSION.manifest.json"
+npm_root="$toolchain_root/npm-$NPM_VERSION"
+npm_manifest="$toolchain_root/npm-$NPM_VERSION.manifest.json"
 xcodegen_root="$toolchain_root/xcodegen-$XCODEGEN_VERSION"
 xcodegen_manifest="$toolchain_root/xcodegen-$XCODEGEN_VERSION.manifest.json"
 go_bin="$go_root/bin/go"
@@ -116,6 +120,29 @@ else
     --metadata "platform=darwin-arm64" \
     --metadata "sourceArchiveSha256=$NODE_DARWIN_ARM64_SHA256" \
     --metadata "version=$NODE_VERSION"
+fi
+
+if [[ -e "$npm_root" || -L "$npm_root" || -e "$npm_manifest" || -L "$npm_manifest" ]]; then
+  [[ -d "$npm_root" && ! -L "$npm_root" && -f "$npm_manifest" && ! -L "$npm_manifest" ]] || {
+    echo "error: refusing to reuse incomplete npm toolchain evidence" >&2
+    exit 1
+  }
+else
+  install_archive \
+    "https://registry.npmjs.org/npm/-/npm-$NPM_VERSION.tgz" \
+    "$NPM_ARCHIVE_SHA256" \
+    "npm-$NPM_VERSION.tgz" \
+    package \
+    "$npm_root" \
+    "$npm_manifest" \
+    --metadata "artifactKind=pinned-npm-toolchain-v1" \
+    --metadata "sourceArchiveSha256=$NPM_ARCHIVE_SHA256" \
+    --metadata "version=$NPM_VERSION"
+fi
+cfw_verify_npm_toolchain_tree "$repo_root" "$toolchain_root" >/dev/null
+if [[ "$("$node_bin" "$npm_root/bin/npm-cli.js" --version)" != "$NPM_VERSION" ]]; then
+  echo "error: pinned npm toolchain identity mismatch" >&2
+  exit 1
 fi
 
 if [[ "$bootstrap_scope" == node-only ]]; then
@@ -218,7 +245,7 @@ PY
     echo "error: pinned XcodeGen source archive has no regular Package.resolved" >&2
     exit 1
   fi
-  printf '%s  %s\n' "$XCODEGEN_PACKAGE_RESOLVED_SHA256" "$extracted/Package.resolved" |
+  printf '%s  %s\n' "$XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256" "$extracted/Package.resolved" |
     shasum -a 256 --check
   mkdir -p "$payload/bin" "$payload/source"
   COPYFILE_DISABLE=1 /bin/cp -R "$extracted/." "$payload/source/"
@@ -238,6 +265,22 @@ PY
     shasum -a 256 --check >/dev/null
   GIT_CEILING_DIRECTORIES="$toolchain_root" \
     /usr/bin/git -C "$payload/source" apply --reverse --check "$xcodegen_patch"
+  local dependency_patch
+  dependency_patch="$repo_root/$XCODEGEN_DEPENDENCY_PATCH_PATH"
+  [[ -f "$dependency_patch" && ! -L "$dependency_patch" ]] || {
+    echo "error: pinned XcodeGen dependency patch is unavailable" >&2
+    exit 1
+  }
+  printf '%s  %s\n' "$XCODEGEN_DEPENDENCY_PATCH_SHA256" "$dependency_patch" |
+    shasum -a 256 --check >/dev/null
+  GIT_CEILING_DIRECTORIES="$toolchain_root" \
+    /usr/bin/git -C "$payload/source" apply --check "$dependency_patch"
+  GIT_CEILING_DIRECTORIES="$toolchain_root" \
+    /usr/bin/git -C "$payload/source" apply "$dependency_patch"
+  GIT_CEILING_DIRECTORIES="$toolchain_root" \
+    /usr/bin/git -C "$payload/source" apply --reverse --check "$dependency_patch"
+  printf '%s  %s\n' "$XCODEGEN_PACKAGE_RESOLVED_SHA256" "$payload/source/Package.resolved" |
+    shasum -a 256 --check >/dev/null
   local isolated_home isolated_tmp swift_cache swift_config swift_security
   isolated_home="$staging/home"
   isolated_tmp="$staging/tmp"
@@ -252,7 +295,8 @@ PY
     "$swift_cache" \
     "$swift_config" \
     "$swift_security"
-  /usr/bin/env -i \
+  local -a swift_resolve_command=(
+    /usr/bin/env -i \
     HOME="$isolated_home" \
     TMPDIR="$isolated_tmp" \
     LANG=C \
@@ -276,7 +320,14 @@ PY
     --only-use-versions-from-resolved-file \
     --no-color-diagnostics \
     resolve
-  if /usr/bin/env -i \
+  )
+  "${swift_resolve_command[@]}"
+  # The upstream manifest is verified before its explicit compatibility patch.
+  # Keep both identities; never silently edit a shared SwiftPM checkout.
+  cfw_patch_xcodegen_aexml "$repo_root" "$build_root/checkouts"
+  "${swift_resolve_command[@]}"
+  local -a swift_build_command=(
+    /usr/bin/env -i \
     HOME="$isolated_home" \
     TMPDIR="$isolated_tmp" \
     LANG=C \
@@ -288,6 +339,7 @@ PY
     GIT_CONFIG_GLOBAL=/dev/null \
     GIT_CONFIG_SYSTEM=/dev/null \
     "$swift_bin" build \
+    --build-system swiftbuild \
     --package-path "$payload/source" \
     --cache-path "$swift_cache" \
     --config-path "$swift_config" \
@@ -303,7 +355,9 @@ PY
     --disable-index-store \
     --configuration release \
     --product xcodegen \
-    -Xswiftc -warnings-as-errors 2>&1 | tee "$build_log"; then
+    -Xswiftc -warnings-as-errors
+  )
+  if "${swift_build_command[@]}" 2>&1 | tee "$build_log"; then
     :
   else
     echo "error: isolated XcodeGen build failed" >&2
@@ -315,8 +369,16 @@ PY
   fi
   printf '%s  %s\n' "$XCODEGEN_PACKAGE_RESOLVED_SHA256" "$payload/source/Package.resolved" |
     shasum -a 256 --check >/dev/null
-  /usr/bin/strip -S "$build_root/release/xcodegen"
-  /usr/bin/install -m 0755 "$build_root/release/xcodegen" "$payload/bin/xcodegen"
+  local xcodegen_bin_dir
+  xcodegen_bin_dir="$("${swift_build_command[@]}" --show-bin-path)"
+  [[ "$xcodegen_bin_dir" == "$build_root/"* &&
+    -d "$xcodegen_bin_dir" && ! -L "$xcodegen_bin_dir" &&
+    -f "$xcodegen_bin_dir/xcodegen" && ! -L "$xcodegen_bin_dir/xcodegen" ]] || {
+    echo "error: Swift Build returned an invalid XcodeGen output directory" >&2
+    exit 1
+  }
+  /usr/bin/strip -S "$xcodegen_bin_dir/xcodegen"
+  /usr/bin/install -m 0755 "$xcodegen_bin_dir/xcodegen" "$payload/bin/xcodegen"
   mkdir -p "$payload/share/xcodegen"
   /usr/bin/ditto --noqtn \
     "$payload/source/SettingPresets" \
@@ -383,10 +445,16 @@ PY
     "$payload" \
     --output "$staging/xcodegen-$XCODEGEN_VERSION.manifest.json" \
     --algorithm sha256-tree-v2 \
-    --metadata "artifactKind=pinned-xcodegen-toolchain-v2" \
+    --metadata "artifactKind=pinned-xcodegen-toolchain-v3" \
     --metadata "buildPolicy=isolated-resolved-swiftpm-v1" \
     --metadata "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
     --metadata "packageResolvedSha256=$XCODEGEN_PACKAGE_RESOLVED_SHA256" \
+    --metadata "upstreamPackageResolvedSha256=$XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256" \
+    --metadata "dependencyPatchSha256=$XCODEGEN_DEPENDENCY_PATCH_SHA256" \
+    --metadata "aexmlCommit=$XCODEGEN_AEXML_COMMIT" \
+    --metadata "aexmlUpstreamManifestSha256=$XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256" \
+    --metadata "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256" \
+    --metadata "aexmlPatchedManifestSha256=$XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256" \
     --metadata "patchSha256=$XCODEGEN_PATCH_SHA256" \
     --metadata "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256" \
     --metadata "platform=darwin-arm64" \
@@ -454,18 +522,20 @@ else
   export GOMODCACHE="$gopath/pkg/mod"
   export GOCACHE="$toolchain_root/go-build-cache"
   configure_networked_go_environment
-  "$go_bin" install \
-    "github.com/sagernet/gomobile/cmd/gomobile@$GOMOBILE_VERSION"
-  "$go_bin" install \
-    "github.com/sagernet/gomobile/cmd/gobind@$GOMOBILE_VERSION"
-  "$go_bin" install \
-    "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
+  cfw_verify_go_release_tools_source "$repo_root"
+  "$go_bin" -C "$repo_root/tools/go-release-tools" install -mod=readonly \
+    github.com/sagernet/gomobile/cmd/gomobile \
+    github.com/sagernet/gomobile/cmd/gobind \
+    golang.org/x/vuln/cmd/govulncheck
+  cfw_verify_go_release_tools_source "$repo_root"
   cfw_run_release_python_script \
     "$repo_root" "$repo_root/scripts/hash_artifact.py" \
     "$tools_staging/bin" \
     --output "$tools_staging/go-workspace-bin.manifest.json" \
     --algorithm sha256-tree-v2 \
-    --metadata "artifactKind=pinned-go-release-tools-v1" \
+    --metadata "artifactKind=pinned-go-release-tools-v2" \
+    --metadata "toolsGoModSha256=$GO_RELEASE_TOOLS_GO_MOD_SHA256" \
+    --metadata "toolsGoSumSha256=$GO_RELEASE_TOOLS_GO_SUM_SHA256" \
     --metadata "goVersion=$GO_VERSION" \
     --metadata "gomobileModuleSum=$GOMOBILE_MODULE_SUM" \
     --metadata "gomobileVersion=$GOMOBILE_VERSION" \

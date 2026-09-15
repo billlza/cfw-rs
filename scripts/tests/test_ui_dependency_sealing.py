@@ -100,7 +100,9 @@ class PinnedNpmBoundaryFixture:
         self.node_root = self.toolchains / f"node-{self.pins['NODE_VERSION']}"
         (self.node_root / "bin").mkdir(parents=True)
         self.node = self.node_root / "bin/node"
-        self.npm = self.node_root / "bin/npm"
+        self.npm_root = self.toolchains / f"npm-{self.pins['NPM_VERSION']}"
+        (self.npm_root / "bin").mkdir(parents=True)
+        self.npm = self.npm_root / "bin/npm-cli.js"
         mutation = ""
         if mutate_dependencies:
             mutation = (
@@ -139,6 +141,17 @@ class PinnedNpmBoundaryFixture:
                 f"version={self.pins['NODE_VERSION']}",
             ],
         )
+        npm_manifest = self.toolchains / f"{self.npm_root.name}.manifest.json"
+        _hash_artifact(
+            self.npm_root,
+            npm_manifest,
+            [
+                "artifactKind=pinned-npm-toolchain-v1",
+                f"sourceArchiveSha256={self.pins['NPM_ARCHIVE_SHA256']}",
+                f"version={self.pins['NPM_VERSION']}",
+            ],
+        )
+        npm_tree_sha256 = json.loads(npm_manifest.read_text(encoding="utf-8"))["sha256"]
         node_tree_sha256 = json.loads(node_manifest.read_text(encoding="utf-8"))[
             "sha256"
         ]
@@ -149,8 +162,10 @@ class PinnedNpmBoundaryFixture:
             self.dependencies,
             self.toolchains / "ui-node-modules.manifest.json",
             [
-                "artifactKind=pinned-ui-dependencies-v1",
+                "artifactKind=pinned-ui-dependencies-v2",
                 f"nodeToolchainTreeSha256={node_tree_sha256}",
+                f"npmToolchainTreeSha256={npm_tree_sha256}",
+                f"npmVersion={self.pins['NPM_VERSION']}",
                 f"nodeVersion={self.pins['NODE_VERSION']}",
                 f"packageLockSha256={lock_sha256}",
                 "platform=darwin-arm64",
@@ -213,6 +228,22 @@ class UIDependencyContractTests(unittest.TestCase):
             self.toolchains / f"{self.node_root.name}.manifest.json"
         )
 
+        self.npm_root = self.toolchains / f"npm-{self.pins['NPM_VERSION']}"
+        (self.npm_root / "bin").mkdir(parents=True)
+        self.npm = self.npm_root / "bin/npm-cli.js"
+        self.npm.write_text("sealed npm\n", encoding="utf-8")
+        npm_manifest = self.toolchains / f"{self.npm_root.name}.manifest.json"
+        self._hash(
+            self.npm_root,
+            npm_manifest,
+            [
+                "artifactKind=pinned-npm-toolchain-v1",
+                f"sourceArchiveSha256={self.pins['NPM_ARCHIVE_SHA256']}",
+                f"version={self.pins['NPM_VERSION']}",
+            ],
+        )
+        self.npm_tree_sha256 = self._manifest_sha256(npm_manifest)
+
         self.dependencies = self.base / "node_modules"
         self.dependencies.mkdir()
         self.dependency_file = self.dependencies / "package.js"
@@ -224,8 +255,10 @@ class UIDependencyContractTests(unittest.TestCase):
             self.dependencies,
             self.dependency_manifest,
             [
-                "artifactKind=pinned-ui-dependencies-v1",
+                "artifactKind=pinned-ui-dependencies-v2",
                 f"nodeToolchainTreeSha256={self.node_tree_sha256}",
+                f"npmToolchainTreeSha256={self.npm_tree_sha256}",
+                f"npmVersion={self.pins['NPM_VERSION']}",
                 f"nodeVersion={self.pins['NODE_VERSION']}",
                 f"packageLockSha256={lock_sha256}",
                 "platform=darwin-arm64",
@@ -280,6 +313,14 @@ class UIDependencyContractTests(unittest.TestCase):
         completed = self.verify()
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("manifest sha256 mismatch", completed.stderr)
+
+
+    def test_npm_tree_drift_invalidates_dependency_evidence(self) -> None:
+        self.npm.write_text("same npm version, different executable code\n", encoding="utf-8")
+        completed = self.verify()
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("manifest sha256 mismatch", completed.stderr)
+
 
 
 class UIDependencyConsumerTests(unittest.TestCase):

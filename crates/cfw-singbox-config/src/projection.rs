@@ -378,14 +378,13 @@ impl ValidatedSingBoxProfile {
             json!({
                 "servers": dns_servers,
 
-                // A private/direct answer must never seed another DNS role.
-                "independent_cache": true,
-                "rules": profile_dns_rules.unwrap_or_else(|| vec![json!({
-                    "domain_regex": ".*",
-                    "retry_on_error": true,
-                    "action": "route",
-                    "server": dns_rule_server
-                })]),
+                "rules": profile_dns_rules.unwrap_or_else(|| {
+                    let mut rules = Vec::new();
+                    crate::dns_policy::append_evaluated_server(
+                        &mut rules, &dns_rule_server, &json!({"domain_regex":".*"}), None,
+                    );
+                    rules
+                }),
                 "final": dns_final_server,
                 "strategy": if dns_ipv6 { "prefer_ipv4" } else { "ipv4_only" }
             }),

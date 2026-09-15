@@ -205,17 +205,17 @@ class PublicationBuildToolTests(unittest.TestCase):
             license_path = resources / "License.rtf"
             license_path.write_text("Pinned Apple Xcode license terms", encoding="utf-8")
             metadata = repository / "dependency_pins.env"
-            metadata.write_text("XCODE_VERSION=26.6\n", encoding="utf-8")
+            metadata.write_text("XCODE_VERSION=27.0\n", encoding="utf-8")
             executable = repository / "xcodebuild"
             executable.write_bytes(b"xcodebuild-fixture")
-            expression = "LicenseRef-Apple-Xcode-EULA-26.6"
+            expression = "LicenseRef-Apple-Xcode-EULA-27.0"
             seed = ComponentSeed(
                 identifier="toolchain:xcode:0000000000000000",
                 name="xcode",
-                version="26.6",
+                version="27.0",
                 ecosystem="toolchain",
                 scope="toolchain",
-                purl="pkg:generic/xcode@26.6",
+                purl="pkg:generic/xcode@27.0",
                 source_root=None,
                 license_root=resources,
                 metadata_path=metadata,

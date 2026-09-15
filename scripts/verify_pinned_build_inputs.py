@@ -13,10 +13,10 @@ entrypoint additionally requires the generated packet LAN peer artifact, while
   ``--locked`` and the release gate checks the exact Apple Silicon target graph;
 * the XcodeGen installed-resource patch and patched source digest are bound to
     the isolated bootstrap and its installed-resource probe;
-* the official Tauri CLI crate, its published lock, the narrow yanked-spin lock
+* the official Tauri CLI crate, its published lock, the compatible dependency lock
   update, the resulting lock, and the exact Cargo cache-normalization contract
   are checksum-bound to one installer entrypoint;
-* the four design-pinned patch files exist as regular files and their computed
+* the six design-pinned patch files exist as regular files and their computed
   SHA-256 digests match both the manifest and dependency_pins.env;
 * the combined diff SHA-256 is pinned and is distinct from any single patch digest;
 * known legacy/partial patch digests are rejected;
@@ -70,7 +70,7 @@ TAURI_CLI_INSTALLER_RELATIVE_PATH = "scripts/install_pinned_tauri_cli.sh"
 # Level 1 source identity: detect accidental or unreviewed installer drift.
 # Exact Git/hosted-CI identity remains the trust root; this is not authentication.
 REQUIRED_TAURI_CLI_INSTALLER_SHA256 = (
-    "7bc439d444cb7dc00c6c60fd7ee9003124ae635d331d71df7c528f75d6158ce7"
+    "b649c88ae4fe0af5a815bc2bcdf93c6a122b18c5ff237e91c540ca8a8c893a8f"
 )
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "66196691cceeb9aadb42bfb1c99d6bd2c74d5dbeb8f3c7065d988812067a7aa8"
+    "fca7f410a092d535b409a2f8b734b2e1e04f2221e2601a121496492e056d64b1"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "fa3d6c67bd72991cd747e246f08eadef3f1644187b7c7c8691fa4c3fd8e38a56"
+    "ebe34be89ba7f0b56fa6c2685eba5025f1baec25b63588aad90e6032c85f8514"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -127,11 +127,11 @@ REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
 GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
     "_publish_and_confirm_stage": "f8647aa681a7e02ca7e38be3f18cfd903fdc2c9cfedf938d0f8313f407dc1c93",
     "_require_hosted_ci_source_binding": "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a",
-    "_verified_prepackage_inputs": "2f04a78c44dd9eafdf1d440c13dc2a4c3c57027241a3cb74201ba4c28982b88d",
+    "_verified_prepackage_inputs": "59e11bf6ba4f11fe7bcb1428ae3d07174d188b053e551fb8d91d69e8977b1ace",
     "_verified_package_sets": "03322fad12344a0f9dbf70acaf152a78a6fa09778794c52202bc6c804110791d",
     "_verified_migration_journals": "aae37ebedddaa00d345475f26ed45e28d69d1097bee7a9a9997b6dd63b7bcc28",
     "_expected_candidate_from_prepackage": "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e",
-    "_require_migration_matches_prepackage": "e9459eb039326db33d2608d7dfa5f8dc6d332e005c5afb12f6bab1cacfb1e3b9",
+    "_require_migration_matches_prepackage": "698e2c7db02537eeaca759fa40197d8ba417d8b4ada12a33ce61f5e27fcdd500",
     "_verified_acceptance_inputs": "6a326b17cf90c28e4410a5b883676d4c64d79c18c9d87e7b9e6a1717d561e702",
     "_verified_runtime_acceptance_adapter": "5784c684917110eba0684fb84de273b02b0b934b44d22f2506181d3af7f393ad",
     "_ga_acceptance_files": "d4530d6ef4c092df45eab0dd91f0751872ad82f69c0a8d011f5a0382e3cb9023",
@@ -142,7 +142,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
     "verify_publication_authorization": "cdc26323dba3a714add18e1e30394717e3a98eafef0e87adfa460f7a0b67ae61",
     "derive_runtime_expectation": "6a1661f1f99190f9be401f2df9635cbf2933757767936f8ef4cd0ea8a3e13930",
     "seal_prepackage": "3d63970071f5c47783136635b7091ce7f352f91f9cba15019f37f16dd9a5b223",
-    "seal_ga_acceptance": "b740e0a8c0c0eca6abadc448bab2e23561e37fae95f4957834071ed452af95f0",
+    "seal_ga_acceptance": "bba01989271681cc77ac63cae155487f4fd806fc02fa550646f2137029ad6d48",
     "seal_publication": "808fbaaea13245bb940eecaf1abc047f472211f8e1e95192a34f47e4a71e1f89",
     "_compose_stage_files": "284e186baba2f7dbb21d02b3fc3fb2380e86ada30464b4ceb81a5df9d459ce8f",
     "_current_stage_executor": "4640733086dffe90fffdef7b33fc52163268546e16d404200ee6b18eb9517b55",
@@ -161,11 +161,11 @@ GA_RELEASE_CLI_FUNCTION_AST_SHA256 = {
 }
 PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_artifact_binding_surface": "fae882ae2244166f36c3a5376b9a3e8777ce2aefc41c0cf852b5fe5bbc2f3e77",
-    "_verify_build_scripts": "a8cf93cc988322f742d31a3914338d53eb4e805ceb87422b164ca25da8933910",
+    "_verify_build_scripts": "291949f92e88f7786a706e74f05ebf4140f68fccb8d86dbb6b16a9224ff409af",
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "512c6c8ce5673cadabe8c405b71bb4407cd10b693840d4e79755acf292252045"
+    "50dc32475c76860d5b6a05581b954999d11980ced9d627a43a8b9f3771b01614"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -202,6 +202,12 @@ BUILD_SCRIPT_RULE_FIELDS = frozenset(
 )
 REQUIRED_TOOL_PIN_KEYS = frozenset(
     {
+        "XCODE_BUILD_VERSION",
+        "XCODE_VERSION",
+        "GO_RELEASE_TOOLS_GO_SUM_SHA256",
+        "GO_RELEASE_TOOLS_GO_MOD_SHA256",
+        "NPM_ARCHIVE_SHA256",
+        "NPM_VERSION",
         "PYTHON_VERSION",
         "RUST_VERSION",
         "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256",
@@ -211,6 +217,14 @@ REQUIRED_TOOL_PIN_KEYS = frozenset(
         "XCODEGEN_COMMIT",
         "XCODEGEN_SOURCE_SHA256",
         "XCODEGEN_PACKAGE_RESOLVED_SHA256",
+        "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256",
+        "XCODEGEN_DEPENDENCY_PATCH_PATH",
+        "XCODEGEN_DEPENDENCY_PATCH_SHA256",
+        "XCODEGEN_AEXML_COMMIT",
+        "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256",
+        "XCODEGEN_AEXML_PATCH_PATH",
+        "XCODEGEN_AEXML_PATCH_SHA256",
+        "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256",
         "NODE_VERSION",
         "GO_VERSION",
         "GOMOBILE_VERSION",
@@ -324,13 +338,13 @@ _NETWORK_RECURSION_RE = re.compile(
     re.IGNORECASE,
 )
 _PACKET_ENDPOINT_BINARY_SHA256 = (
-    "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
+    "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0"
 )
 _PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256 = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
 )
 _PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256 = (
-    "14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8"
+    "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3"
 )
 _PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256 = (
     "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
@@ -342,7 +356,7 @@ _PACKET_ENDPOINT_KNOWN_HOSTS_SHA256 = (
     "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
 )
 _PACKET_ENDPOINT_POLICY_SHA256 = (
-    "35f1e9bfc73baae302f7b26e24adf86df57a01c61f3c71133ae7cba23e64a5cb"
+    "c1c6dd34a5b5ea1d36cd83430d2213b6cd613cc3dfad6ef2ca2f8e2b9184651d"
 )
 _PACKET_ENDPOINT_SOURCE_PATHS = frozenset(
     {
@@ -363,17 +377,18 @@ _PACKET_ENDPOINT_BUILD_FRAGMENTS = (
     "CGO_ENABLED=0",
     "GOOS=linux",
     "GOARCH=amd64",
-    "target/toolchains/go-1.26.6/bin/go",
+    "target/toolchains/go-1.27.1/bin/go",
     "-C tools/packet-evidence-endpoint",
+    "-buildvcs=false",
     "-trimpath",
     "-ldflags='-s -w -buildid='",
     "-o ../../target/packet-evidence-endpoint-linux-amd64",
     _PACKET_ENDPOINT_BINARY_SHA256,
 )
 _PACKET_LAN_PEER_ARTIFACT_SHA256 = (
-    "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c"
+    "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90"
 )
-_PACKET_LAN_PEER_ARTIFACT_SIZE = 2359422
+_PACKET_LAN_PEER_ARTIFACT_SIZE = 2293884
 _ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
 _ADB_RUNTIME_TOOL_VERSION = "37.0.0-14910828"
 _ADB_RUNTIME_TOOL_SHA256 = (
@@ -381,17 +396,17 @@ _ADB_RUNTIME_TOOL_SHA256 = (
 )
 _ANDROID_LAN_PEER_SOURCE_PATH = "scripts/physical_capture/android_lan_peer.py"
 _ANDROID_LAN_PEER_SOURCE_SHA256 = (
-    "bed9e81cd7e11eb4251a3324acee88e8e9195d0f8ac33f59f9c755fff25148b2"
+    "bee7d226ea09a23bdf2cc806f36d045f4732fbb3e6a5546a5bf04be28d5c04a7"
 )
 _ANDROID_LAN_PEER_SOURCE_SIZE = 137417
 _PACKET_LAN_PEER_SOURCE_TREE_SHA256 = (
-    "8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4"
+    "c40181aa8a78325877bf2b091a5be9a091f223be09f443297bcf8e052df7abb9"
 )
 _PACKET_LAN_PEER_BUILD_SCRIPT_SHA256 = (
     "c3fb49c83d98a710a15874afe83a3606b3f50f1f65b01c76dbb03edfcc9b43d8"
 )
 _PACKET_LAN_PEER_VERIFY_SCRIPT_SHA256 = (
-    "eb7c518d3209ccf6486847e9f9042f58796b2192d5fdd733f3b991f640d7309e"
+    "d8bb6f9a057764a87949bedbd805ee662b89179085c0e88e54007e24c286a1b9"
 )
 _PACKET_LAN_PEER_SOURCE_FILES = (
     (
@@ -402,7 +417,7 @@ _PACKET_LAN_PEER_SOURCE_FILES = (
     ),
     (
         "go.mod",
-        "af5ff7973354844d111edb9d303d6543d8aa6dc0afc6ecf439225acc15e1d1fd",
+        "5dbd54a17b7a97a17e71fe82ea46d0b36f0325ba3b6043ca43d14a8836effcee",
         70,
         "0644",
     ),
@@ -446,8 +461,8 @@ _PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
     'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
     'source_root="$repo_root/tools/packet-lan-peer"',
     'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
-    "expected_artifact_size=2359422",
+    "expected_artifact_sha256=d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+    "expected_artifact_size=2293884",
     "expected_artifact_mode=555",
     "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
     "GOTOOLCHAIN=local",
@@ -470,14 +485,14 @@ _PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
     '"$artifact_sha256" != "$expected_artifact_sha256"',
 )
 _PHYSICAL_COLLECTOR_GO_MOD_SHA256 = (
-    "24b0294d6fe42b5baab92bc58ed47a69275323bb02ca75b087605a5aabf2b2d0"
+    "fd4dce001fb12c0ba2cd289bbdaa1f649fc085861362ad1300c56643f17c5a6f"
 )
 _PHYSICAL_COLLECTOR_GO_SUM_SHA256 = (
-    "5c71b0dca9d0be45b65ab07b1a7386475f72d454c9638d60c36494a75fbc35ec"
+    "f5dc5ed58b07c6dc0dc772a33592361db55edf8010377ccf8d874f8bb5900e5c"
 )
 _PHYSICAL_COLLECTOR_MODULE_FRAGMENTS = (
-    "google.golang.org/grpc v1.82.1",
-    "golang.org/x/text v0.39.0",
+    "google.golang.org/grpc v1.83.2",
+    "golang.org/x/text v0.42.0",
 )
 
 
@@ -4250,7 +4265,7 @@ def _verify_build_scripts(
                     "exactly match dependency_pins.env"
                 )
             required_python_fragments = (
-                "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+                "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
                 "id: validation-python",
                 "architecture: arm64",
                 "update-environment: false",

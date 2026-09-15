@@ -780,8 +780,15 @@ def _resolved_toolchain(
         f"v{pins['NODE_VERSION']}",
         "Node.js",
     )
-    resolved["npm"] = identity_output(
-        [str(node_bin_dir / "npm"), "--version"], repository, "npm", node_env
+    resolved["npm"] = _expect(
+        identity_output(
+            [str(node_bin_dir / "node"),
+             str(toolchain_root / f"npm-{pins['NPM_VERSION']}" / "bin/npm-cli.js"),
+             "--version"],
+            repository, "npm", node_env,
+        ),
+        pins["NPM_VERSION"],
+        "npm",
     )
     resolved["go"] = _expect(
         identity_output([str(go_bin), "version"], repository, "Go", base),

@@ -58,14 +58,41 @@ fn append_pool(
 // continuing into an unrelated DNS policy or a direct bootstrap resolver.
 fn append_pool_rules(rules: &mut Vec<Value>, tags: &[String], condition: &Value) {
     for (index, tag) in tags.iter().enumerate() {
-        let mut rule = condition.clone();
-        if index + 1 != tags.len() {
-            rule["retry_on_error"] = json!(true);
+        if index + 1 == tags.len() {
+            let mut rule = condition.clone();
+            rule["action"] = json!("route");
+            rule["server"] = json!(tag);
+            rules.push(rule);
+        } else {
+            append_evaluated_server(rules, tag, condition, None);
         }
-        rule["action"] = json!("route");
-        rule["server"] = json!(tag);
-        rules.push(rule);
     }
+}
+
+// The response rule repeats the query condition: a skipped evaluate must never
+// respond using an anonymous result left by a preceding, unrelated policy.
+pub(crate) fn append_evaluated_server(
+    rules: &mut Vec<Value>,
+    tag: &str,
+    condition: &Value,
+    response_filter: Option<&Value>,
+) {
+    let mut evaluate = condition.clone();
+    evaluate["action"] = json!("evaluate");
+    evaluate["server"] = json!(tag);
+    if let Some(filter) = response_filter {
+        evaluate["response_filter"] = filter.clone();
+        evaluate["response_ip_accept_all"] = json!(true);
+    }
+    rules.push(evaluate);
+    rules.push(json!({
+        "type":"logical", "mode":"and", "rules":[condition, {
+            "type":"logical", "mode":"or", "rules":[
+                {"match_response":true,"response_rcode":"NOERROR"},
+                {"match_response":true,"response_rcode":"NXDOMAIN"}
+            ]
+        }], "action":"respond"
+    }));
 }
 
 pub(crate) fn project_profile_dns(
@@ -213,40 +240,34 @@ pub(crate) fn project_profile_dns(
             &json!({"query_type":["A","AAAA","HTTPS"],"invert":true}),
         );
     }
-    for (index, tag) in ordinary.iter().enumerate() {
-        let mut rule = if let Some(filter) = dns
-            .fallback_filter
-            .as_ref()
-            .filter(|filter| !filter.ip_cidr.is_empty() || filter.geoip_code.is_some())
-        {
-            {
-                let mut conditions = vec![json!({"ip_accept_any":true})];
-                if !filter.ip_cidr.is_empty() {
-                    conditions.push(json!({"ip_cidr":filter.ip_cidr,"invert":true}));
-                }
-                if let Some(country) = &filter.geoip_code {
-                    conditions.push(json!({"rule_set":[format!("cfw-geoip-{country}")]}));
-                }
-                json!({"type":"logical","mode":"and","rules":conditions,"response_ip_accept_all":true})
+    let response_filter = dns
+        .fallback_filter
+        .as_ref()
+        .filter(|filter| !filter.ip_cidr.is_empty() || filter.geoip_code.is_some())
+        .map(|filter| {
+            let mut conditions = vec![json!({"ip_accept_any":true})];
+            if !filter.ip_cidr.is_empty() {
+                conditions.push(json!({"ip_cidr":filter.ip_cidr,"invert":true}));
             }
-        } else {
-            json!({"domain_regex":".*"})
-        };
-        // The final server is emitted as dns.final, preserving existing profile
-        // projections and avoiding a redundant terminal lookup.
+            if let Some(country) = &filter.geoip_code {
+                conditions.push(json!({"rule_set":[format!("cfw-geoip-{country}")]}));
+            }
+            json!({"type":"logical","mode":"and","rules":conditions})
+        });
+    for (index, tag) in ordinary.iter().enumerate() {
         if fallback.is_none() && index + 1 == ordinary.len() {
             break;
         }
-        rule["action"] = json!("route");
-        rule["server"] = json!(tag);
-        rule["retry_on_error"] = json!(true);
-        rules.push(rule);
+        append_evaluated_server(
+            &mut rules,
+            tag,
+            &json!({"domain_regex":".*"}),
+            response_filter.as_ref(),
+        );
     }
     if let Some(fallback) = &fallback {
         for tag in &fallback[..fallback.len() - 1] {
-            rules.push(
-                json!({"domain_regex":".*","retry_on_error":true,"action":"route","server":tag}),
-            );
+            append_evaluated_server(&mut rules, tag, &json!({"domain_regex":".*"}), None);
         }
     }
     Ok(DnsPolicyProjection {

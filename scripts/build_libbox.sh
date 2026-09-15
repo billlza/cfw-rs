@@ -109,7 +109,7 @@ export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
   }
   "$go_bin" mod verify
   version_without_prefix="${SING_BOX_VERSION#v}"
-  libbox_ldflags="-X github.com/sagernet/sing-box/constant.Version=$version_without_prefix -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0"
+  libbox_ldflags="-X github.com/sagernet/sing-box/constant.Version=$version_without_prefix -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0 '-extld=$repo_root/scripts/libbox_clang_linker.sh'"
   "$gobin/gomobile" bind \
     -v \
     -target "$LIBBOX_APPLE_PLATFORM" \

@@ -184,7 +184,7 @@ class CanonicalPythonRuntimeTests(unittest.TestCase):
             runtime.write_bytes(b"fixture runtime")
             runtime.chmod(0o755)
             (runtime.parent / "python").symlink_to(runtime.name)
-            toolcache = root / "hostedtoolcache/Python/3.14.6/arm64/bin"
+            toolcache = root / "hostedtoolcache/Python/3.14.7/arm64/bin"
             toolcache.parent.mkdir(parents=True)
             toolcache.symlink_to(runtime.parent, target_is_directory=True)
             executable = toolcache / "python"

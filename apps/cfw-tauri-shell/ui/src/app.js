@@ -476,12 +476,17 @@ function renderLogStreamHtml() {
         `).join("") || `<p class="empty">No ${state.logFilter === "all" ? "" : `${state.logFilter.toUpperCase()} `}logs for this filter.</p>`;
 }
 
+function logCountLabel(visibleCount) {
+  const total = state.logs.length > visibleCount ? ` of ${state.logs.length}` : "";
+  return `${visibleCount}${total} log entries${state.logsPaused ? " paused" : ""}`;
+}
+
 function patchLogStream() {
   const stream = document.querySelector(".log-stream");
   if (!stream) return false;
   const heading = document.querySelector(".logs-layout .toolbar-panel h3");
   if (heading) {
-    heading.textContent = `${visibleLogs().length} log entries${state.logsPaused ? " paused" : ""}`;
+    heading.textContent = logCountLabel(visibleLogs().length);
   }
   stream.innerHTML = renderLogStreamHtml();
   return true;
@@ -2140,7 +2145,7 @@ function renderLogs() {
       <section class="panel toolbar-panel">
         <div>
           <p class="label">Diagnostics</p>
-          <h3>${logs.length} log entries${state.logsPaused ? " paused" : ""}</h3>
+          <h3>${logCountLabel(logs.length)}</h3>
         </div>
         <div class="search-box">
           <input value="${escapeHtml(state.logSearch)}" data-log-search aria-label="Search logs" placeholder="Search logs or regex" />

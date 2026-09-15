@@ -146,8 +146,8 @@ class LicenseResolutionTests(unittest.TestCase):
             "Apache-2.0 WITH LLVM-exception",
         )
         self.assertEqual(
-            canonical_spdx_expression("LicenseRef-Apple-Xcode-EULA-26.6"),
-            "LicenseRef-Apple-Xcode-EULA-26.6",
+            canonical_spdx_expression("LicenseRef-Apple-Xcode-EULA-27.0"),
+            "LicenseRef-Apple-Xcode-EULA-27.0",
         )
         for invalid in (
             "MadeUp-1.0",

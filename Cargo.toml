@@ -25,7 +25,7 @@ urlpattern = { path = "crates/urlpattern-maintained-adapter" }
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["bill"]
-rust-version = "1.97"
+rust-version = "1.98"
 
 # Release profile tuned for aarch64-apple-darwin: maximum optimization, whole-
 # program LTO and a single codegen unit for the best runtime performance, with
@@ -38,26 +38,26 @@ codegen-units = 1
 strip = true
 
 [workspace.dependencies]
-anyhow = "1.0"
-base64 = { version = "0.23.0", default-features = false, features = ["std"] }
-futures-util = "0.3.33"
+anyhow = "1.0.104"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+futures-util = "0.3.34"
 libc = "0.2.189"
 minisign-verify = "0.2.5"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream", "socks"] }
-rustls = { version = "0.23.42", default-features = false, features = ["ring", "std"] }
-plist = "1.10.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "socks"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+plist = "1.10.1"
 # Pure-Rust QR encoder for the profile subscription QR code. The image and
 # bitmap renderers are not needed: only the SVG renderer is used.
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 # Pure-Rust event-level YAML parser for Clash subscription conversion. The
 # event API is used deliberately: the importer owns its own alias, depth, and
 # event budgets instead of trusting a document-level loader.
-saphyr-parser = "0.0.11"
+saphyr-parser = "0.0.12"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-sha2 = "0.11"
-thiserror = "2.0.19"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "sync", "time"] }
 # Loopback-only websocket client for the clash-compatible controller streams.
@@ -65,5 +65,5 @@ tokio = { version = "1.53.1", features = ["macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 urlencoding = "2.1.3"
 url = "2.5.8"
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1.26.1", features = ["serde", "v4"] }
 zeroize = "1.9.0"

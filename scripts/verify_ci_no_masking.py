@@ -58,7 +58,7 @@ DEFAULT_PINS = REPO_ROOT / "scripts" / "dependency_pins.env"
 RELEASE_CI_GATE = REPO_ROOT / "scripts" / "run_release_ci_gate.sh"
 REQUIRED_RUN_SHELL = "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
 REQUIRED_CHECKOUT_ACTION = (
-    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 )
 REQUIRED_SOURCE_REF = (
     "${{ github.event_name == 'pull_request' && "
@@ -75,7 +75,7 @@ REQUIRED_SOURCE_ASSERTION_STEP = (
 )
 REQUIRED_XCODE_OWNERSHIP_STEP = """      - name: Normalize pinned Xcode ownership
         run: |
-          readonly xcode_application=/Applications/Xcode_26.6.app
+          readonly xcode_application=/Applications/Xcode_27.0.app
           /bin/test "$DEVELOPER_DIR" = "$xcode_application/Contents/Developer"
           /bin/test -d "$xcode_application"
           /bin/test ! -L "$xcode_application"
@@ -84,7 +84,7 @@ REQUIRED_XCODE_OWNERSHIP_STEP = """      - name: Normalize pinned Xcode ownershi
           /bin/test -d "$xcode_application/Contents/Developer"
           /bin/test ! -L "$xcode_application/Contents/Developer"
           /usr/sbin/spctl --assess --type execute "$xcode_application"
-          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 27.0\\nBuild version 27A266a'
 
           runner_uid="$(/usr/bin/id -u)"
           readonly runner_uid
@@ -113,7 +113,7 @@ REQUIRED_XCODE_OWNERSHIP_STEP = """      - name: Normalize pinned Xcode ownershi
           readonly remaining_unsafe_entry
           /bin/test -z "$remaining_unsafe_entry"
           /usr/sbin/spctl --assess --type execute "$xcode_application"
-          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'"""
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 27.0\\nBuild version 27A266a'"""
 REQUIRED_TAURI_TMPDIR = "${{ runner.temp }}"
 REQUIRED_SWIFT_TARGET_INFO_PROBE = (
     'swift_identity_stderr="$(/usr/bin/mktemp '
@@ -147,7 +147,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "e10113e967081dcc4bbd4b6eeff5d6d1e5a739b1eabfd773584f9b9e95bacc41"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "b0881faa331b4072b1d0e9d957fe5db99920aef0e7ee8d6284accb6531d3a724"
+    "0d277ec80d7267f915f32102b4272bd00d883a2129fd7fe2cfee9cf8e6eafca4"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -901,7 +901,7 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         if not job_gates:
             continue
         for fragment in (
-            "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
             "id: validation-python",
             f'python-version: "{pins["PYTHON_VERSION"]}"',
             "architecture: arm64",

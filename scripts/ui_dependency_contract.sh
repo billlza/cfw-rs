@@ -27,6 +27,7 @@ cfw_verify_ui_dependencies_artifact() {
   local contract_toolchain_root="$2"
   local contract_artifact="$3"
   local contract_manifest="$4"
+  local contract_npm_tree_sha256
   local contract_node_tree_sha256
   local contract_package_lock_sha256
 
@@ -35,6 +36,7 @@ cfw_verify_ui_dependencies_artifact() {
       "$contract_repository" \
       "$contract_toolchain_root"
   )"
+  contract_npm_tree_sha256="$(cfw_verify_npm_toolchain_tree "$contract_repository" "$contract_toolchain_root")"
   contract_package_lock_sha256="$(cfw_ui_package_lock_sha256 "$contract_repository")"
   cfw_run_release_python_script \
     "$contract_repository" \
@@ -43,9 +45,11 @@ cfw_verify_ui_dependencies_artifact() {
     "$contract_manifest" \
     --algorithm sha256-tree-v2 \
     --exact-metadata \
-    --metadata "artifactKind=pinned-ui-dependencies-v1" \
+    --metadata "artifactKind=pinned-ui-dependencies-v2" \
     --metadata "nodeToolchainTreeSha256=$contract_node_tree_sha256" \
     --metadata "nodeVersion=$NODE_VERSION" \
+    --metadata "npmToolchainTreeSha256=$contract_npm_tree_sha256" \
+    --metadata "npmVersion=$NPM_VERSION" \
     --metadata "packageLockSha256=$contract_package_lock_sha256" \
     --metadata "platform=darwin-arm64" \
     --print-tree-sha256

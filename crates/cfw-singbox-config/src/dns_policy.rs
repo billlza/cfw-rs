@@ -12,7 +12,8 @@ mod matcher;
 mod project;
 pub(crate) use bootstrap::{BootstrapDnsServer, validate_bootstrap_pool};
 pub(crate) use project::{
-    add_connection_dns_rules, project_profile_dns, resolver_tags, resolver_value,
+    add_connection_dns_rules, append_evaluated_server, project_profile_dns, resolver_tags,
+    resolver_value,
 };
 
 pub(crate) const MAX_DNS_RESOLVERS: usize = 8;

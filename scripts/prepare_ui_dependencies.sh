@@ -16,7 +16,7 @@ source "$repo_root/scripts/ui_dependency_contract.sh"
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 node_root="$toolchain_root/node-$NODE_VERSION"
 node_bin="$node_root/bin/node"
-npm_bin="$node_root/bin/npm"
+npm_bin="$toolchain_root/npm-$NPM_VERSION/bin/npm-cli.js"
 shell_root="$repo_root/apps/cfw-tauri-shell"
 dependency_root="$shell_root/node_modules"
 dependency_manifest="$toolchain_root/ui-node-modules.manifest.json"
@@ -37,6 +37,8 @@ python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
   die "release toolchain root must be a real directory"
 
 node_tree_sha256="$(cfw_verified_node_toolchain_tree_sha256 "$repo_root" "$toolchain_root")"
+npm_tree_sha256="$(cfw_verify_npm_toolchain_tree "$repo_root" "$toolchain_root")"
+[[ "$npm_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || die "verified npm tree digest is malformed"
 [[ "$node_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || die "verified Node tree digest is malformed"
 [[ "$("$node_bin" --version)" == "v$NODE_VERSION" ]] ||
   die "pinned Node.js $NODE_VERSION identity mismatch"
@@ -48,7 +50,7 @@ if [[ -e "$dependency_root" || -L "$dependency_root" || -e "$dependency_manifest
     die "refusing UI dependencies without their sealed manifest"
   cfw_verify_ui_dependencies_tree "$repo_root" "$toolchain_root" >/dev/null
   PATH="$node_root/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$npm_bin" --prefix "$shell_root" ls --all --offline >/dev/null
+    "$node_bin" "$npm_bin" --prefix "$shell_root" ls --all --offline >/dev/null
   cfw_verify_ui_dependencies_tree "$repo_root" "$toolchain_root" >/dev/null
   echo "sealed UI dependencies already verified"
   exit 0
@@ -90,7 +92,7 @@ mkdir -p \
   NPM_CONFIG_USERCONFIG=/dev/null \
   PATH="$node_root/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   TMPDIR="$bootstrap_tmp" \
-  "$npm_bin" --prefix "$workspace" ci --ignore-scripts=false --install-links=true
+  "$node_bin" "$npm_bin" --prefix "$workspace" ci --ignore-scripts=false --install-links=true
 
 # npm may hard-link native package payloads either to its download cache or to
 # another package path. The release tree deliberately forbids hard links, so
@@ -112,7 +114,7 @@ mkdir -p \
   NPM_CONFIG_USERCONFIG=/dev/null \
   PATH="$node_root/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   TMPDIR="$bootstrap_tmp" \
-  "$npm_bin" --prefix "$sealed_workspace" ls --all --offline >/dev/null
+  "$node_bin" "$npm_bin" --prefix "$sealed_workspace" ls --all --offline >/dev/null
 
 package_lock_sha256="$(cfw_ui_package_lock_sha256 "$repo_root")"
 cfw_run_release_python_script \
@@ -120,9 +122,11 @@ cfw_run_release_python_script \
   "$sealed_workspace/node_modules" \
   --output "$staged_manifest" \
   --algorithm sha256-tree-v2 \
-  --metadata "artifactKind=pinned-ui-dependencies-v1" \
+  --metadata "artifactKind=pinned-ui-dependencies-v2" \
   --metadata "nodeToolchainTreeSha256=$node_tree_sha256" \
   --metadata "nodeVersion=$NODE_VERSION" \
+  --metadata "npmToolchainTreeSha256=$npm_tree_sha256" \
+  --metadata "npmVersion=$NPM_VERSION" \
   --metadata "packageLockSha256=$package_lock_sha256" \
   --metadata "platform=darwin-arm64"
 cfw_verify_ui_dependencies_artifact \

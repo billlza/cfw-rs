@@ -69,6 +69,7 @@ source "$repository/scripts/release_toolchain_contract.sh"
 source "$repository/scripts/ui_dependency_contract.sh"
 go_digest="$(cfw_verify_go_toolchain_tree "$repository" "$toolchain_root")"
 node_digest="$(cfw_verify_node_toolchain_tree "$repository" "$toolchain_root")"
+npm_digest="$(cfw_verify_npm_toolchain_tree "$repository" "$toolchain_root")"
 xcodegen_digest="$(cfw_verify_xcodegen_toolchain_tree "$repository" "$toolchain_root")"
 tauri_digest="$(cfw_verify_tauri_toolchain_tree "$repository" "$toolchain_root")"
 go_tools_digest="$(cfw_verify_go_release_tools_tree "$repository" "$toolchain_root")"
@@ -76,6 +77,7 @@ go_module_digest="$(cfw_verify_go_module_cache_tree "$repository" "$toolchain_ro
 ui_dependencies_digest="$(cfw_verify_ui_dependencies_tree "$repository" "$toolchain_root")"
 printf 'go=%s\n' "$go_digest"
 printf 'node=%s\n' "$node_digest"
+printf 'npm=%s\n' "$npm_digest"
 printf 'xcodegen=%s\n' "$xcodegen_digest"
 printf 'tauri-cli=%s\n' "$tauri_digest"
 printf 'go-release-tools=%s\n' "$go_tools_digest"
@@ -119,6 +121,7 @@ printf 'ui-dependencies=%s\n' "$ui_dependencies_digest"
         "cargo-workspace-sources",
         "go",
         "node",
+        "npm",
         "xcodegen",
         "tauri-cli",
         "go-release-tools",

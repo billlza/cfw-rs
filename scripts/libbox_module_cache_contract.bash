@@ -10,6 +10,9 @@ LIBBOX_GOMOBILE_BIND_PACKAGES=(
 )
 
 LIBBOX_RACE_TEST_PACKAGES=(
+  "./experimental/libbox"
+  "./route"
+  "./route/rule"
   "./common/tls"
   "./common/urltest"
   "./adapter/outbound"

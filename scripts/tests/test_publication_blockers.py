@@ -25,7 +25,7 @@ class PublicationBlockerTests(unittest.TestCase):
         plan = _source_closure(self.seed("rust"))
         self.assertEqual(plan["release_impact"], "non-blocking-external-build-tool-provenance")
         self.assertIn("executable SHA-256", plan["closure_action"])
-        self.assertIn("8bab26f4", plan["acceptance"])
+        self.assertIn("48a229ceaefd4985c50990b14116b6d856af0985", plan["acceptance"])
 
     def test_xcode_is_not_misreported_as_redistributable_source(self) -> None:
         seed = replace(self.seed("xcode"), external_build_tool=True)

@@ -606,7 +606,7 @@ class PhysicalEvidenceFixture:
         self.raw_bindings: list[list[dict[str, Any]]] = []
         self.machine_sha256 = sha("physical-machine") if single_machine else None
         for index, (os_label, version, build) in enumerate(
-            (("macos15", "15.7.8", "24G824"), ("current-macos", "27.0", "25G72"))
+            (("macos15", "15.7.8", "24G824"), ("current-macos", "26.6", "25G72"))
         ):
             self._build_run(index, os_label, version, build)
 

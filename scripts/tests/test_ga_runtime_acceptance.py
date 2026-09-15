@@ -952,7 +952,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40048", "40068"))
+        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40067", "40068"))
         self.assertEqual(
             (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
             (15 * 60, 30 * 60),
@@ -1382,7 +1382,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_service_registration_rejects_a_different_parent_bundle_build(self) -> None:
         original = self._service_stdout("proxy_agent")
-        for build in ("40041", "40043", "40044", "40045", "40046", "40047", "40048"):
+        for build in ("40041", "40043", "40044", "40045", "40046", "40047", "40048", "40067"):
             with self.subTest(build=build):
                 self._set_service_stdout(
                     "proxy_agent",

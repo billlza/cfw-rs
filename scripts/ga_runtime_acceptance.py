@@ -4,7 +4,7 @@
 This module deliberately does not accept a caller-selected evidence path and it
 does not accept a list of boolean outcomes. Collection starts only after the
 existing dormant-install and current-service owners have closed their
-40048 -> 40068 journals. ``collect`` creates a durable CSPRNG challenge intent,
+40067 -> 40068 journals. ``collect`` creates a durable CSPRNG challenge intent,
 owns every runtime command and packet byte, atomically publishes the exact
 raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore;
 it never duplicates either installation state machine. ``verify`` reopens
@@ -178,7 +178,7 @@ PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
 
 PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 TO_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
-FROM_BUILD: Final = "40048"
+FROM_BUILD: Final = "40067"
 TEAM_ID: Final = "YKUPL7Z869"
 APP_BUNDLE_ID: Final = "com.bill.clashformac"
 PACKET_EXTENSION_BUNDLE_ID: Final = "com.bill.clashformac.packet-tunnel"
@@ -972,7 +972,7 @@ def _installed_candidate_tree(repository: Path, expected: dict[str, Any]) -> str
         or normalized["candidate"]["build_number"] != TO_BUILD
         or normalized["previous"]["build_number"] != FROM_BUILD
     ):
-        raise _error("GA install journal is not the completed 40048 to 40068 install")
+        raise _error("GA install journal is not the completed 40067 to 40068 install")
     try:
         installed = dormant_app_install.read_app_identity(INSTALLED_APP)
     except dormant_app_install.InstallError as error:
@@ -3620,7 +3620,7 @@ def self_check() -> None:
     except OSError as error:
         raise _error("GA runtime collector source/build registry is unavailable") from error
     if (
-        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40048", "40068")
+        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40067", "40068")
         or (MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS)
         != (15 * 60, 30 * 60)
         or len(CHECKS) != 12

@@ -186,6 +186,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                 "40046": install.INSTALLED_40046_PREDECESSOR,
                 "40047": install.INSTALLED_40047_PREDECESSOR,
                 "40048": install.INSTALLED_40048_PREDECESSOR,
+                "40067": install.INSTALLED_40067_PREDECESSOR,
             },
         )
         self.assertEqual(

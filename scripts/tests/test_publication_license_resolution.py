@@ -131,6 +131,18 @@ class LicenseResolutionTests(unittest.TestCase):
             self.assertEqual(resolution["status"], "automatic")
             self.assertEqual(resolution["expression"], "MIT")
 
+    def test_quoted_go_module_path_keeps_exact_identity_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+            seed = self.seed(root, ecosystem="go", declared_license=None)
+            (root / "go.mod").write_text('module "example.com/fixture"\n', encoding="utf-8")
+            self.assertEqual(resolve_license(seed)["status"], "automatic")
+            for declaration in ('"example.com/foreign"', '"example.com/fixture', '"example.com/fixture"\nmodule example.com/fixture'):
+                (root / "go.mod").write_text(f"module {declaration}\n", encoding="utf-8")
+                with self.subTest(declaration=declaration), self.assertRaises(PublicationError):
+                    resolve_license(seed)
+
     def test_commented_isc_text_resolves_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

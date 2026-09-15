@@ -405,7 +405,7 @@ def _metadata_identity(seed: ComponentSeed) -> dict[str, str] | None:
     elif seed.ecosystem == "go":
         text = read_regular(path).decode("utf-8")
         module_lines = [line.split(None, 1)[1] for line in text.splitlines() if line.startswith("module ")]
-        if module_lines != [seed.name]:
+        if module_lines not in ([seed.name], [json.dumps(seed.name)]):
             raise PublicationError(f"Go module metadata identity mismatch: {seed.identifier}")
     return {"path": str(path.resolve(strict=True)), "sha256": sha256_file(path)}
 

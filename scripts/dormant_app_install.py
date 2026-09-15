@@ -355,6 +355,17 @@ INSTALLED_40067_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# The installed 40068 and retained notarized app were independently hashed and
+# matched before allocating the ticket-startup correction.
+INSTALLED_40068_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40068",
+    tree_sha256="422197244ef7f336b529f03d51d012a52b25d555178014c70dd519c8ee3e216c",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
@@ -366,6 +377,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40047_PREDECESSOR.build_number: INSTALLED_40047_PREDECESSOR,
         INSTALLED_40048_PREDECESSOR.build_number: INSTALLED_40048_PREDECESSOR,
         INSTALLED_40067_PREDECESSOR.build_number: INSTALLED_40067_PREDECESSOR,
+        INSTALLED_40068_PREDECESSOR.build_number: INSTALLED_40068_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

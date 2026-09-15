@@ -143,7 +143,6 @@ AUTHORITY_PROGRAM: Final = "Contents/Library/HelperTools/CFWGlobalAuthority"
 PROXY_PROCESS_SUFFIX: Final = f"/Contents/Library/LoginItems/{PROXY_PROGRAM.split('/', 3)[-1]}"
 AUTHORITY_PROCESS_SUFFIX: Final = f"/Contents/Library/HelperTools/CFWGlobalAuthority"
 HOST_PROCESS_SUFFIX: Final = "/Contents/MacOS/clash-for-mac"
-TUNNEL_PROCESS_SUFFIX: Final = "/Contents/MacOS/CFWPacketTunnel"
 
 
 @dataclass(frozen=True)
@@ -1796,13 +1795,13 @@ def _absolute_process_path(pid: int) -> str:
     return path
 
 
-def _require_no_host_or_tunnel_process(processes: list[dict[str, Any]]) -> None:
+def _require_no_host_process(processes: list[dict[str, Any]]) -> None:
     if any(
-        process["path"].endswith((HOST_PROCESS_SUFFIX, TUNNEL_PROCESS_SUFFIX))
+        process["path"].endswith(HOST_PROCESS_SUFFIX)
         for process in processes
     ):
         raise install.InstallError(
-            "service_host_running", "Clash for Mac Host or Packet Tunnel is still running"
+            "service_host_running", "Clash for Mac Host is still running"
         )
 
 
@@ -1813,7 +1812,8 @@ def _require_registered_services(
     uid: int,
 ) -> None:
     processes = _processes(runtime)
-    _require_no_host_or_tunnel_process(processes)
+    _require_no_host_process(processes)
+    inactive_tunnels = install.require_inactive_managed_tunnel_processes(processes, runtime.runner)
     login_uids = {
         process["uid"]
         for process in processes
@@ -1855,7 +1855,7 @@ def _require_registered_services(
     observed_helper_pids = {
         process["pid"]
         for process in processes
-        if any(
+        if process["pid"] not in inactive_tunnels and any(
             process["path"].endswith(suffix)
             for suffix in install.CFM_PROCESS_SUFFIXES
         )
@@ -1904,35 +1904,20 @@ def _require_registered_services(
             )
 
 
-def _require_tombstone_and_no_system_extension(runtime: ServiceRuntime) -> None:
+def _require_tombstone_and_inactive_system_extension(runtime: ServiceRuntime) -> None:
     install._require_legacy_tombstone_absent_or_inactive(
         _launchctl_domain(runtime, TOMBSTONE_DOMAIN)
     )
-    extensions = runtime.runner(("/usr/bin/systemextensionsctl", "list"))
-    if extensions.returncode != 0 or extensions.stderr:
-        raise install.InstallError(
-            "service_system_extension_observation_failed",
-            "cannot prove Packet Tunnel system extension absence",
-        )
-    if install.CFM_SYSTEM_EXTENSION_IDENTITY in install._parse_system_extension_identities(
-        extensions.stdout
-    ):
-        raise install.InstallError(
-            "service_system_extension_registered",
-            "Packet Tunnel system extension must be deactivated before service maintenance",
-        )
+    install.require_cfm_system_extension_inactive(runtime.runner)
 
 
 def _uid_from_guard(guard: dict[str, Any]) -> int:
-    processes = guard.get("cfw_processes")
-    if not isinstance(processes, list) or not processes:
-        raise install.InstallError("cfw_identity_invalid", "CFW guard has no GUI identity")
-    uid = processes[0].get("uid")
-    if type(uid) is not int or uid <= 0 or uid != os.geteuid():
+    try:
+        return install.maintenance_owner_uid(guard)
+    except install.InstallError as error:
         raise install.InstallError(
-            "service_user_invalid", "maintenance user differs from the CFW GUI owner"
-        )
-    return uid
+            "service_user_invalid", "maintenance user differs from the observed network owner"
+        ) from error
 
 
 def _assert_absent_job(result: install.CommandResult, domain: str) -> None:
@@ -2050,7 +2035,7 @@ class CurrentServiceTransaction:
         _require_registered_services(
             self.runtime, parent_build=previous.build_number, uid=uid
         )
-        _require_tombstone_and_no_system_extension(self.runtime)
+        _require_tombstone_and_inactive_system_extension(self.runtime)
         proof = _service_receipt(
             self.runtime,
             self.paths.install_paths.candidate_executable,
@@ -2150,7 +2135,7 @@ class CurrentServiceTransaction:
         _require_registered_services(
             self.runtime, parent_build=installed.build_number, uid=uid
         )
-        _require_tombstone_and_no_system_extension(self.runtime)
+        _require_tombstone_and_inactive_system_extension(self.runtime)
         after = self.runtime.capture_guard()
         install._assert_guard_unchanged(before, after)
         self._require_environment(intent)

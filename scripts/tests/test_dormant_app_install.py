@@ -1601,7 +1601,7 @@ class DormantInstallValidationTests(unittest.TestCase):
             require_cfm_dormant(guard(), runner)
         self.assertEqual(captured.exception.code, "cfm_process_running")
 
-    def test_registered_packet_tunnel_extension_blocks_dormancy(self) -> None:
+    def test_connected_registered_packet_tunnel_extension_blocks_dormancy(self) -> None:
         def runner(arguments: tuple[str, ...]) -> CommandResult:
             if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                 return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
@@ -1625,11 +1625,13 @@ class DormantInstallValidationTests(unittest.TestCase):
                     ),
                     "",
                 )
+            if arguments == ("/usr/sbin/scutil", "--nc", "list"):
+                return CommandResult(0, 'Available network connection services in the current set (*=enabled):\n* (Connected) 97543966-32A2-4199-B43A-2F18E9C69F84 VPN (com.bill.clashformac) "Clash for Mac Tunnel" [VPN:com.bill.clashformac]\n', "")
             raise AssertionError(arguments)
 
         with self.assertRaises(InstallError) as captured:
             require_cfm_dormant(guard(), runner)
-        self.assertEqual(captured.exception.code, "cfm_system_extension_registered")
+        self.assertEqual(captured.exception.code, "cfm_tunnel_not_disconnected")
 
     def test_all_known_cfm_runtime_surfaces_absent_passes_read_only_gate(self) -> None:
         observed: list[tuple[str, ...]] = []
@@ -1652,6 +1654,8 @@ class DormantInstallValidationTests(unittest.TestCase):
                 return CommandResult(0, service_status_fixture(), "")
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(0, "0 extension(s)\n", "")
+            if arguments == ("/usr/sbin/scutil", "--nc", "list"):
+                return CommandResult(0, "Available network connection services in the current set (*=enabled):\n", "")
             raise AssertionError(arguments)
 
         require_cfm_dormant(guard(), runner)
@@ -1663,6 +1667,8 @@ class DormantInstallValidationTests(unittest.TestCase):
 
     def test_unrelated_system_extensions_do_not_block_dormancy(self) -> None:
         def runner(arguments: tuple[str, ...]) -> CommandResult:
+            if arguments == ("/usr/sbin/scutil", "--nc", "list"):
+                return CommandResult(0, "Available network connection services in the current set (*=enabled):\n", "")
             if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                 return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
             if is_local_user_inventory_command(arguments):
@@ -1692,6 +1698,8 @@ class DormantInstallValidationTests(unittest.TestCase):
     def test_signed_service_status_and_inactive_tombstone_are_both_required(self) -> None:
         def run_with(*, service_status: str, tombstone: str) -> None:
             def runner(arguments: tuple[str, ...]) -> CommandResult:
+                if arguments == ("/usr/sbin/scutil", "--nc", "list"):
+                    return CommandResult(0, "Available network connection services in the current set (*=enabled):\n", "")
                 if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                     return CommandResult(
                         0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", ""
@@ -2043,6 +2051,19 @@ class InstallPredecessorTests(unittest.TestCase):
 
 
 class SystemExtensionParserTests(unittest.TestCase):
+    def test_retired_versions_and_current_registration_share_an_identity(self) -> None:
+        identity = install.CFM_SYSTEM_EXTENSION_IDENTITY
+        current = system_extensions_fixture(identity)
+        retired = current.splitlines()[-1].replace("1.2.3/123", "1.2.3/122")
+        retired = retired.replace("*\t*\t", "\t\t", 1).replace(
+            "[activated enabled]", "[terminated waiting to uninstall on reboot]"
+        )
+        output = current.replace("1 extension(s)", "2 extension(s)", 1) + retired + "\n"
+        self.assertEqual(_parse_system_extension_identities(output), {identity})
+        with self.assertRaises(InstallError) as raised:
+            _parse_system_extension_identities(output.replace("2 extension(s)", "1 extension(s)", 1))
+        self.assertEqual(raised.exception.code, "cfm_system_extension_observation_invalid")
+
     def test_unrelated_and_near_match_identities_are_accepted(self) -> None:
         identities = _parse_system_extension_identities(
             system_extensions_fixture(
@@ -2157,6 +2178,32 @@ en0: flags=8863<UP> mtu 1500
             ["Thu Jul 23 15:20:55 2026", "Thu Jul 23 15:21:03 2026"],
         )
         self.assertRegex(snapshot["proxy_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_absent_cfw_preserves_observed_network_without_requiring_its_binaries(self) -> None:
+        overrides = {
+            ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="): "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n",
+            ("/usr/sbin/scutil", "--proxy"): "<dictionary> {\n}\n",
+            ("/sbin/ifconfig",): "lo0: flags=8049<UP,LOOPBACK,RUNNING> mtu 16384\n\tinet 127.0.0.1 netmask 0xff000000\n",
+        }
+        with patch.object(install, "_hash_regular", side_effect=AssertionError("CFW must not be required")):
+            snapshot = capture_cfw_guard(self.runner(overrides))
+        self.assertEqual(snapshot["cfw_processes"], [])
+        self.assertEqual(install._validate_guard(snapshot), snapshot)
+        with patch.object(os, "geteuid", return_value=501):
+            self.assertEqual(install.maintenance_owner_uid(snapshot), 501)
+        with patch.object(os, "geteuid", return_value=0), self.assertRaises(InstallError):
+            install.maintenance_owner_uid(snapshot)
+
+    def test_absent_cfw_does_not_turn_missing_network_observations_into_success(self) -> None:
+        absent = {("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="): "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n"}
+        commands = (
+            ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="),
+            ("/usr/sbin/scutil", "--proxy"), ("/usr/sbin/scutil", "--dns"),
+            ("/usr/sbin/netstat", "-rn", "-f", "inet"), ("/sbin/ifconfig",),
+        )
+        for command in commands:
+            with self.subTest(command=command), self.assertRaises(InstallError):
+                capture_cfw_guard(self.runner({**absent, command: ""}))
 
     def test_missing_or_duplicate_fixed_process_is_rejected(self) -> None:
         missing = self.PS.splitlines()[0] + "\n"

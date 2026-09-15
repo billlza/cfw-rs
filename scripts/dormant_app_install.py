@@ -43,6 +43,10 @@ from typing import Any, Callable, Final, Iterator, Literal
 import uuid
 
 if __package__:
+    from .maintenance_network_observations import (
+        NetworkObservationError, cfm_vpn_services, network_routes, tunnel_interfaces,
+        MANAGED_TUNNEL_BUNDLE, require_managed_tunnel_location,
+    )
     from .candidate_artifact_binding import (
         CandidateBindingError,
         load_strict_json,
@@ -78,6 +82,10 @@ if __package__:
     from .repository_source_identity import SourceIdentityError
     from .verify_notary_log import NotaryLogError, validate_files as validate_notary_files
 else:
+    from maintenance_network_observations import (
+        NetworkObservationError, cfm_vpn_services, network_routes, tunnel_interfaces,
+        MANAGED_TUNNEL_BUNDLE, require_managed_tunnel_location,
+    )
     from candidate_artifact_binding import (
         CandidateBindingError,
         load_strict_json,
@@ -119,6 +127,12 @@ SCHEMA_VERSION: Final = 2
 VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 BUILD_NUMBER: Final = ACTIVE_RELEASE_IDENTITY.ga_build
 TEAM_ID: Final = "YKUPL7Z869"
+TUNNEL_SIGNING_REQUIREMENT: Final = (
+    '=identifier "com.bill.clashformac.packet-tunnel" and anchor apple generic '
+    'and certificate 1[field.1.2.840.113635.100.6.2.6] '
+    'and certificate leaf[field.1.2.840.113635.100.6.1.13] '
+    'and certificate leaf[subject.OU] = "YKUPL7Z869"'
+)
 TARGET_NAME: Final = "Clash for Mac.app"
 PAYLOAD_NAME: Final = TARGET_NAME
 PARTIAL_PAYLOAD_NAME: Final = ".Clash for Mac.app.partial"
@@ -907,8 +921,24 @@ def _require_fixed_command(arguments: tuple[str, ...]) -> None:
         ("/usr/sbin/netstat", "-rn", "-f", "inet6"),
         ("/usr/sbin/scutil", "--dns"),
         ("/usr/sbin/scutil", "--proxy"),
+        ("/usr/sbin/scutil", "--nc", "list"),
     }
     if arguments in fixed:
+        return
+    if (
+        len(arguments) == 7
+        and arguments[:6] == (
+            "/usr/bin/codesign", "--verify", "--deep", "--strict",
+            "-R", TUNNEL_SIGNING_REQUIREMENT,
+        )
+        and MANAGED_TUNNEL_BUNDLE.fullmatch(arguments[-1])
+    ):
+        return
+    if (
+        len(arguments) == 4
+        and arguments[:3] == ("/usr/sbin/scutil", "--nc", "status")
+        and re.fullmatch(r"[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}", arguments[3])
+    ):
         return
     if (
         len(arguments) == 3
@@ -1597,6 +1627,7 @@ def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
         return set()
 
     identities: set[tuple[str, str]] = set()
+    registrations: set[tuple[str, str, str]] = set()
     categories: set[str] = set()
     index = 1
     while index < len(lines):
@@ -1631,22 +1662,49 @@ def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
             ):
                 raise InstallError("cfm_system_extension_observation_invalid", invalid)
             identity = (team_id, bundle_match.group(1))
-            if identity in identities:
+            # macOS retains replaced versions until reboot. Count actual
+            # registrations while coalescing their team/bundle presence.
+            registration = (*identity, bundle_match.group(2))
+            if registration in registrations:
                 raise InstallError("cfm_system_extension_observation_invalid", invalid)
+            registrations.add(registration)
             identities.add(identity)
             section_count += 1
             index += 1
         if section_count == 0:
             raise InstallError("cfm_system_extension_observation_invalid", invalid)
 
-    if len(identities) != expected_count:
+    if len(registrations) != expected_count:
         raise InstallError("cfm_system_extension_observation_invalid", invalid)
     return identities
 
 
-def _require_no_cfm_processes(processes: list[dict[str, Any]]) -> None:
+def require_inactive_managed_tunnel_processes(
+    processes: list[dict[str, Any]], runner: CommandRunner
+) -> set[int]:
+    tunnels = [process for process in processes if process["path"].endswith("/Contents/MacOS/CFWPacketTunnel")]
+    if not tunnels:
+        return set()
+    if len(tunnels) != 1 or tunnels[0]["uid"] != 0:
+        raise InstallError("cfm_process_running", "Packet Tunnel process ownership is ambiguous")
+    bundle = Path(tunnels[0]["path"]).parents[2]
+    try:
+        require_managed_tunnel_location(bundle)
+    except (NetworkObservationError, OSError) as error:
+        raise InstallError("cfm_process_running", "Packet Tunnel is not a protected OS-managed copy") from error
+    _require_command_success(runner((
+        "/usr/bin/codesign", "--verify", "--deep", "--strict",
+        "-R", TUNNEL_SIGNING_REQUIREMENT, str(bundle),
+    )), "OS-managed Packet Tunnel signing identity")
+    require_cfm_system_extension_inactive(runner)
+    return {tunnels[0]["pid"]}
+
+
+def _require_no_cfm_processes(processes: list[dict[str, Any]], runner: CommandRunner) -> None:
+    inactive_tunnels = require_inactive_managed_tunnel_processes(processes, runner)
     if any(
-        any(process["path"].endswith(suffix) for suffix in CFM_PROCESS_SUFFIXES)
+        process["pid"] not in inactive_tunnels
+        and any(process["path"].endswith(suffix) for suffix in CFM_PROCESS_SUFFIXES)
         for process in processes
     ):
         raise InstallError(
@@ -1663,10 +1721,15 @@ def capture_cfw_guard(
         "CFW process observation",
     )
     observed = _parse_processes(process_output)
+    if not observed:
+        raise InstallError("process_observation_invalid", "system process observation is empty")
     if require_cfm_absent:
-        _require_no_cfm_processes(observed)
+        _require_no_cfm_processes(observed, runner)
     required = []
+    legacy_running = any(process["path"] in {CFW_GUI, CFW_CORE} for process in observed)
     for path in (CFW_GUI, CFW_CORE):
+        if not legacy_running:
+            break
         matches = [process for process in observed if process["path"] == path]
         if len(matches) != 1:
             raise InstallError(
@@ -1681,13 +1744,14 @@ def capture_cfw_guard(
                 "binary_sha256": _hash_regular(binary, "Clash for Windows executable"),
             }
         )
-    if required[0]["uid"] == 0 or required[1]["uid"] != 0:
+    if required and (required[0]["uid"] == 0 or required[1]["uid"] != 0):
         raise InstallError("cfw_identity_invalid", "Clash for Windows GUI/core uid contract changed")
 
     proxy = _require_command_success(
         runner(("/usr/sbin/scutil", "--proxy")), "system proxy observation"
     )
-    _require_exact_cfw_proxy(proxy)
+    if legacy_running:
+        _require_exact_cfw_proxy(proxy)
     dns = _require_command_success(
         runner(("/usr/sbin/scutil", "--dns")), "DNS observation"
     )
@@ -1700,14 +1764,26 @@ def capture_cfw_guard(
     interfaces = _require_command_success(
         runner(("/sbin/ifconfig",)), "tunnel interface observation"
     )
-    tun_interface = _find_cfw_tun_interface(interfaces)
-    tun = _utun_projection(interfaces, tun_interface)
-    routes4_projection = _normalize_routes(routes4, tun_interface)
-    routes6_projection = _normalize_routes(routes6, tun_interface)
-    if not routes4_projection or CFW_TUN_ADDRESS not in routes4_projection:
-        raise InstallError("cfw_routes_absent", "no CFW tunnel routes are available to protect")
-    if f"nameserver[0] : {CFW_DNS_SERVER}" not in dns:
-        raise InstallError("cfw_dns_invalid", "the exact Clash for Windows DNS binding is absent")
+    if legacy_running:
+        tun_interface = _find_cfw_tun_interface(interfaces)
+        tun = _utun_projection(interfaces, tun_interface)
+        routes4_projection = _normalize_routes(routes4, tun_interface)
+        routes6_projection = _normalize_routes(routes6, tun_interface)
+        if not routes4_projection or CFW_TUN_ADDRESS not in routes4_projection:
+            raise InstallError("cfw_routes_absent", "no CFW tunnel routes are available to protect")
+        if f"nameserver[0] : {CFW_DNS_SERVER}" not in dns:
+            raise InstallError("cfw_dns_invalid", "the exact Clash for Windows DNS binding is absent")
+    else:
+        try:
+            if not proxy.strip().startswith("<dictionary> {") or not proxy.rstrip().endswith("}"):
+                raise NetworkObservationError("system proxy observation is malformed")
+            if not (dns.startswith("DNS configuration\n") or dns.strip() == "No DNS configuration available"):
+                raise NetworkObservationError("DNS observation is malformed")
+            tun = tunnel_interfaces(interfaces)
+            routes4_projection = network_routes(routes4)
+            routes6_projection = network_routes(routes6)
+        except NetworkObservationError as error:
+            raise InstallError("network_observation_invalid", str(error)) from error
     return {
         "cfw_processes": required,
         "dns_sha256": _observation_digest(_normalize_dns(dns)),
@@ -1725,7 +1801,7 @@ def require_cfm_process_absent(runner: CommandRunner) -> list[dict[str, Any]]:
             "Clash for Mac process observation",
         )
     )
-    _require_no_cfm_processes(processes)
+    _require_no_cfm_processes(processes, runner)
     return processes
 
 
@@ -1970,6 +2046,49 @@ def _require_current_services_unregistered(
         )
 
 
+def maintenance_owner_uid(guard: dict[str, Any]) -> int:
+    processes = guard.get("cfw_processes")
+    if not isinstance(processes, list) or len(processes) not in {0, 2}:
+        raise InstallError("cfw_identity_invalid", "network guard process identities are invalid")
+    if processes and not isinstance(processes[0], dict):
+        raise InstallError("cfw_identity_invalid", "network guard owner is malformed")
+    uid = processes[0].get("uid") if processes else os.geteuid()
+    if type(uid) is not int or uid <= 0 or uid != os.geteuid():
+        raise InstallError("cfw_identity_invalid", "network guard owner differs from the maintenance user")
+    return uid
+
+
+def require_cfm_system_extension_inactive(runner: CommandRunner) -> None:
+    result = runner(("/usr/bin/systemextensionsctl", "list"))
+    if result.returncode != 0:
+        raise InstallError("cfm_system_extension_observation_failed", "cannot observe system extension registration")
+    if result.stderr:
+        raise InstallError("cfm_system_extension_observation_invalid", "system extension observation emitted diagnostics")
+    extensions = result.stdout
+    identities = _parse_system_extension_identities(extensions)
+    if any(bundle == CFM_SYSTEM_EXTENSION_IDENTITY[1] and team != TEAM_ID for team, bundle in identities):
+        raise InstallError("cfm_system_extension_identity_invalid", "CFM extension has an unexpected team")
+    try:
+        before = cfm_vpn_services(_require_command_success(
+            runner(("/usr/sbin/scutil", "--nc", "list")), "CFM VPN service observation"
+        ))
+        for identifier, state in before:
+            if state != "Disconnected":
+                raise InstallError("cfm_tunnel_not_disconnected", "CFM VPN must be disconnected before maintenance")
+            status = _require_command_success(
+                runner(("/usr/sbin/scutil", "--nc", "status", identifier)), "CFM VPN status observation"
+            )
+            if not status.splitlines() or status.splitlines()[0] != "Disconnected":
+                raise InstallError("cfm_tunnel_not_disconnected", "CFM VPN status changed during observation")
+        after = cfm_vpn_services(_require_command_success(
+            runner(("/usr/sbin/scutil", "--nc", "list")), "CFM VPN service re-observation"
+        ))
+        if after != before:
+            raise InstallError("cfm_tunnel_state_changed", "CFM VPN services changed during observation")
+    except NetworkObservationError as error:
+        raise InstallError("cfm_tunnel_observation_invalid", str(error)) from error
+
+
 def require_cfm_dormant(
     guard: dict[str, Any],
     runner: CommandRunner,
@@ -1977,12 +2096,7 @@ def require_cfm_dormant(
     executable: Path | None = None,
 ) -> None:
     processes = require_cfm_process_absent(runner)
-    cfw_processes = guard.get("cfw_processes")
-    if not isinstance(cfw_processes, list) or not cfw_processes:
-        raise InstallError("cfw_identity_invalid", "CFW guard has no GUI identity")
-    gui_uid = cfw_processes[0].get("uid")
-    if type(gui_uid) is not int or gui_uid <= 0:
-        raise InstallError("cfw_identity_invalid", "CFW GUI uid is invalid")
+    gui_uid = maintenance_owner_uid(guard)
     require_single_interactive_local_user(runner, gui_uid)
     gui_uids = {gui_uid}
     gui_uids.update(
@@ -2013,23 +2127,7 @@ def require_cfm_dormant(
     # `sfltool dumpbtm` is not a bounded API. The signed Host SMAppService
     # statuses plus exact launchd job/process absence are authoritative here.
     _require_current_services_unregistered(runner, executable=executable)
-    extensions = runner(("/usr/bin/systemextensionsctl", "list"))
-    if extensions.returncode != 0:
-        raise InstallError(
-            "cfm_system_extension_observation_failed",
-            "cannot prove Clash for Mac system extension absence",
-        )
-    if extensions.stderr:
-        raise InstallError(
-            "cfm_system_extension_observation_invalid",
-            "system extension observation produced unexpected diagnostic output",
-        )
-    extension_identities = _parse_system_extension_identities(extensions.stdout)
-    if CFM_SYSTEM_EXTENSION_IDENTITY in extension_identities:
-        raise InstallError(
-            "cfm_system_extension_registered",
-            "Clash for Mac packet-tunnel system extension remains registered",
-        )
+    require_cfm_system_extension_inactive(runner)
 
 
 def _assert_guard_unchanged(before: dict[str, Any], after: dict[str, Any]) -> None:
@@ -2640,7 +2738,7 @@ def _validate_guard(value: object) -> dict[str, Any]:
         "CFW guard",
     )
     processes = guard["cfw_processes"]
-    if not isinstance(processes, list) or len(processes) != 2:
+    if not isinstance(processes, list) or len(processes) not in {0, 2}:
         raise InstallError("journal_invalid", "CFW guard process set is invalid")
     paths = []
     for process in processes:
@@ -2659,7 +2757,7 @@ def _validate_guard(value: object) -> dict[str, Any]:
         ) is None:
             raise InstallError("journal_invalid", "CFW process start time is invalid")
         _validate_sha256(process["binary_sha256"], "CFW executable digest")
-    if paths != [CFW_GUI, CFW_CORE]:
+    if paths not in ([], [CFW_GUI, CFW_CORE]):
         raise InstallError("journal_invalid", "CFW process paths are not fixed")
     for key in guard.keys() - {"cfw_processes"}:
         _validate_sha256(guard[key], f"CFW guard {key}")

@@ -1131,6 +1131,19 @@ wire proof.
 6. while the old CFM is Off and its Host is absent, preserve the inactive
    one-way legacy tombstone and run the fixed maintenance/install sequence:
 
+   CFW need not be running. If both of its known GUI/core processes are
+   positively absent, the guard records that absence and preserves the observed
+   proxy, DNS, configured routes and tunnel interfaces. Failed or malformed OS
+   observations remain blockers. Maintenance runs as the verified owning local
+   administrator; it does not obtain its user identity from a required CFW GUI.
+   A registered CFM System Extension may remain installed only when macOS
+   reports all CFM VPN services Disconnected (or a complete list proves there
+   are none). An idle root Packet Tunnel process may remain only in its protected
+   OS-managed copy under `/Library/SystemExtensions`, with its exact Developer ID
+   signing requirement verified. Host/current-service process absence and the
+   signed Authority Off proofs remain required. No VPN activation, registration removal or network-setting command
+   is added to the installer.
+
    ```bash
    scripts/run_current_service_transaction.sh --decommission
    scripts/run_dormant_app_install.sh --install

@@ -1149,7 +1149,11 @@
       "selector: selectors.BaseSelector | None = None",
       "command_io_unavailable",
       "def terminal_snapshot(self) -> TerminalInstallJournalSnapshot:",
-      "RETIRED_SERVICE_TRANSACTION_NAMES: Final"
+      "RETIRED_SERVICE_TRANSACTION_NAMES: Final",
+      "require_inactive_managed_tunnel_processes",
+      "TUNNEL_SIGNING_REQUIREMENT",
+      "maintenance_owner_uid",
+      "registrations.add(registration)"
     ],
     "scripts/current_service_transaction.py": [
       "cfw-current-service-transaction-v3",
@@ -1173,7 +1177,7 @@
       "capture_cfw_guard(self.runner, require_cfm_absent=False)",
       "RENAME_EXCL | install.RENAME_NOFOLLOW_ANY",
       "TOMBSTONE_DOMAIN: Final = \"system/com.bill.clashformac.helper\"",
-      "service_system_extension_registered",
+      "install.require_cfm_system_extension_inactive(runtime.runner)",
       "service_install_evidence_invalid",
       "installation[\"previous\"] != intent[\"previous\"]",
       "--final"
@@ -3277,6 +3281,14 @@
       "apply --check",
       "apply --reverse --check",
       "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256"
+    ],
+    "scripts/maintenance_network_observations.py": [
+      "NetworkObservationError",
+      "network_routes",
+      "cfm_vpn_services",
+      "require_managed_tunnel_location",
+      "if \"L\" not in row[2] and \"W\" not in row[2]:",
+      "MANAGED_TUNNEL_BUNDLE"
     ]
   },
   "artifactSourceSha256": {
@@ -3308,8 +3320,8 @@
     "scripts/prepare_publication_evidence.py": "204204877eb7e0dce49d0deda0599df7c11bb859d3363f48ba3ad3df23a53327",
     "scripts/verify_ci_no_masking.py": "bd3989e042cb78bb283b6c394e9eb33e4652f20dd77651479d68da05d4a43b69",
     ".github/workflows/ci.yml": "a0a29e6791e00f92af38be160d28bdf53d243592a04a6403d25346b81d0e2d3a",
-    "scripts/dormant_app_install.py": "1d42adb1d595c03619218332011efa6a41be1734b76f1618eb043da4f91448ed",
-    "scripts/current_service_transaction.py": "0bdf48f5219225be59cf7d2d7981ee77b48448d984bd97fc63ee04957189caf6",
+    "scripts/dormant_app_install.py": "ce2812d42c22f05e48c8102707cafe5cd18087b60efc660db625b8226010422d",
+    "scripts/current_service_transaction.py": "aaa8189e6ab61956228b74e18568e68aa3280a26bd58fefe9bb3830d80690982",
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
     "scripts/notarization_transaction.py": "e8e248483ffc25cb43170aa419d940cd7cf3372277c7b69c1a22fb39a4830bd3",
     "scripts/notarization_executor.py": "15a2065c0f7792d3b0609082471d557136b26575d3d7244b15434cc461e50005",
@@ -3351,7 +3363,7 @@
     "scripts/release_publication_path_contract.sh": "0f25686c1cb474bfa24d50ec5f227d45a53532a10ca332ad2b995f79d51e017b",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "a33bec56c4c8ba2e422f577b6f6365419e46dbcde7bfde2a0857fa79185b00ad",
+    "RELEASE.md": "142ea898577f6ebb176e5115ee004cf7e293e20e9861cb3178c8fcefb3ce774c",
     "scripts/updater_signing_launcher.py": "b6240012d2539077dcfa6969e5fb3118486f0469b75c75d4e984075d4c18b974",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "0189ac29728266fbc36e8945f60ea44c6b1f583c96d64e93e57bd36fe8e70cb3",
@@ -3453,6 +3465,7 @@
     "tools/go-release-tools/go.sum": "6c37e1d4a75699211d3a482cf561098b84427252f2c059244f7f29b0fb1d0906",
     "scripts/xcodegen-2.46.0-dependency-refresh.patch": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
     "scripts/aexml-4.7.0-supported-watchos.patch": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
-    "scripts/xcodegen_dependency_contract.sh": "0ef7d7447bd9aebf32c0073be65bcfe65f0bcefdfdcddebffdb60311647ff7d2"
+    "scripts/xcodegen_dependency_contract.sh": "0ef7d7447bd9aebf32c0073be65bcfe65f0bcefdfdcddebffdb60311647ff7d2",
+    "scripts/maintenance_network_observations.py": "48b606d55bcd9e8d7dc2df57bb6c32400c5cf26b1d467daa211e7a4e0ce26ce5"
   }
 }

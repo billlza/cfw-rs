@@ -1117,6 +1117,29 @@ class ServiceEventStoreTests(unittest.TestCase):
 
 
 class RegisteredServiceObservationTests(unittest.TestCase):
+    def test_idle_managed_tunnel_is_distinct_from_current_app_service_jobs(self) -> None:
+        from test_maintenance_network_observations import (
+            MANAGED_PROCESS, RegisteredExtensionMaintenanceTests,
+        )
+        tunnel_runner, _ = RegisteredExtensionMaintenanceTests().runner()
+        process_line = f"7002 0 Sun Aug 23 04:02:00 2026 {MANAGED_PROCESS['path']}"
+        base = self.runtime(service_processes(extra=(process_line,)))
+
+        def runner(command):
+            if command[0] in ("/usr/bin/codesign", "/usr/bin/systemextensionsctl", "/usr/sbin/scutil"):
+                return tunnel_runner(command)
+            return base.runner(command)
+
+        paths = {
+            6805: f"/Applications/Clash for Mac.app/{service.PROXY_PROGRAM}",
+            6806: f"/Applications/Clash for Mac.app/{service.AUTHORITY_PROGRAM}",
+        }
+        runtime = service.ServiceRuntime(runner, base.observe_environment)
+        with patch.object(install, "require_managed_tunnel_location"), patch.object(
+            service, "_absolute_process_path", side_effect=lambda pid: paths[pid]
+        ):
+            service._require_registered_services(runtime, parent_build="40019", uid=501)
+
     @staticmethod
     def runtime(process_output: str) -> service.ServiceRuntime:
         proxy_domain = service.PROXY_DOMAIN_TEMPLATE.format(uid=501)
@@ -1505,7 +1528,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             ),
             patch.object(service, "_service_receipt", side_effect=run_action),
             patch.object(service, "_require_registered_services"),
-            patch.object(service, "_require_tombstone_and_no_system_extension"),
+            patch.object(service, "_require_tombstone_and_inactive_system_extension"),
         ):
             result = self.fixture.transaction.recommission()
 
@@ -1624,7 +1647,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
                     patch.object(fixture.transaction, "_identity_pair", return_value=(candidate, previous)),
                     patch.object(service, "_service_receipt", side_effect=run_action),
                     patch.object(service, "_require_registered_services"),
-                    patch.object(service, "_require_tombstone_and_no_system_extension"),
+                    patch.object(service, "_require_tombstone_and_inactive_system_extension"),
                     patch.object(install, "require_single_interactive_local_user"),
                 ):
                     result = fixture.transaction.preflight()

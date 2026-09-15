@@ -1149,11 +1149,21 @@ wire proof.
    is added to the installer.
 
    ```bash
+   scripts/run_archive_install_history.sh --previous-build 40068
    scripts/run_current_service_transaction.sh --decommission
    scripts/run_dormant_app_install.sh --install
    scripts/run_current_service_transaction.sh --recommission
    scripts/run_ga_acceptance_journal_export.sh --export
    ```
+
+   The history step is needed when the preceding completed installation still
+   occupies the fixed producer paths. It validates both terminal journals and
+   the exact installed predecessor under the existing maintenance, service and
+   install locks. It retains their original bytes beneath
+   `/Applications/.com.bill.clashformac.install-history-v1/40068`, with a durable
+   intent and completion receipt. A retry resumes the same two renames;
+   pending work, contradictory records, changed bytes or unsafe paths block it.
+   It neither changes network/service state nor removes an application bundle.
 
    Decommission and install each perform their own mandatory admission checks;
    separate `--preflight` calls remain available for diagnosis. The first

@@ -3293,6 +3293,21 @@
       "require_managed_tunnel_location",
       "if \"L\" not in row[2] and \"W\" not in row[2]:",
       "MANAGED_TUNNEL_BUNDLE"
+    ],
+    "scripts/archive_install_history.py": [
+      "service_store.locked(require_existing=True)",
+      "install_store.locked(require_existing=True)",
+      "terminal_snapshot()",
+      "cfm-install-history-intent-v1",
+      "cfm-install-history-complete-v1",
+      "require_source_unchanged()",
+      "observe_installed() != expected"
+    ],
+    "scripts/run_archive_install_history.sh": [
+      "cfw_seal_release_tool_environment production",
+      "cfw_select_release_apple_toolchain",
+      "cfw_run_release_python_script",
+      "scripts/archive_install_history.py"
     ]
   },
   "artifactSourceSha256": {
@@ -3367,7 +3382,7 @@
     "scripts/release_publication_path_contract.sh": "bba7d1376a63d7efd50cae49e67ba9d3a5706a7ad189fa5d6ec109b8ea5243da",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "a41822311f46616fcde88198aa15d65827d6b9e67563bc581ae91fb46bcef373",
+    "RELEASE.md": "538001236633298fccdccfd2b064fbfab0f1e383d4c827960e39d0c07ececc42",
     "scripts/updater_signing_launcher.py": "b6240012d2539077dcfa6969e5fb3118486f0469b75c75d4e984075d4c18b974",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "0189ac29728266fbc36e8945f60ea44c6b1f583c96d64e93e57bd36fe8e70cb3",
@@ -3470,6 +3485,8 @@
     "scripts/xcodegen-2.46.0-dependency-refresh.patch": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
     "scripts/aexml-4.7.0-supported-watchos.patch": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
     "scripts/xcodegen_dependency_contract.sh": "0ef7d7447bd9aebf32c0073be65bcfe65f0bcefdfdcddebffdb60311647ff7d2",
-    "scripts/maintenance_network_observations.py": "48b606d55bcd9e8d7dc2df57bb6c32400c5cf26b1d467daa211e7a4e0ce26ce5"
+    "scripts/maintenance_network_observations.py": "48b606d55bcd9e8d7dc2df57bb6c32400c5cf26b1d467daa211e7a4e0ce26ce5",
+    "scripts/archive_install_history.py": "ebcce5f7d7b8e91192cebb0227abba10f04daa697bcde802118159f43e4d090b",
+    "scripts/run_archive_install_history.sh": "574a14e1b9eef0ba92baffc9f10a47b8492096dd33bb214b475167783093636e"
   }
 }

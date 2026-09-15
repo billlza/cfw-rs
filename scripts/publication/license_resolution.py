@@ -34,6 +34,7 @@ REVIEWED_SPDX_LICENSE_IDS = frozenset(
     {
         "0BSD",
         "Apache-2.0",
+        "Artistic-2.0",
         "BSD-2-Clause",
         "BSD-3-Clause",
         "BSL-1.0",
@@ -314,6 +315,15 @@ def _supports(identifier: str, text: str, filename: str) -> bool:
             "version 2.0, january 2004" in lowered
             or "apache license, version 2.0" in lowered
         )
+    if identifier == "Artistic-2.0":
+        return (
+            "the artistic license 2.0" in lowered
+            and "permissions for redistribution of the standard version" in lowered
+            and "distribution of modified versions of the package as source" in lowered
+            and "this license includes the non-exclusive, worldwide, free-of-charge patent license" in lowered
+            and "disclaimer of warranty" in lowered
+            and all(re.search(rf"\({section}\)\s", uncommented) for section in range(1, 15))
+        )
     if identifier == "LLVM-exception":
         return "llvm exceptions to the apache 2.0 license" in lowered or "llvm-exception" in name
     if identifier == "MPL-2.0":
@@ -476,6 +486,7 @@ def resolve_license(seed: ComponentSeed) -> dict[str, Any]:
     for identifier in (
         "0BSD",
         "Apache-2.0",
+        "Artistic-2.0",
         "BSD-2-Clause",
         "BSD-3-Clause",
         "BSL-1.0",

@@ -31,6 +31,21 @@ ISC_COMMENTED_TEXT = """// Copyright 2026 Fixture Authors.
 
 
 class LicenseResolutionTests(unittest.TestCase):
+    def test_npm_artistic_2_requires_the_actual_complete_license_sections(self) -> None:
+        text = (Path(__file__).parent / "fixtures/npm-12.0.2-LICENSE").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed = self.seed(root, declared_license="Artistic-2.0")
+            license_file = root / "LICENSE"
+            license_file.write_text(text, encoding="utf-8")
+            resolution = resolve_license(seed)
+            self.assertEqual(resolution["status"], "automatic")
+            self.assertEqual(resolution["expression"], "Artistic-2.0")
+            for changed in ("The Artistic License 2.0\n", text.replace("(13)", "", 1), text.replace("(14)", "", 1)):
+                license_file.write_text(changed, encoding="utf-8")
+                with self.subTest(changed=changed[:45]):
+                    self.assertEqual(resolve_license(seed)["status"], "manual-required")
+
     def seed(
         self,
         root: Path,

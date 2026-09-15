@@ -3201,7 +3201,8 @@
       "MAX_LICENSE_BYTES = 4 * 1024 * 1024",
       "MAX_SPDX_BRANCHES = 128",
       "def resolve_license(",
-      "def validate_automatic_resolution("
+      "def validate_automatic_resolution(",
+      "\"Artistic-2.0\""
     ],
     "scripts/verify_release_authority_gate.py": [
       "class AuthorityGateContractError(",
@@ -3457,7 +3458,7 @@
     "scripts/publication/source_archive.py": "4a3e73c95aea8991e80f1872636db0a4b707427146ae01bd2e7c30d3af55cd71",
     "scripts/publication/sbom.py": "4687ce76a284e0d4ddaa4fca6d08b1f75db3e6829c776caf9dec8c04f0e96b9d",
     "scripts/publication/legal_review.py": "b2d2941861c70cc89ebbe08888d5a0c31508133f1e8ea164e7435e653a3ee4f1",
-    "scripts/publication/license_resolution.py": "937eceffbcabf19d60e45a2bffefc6ad7996c7aab197aeee0267c13fc1cfb531",
+    "scripts/publication/license_resolution.py": "9e00327e2c3cb8383c7d9303c61b13a53208d09c5b1b9c068f54e60e430efacf",
     "scripts/verify_release_authority_gate.py": "7e37868a9c8f48af23c00f25c533d71ff6f6e3b99aa924a40009f68507dd0f01",
     "scripts/verify_production_boundary_removal.py": "e32545944c88bdc1ac09ad5432ea18e5fb85460f38087b9b30341794c23f5159",
     "scripts/publication/__init__.py": "5fc6024921e18d7ea6ea3f9f02a00a102c4ab5e89166f881cd8d001b24919271",

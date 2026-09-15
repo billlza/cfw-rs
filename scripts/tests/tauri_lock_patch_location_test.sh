@@ -7,9 +7,14 @@ unset CDPATH
 
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/../.." && /bin/pwd -P)"
 readonly repo_root
+# shellcheck source=scripts/dependency_pins.env
+source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_python_launcher.sh
 source "$repo_root/scripts/release_python_launcher.sh"
-readonly lock_patch="$repo_root/scripts/tauri-cli-2.11.4-dependency-refresh.patch"
+readonly lock_patch="$repo_root/$TAURI_CLI_LOCK_PATCH_PATH"
+# Exact Cargo.lock from the checksum-pinned crates.io archive. Keep the fixture
+# offline and independent of both the patch and an installed Tauri CLI.
+readonly upstream_lock_fixture="$repo_root/scripts/tests/fixtures/tauri-cli-$TAURI_CLI_VERSION.Cargo.lock"
 readonly cargo_bin="${CFW_RELEASE_CARGO_EXECUTABLE:-}"
 readonly python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
 readonly inside_parent="$repo_root/target/release-gate-tests"
@@ -51,22 +56,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-write_lock() {
-  [[ $# -eq 3 ]] || return 2
-  local output="$1"
-  local version="$2"
-  local checksum="$3"
-  local line
-  {
-    for ((line = 1; line <= 6299; line += 1)); do
-      printf '# fixture line %d\n' "$line"
-    done
-    printf 'version = "%s"\n' "$version"
-    printf 'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
-    printf 'checksum = "%s"\n' "$checksum"
-  } >"$output"
-}
-
 verify_patch_location() {
   [[ $# -eq 2 ]] || return 2
   local fixture_root="$1"
@@ -74,18 +63,14 @@ verify_patch_location() {
   local staging="$fixture_root/staging"
   local source_root="$staging/tauri-cli-2.11.4"
   local cargo_lock="$source_root/Cargo.lock"
-  local expected_lock="$fixture_root/expected.Cargo.lock"
-  local actual_sha256 expected_sha256 discovered_repository
+  local actual_sha256 discovered_repository
 
   /bin/mkdir -m 0700 "$staging" "$source_root"
-  write_lock \
-    "$cargo_lock" \
-    "0.9.8" \
-    "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
-  write_lock \
-    "$expected_lock" \
-    "0.9.9" \
-    "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+  /usr/bin/install -m 0600 "$upstream_lock_fixture" "$cargo_lock"
+  printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
+    /usr/bin/shasum -a 256 --check >/dev/null
+  printf '%s  %s\n' "$TAURI_CLI_LOCK_PATCH_SHA256" "$lock_patch" |
+    /usr/bin/shasum -a 256 --check >/dev/null
 
   if [[ "$expect_parent_repository" == "yes" ]]; then
     discovered_repository="$(/usr/bin/git -C "$source_root" rev-parse --show-toplevel)"
@@ -104,18 +89,19 @@ verify_patch_location() {
     /usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"
   GIT_CEILING_DIRECTORIES="$staging" \
     /usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"
-  /usr/bin/cmp -s "$cargo_lock" "$expected_lock" || {
-    echo "error: Tauri lock patch did not modify the exact extracted lock" >&2
-    return 1
-  }
   actual_sha256="$(/usr/bin/shasum -a 256 "$cargo_lock" | /usr/bin/awk '{print $1}')"
-  expected_sha256="$(/usr/bin/shasum -a 256 "$expected_lock" | /usr/bin/awk '{print $1}')"
-  [[ "$actual_sha256" == "$expected_sha256" ]] || {
-    echo "error: Tauri lock patch result digest differs by staging location" >&2
+  [[ "$actual_sha256" == "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" ]] || {
+    echo "error: Tauri lock patch did not produce the exact pinned lock" >&2
     return 1
   }
   GIT_CEILING_DIRECTORIES="$staging" \
     /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"
+  GIT_CEILING_DIRECTORIES="$staging" \
+    /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse "$lock_patch"
+  /usr/bin/cmp -s "$cargo_lock" "$upstream_lock_fixture" || {
+    echo "error: Tauri lock patch did not restore the exact upstream lock" >&2
+    return 1
+  }
 }
 
 verify_cargo_workspace_location() {

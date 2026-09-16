@@ -366,6 +366,17 @@ INSTALLED_40068_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Installed 40069 and its retained notarized app independently match this tree.
+# The IPv6 DNS switch changes product bytes while preserving this predecessor.
+INSTALLED_40069_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40069",
+    tree_sha256="edca78995aacfbb35247e76e7f6aefa451c974e1b4cce4376cf0e1adfb7a91d5",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
@@ -378,6 +389,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40048_PREDECESSOR.build_number: INSTALLED_40048_PREDECESSOR,
         INSTALLED_40067_PREDECESSOR.build_number: INSTALLED_40067_PREDECESSOR,
         INSTALLED_40068_PREDECESSOR.build_number: INSTALLED_40068_PREDECESSOR,
+        INSTALLED_40069_PREDECESSOR.build_number: INSTALLED_40069_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

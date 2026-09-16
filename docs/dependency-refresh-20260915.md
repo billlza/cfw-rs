@@ -1,6 +1,6 @@
 # Compatible dependency refresh — 2026-09-15
 
-The dependency refresh produced 0.4.0 build 40068. Its frozen predecessor 40067 is preserved. The subsequent Tunnel startup correction is allocated as build 40069; installed 40068 and its failed-start evidence remain preserved. This document records source preparation and local validation; it does not assert publication or new-package runtime acceptance.
+The dependency refresh produced 0.4.0 build 40068. Its frozen predecessor 40067 is preserved. The subsequent Tunnel startup correction is allocated as build 40069; installed 40068 and its failed-start evidence remain preserved. The direct IPv6 DNS control is allocated as build 40070, preserving installed 40069. This document records source preparation and local validation; it does not assert publication or new-package runtime acceptance.
 
 | Input | Previous | Selected |
 | --- | --- | --- |

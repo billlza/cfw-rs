@@ -25,7 +25,7 @@ PREVIOUS = install.AppIdentity(
 # speak the same vocabulary the production path selects.
 BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40069", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40070", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -172,7 +172,7 @@ class ServiceEventStoreTests(unittest.TestCase):
         paths = service.ServicePaths.production()
 
         self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
-        self.assertEqual(paths.install_paths.profile.build_number, "40069")
+        self.assertEqual(paths.install_paths.profile.build_number, "40070")
         # The predecessor is observed and bound, never declared on the profile.
         self.assertFalse(hasattr(paths.install_paths.profile, "previous_build_number"))
         self.assertEqual(
@@ -188,6 +188,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                 "40048": install.INSTALLED_40048_PREDECESSOR,
                 "40067": install.INSTALLED_40067_PREDECESSOR,
                 "40068": install.INSTALLED_40068_PREDECESSOR,
+                "40069": install.INSTALLED_40069_PREDECESSOR,
             },
         )
         self.assertEqual(
@@ -1548,7 +1549,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             (CANDIDATE, install.AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40019", "f" * 64), "predecessor_identity_mismatch"),
             # The GA build itself is never a predecessor.
-            (CANDIDATE, install.AppIdentity("0.4.0", "40069", "a" * 64), "predecessor_unsupported"),
+            (CANDIDATE, install.AppIdentity("0.4.0", "40070", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40043", "a" * 64), "predecessor_identity_mismatch"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40044", "a" * 64), "predecessor_identity_mismatch"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40045", "a" * 64), "predecessor_identity_mismatch"),

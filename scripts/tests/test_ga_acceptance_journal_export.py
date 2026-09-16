@@ -22,14 +22,14 @@ from scripts.publication.durable_file import (
 )
 
 
-# The recorded predecessor is the installed 40068 with its real frozen tree
+# The recorded predecessor is the installed 40069 with its real frozen tree
 # identity; the install journal is only readable against the exact predecessor
 # it names, and that predecessor selects the current service vocabulary.
 PREVIOUS = install.AppIdentity(
-    "0.4.0", "40068", install.INSTALLED_40068_PREDECESSOR.tree_sha256
+    "0.4.0", "40069", install.INSTALLED_40069_PREDECESSOR.tree_sha256
 )
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40069", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40070", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -888,7 +888,7 @@ class JournalExportSourceContractTests(unittest.TestCase):
                 journal_export.PREVIOUS_BUILD,
                 journal_export.GA_BUILD,
             ),
-            ("0.4.0", "40068", "40069"),
+            ("0.4.0", "40069", "40070"),
         )
         self.assertEqual(
             journal_export.ENVIRONMENT_RELATIVE,

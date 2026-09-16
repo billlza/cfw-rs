@@ -16,8 +16,8 @@ class InstallHistoryTests(unittest.TestCase):
     def setUp(self) -> None:
         # Construct a completed historical upgrade, then validate it through
         # today's operator whose active build is newer.
-        profile = replace(install.GA_INSTALL_PROFILE, build_number="40068")
-        self.expected = replace(fixture_module.CANDIDATE.app, build_number="40068")
+        profile = replace(install.GA_INSTALL_PROFILE, build_number="40069")
+        self.expected = replace(fixture_module.CANDIDATE.app, build_number="40069")
         candidate = replace(fixture_module.CANDIDATE, app=self.expected)
         previous = install.AppIdentity(
             "0.4.0", "40067", install.INSTALLED_40067_PREDECESSOR.tree_sha256)
@@ -27,7 +27,7 @@ class InstallHistoryTests(unittest.TestCase):
             self.fixture = fixture_module.JournalExportFixture(previous=previous)
         self.addCleanup(self.fixture.cleanup)
         self.paths = self.fixture.install_paths
-        self.destination = self.paths.target_parent / archive.HISTORY_NAME / "40068"
+        self.destination = self.paths.target_parent / archive.HISTORY_NAME / "40069"
         self.executor = {"repositoryCommit": "a" * 40, "releaseSourceSha256": "b" * 64}
 
     def retain(self, **options: object) -> Path:

@@ -20,6 +20,9 @@ use native_product_input::{
 /// is no shared directory, no implicit default, and no stale-directory recovery.
 const NATIVE_PRODUCTS_OUTPUT_ENV: &str = "CFW_NATIVE_PRODUCTS_OUTPUT";
 const BUILD_NUMBER_ENV: &str = "CFW_BUILD_NUMBER";
+const VALIDATION_XCODE_VERSION_ENV: &str = "CFW_UNSIGNED_VALIDATION_XCODE_VERSION";
+const VALIDATION_XCODE_BUILD_ENV: &str = "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION";
+const VALIDATION_PYTHON_ENV: &str = "CFW_UNSIGNED_VALIDATION_PYTHON";
 const REPOSITORY_COMMIT_ENV: &str = "CFW_REPOSITORY_COMMIT";
 const RELEASE_SOURCE_SHA256_ENV: &str = "CFW_RELEASE_SOURCE_SHA256";
 const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
@@ -178,6 +181,9 @@ fn main() {
     );
     println!("cargo:rerun-if-env-changed={NATIVE_PRODUCTS_OUTPUT_ENV}");
     println!("cargo:rerun-if-env-changed={BUILD_NUMBER_ENV}");
+    println!("cargo:rerun-if-env-changed={VALIDATION_XCODE_VERSION_ENV}");
+    println!("cargo:rerun-if-env-changed={VALIDATION_XCODE_BUILD_ENV}");
+    println!("cargo:rerun-if-env-changed={VALIDATION_PYTHON_ENV}");
     println!("cargo:rerun-if-env-changed={REPOSITORY_COMMIT_ENV}");
     println!("cargo:rerun-if-env-changed={RELEASE_SOURCE_SHA256_ENV}");
     println!("cargo:rerun-if-env-changed={GO_TOOLCHAIN_TREE_SHA256_ENV}");
@@ -505,6 +511,14 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         .get("MACOS_DEPLOYMENT_TARGET")
         .ok_or_else(|| "required pin MACOS_DEPLOYMENT_TARGET is missing".to_string())?;
     let products = candidate_native_products_root(repository_root)?;
+    let validation_version = optional_utf8_environment(VALIDATION_XCODE_VERSION_ENV)?;
+    let validation_build = optional_utf8_environment(VALIDATION_XCODE_BUILD_ENV)?;
+    let validation_python = optional_utf8_environment(VALIDATION_PYTHON_ENV)?;
+    let (xcode_version, xcode_build) = products.context.expected_apple_identity(
+        (xcode_version, xcode_build),
+        (validation_version.as_deref(), validation_build.as_deref()),
+        validation_python.as_deref(),
+    )?;
     for (product, artifact_kind) in NATIVE_PRODUCTS {
         let product_path = products.root.join(product);
         let product_manifest_path = products.root.join(format!("{product}.manifest.json"));
@@ -596,6 +610,16 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     // (Contents/Frameworks), never from the candidate build directory.
     println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../Frameworks");
     Ok(())
+}
+
+fn optional_utf8_environment(name: &str) -> Result<Option<String>, String> {
+    std::env::var_os(name)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| format!("{name} must be UTF-8"))
+        })
+        .transpose()
 }
 
 /// Resolve the candidate-scoped native product root that the release build must

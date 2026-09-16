@@ -21,6 +21,88 @@ const ARTIFACTS: [&str; 5] = [
     "CFWLegacyTombstone",
 ];
 
+#[test]
+fn ga_apple_identity_stays_pinned_and_refuses_every_validation_selection() {
+    let pinned = ("27.0", "27A266a");
+    assert_eq!(
+        NativeProductContext::GaPreSign
+            .expected_apple_identity(pinned, (None, None), None)
+            .unwrap(),
+        pinned
+    );
+    for selection in [
+        (Some("27.0"), Some("27A5252f")),
+        (Some("27.0"), Some("27A266a")),
+        (Some(""), None),
+    ] {
+        assert!(
+            NativeProductContext::GaPreSign
+                .expected_apple_identity(pinned, selection, Some("/toolchain/python3"))
+                .is_err()
+        );
+    }
+    assert!(
+        NativeProductContext::GaPreSign
+            .expected_apple_identity(pinned, (None, None), Some("/toolchain/python3"))
+            .is_err()
+    );
+}
+
+#[test]
+fn unsigned_apple_identity_accepts_the_explicit_hosted_version() {
+    let context = NativeProductContext::UnsignedValidation;
+    let pinned = ("27.0", "27A266a");
+    assert_eq!(
+        context
+            .expected_apple_identity(pinned, (None, None), None)
+            .unwrap(),
+        pinned
+    );
+    for expected in [
+        ("27.0", "27A5252f"),
+        ("26.4", "17E133"),
+        ("27.1", "27B5032a"),
+    ] {
+        assert_eq!(
+            context
+                .expected_apple_identity(
+                    pinned,
+                    (Some(expected.0), Some(expected.1)),
+                    Some("/toolchain/python3")
+                )
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn unsigned_apple_identity_rejects_partial_or_malformed_selection() {
+    let context = NativeProductContext::UnsignedValidation;
+    let pinned = ("27.0", "27A266a");
+    for selected in [
+        (Some("27.0"), None),
+        (None, Some("27A5252f")),
+        (Some("27.0\n"), Some("27A5252f")),
+        (Some("27"), Some("27A5252f")),
+        (Some("27.0"), Some("27A5252f\n")),
+        (Some("27.0"), Some("27AB5252")),
+    ] {
+        assert!(
+            context
+                .expected_apple_identity(pinned, selected, Some("/toolchain/python3"))
+                .is_err()
+        );
+    }
+    for python in [None, Some("python3"), Some("/bad\0path")] {
+        assert!(
+            context
+                .expected_apple_identity(pinned, (Some("27.0"), Some("27A5252f")), python)
+                .is_err()
+        );
+    }
+}
+
 struct CandidateFixture {
     _temporary: TempDir,
     candidate_root: PathBuf,

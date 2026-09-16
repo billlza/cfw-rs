@@ -477,6 +477,29 @@ class RepositorySourceIdentityTests(unittest.TestCase):
                 with self.assertRaisesRegex(SourceIdentityError, "product or unreviewed"):
                     source_identity.release_ci_source_changes(self.root, prior, repository_commit(self.root))
 
+    def test_ci_native_build_adapters_are_explicit_and_runtime_sources_stay_excluded(self) -> None:
+        before = repository_commit(self.root)
+        allowed = (
+            "apps/cfw-tauri-shell/build.rs",
+            "apps/cfw-tauri-shell/build_support/native_product_input.rs",
+            "apps/cfw-tauri-shell/tests/native_product_input.rs",
+        )
+        for relative in allowed:
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("// unsigned validation build adapter\n")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "adapt unsigned native toolchain validation")
+        tested = repository_commit(self.root)
+        self.assertEqual(source_identity.release_ci_source_changes(self.root, before, tested), allowed)
+        runtime = self.root / "apps/cfw-tauri-shell/src/main.rs"
+        runtime.parent.mkdir(parents=True, exist_ok=True)
+        runtime.write_text("fn main() {}\n")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "change runtime")
+        with self.assertRaisesRegex(SourceIdentityError, "product"):
+            source_identity.release_ci_source_changes(self.root, tested, repository_commit(self.root))
+
     def test_historical_file_bytes_are_bounded_and_ignore_current_edits(self) -> None:
         commit = repository_commit(self.root)
         original = (self.root / "apps/app.rs").read_bytes()

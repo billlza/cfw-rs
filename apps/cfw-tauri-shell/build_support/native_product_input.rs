@@ -17,6 +17,52 @@ pub enum NativeProductContext {
 }
 
 impl NativeProductContext {
+    /// Hosted Xcode selection belongs only to the non-distributable 40000
+    /// validation context. GA always retains the production pins.
+    pub fn expected_apple_identity<'a>(
+        self,
+        pinned: (&'a str, &'a str),
+        selected: (Option<&'a str>, Option<&'a str>),
+        validation_python: Option<&str>,
+    ) -> Result<(&'a str, &'a str), String> {
+        if self == Self::GaPreSign {
+            if selected.0.is_some() || selected.1.is_some() || validation_python.is_some() {
+                return Err(
+                    "GA native inputs refuse unsigned-validation toolchain selection".into(),
+                );
+            }
+            return Ok(pinned);
+        }
+        let (version, build) = match selected {
+            (None, None) => return Ok(pinned),
+            (Some(version), Some(build)) => (version, build),
+            _ => return Err("unsigned-validation Apple identity is incomplete".into()),
+        };
+        let python = validation_python
+            .filter(|value| Path::new(value).is_absolute() && !value.contains('\0'))
+            .ok_or("unsigned-validation Apple identity requires its explicit Python runtime")?;
+        if python.len() > 4096 || version.len() > 64 || build.len() > 64 {
+            return Err("unsigned-validation Apple identity exceeds its bound".into());
+        }
+        let version_parts: Vec<_> = version.split('.').collect();
+        let decimal =
+            |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+        let build_number = build
+            .strip_suffix(|character: char| character.is_ascii_lowercase())
+            .unwrap_or(build);
+        let build_parts: Vec<_> = build_number
+            .split(|character: char| character.is_ascii_uppercase())
+            .collect();
+        if !(2..=3).contains(&version_parts.len())
+            || !version_parts.iter().all(|part| decimal(part))
+            || build_parts.len() != 2
+            || !build_parts.iter().all(|part| decimal(part))
+        {
+            return Err("unsigned-validation Apple identity is not canonical".into());
+        }
+        Ok((version, build))
+    }
+
     pub const fn expected_build_number(self) -> &'static str {
         match self {
             Self::UnsignedValidation => UNSIGNED_BUILD_NUMBER,

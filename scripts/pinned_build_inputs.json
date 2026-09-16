@@ -555,7 +555,12 @@
       ".require_manifest_identity(&tombstone_manifest.metadata, \"CFWLegacyTombstone\")?",
       "require_single_link_regular_file(&manifest_path)",
       "require_single_link_regular_file(&tombstone_manifest)",
-      "require_utf8_relative_artifact_path(root, &path)?"
+      "require_utf8_relative_artifact_path(root, &path)?",
+      "VALIDATION_XCODE_VERSION_ENV",
+      "VALIDATION_XCODE_BUILD_ENV",
+      "VALIDATION_PYTHON_ENV",
+      "products.context.expected_apple_identity(",
+      "fn optional_utf8_environment("
     ],
     "apps/cfw-tauri-shell/build_support/native_product_input.rs": [
       "const UNSIGNED_RELATIVE_ROOT: &str = \"unsigned/native-products\";",
@@ -569,7 +574,10 @@
       "pub fn require_real_directory(",
       "pub fn require_single_link_regular_file(",
       "pub fn require_utf8_relative_artifact_path(",
-      "pub fn require_manifest_identity("
+      "pub fn require_manifest_identity(",
+      "pub fn expected_apple_identity",
+      "GA native inputs refuse unsigned-validation toolchain selection",
+      "unsigned-validation Apple identity is incomplete"
     ],
     "scripts/libbox_source_contract.sh": [
       "sourceTag=$SING_BOX_VERSION",
@@ -3361,8 +3369,8 @@
     ]
   },
   "artifactSourceSha256": {
-    "apps/cfw-tauri-shell/build.rs": "eeff4388e01091393e5e96d1960753163a8ecca089c6aa530b31aed76bb48d0e",
-    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "19f7320d4737a66c9186d78afd6a4b904c19d29fa28d35fb00f97c6a0596ccfe",
+    "apps/cfw-tauri-shell/build.rs": "6864c96fba57d710073f094ea1cdda320f124bee6aa565231d7e30023d3de1f5",
+    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "d301cd4301b06cabe48132c1e506e5147a82ac1de02534fd82ddcd17e56ace6e",
     "scripts/libbox_source_contract.sh": "f8c208e43a4589a563147e23437b6dac0d819a52665d5f965ea922eb74c4db5d",
     "scripts/build_libbox.sh": "f37bc8e6e03eebcf7fdb1e0d56b798c97ed89a5102796a744e3ee13f53752421",
     "scripts/build_native_products.sh": "37d375ff2ed3a7ee394b9de48f8e29a6ef51dbf2cc7443b4866998d95413f16c",
@@ -3398,7 +3406,7 @@
     "scripts/dmg_notarization_transaction.py": "9f472927720d153df58fb4b3c9df41c064565ab1b63c689fd463accdfd5fd6e6",
     "scripts/release_artifact_set.py": "e2419beb95953c8418e04b0a0c7d19c5cc4adbee81635e3ecb2fc11391039f37",
     "scripts/release_apple_toolchain.py": "b4ff7cc330566f7d60efd75f3aa7f1e33647f913c0a9a4ad70a71babd422bf7f",
-    "scripts/repository_source_identity.py": "5e7a6838a589b55c3a387f10a9f3eb7ee168abc5d166bc97b5e8d3552faa2bb4",
+    "scripts/repository_source_identity.py": "3a9ae0e221efe9cca5a6657ca8653934229cad152561a1532a9073c5bb4f40dd",
     "scripts/release_git.py": "1cfdf6620923863f20f46f20830e0ded8240401117ef4d1464007be8ffee656e",
     "scripts/hash_artifact.py": "fd524dc2d44bbb00cfeadfe3052ed3c8c7871c632d8b8ad704c728a0d3b17f66",
     "scripts/hash_native_build_inputs.py": "7e7d327c3a1c3edd6a7c33cdf544d22d349ce40646e4c5ed26651e060f5bb0fa",
@@ -3432,7 +3440,7 @@
     "scripts/release_publication_path_contract.sh": "47026ea65ce379823276fa2b80b381d67446390103924855dc75cd7e38b4c373",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "5c46931ba7e352bd97fed80d510d036ffa58e14913e370347355b2be570ecf09",
+    "RELEASE.md": "4a755ec6647244e63b812f595cff8909e68f1eaa418662835dcaef8cbc53bafe",
     "scripts/updater_signing_launcher.py": "dad1c4307f05adc05a9ec729abe3a2871d6a53c5375ea323845694c4f8898f60",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "0189ac29728266fbc36e8945f60ea44c6b1f583c96d64e93e57bd36fe8e70cb3",

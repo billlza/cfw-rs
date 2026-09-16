@@ -958,7 +958,10 @@ wire proof.
    immutable commit differing only in the reviewed validation/provenance
    adapters and `scripts/tests/`, satisfies ordinary GA's deterministic CI
    requirement. Receipt v5 binds both source identities and the actual hosted
-   Xcode version; product, dependency-lock and signing inputs must remain equal.
+   Xcode version; runtime, dependency-lock and signing inputs must remain equal.
+   The reviewed Rust build adapter accepts a hosted selection only for unsigned
+   build 40000. GA pre-sign builds reject every such override and retain their
+   exact production pins. The frozen signed application is not rebuilt.
    It runs the same 27 lane
    commands. A second full local reproduction is optional assurance evidence,
    not a prepackage or corresponding-source prerequisite. The signed product

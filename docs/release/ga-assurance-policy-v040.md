@@ -493,8 +493,10 @@ Prepackage v3 requires a complete successful hosted CI receipt. Receipt v5
 retains the frozen product source and separately records the actual tested
 commit. A different tested commit is admitted only when both complete immutable
 Git trees differ solely in regular files under `scripts/tests/` or the explicit
-`CI_VALIDATION_SOURCE_PATHS` validation/provenance adapter list. Application and
-native sources, dependency locks and version pins, signing/provisioning inputs,
+`CI_VALIDATION_SOURCE_PATHS` validation/provenance adapter list. The Rust build
+adapter accepts a selected hosted Xcode only for unsigned build 40000 and rejects
+every validation override in the GA pre-sign context. Application runtime and
+native implementation sources, dependency locks and version pins, signing/provisioning inputs,
 their modes and unclassified changes remain rejected. The actual tested workflow
 is re-read from its own immutable Git commit, separately from the artifact's
 frozen workflow. Each job records the real selected Xcode version/build.

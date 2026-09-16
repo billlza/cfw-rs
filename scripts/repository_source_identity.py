@@ -447,10 +447,15 @@ def release_test_source_changes(
     return changed
 
 
-# Explicit post-freeze validation/provenance adapter surfaces. Application and
-# native sources, dependency locks/pins, and signing/provisioning inputs remain
-# outside this set. Receipt v5 retains every changed path and both source identities.
+# Explicit post-freeze validation/provenance adapter surfaces. Application
+# runtime and native implementation sources, dependency locks/pins, and signing
+# inputs remain outside this set. The Rust build adapter admits hosted Xcode
+# only for unsigned build 40000; its GA context still rejects all overrides.
+# Receipt v5 retains every changed path and both source identities.
 CI_VALIDATION_SOURCE_PATHS = frozenset({
+    "apps/cfw-tauri-shell/build.rs",
+    "apps/cfw-tauri-shell/build_support/native_product_input.rs",
+    "apps/cfw-tauri-shell/tests/native_product_input.rs",
     ".github/workflows/ci.yml",
     "RELEASE.md",
     "docs/release/ga-assurance-policy-v040.md",
@@ -482,7 +487,7 @@ def release_ci_source_changes(
     tested_commit: str,
     environment: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """Allow reviewed validation adapters while preserving every product byte."""
+    """Allow reviewed build adapters while preserving runtime and dependency inputs."""
     candidate = {entry.path: entry for entry in _historical_source_files(
         repository, candidate_commit, environment, paths=()
     )}

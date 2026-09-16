@@ -955,8 +955,11 @@ wire proof.
    never use this entry to retry an unknown submission or rerun the builder;
 3. capture the hosted run through the fixed public GitHub API after freeze.
    One complete successful hosted run for the frozen product commit, or for an
-   immutable commit differing only in `scripts/tests/`, satisfies ordinary GA's
-   deterministic CI requirement. It runs the same 27 lane
+   immutable commit differing only in the reviewed validation/provenance
+   adapters and `scripts/tests/`, satisfies ordinary GA's deterministic CI
+   requirement. Receipt v5 binds both source identities and the actual hosted
+   Xcode version; product, dependency-lock and signing inputs must remain equal.
+   It runs the same 27 lane
    commands. A second full local reproduction is optional assurance evidence,
    not a prepackage or corresponding-source prerequisite. The signed product
    still binds its actual build toolchain; installed-app and network acceptance
@@ -968,15 +971,29 @@ wire proof.
    ```
 
    Capture reopens its result. `scripts/release_publication_gate.sh --verify-hosted-ci`
-   remains available for independent read-only investigation. Receipt v4 keeps
+   remains available for independent read-only investigation. Receipt v5 keeps
    the frozen application `source` separate from the real CI `tested_source`.
    Every read compares both complete Git trees, including modes, and rederives
-   the tested source identity. Only regular-file changes in the existing
-   release-only `scripts/tests/` harness are allowed. Changes to application,
-   build, dependency, workflow or other inputs fail admission. The complete
+   the tested source identity. Regular-file changes are limited to the existing
+   `scripts/tests/` harness and the explicit `CI_VALIDATION_SOURCE_PATHS` set of
+   validation, provenance and policy-document adapters. Application/native
+   sources, dependency locks and version pins, signing inputs and unclassified
+   paths remain byte-identical. The actual tested workflow is re-read from its
+   own immutable commit; it is not relabelled as the frozen artifact workflow. The complete
    successful run, all job steps and zero-annotation checks remain mandatory;
    a previous failed run is retained with its actual result. The later capture
    tool's identity remains the separate stage executor identity.
+
+   Each hosted job selects the latest Xcode installed in its runner image,
+   deduplicating aliases and ordering marketing version then Apple's numeric
+   `CFBundleVersion`. This allows a hosted beta or older image while Apple and
+   GitHub release schedules differ. The job verifies and normalizes only that
+   application's ownership, records the real version/build, and executes every
+   existing build, test and security gate. Unsupported SDK or Swift features
+   still fail those actual checks. Receipt v5 retains the selected identity for
+   every job. Production entry points reject unsigned-validation selections;
+   release packaging continues to require the exact production Xcode pin and
+   the consumed candidate's original toolchain provenance.
 
    Optional local reproduction uses its own explicit journal and produces only
    a local record; it cannot substitute for hosted CI or runtime acceptance:

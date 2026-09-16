@@ -457,6 +457,35 @@ class RepositorySourceIdentityTests(unittest.TestCase):
                 self.root, candidate, repository_commit(self.root)
             )
 
+    def test_ci_validation_changes_preserve_product_and_dependency_inputs(self) -> None:
+        before = repository_commit(self.root)
+        workflow = self.root / ".github/workflows/ci.yml"
+        workflow.parent.mkdir(parents=True, exist_ok=True)
+        workflow.write_text("name: CI\n# select latest installed Xcode\n")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "adjust hosted validation toolchain")
+        tested = repository_commit(self.root)
+        self.assertEqual(source_identity.release_ci_source_changes(self.root, before, tested), (".github/workflows/ci.yml",))
+        for path in ("apps/app.rs", "Cargo.lock", "scripts/dependency_pins.env", "scripts/build_signed_candidate.sh", "unreviewed-input.txt"):
+            with self.subTest(path=path):
+                prior = repository_commit(self.root)
+                target = self.root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("changed protected input\n")
+                git(self.root, "add", ".")
+                git(self.root, "commit", "-q", "-m", "change protected input")
+                with self.assertRaisesRegex(SourceIdentityError, "product or unreviewed"):
+                    source_identity.release_ci_source_changes(self.root, prior, repository_commit(self.root))
+
+    def test_historical_file_bytes_are_bounded_and_ignore_current_edits(self) -> None:
+        commit = repository_commit(self.root)
+        original = (self.root / "apps/app.rs").read_bytes()
+        (self.root / "apps/app.rs").write_text("later uncommitted edit\n")
+        self.assertEqual(source_identity.historical_file_bytes(self.root, commit, "apps/app.rs", maximum_bytes=1024), original)
+        for path, maximum in (("apps/app.rs", 1), ("../apps/app.rs", 1024), ("missing.rs", 1024)):
+            with self.subTest(path=path), self.assertRaises(SourceIdentityError):
+                source_identity.historical_file_bytes(self.root, commit, path, maximum_bytes=maximum)
+
     def test_release_test_scope_rejects_other_paths_including_unclassified_inputs(self) -> None:
         for name in (
             "apps/app.rs", "Cargo.lock", ".github/workflows/ci.yml",

@@ -18,6 +18,7 @@ import stat
 from typing import Mapping
 
 if __package__:
+    from .apple_validation_policy import selected_apple_identity
     from .publication.bounded_process import (
         BoundedProcessError,
         run_bounded_process,
@@ -25,6 +26,7 @@ if __package__:
     from .publication.common import PublicationError
     from .publication.graph_model import load_pins
 else:
+    from apple_validation_policy import selected_apple_identity
     from publication.bounded_process import BoundedProcessError, run_bounded_process
     from publication.common import PublicationError
     from publication.graph_model import load_pins
@@ -337,10 +339,11 @@ def capture_release_apple_toolchain(
     try:
         developer_value = environment_source["DEVELOPER_DIR"]
         pins = load_pins(repository / "scripts/dependency_pins.env")
-        expected_xcode_version = pins["XCODE_VERSION"]
-        expected_xcode_build = pins["XCODE_BUILD_VERSION"]
+        expected_xcode_version, expected_xcode_build = selected_apple_identity(
+            pins, environment_source
+        )
         expected_deployment_target = pins["MACOS_DEPLOYMENT_TARGET"]
-    except (KeyError, OSError, PublicationError, UnicodeDecodeError) as error:
+    except (KeyError, OSError, PublicationError, ValueError, UnicodeDecodeError) as error:
         raise ReleaseAppleToolchainError(
             "Apple release toolchain pins or selection are unavailable"
         ) from error

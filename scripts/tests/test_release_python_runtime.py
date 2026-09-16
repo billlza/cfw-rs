@@ -219,9 +219,11 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
         def identity(argv, _repository, _label, _environment, maximum=512):
             del maximum
             if argv == [release_environment.APPLE_XCODEBUILD, "-version"]:
+                version, build = release_environment.selected_apple_identity(
+                    self.pins, self.baseline, role=self.role
+                )
                 return (
-                    f"Xcode {self.pins['XCODE_VERSION']}; "
-                    f"Build version {self.pins['XCODE_BUILD_VERSION']}"
+                    f"Xcode {version}; Build version {build}"
                 )
             if argv == [release_environment.APPLE_XCRUN, "--find", "swift"]:
                 return str(
@@ -628,7 +630,11 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
         for index, name in enumerate(
             sorted(release_environment._OPERATIONAL_ENVIRONMENT)
         ):
-            if name in {"CFW_UNSIGNED_VALIDATION_PYTHON", "CFW_RELEASE_RUST_TOOLCHAIN"}:
+            if name in {
+                "CFW_UNSIGNED_VALIDATION_PYTHON", "CFW_RELEASE_RUST_TOOLCHAIN",
+                "CFW_UNSIGNED_VALIDATION_XCODE_VERSION",
+                "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION",
+            }:
                 continue
             value = f"fixture {index}=alpha=beta gamma"
             if name == "CFW_TOOLCHAIN_ROOT":
@@ -643,6 +649,13 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
                 self.assertEqual(result[name], environment[name], name)
         self.assertEqual(result["NOTARY_PROFILE"], "fixture = alpha=beta gamma")
         self.assertNotIn("UNREVIEWED_ENVIRONMENT", result)
+
+    def test_apple_validation_identity_is_not_free_form_operational_text(self) -> None:
+        environment = dict(self.baseline)
+        environment["CFW_UNSIGNED_VALIDATION_XCODE_VERSION"] = "27.0 = altered"
+        environment["CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION"] = "27A5252f"
+        with self.assertRaises(release_environment.PublicationError):
+            self.call_with_output(self.encoded(environment))
 
     def test_malformed_nul_environment_records_fail_closed(self) -> None:
         valid = self.encoded(self.baseline)

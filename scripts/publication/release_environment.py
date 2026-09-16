@@ -14,6 +14,7 @@ from .common import PublicationError, canonical_json
 from .graph_model import load_pins
 
 if __package__ and __package__.startswith("scripts."):
+    from scripts.apple_validation_policy import AppleValidationPolicyError, selected_apple_identity
     from scripts.release_cargo_inputs import (
         ReleaseCargoInputsError,
         verify_workspace_cargo_inputs,
@@ -24,6 +25,7 @@ if __package__ and __package__.startswith("scripts."):
         selected_toolchain_root as selected_rust_toolchain_root,
     )
 else:
+    from apple_validation_policy import AppleValidationPolicyError, selected_apple_identity
     from release_cargo_inputs import (
         ReleaseCargoInputsError,
         verify_workspace_cargo_inputs,
@@ -80,6 +82,8 @@ _OPERATIONAL_ENVIRONMENT = {
     "CFW_REPOSITORY_COMMIT",
     "CFW_TOOLCHAIN_ROOT",
     "CFW_UNSIGNED_VALIDATION_PYTHON",
+    "CFW_UNSIGNED_VALIDATION_XCODE_VERSION",
+    "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION",
     "HOST_PROVISIONING_PROFILE_PATH",
     "MACOS_SIGN_IDENTITY",
     "NOTARY_PROFILE",
@@ -639,9 +643,11 @@ def release_tool_environment(
     xcode_identity = identity_output(
         [APPLE_XCODEBUILD, "-version"], repository, "Xcode", environment
     )
-    expected_xcode = (
-        f"Xcode {pins['XCODE_VERSION']}; Build version {pins['XCODE_BUILD_VERSION']}"
-    )
+    try:
+        selected_version, selected_build = selected_apple_identity(pins, environment, role=role)
+    except AppleValidationPolicyError as error:
+        raise PublicationError(f"Apple validation toolchain selection is invalid: {error}") from error
+    expected_xcode = f"Xcode {selected_version}; Build version {selected_build}"
     if xcode_identity != expected_xcode:
         raise PublicationError(
             f"Xcode identity {xcode_identity!r} does not match {expected_xcode!r}"

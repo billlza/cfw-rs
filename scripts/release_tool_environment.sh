@@ -7,6 +7,8 @@ release_environment_directory="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" &&
 source "$release_environment_directory/release_python_launcher.sh"
 # shellcheck source=scripts/release_cargo_inputs.sh
 source "$release_environment_directory/release_cargo_inputs.sh"
+# shellcheck source=scripts/apple_validation_policy.sh
+source "$release_environment_directory/apple_validation_policy.sh"
 unset release_environment_directory
 
 cfw_seal_release_tool_environment() {
@@ -23,6 +25,12 @@ cfw_seal_release_tool_environment() {
   fi
   if [[ "$release_role" == "production" && -n "$validation_python_input" ]]; then
     echo "error: release tooling refuses an unsigned-validation Python selection for this role" >&2
+    return 1
+  fi
+  if [[ "$release_role" == "production" && \
+    ( -n "${CFW_UNSIGNED_VALIDATION_XCODE_VERSION+x}" || \
+      -n "${CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION+x}" ) ]]; then
+    echo "error: production refuses an unsigned-validation Xcode selection" >&2
     return 1
   fi
   if [[ "$release_role" == "unsigned-validation" && \
@@ -266,6 +274,8 @@ cfw_seal_release_tool_environment() {
         CFW_RELEASE_RUSTC_EXECUTABLE | CFW_RELEASE_RUST_TOOLCHAIN | \
         CFW_RELEASE_SOURCE_SHA256 | CFW_REPOSITORY_COMMIT | CFW_TOOLCHAIN_ROOT | \
         CFW_UNSIGNED_VALIDATION_PYTHON | \
+        CFW_UNSIGNED_VALIDATION_XCODE_VERSION | \
+        CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION | \
         HOST_PROVISIONING_PROFILE_PATH | MACOS_SIGN_IDENTITY | NOTARY_PROFILE | CFW_NOTARY_PROXY | \
         PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER | \
         PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER)
@@ -370,6 +380,7 @@ cfw_seal_release_tool_environment() {
     echo "error: the fixed Python interpreter does not match the release pin" >&2
     return 1
   fi
+  cfw_apply_validation_apple_toolchain "$release_repository"
 }
 
 cfw_select_release_apple_toolchain() {

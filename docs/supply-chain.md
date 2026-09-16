@@ -331,6 +331,15 @@ always blocks. Ambiguous expressions and missing texts therefore remain
 explicit legal-review blockers, including the compound klauspost conclusion
 and the pinned Xcode EULA.
 
+Hosted CI selects and records the latest Xcode actually available on each
+GitHub runner, including a preview when the stable release has not reached the
+image. Its explicit unsigned-validation role cannot authorize production
+signing or packaging. The production Xcode pin, build-tool license provenance
+and frozen application stay unchanged; all CI compile, test and supply-chain
+checks remain required. Hosted receipt v5 separately binds the frozen artifact,
+the actual tested source/workflow, the reviewed validation-adapter differences
+and every job's observed Xcode version/build.
+
 Generating a new template does not invalidate an existing component review.
 An approved conclusion may be retained when the component identity, complete
 license-file set and bytes, metadata, and corresponding-source scope are

@@ -76,6 +76,8 @@ _FORBIDDEN_ENVIRONMENT = frozenset(
         "TOOLCHAINS",
         "XCODE_XCCONFIG_FILE",
         "CFW_UNSIGNED_VALIDATION_PYTHON",
+        "CFW_UNSIGNED_VALIDATION_XCODE_VERSION",
+        "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION",
     }
 )
 
@@ -291,7 +293,11 @@ def require_closed_release_runtime(*, allow_unsigned_validation: bool = False) -
         if (
             name in _FORBIDDEN_ENVIRONMENT
             and not (
-                name == "CFW_UNSIGNED_VALIDATION_PYTHON"
+                name in {
+                    "CFW_UNSIGNED_VALIDATION_PYTHON",
+                    "CFW_UNSIGNED_VALIDATION_XCODE_VERSION",
+                    "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION",
+                }
                 and allow_unsigned_validation
                 and validation_launcher_value is not None
             )

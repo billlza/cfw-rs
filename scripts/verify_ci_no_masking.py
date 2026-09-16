@@ -73,52 +73,8 @@ REQUIRED_SOURCE_ASSERTION_STEP = (
     f"{REQUIRED_WORKFLOW_SOURCE_SHA}\n"
     f"        run: {REQUIRED_HEAD_ASSERTION}"
 )
-REQUIRED_XCODE_OWNERSHIP_STEP = """      - name: Normalize pinned Xcode ownership
-        run: |
-          readonly xcode_alias=/Applications/Xcode_27.0.app
-          /bin/test "$DEVELOPER_DIR" = "$xcode_alias/Contents/Developer"
-          /bin/test -d "$xcode_alias"
-          xcode_application="$(cd "$xcode_alias" && /bin/pwd -P)"
-          readonly xcode_application
-          [[ "$xcode_application" =~ ^/Applications/Xcode[A-Za-z0-9._-]*[.]app$ ]] || exit 1
-          export DEVELOPER_DIR="$xcode_application/Contents/Developer"
-          /bin/test -d "$xcode_application"
-          /bin/test ! -L "$xcode_application"
-          /bin/test -d "$xcode_application/Contents"
-          /bin/test ! -L "$xcode_application/Contents"
-          /bin/test -d "$xcode_application/Contents/Developer"
-          /bin/test ! -L "$xcode_application/Contents/Developer"
-          /usr/sbin/spctl --assess --type execute "$xcode_application"
-          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 27.0\\nBuild version 27A266a'
-
-          runner_uid="$(/usr/bin/id -u)"
-          readonly runner_uid
-          /bin/test "$runner_uid" -ne 0
-          runner_groups=" $(/usr/bin/id -G) "
-          readonly runner_groups
-          [[ "$runner_groups" != *" 0 "* ]] || exit 1
-          xcode_device_inode="$(/usr/bin/stat -f '%d:%i' "$xcode_application")"
-          readonly xcode_device_inode
-          unexpected_entry="$(
-            /usr/bin/find -P -x "$xcode_application" \\
-              \\( \\( ! -uid 0 -a ! -uid "$runner_uid" \\) -o -perm -0002 \\) \\
-              -print -quit
-          )"
-          readonly unexpected_entry
-          /bin/test -z "$unexpected_entry"
-
-          /usr/bin/sudo -n /usr/bin/find -P -x "$xcode_application" \\
-            -exec /usr/sbin/chown -h 0:0 {} +
-
-          /bin/test "$(/usr/bin/stat -f '%d:%i' "$xcode_application")" = "$xcode_device_inode"
-          remaining_unsafe_entry="$(
-            /usr/bin/find -P -x "$xcode_application" \\
-              \\( ! -uid 0 -o ! -gid 0 -o -perm -0002 \\) -print -quit
-          )"
-          readonly remaining_unsafe_entry
-          /bin/test -z "$remaining_unsafe_entry"
-          /usr/sbin/spctl --assess --type execute "$xcode_application"
-          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 27.0\\nBuild version 27A266a'"""
+REQUIRED_XCODE_OWNERSHIP_STEP = '      - name: Select latest available Xcode\n        run: |\n          validation_python=\'${{ steps.validation-python.outputs.python-path }}\'\n          /usr/bin/env -i \\\n            GITHUB_ACTIONS=true \\\n            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \\\n            PATH=/usr/bin:/bin:/usr/sbin:/sbin \\\n            "$validation_python" -I -S -B -W error scripts/select_ci_xcode.py \\\n            --github-env "$GITHUB_ENV" \\\n            --output "$RUNNER_TEMP/cfw-ci-xcode.json"'
+REQUIRED_XCODE_RECORD_STEP = '      - name: Record Apple validation toolchain ${{ env.CFW_UNSIGNED_VALIDATION_XCODE_VERSION }} (${{ env.CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION }})\n        run: /bin/cat "$RUNNER_TEMP/cfw-ci-xcode.json"'
 REQUIRED_TAURI_TMPDIR = "${{ runner.temp }}"
 REQUIRED_SWIFT_TARGET_INFO_PROBE = (
     'swift_identity_stderr="$(/usr/bin/mktemp '
@@ -152,7 +108,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "e10113e967081dcc4bbd4b6eeff5d6d1e5a739b1eabfd773584f9b9e95bacc41"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "a0a29e6791e00f92af38be160d28bdf53d243592a04a6403d25346b81d0e2d3a"
+    "9ba5e2d3e600bee869f959a9e7ef32c12a7acbda329a2c39cf07f2834b7dc71c"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -354,65 +310,20 @@ def _check_hosted_xcode_ownership(
     jobs: dict[str, str],
     pins: dict[str, str],
 ) -> list[str]:
-    """Require the one privileged hosted-Xcode adapter before repository code."""
-
+    """Every job selects and verifies its newest Xcode before any build gate."""
     findings: list[str] = []
-    release_tooling_jobs = tuple(
-        (name, body)
-        for name, body in jobs.items()
-        if "release-tool-tests" in _release_gate_commands(body)
-    )
-    if len(release_tooling_jobs) != 1:
-        return [
-            "workflow must contain exactly one release-tooling job for pinned "
-            "Xcode ownership normalization"
-        ]
-
-    job_name, job_body = release_tooling_jobs[0]
-    steps = _split_job_steps(job_body)
-    normalization_steps = tuple(
-        index
-        for index, step in enumerate(steps)
-        if step == REQUIRED_XCODE_OWNERSHIP_STEP
-    )
-    if normalization_steps != (2,):
-        findings.append(
-            f"job {job_name!r} must normalize the exact pinned Xcode ownership "
-            "once, immediately after checkout and exact-HEAD verification"
-        )
-
-    expected_alias = f"/Applications/Xcode_{pins['XCODE_VERSION']}.app"
-    expected_identity = (
-        f"Xcode {pins['XCODE_VERSION']}\\n"
-        f"Build version {pins['XCODE_BUILD_VERSION']}"
-    )
-    if (
-        f"readonly xcode_alias={expected_alias}"
-        not in REQUIRED_XCODE_OWNERSHIP_STEP
-        or REQUIRED_XCODE_OWNERSHIP_STEP.count(expected_identity) != 2
-    ):
-        findings.append(
-            "pinned Xcode ownership policy differs from the Xcode version pins"
-        )
-
-    privileged_commands = (
-        "/usr/bin/sudo",
-        "/usr/sbin/chown",
-        "/usr/sbin/spctl",
-    )
     for name, body in jobs.items():
-        for index, step in enumerate(_split_job_steps(body)):
-            if (
-                name == job_name
-                and index == 2
-                and step == REQUIRED_XCODE_OWNERSHIP_STEP
-            ):
+        steps = _split_job_steps(body)
+        selected = [index for index, step in enumerate(steps) if step == REQUIRED_XCODE_OWNERSHIP_STEP]
+        if selected != [3]:
+            findings.append(f"job {name!r} must normalize the selected Xcode ownership once after checkout, exact-HEAD verification and pinned Python setup")
+        if len(steps) < 5 or "actions/setup-python@" not in steps[2] or steps[4] != REQUIRED_XCODE_RECORD_STEP:
+            findings.append(f"job {name!r} must record its actual Apple validation toolchain immediately after selection")
+        for index, step in enumerate(steps):
+            if step == REQUIRED_XCODE_OWNERSHIP_STEP:
                 continue
-            if any(command in step for command in privileged_commands):
-                findings.append(
-                    f"job {name!r} step {index + 1} contains an unreviewed "
-                    "privileged Xcode ownership command"
-                )
+            if any(command in step for command in ("/usr/bin/sudo", "/usr/sbin/chown", "/usr/sbin/spctl")):
+                findings.append(f"job {name!r} step {index + 1} contains an unreviewed privileged Xcode ownership command")
     return findings
 
 
@@ -1242,16 +1153,14 @@ def _check_single_toolchain(text: str, pins: dict[str, str]) -> list[str]:
         node.add(pins["NODE_VERSION"])
     _single(node, "Node.js", pins["NODE_VERSION"], findings)
 
-    xcode = set(re.findall(r"Xcode_([0-9][0-9A-Za-z.]*)\.app", text))
-    xcode |= set(re.findall(r"Xcode\s+([0-9][0-9A-Za-z.]*)", text))
-    _single(xcode, "Xcode", pins["XCODE_VERSION"], findings)
-
-    build_versions = set(re.findall(r"Build version\s+([0-9A-Za-z]+)", text))
-    if build_versions and build_versions != {pins["XCODE_BUILD_VERSION"]}:
-        findings.append(
-            f"Xcode build version binding {sorted(build_versions)} does not match "
-            f"the pinned {pins['XCODE_BUILD_VERSION']!r}"
-        )
+    # Cloud validation records the selected installed Xcode. Product builds
+    # retain the exact dependency pins; pinning this workflow to that newly
+    # released SDK would make hosted image rollout a false product failure.
+    if "DEVELOPER_DIR:" in text or re.search(r"Build version\s+[0-9]", text):
+        findings.append("hosted Xcode must come from the latest installed selector, not a hard-coded release identity")
+    jobs = _split_jobs(text)
+    if any(REQUIRED_XCODE_OWNERSHIP_STEP not in body or REQUIRED_XCODE_RECORD_STEP not in body for body in jobs.values()):
+        findings.append("workflow does not bind each observed Xcode toolchain")
     return findings
 
 

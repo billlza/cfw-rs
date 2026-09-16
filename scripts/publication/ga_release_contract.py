@@ -431,6 +431,7 @@ def _require_hosted_ci_source_binding(
     candidate_freeze_intent_sha256: str,
     release_source_sha256: str,
     repository_commit: str,
+    artifact_workflow_sha256: str,
 ) -> None:
     if not isinstance(hosted_ci, dict):
         raise PublicationError("hosted CI receipt is not an object")
@@ -448,7 +449,7 @@ def _require_hosted_ci_source_binding(
         "candidate_freeze_intent_sha256": candidate_freeze_intent_sha256,
         "release_source_sha256": release_source_sha256,
         "repository_commit": repository_commit,
-        "workflow_sha256": workflow_sha256,
+        "workflow_sha256": require_sha256(artifact_workflow_sha256, "frozen artifact workflow"),
     }:
         raise PublicationError("hosted CI receipt differs from the frozen candidate")
 
@@ -574,6 +575,7 @@ def _verified_prepackage_inputs(
         candidate_freeze_intent_sha256=frozen.intent_sha256,
         release_source_sha256=intent["release_source_sha256"],
         repository_commit=intent["repository_commit"],
+        artifact_workflow_sha256=sha256_file(repository / ".github/workflows/ci.yml"),
     )
 
     source_identity = {

@@ -771,7 +771,9 @@
       "XCODE_XCCONFIG_FILE",
       "GIT_DIR",
       "NODE_PATH",
-      "source \"$release_environment_directory/release_cargo_inputs.sh\""
+      "source \"$release_environment_directory/release_cargo_inputs.sh\"",
+      "source \"$release_environment_directory/apple_validation_policy.sh\"",
+      "cfw_apply_validation_apple_toolchain"
     ],
     "scripts/publication/ci_lanes.py": [
       "from .release_environment import (",
@@ -1063,21 +1065,11 @@
       "direct {match.group(1)} command bypasses the closed Apple driver gate"
     ],
     ".github/workflows/ci.yml": [
-      "DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer",
       "shell: \"/bin/bash --noprofile --norc -p -e -o pipefail {0}\"",
       "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
       "github.event.pull_request.head.sha || github.sha",
       "persist-credentials: false",
       "Assert exact CI source and workflow identity ${{ github.workflow_sha }}",
-      "Normalize pinned Xcode ownership",
-      "readonly xcode_alias=/Applications/Xcode_27.0.app",
-      "/usr/bin/find -P -x \"$xcode_application\"",
-      "/usr/bin/sudo -n /usr/bin/find -P -x \"$xcode_application\"",
-      "-exec /usr/sbin/chown -h 0:0 {} +",
-      "/bin/test \"$runner_uid\" -ne 0",
-      "[[ \"$runner_groups\" != *\" 0 \"* ]]",
-      "\\( ! -uid 0 -o ! -gid 0 -o -perm -0002 \\)",
-      "/usr/sbin/spctl --assess --type execute \"$xcode_application\"",
       "python-version: \"3.14.7\"",
       "architecture: arm64",
       "update-environment: false",
@@ -1103,9 +1095,13 @@
       "error: Swift target identity is empty",
       "trap - EXIT",
       "TMPDIR: ${{ runner.temp }}",
-      "xcode_application=\"$(cd \"$xcode_alias\" && /bin/pwd -P)\"",
-      "[[ \"$xcode_application\" =~ ^/Applications/Xcode[A-Za-z0-9._-]*[.]app$ ]] || exit 1",
-      "[[ \"$runner_groups\" != *\" 0 \"* ]] || exit 1"
+      "Select latest available Xcode",
+      "scripts/select_ci_xcode.py",
+      "--github-env \"$GITHUB_ENV\"",
+      "--output \"$RUNNER_TEMP/cfw-ci-xcode.json\"",
+      "Record Apple validation toolchain",
+      "CFW_UNSIGNED_VALIDATION_XCODE_VERSION",
+      "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION"
     ],
     "scripts/dormant_app_install.py": [
       "from .macos_durability import full_fsync",
@@ -1486,7 +1482,10 @@
       "def _read_historical_blob_batch(",
       "def _historical_blob_digests(",
       "historical Git batch contains unrequested trailing bytes",
-      "historical Git blob size differs from its tree"
+      "historical Git blob size differs from its tree",
+      "CI_VALIDATION_SOURCE_PATHS",
+      "def release_ci_source_changes(",
+      "def historical_file_bytes("
     ],
     "scripts/release_git.py": [
       "GIT_EXECUTABLE = \"/usr/bin/git\"",
@@ -1921,7 +1920,9 @@
       "--exact-metadata",
       "cfw_verify_go_release_tools_source",
       "toolsGoModSha256=$GO_RELEASE_TOOLS_GO_MOD_SHA256",
-      "toolsGoSumSha256=$GO_RELEASE_TOOLS_GO_SUM_SHA256"
+      "toolsGoSumSha256=$GO_RELEASE_TOOLS_GO_SUM_SHA256",
+      "source \"$release_contract_directory/apple_validation_policy.sh\"",
+      "cfw_apply_validation_apple_toolchain"
     ],
     "scripts/release_publication_gate.sh": [
       "--seal-assets",
@@ -2345,7 +2346,7 @@
       "cfm-candidate-freeze-intent-v3",
       "cfm-ga-signing-attempt-v1",
       "cfm-ga-signing-transformation-v2",
-      "cfw-github-hosted-ci-receipt-v4",
+      "cfw-github-hosted-ci-receipt-v5",
       "WORKFLOW_SOURCE_STEP_PREFIX: Final =",
       "def _workflow_contents_api_path(",
       "def _project_workflow_source(",
@@ -2890,13 +2891,13 @@
       "def load_receipt("
     ],
     "scripts/github_hosted_ci_receipt.py": [
-      "DOCUMENT: Final = \"cfw-github-hosted-ci-receipt-v4\"",
+      "DOCUMENT: Final = \"cfw-github-hosted-ci-receipt-v5\"",
       "REPOSITORY_ID: Final = 1_306_403_473",
       "WORKFLOW_ID: Final = 316_580_234",
       "WORKFLOW_SOURCE_STEP_PREFIX: Final =",
       "EXPECTED_JOB_NAMES: Final = frozenset(",
       "REQUIRED_JOB_STEP_NAMES: Final = {",
-      "Normalize pinned Xcode ownership",
+      "Select latest available Xcode",
       "ProxyHandler({})",
       "_RejectRedirects()",
       "/attempts/{attempt}/jobs",
@@ -2916,7 +2917,12 @@
       "def validate_receipt_offline(",
       "def verify_receipt(",
       "capture_frozen_release_sources(",
-      "require_frozen_sources_unchanged(sources)"
+      "require_frozen_sources_unchanged(sources)",
+      "APPLE_VALIDATION_STEP_PREFIX",
+      "apple_validation_toolchain",
+      "release_ci_source_changes(",
+      "historical_file_bytes(",
+      "tested_workflow_bytes"
     ],
     "scripts/ga_acceptance_environment.py": [
       "DOCUMENT: Final = \"cfm-ga-environment-identity-v1\"",
@@ -3308,6 +3314,38 @@
       "cfw_select_release_apple_toolchain",
       "cfw_run_release_python_script",
       "scripts/archive_install_history.py"
+    ],
+    "scripts/select_ci_xcode.py": [
+      "def newest_installation(",
+      "CFBundleVersion",
+      "def normalize_and_verify(",
+      "GITHUB_ACTIONS",
+      "RUNNER_ENVIRONMENT",
+      "uid == 0 or 0 in os.getgroups()",
+      "\"/usr/sbin/spctl\", \"--assess\", \"--type\", \"execute\"",
+      "\"/usr/bin/sudo\", \"-n\", \"/usr/bin/find\", \"-P\", \"-x\"",
+      "\"/usr/sbin/chown\", \"-h\", \"0:0\"",
+      "\"-perm\", \"-0002\"",
+      "read_installation(selected.application) != selected",
+      "before.st_dev, before.st_ino",
+      "version_plist_sha256",
+      "unsigned-ci-validation",
+      "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION"
+    ],
+    "scripts/apple_validation_policy.py": [
+      "def selected_apple_identity(",
+      "role == \"production\"",
+      "production refuses an unsigned-validation Xcode selection",
+      "present != VALIDATION_KEYS",
+      "CFW_UNSIGNED_VALIDATION_PYTHON",
+      "version_tuple(selected_version)"
+    ],
+    "scripts/apple_validation_policy.sh": [
+      "cfw_apply_validation_apple_toolchain()",
+      "cfw_run_release_python_script",
+      "observed_identity=",
+      "XCODE_VERSION=\"$observed_version\"",
+      "XCODE_BUILD_VERSION=\"$observed_build\""
     ]
   },
   "artifactSourceSha256": {
@@ -3319,9 +3357,9 @@
     "scripts/build_ui_with_pinned_node.sh": "5b9df6542382e6475bd829446737537c773d0f92a0a5c424e33f4e70a422edad",
     "scripts/build_unsigned_candidate.sh": "58c9028c05ef97b3f95fbcae5a5334fb44edba7de41b267ad75a9c0680056bd1",
     "scripts/build_signed_candidate.sh": "1a0aad3254644f80fa68d3ea090362a14f781fb47b77a2c64dc28fcba3cc701d",
-    "scripts/release_tool_environment.sh": "4f8142a46b4499bfb8d8a366991bf6a0f9a78577ae661520876939baa94dd94b",
-    "scripts/publication/ci_lanes.py": "a37f9681ca137b786fcb74ee63a99fad74ad967fcec0f32c0fede31e1b204fbd",
-    "scripts/publication/release_environment.py": "b754473d623ec8f4f1ddd06f34d9d7571e98aab2da8467f6127e9862168b03d8",
+    "scripts/release_tool_environment.sh": "b6bdd4e08b323ed32209b75e4dd943e080bc5881c8839ea8773239818633029b",
+    "scripts/publication/ci_lanes.py": "476c6f019701060544ebb4f7a31c7af9767af23c62b579f20710138c7ad49b5e",
+    "scripts/publication/release_environment.py": "1070bbc1435ce302d542bc12c6b9c03ed6ea22c1d7a5fcc99e6d6075aca2a135",
     "scripts/publication/release_toolchains.py": "febc6ad04ccb0ee8a6ef6ce94921b82f5b5e6d5e8e1a87cf77ae438b89c966c0",
     "scripts/publication/graph_model.py": "779440a6ec49dc84e3085a070de2c0612ce93af65e28348da89cc52aa1cfa1ad",
     "scripts/candidate_artifact_binding.py": "0baffb212f283e3021442f7480a26f5f36b6abdd14e245259ee9dd2e2fdb8f62",
@@ -3337,8 +3375,8 @@
     "scripts/publication/artifact_preparation.py": "65c584801ce49328313cc675d863a2722c11e8386a23922d6ced60f3fded480a",
     "scripts/prepare_publication_evidence.sh": "79c45634e64965e0b9ca6bb25fd2a0afa96689a0ef0d760099de1bc40604b1a6",
     "scripts/prepare_publication_evidence.py": "204204877eb7e0dce49d0deda0599df7c11bb859d3363f48ba3ad3df23a53327",
-    "scripts/verify_ci_no_masking.py": "bd3989e042cb78bb283b6c394e9eb33e4652f20dd77651479d68da05d4a43b69",
-    ".github/workflows/ci.yml": "a0a29e6791e00f92af38be160d28bdf53d243592a04a6403d25346b81d0e2d3a",
+    "scripts/verify_ci_no_masking.py": "318f65b5edd1688a1b46cc08544d23c6d08bf65d63907087e45fb110b3458196",
+    ".github/workflows/ci.yml": "9ba5e2d3e600bee869f959a9e7ef32c12a7acbda329a2c39cf07f2834b7dc71c",
     "scripts/dormant_app_install.py": "cdaf003a9e2f2cbb47adfbfdf6d1963043464ef6f0d14fe60f7fcc8f81362a34",
     "scripts/current_service_transaction.py": "ce3e3e0a0f184843f75f6359498c1e8c4cdffbf0a983d79a5666c90afd81bc54",
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
@@ -3347,15 +3385,15 @@
     "scripts/run_notarization_transaction.sh": "8ee5288ff7e441cf34c0295b0f8debe78c057c9cde1b1393c9f7ef77b401de0e",
     "scripts/dmg_notarization_transaction.py": "9f472927720d153df58fb4b3c9df41c064565ab1b63c689fd463accdfd5fd6e6",
     "scripts/release_artifact_set.py": "e2419beb95953c8418e04b0a0c7d19c5cc4adbee81635e3ecb2fc11391039f37",
-    "scripts/release_apple_toolchain.py": "eaa3c72835dee721a52f3fea81a6dbcfb7f8d8bf683b7a7e5f52083dbe6c2597",
-    "scripts/repository_source_identity.py": "4ec65526cff04c985bcc4a3bc7e071a7dd2bd2e3ad51db3fcb905718a95dfb19",
+    "scripts/release_apple_toolchain.py": "b4ff7cc330566f7d60efd75f3aa7f1e33647f913c0a9a4ad70a71babd422bf7f",
+    "scripts/repository_source_identity.py": "943be31e258b34f6fae402db0f68025dd9db43f3967744533cfb235d243d665f",
     "scripts/release_git.py": "1cfdf6620923863f20f46f20830e0ded8240401117ef4d1464007be8ffee656e",
     "scripts/hash_artifact.py": "fd524dc2d44bbb00cfeadfe3052ed3c8c7871c632d8b8ad704c728a0d3b17f66",
     "scripts/hash_native_build_inputs.py": "7e7d327c3a1c3edd6a7c33cdf544d22d349ce40646e4c5ed26651e060f5bb0fa",
     "scripts/release_cargo_inputs.py": "46cc74cd18e2c92a9300da62dadf765e647419cb03213f1188ab19e0c37de0f8",
     "scripts/release_cargo_inputs.sh": "548f5279e951c90492aba0e6cf8162705d8bad140d899a4eb963aabbea58f7aa",
     "scripts/release_python_launcher.sh": "80c2be4bc813785a9be4e3abed1f360a5c09a72a95ff96629a9fd568bd1600e2",
-    "scripts/release_python_runtime.py": "4e79a54f1a9dde39398404afdee70fef09c7dfec5ca1ac752057246be6df4fa9",
+    "scripts/release_python_runtime.py": "f73d2b9e2fec9925931588ba33961004282623697421007e3b6b45377b3cab32",
     "scripts/release_build_identity.py": "8953d59c4a6fdf77214aa98dae3bc1a4f62b7f378a3d0e5f6074f71125d5cfaa",
     "scripts/release_regular_file.py": "9b623ad7d818abb35400e33a92bd408d200451aa20b8bbaf06319f73571190f0",
     "scripts/release_bundle_codesign.sh": "98b4c8e66b76dc4fe5d638ab79e36473304850feca36c035fe41a5169d4d4555",
@@ -3377,12 +3415,12 @@
     "scripts/verify_remote_release.py": "c27f446e8bc9970d9b9f6acfd3cd926a7123a6d74ee50bc7ca61176a895b5193",
     "scripts/make_dmg.sh": "c81eebabf423a2f9066f163ba12aeb4a7ce88d7c5a57c6fa2d7a15037a66ec8c",
     "scripts/make_updater_manifest.sh": "6a4a718d045e36439cdd6f952a2161014141efe4d7ed9bf7a949491349d8be57",
-    "scripts/release_toolchain_contract.sh": "90ed2c39ef2c0d8c354e20b8d66d99ed9cef9aeed73c3bfa0931a642c017c2cb",
+    "scripts/release_toolchain_contract.sh": "e5680436f88c1da15d3140b8d92b09a6be19d88a9108fedd859b3b0243a6bf18",
     "scripts/release_publication_gate.sh": "04ea99a84f7924082dfcc67d473590ca69967548cd6280bffcfaa124efc513fa",
     "scripts/release_publication_path_contract.sh": "47026ea65ce379823276fa2b80b381d67446390103924855dc75cd7e38b4c373",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "7a1734d72a35893b1fb1e7a990ec07b1435fa664fe15ee8e8ea54e7b5877d74c",
+    "RELEASE.md": "24f0d6e94b1a6666a5da14ab4ebe5e33b8eabc69a582b92c1da0d1870b4c0a86",
     "scripts/updater_signing_launcher.py": "b6240012d2539077dcfa6969e5fb3118486f0469b75c75d4e984075d4c18b974",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "0189ac29728266fbc36e8945f60ea44c6b1f583c96d64e93e57bd36fe8e70cb3",
@@ -3412,7 +3450,7 @@
     "scripts/physical_capture/session.py": "9afa0ae66577d9a104a8a38274fe88fee131a10919a086a80c07e7d410f6a347",
     "scripts/physical_capture/finalize.py": "328727e6615c24ecefec74dbb4bfa7b36c0cbce453a91909026a2ddeb8825a15",
     "scripts/verify_physical_capture_readiness.py": "77916dcd25a0577e392e116ff9304b6f1a8eeeb92f2a3eaac83e00baa99db172",
-    "scripts/verify_build_boundaries.sh": "0572086f2987b9c7886de3b8712c1fd6e7e9717983fdda5f18b07d4db73b74bc",
+    "scripts/verify_build_boundaries.sh": "70a3095467fc819eecfcf8390d7da75744ae65a47feb79b000298f9588c99a16",
     "scripts/verify_release_build_allocations.py": "d96b1a41c1855cd64c52f061edb0209cb4e6d4e32422d2f86a9c92d17c66cdc0",
     "scripts/verify_release_environment.sh": "14a788b3a8af8d177588279e17d00219784e16bb5bbfa9d4622b1a49303ab793",
     "scripts/physical_capture/performance_operator.py": "52cb974c954e4615d52b3d027651f86609578112e68946026221625f56b0137c",
@@ -3421,7 +3459,7 @@
     "scripts/physical_capture/performance_profiles/latency-300ms-loss-5pct-1mbps.pf": "85097feae3cff0695299e222f576660f310c09b458c20c6fc4573a14f85e1a29",
     "scripts/physical_capture/performance_profiles/outage-30s.pf": "071121d49e606b00862d36c7829711260c5d69421c64e3161359f854f9bcd7c6",
     "scripts/publication/orchestrator.py": "12aad95bc46d380bf41bab8d370de0dfd82c9f5b40cca099692fff79d29f36c4",
-    "scripts/publication/ga_release_contract.py": "bc215543519c90992d37d212eef25ef9ea14e790e02c4a79ce54529ed2219204",
+    "scripts/publication/ga_release_contract.py": "d26b2d35dcbcc7c148677468deea83e71eaaf305b72da23d0cf1e8cc17729dbf",
     "scripts/macos_durability.py": "60dc9f319c89617aad0c9f6fc6760b03f506266722029f7f7435fabb2238d528",
     "scripts/production_release_evidence.py": "4c028f54a3fefff889484aab9defc7bc46c2cba9c0706b2f1bb41a14634d2826",
     "scripts/publication/sealed_manifest.py": "57f9652ff59f323c01be11d6752534b3c4d8caa668febfd010a41bbfabd0fb0a",
@@ -3445,7 +3483,7 @@
     "scripts/promote_signed_native_manifest.py": "ac4c59c8b590d9567b3190c59bd3994a7caba60407125c874cff2dcd716276c7",
     "scripts/verify_legacy_tombstone_provenance.py": "6cb33669fc41ed7f1874dd32c1e1251383c11cf87bda9ec92a7a7b2d0146da47",
     "scripts/verify_signing_transformation.py": "1f1618f26a7fe1b9e6820918aeb9c867d59cb4acdcb194cfe1a17cfe24fb8a02",
-    "scripts/github_hosted_ci_receipt.py": "cf5f94ce59f49bf57684d5a3fba38dac2f2f65cd9ef23e50d2ca95759a7fdacb",
+    "scripts/github_hosted_ci_receipt.py": "6346c0cf5d09b3b3f79bd3b083303ba154ce2c982bf9f13fa9b31e23fb69d4cf",
     "scripts/ga_acceptance_environment.py": "e5c656e24a3d3f11a196c7620c4ce318fc092fba90bf8f5e295544e242c3e5ea",
     "scripts/ga_acceptance_journal_export.py": "ea8640390362f196ad8acde042ca5d6f0900a13f716f3948319b465c06bdbf0a",
     "scripts/ga_runtime_acceptance.py": "16b1c1975c56b7eb4cf692861a4ad6ee941114a03982335c620d76dd55dabcc4",
@@ -3487,6 +3525,9 @@
     "scripts/xcodegen_dependency_contract.sh": "0ef7d7447bd9aebf32c0073be65bcfe65f0bcefdfdcddebffdb60311647ff7d2",
     "scripts/maintenance_network_observations.py": "48b606d55bcd9e8d7dc2df57bb6c32400c5cf26b1d467daa211e7a4e0ce26ce5",
     "scripts/archive_install_history.py": "ebcce5f7d7b8e91192cebb0227abba10f04daa697bcde802118159f43e4d090b",
-    "scripts/run_archive_install_history.sh": "574a14e1b9eef0ba92baffc9f10a47b8492096dd33bb214b475167783093636e"
+    "scripts/run_archive_install_history.sh": "574a14e1b9eef0ba92baffc9f10a47b8492096dd33bb214b475167783093636e",
+    "scripts/select_ci_xcode.py": "183fdbd5b184ed88f990f6ba601e0b8a56c443e986a539a6bbcd0f6e321d07e5",
+    "scripts/apple_validation_policy.py": "0d973cd2591684d7ab6817b2fab0517a04b5d78f5446c68841e80ad6502b7047",
+    "scripts/apple_validation_policy.sh": "7858530b4243c2edbb64fdc4db77d1d8fa13cbd2509af5cceeb780b1636bb56a"
   }
 }

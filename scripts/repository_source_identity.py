@@ -447,6 +447,78 @@ def release_test_source_changes(
     return changed
 
 
+# Explicit post-freeze validation/provenance adapter surfaces. Application and
+# native sources, dependency locks/pins, and signing/provisioning inputs remain
+# outside this set. Receipt v5 retains every changed path and both source identities.
+CI_VALIDATION_SOURCE_PATHS = frozenset({
+    ".github/workflows/ci.yml",
+    "RELEASE.md",
+    "docs/release/ga-assurance-policy-v040.md",
+    "docs/supply-chain.md",
+    "scripts/apple_validation_policy.py",
+    "scripts/apple_validation_policy.sh",
+    "scripts/select_ci_xcode.py",
+    "scripts/release_tool_environment.sh",
+    "scripts/release_toolchain_contract.sh",
+    "scripts/release_python_runtime.py",
+    "scripts/release_apple_toolchain.py",
+    "scripts/publication/release_environment.py",
+    "scripts/publication/ci_lanes.py",
+    "scripts/publication/ga_release_contract.py",
+    "scripts/verify_ci_no_masking.py",
+    "scripts/verify_pinned_build_inputs.py",
+    "scripts/verify_build_boundaries.sh",
+    "scripts/pinned_build_inputs.json",
+    "scripts/github_hosted_ci_receipt.py",
+    "scripts/repository_source_identity.py",
+})
+
+
+def release_ci_source_changes(
+    repository: Path,
+    candidate_commit: str,
+    tested_commit: str,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Allow reviewed validation adapters while preserving every product byte."""
+    candidate = {entry.path: entry for entry in _historical_source_files(
+        repository, candidate_commit, environment, paths=()
+    )}
+    tested = {entry.path: entry for entry in _historical_source_files(
+        repository, tested_commit, environment, paths=()
+    )}
+    changed = tuple(sorted(path for path in candidate.keys() | tested.keys()
+                           if candidate.get(path) != tested.get(path)))
+    if any(not path.startswith("scripts/tests/") and path not in CI_VALIDATION_SOURCE_PATHS
+           for path in changed):
+        raise SourceIdentityError("tested CI source changes product or unreviewed inputs")
+    return changed
+
+
+def historical_file_bytes(
+    repository: Path,
+    commit: str,
+    relative_path: str,
+    *,
+    maximum_bytes: int,
+    environment: Mapping[str, str] | None = None,
+) -> bytes:
+    """Read one bounded regular file from an immutable, verified Git tree."""
+    path = Path(relative_path)
+    if (not relative_path or path.is_absolute() or ".." in path.parts
+            or path.as_posix() != relative_path or "\x00" in relative_path
+            or not 0 < maximum_bytes <= MAX_HISTORICAL_BATCH_BYTES):
+        raise SourceIdentityError("historical file request is not bounded and canonical")
+    entries = _historical_source_files(repository, commit, environment, paths=(relative_path,))
+    if len(entries) != 1 or entries[0].path != relative_path or entries[0].size > maximum_bytes:
+        raise SourceIdentityError("historical file is missing, ambiguous or too large")
+    entry = entries[0]
+    payload = _run_git(repository, ["cat-file", "blob", entry.object_id.decode("ascii")], environment)
+    if len(payload) != entry.size:
+        raise SourceIdentityError("historical file size differs from its Git object")
+    return payload
+
+
 def identity_at_commit(
     repository: Path,
     commit: str,

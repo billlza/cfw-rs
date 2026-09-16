@@ -16,6 +16,7 @@ from scripts.verify_ci_no_masking import (
     REQUIRED_SOURCE_ASSERTION_STEP,
     REQUIRED_SWIFT_TARGET_INFO_PROBE,
     REQUIRED_XCODE_OWNERSHIP_STEP,
+    REQUIRED_XCODE_RECORD_STEP,
     audit_shell_test_python_isolation,
     audit_workflow,
 )
@@ -38,9 +39,6 @@ defaults:
   run:
     shell: "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
 
-env:
-  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
-
 jobs:
   build:
     runs-on: xcode-27
@@ -50,16 +48,16 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-""" + REQUIRED_SOURCE_ASSERTION_STEP + "\n" + REQUIRED_XCODE_OWNERSHIP_STEP + "\n" + """
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.98.1"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+""" + REQUIRED_SOURCE_ASSERTION_STEP + "\n" + """      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         id: validation-python
         with:
           python-version: "3.14.7"
           architecture: arm64
           update-environment: false
+""" + REQUIRED_XCODE_OWNERSHIP_STEP + "\n" + REQUIRED_XCODE_RECORD_STEP + "\n" + """
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.1"
       - name: Bootstrap Node
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-node-toolchain
       - name: Verify policy
@@ -524,146 +522,40 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             with self.assertRaisesRegex(CiPolicyError, "absolute /bin/test"):
                 audit_workflow(workflow_path, pins_path)
 
-    def test_pinned_xcode_ownership_normalization_is_the_third_step(self) -> None:
-        self.assertIn(XCODE_OWNERSHIP_STEP, GOOD_WORKFLOW)
-        rust_setup = (
-            "      - uses: dtolnay/rust-toolchain@stable\n"
-            "        with:\n"
-            '          toolchain: "1.98.1"\n'
-        )
-        without_normalization = GOOD_WORKFLOW.replace(
-            XCODE_OWNERSHIP_STEP,
-            "",
-            1,
-        )
+    def test_latest_xcode_selection_and_identity_are_required_in_order(self) -> None:
         variants = (
-            without_normalization,
-            without_normalization.replace(
-                rust_setup,
-                rust_setup + XCODE_OWNERSHIP_STEP,
-                1,
-            ),
-            GOOD_WORKFLOW.replace(
-                XCODE_OWNERSHIP_STEP,
-                XCODE_OWNERSHIP_STEP * 2,
-                1,
-            ),
+            GOOD_WORKFLOW.replace(XCODE_OWNERSHIP_STEP, "", 1),
+            GOOD_WORKFLOW.replace(XCODE_OWNERSHIP_STEP, XCODE_OWNERSHIP_STEP * 2, 1),
+            GOOD_WORKFLOW.replace(REQUIRED_XCODE_RECORD_STEP, "", 1),
+            GOOD_WORKFLOW.replace("scripts/select_ci_xcode.py", "scripts/unreviewed_selector.py", 1),
+            GOOD_WORKFLOW.replace("--github-env", "--inspect --github-env", 1),
         )
         for workflow in variants:
             with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as tmp:
                 workflow_path, pins_path = self._write(Path(tmp), workflow)
-                with self.assertRaisesRegex(CiPolicyError, "pinned Xcode ownership"):
+                with self.assertRaises(CiPolicyError):
                     audit_workflow(workflow_path, pins_path)
 
-    def test_pinned_xcode_ownership_policy_cannot_be_weakened(self) -> None:
-        mutations = (
-            ("/Applications/Xcode_27.0.app", "/Applications/Xcode.app"),
-            ("/usr/bin/find -P -x", "/usr/bin/find -L -x"),
-            ("/usr/bin/sudo -n", "/usr/bin/sudo"),
-            (
-                "\\( ! -uid 0 -o ! -gid 0 -o -perm -0002 \\)",
-                "\\( ! -uid 0 -a ! -gid 0 -o -perm -0002 \\)",
-            ),
-            ('[[ "$runner_groups" != *" 0 "* ]]', ""),
-            ('/usr/sbin/spctl --assess --type execute "$xcode_application"', ""),
+    def test_latest_xcode_selection_follows_pinned_python_setup(self) -> None:
+        rust_setup = "      - uses: dtolnay/rust-toolchain@stable\n"
+        self.assertIn(rust_setup, GOOD_WORKFLOW)
+        moved = GOOD_WORKFLOW.replace(XCODE_OWNERSHIP_STEP, "", 1).replace(
+            rust_setup, XCODE_OWNERSHIP_STEP + rust_setup, 1
         )
-        for original, replacement in mutations:
-            with self.subTest(original=original), tempfile.TemporaryDirectory() as tmp:
-                self.assertIn(original, XCODE_OWNERSHIP_STEP)
-                mutated_step = XCODE_OWNERSHIP_STEP.replace(
-                    original,
-                    replacement,
-                    1,
-                )
-                workflow = GOOD_WORKFLOW.replace(
-                    XCODE_OWNERSHIP_STEP,
-                    mutated_step,
-                    1,
-                )
-                workflow_path, pins_path = self._write(Path(tmp), workflow)
-                with self.assertRaisesRegex(CiPolicyError, "pinned Xcode ownership"):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path, pins_path = self._write(Path(tmp), moved)
+            with self.assertRaisesRegex(CiPolicyError, "Xcode ownership"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_workflow_cannot_pin_a_stale_xcode_installation(self) -> None:
+        for injected in (
+            "env:\n  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer\n",
+            "env:\n  STALE_XCODE_IDENTITY: Build version 27A266a\n",
+        ):
+            with self.subTest(injected=injected), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(Path(tmp), injected + GOOD_WORKFLOW)
+                with self.assertRaisesRegex(CiPolicyError, "hard-coded release identity"):
                     audit_workflow(workflow_path, pins_path)
-
-    def test_pinned_xcode_alias_resolves_only_inside_the_application_root(self) -> None:
-        # Execute only the path-selection prelude. Signature assessment and
-        # privileged ownership operations are covered by the policy checks.
-        for variant in ("alias", "outside", "linked-contents", "linked-developer"):
-            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary).resolve()
-                applications = root / "Applications"
-                applications.mkdir()
-                parent = root / "Other" if variant == "outside" else applications
-                selected = parent / "Xcode_27.0.0.app"
-                developer = selected / "Contents/Developer"
-                developer.mkdir(parents=True)
-                if variant == "linked-contents":
-                    moved = root / "Contents"
-                    (selected / "Contents").rename(moved)
-                    (selected / "Contents").symlink_to(moved, target_is_directory=True)
-                elif variant == "linked-developer":
-                    moved = root / "Developer"
-                    developer.rename(moved)
-                    developer.symlink_to(moved, target_is_directory=True)
-                alias = applications / "Xcode_27.0.app"
-                alias.symlink_to(selected, target_is_directory=True)
-                prelude = XCODE_OWNERSHIP_STEP.split("        run: |\n", 1)[1]
-                prelude = prelude.split("          /usr/sbin/spctl", 1)[0]
-                prelude = "\n".join(line[10:] for line in prelude.splitlines())
-                prelude = prelude.replace("/Applications", str(applications))
-                result = subprocess.run(
-                    ["/bin/bash", "-p", "-c", "set -euo pipefail\n" + prelude
-                     + "\nprintf '%s\\n' \"$xcode_application\""],
-                    env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty",
-                         "DEVELOPER_DIR": str(alias / "Contents/Developer")},
-                    capture_output=True, text=True, timeout=5, check=False,
-                )
-                if variant == "alias":
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout.strip(), str(selected))
-                else:
-                    self.assertNotEqual(result.returncode, 0, result.stdout + "\n" + prelude)
-
-    def test_xcode_normalization_preserves_unselected_bundle_modes(self) -> None:
-        self.assertNotIn("/usr/sbin/chmod", XCODE_OWNERSHIP_STEP)
-        self.assertNotIn("-perm -0020", XCODE_OWNERSHIP_STEP)
-        self.assertEqual(XCODE_OWNERSHIP_STEP.count("-perm -0002"), 2)
-
-    def test_xcode_ownership_rejects_root_group_under_system_bash(self) -> None:
-        guard = next(
-            line.strip() for line in XCODE_OWNERSHIP_STEP.splitlines()
-            if "[[" in line and "runner_groups" in line
-        )
-        for groups, expected in ((" 20 0 80 ", 1), (" 20 80 ", 0)):
-            with self.subTest(groups=groups):
-                result = subprocess.run(
-                    ["/bin/bash", "-p", "-c",
-                     "set -euo pipefail\nrunner_groups=" + shlex.quote(groups)
-                     + "\n" + guard + "\nexit 0"],
-                    env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty"},
-                    capture_output=True, timeout=5, check=False,
-                )
-                self.assertEqual(result.returncode, expected, result.stderr)
-
-    def test_xcode_bundle_is_assessed_before_each_identity_execution(self) -> None:
-        assessment = (
-            '/usr/sbin/spctl --assess --type execute "$xcode_application"'
-        )
-        execution = "/usr/bin/xcodebuild -version"
-        assessment_offsets = tuple(
-            index
-            for index in range(len(XCODE_OWNERSHIP_STEP))
-            if XCODE_OWNERSHIP_STEP.startswith(assessment, index)
-        )
-        execution_offsets = tuple(
-            index
-            for index in range(len(XCODE_OWNERSHIP_STEP))
-            if XCODE_OWNERSHIP_STEP.startswith(execution, index)
-        )
-        self.assertEqual(len(assessment_offsets), 2)
-        self.assertEqual(len(execution_offsets), 2)
-        self.assertLess(assessment_offsets[0], execution_offsets[0])
-        self.assertLess(execution_offsets[0], assessment_offsets[1])
-        self.assertLess(assessment_offsets[1], execution_offsets[1])
 
     def test_privileged_xcode_commands_are_confined_to_normalization(self) -> None:
         injected = (

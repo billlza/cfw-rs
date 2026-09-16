@@ -8,7 +8,9 @@ fixed to one public repository/workflow, and revalidates one run and its fixed
 Check Suite around the attempt-specific jobs and zero-annotation responses so
 a rerun, workflow-file source drift, or successful job carrying diagnostics
 cannot be mistaken for the retained attempt. The artifact source stays frozen;
-its tested CI head may differ only in the source-owned scripts/tests harness.
+its tested CI head may differ only in the source-owned test harness and the
+explicit validation/provenance adapter set. The selected hosted Apple toolchain
+is recorded independently of the frozen production toolchain.
 Every reopened receipt rederives that distinction from immutable Git inputs.
 """
 
@@ -57,7 +59,8 @@ if __package__:
         SourceIdentityError,
         current_identity,
         identity_at_commit,
-        release_test_source_changes,
+        release_ci_source_changes,
+        historical_file_bytes,
     )
     from .release_executor_source import (
         capture_frozen_release_sources,
@@ -86,7 +89,8 @@ else:
         SourceIdentityError,
         current_identity,
         identity_at_commit,
-        release_test_source_changes,
+        release_ci_source_changes,
+        historical_file_bytes,
     )
     from release_executor_source import (
         capture_frozen_release_sources,
@@ -98,8 +102,8 @@ class HostedCIReceiptError(PublicationError):
     """The hosted-CI receipt is unavailable, ambiguous, or not successful."""
 
 
-SCHEMA_VERSION: Final = 4
-DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v4"
+SCHEMA_VERSION: Final = 5
+DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v5"
 PRODUCT_VERSION: Final = "0.4.0"
 GA_BUILD: Final = "40070"
 
@@ -122,6 +126,11 @@ WORKFLOW_SOURCE_STEP_PREFIX: Final = "Assert exact CI source and workflow identi
 WORKFLOW_SOURCE_STEP_RE: Final = re.compile(
     rf"^{re.escape(WORKFLOW_SOURCE_STEP_PREFIX)}(?P<sha>[0-9a-f]{{40}})$"
 )
+APPLE_VALIDATION_STEP_PREFIX: Final = "Record Apple validation toolchain "
+APPLE_VALIDATION_STEP_RE: Final = re.compile(
+    r"^Record Apple validation toolchain (?P<version>[0-9]+(?:\.[0-9]+){1,2}) "
+    r"\((?P<build>[0-9]+[A-Z][0-9]+[a-z]?)\)$"
+)
 EXPECTED_JOB_NAMES: Final = frozenset(
     {
         "Rust, UI, and script quality gates",
@@ -132,7 +141,7 @@ EXPECTED_JOB_NAMES: Final = frozenset(
 REQUIRED_JOB_STEP_NAMES: Final = {
     "Rust, UI, and script quality gates": frozenset(
         {
-            "Normalize pinned Xcode ownership",
+            "Select latest available Xcode",
             "Verify build-script boundary",
             "Test release tooling",
             "Validate shell scripts",
@@ -649,6 +658,10 @@ def _project_job(value: object, run: dict[str, Any]) -> dict[str, Any]:
         raise _error(
             f"GitHub job {name!r} is not bound to the exact workflow-file source"
         )
+    apple_steps = [step for step in steps if step["name"].startswith(APPLE_VALIDATION_STEP_PREFIX)]
+    apple_match = APPLE_VALIDATION_STEP_RE.fullmatch(apple_steps[0]["name"]) if len(apple_steps) == 1 else None
+    if apple_match is None or "Select latest available Xcode" not in step_names:
+        raise _error(f"GitHub job {name!r} did not record its selected Apple validation toolchain")
     if any(
         _timestamp_value(step["started_at"]) < _timestamp_value(started_at)
         or _timestamp_value(step["completed_at"]) > _timestamp_value(completed_at)
@@ -668,6 +681,7 @@ def _project_job(value: object, run: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "steps": steps,
         "workflow_source_sha": workflow_source_match.group("sha"),
+        "apple_validation_toolchain": {"xcode_version": apple_match.group("version"), "xcode_build_version": apple_match.group("build")},
     }
 
 
@@ -894,18 +908,35 @@ def _tested_source_binding(
         }
     try:
         identity = identity_at_commit(repository, tested_commit)
-        changed = release_test_source_changes(
+        changed = release_ci_source_changes(
             repository, source["repository_commit"], tested_commit
         )
     except (SourceIdentityError, OSError, ValueError) as error:
         raise _error(
-            "tested CI source is unavailable or changes inputs outside scripts/tests"
+            "tested CI source is unavailable or changes product/unreviewed inputs"
         ) from error
     return {
         "repository_commit": identity["repositoryCommit"],
         "release_source_sha256": identity["releaseSourceSha256"],
         "changed_paths": list(changed),
     }
+
+
+def _tested_workflow_bytes(
+    repository: Path,
+    artifact_source: dict[str, str],
+    tested_source: dict[str, Any],
+    artifact_workflow_bytes: bytes,
+) -> bytes:
+    if tested_source["repository_commit"] == artifact_source["repository_commit"]:
+        return artifact_workflow_bytes
+    try:
+        return historical_file_bytes(
+            repository, tested_source["repository_commit"], WORKFLOW_PATH,
+            maximum_bytes=MAX_WORKFLOW_BYTES,
+        )
+    except (SourceIdentityError, OSError, ValueError) as error:
+        raise _error("tested workflow bytes are unavailable from the immutable CI source") from error
 
 
 def _live_receipt(
@@ -926,10 +957,11 @@ def _live_receipt(
         run_before,
     )
     workflow_sha = jobs[0]["workflow_source_sha"]
+    tested_workflow_bytes = _tested_workflow_bytes(repository, source, tested_source, workflow_bytes)
     workflow_source = _project_workflow_source(
         _fetch_api_json(_workflow_contents_api_path(workflow_sha)),
         workflow_sha,
-        workflow_bytes,
+        tested_workflow_bytes,
     )
     check_runs_before = _project_check_runs(
         _fetch_api_json(_check_runs_api_path(run_before["check_suite_id"])),
@@ -1018,8 +1050,9 @@ def _validated_stored_receipt(
         "hosted CI workflow-file source identity",
     )
     retained_workflow_sha = workflow_source["workflow_sha"]
+    tested_workflow_bytes = _tested_workflow_bytes(repository, expected_source, tested_source, workflow_bytes)
     expected_workflow_source = (
-        _workflow_source_identity(retained_workflow_sha, workflow_bytes)
+        _workflow_source_identity(retained_workflow_sha, tested_workflow_bytes)
         if isinstance(retained_workflow_sha, str)
         else None
     )

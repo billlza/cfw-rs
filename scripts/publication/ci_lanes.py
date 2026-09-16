@@ -106,11 +106,13 @@ from .release_environment import (
     swift_toolchain_identity,
 )
 if __package__ and __package__.startswith("scripts."):
+    from scripts.apple_validation_policy import selected_apple_identity
     from scripts.release_rust_toolchain import (
         ReleaseRustToolchainError,
         verify_pinned_toolchain,
     )
 else:
+    from apple_validation_policy import selected_apple_identity
     from release_rust_toolchain import (
         ReleaseRustToolchainError,
         verify_pinned_toolchain,
@@ -763,9 +765,10 @@ def _resolved_toolchain(
         f"Version: {pins['XCODEGEN_VERSION']}",
         "XcodeGen",
     )
+    selected_version, selected_build = selected_apple_identity(pins, base)
     resolved["xcodebuild"] = _expect(
         identity_output([APPLE_XCODEBUILD, "-version"], repository, "Xcode", base),
-        f"Xcode {pins['XCODE_VERSION']}; Build version {pins['XCODE_BUILD_VERSION']}",
+        f"Xcode {selected_version}; Build version {selected_build}",
         "Xcode",
     )
     # Swift ships inside the pinned Xcode. Its structured target identity is
@@ -847,6 +850,7 @@ def derive_toolchain_identity(
     )
     if _verified_root_after != toolchain_root or tree_digests_after != tree_digests:
         raise PublicationError("release toolchain changed while resolving its identity")
+    selected_version, selected_build = selected_apple_identity(pins, environment)
     return {
         "document": TOOLCHAIN_BINDING_KIND,
         "pins_path": PINS_RELATIVE,
@@ -855,8 +859,8 @@ def derive_toolchain_identity(
         "toolchain_digests": supply["toolchain_digests"],
         "release_tree_sha256": tree_digests,
         "apple_toolchain": {
-            "xcode_version": pins["XCODE_VERSION"],
-            "xcode_build_version": pins["XCODE_BUILD_VERSION"],
+            "xcode_version": selected_version,
+            "xcode_build_version": selected_build,
             "macos_deployment_target": pins["MACOS_DEPLOYMENT_TARGET"],
         },
         "resolved": resolved,

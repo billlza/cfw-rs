@@ -122,7 +122,7 @@ class StageFixture:
         return {
             "hosted-ci.json": canonical_json(
                 {
-                    "document": "cfw-github-hosted-ci-receipt-v4",
+                    "document": "cfw-github-hosted-ci-receipt-v5",
                     "run": {"id": 1, "run_attempt": 1},
                     "schema_version": 4,
                 }
@@ -743,17 +743,20 @@ class AdapterContractTests(unittest.TestCase):
             "candidate_freeze_intent_sha256": "a" * 64,
             "release_source_sha256": "b" * 64,
             "repository_commit": "c" * 40,
+            "artifact_workflow_sha256": "d" * 64,
         }
         _require_hosted_ci_source_binding(valid, **arguments)
+        # The hosted receipt independently verifies the newer validation
+        # workflow against its actual tested commit; artifact identity stays fixed.
+        _require_hosted_ci_source_binding(
+            {"source": dict(expected_source), "workflow": {"source": {"sha256": "e" * 64}}},
+            **arguments,
+        )
 
         old_source = dict(expected_source)
         old_source.pop("workflow_sha256")
         variants = (
             {"source": old_source, "workflow": valid["workflow"]},
-            {
-                "source": dict(expected_source),
-                "workflow": {"source": {"sha256": "e" * 64}},
-            },
             {
                 "source": {**expected_source, "workflow_sha256": "e" * 64},
                 "workflow": valid["workflow"],

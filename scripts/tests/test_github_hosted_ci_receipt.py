@@ -109,7 +109,8 @@ def job_response(name: str, identifier: int, *, attempt: int = 2) -> dict[str, o
     step_names = [
         "Set up job",
         hosted.WORKFLOW_SOURCE_STEP_PREFIX + WORKFLOW_SHA,
-        *sorted(hosted.REQUIRED_JOB_STEP_NAMES.get(name, frozenset())),
+        *sorted(hosted.REQUIRED_JOB_STEP_NAMES.get(name, frozenset()) | {"Select latest available Xcode"}),
+        hosted.APPLE_VALIDATION_STEP_PREFIX + "27.0 (27A5252f)",
         "Complete job",
     ]
     steps = [
@@ -431,7 +432,7 @@ class HostedCIReceiptTests(unittest.TestCase):
 
     def test_xcode_ownership_step_must_be_present_and_successful(self) -> None:
         rust_job_name = "Rust, UI, and script quality gates"
-        step_name = "Normalize pinned Xcode ownership"
+        step_name = "Select latest available Xcode"
         for conclusion in (None, "failure", "skipped"):
             with self.subTest(conclusion=conclusion):
                 value = jobs_response()
@@ -450,6 +451,28 @@ class HostedCIReceiptTests(unittest.TestCase):
                         value,
                         hosted._project_run(run_response(), HEAD_SHA, RUN_ID),
                     )
+
+    def test_actual_apple_identity_is_required_and_cannot_be_relabeled(self) -> None:
+        for mutation in ("missing", "malformed", "duplicate"):
+            with self.subTest(mutation=mutation):
+                jobs = jobs_response()
+                steps = jobs["jobs"][0]["steps"]
+                step = next(item for item in steps if item["name"].startswith(hosted.APPLE_VALIDATION_STEP_PREFIX))
+                if mutation == "missing":
+                    steps.remove(step)
+                elif mutation == "malformed":
+                    step["name"] = hosted.APPLE_VALIDATION_STEP_PREFIX + "unknown"
+                else:
+                    other = dict(step)
+                    other["number"] = len(steps) + 1
+                    steps.append(other)
+                with self.assertRaises(hosted.HostedCIReceiptError):
+                    hosted._project_jobs(jobs, hosted._project_run(run_response(), HEAD_SHA, RUN_ID))
+        receipt = self._write_receipt()
+        receipt["jobs"][0]["apple_validation_toolchain"]["xcode_build_version"] = "27A266a"
+        self.output.write_bytes(hosted._canonical_json(receipt))
+        with patch.object(hosted, "_source_binding", return_value=dict(SOURCE)), self.assertRaises(hosted.HostedCIReceiptError):
+            hosted.validate_receipt_offline(self.repository)
 
     def test_workflow_source_marker_may_differ_from_tested_head(self) -> None:
         projected = hosted._project_jobs(
@@ -1059,10 +1082,33 @@ class HistoricalTestedSourceReceiptTests(unittest.TestCase):
         ):
             return hosted.capture_receipt(self.repository, RUN_ID)
 
+    def test_ci_workflow_change_binds_actual_tested_bytes_and_keeps_artifact_frozen(self) -> None:
+        git(self.repository, "checkout", "-q", self.tested_commit)
+        workflow_bytes = WORKFLOW_BYTES + b"# select newest hosted Xcode\n"
+        (self.repository / hosted.WORKFLOW_PATH).write_bytes(workflow_bytes)
+        git(self.repository, "add", ".")
+        git(self.repository, "commit", "-q", "-m", "update CI validation toolchain")
+        self.tested_commit = git_output(self.repository, "rev-parse", "HEAD")
+        git(self.repository, "checkout", "-q", self.source["repository_commit"])
+        api = self.api()
+        api.workflow = workflow_response(content=workflow_bytes)
+        receipt = self.capture(api)
+        self.assertEqual(receipt["source"]["workflow_sha256"], hashlib.sha256(WORKFLOW_BYTES).hexdigest())
+        self.assertEqual(receipt["workflow"]["source"]["sha256"], hashlib.sha256(workflow_bytes).hexdigest())
+        self.assertEqual(receipt["tested_source"]["changed_paths"], [hosted.WORKFLOW_PATH, "scripts/tests/test_release.py"])
+        self.assertEqual(receipt["jobs"][0]["apple_validation_toolchain"], {"xcode_version": "27.0", "xcode_build_version": "27A5252f"})
+        with patch.object(hosted, "_source_binding", return_value=dict(self.source)), patch.object(hosted, "_fetch_api_json", side_effect=api):
+            self.assertEqual(hosted.validate_receipt_offline(self.repository), receipt)
+            self.assertEqual(hosted.verify_receipt(self.repository), receipt)
+        receipt["workflow"]["source"]["sha256"] = self.source["workflow_sha256"]
+        self.output.write_bytes(hosted._canonical_json(receipt))
+        with patch.object(hosted, "_source_binding", return_value=dict(self.source)), self.assertRaises(hosted.HostedCIReceiptError):
+            hosted.validate_receipt_offline(self.repository)
+
     def test_capture_offline_and_live_replay_keep_frozen_and_tested_sources_distinct(self) -> None:
         receipt = self.capture()
         self.assertEqual((receipt["schema_version"], receipt["document"]),
-                         (4, "cfw-github-hosted-ci-receipt-v4"))
+                         (5, "cfw-github-hosted-ci-receipt-v5"))
         self.assertEqual(receipt["source"], self.source)
         self.assertEqual(receipt["tested_source"], {
             "repository_commit": self.tested_commit,

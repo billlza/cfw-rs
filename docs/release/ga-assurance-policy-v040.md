@@ -489,19 +489,27 @@ Legacy maintenance remains an explicit action with its original confirmation and
 recovery boundaries; ordinary startup neither advances that transaction nor
 deletes its data. Runtime acceptance must exercise the normal startup controls.
 
-Prepackage v3 requires a complete successful hosted CI receipt. Receipt v4
+Prepackage v3 requires a complete successful hosted CI receipt. Receipt v5
 retains the frozen product source and separately records the actual tested
 commit. A different tested commit is admitted only when both complete immutable
-Git trees differ solely in regular files under `scripts/tests/`; application,
-build, dependency, workflow, mode and unclassified changes remain rejected.
+Git trees differ solely in regular files under `scripts/tests/` or the explicit
+`CI_VALIDATION_SOURCE_PATHS` validation/provenance adapter list. Application and
+native sources, dependency locks and version pins, signing/provisioning inputs,
+their modes and unclassified changes remain rejected. The actual tested workflow
+is re-read from its own immutable Git commit, separately from the artifact's
+frozen workflow. Each job records the real selected Xcode version/build.
 The actual tested head, source digest and changed paths are rederived during
 capture and replay. All three jobs, required steps and zero-annotation checks
 remain mandatory. A failed original run is never relabelled successful, and a
-later release-tool executor is not presented as the tested source. Earlier v3
+later release-tool executor is not presented as the tested source. Earlier v3/v4
 receipts remain with their original frozen verifier and are not rewritten.
 The 27-command local CI reproduction is optional assurance and
 is excluded from the prepackage file set, CI binding, and mandatory publication
 artifact closure. Hosted validation uses the pinned validation Python entry;
+each job selects the latest Xcode actually installed in its GitHub image. A
+different or prerelease hosted Xcode does not bypass any compile, test, scan,
+signature or ownership check. Production commands reject the unsigned-validation
+Xcode selection and continue to require the exact release pin;
 the product's actual release toolchain remains independently bound by its frozen
 product input and signing evidence. Installation and core network acceptance
 remain mandatory. Local records and failed attempts retain their own truthful

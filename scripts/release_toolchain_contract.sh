@@ -6,6 +6,9 @@
 release_contract_directory="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && /bin/pwd -P)"
 # shellcheck source=scripts/release_python_launcher.sh
 source "$release_contract_directory/release_python_launcher.sh"
+# shellcheck source=scripts/apple_validation_policy.sh
+source "$release_contract_directory/apple_validation_policy.sh"
+cfw_apply_validation_apple_toolchain "$(cd "$release_contract_directory/.." && /bin/pwd -P)"
 unset release_contract_directory
 
 cfw_require_supported_python() {
@@ -56,6 +59,7 @@ cfw_verify_go_toolchain_tree() {
 cfw_verify_node_toolchain_tree() {
   local contract_repository="$1"
   local contract_toolchain_root="$2"
+  : "${NODE_VERSION:?the pinned Node version must be loaded}"
   cfw_verify_release_toolchain_manifest \
     "$contract_repository" \
     "$contract_toolchain_root/node-$NODE_VERSION" \

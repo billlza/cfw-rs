@@ -63,6 +63,7 @@ from scripts.ga_acceptance_journal_export import (
     GAAcceptanceJournalExportError,
     INSTALL_RELATIVE,
     MIGRATION_RELATIVE,
+    PREVIOUS_BUILD,
     SERVICE_RELATIVE,
     verify_ga_acceptance_journal_export,
 )
@@ -989,7 +990,7 @@ def _require_migration_matches_prepackage(
         closed_migration = (
             install_journal["phase"] == "installed"
             and install_journal["candidate"]["build_number"] == GA_BUILD
-            and install_journal["previous"]["build_number"] == "40048"
+            and install_journal["previous"]["build_number"] == PREVIOUS_BUILD
             and all(
                 segment["after"] is not None
                 for segment in install_journal["guards"]
@@ -1005,7 +1006,7 @@ def _require_migration_matches_prepackage(
         ) from error
     if not closed_migration:
         raise PublicationError(
-            "install journal is not a closed 40048 to 40070 migration"
+            f"install journal is not a closed {PREVIOUS_BUILD} to {GA_BUILD} migration"
         )
     if not candidate_matches:
         raise PublicationError(
@@ -1071,7 +1072,7 @@ def _verified_runtime_acceptance_adapter(
         "dmg_sha256": packages["dmg"]["dmg_sha256"],
         "dmg_gatekeeper_sha256": packages["dmg"]["gatekeeper_sha256"],
         "dmg_set_seal_sha256": packages["dmg"]["seal"]["sha256"],
-        "from_build": "40048",
+        "from_build": PREVIOUS_BUILD,
         "ga_environment_sha256": ga_environment_sha256,
         "install_journal_sha256": install_journal_sha256,
         "product_version": PRODUCT_VERSION,
@@ -1377,7 +1378,7 @@ def derive_runtime_expectation(
         "dmg_gatekeeper_sha256": packages["dmg"]["gatekeeper_sha256"],
         "dmg_set_seal_sha256": packages["dmg"]["seal"]["sha256"],
         "dmg_sha256": packages["dmg"]["dmg_sha256"],
-        "from_build": "40048",
+        "from_build": PREVIOUS_BUILD,
         "ga_environment_sha256": migration["environment"]["sha256"],
         "install_journal_sha256": migration["install_journal"]["record"]["sha256"],
         "product_version": PRODUCT_VERSION,

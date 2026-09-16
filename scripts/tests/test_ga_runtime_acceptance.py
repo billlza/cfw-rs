@@ -502,18 +502,9 @@ class RuntimeFixture:
                 "size": len(capture),
             },
             capture_command=command(
-                [
-                    "/usr/sbin/tcpdump",
-                    "-U",
-                    "-n",
-                    "-i",
-                    "en0",
-                    "-c",
-                    str(policy["expected_records"]),
-                    "-w",
-                    "-",
-                    *capture_filter,
-                ],
+                ga_runtime._capture_command_argv(
+                    "en0", policy["expected_records"], capture_filter
+                ),
                 stderr=f"{policy['expected_records']} packets captured\n",
             ),
             endpoint={
@@ -949,6 +940,15 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = RuntimeFixture()
         self.addCleanup(self.fixture.cleanup)
+
+    def test_capture_receipt_requires_explicit_drop_to_operator(self) -> None:
+        capture = self.fixture.documents["tcp-traffic.json"]["capture_command"]
+        position = capture["argv"].index("-Z")
+        del capture["argv"][position:position + 2]
+        self.fixture.write_all()
+        with self.assertRaises(GARuntimeAcceptanceError):
+            self.fixture.seal()
+        self.assertFalse(self.fixture.acceptance.exists())
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
@@ -1537,6 +1537,12 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
 
 class FakeCollectorRuntime:
+    def require_capture_authority(self) -> None:
+        return None
+
+    def release_capture_authority(self) -> None:
+        return None
+
     def __init__(
         self,
         fixture: RuntimeFixture,
@@ -1652,6 +1658,7 @@ class GARuntimeCollectorTests(unittest.TestCase):
             self.pid = 525_252
             self.stdout = stdout
             self.stderr = stderr
+            self.stdin = io.BytesIO()
             self.returncode = None
 
     def setUp(self) -> None:
@@ -1679,7 +1686,50 @@ class GARuntimeCollectorTests(unittest.TestCase):
         runtime = object.__new__(ProductionCollectorRuntime)
         runtime.repository = self.fixture.repository
         runtime.environment = {}
+        runtime._capture_password = bytearray()
         return runtime
+
+    def test_capture_authorization_is_required_before_any_app_command(self) -> None:
+        runtime = FakeCollectorRuntime(self.fixture)
+        with patch.object(runtime, "require_capture_authority", side_effect=GARuntimeAcceptanceError("authorization unavailable")), patch.object(runtime, "release_capture_authority") as release:
+            sources = self._patch_evidence_sources()
+            with sources[0], sources[1], sources[2], self.assertRaisesRegex(GARuntimeAcceptanceError, "authorization unavailable"):
+                collect_ga_runtime_acceptance(
+                    repository=self.fixture.repository,
+                    expected=self.fixture.expected,
+                    prepackage_stage_verifier=prepackage_stage_verifier,
+                    runtime=runtime,
+                )
+        self.assertEqual(runtime.calls, [])
+        release.assert_called_once()
+        self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_no_terminal_never_reads_password_from_unattended_input(self) -> None:
+        runtime = self._capture_runtime()
+        with patch.object(runtime, "run", return_value={"exit_code": 1}), patch.object(ga_runtime.sys.stdin, "isatty", return_value=False), patch.object(ga_runtime.getpass, "getpass") as prompt:
+            with self.assertRaisesRegex(GARuntimeAcceptanceError, "terminal before collection"):
+                runtime.require_capture_authority()
+        prompt.assert_not_called()
+        self.assertEqual(runtime._capture_password, bytearray())
+
+    def test_capture_authorization_uses_private_input_and_clears_on_failure(self) -> None:
+        runtime = self._capture_runtime()
+        credential = bytearray(b"fixture-authorization\n")
+        runtime._capture_password = credential
+        failed = ga_runtime.subprocess.CompletedProcess([], 1, b"", b"authorization denied")
+        with patch.object(ga_runtime, "run_bounded_process", return_value=failed) as runner:
+            with self.assertRaisesRegex(GARuntimeAcceptanceError, "authorization failed"):
+                runtime.require_capture_authority()
+        self.assertEqual(runner.call_args.kwargs["input_bytes"], b"fixture-authorization\n")
+        self.assertNotIn("fixture-authorization", repr(runner.call_args.args))
+        self.assertNotIn("fixture-authorization", repr(runner.call_args.kwargs["environment"]))
+        self.assertEqual(credential, bytearray())
+
+    def test_capture_refuses_root_or_changed_effective_identity(self) -> None:
+        for uid, effective in ((0, 0), (501, 0)):
+            with self.subTest(uid=uid), patch.object(ga_runtime.os, "getuid", return_value=uid), patch.object(ga_runtime.os, "geteuid", return_value=effective):
+                with self.assertRaisesRegex(GARuntimeAcceptanceError, "ordinary release account"):
+                    ga_runtime._capture_command_argv("utun6", 3, ())
 
     def test_capture_selector_initialization_failure_cleans_all_resources(
         self,

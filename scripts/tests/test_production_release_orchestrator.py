@@ -966,7 +966,7 @@ class AdapterContractTests(unittest.TestCase):
             "ga_environment_sha256": "9" * 64,
             "phase": "installed",
             "previous": {
-                "build_number": "40048",
+                "build_number": journal_export.PREVIOUS_BUILD,
                 "tree_sha256": "5" * 64,
                 "version": "0.4.0",
             },
@@ -1086,6 +1086,26 @@ class MigrationJournalContractIntegrationTests(unittest.TestCase):
             verified["environment"]["record"]["path"],
             SERVICE_ENVIRONMENT_INPUT.as_posix(),
         )
+        candidate = verified["candidate"]
+        prepackage = {"bindings": {
+            "candidate": {
+                "app_manifest": {"sha256": candidate["manifest_sha256"]},
+                "signed_app": {"tree_sha256": candidate["tree_sha256"]},
+            },
+            "source": {
+                "release_source_sha256": candidate["release_source_sha256"],
+                "repository_commit": candidate["repository_commit"],
+            },
+        }}
+        contract._require_migration_matches_prepackage(prepackage, verified)
+        packages = {"dmg": {"dmg_sha256": "6" * 64, "gatekeeper_sha256": "7" * 64,
+                            "seal": {"sha256": "8" * 64}}}
+        with patch.object(contract, "verify_stage", return_value=prepackage), patch.object(contract, "_verified_package_sets", return_value=packages), patch.object(contract, "_verified_migration_journals", return_value=verified):
+            expectation = derive_runtime_expectation(fixture.repository)
+        self.assertEqual(expectation["from_build"], journal_export.PREVIOUS_BUILD)
+        verified["install_journal"]["document"]["previous"]["build_number"] = "40048"
+        with self.assertRaisesRegex(PublicationError, "closed"):
+            contract._require_migration_matches_prepackage(prepackage, verified)
 
     def test_export_verification_failure_stops_before_contract_reopen(self) -> None:
         fixture = StageFixture()
@@ -1129,7 +1149,7 @@ class MigrationJournalContractIntegrationTests(unittest.TestCase):
             "version": "0.4.0",
         }
         previous = {
-            "build_number": "40048",
+            "build_number": journal_export.PREVIOUS_BUILD,
             "tree_sha256": "5" * 64,
             "version": "0.4.0",
         }

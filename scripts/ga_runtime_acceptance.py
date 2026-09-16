@@ -23,10 +23,12 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import getpass
 import ipaddress
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import selectors
 import stat
@@ -1714,18 +1716,9 @@ def _validate_traffic(
         case_id=policy["case_id"],
         tokens=(tokens["start"], tokens["target"], tokens["end"]),
     )
-    capture_argv = [
-        "/usr/sbin/tcpdump",
-        "-U",
-        "-n",
-        "-i",
-        endpoint["interface_name"],
-        "-c",
-        str(policy["expected_records"]),
-        "-w",
-        "-",
-        *filter_argv,
-    ]
+    capture_argv = _capture_command_argv(
+        endpoint["interface_name"], policy["expected_records"], filter_argv
+    )
     capture_command = _command(
         document["capture_command"],
         expected_argv=capture_argv,
@@ -2225,6 +2218,32 @@ def _utc_now() -> str:
     )
 
 
+def _capture_command_argv(
+    interface: str, expected_records: int, filter_argv: Iterable[str]
+) -> list[str]:
+    """Open BPF with administrator authority, then capture as the operator.
+
+    macOS BPF devices are normally root-only. tcpdump's -Z drops its user and
+    group before writing packet bytes; no device permissions are changed.
+    The same fixed argv is used for execution and receipt verification.
+    """
+    uid = os.getuid()
+    if uid == 0 or os.geteuid() != uid:
+        raise _error("packet capture must be coordinated by the ordinary release account")
+    try:
+        account = pwd.getpwuid(uid)
+    except KeyError as error:
+        raise _error("packet capture operator account is unavailable") from error
+    if account.pw_uid != uid or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,254}", account.pw_name):
+        raise _error("packet capture operator account is not canonical")
+    return [
+        "/usr/bin/sudo", "-S", "-p", "CFM capture authorization: ", "--", "/usr/sbin/tcpdump",
+        "-Z", account.pw_name,
+        "-U", "-n", "-i", interface,
+        "-c", str(expected_records), "-w", "-", *filter_argv,
+    ]
+
+
 class ProductionCollectorRuntime:
     """Bounded production runner for the fixed GA collection registry."""
 
@@ -2232,6 +2251,7 @@ class ProductionCollectorRuntime:
         self.repository = _canonical_repository(repository)
         pins = load_pins(self.repository / "scripts/dependency_pins.env")
         self.environment = release_tool_environment(self.repository, pins)
+        self._capture_password = bytearray()
 
     def run(self, argv: list[str], *, timeout: int = 900) -> dict[str, Any]:
         started_at = _utc_now()
@@ -2266,6 +2286,45 @@ class ProductionCollectorRuntime:
 
     def capture_environment(self) -> dict[str, Any]:
         return observe_environment()
+
+    def require_capture_authority(self) -> None:
+        # This runs before changing app state and can also be called by an
+        # operator's restoration wrapper before stopping an active connection.
+        # An absent sudo authorization must never strand an active connection.
+        _capture_command_argv("lo0", 1, ())
+        if not self._capture_password:
+            cached = self.run(
+                ["/usr/bin/sudo", "-n", "--", "/usr/sbin/tcpdump", "--version"],
+                timeout=10,
+            )
+            if cached["exit_code"] == 0:
+                return
+            if not sys.stdin.isatty():
+                raise _error("packet capture needs administrator authorization in a terminal before collection")
+            password = getpass.getpass("Authorize bounded CFM packet capture: ")
+            self._capture_password = bytearray((password + "\n").encode("utf-8"))
+            del password
+            if len(self._capture_password) > 4096:
+                self.release_capture_authority()
+                raise _error("packet capture authorization input exceeds its bound")
+        try:
+            result = run_bounded_process(
+                ["/usr/bin/sudo", "-S", "-p", "CFM capture authorization: ", "--", "/usr/sbin/tcpdump", "--version"],
+                cwd=self.repository,
+                environment=self.environment,
+                input_bytes=bytes(self._capture_password),
+                timeout=10,
+                output_limit=4096,
+            )
+            if result.returncode != 0:
+                raise _error("packet capture administrator authorization failed before collection")
+        except BaseException:
+            self.release_capture_authority()
+            raise
+
+    def release_capture_authority(self) -> None:
+        self._capture_password[:] = b"\0" * len(self._capture_password)
+        self._capture_password.clear()
 
     def capture_guard(self) -> dict[str, Any]:
         try:
@@ -2389,25 +2448,16 @@ class ProductionCollectorRuntime:
             case_id=policy["case_id"],
             tokens=(tokens["start"], tokens["target"], tokens["end"]),
         )
-        capture_argv = [
-            "/usr/sbin/tcpdump",
-            "-U",
-            "-n",
-            "-i",
-            interface,
-            "-c",
-            str(policy["expected_records"]),
-            "-w",
-            "-",
-            *filter_argv,
-        ]
+        capture_argv = _capture_command_argv(
+            interface, policy["expected_records"], filter_argv
+        )
         started_at = _utc_now()
         try:
             process = subprocess.Popen(
                 capture_argv,
                 cwd=self.repository,
                 env=self.environment,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
@@ -2420,8 +2470,13 @@ class ProductionCollectorRuntime:
         cleanup_failure: GARuntimeAcceptanceError | None = None
         result: tuple[dict[str, Any], bytes] | None = None
         try:
-            if process.stdout is None or process.stderr is None:
+            if process.stdout is None or process.stderr is None or process.stdin is None:
                 raise _error("fixed tcpdump capture pipes are unavailable")
+            # The credential is sent only to sudo's private input pipe. It is
+            # never an argv, environment value, file, log or evidence field.
+            process.stdin.write(self._capture_password)
+            process.stdin.close()
+            process.stdin = None
             try:
                 selector = selectors.DefaultSelector()
             except OSError as error:
@@ -2575,7 +2630,7 @@ class ProductionCollectorRuntime:
                             "tcpdump output selector could not be closed"
                         )
                         cleanup_failure.__cause__ = error
-            for stream in (process.stdout, process.stderr):
+            for stream in (process.stdout, process.stderr, process.stdin):
                 if stream is None:
                     continue
                 try:
@@ -3045,6 +3100,7 @@ def collect_ga_runtime_acceptance(
     )
     mutation_started = False
     try:
+        selected_runtime.require_capture_authority()
         gatekeeper_argv = [
             "/usr/sbin/spctl",
             "--assess",
@@ -3228,6 +3284,7 @@ def collect_ga_runtime_acceptance(
                 "send_commands": traffic["send_commands"],
                 "tokens": tokens,
             }
+        selected_runtime.release_capture_authority()
         # The traffic transactions wait for the first macOS approval and
         # prove Tunnel readiness. Observe the enabled extension after that
         # boundary, while Tunnel is still active and before stop/restore.
@@ -3410,6 +3467,8 @@ def collect_ga_runtime_acceptance(
                 "GA runtime collection crossed the runtime boundary; run fixed recovery"
             ) from error
         raise
+    finally:
+        selected_runtime.release_capture_authority()
 
 
 def _load_collection_intent(

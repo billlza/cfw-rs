@@ -1247,6 +1247,12 @@ wire proof.
    journals. Historical journal closure remains required; CFW may have restarted
    or legitimately updated between that history and this collection. Every
    observation within this collection must match its own durable baseline.
+   Packet capture needs administrator authorization to open macOS BPF devices.
+   The collector requests it before changing app state, sends credentials only
+   through a private input pipe, and runs tcpdump with `-Z` to drop back to the
+   release account after opening the device. Capture is bounded by the exact
+   test filter, packet count and timeout. An operator restoring a live CFM
+   session must complete this authorization before stopping that session.
    Use the ordinary TUN controls without legacy Prepare or Confirm:
 
    ```bash

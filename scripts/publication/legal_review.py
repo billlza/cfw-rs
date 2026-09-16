@@ -31,7 +31,11 @@ def legal_review(
         },
         "legal review",
     )
-    if review["schema_version"] != 1 or review["decision"] != "approved":
+    if (
+        type(review["schema_version"]) is not int
+        or review["schema_version"] != 1
+        or review["decision"] != "approved"
+    ):
         raise PublicationError("legal review is not an explicit approval")
     reviewer = review["reviewer"]
     if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer) > 200:

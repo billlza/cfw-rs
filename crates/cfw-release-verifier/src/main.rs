@@ -7,6 +7,8 @@ use std::path::Path;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use minisign_verify::{PublicKey, Signature};
+use serde_json::json;
+use sha2::{Digest as _, Sha256};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_SIGNATURE_BYTES: u64 = 16 * 1024;
@@ -14,16 +16,31 @@ const MAX_TRUSTED_COMMENT_BYTES: usize = 1024;
 const MAX_ARCHIVE_NAME_BYTES: usize = 255;
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("error: {error}");
-        std::process::exit(1);
+    match run() {
+        Ok(Some(receipt)) => println!("{receipt}"),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
     }
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<Option<serde_json::Value>, String> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    let [config_path, archive_path, signature_path] = arguments.as_slice() else {
-        return Err("usage: cfw-release-verifier <tauri.conf.json> <archive> <archive.sig>".into());
+    let (config_path, archive_path, signature_path, emit_json) = match arguments.as_slice() {
+        [config_path, archive_path, signature_path] => {
+            (config_path, archive_path, signature_path, false)
+        }
+        [config_path, archive_path, signature_path, output] if output == "--json" => {
+            (config_path, archive_path, signature_path, true)
+        }
+        _ => {
+            return Err(
+                "usage: cfw-release-verifier <tauri.conf.json> <archive> <archive.sig> [--json]"
+                    .into(),
+            );
+        }
     };
 
     let config = read_bounded_regular_file(Path::new(config_path), MAX_CONFIG_BYTES)?;
@@ -47,6 +64,12 @@ fn run() -> Result<(), String> {
         .verify_stream(&signature)
         .map_err(|error| format!("cannot initialize updater signature verification: {error}"))?;
     let mut archive = open_regular_file(Path::new(archive_path))?;
+    let archive_size = archive
+        .metadata()
+        .map_err(|error| format!("inspect updater archive: {error}"))?
+        .len();
+    let mut archive_sha256 = Sha256::new();
+    let mut bytes_read = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let count = archive
@@ -55,12 +78,49 @@ fn run() -> Result<(), String> {
         if count == 0 {
             break;
         }
+        bytes_read = bytes_read
+            .checked_add(count as u64)
+            .ok_or_else(|| "updater archive size overflowed".to_owned())?;
+        archive_sha256.update(&buffer[..count]);
         verifier.update(&buffer[..count]);
+    }
+    if bytes_read != archive_size {
+        return Err("updater archive changed while it was verified".into());
     }
     verifier.finalize().map_err(|error| {
         format!("updater signature does not match the embedded public key: {error}")
     })?;
-    validate_signature_archive(&signature, expected_archive_name)
+    validate_signature_archive(&signature, expected_archive_name)?;
+    if !emit_json {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "archive_filename": expected_archive_name,
+        "archive_sha256": encode_hex(archive_sha256.finalize().as_ref()),
+        "archive_size": archive_size,
+        "document": "cfw-updater-embedded-pubkey-verification-v1",
+        "embedded_public_key_sha256": sha256_hex(public_key_envelope.as_bytes()),
+        "result": "verified",
+        "schema_version": 1,
+        "signature_filename": archive_file_name(Path::new(signature_path))?,
+        "signature_sha256": sha256_hex(&signature_envelope),
+        "signature_size": signature_envelope.len(),
+        "tauri_config_sha256": sha256_hex(&config),
+    })))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    encode_hex(Sha256::digest(bytes).as_ref())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn archive_file_name(path: &Path) -> Result<&str, String> {
@@ -230,6 +290,14 @@ mod tests {
     #[test]
     fn rejects_non_base64_envelopes() {
         assert!(decode_base64_utf8("%%%", "test").is_err());
+    }
+
+    #[test]
+    fn receipt_digests_use_fixed_lowercase_hex() {
+        assert_eq!(
+            sha256_hex(b"fixture"),
+            "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d"
+        );
     }
 
     #[test]

@@ -92,7 +92,7 @@ pub(crate) fn decode(mut file: File) -> Result<ProfileSelection, ProfileError> {
     Ok(selection)
 }
 
-fn validate_digest(digest: &str) -> Result<(), ProfileError> {
+pub(crate) fn validate_digest(digest: &str) -> Result<(), ProfileError> {
     if digest.len() == 64
         && digest
             .bytes()

@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 cfw-engine-api = { path = "../cfw-engine-api" }
 core-foundation = "=0.10.1"
-libc = "0.2"
+libc = "0.2.189"
 security-framework = { version = "=3.7.0", features = ["OSX_10_15"] }
 security-framework-sys = { version = "=2.17.0", features = ["OSX_10_15"] }
 serde.workspace = true

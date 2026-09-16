@@ -50,6 +50,12 @@ _FORBIDDEN = {
     "private Network Extension access": "let fd = socket.fileDescriptor\n",
     "provider-local lease authority": "let s = CrossProcessEngineLeaseStore(productionPort: 1)\n",
     "executable-launch or alternate-core fallback": "let t = Process()\n",
+    "fail-closed production composition": "let o = FailClosedEngineOwnerAuthorityClient()\n",
+    "unproven signed Authority channel": "let signedChannelProven = false\n",
+    "permanently unavailable Authority release gate": "try validate(.availabilityUnproven)\n",
+    "private NSXPCConnection audit-token access": (
+        'let selector = NSSelectorFromString("auditToken")\n'
+    ),
 }
 
 

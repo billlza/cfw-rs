@@ -9,10 +9,11 @@ use tokio::{sync::watch, time::timeout};
 use uuid::Uuid;
 
 use crate::RecoveredRuntimeMismatch;
-use crate::{EngineCoordinatorError, EngineOperation};
+use crate::{EngineCoordinatorError, EngineOperation, EngineRestartSpec};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum NativeLeaseKind {
+    LocalProxy,
     SystemProxy,
     TunnelInstallation,
     TunnelRuntime,
@@ -35,6 +36,9 @@ pub(crate) struct CoordinatorState {
     /// backend; only an explicit Off reconciliation that proves the stop
     /// barrier clears it. Ambiguity is never treated as Off.
     pub(crate) quarantine: Option<EngineCoordinatorError>,
+    /// Last accepted source inputs, retained only by this process so a closed
+    /// maintenance transaction can restore an exact active baseline.
+    pub(crate) restart_spec: Option<EngineRestartSpec>,
 }
 
 /// Classifies a native failure whose only safe recovery is an explicit Off
@@ -44,7 +48,7 @@ pub(crate) struct CoordinatorState {
 pub(crate) fn requires_explicit_reconciliation(kind: BackendErrorKind) -> bool {
     matches!(
         kind.retry_directive(),
-        RetryDirective::ExplicitReconciliation
+        RetryDirective::ExplicitReconciliation | RetryDirective::MaintenanceRequired
     )
 }
 
@@ -55,6 +59,7 @@ pub(crate) struct TransitionContext<'a> {
     pub(crate) session: &'a EngineSessionIdentity,
     pub(crate) generation_store: Option<&'a dyn EngineGenerationStore>,
     pub(crate) operation_timeout: Duration,
+    pub(crate) authorization_timeout: Duration,
     pub(crate) status_query_timeout: Duration,
 }
 
@@ -84,8 +89,9 @@ pub(crate) fn validate_runtime(
 ///
 /// The coordinator actor is the only caller, so no transition can interleave
 /// with the query. A failed observation deliberately preserves `native_lease`:
-/// an Off report, identity drift, or transport error is not proof that the
-/// exact runtime ownership has been released.
+/// identity drift or a transport error is not proof of cleanup. A successful
+/// native Off observation is the complete authenticated global stop barrier;
+/// the native layer has already retired that owner and its generation.
 pub(crate) async fn reconcile_active_runtime(
     backend: &dyn EngineBackend,
     state: &mut CoordinatorState,
@@ -93,13 +99,14 @@ pub(crate) async fn reconcile_active_runtime(
     operation_timeout: Duration,
 ) -> Result<(), EngineCoordinatorError> {
     let (expected_mode, expected_owner, expected_runtime) = match &state.snapshot.state {
-        EngineState::ProxyActive { runtime } => (
-            EngineMode::SystemProxy,
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => (
+            state.snapshot.state.active_mode(),
             EngineOwner::ProxyAgent,
             runtime.clone(),
         ),
-        EngineState::TunnelActive { runtime } => (
-            EngineMode::Tunnel,
+        EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime } => (
+            state.snapshot.state.active_mode(),
             EngineOwner::PacketTunnelSystemExtension,
             runtime.clone(),
         ),
@@ -122,9 +129,21 @@ pub(crate) async fn reconcile_active_runtime(
         }
     };
 
+    if matches!(observation, NativeEngineStatus::Off) {
+        // A system-originated stop can complete below the coordinator. Retain
+        // the unexpected-disconnect error below, but retire our local lease:
+        // replaying Stop against an owner already proven Off is rejected by
+        // the native identity boundary and would prevent every later restart.
+        state.native_lease = None;
+    }
+
     let observed_runtime = match (&observation, expected_mode) {
-        (NativeEngineStatus::SystemProxy { runtime }, EngineMode::SystemProxy)
-        | (NativeEngineStatus::Tunnel { runtime }, EngineMode::Tunnel) => runtime,
+        (NativeEngineStatus::LocalProxy { runtime }, EngineMode::LocalProxy)
+        | (NativeEngineStatus::SystemProxy { runtime }, EngineMode::SystemProxy)
+        | (
+            NativeEngineStatus::Tunnel { runtime },
+            EngineMode::Tunnel | EngineMode::TunnelSystemProxy,
+        ) => runtime,
         _ => {
             let error = EngineCoordinatorError::ActiveRuntimeStatusMismatch {
                 expected_mode,

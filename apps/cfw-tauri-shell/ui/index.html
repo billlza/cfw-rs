@@ -14,27 +14,27 @@
     <header class="status-bar" data-tauri-drag-region>
       <div class="status-progress" aria-hidden="true"><i id="traffic-progress"></i></div>
       <span id="status-title">Clash for Mac</span>
-      <button id="reload-button" class="status-button" data-action="reload" title="Reload dashboard">Reload</button>
+      <button id="reload-button" class="status-button" title="Reload dashboard">Reload</button>
     </header>
 
     <div class="app-shell">
       <aside class="sidebar">
         <section class="traffic-pane">
           <div class="traffic-row">
-            <span>Proxy</span>
-            <strong id="proxy-state-value">Off</strong>
+            <span aria-hidden="true">&uarr;</span>
+            <strong id="upload-rate">0.0 MB/s</strong>
           </div>
           <div class="traffic-row">
-            <span>Tunnel</span>
-            <strong id="tunnel-state-value">Off</strong>
+            <span aria-hidden="true">&darr;</span>
+            <strong id="download-rate">0.0 MB/s</strong>
           </div>
         </section>
 
         <nav id="nav" class="nav-list" aria-label="Primary navigation"></nav>
 
         <section class="runtime-pane">
-          <span>Last Refresh</span>
-          <strong id="runtime-value">Not refreshed</strong>
+          <span>Running Time</span>
+          <strong id="runtime-value">00 : 00 : 00</strong>
         </section>
 
         <section class="sidebar-meta">
@@ -49,6 +49,7 @@
       </main>
     </div>
 
+    <div id="glass-menu-root" aria-live="polite"></div>
     <script src="./main.js"></script>
   </body>
 </html>

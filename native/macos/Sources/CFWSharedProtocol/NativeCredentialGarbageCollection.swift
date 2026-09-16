@@ -2,82 +2,114 @@ import Foundation
 
 public struct CredentialGarbageCollectionRequest: Codable, Equatable, Sendable {
   public let snapshotDigest: SHA256Digest
-  public let liveReferences: [CredentialReference]
+  public let catalog: [CredentialProfileCatalogEntry]
 
-  public init(snapshotDigest: SHA256Digest, liveReferences: [CredentialReference]) throws {
-    try Self.validateCanonicalReferences(liveReferences)
+  public init(
+    snapshotDigest: SHA256Digest,
+    catalog: [CredentialProfileCatalogEntry]
+  ) throws {
+    try Self.validateCanonicalCatalog(catalog)
     self.snapshotDigest = snapshotDigest
-    self.liveReferences = liveReferences
+    self.catalog = catalog
   }
 
   private enum CodingKeys: String, CodingKey {
     case snapshotDigest = "snapshot_digest"
-    case liveReferences = "live_references"
+    case catalog
   }
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     try self.init(
       snapshotDigest: container.decode(SHA256Digest.self, forKey: .snapshotDigest),
-      liveReferences: container.decode([CredentialReference].self, forKey: .liveReferences)
+      catalog: container.decode([CredentialProfileCatalogEntry].self, forKey: .catalog)
     )
   }
 
-  static func validateCanonicalReferences(
-    _ references: [CredentialReference]
+  static func validateCanonicalCatalog(
+    _ catalog: [CredentialProfileCatalogEntry]
   ) throws {
-    guard references.count <= NativeBridgeProtocolConstants.maximumCredentialVaultReferences
+    guard catalog.count <= NativeBridgeProtocolConstants.maximumCredentialCatalogProfiles,
+      catalog.sorted(by: catalogEntryPrecedes) == catalog
     else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }
-    let sorted = references.sorted(by: Self.referencePrecedes)
-    guard sorted == references else {
+    var audiences = Set<CredentialAudience>()
+    var totalBindings = 0
+    for entry in catalog {
+      guard audiences.insert(entry.audience).inserted else {
+        throw NativeBridgeProtocolError.duplicateCredentialPointer
+      }
+      let (next, overflow) = totalBindings.addingReportingOverflow(entry.references.count)
+      guard !overflow,
+        next <= NativeBridgeProtocolConstants.maximumCredentialVaultReferences
+      else {
+        throw NativeBridgeProtocolError.invalidCredentialSlot
+      }
+      totalBindings = next
+    }
+  }
+
+  static func validateCanonicalBindings(
+    _ bindings: [CredentialBinding]
+  ) throws {
+    guard bindings.count <= NativeBridgeProtocolConstants.maximumCredentialVaultReferences,
+      bindings.sorted(by: CredentialBinding.canonicalPrecedes) == bindings
+    else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }
-    var identifiers = Set<UUID>()
-    guard references.allSatisfy({ identifiers.insert($0.id).inserted }) else {
+    var unique = Set<CredentialBinding>()
+    guard bindings.allSatisfy({ unique.insert($0).inserted }) else {
       throw NativeBridgeProtocolError.duplicateCredentialPointer
     }
   }
 
-  static func referencePrecedes(
-    _ left: CredentialReference,
-    _ right: CredentialReference
+  public static func catalogEntryPrecedes(
+    _ left: CredentialProfileCatalogEntry,
+    _ right: CredentialProfileCatalogEntry
   ) -> Bool {
-    let leftID = left.id.uuidString.lowercased()
-    let rightID = right.id.uuidString.lowercased()
+    let leftID = left.audience.profileID.uuidString.lowercased()
+    let rightID = right.audience.profileID.uuidString.lowercased()
     if leftID != rightID {
       return leftID < rightID
     }
-    return left.kind.rawValue < right.kind.rawValue
+    return left.audience.profileDigest.hex < right.audience.profileDigest.hex
+  }
+
+  public var bindings: [CredentialBinding] {
+    catalog.flatMap { entry in
+      entry.references.map {
+        CredentialBinding(audience: entry.audience, reference: $0)
+      }
+    }
   }
 }
 
 public struct CredentialGarbageCollectionPreview: Codable, Equatable, Sendable {
   public let snapshotDigest: SHA256Digest
   public let vaultRevision: UUID
-  public let orphanReferences: [CredentialReference]
+  public let orphanBindings: [CredentialBinding]
   public let orphanCount: UInt32
 
   public init(
     snapshotDigest: SHA256Digest,
     vaultRevision: UUID,
-    orphanReferences: [CredentialReference]
+    orphanBindings: [CredentialBinding]
   ) throws {
-    try CredentialGarbageCollectionRequest.validateCanonicalReferences(orphanReferences)
-    guard let orphanCount = UInt32(exactly: orphanReferences.count) else {
+    try CredentialGarbageCollectionRequest.validateCanonicalBindings(orphanBindings)
+    guard let orphanCount = UInt32(exactly: orphanBindings.count) else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }
     self.snapshotDigest = snapshotDigest
     self.vaultRevision = vaultRevision
-    self.orphanReferences = orphanReferences
+    self.orphanBindings = orphanBindings
     self.orphanCount = orphanCount
   }
 
   private enum CodingKeys: String, CodingKey {
     case snapshotDigest = "snapshot_digest"
     case vaultRevision = "vault_revision"
-    case orphanReferences = "orphan_references"
+    case orphanBindings = "orphan_bindings"
     case orphanCount = "orphan_count"
   }
 
@@ -90,14 +122,14 @@ public struct CredentialGarbageCollectionPreview: Codable, Equatable, Sendable {
     else {
       throw NativeBridgeProtocolError.invalidContext
     }
-    let references = try container.decode(
-      [CredentialReference].self,
-      forKey: .orphanReferences
+    let bindings = try container.decode(
+      [CredentialBinding].self,
+      forKey: .orphanBindings
     )
     try self.init(
       snapshotDigest: container.decode(SHA256Digest.self, forKey: .snapshotDigest),
       vaultRevision: revision,
-      orphanReferences: references
+      orphanBindings: bindings
     )
     guard orphanCount == (try container.decode(UInt32.self, forKey: .orphanCount)) else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
@@ -108,36 +140,36 @@ public struct CredentialGarbageCollectionPreview: Codable, Equatable, Sendable {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(snapshotDigest, forKey: .snapshotDigest)
     try container.encode(vaultRevision.uuidString.lowercased(), forKey: .vaultRevision)
-    try container.encode(orphanReferences, forKey: .orphanReferences)
+    try container.encode(orphanBindings, forKey: .orphanBindings)
     try container.encode(orphanCount, forKey: .orphanCount)
   }
 }
 
 public struct CredentialGarbageCollectionCommitRequest: Codable, Equatable, Sendable {
   public let snapshotDigest: SHA256Digest
-  public let liveReferences: [CredentialReference]
+  public let catalog: [CredentialProfileCatalogEntry]
   public let expectedVaultRevision: UUID
-  public let expectedOrphanReferences: [CredentialReference]
+  public let expectedOrphanBindings: [CredentialBinding]
 
   public init(
     snapshotDigest: SHA256Digest,
-    liveReferences: [CredentialReference],
+    catalog: [CredentialProfileCatalogEntry],
     expectedVaultRevision: UUID,
-    expectedOrphanReferences: [CredentialReference]
+    expectedOrphanBindings: [CredentialBinding]
   ) throws {
-    try CredentialGarbageCollectionRequest.validateCanonicalReferences(liveReferences)
-    try CredentialGarbageCollectionRequest.validateCanonicalReferences(expectedOrphanReferences)
+    try CredentialGarbageCollectionRequest.validateCanonicalCatalog(catalog)
+    try CredentialGarbageCollectionRequest.validateCanonicalBindings(expectedOrphanBindings)
     self.snapshotDigest = snapshotDigest
-    self.liveReferences = liveReferences
+    self.catalog = catalog
     self.expectedVaultRevision = expectedVaultRevision
-    self.expectedOrphanReferences = expectedOrphanReferences
+    self.expectedOrphanBindings = expectedOrphanBindings
   }
 
   private enum CodingKeys: String, CodingKey {
     case snapshotDigest = "snapshot_digest"
-    case liveReferences = "live_references"
+    case catalog
     case expectedVaultRevision = "expected_vault_revision"
-    case expectedOrphanReferences = "expected_orphan_references"
+    case expectedOrphanBindings = "expected_orphan_bindings"
   }
 
   public init(from decoder: Decoder) throws {
@@ -151,11 +183,11 @@ public struct CredentialGarbageCollectionCommitRequest: Codable, Equatable, Send
     }
     try self.init(
       snapshotDigest: container.decode(SHA256Digest.self, forKey: .snapshotDigest),
-      liveReferences: container.decode([CredentialReference].self, forKey: .liveReferences),
+      catalog: container.decode([CredentialProfileCatalogEntry].self, forKey: .catalog),
       expectedVaultRevision: revision,
-      expectedOrphanReferences: container.decode(
-        [CredentialReference].self,
-        forKey: .expectedOrphanReferences
+      expectedOrphanBindings: container.decode(
+        [CredentialBinding].self,
+        forKey: .expectedOrphanBindings
       )
     )
   }
@@ -163,12 +195,12 @@ public struct CredentialGarbageCollectionCommitRequest: Codable, Equatable, Send
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(snapshotDigest, forKey: .snapshotDigest)
-    try container.encode(liveReferences, forKey: .liveReferences)
+    try container.encode(catalog, forKey: .catalog)
     try container.encode(
       expectedVaultRevision.uuidString.lowercased(),
       forKey: .expectedVaultRevision
     )
-    try container.encode(expectedOrphanReferences, forKey: .expectedOrphanReferences)
+    try container.encode(expectedOrphanBindings, forKey: .expectedOrphanBindings)
   }
 }
 

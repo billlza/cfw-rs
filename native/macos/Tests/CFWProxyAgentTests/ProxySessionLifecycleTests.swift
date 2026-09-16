@@ -1,3 +1,4 @@
+import CFWCredentialTransport
 import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
@@ -24,11 +25,119 @@ private struct SecretEchoConfigurationChecker: LibboxConfigurationChecking {
   }
 }
 
+/// Keeps this validation-only service test behind the same Authority-owned
+/// surface as production. An accidental start fails explicitly instead of
+/// bypassing the one-use owner authorization contract.
+private final class ValidationOnlyProxyOwner: ProxySystemProxyOwning, @unchecked Sendable {
+  private let lifecycle: ProxySessionLifecycle
+  private let lock = NSLock()
+  private var startCountValue = 0
+
+  init(lifecycle: ProxySessionLifecycle) {
+    self.lifecycle = lifecycle
+  }
+
+  func start(
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
+    authorization: ProxyOwnerAuthorization,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    lock.withLock { startCountValue += 1 }
+    configuration.erase()
+    _ = descriptor
+    authorization.erase()
+    completionHandler(
+      .failure(.engineLease("Validation-only owner cannot authorize a start.")))
+  }
+
+  var startCount: Int { lock.withLock { startCountValue } }
+
+  func stop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    lifecycle.stop(
+      expectedConfiguration: expectedConfiguration,
+      completionHandler: completionHandler)
+  }
+
+  func snapshot(
+    completionHandler: @escaping @Sendable (EngineSnapshot) -> Void
+  ) {
+    lifecycle.snapshot(completionHandler: completionHandler)
+  }
+}
+
+@Test func proxyStartRejectsMismatchedRuntimeBytesBeforeOwnerBinding() throws {
+  let owner = ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle)
+  let service = ProxyAgentService(
+    lifecycle: owner,
+    configurationChecker: SecretEchoConfigurationChecker(secret: "unused"),
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
+  )
+  let configurationDescriptor = try descriptor()
+  let operation = try OperationContext(
+    operationID: AuthorityIdentifier(UUID()),
+    root: RootContext(
+      installationID: AuthorityIdentifier(configurationDescriptor.installationID),
+      epoch: configurationDescriptor.epoch,
+      generation: configurationDescriptor.generation),
+    mode: .systemProxy,
+    configSHA256: configurationDescriptor.sha256,
+    identitySHA256: configurationDescriptor.identitySHA256,
+    ownerUID: 501,
+    authorityRevision: 1)
+  let context = try ProxyOwnerContext(
+    operation: operation,
+    leaseID: AuthorityIdentifier(UUID()))
+  let request = RequestEnvelope(
+    command: try NativeCommand(
+      kind: .startSystemProxy,
+      configuration: configurationDescriptor))
+  var responseData: Data?
+  var responseError: NSError?
+
+  service.startSystemProxy(
+    Data(repeating: 0x5, count: AuthorityV1Limits.capabilityBytes),
+    context: try AuthorityV1Codec.encodeCanonical(context),
+    configuration: Data("{}".utf8),
+    request: try ProtocolCodec.encode(request)
+  ) { data, error in
+    responseData = data
+    responseError = error
+  }
+
+  #expect(responseError == nil)
+  let response = try ProtocolCodec.decodeResponse(try #require(responseData))
+  #expect(response.failure?.code == "invalid-runtime-configuration")
+  #expect(owner.startCount == 0)
+}
+
+/// Test-only adapter that always supplies a fresh one-use in-memory template.
+/// Production has no descriptor-only start overload and cannot read a template
+/// back from disk.
+extension ProxySessionLifecycle {
+  fileprivate func start(
+    configuration descriptor: ConfigurationDescriptor,
+    completionHandler:
+      @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    start(
+      configuration: SensitiveDataBuffer(copying: Data("{}".utf8)),
+      descriptor: descriptor,
+      completionHandler: completionHandler)
+  }
+}
+
 @Test func proxyValidationResponseNeverEchoesUnderlyingSecretError() throws {
   let secret = "credential-that-must-never-leave-agent"
   let service = ProxyAgentService(
-    lifecycle: makeFixture().lifecycle,
-    configurationChecker: SecretEchoConfigurationChecker(secret: secret)
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: SecretEchoConfigurationChecker(secret: secret),
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
   )
   let request = RequestEnvelope(
     command: try NativeCommand(
@@ -234,16 +343,27 @@ private final class MemoryLifecycleJournalDataStore: JournalDataStoring, @unchec
 }
 
 private final class FakeSystemProxyPreferences: SystemProxyPreferences, @unchecked Sendable {
+  private let authorizationFailure: SystemProxyPreferencesError?
+  func requireAuthorization() throws {
+    if let authorizationFailure { throw authorizationFailure }
+  }
   private let lock = NSLock()
   private var values: [SystemProxyField: ProxyPreferenceValue]
   private var prepareCountValue = 0
   private var applyCountValue = 0
   private var restoreCountValue = 0
   private var restoreFailuresRemaining = 0
+  private let prepareFailure: SystemProxyPreferencesError?
   var applyFailsAfterPartialMutation = false
 
-  init(values: [SystemProxyField: ProxyPreferenceValue] = [:]) {
+  init(
+    values: [SystemProxyField: ProxyPreferenceValue] = [:],
+    prepareFailure: SystemProxyPreferencesError? = nil,
+    authorizationFailure: SystemProxyPreferencesError? = nil
+  ) {
     self.values = values
+    self.prepareFailure = prepareFailure
+    self.authorizationFailure = authorizationFailure
   }
 
   var prepareCount: Int {
@@ -280,6 +400,7 @@ private final class FakeSystemProxyPreferences: SystemProxyPreferences, @uncheck
   ) throws -> ProxyOwnershipJournal {
     try lock.withLock {
       prepareCountValue += 1
+      if let prepareFailure { throw prepareFailure }
       return try Self.journal(
         configuration: configuration,
         endpoint: endpoint,
@@ -413,7 +534,9 @@ private struct ProxyFixture {
   let journalStore: FakeJournalStore
 }
 
-private func descriptor(generation: UInt64 = 1) throws -> ConfigurationDescriptor {
+private func descriptor(generation: UInt64 = 1, slot: ConfigurationSlot = .systemProxy) throws
+  -> ConfigurationDescriptor
+{
   guard
     let installationID = UUID(
       uuidString: "11111111-1111-1111-1111-111111111111"
@@ -422,8 +545,11 @@ private func descriptor(generation: UInt64 = 1) throws -> ConfigurationDescripto
     throw ForcedProxyFailure.requested
   }
   return try ConfigurationDescriptor(
-    slot: .systemProxy,
+    slot: slot,
     tunnelOptions: nil,
+    credentialAudience: CredentialAudience(
+      profileID: installationID,
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: installationID,
     epoch: 1,
     generation: generation,
@@ -442,8 +568,8 @@ private func makeFixture(
   let lease = FakeLease()
   let lifecycle = ProxySessionLifecycle(
     dependencies: ProxySessionDependencies(
-      prepareConfiguration: { _ in
-        PreparedProxyConfiguration(configuration: Data("{}".utf8), lease: lease)
+      prepareOwnership: { _ in
+        PreparedProxyOwnership(lease: lease)
       },
       recoverCleanupLease: { _ in lease },
       engineFactory: FakeProxyEngineFactory(
@@ -482,8 +608,8 @@ private func recoveryLifecycle(
   let lease = FakeLease()
   return ProxySessionLifecycle(
     dependencies: ProxySessionDependencies(
-      prepareConfiguration: { _ in
-        PreparedProxyConfiguration(configuration: Data("{}".utf8), lease: lease)
+      prepareOwnership: { _ in
+        PreparedProxyOwnership(lease: lease)
       },
       recoverCleanupLease: { _ in lease },
       engineFactory: FakeProxyEngineFactory(engine: engine, creationFails: false),
@@ -496,6 +622,158 @@ private func recoveryLifecycle(
 
 @Suite(.serialized)
 struct ProxySessionLifecycleTests {
+  @Test func localProxyStartsWithoutNetworkAuthorizationAndNeverWritesPreferences() throws {
+    let preferences = FakeSystemProxyPreferences(
+      values: [.httpHost: .string("other-app"), .httpPort: .integer(7890)],
+      authorizationFailure: .authorizationDenied(-60007))
+    let fixture = makeFixture(preferences: preferences)
+    let configuration = try descriptor(slot: .localProxy)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    #expect(start.values.isEmpty)
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+    #expect(fixture.lifecycle.testingSnapshot().mode == .localProxy)
+    #expect(preferences.prepareCount == 0)
+    #expect(preferences.applyCount == 0)
+    #expect(fixture.journalStore.saveCount == 0)
+
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(preferences.restoreCount == 0)
+    #expect(preferences.currentValue(.httpHost) == .string("other-app"))
+    #expect(preferences.currentValue(.httpPort) == .integer(7890))
+    #expect(fixture.lifecycle.testingSnapshot().mode == .off)
+  }
+
+  @Test func localProxyStopRequiresExactModeAndRetainsOwnershipOnEngineFailure() throws {
+    let fixture = makeFixture()
+    let configuration = try descriptor(slot: .localProxy)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    let wrongMode = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: try descriptor()) { wrongMode.record($0) }
+    #expect(wrongMode.wait())
+    #expect(wrongMode.values == [.failure(.staleStopRequest)])
+    #expect(fixture.engine.stopCount == 0)
+    fixture.engine.setStopFails(true)
+    let failedStop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { failedStop.record($0) }
+    #expect(failedStop.wait())
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
+    #expect(fixture.lifecycle.testingSnapshot().mode == .localProxy)
+    #expect(fixture.lease.releaseCount == 0)
+    fixture.engine.setStopFails(false)
+    let retry = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { retry.record($0) }
+    #expect(retry.wait())
+    #expect(retry.values == [.success])
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(fixture.preferences.applyCount == 0)
+    #expect(fixture.preferences.restoreCount == 0)
+  }
+
+  @Test func legacyJournalKeepsItsIdentityAndRecoversBeforeLocalProxyStart() throws {
+    // This is the pre-LocalProxy descriptor wire shape. Its identity is retained,
+    // not recomputed with the new configuration identity schema.
+    let legacyDescriptor = Data(
+      #"{"slot":"systemProxy","credentialAudience":{"profile_id":"11111111-1111-1111-1111-111111111111","profile_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"installationID":"11111111-1111-1111-1111-111111111111","epoch":1,"generation":1,"byteCount":2,"sha256":"0000000000000000000000000000000000000000000000000000000000000000","identitySHA256":"1111111111111111111111111111111111111111111111111111111111111111","credentialSlots":[]}"#
+        .utf8)
+    let oldConfiguration = try JSONDecoder().decode(
+      ConfigurationDescriptor.self, from: legacyDescriptor)
+    let oldJournal = try FakeSystemProxyPreferences.journal(
+      configuration: oldConfiguration, endpoint: readyEndpoint(),
+      originalValues: [.httpHost: .string("original")]
+    ).markingApplied()
+    let services = String(decoding: try JSONEncoder().encode(oldJournal.services), as: UTF8.self)
+    let legacyJournal = Data(
+      "{\"schemaVersion\":1,\"phase\":\"applied\",\"configuration\":\(String(decoding: legacyDescriptor, as: UTF8.self)),\"services\":\(services)}"
+        .utf8)
+    let recovered = try JSONDecoder().decode(ProxyOwnershipJournal.self, from: legacyJournal)
+    #expect(recovered.configuration.identitySHA256.hex == String(repeating: "11", count: 32))
+    #expect(recovered.configuration.slot == .systemProxy)
+    let preferences = FakeSystemProxyPreferences()
+    try preferences.apply(recovered)
+    let store = FakeJournalStore(journal: recovered)
+    let fixture = makeFixture(preferences: preferences, journalStore: store)
+    #expect(preferences.restoreCount == 1)
+    #expect(store.journal == nil)
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor(generation: 2, slot: .localProxy)) {
+      start.record($0)
+    }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+    #expect(store.saveCount == 0)
+    #expect(preferences.applyCount == 1)
+    #expect(preferences.restoreCount == 1)
+  }
+
+  @Test func unresolvedOldOwnershipPreventsLocalProxyStart() throws {
+    let journal = try FakeSystemProxyPreferences.journal(
+      configuration: descriptor(), endpoint: readyEndpoint(), originalValues: [:]
+    ).markingApplied()
+    let preferences = FakeSystemProxyPreferences()
+    preferences.failNextRestore()
+    let store = FakeJournalStore(journal: journal)
+    let fixture = makeFixture(preferences: preferences, journalStore: store)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor(generation: 2, slot: .localProxy)) {
+      start.record($0)
+    }
+    #expect(start.wait())
+    #expect(start.values == [.failure(.lifecycleConflict)])
+    #expect(fixture.engine.startCount == 0)
+    #expect(store.journal == journal)
+  }
+
+  @Test func ungrantedAuthorizationStartsNoEngineAndWritesNoPreferences() throws {
+    let preferences = FakeSystemProxyPreferences(
+      authorizationFailure: .authorizationDenied(-60007))
+    let fixture = makeFixture(preferences: preferences)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor()) { start.record($0) }
+    #expect(start.wait())
+    #expect(start.values == [.failure(.authorizationRequired)])
+    #expect(fixture.engine.startCount == 0)
+    #expect(preferences.prepareCount == 0)
+    #expect(preferences.applyCount == 0)
+    #expect(fixture.journalStore.journal == nil)
+  }
+
+  @Test func existingProxyFailurePreservesTheCauseAndMakesNoPreferenceWrite() throws {
+    let preferences = FakeSystemProxyPreferences(
+      values: [.httpEnabled: .integer(1), .httpPort: .integer(7_890)],
+      prepareFailure: .existingProxyConfiguration(serviceID: "other-app", field: .httpEnabled))
+    let fixture = makeFixture(preferences: preferences)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: try descriptor()) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.failure(.existingSystemProxy)])
+    #expect(
+      ProxySessionLifecycleError.existingSystemProxy.engineFailure.code == "existing-system-proxy")
+    #expect(preferences.applyCount == 0)
+    #expect(preferences.restoreCount == 0)
+    #expect(preferences.currentValue(.httpPort) == .integer(7_890))
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(fixture.journalStore.journal == nil)
+  }
+
   @Test func preferencesAreNotAppliedBeforeMixedListenerReadiness() throws {
     let fixture = makeFixture()
     let start = OperationRecorder()
@@ -865,8 +1143,8 @@ struct ProxySessionLifecycleTests {
     let lease = FakeLease()
     let lifecycle = ProxySessionLifecycle(
       dependencies: ProxySessionDependencies(
-        prepareConfiguration: { _ in
-          PreparedProxyConfiguration(configuration: Data("{}".utf8), lease: lease)
+        prepareOwnership: { _ in
+          PreparedProxyOwnership(lease: lease)
         },
         recoverCleanupLease: { _ in lease },
         engineFactory: FakeProxyEngineFactory(engine: engine, creationFails: false),

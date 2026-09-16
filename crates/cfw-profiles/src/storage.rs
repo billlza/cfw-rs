@@ -9,7 +9,9 @@ use uuid::Uuid;
 
 use crate::envelope::profile_file_name;
 use crate::storage_atomic::committed_sync_result;
-use crate::{MAX_REPOSITORY_ENTRIES, ProfileError, SELECTION_FILE_NAME};
+use crate::{
+    MAX_REPOSITORY_ENTRIES, ProfileError, SELECTED_REPLACE_FILE_NAME, SELECTION_FILE_NAME,
+};
 
 pub(super) const MAX_ABANDONED_TEMPORARIES: usize = 64;
 
@@ -206,6 +208,28 @@ impl RepositoryDirectory {
         }
     }
 
+    pub(crate) fn open_selected_replace_file(&self) -> Result<File, ProfileError> {
+        let name = CString::new(SELECTED_REPLACE_FILE_NAME)
+            .expect("selected replacement filename never contains NUL");
+        let descriptor = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                Err(ProfileError::UnsafeSelectedReplaceFile)
+            } else {
+                Err(ProfileError::Io(error))
+            }
+        } else {
+            Ok(unsafe { File::from_raw_fd(descriptor) })
+        }
+    }
+
     pub(crate) fn unlink(&self, name: &str) -> Result<(), ProfileError> {
         self.unlink_os(OsStr::new(name))
     }
@@ -270,8 +294,9 @@ pub(crate) fn ensure_entry_capacity(current_entries: usize) -> Result<(), Profil
 }
 
 pub(super) fn ensure_directory_entry_capacity(current_entries: usize) -> Result<(), ProfileError> {
-    // Selection metadata plus bounded crash temporaries remain enumerable.
-    if current_entries >= MAX_REPOSITORY_ENTRIES + 1 + MAX_ABANDONED_TEMPORARIES {
+    // Selection metadata, one selected-replacement intent, and bounded crash
+    // temporaries remain enumerable.
+    if current_entries >= MAX_REPOSITORY_ENTRIES + 2 + MAX_ABANDONED_TEMPORARIES {
         Err(ProfileError::TooManyEntries)
     } else {
         Ok(())

@@ -42,12 +42,14 @@ check_for_updates: true
 system_proxy: true
 tun_mode: true
 mixed_port: 7900
+active_profile: bgbyehygqdaznavk-78bcfb32
 restore-dns-servers:
 - "1.1.1.1"
 - '2001:4860:4860::8888'
 secret: should-not-survive
 "#;
-    let (preferences, network) = parse_legacy_settings(input).expect("parse legacy settings");
+    let (preferences, network, active_profile) =
+        parse_legacy_settings(input).expect("parse legacy settings");
     assert_eq!(preferences.theme, AppearanceTheme::Dark);
     assert_eq!(preferences.font_family, FontFamily::SfMono);
     assert!(preferences.launch_at_login);
@@ -58,6 +60,7 @@ secret: should-not-survive
     assert!(network.system_proxy);
     assert!(network.tun_mode);
     assert_eq!(network.mixed_port, Some(7900));
+    assert_eq!(active_profile.as_deref(), Some("bgbyehygqdaznavk-78bcfb32"));
 }
 
 #[test]
@@ -85,6 +88,20 @@ fn malformed_whitelisted_values_are_not_defaulted() {
     ] {
         assert!(parse_legacy_settings(input).is_err(), "accepted: {input}");
     }
+    assert!(parse_legacy_settings(&format!("{REQUIRED_BASE}active_profile: ../escape\n")).is_err());
+}
+
+#[test]
+fn active_profile_is_optional_but_alias_duplicates_fail_closed() {
+    let (_, _, active_profile) =
+        parse_legacy_settings(REQUIRED_BASE).expect("legacy settings without a selected profile");
+    assert_eq!(active_profile, None);
+    assert!(matches!(
+        parse_legacy_settings(&format!(
+            "{REQUIRED_BASE}active_profile: first\nactiveProfile: second\n"
+        )),
+        Err(SettingsStoreError::AmbiguousLegacySetting { .. })
+    ));
 }
 
 #[test]

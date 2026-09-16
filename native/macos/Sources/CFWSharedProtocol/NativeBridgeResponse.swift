@@ -62,6 +62,7 @@ public struct NativeRuntimeIdentity: Codable, Equatable, Sendable {
 
 public enum NativeEngineStatus: Equatable, Sendable {
   case off
+  case localProxy(NativeRuntimeIdentity)
   case systemProxy(NativeRuntimeIdentity)
   case tunnel(NativeRuntimeIdentity)
 }
@@ -74,6 +75,7 @@ extension NativeEngineStatus: Codable {
 
   private enum Status: String, Codable {
     case off
+    case localProxy = "local_proxy"
     case systemProxy = "system_proxy"
     case tunnel
   }
@@ -82,6 +84,8 @@ extension NativeEngineStatus: Codable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     switch try container.decode(Status.self, forKey: .status) {
     case .off: self = .off
+    case .localProxy:
+      self = .localProxy(try container.decode(NativeRuntimeIdentity.self, forKey: .runtime))
     case .systemProxy:
       self = .systemProxy(try container.decode(NativeRuntimeIdentity.self, forKey: .runtime))
     case .tunnel:
@@ -96,6 +100,9 @@ extension NativeEngineStatus: Codable {
       try container.encode(Status.off, forKey: .status)
     case .systemProxy(let runtime):
       try container.encode(Status.systemProxy, forKey: .status)
+      try container.encode(runtime, forKey: .runtime)
+    case .localProxy(let runtime):
+      try container.encode(Status.localProxy, forKey: .status)
       try container.encode(runtime, forKey: .runtime)
     case .tunnel(let runtime):
       try container.encode(Status.tunnel, forKey: .status)
@@ -112,13 +119,26 @@ public enum NativeTunnelInstallOutcome: String, Codable, Sendable {
 public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case busy
   case resourceExhausted = "resource_exhausted"
+  case journalCapacityExhausted = "journal_capacity_exhausted"
   case permissionDenied = "permission_denied"
   case approvalDenied = "approval_denied"
   case configurationRejected = "configuration_rejected"
+  case systemExtensionValidationFailed = "system_extension_validation_failed"
+  case systemProxyConfigurationFailed = "system_proxy_configuration_failed"
+  case systemProxyRuntimeFailed = "system_proxy_runtime_failed"
+  case systemProxyPreferencesFailed = "system_proxy_preferences_failed"
+  case systemProxyJournalFailed = "system_proxy_journal_failed"
+  case systemProxyAuthorityFailed = "system_proxy_authority_failed"
+  case existingSystemProxy = "existing_system_proxy"
+  case mixedEndpointInUse = "mixed_endpoint_in_use"
+  case controllerEndpointInUse = "controller_endpoint_in_use"
   case credentialsUnavailable = "credentials_unavailable"
   case credentialConflict = "credential_conflict"
   case credentialVaultMissing = "credential_vault_missing"
+  case credentialVaultCorrupt = "credential_vault_corrupt"
+  case credentialMigrationRequired = "credential_migration_required"
   case credentialGCConflict = "credential_gc_conflict"
+  case proxyAgentApprovalRequired = "proxy_agent_approval_required"
   case globalAuthorityUnavailable = "global_authority_unavailable"
   case globalAuthorityRegistrationRequired = "global_authority_registration_required"
   case globalAuthorityApprovalRequired = "global_authority_approval_required"
@@ -150,13 +170,35 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
     switch self {
     case .busy: "Global Authority mutation is busy."
     case .resourceExhausted: "Global Authority read capacity is exhausted."
+    case .journalCapacityExhausted:
+      "The Global Authority journal reached its fixed capacity and requires maintenance."
     case .permissionDenied: "The native operation was denied."
     case .approvalDenied: "Required operating-system approval was denied."
     case .configurationRejected: "The native configuration was rejected."
+    case .systemProxyAuthorityFailed:
+      "System Proxy ownership or readiness could not be confirmed by the network authority."
+    case .systemExtensionValidationFailed:
+      "macOS rejected the Packet Tunnel extension configuration or signature. Install a corrected application build."
+    case .systemProxyConfigurationFailed:
+      "System Proxy could not resolve or validate the selected configuration."
+    case .systemProxyRuntimeFailed:
+      "The System Proxy runtime could not be created or started."
+    case .systemProxyPreferencesFailed:
+      "System Proxy could not read, apply, or verify macOS network preferences."
+    case .systemProxyJournalFailed:
+      "System Proxy could not save its network recovery record."
+    case .existingSystemProxy:
+      "Another system proxy is enabled. Turn it off in its app or System Settings before enabling Clash for Mac. Existing proxy settings were not changed."
+    case .mixedEndpointInUse: "The mixed listener endpoint is already in use."
+    case .controllerEndpointInUse: "The controller endpoint is already in use."
     case .credentialsUnavailable: "Required credentials are unavailable."
     case .credentialConflict: "Credential material conflicts with an immutable entry."
     case .credentialVaultMissing: "The credential vault is unavailable."
+    case .credentialVaultCorrupt: "The credential vault data is corrupt."
+    case .credentialMigrationRequired:
+      "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
     case .credentialGCConflict: "Credential cleanup requires a fresh preview."
+    case .proxyAgentApprovalRequired: "ProxyAgent approval is required in System Settings."
     case .globalAuthorityUnavailable: "Global Authority is unavailable."
     case .globalAuthorityRegistrationRequired: "Global Authority registration is required."
     case .globalAuthorityApprovalRequired: "Global Authority approval is required."
@@ -247,6 +289,8 @@ public enum NativeBridgeResult: Equatable, Sendable {
   case credentialGarbageCollectionPreview(CredentialGarbageCollectionPreview)
   case credentialGarbageCollectionReceipt(CredentialGarbageCollectionReceipt)
   case cutoverPreflight(CutoverPreflightOutcome)
+  case serviceMaintenance(NativeServiceMaintenanceResult)
+  case profileDelays([ProfileProxyDelay])
 }
 
 extension NativeBridgeResult: Codable {
@@ -265,6 +309,8 @@ extension NativeBridgeResult: Codable {
     case credentialGarbageCollectionPreview = "credential_garbage_collection_preview"
     case credentialGarbageCollectionReceipt = "credential_garbage_collection_receipt"
     case cutoverPreflight = "cutover_preflight"
+    case serviceMaintenance = "service_maintenance"
+    case profileDelays = "profile_delays"
   }
 
   public init(from decoder: Decoder) throws {
@@ -298,6 +344,12 @@ extension NativeBridgeResult: Codable {
       self = .cutoverPreflight(
         try container.decode(CutoverPreflightOutcome.self, forKey: .value)
       )
+    case .profileDelays:
+      self = .profileDelays(try container.decode([ProfileProxyDelay].self, forKey: .value))
+    case .serviceMaintenance:
+      self = .serviceMaintenance(
+        try container.decode(NativeServiceMaintenanceResult.self, forKey: .value)
+      )
     }
   }
 
@@ -330,6 +382,12 @@ extension NativeBridgeResult: Codable {
     case .cutoverPreflight(let outcome):
       try container.encode(Kind.cutoverPreflight, forKey: .kind)
       try container.encode(outcome, forKey: .value)
+    case .profileDelays(let results):
+      try container.encode(Kind.profileDelays, forKey: .kind)
+      try container.encode(results, forKey: .value)
+    case .serviceMaintenance(let result):
+      try container.encode(Kind.serviceMaintenance, forKey: .kind)
+      try container.encode(result, forKey: .value)
     }
   }
 }

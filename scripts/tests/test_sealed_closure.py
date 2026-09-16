@@ -18,27 +18,32 @@ from scripts.publication.sealed_closure import (
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-# The three design-pinned sing-box patches. The supply-chain test hashes these
+# The six design-pinned sing-box patches. The supply-chain test hashes these
 # files itself, so the derived patch closure is bound to the patch bytes in the
 # repository rather than to the pin table the production code already reads.
 PATCH_PATHS = {
-    "security": "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-    "raw_packet": "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-    "dns_failover": "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
+    "socks_lifecycle": "native/macos/patches/sing-box-v1.14.1-socks-lifecycle.patch",
+    "security": "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch",
+    "raw_packet": "native/macos/patches/sing-box-v1.14.1-raw-packet-tun.patch",
+    "dns_failover": "native/macos/patches/sing-box-v1.14.1-dns-failover.patch",
+    "endpoint_conflict": "native/macos/patches/sing-box-v1.14.1-endpoint-conflict.patch",
+    "profile_probe": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
 }
-# Authoritative digest of the *corrected* raw-packet TUN patch: its hunk header
-# declared 271 added lines while the hunk carried 303, so `git apply` silently
-# dropped four test helpers. Kept as a literal because hashing the file alone
-# would still pass if that patch regressed and the pins were recomputed to match.
+# Authoritative digest of the raw-packet TUN patch with cleanup ownership retained
+# until Close succeeds. Kept as a literal because hashing the file alone would
+# still pass if the patch regressed and the pins were recomputed to match.
 EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
+    "a550daa7b955f838b5b9b8983b41b789ccb9aedcc97b9a53f96f6affbe3f06e9"
 )
-# The combined diff is the digest of the whole working-tree diff of the patched
-# sing-box checkout (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256),
-# which cannot be recomputed from the patch files alone. A pinned literal is
-# therefore the only form of this assertion that still fails when a pin drifts.
+# The combined diff is the full-object-ID digest of the whole working-tree diff
+# of the patched sing-box checkout
+# (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256), which cannot
+# be recomputed from the patch files alone. A pinned literal is therefore the
+# only form of this assertion that still fails when a pin drifts.
+# This revision includes all six patches, the utun resolver, synchronized SOCKS
+# packet addresses and Go 1.27 debug-crash compatibility.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233"
+    "40efd5359e142d419a0aecfd3f959179864831f4eba0b07aa9c6cd973a4a366c"
 )
 
 
@@ -142,18 +147,18 @@ def _request(**overrides) -> dict:
 class DeriveSupplyChainTests(unittest.TestCase):
     def test_binds_repository_toolchain_and_patched_source(self) -> None:
         supply_chain = derive_supply_chain(REPOSITORY)
-        self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.97.1")
-        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.26.5")
+        self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.98.1")
+        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.27.1")
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
-            "25a600db24f7680ad9806ce5427bd0ab8afe1114",
+            "1ac1a339cb1223e9c70eae14c44411c75033c02d",
         )
         patched_source = supply_chain["patched_source"]
 
-        # The bound patch closure must be exactly the three patch files that live
+        # The bound patch closure must be exactly the six patch files that live
         # in this repository, hashed from their bytes here.
         on_disk = {name: _file_sha256(path) for name, path in PATCH_PATHS.items()}
-        self.assertEqual(len(patched_source["patch_digests"]), 3)
+        self.assertEqual(len(patched_source["patch_digests"]), 6)
         self.assertEqual(patched_source["patch_digests"], sorted(on_disk.values()))
         # ...and the raw-packet patch must be the corrected revision, not the
         # truncated-hunk one that silently dropped four test helpers.
@@ -179,17 +184,17 @@ class DeriveSupplyChainTests(unittest.TestCase):
     def test_missing_tool_inputs_fail_closed(self) -> None:
         from scripts.publication import sealed_closure
 
-        original = sealed_closure.pinned.verify
+        original = sealed_closure.pinned.verify_source_contract
 
         def _raise(_repository):
             raise sealed_closure.pinned.PinnedInputError("dependency_pins.env is missing GO_VERSION")
 
-        sealed_closure.pinned.verify = _raise
+        sealed_closure.pinned.verify_source_contract = _raise
         try:
             with self.assertRaisesRegex(PublicationError, "pinned supply-chain inputs failed"):
                 derive_supply_chain(REPOSITORY)
         finally:
-            sealed_closure.pinned.verify = original
+            sealed_closure.pinned.verify_source_contract = original
 
 
 class SealedClosureRoundTripTests(unittest.TestCase):
@@ -219,6 +224,14 @@ class SealedClosureRoundTripTests(unittest.TestCase):
 class SealedClosureRejectionTests(unittest.TestCase):
     def _base(self) -> dict:
         return build_sealed_closure(REPOSITORY, _request(), fixture=True)
+
+    def test_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                closure = self._base()
+                closure["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                    validate_sealed_closure(REPOSITORY, closure, fixture=True)
 
     def test_unreviewed_license_node_rejected(self) -> None:
         graph = _sbom_graph()

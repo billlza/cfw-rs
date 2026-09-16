@@ -1,7 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-use tokio::sync::Notify;
 
 use super::contract::UpdateAuthorization;
 use super::error::{Result, UpdateError};
@@ -16,49 +13,23 @@ pub(crate) struct UpdaterSecurityState {
 struct Inner {
     authorization_generation: u64,
     authorization: Option<UpdateAuthorization>,
-    next_download_id: u64,
-    active: Option<ActiveDownload>,
-}
-
-struct ActiveDownload {
-    id: u64,
-    phase: ActivePhase,
-    cancellation: Arc<DownloadCancellation>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ActivePhase {
-    Downloading,
-    Committing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AuthorizedCheck {
     generation: u64,
-    pub(super) authorization: UpdateAuthorization,
-}
-
-pub(super) struct DownloadLease {
-    state: Arc<Mutex<Inner>>,
-    id: u64,
-    pub(super) cancellation: Arc<DownloadCancellation>,
-}
-
-pub(super) struct DownloadCancellation {
-    cancelled: AtomicBool,
-    notify: Notify,
+    authorization: UpdateAuthorization,
 }
 
 impl UpdaterSecurityState {
-    pub(super) async fn serialize_checks(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.check_serialization.lock().await
+    pub(super) fn try_serialize_checks(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        self.check_serialization
+            .try_lock()
+            .map_err(|_| UpdateError::Busy)
     }
 
     pub(super) fn clear_authorization(&self) -> Result<()> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
-        if inner.active.is_some() {
-            return Err(UpdateError::DownloadAlreadyActive);
-        }
         inner.authorization_generation = inner
             .authorization_generation
             .checked_add(1)
@@ -67,29 +38,28 @@ impl UpdaterSecurityState {
         Ok(())
     }
 
-    pub(super) fn authorize(&self, authorization: UpdateAuthorization) -> Result<AuthorizedCheck> {
+    pub(super) fn authorize(&self, authorization: UpdateAuthorization) -> Result<()> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
-        if inner.active.is_some() {
-            return Err(UpdateError::DownloadAlreadyActive);
-        }
         inner.authorization_generation = inner
             .authorization_generation
             .checked_add(1)
             .ok_or(UpdateError::StateCounterExhausted)?;
-        inner.authorization = Some(authorization.clone());
-        Ok(AuthorizedCheck {
-            generation: inner.authorization_generation,
-            authorization,
-        })
+        inner.authorization = Some(authorization);
+        Ok(())
     }
 
     pub(super) fn authorization(&self, expected_version: &str) -> Result<AuthorizedCheck> {
-        let inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
+        let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
         let authorization = inner
             .authorization
             .clone()
             .ok_or(UpdateError::MissingAuthorization)?;
         if authorization.version != expected_version {
+            inner.authorization_generation = inner
+                .authorization_generation
+                .checked_add(1)
+                .ok_or(UpdateError::StateCounterExhausted)?;
+            inner.authorization = None;
             return Err(UpdateError::AuthorizationChanged);
         }
         Ok(AuthorizedCheck {
@@ -98,108 +68,27 @@ impl UpdaterSecurityState {
         })
     }
 
-    pub(super) fn begin_download(
+    /// Atomically validates and consumes the presented authorization after the
+    /// network recheck. A mismatch consumes it too, so every terminal open
+    /// attempt requires a fresh user-visible check.
+    pub(super) fn consume_if_current(
         &self,
         checked: &AuthorizedCheck,
         current: &UpdateAuthorization,
-    ) -> Result<DownloadLease> {
+    ) -> Result<()> {
         let mut inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
-        let authorization_is_current = inner.authorization_generation == checked.generation
+        let matches = inner.authorization_generation == checked.generation
             && inner.authorization.as_ref() == Some(&checked.authorization)
             && current == &checked.authorization;
-        if !authorization_is_current {
-            return Err(UpdateError::AuthorizationChanged);
-        }
-        if inner.active.is_some() {
-            return Err(UpdateError::DownloadAlreadyActive);
-        }
-
-        inner.next_download_id = inner
-            .next_download_id
+        inner.authorization_generation = inner
+            .authorization_generation
             .checked_add(1)
             .ok_or(UpdateError::StateCounterExhausted)?;
-        let id = inner.next_download_id;
-        let cancellation = Arc::new(DownloadCancellation::new());
-        inner.active = Some(ActiveDownload {
-            id,
-            phase: ActivePhase::Downloading,
-            cancellation: cancellation.clone(),
-        });
-        Ok(DownloadLease {
-            state: self.inner.clone(),
-            id,
-            cancellation,
-        })
-    }
-
-    pub(super) fn cancel_download(&self) -> Result<bool> {
-        let inner = self.inner.lock().map_err(|_| UpdateError::StateLock)?;
-        let Some(active) = inner.active.as_ref() else {
-            return Ok(false);
-        };
-        if active.phase == ActivePhase::Committing {
-            return Err(UpdateError::InstallationAlreadyStarted);
+        inner.authorization = None;
+        if !matches {
+            return Err(UpdateError::AuthorizationChanged);
         }
-        active.cancellation.cancel();
-        Ok(true)
-    }
-}
-
-impl DownloadLease {
-    pub(super) fn begin_commit(&self) -> Result<()> {
-        let mut inner = self.state.lock().map_err(|_| UpdateError::StateLock)?;
-        let active = inner
-            .active
-            .as_mut()
-            .filter(|active| active.id == self.id)
-            .ok_or(UpdateError::AuthorizationChanged)?;
-        if active.cancellation.is_cancelled() {
-            return Err(UpdateError::DownloadCancelled);
-        }
-        active.phase = ActivePhase::Committing;
         Ok(())
-    }
-}
-
-impl Drop for DownloadLease {
-    fn drop(&mut self) {
-        if let Ok(mut inner) = self.state.lock()
-            && inner.active.as_ref().map(|active| active.id) == Some(self.id)
-        {
-            inner.active = None;
-        }
-    }
-}
-
-impl DownloadCancellation {
-    fn new() -> Self {
-        Self {
-            cancelled: AtomicBool::new(false),
-            notify: Notify::new(),
-        }
-    }
-
-    fn cancel(&self) {
-        if !self.cancelled.swap(true, Ordering::AcqRel) {
-            self.notify.notify_one();
-        }
-    }
-
-    pub(super) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
-    pub(super) async fn cancelled(&self) {
-        loop {
-            if self.is_cancelled() {
-                return;
-            }
-            let notified = self.notify.notified();
-            if self.is_cancelled() {
-                return;
-            }
-            notified.await;
-        }
     }
 }
 
@@ -217,34 +106,6 @@ mod tests {
     }
 
     #[test]
-    fn second_check_must_match_the_presented_authorization() {
-        let state = UpdaterSecurityState::default();
-        let first = state
-            .authorize(authorization("1.2.3"))
-            .expect("first check");
-        let changed = authorization("1.2.4");
-        assert!(matches!(
-            state.begin_download(&first, &changed),
-            Err(UpdateError::AuthorizationChanged)
-        ));
-    }
-
-    #[test]
-    fn intervening_check_invalidates_an_install_snapshot() {
-        let state = UpdaterSecurityState::default();
-        let first = state
-            .authorize(authorization("1.2.3"))
-            .expect("first check");
-        state
-            .authorize(authorization("1.2.4"))
-            .expect("intervening check");
-        assert!(matches!(
-            state.begin_download(&first, &first.authorization),
-            Err(UpdateError::AuthorizationChanged)
-        ));
-    }
-
-    #[test]
     fn renderer_must_request_the_exact_presented_version() {
         let state = UpdaterSecurityState::default();
         state
@@ -255,53 +116,82 @@ mod tests {
             state.authorization("1.2.4"),
             Err(UpdateError::AuthorizationChanged)
         ));
-    }
-
-    #[test]
-    fn exact_second_check_gets_one_exclusive_download_lease() {
-        let state = UpdaterSecurityState::default();
-        let checked = state.authorize(authorization("1.2.3")).expect("check");
-        let lease = state
-            .begin_download(&checked, &checked.authorization)
-            .expect("matching download");
         assert!(matches!(
-            state.begin_download(&checked, &checked.authorization),
-            Err(UpdateError::DownloadAlreadyActive)
-        ));
-        drop(lease);
-        assert!(
-            state
-                .begin_download(&checked, &checked.authorization)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn cancellation_is_observable_until_installation_starts() {
-        let state = UpdaterSecurityState::default();
-        let checked = state.authorize(authorization("1.2.3")).expect("check");
-        let lease = state
-            .begin_download(&checked, &checked.authorization)
-            .expect("download");
-        assert!(matches!(state.cancel_download(), Ok(true)));
-        assert!(lease.cancellation.is_cancelled());
-        assert!(matches!(
-            lease.begin_commit(),
-            Err(UpdateError::DownloadCancelled)
+            state.authorization("1.2.3"),
+            Err(UpdateError::MissingAuthorization)
         ));
     }
 
     #[test]
-    fn commit_boundary_atomically_closes_cancellation_before_network_stop() {
+    fn recheck_must_match_the_exact_presented_authorization() {
         let state = UpdaterSecurityState::default();
-        let checked = state.authorize(authorization("1.2.3")).expect("check");
-        let lease = state
-            .begin_download(&checked, &checked.authorization)
-            .expect("download");
-        lease.begin_commit().expect("commit phase");
+        let first = authorization("1.2.3");
+        state.authorize(first.clone()).expect("presented check");
+        let checked = state.authorization("1.2.3").expect("authorization");
+        state
+            .consume_if_current(&checked, &first)
+            .expect("matching recheck");
         assert!(matches!(
-            state.cancel_download(),
-            Err(UpdateError::InstallationAlreadyStarted)
+            state.authorization("1.2.3"),
+            Err(UpdateError::MissingAuthorization)
         ));
+
+        state.authorize(first.clone()).expect("second check");
+        let checked = state.authorization("1.2.3").expect("authorization");
+        assert!(matches!(
+            state.consume_if_current(&checked, &authorization("1.2.4")),
+            Err(UpdateError::AuthorizationChanged)
+        ));
+        assert!(matches!(
+            state.authorization("1.2.3"),
+            Err(UpdateError::MissingAuthorization)
+        ));
+    }
+
+    #[test]
+    fn any_intervening_check_invalidates_the_presented_snapshot() {
+        let state = UpdaterSecurityState::default();
+        let first = authorization("1.2.3");
+        state.authorize(first.clone()).expect("first check");
+        let checked = state.authorization("1.2.3").expect("authorization");
+        state
+            .authorize(authorization("1.2.4"))
+            .expect("intervening check");
+        assert!(matches!(
+            state.consume_if_current(&checked, &first),
+            Err(UpdateError::AuthorizationChanged)
+        ));
+    }
+
+    #[test]
+    fn consumed_authorization_cannot_be_replayed() {
+        let state = UpdaterSecurityState::default();
+        state
+            .authorize(authorization("1.2.3"))
+            .expect("presented check");
+        state.clear_authorization().expect("consume authorization");
+        assert!(matches!(
+            state.authorization("1.2.3"),
+            Err(UpdateError::MissingAuthorization)
+        ));
+    }
+
+    #[test]
+    fn concurrent_checks_are_rejected_instead_of_queued() {
+        let state = UpdaterSecurityState::default();
+        let first = state.try_serialize_checks().expect("first check");
+        assert!(matches!(
+            state.try_serialize_checks(),
+            Err(UpdateError::Busy)
+        ));
+        drop(first);
+        let second = state
+            .try_serialize_checks()
+            .expect("capacity returns after the active check");
+        assert!(matches!(
+            state.try_serialize_checks(),
+            Err(UpdateError::Busy)
+        ));
+        drop(second);
     }
 }

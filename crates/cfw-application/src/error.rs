@@ -1,6 +1,6 @@
 use cfw_engine_api::{
-    BackendError, CutoverPreflightRequestError, EngineCommandContext, EngineMode, EngineOwner,
-    NativeEngineStatus, RuntimeIdentity,
+    BackendError, BackendErrorKind, CutoverPreflightRequestError, EngineCommandContext, EngineMode,
+    EngineOwner, NativeEngineStatus, RuntimeIdentity,
 };
 use cfw_singbox_config::ConfigError;
 use thiserror::Error;
@@ -8,10 +8,14 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineOperation {
     QueryStatus,
+    CheckConfiguration,
+    StartLocalProxy,
+    StopLocalProxy,
     StartSystemProxy,
     StopSystemProxy,
     InstallTunnel,
     CancelTunnelInstall,
+    AuthorizeTunnelConfiguration,
     StartTunnel,
     StopTunnel,
 }
@@ -20,10 +24,14 @@ impl std::fmt::Display for EngineOperation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::QueryStatus => "query_status",
+            Self::CheckConfiguration => "check_configuration",
+            Self::StartLocalProxy => "start_local_proxy",
+            Self::StopLocalProxy => "stop_local_proxy",
             Self::StartSystemProxy => "start_system_proxy",
             Self::StopSystemProxy => "stop_system_proxy",
             Self::InstallTunnel => "install_tunnel",
             Self::CancelTunnelInstall => "cancel_tunnel_install",
+            Self::AuthorizeTunnelConfiguration => "authorize_tunnel_configuration",
             Self::StartTunnel => "start_tunnel",
             Self::StopTunnel => "stop_tunnel",
         };
@@ -59,12 +67,29 @@ pub enum RecoveredRuntimeMismatch {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum EngineCoordinatorError {
+    #[error("profile preparation failed: {0}")]
+    ProfilePreparation(String),
+    #[error("profile commit failed: {0}")]
+    ProfileCommit(String),
+    #[error("{source}; the previous runtime was restored")]
+    ProfileChangeRolledBack { source: Box<EngineCoordinatorError> },
+    #[error("{source}; restoring the previous runtime also failed: {rollback}")]
+    ProfileChangeRollbackFailed {
+        source: Box<EngineCoordinatorError>,
+        rollback: Box<EngineCoordinatorError>,
+    },
+    #[error(
+        "{source}; exact runtime cleanup is required before the previous configuration can be restored"
+    )]
+    ProfileChangeRecoveryRequired { source: Box<EngineCoordinatorError> },
     #[error("engine coordinator is no longer running")]
     CoordinatorClosed,
     #[error("engine coordinator command queue is full")]
     CommandQueueFull,
     #[error("configuration projection failed: {0}")]
     InvalidConfiguration(#[from] ConfigError),
+    #[error("saved proxy selections could not be applied: {0}")]
+    ProxySelectionInitialization(String),
     #[error("cutover preparation requires the replacement engine to be exactly Off")]
     CutoverRequiresOff,
     #[error(
@@ -112,11 +137,35 @@ pub enum EngineCoordinatorError {
         cleanup_operation: EngineOperation,
         cleanup_error: BackendError,
     },
+    #[error(
+        "native start {start_operation} failed: {start_error}; independent global Off proof also failed: {proof_error}"
+    )]
+    StartAndOffProofFailed {
+        start_operation: EngineOperation,
+        start_error: BackendError,
+        proof_error: Box<EngineCoordinatorError>,
+    },
+    #[error(
+        "native start {operation} encountered {conflict:?}; exact cleanup and independent global Off were proven, so a fresh endpoint projection is required"
+    )]
+    StartEndpointConflictAfterOff {
+        operation: EngineOperation,
+        conflict: BackendErrorKind,
+    },
+    #[error(
+        "the Tunnel start ticket expired while macOS was starting the extension; exact cleanup and independent global Off were proven"
+    )]
+    StartTicketExpiredAfterOff,
     #[error("{validation_error}; cleanup {cleanup_operation} also failed: {cleanup_error}")]
     ValidationAndCleanupFailed {
         validation_error: Box<EngineCoordinatorError>,
         cleanup_operation: EngineOperation,
         cleanup_error: BackendError,
+    },
+    #[error("{validation_error}; independent global Off proof also failed: {proof_error}")]
+    ValidationAndOffProofFailed {
+        validation_error: Box<EngineCoordinatorError>,
+        proof_error: Box<EngineCoordinatorError>,
     },
     #[error("engine generation counter is exhausted")]
     GenerationExhausted,
@@ -126,4 +175,10 @@ pub enum EngineCoordinatorError {
     JournalGenerationMismatch { expected: u64, actual: u64 },
     #[error("engine lineage is invalid: {0}")]
     InvalidLineage(String),
+    #[error("engine snapshot changed before the conditional mode transition")]
+    SnapshotPreconditionChanged,
+    #[error(
+        "release evidence restore is unproven; explicit Off reconciliation is required before another non-Off transition"
+    )]
+    ReleaseEvidenceRestoreUnproven,
 }

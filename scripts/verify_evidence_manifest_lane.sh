@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Deterministic unsigned CI lane (task 8.4) that exercises the canonical Evidence
 # Manifest validator both ways: a well-formed manifest must be accepted and a set
 # of known-bad manifests must be rejected. This lane only *consumes*
@@ -9,12 +9,14 @@
 # abort the lane with a nonzero exit and a specific message. No "|| true", no
 # swallowed status, no unconditional skips.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 validator="$repo_root/scripts/evidence_manifest.py"
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "error: python3 is required for the evidence manifest lane" >&2
+if [[ ! -x "$python_bin" ]]; then
+  echo "error: closed release Python is required for the evidence manifest lane" >&2
   exit 1
 fi
 if [[ ! -f "$validator" ]]; then
@@ -28,7 +30,7 @@ trap '/bin/rm -rf "$workdir"' EXIT
 # Emit one good manifest and several distinct bad manifests into $workdir. Each
 # bad manifest isolates a different masking/promotion defect the validator must
 # reject.
-PYTHONDONTWRITEBYTECODE=1 python3 -B - "$workdir" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - "$workdir" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -104,7 +106,8 @@ stale["reports"][0]["bindings"]["commit"] = "e" * 40
 PY
 
 # Positive case: the good manifest must be accepted (exit 0).
-if ! PYTHONDONTWRITEBYTECODE=1 python3 -B "$validator" "$workdir/good.json" >/dev/null; then
+if ! PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error \
+  "$validator" "$workdir/good.json" >/dev/null; then
   echo "error: evidence manifest lane rejected a well-formed manifest" >&2
   exit 1
 fi
@@ -113,7 +116,8 @@ echo "evidence manifest lane: well-formed manifest accepted"
 # Negative cases: each known-bad manifest must be rejected (nonzero exit). A
 # validator that accepts any of them fails this lane immediately.
 for bad in bad-masked-status bad-over-promotion bad-stale-binding bad-duplicate-keys; do
-  if PYTHONDONTWRITEBYTECODE=1 python3 -B "$validator" "$workdir/$bad.json" >/dev/null 2>&1; then
+  if PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error \
+    "$validator" "$workdir/$bad.json" >/dev/null 2>&1; then
     echo "error: evidence manifest validator accepted a known-bad manifest: $bad" >&2
     exit 1
   fi

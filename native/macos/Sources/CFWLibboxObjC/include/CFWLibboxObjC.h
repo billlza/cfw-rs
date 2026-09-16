@@ -14,6 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
                                   error:(NSError *_Nullable *_Nullable)error;
 - (id<LibboxNetworkInterfaceIterator> _Nullable)getInterfaces:
     (NSError *_Nullable *_Nullable)error;
+- (void)registerMyInterface:(NSString *)name;
 - (void)clearDNSCache;
 @end
 
@@ -24,10 +25,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithPacketTunnel:(BOOL)packetTunnel
                              delegate:(id<CFWLibboxPlatformDelegate>)delegate
+                         processNames:(NSArray<NSString *> *)processNames
+                         processPaths:(NSArray<NSString *> *)processPaths
     NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
+
+/// A successful Go call may return no conflict and no error. Keep that nullable
+/// result separate from NSError so Swift does not import it as nonoptional.
++ (BOOL)startOrReloadService:(LibboxCommandServer *)server
+              configuration:(NSString *)configuration
+                    options:(LibboxOverrideOptions *)options
+           reportedConflict:(LibboxRuntimeStartConflict *_Nullable *_Nonnull)conflict
+                      error:(NSError *_Nullable *_Nullable)error;
 
 @end
 
 NS_ASSUME_NONNULL_END
-

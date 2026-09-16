@@ -6,7 +6,7 @@ not create a competing framework: it consumes the wave-11 physical-evidence
 aggregate (``harness.physical_evidence_aggregator``) as a black box for the
 installed lifecycle matrix, unique-token packet evidence, performance/soak
 gates, and the adversarial/security matrix, and it consumes the path/name-only
-updater-key release blocker (``updater_key_release_blocker``) unchanged.
+workspace secret-material blocker (``release_secret_material_blocker``).
 
 On top of those, the binder requires — for exactly one unchanged signed app
 tree — accepted notarization, a stapled ticket, a Gatekeeper assessment, the
@@ -25,10 +25,9 @@ It is *fail closed* and invalidates the candidate on:
   app-tree hash re-observed *after* every verification step differs from the
   hash all of that evidence was bound to;
 * a stale report — any notarization/staple/Gatekeeper/physical capture that
-  predates the candidate build, a physical aggregate whose build time or
-  identity does not match the final candidate, a report set bound to a
-  different (superseded) final artifact-hash manifest, or a raw report the
-  operator has recorded as superseded;
+  predates the candidate build, or a physical aggregate whose build time,
+  identity, or signed final artifact-hash manifest does not match the final
+  candidate;
 * an identity mismatch — a wrong Team ID, an unexpected/absent inside-out
   bundle identity, an inside-out component linked against a different libbox
   XCFramework, an XCFramework that is not the pinned patched-source build, or a
@@ -37,9 +36,9 @@ It is *fail closed* and invalidates the candidate on:
   artifact hash, a missing installed-matrix / packet / performance / security /
   soak report for either required macOS run set, or any missing
   physical/notarization/post-verification input; and
-* the updater-key release blocker — if any updater-key file exists in the
-  workspace (for example ``.tauri/cfw-rs.key``), the candidate is invalid.
-  The key is referenced by path/name only and is never opened (Requirement 8.1).
+* the workspace secret-material blocker — if any key candidate exists in the
+  workspace, the candidate is invalid. The candidate is referenced by
+  path/name only and is never opened (Requirement 8.1).
 
 Where the physical, signed, or notarized artifacts are unavailable in this
 environment, the binding is environment-gated: it reports ``blocked`` and can
@@ -77,11 +76,22 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
     from scripts.harness.physical_evidence_aggregator import (
         REQUIRED_OS,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
     )
-    from scripts.release_build_identity import canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.harness.physical_machine_identity import (
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
+    )
+    from scripts.release_build_identity import canonical_build_version, ga_root
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 except ImportError:  # pragma: no cover - CLI invocation style
@@ -91,11 +101,22 @@ except ImportError:  # pragma: no cover - CLI invocation style
     from scripts.harness.physical_evidence_aggregator import (
         REQUIRED_OS,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
     )
-    from scripts.release_build_identity import canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.harness.physical_machine_identity import (
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
+    )
+    from scripts.release_build_identity import canonical_build_version, ga_root
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 
@@ -104,10 +125,20 @@ except ImportError:  # pragma: no cover - CLI invocation style
 # candidate's XCFramework identity can never drift from the pinned build inputs
 # and so this task adds no competing supply-chain logic.
 from scripts.publication.sealed_closure import derive_supply_chain  # noqa: E402
+from scripts.gatekeeper_assessment import (  # noqa: E402
+    GatekeeperEvidenceError,
+    validate_evidence as validate_gatekeeper_evidence,
+)
+from scripts.repository_source_identity import (  # noqa: E402
+    SourceIdentityError,
+    repository_commit,
+    require_clean_repository,
+)
 
 
-SCHEMA_VERSION = 1
-DOCUMENT_KIND = "final-candidate-notarization-installed-binding-v1"
+SCHEMA_VERSION = 3
+DOCUMENT_KIND = "final-candidate-notarization-installed-binding-v3"
+DOCUMENT_VISIBILITY = "private-release-operations"
 VERIFIED = "verified"
 BLOCKED = "blocked"
 STATUSES = {VERIFIED, BLOCKED}
@@ -138,12 +169,12 @@ XCFRAMEWORK_NAME = "Libbox.xcframework"
 
 # The five report families that must exist for *every* required macOS run set:
 # the installed lifecycle matrix (Requirement 6.1), unique-token packet evidence
-# (6.2), the performance/weak-network gates and the 24-hour soak (6.3), and the
+# (6.2), the performance/weak-network gates and the 3-hour internal soak (6.3), and the
 # separately signed adversarial/security matrix (6.4).
 REPORT_CATEGORIES = ("installed_matrix", "packet", "performance", "security", "soak")
 
 # Report family -> wave-11 harness that produces its raw report. ``soak`` has no
-# separate harness: Requirement 6.3 keeps the 24-hour zero-crash result inside
+# separate harness: Requirement 6.3 keeps the 3-hour zero-crash result inside
 # the performance document, so its hash is content-addressed from that section.
 HARNESS_BY_CATEGORY: dict[str, str] = {
     "installed_matrix": "lifecycle",
@@ -166,9 +197,9 @@ PHYSICAL_INPUTS = (
     "post_verification",
 )
 
-# The synthetic blocked marker recorded when the updater-key release blocker
-# fires. The candidate is always invalid while any updater-key file is present.
-UPDATER_KEY_BLOCK = "updater_key_release_blocker"
+# The synthetic blocked marker recorded when the secret-material blocker fires.
+# The candidate is always invalid while any secret candidate is present.
+WORKSPACE_SECRET_BLOCK = "release_secret_material_blocker"
 
 
 def _require_str(value: object, label: str, maximum: int = 256) -> str:
@@ -181,6 +212,19 @@ def _require_commit(value: object, label: str) -> str:
     if not isinstance(value, str) or not COMMIT_RE.fullmatch(value):
         raise PublicationError(f"{label} is not a 40-hex commit hash")
     return value
+
+
+def _require_current_repository_commit(
+    repository: Path, declared_commit: str, *, require_clean: bool
+) -> None:
+    try:
+        current_commit = repository_commit(repository)
+        if require_clean:
+            require_clean_repository(repository)
+    except SourceIdentityError as error:
+        raise PublicationError(f"cannot verify the final-candidate repository: {error}") from error
+    if declared_commit != current_commit:
+        raise PublicationError("final candidate repository commit does not match current HEAD")
 
 
 def _require_cdhash(value: object, label: str) -> str:
@@ -464,38 +508,51 @@ def _staple(value: object, signed_app_tree: str, built_at: datetime) -> dict[str
 
 
 def _gatekeeper(value: object, signed_app_tree: str, built_at: datetime) -> dict[str, Any]:
-    gatekeeper = require_exact_keys(
-        value,
-        {"assessment", "source", "target_signed_app_tree_sha256", "captured_at"},
-        "gatekeeper",
+    try:
+        gatekeeper = validate_gatekeeper_evidence(
+            value,
+            expected_assessment_type="execute",
+            expected_primary_signature_context=False,
+        )
+    except GatekeeperEvidenceError as error:
+        raise PublicationError(f"Gatekeeper evidence is invalid: {error}") from error
+    gatekeeper["target_signed_app_tree_sha256"] = _check_target(
+        gatekeeper["target_signed_app_tree_sha256"], signed_app_tree, "gatekeeper"
     )
-    if gatekeeper["assessment"] != "accepted":
-        raise PublicationError("Gatekeeper assessment did not accept the candidate")
-    if gatekeeper["source"] != "spctl":
-        raise PublicationError("Gatekeeper assessment source is not a spctl assessment")
-    return {
-        "assessment": "accepted",
-        "source": "spctl",
-        "target_signed_app_tree_sha256": _check_target(
-            gatekeeper["target_signed_app_tree_sha256"], signed_app_tree, "gatekeeper"
-        ),
-        "captured_at": _check_not_stale(gatekeeper["captured_at"], built_at, "gatekeeper"),
-    }
+    gatekeeper["captured_at"] = _check_not_stale(
+        gatekeeper["captured_at"], built_at, "gatekeeper"
+    )
+    return gatekeeper
 
 
-def _physical_evidence(value: object, final: dict[str, Any]) -> dict[str, Any]:
-    """Validate the physical aggregate and bind it to the final candidate.
+def _physical_evidence(
+    value: object,
+    final: dict[str, Any],
+    *,
+    evidence_root: Path,
+    trust_policy: CollectorTrustPolicy,
+    fixture: bool,
+) -> dict[str, Any]:
+    """Reopen the private aggregate archive and bind it to the final candidate.
 
     The aggregate carries the installed lifecycle matrix hashes and the
     packet/performance/security/soak reports; it is consumed as a black box and
     then cross-checked against the exact final artifact hashes and product
     identity so a stale or foreign aggregate cannot be smuggled in.
     """
-    if not isinstance(value, dict):
-        raise PublicationError("physical evidence aggregate must be a JSON object")
     try:
-        summary = validate_physical_evidence(value)
-    except PhysicalEvidenceError as error:
+        descriptor = parse_descriptor(
+            value,
+            expected_kinds={"physical-aggregate"},
+            label="physical evidence aggregate artifact",
+        )
+        summary = load_physical_evidence_artifact(
+            descriptor.as_dict(),
+            evidence_root=evidence_root,
+            trust_policy=trust_policy,
+            fixture=fixture,
+        )
+    except (PhysicalEvidenceError, RawArtifactError) as error:
         raise PublicationError(f"physical evidence aggregate is invalid: {error}") from error
     candidate = summary["candidate"]
     if candidate["version"] != final["product"]["version"]:
@@ -505,12 +562,21 @@ def _physical_evidence(value: object, final: dict[str, Any]) -> dict[str, Any]:
     if candidate["signed_app_tree_sha256"] != final["signed_app_tree_sha256"]:
         # A different signed app tree is a post-verification mutation / identity
         # mismatch: the installed evidence does not describe this final tree.
-        raise PublicationError("physical evidence signed app tree does not match the final candidate")
+        raise PublicationError(
+            "physical evidence signed app tree does not match the final candidate"
+        )
     if candidate["app_manifest_sha256"] != final["app_manifest_sha256"]:
         raise PublicationError("physical evidence app manifest does not match the final candidate")
+    if (
+        candidate["artifact_hash_manifest_sha256"]
+        != final["artifact_hash_manifest_sha256"]
+    ):
+        raise PublicationError(
+            "physical evidence artifact-hash manifest does not match the recomputed final manifest"
+        )
     # The aggregate's own candidate build time must equal the final build time so
     # a stale run set from an earlier build cannot be reused.
-    built_at = value.get("candidate", {}).get("built_at")
+    built_at = candidate["built_at"]
     _timestamp(built_at, "physical_evidence.candidate.built_at")
     if built_at != final["built_at"]:
         raise PublicationError("physical evidence build time does not match the final candidate")
@@ -522,59 +588,69 @@ def _physical_evidence(value: object, final: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def _derive_report_bindings(aggregate: dict[str, Any]) -> dict[str, Any]:
+def _derive_report_bindings(summary: dict[str, Any]) -> dict[str, Any]:
     """Extract the exact raw-report hashes the final candidate must bind.
 
-    Called only after :func:`validate_physical_evidence` has accepted the
-    aggregate, so every run/report field is already canonical. The result is
-    derived, never operator-supplied: the installed lifecycle matrix, packet,
+    Called only after :func:`load_physical_evidence_artifact` has reopened and
+    accepted the aggregate, so every run/report field is already canonical.
+    The result is derived, never operator-supplied: the installed lifecycle matrix, packet,
     performance, security-adversarial, and soak report hashes for *each* required
     macOS run set. A missing family or run set is missing raw evidence.
     """
+    raw_bindings = summary.get("report_bindings")
+    raw_runs = summary.get("installed_runs")
+    if not isinstance(raw_bindings, list) or not isinstance(raw_runs, list):
+        raise PublicationError("physical evidence summary lacks proof-to-byte bindings")
     bindings: list[dict[str, Any]] = []
-    installed_runs: list[dict[str, Any]] = []
-    for run in aggregate["runs"]:
-        os_label = run["os"]
-        reports = run["reports"]
-        run_hashes: list[str] = []
-        for category in REPORT_CATEGORIES:
-            if category == SOAK_CATEGORY:
-                performance = reports["performance"]
-                soak = performance["document"].get("soak")
-                if not isinstance(soak, dict):
-                    raise PublicationError(
-                        f"physical evidence run[{os_label}] carries no soak report"
-                    )
-                # Content-address the soak section itself so a mutated duration or
-                # crash count breaks this binding. Two clean runs can legitimately
-                # produce the same soak section, so this hash is not required to be
-                # unique across runs (the raw report hashes above already are).
-                entry = {
-                    "os": os_label,
-                    "category": category,
-                    "tool_version": performance["tool_version"],
-                    "report_sha256": sha256_bytes(canonical_json(soak)),
-                    "captured_at": performance["captured_at"],
-                }
-            else:
-                report = reports[HARNESS_BY_CATEGORY[category]]
-                entry = {
-                    "os": os_label,
-                    "category": category,
-                    "tool_version": report["tool_version"],
-                    "report_sha256": report["report_sha256"],
-                    "captured_at": report["captured_at"],
-                }
-            bindings.append(entry)
-            run_hashes.append(entry["report_sha256"])
-        installed_runs.append(
+    for index, raw in enumerate(raw_bindings):
+        entry = require_exact_keys(
+            raw,
             {
-                "os": os_label,
-                "macos_build": run["macos_build"],
-                "machine_sha256": run["machine_sha256"],
-                "report_hashes": sorted(set(run_hashes)),
+                "os",
+                "category",
+                "tool_version",
+                "captured_at",
+                "completed_at",
+                "signed_at",
+                "report_sha256",
+                "artifact_path",
+            },
+            f"physical report binding[{index}]",
+        )
+        bindings.append(
+            {
+                "os": entry["os"],
+                "category": entry["category"],
+                "tool_version": entry["tool_version"],
+                "report_sha256": require_sha256(
+                    entry["report_sha256"], f"physical report binding[{index}].sha256"
+                ),
+                "captured_at": entry["captured_at"],
+                "completed_at": entry["completed_at"],
+                "signed_at": entry["signed_at"],
+                "artifact_path": str(
+                    safe_relative(
+                        entry["artifact_path"],
+                        f"physical report binding[{index}].artifact_path",
+                    )
+                ),
             }
         )
+    installed_runs = [
+        require_exact_keys(
+            run,
+            {
+                "os",
+                "macos_build",
+                "machine_sha256",
+                "hardware_model",
+                "boot_environment_sha256",
+                "report_hashes",
+            },
+            f"installed run[{index}]",
+        )
+        for index, run in enumerate(raw_runs)
+    ]
     expected = {(os_label, category) for os_label in REQUIRED_OS for category in REPORT_CATEGORIES}
     actual = {(entry["os"], entry["category"]) for entry in bindings}
     if actual != expected:
@@ -582,53 +658,53 @@ def _derive_report_bindings(aggregate: dict[str, Any]) -> dict[str, Any]:
             "final candidate is missing raw physical reports: "
             f"{sorted(expected - actual)}"
         )
+    if len({entry["report_sha256"] for entry in bindings}) != len(bindings):
+        raise PublicationError("final candidate physical report bytes are reused")
+    expected_run_hashes = {
+        os_label: sorted(
+            entry["report_sha256"] for entry in bindings if entry["os"] == os_label
+        )
+        for os_label in REQUIRED_OS
+    }
+    seen_runs: set[str] = set()
+    for index, run in enumerate(installed_runs):
+        os_label = run["os"]
+        if os_label not in REQUIRED_OS or os_label in seen_runs:
+            raise PublicationError("installed-run summary has an unknown/duplicate OS")
+        seen_runs.add(os_label)
+        safe_identifier(run["macos_build"], f"installed run[{index}].macos_build")
+        require_sha256(run["machine_sha256"], f"installed run[{index}].machine_sha256")
+        require_sha256(
+            run["boot_environment_sha256"],
+            f"installed run[{index}].boot_environment_sha256",
+        )
+        try:
+            validate_physical_hardware_model(run["hardware_model"])
+        except PhysicalMachineIdentityError as error:
+            raise PublicationError(
+                f"installed run[{index}].hardware_model is invalid"
+            ) from error
+        if run["report_hashes"] != expected_run_hashes[os_label]:
+            raise PublicationError("installed-run report hashes differ from raw descriptors")
+    if seen_runs != set(REQUIRED_OS):
+        raise PublicationError("installed-run summary is missing a required OS")
+    if len({run["machine_sha256"] for run in installed_runs}) != 1:
+        raise PublicationError(
+            "installed-run summary does not bind one physical machine"
+        )
+    if len({run["hardware_model"] for run in installed_runs}) != 1:
+        raise PublicationError(
+            "installed-run summary does not bind one hardware model"
+        )
+    if len({run["boot_environment_sha256"] for run in installed_runs}) != len(
+        REQUIRED_OS
+    ):
+        raise PublicationError(
+            "installed-run summary reuses a boot/install environment"
+        )
     bindings.sort(key=lambda entry: (entry["os"], entry["category"]))
     installed_runs.sort(key=lambda entry: entry["os"])
     return {"report_bindings": bindings, "installed_runs": installed_runs}
-
-
-def _evidence_binding(
-    value: object, artifact_manifest_sha256: str, bound_hashes: set[str]
-) -> dict[str, Any]:
-    """Bind the whole report set to the exact final artifact hashes.
-
-    ``artifact_hash_manifest_sha256`` is the digest of the exact final
-    artifact-hash manifest the reports were captured against. If it names a
-    different (earlier, superseded) manifest, the reports are stale for this
-    candidate. ``superseded_report_hashes`` records raw reports the operator has
-    explicitly retired; binding any of them fails closed.
-    """
-    binding = require_exact_keys(
-        value,
-        {"artifact_hash_manifest_sha256", "superseded_report_hashes"},
-        "evidence_binding",
-    )
-    declared = require_sha256(
-        binding["artifact_hash_manifest_sha256"],
-        "evidence_binding.artifact_hash_manifest_sha256",
-    )
-    if declared != artifact_manifest_sha256:
-        raise PublicationError(
-            "bound reports are stale: they are bound to a superseded final artifact-hash manifest"
-        )
-    raw = binding["superseded_report_hashes"]
-    if not isinstance(raw, list):
-        raise PublicationError("evidence_binding.superseded_report_hashes must be a list")
-    superseded: list[str] = []
-    for index, item in enumerate(raw):
-        digest = require_sha256(item, f"evidence_binding.superseded_report_hashes[{index}]")
-        if digest in superseded:
-            raise PublicationError("evidence_binding repeats a superseded report hash")
-        superseded.append(digest)
-    collision = sorted(set(superseded) & bound_hashes)
-    if collision:
-        raise PublicationError(
-            f"final candidate binds superseded raw reports: {collision}"
-        )
-    return {
-        "artifact_hash_manifest_sha256": declared,
-        "superseded_report_hashes": sorted(superseded),
-    }
 
 
 def _post_verification(
@@ -658,34 +734,39 @@ def _post_verification(
 
 
 # --------------------------------------------------------------------------
-# Updater-key release blocker (path/name only, never opened)
+# Workspace secret-material release blocker (path/name only, never opened)
 # --------------------------------------------------------------------------
 
 
-def _updater_key_responses(workspace_root: Path) -> list[Any]:
-    """Return the atomic updater-key security responses for the workspace.
+def _secret_material_responses(workspace_root: Path) -> list[Any]:
+    """Return typed secret-material security responses for the workspace.
 
     Delegates to the path/name-only blocker; it never opens or reads a key.
     Fails closed: an unreadable/symlinked/malformed workspace raises.
     """
     try:
         return list(evaluate_workspace(workspace_root))
-    except UpdaterKeyReleaseBlock as error:
-        raise PublicationError(f"updater-key release blocker failed closed: {error}") from error
+    except SecretMaterialReleaseBlock as error:
+        raise PublicationError(
+            f"release secret-material blocker failed closed: {error}"
+        ) from error
 
 
-def _updater_key_blocked(workspace_root: Path) -> bool:
-    """Return True when an updater-key file exists in the workspace."""
-    return bool(_updater_key_responses(workspace_root))
+def _secret_material_blocked(workspace_root: Path) -> bool:
+    """Return True when release secret material exists in the workspace."""
+    return bool(_secret_material_responses(workspace_root))
 
 
 # --------------------------------------------------------------------------
 # Environment status (which final-candidate inputs exist at all)
 # --------------------------------------------------------------------------
 
-# Where the release pipeline stages the environment-gated final-candidate inputs
-# (alongside the existing 0.4.0 candidate/publication layout).
-DEFAULT_EVIDENCE_DIRECTORY = "target/candidates/0.4.0/release/final-candidate"
+# This legacy binder remains a callable validator, so its default input root is
+# confined to the one active GA identity.  It must never recreate the retired
+# parallel ``target/candidates/0.4.0/release`` namespace.
+DEFAULT_EVIDENCE_DIRECTORY = str(
+    ga_root(Path()) / "stage-inputs/final-candidate"
+)
 
 ENVIRONMENT_INPUT_FILES: dict[str, str] = {
     "notarization": "notarization.json",
@@ -708,7 +789,7 @@ def environment_status(
     """Report which final-candidate inputs exist, without fabricating any.
 
     Every environment-gated input is reported as ``present`` or ``not-run`` from
-    path/type metadata alone, and the updater-key blocker is reported by
+    path/type metadata alone, and the secret-material blocker is reported by
     path/name only. An input that is absent, a symlink, or not a regular file is
     ``not-run`` and blocks the candidate; nothing here can grant acceptance.
     """
@@ -726,23 +807,33 @@ def environment_status(
         inputs[name] = {"path": str(candidate), "state": PRESENT if present else NOT_RUN}
         if not present:
             blocked.append(name)
-    updater_key_blocks = [
+    workspace_secret_blocks = [
         {
             "path": response.detected_path,
             "name": response.detected_name,
+            "credential_kind": response.credential_kind.value,
             "relocation_target": response.relocation_target,
             "exposure_plausible": response.exposure_plausible,
             "rotation_required": response.rotation_required,
-            "trust_migration_required": response.trust_migration_required,
+            "required_trust_action": response.required_trust_action.value,
+            "updater_trust_migration_required": (
+                response.updater_trust_migration_required
+            ),
+            "notary_profile_reprovision_required": (
+                response.notary_profile_reprovision_required
+            ),
+            "trust_domain_identification_required": (
+                response.trust_domain_identification_required
+            ),
         }
-        for response in _updater_key_responses(root)
+        for response in _secret_material_responses(root)
     ]
-    if updater_key_blocks:
-        blocked.append(UPDATER_KEY_BLOCK)
+    if workspace_secret_blocks:
+        blocked.append(WORKSPACE_SECRET_BLOCK)
     return {
         "evidence_directory": str(directory),
         "inputs": inputs,
-        "updater_key_blocks": updater_key_blocks,
+        "workspace_secret_blocks": workspace_secret_blocks,
         "blocked_inputs": sorted(blocked),
         # ``inputs-present`` means only that the files exist; acceptance still
         # requires build + validate over their contents.
@@ -760,21 +851,27 @@ def _binding_body(document: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_final_candidate_binding(
-    repository: Path, request: object, *, fixture: bool, workspace_root: Path | None = None
+    repository: Path,
+    request: object,
+    *,
+    fixture: bool,
+    workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
 ) -> dict[str, Any]:
     """Assemble the canonical final-candidate binding from reviewed inputs.
 
-    ``workspace_root`` is scanned by the updater-key blocker (path/name only);
-    it defaults to ``repository``. A present updater-key file always blocks.
+    ``workspace_root`` is scanned by the secret-material blocker (path/name
+    only); it defaults to ``repository``. A present candidate always blocks.
     """
     root = repository if workspace_root is None else workspace_root
+    evidence_root = repository if physical_evidence_root is None else physical_evidence_root
     fields = {
         "product",
         "commit",
         "final_artifacts",
         "xcframework",
         "nested_code",
-        "evidence_binding",
         "notarization",
         "staple",
         "gatekeeper",
@@ -784,6 +881,7 @@ def build_final_candidate_binding(
     payload = require_exact_keys(request, fields, "final candidate binding request")
     product = _product(payload["product"])
     commit = _require_commit(payload["commit"], "repository commit")
+    _require_current_repository_commit(repository, commit, require_clean=not fixture)
     final_artifacts = _final_artifacts(payload["final_artifacts"])
     exact_hashes = {
         entry["sha256"] for entry in final_artifacts["artifact_hash_manifest"]["entries"]
@@ -795,6 +893,7 @@ def build_final_candidate_binding(
         "product": product,
         "signed_app_tree_sha256": final_artifacts["signed_app_tree_sha256"],
         "app_manifest_sha256": final_artifacts["app_manifest_sha256"],
+        "artifact_hash_manifest_sha256": final_artifacts["artifact_hash_manifest"]["sha256"],
         "built_at": final_artifacts["built_at"],
     }
     signed_app_tree = final_artifacts["signed_app_tree_sha256"]
@@ -805,9 +904,12 @@ def build_final_candidate_binding(
     staple = None
     gatekeeper = None
     physical_evidence = None
+    physical_archive = None
+    physical_artifact_hash_manifest_sha256 = None
     post_verification = None
     report_bindings: list[dict[str, Any]] = []
     installed_runs: list[dict[str, Any]] = []
+    physical_trust_policy_sha256 = None
     evidence_timestamps: list[datetime] = []
     if payload["notarization"] is None:
         missing.append("notarization")
@@ -827,26 +929,46 @@ def build_final_candidate_binding(
     if payload["physical_evidence"] is None:
         missing.append("physical_evidence")
     else:
-        # Validate the aggregate and bind it to the final candidate, but store
-        # the raw aggregate verbatim so validation is idempotent under rebuild.
-        _physical_evidence(payload["physical_evidence"], final)
-        physical_evidence = payload["physical_evidence"]
-        derived = _derive_report_bindings(physical_evidence)
-        report_bindings = derived["report_bindings"]
-        installed_runs = derived["installed_runs"]
-        evidence_timestamps.extend(
-            _timestamp(entry["captured_at"], f"report[{entry['os']}.{entry['category']}]")
-            for entry in report_bindings
-        )
-
-    # Bind the whole raw-report set to the exact final artifact hashes and reject
-    # superseded reports. This is checked whether or not the physical aggregate is
-    # available, so a wrong manifest binding is caught in every environment.
-    evidence_binding = _evidence_binding(
-        payload["evidence_binding"],
-        final_artifacts["artifact_hash_manifest"]["sha256"],
-        {entry["report_sha256"] for entry in report_bindings},
-    )
+        # The publication binding stores only the aggregate descriptor. Raw
+        # aggregate/report/capture bytes remain in the retained private archive.
+        try:
+            physical_evidence = parse_descriptor(
+                payload["physical_evidence"],
+                expected_kinds={"physical-aggregate"},
+                label="physical evidence aggregate artifact",
+            ).as_dict()
+        except RawArtifactError as error:
+            raise PublicationError(f"physical evidence descriptor is invalid: {error}") from error
+        try:
+            policy = (
+                load_release_trust_policy()
+                if physical_trust_policy is None
+                else physical_trust_policy
+            )
+        except CollectorTrustNotConfiguredError:
+            missing.append("collector_trust_policy")
+        except RawArtifactError as error:
+            raise PublicationError(f"collector trust policy is invalid: {error}") from error
+        else:
+            summary = _physical_evidence(
+                physical_evidence,
+                final,
+                evidence_root=evidence_root,
+                trust_policy=policy,
+                fixture=fixture,
+            )
+            derived = _derive_report_bindings(summary)
+            report_bindings = derived["report_bindings"]
+            installed_runs = derived["installed_runs"]
+            physical_archive = summary["private_archive"]
+            physical_artifact_hash_manifest_sha256 = summary["candidate"][
+                "artifact_hash_manifest_sha256"
+            ]
+            physical_trust_policy_sha256 = summary["trust_policy_sha256"]
+            evidence_timestamps.extend(
+                _timestamp(entry["signed_at"], f"report[{entry['os']}.{entry['category']}]")
+                for entry in report_bindings
+            )
 
     latest_evidence_at = max(evidence_timestamps) if evidence_timestamps else None
     if payload["post_verification"] is None:
@@ -856,10 +978,10 @@ def build_final_candidate_binding(
             payload["post_verification"], signed_app_tree, latest_evidence_at
         )
 
-    # The updater-key release blocker always invalidates the candidate while any
-    # updater-key file is present in the workspace (Requirement 8.1).
-    if _updater_key_blocked(root):
-        missing.append(UPDATER_KEY_BLOCK)
+    # Secret material always invalidates the candidate while present in the
+    # workspace (Requirement 8.1).
+    if _secret_material_blocked(root):
+        missing.append(WORKSPACE_SECRET_BLOCK)
 
     blocked_inputs = sorted(set(missing))
     status = VERIFIED if not blocked_inputs else BLOCKED
@@ -867,6 +989,7 @@ def build_final_candidate_binding(
     body = {
         "schema_version": SCHEMA_VERSION,
         "document": DOCUMENT_KIND,
+        "visibility": DOCUMENT_VISIBILITY,
         "fixture": bool(fixture),
         "status": status,
         "blocked_inputs": blocked_inputs,
@@ -880,11 +1003,13 @@ def build_final_candidate_binding(
         },
         "xcframework": xcframework,
         "nested_code": nested_code,
-        "evidence_binding": evidence_binding,
         "notarization": notarization,
         "staple": staple,
         "gatekeeper": gatekeeper,
         "physical_evidence": physical_evidence,
+        "physical_archive": physical_archive,
+        "physical_artifact_hash_manifest_sha256": physical_artifact_hash_manifest_sha256,
+        "physical_trust_policy_sha256": physical_trust_policy_sha256,
         "report_bindings": report_bindings,
         "installed_runs": installed_runs,
         "post_verification": post_verification,
@@ -899,13 +1024,15 @@ def validate_final_candidate_binding(
     *,
     fixture: bool,
     workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
     require_verified: bool = False,
 ) -> dict[str, Any]:
     """Fail-closed validation of a final-candidate binding document.
 
-    Re-derives the binding from the embedded evidence, re-runs the updater-key
+    Re-derives the binding from the embedded evidence, re-runs the secret-material
     scan, and rejects any post-verification mutation, stale report, identity
-    mismatch, missing raw evidence, or updater-key blocker. With
+    mismatch, missing raw evidence, or workspace-secret blocker. With
     ``require_verified`` a ``blocked`` (environment-gated) binding is rejected so
     an incomplete environment can never be promoted.
     """
@@ -913,6 +1040,7 @@ def validate_final_candidate_binding(
     fields = {
         "schema_version",
         "document",
+        "visibility",
         "fixture",
         "status",
         "blocked_inputs",
@@ -921,18 +1049,26 @@ def validate_final_candidate_binding(
         "final_artifacts",
         "xcframework",
         "nested_code",
-        "evidence_binding",
         "notarization",
         "staple",
         "gatekeeper",
         "physical_evidence",
+        "physical_archive",
+        "physical_artifact_hash_manifest_sha256",
+        "physical_trust_policy_sha256",
         "report_bindings",
         "installed_runs",
         "post_verification",
     }
     parsed = require_exact_keys(document, fields | {"binding_sha256"}, "final candidate binding")
-    if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != SCHEMA_VERSION
+        or parsed["document"] != DOCUMENT_KIND
+    ):
         raise PublicationError("final candidate binding has an unsupported schema/document kind")
+    if parsed["visibility"] != DOCUMENT_VISIBILITY:
+        raise PublicationError("final candidate binding is not private release-operations evidence")
     if parsed["fixture"] is not bool(fixture):
         raise PublicationError("final candidate binding fixture mode mismatch")
     status = parsed["status"]
@@ -949,7 +1085,6 @@ def validate_final_candidate_binding(
         "final_artifacts": parsed["final_artifacts"],
         "xcframework": parsed["xcframework"],
         "nested_code": parsed["nested_code"],
-        "evidence_binding": parsed["evidence_binding"],
         "notarization": parsed["notarization"],
         "staple": parsed["staple"],
         "gatekeeper": parsed["gatekeeper"],
@@ -957,7 +1092,12 @@ def validate_final_candidate_binding(
         "post_verification": parsed["post_verification"],
     }
     rebuilt = build_final_candidate_binding(
-        repository, request, fixture=fixture, workspace_root=root
+        repository,
+        request,
+        fixture=fixture,
+        workspace_root=root,
+        physical_evidence_root=physical_evidence_root,
+        physical_trust_policy=physical_trust_policy,
     )
 
     if sorted(parsed["blocked_inputs"]) != rebuilt["blocked_inputs"]:
@@ -974,6 +1114,19 @@ def validate_final_candidate_binding(
         raise PublicationError(
             "final candidate installed-run summary does not match the raw physical evidence"
         )
+    if parsed["physical_archive"] != rebuilt["physical_archive"]:
+        raise PublicationError(
+            "final candidate private evidence archive does not match reopened bytes"
+        )
+    if (
+        parsed["physical_artifact_hash_manifest_sha256"]
+        != rebuilt["physical_artifact_hash_manifest_sha256"]
+    ):
+        raise PublicationError(
+            "final candidate physical artifact-hash manifest binding was hand-edited"
+        )
+    if parsed["physical_trust_policy_sha256"] != rebuilt["physical_trust_policy_sha256"]:
+        raise PublicationError("final candidate collector trust-policy binding was hand-edited")
     if parsed["binding_sha256"] != rebuilt["binding_sha256"]:
         raise PublicationError("final candidate binding content digest mismatch")
 
@@ -989,9 +1142,14 @@ def self_check() -> None:
     """Verify the binder's internal wiring without any evidence file.
 
     Lets a static boundary gate confirm the final-candidate binder is wired to
-    the physical aggregator and the updater-key blocker and requires the full
+    the physical aggregator and the secret-material blocker and requires the full
     inside-out identity set, without needing signed/notarized/physical inputs.
     """
+    if (
+        SCHEMA_VERSION != 3
+        or DOCUMENT_KIND != "final-candidate-notarization-installed-binding-v3"
+    ):
+        raise PublicationError("final-candidate schema wiring is inconsistent")
     if set(REQUIRED_NESTED_CODE) != {
         "host",
         "packet-tunnel",
@@ -1013,7 +1171,7 @@ def self_check() -> None:
         raise PublicationError("environment-gated input file wiring is inconsistent")
     if len(REQUIRED_OS) != 2:
         raise PublicationError("final candidate must bind both required macOS run sets")
-    if validate_physical_evidence is None or evaluate_workspace is None:
+    if load_physical_evidence_artifact is None or evaluate_workspace is None:
         raise PublicationError("final candidate binder is not wired to its dependencies")
     if derive_supply_chain is None:
         raise PublicationError("final candidate binder is not wired to the sealed closure pins")

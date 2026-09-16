@@ -126,13 +126,23 @@ impl MacOsPlatformService {
 
     /// When no live product-owned proxy is expected, require every current
     /// network service to have the relevant proxy modes disabled.
-    pub fn verify_all_legacy_proxies_disabled(&self) -> Result<()> {
+    /// Proves the retired installation holds no system proxy, scoped to the
+    /// endpoint that installation recorded as its own. A proxy belonging to a
+    /// different product is not evidence about this one, so it is not consulted.
+    pub fn verify_no_legacy_owned_proxy(
+        &self,
+        owned_ports: &[u16],
+        legacy_pac_present: bool,
+    ) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            crate::sysproxy_sc::verify_proxies_disabled()
+            crate::sysproxy_sc::verify_no_legacy_owned_proxy(owned_ports, legacy_pac_present)
         }
         #[cfg(not(target_os = "macos"))]
-        bail!("system proxy verification is only available on macOS")
+        {
+            let _ = (owned_ports, legacy_pac_present);
+            bail!("system proxy verification is only available on macOS")
+        }
     }
 }
 

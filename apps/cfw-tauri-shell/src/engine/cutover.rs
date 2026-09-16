@@ -196,10 +196,12 @@ pub(crate) fn validate_outcome_binding(
             context,
             system_proxy_config_digest,
             tunnel_config_digest,
+            credential_audience,
         } if *target == request.target()
             && *context == request.system_proxy_request().context
             && system_proxy_config_digest == &request.system_proxy_request().config_digest
-            && tunnel_config_digest == &request.tunnel_request().config_digest =>
+            && tunnel_config_digest == &request.tunnel_request().config_digest
+            && credential_audience == &request.system_proxy_request().credential_audience =>
         {
             Ok(())
         }
@@ -226,6 +228,7 @@ fn validate_ready_binding(
         && attestation.context == request.system_proxy_request().context
         && attestation.system_proxy_config_digest == request.system_proxy_request().config_digest
         && attestation.tunnel_config_digest == request.tunnel_request().config_digest
+        && attestation.credential_audience == request.system_proxy_request().credential_audience
         && attestation.credential_references == references
     {
         Ok(())
@@ -242,12 +245,13 @@ pub(crate) async fn prepare_legacy_cutover(
     launch: State<'_, crate::LaunchContext>,
     target: EngineMode,
 ) -> Result<UiCutoverPreparation, String> {
-    if !launch.migration_handoff {
+    if !launch.is_migration_handoff() {
         return Err(
             "legacy preparation requires launching 0.4.0 with --migration-handoff while the old GUI remains running"
                 .into(),
         );
     }
+    launch.require_renderer_ready_published()?;
     crate::legacy::require_canonical_handoff_candidate()?;
     if !matches!(
         retirement.status()?,
@@ -267,10 +271,15 @@ pub(crate) async fn prepare_legacy_cutover(
         .repository()
         .require_selected()
         .map_err(|error| error.to_string())?;
-    let settings = EngineSettings::default();
+    let settings = engine.engine_settings()?;
     let request = engine
         .coordinator
-        .prepare_cutover(target, selected.profile.clone(), settings.clone())
+        .prepare_cutover(
+            target,
+            selected.record.id.clone(),
+            selected.profile.clone(),
+            settings.clone(),
+        )
         .await
         .map_err(|error| error.to_string())?;
     let outcome = run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
@@ -292,7 +301,9 @@ pub(crate) async fn prepare_legacy_cutover(
 
 #[cfg(test)]
 mod tests {
-    use cfw_engine_api::{EngineCommandContext, EngineStartRequest, TunnelNetworkOptions};
+    use cfw_engine_api::{
+        DirectIpv4HostRoutes, EngineCommandContext, EngineStartRequest, TunnelNetworkOptions,
+    };
 
     use super::*;
 
@@ -302,8 +313,15 @@ mod tests {
             config_epoch: 1,
             generation: 4,
         };
+        let credential_audience = cfw_engine_api::CredentialAudience::new(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "33".repeat(32),
+        )
+        .expect("audience");
         let proxy = EngineStartRequest {
+            mode: cfw_singbox_config::ProjectionMode::SystemProxy,
             context: context.clone(),
+            credential_audience: credential_audience.clone(),
             config_json: "{}".into(),
             config_content_digest: "10".repeat(32),
             config_digest: "11".repeat(32),
@@ -311,7 +329,9 @@ mod tests {
             tunnel_options: None,
         };
         let tunnel = EngineStartRequest {
+            mode: cfw_singbox_config::ProjectionMode::Tunnel,
             context,
+            credential_audience,
             config_json: "{}".into(),
             config_content_digest: "20".repeat(32),
             config_digest: "22".repeat(32),
@@ -319,7 +339,9 @@ mod tests {
             tunnel_options: Some(TunnelNetworkOptions {
                 ipv6_enabled: true,
                 bypass_private_networks: true,
+                direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1500,
+                system_proxy_port: None,
             }),
         };
         CutoverPreflightRequest::new(EngineMode::Tunnel, proxy, tunnel).expect("request")
@@ -335,6 +357,7 @@ mod tests {
             context: request.system_proxy_request().context.clone(),
             system_proxy_config_digest: request.system_proxy_request().config_digest.clone(),
             tunnel_config_digest: request.tunnel_request().config_digest.clone(),
+            credential_audience: request.system_proxy_request().credential_audience.clone(),
             credential_references: Vec::new(),
             valid_for_millis: validity,
         }

@@ -23,6 +23,23 @@ pub(crate) struct FileIdentity {
     digest: [u8; 32],
 }
 
+impl FileIdentity {
+    pub(crate) fn revision(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"cfw-settings-revision-v1\0");
+        hash.update(self.device.to_be_bytes());
+        hash.update(self.inode.to_be_bytes());
+        hash.update(self.digest);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut text = String::with_capacity(64);
+        for byte in hash.finalize() {
+            text.push(HEX[usize::from(byte >> 4)] as char);
+            text.push(HEX[usize::from(byte & 15)] as char);
+        }
+        text
+    }
+}
+
 pub(crate) struct StoredBytes {
     pub(crate) bytes: Vec<u8>,
     pub(crate) identity: FileIdentity,
@@ -33,6 +50,55 @@ pub(crate) struct SecureDirectory {
 }
 
 impl SecureDirectory {
+    pub(crate) fn compare_and_swap_atomic(
+        &self,
+        name: &str,
+        expected_revision: Option<&str>,
+        bytes: &[u8],
+        maximum: usize,
+    ) -> Result<(), SettingsStoreError> {
+        self.lock(libc::LOCK_EX)?;
+        let current = self.read_optional_locked(name, maximum, FilePolicy::Private)?;
+        let revision = current.as_ref().map(|stored| stored.identity.revision());
+        if revision.as_deref() != expected_revision {
+            return Err(SettingsStoreError::RuntimeSettingsChanged);
+        }
+        // The descriptor retains its exclusive lock across the trusted read,
+        // replacement and directory sync. write_atomic uses this same lock.
+        self.write_atomic(name, bytes, maximum)
+    }
+    pub(crate) fn open_existing(path: &Path) -> Result<Option<Self>, SettingsStoreError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                return Err(SettingsStoreError::UnsafeDirectory);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| SettingsStoreError::InvalidPath)?;
+        let descriptor = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != current_uid()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(SettingsStoreError::UnsafeDirectory);
+        }
+        Ok(Some(Self { file }))
+    }
+
     pub(crate) fn open_or_create(path: &Path) -> Result<Self, SettingsStoreError> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if !metadata.file_type().is_dir() => {

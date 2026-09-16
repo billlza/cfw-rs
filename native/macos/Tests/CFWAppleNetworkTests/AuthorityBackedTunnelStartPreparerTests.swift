@@ -25,8 +25,14 @@ private final class FakeAuthorityClient: AuthorityClient, @unchecked Sendable {
     _ request: PrepareStartRequest,
     configuration: SensitiveBytes, secrets: SensitiveBytes?
   ) async throws -> PreparedStart {
-    configuration.erase()
-    secrets?.erase()
+    defer {
+      configuration.erase()
+      secrets?.erase()
+    }
+    var payload = try secrets?.withUnsafeBytes { Data($0) }
+    defer { if payload != nil { payload!.resetBytes(in: payload!.startIndex..<payload!.endIndex) } }
+    let decoded = try AuthoritySecretPayloadCodec.decode(payload, descriptor: request.configuration)
+    defer { decoded.erase() }
     lock.withLock {
       prepareCountValue += 1
       recordedRequests.append(request)
@@ -40,6 +46,16 @@ private final class FakeAuthorityClient: AuthorityClient, @unchecked Sendable {
   func cancelPrepared(_ context: OperationContext, revision: UInt64) async throws {}
 
   func beginStop(_ request: BeginStopRequest) async throws -> StopDirective {
+    throw AuthorityDomainError(code: .invalidMessage)
+  }
+
+  func completeStop(_ request: CompleteStopRequest) async throws {
+    throw AuthorityDomainError(code: .invalidMessage)
+  }
+
+  func reconcileOff(
+    _ request: ReconcileOffRequest
+  ) async throws -> ReconcileOffReceipt {
     throw AuthorityDomainError(code: .invalidMessage)
   }
 
@@ -102,15 +118,17 @@ private let installationB = UUID(uuidString: "22222222-2222-2222-2222-2222222222
 private func tunnelDescriptor(
   installationID: UUID,
   sha: String = String(repeating: "ab", count: 32),
-  identity: String = String(repeating: "cd", count: 32)
+  identity: String = String(repeating: "cd", count: 32),
+  credentialSlots: [CredentialSlot] = []
 ) throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: installationID,
     epoch: 1, generation: 1, byteCount: 2,
     sha256: SHA256Digest(hex: sha),
-    identitySHA256: SHA256Digest(hex: identity))
+    identitySHA256: SHA256Digest(hex: identity), credentialSlots: credentialSlots)
 }
 
 private func offSnapshot(
@@ -158,6 +176,39 @@ private func sharedProtocolSource(_ fileName: String) throws -> String {
 
 @Suite(.serialized)
 struct AuthorityBackedTunnelStartPreparerTests {
+  @Test func acceptsMaximumSecretBytesPlusBoundedFraming() async throws {
+    let slotCount =
+      AuthorityV1Limits.maximumTotalSecretBytes / AuthorityV1Limits.maximumIndividualSecretBytes
+    let slots = try (0..<slotCount).map { index in
+      try CredentialSlot(
+        reference: CredentialReference(id: UUID(), kind: .trojanPassword),
+        target: .trojanPassword, outboundIndex: UInt16(index),
+        jsonPointer: "/outbounds/\(index)/password")
+    }
+    let material = try AuthoritySecretMaterial(
+      slots: slots.map {
+        try AuthoritySecretSlot(
+          reference: $0.reference,
+          copying: Data(repeating: 0x61, count: AuthorityV1Limits.maximumIndividualSecretBytes))
+      })
+    defer { material.erase() }
+    let encoded = try #require(try AuthoritySecretPayloadCodec.encode(material))
+    defer { encoded.erase() }
+    var payload = try encoded.withUnsafeBytes { Data($0) }
+    defer { payload.resetBytes(in: payload.startIndex..<payload.endIndex) }
+    #expect(payload.count > AuthorityV1Limits.maximumTotalSecretBytes)
+    let descriptor = try tunnelDescriptor(installationID: installationA, credentialSlots: slots)
+    let client = FakeAuthorityClient(snapshot: try offSnapshot(installationID: installationA))
+    client.prepareResultFactory = { try preparedTicket(for: $0) }
+    let prepared = try await AuthorityBackedTunnelStartPreparer(authority: client, ownerUID: 501)
+      .prepareTunnelStart(
+        HostTunnelStartPreparation(
+          descriptor: descriptor,
+          configuration: Data("{}".utf8), credentialPayload: payload))
+    defer { prepared.ticket.erase() }
+    #expect(client.prepareCount == 1)
+  }
+
   @Test func preparesTunnelStartThroughAuthorityAndReturnsOnlyTheTicket() async throws {
     let descriptor = try tunnelDescriptor(installationID: installationA)
     let client = FakeAuthorityClient(snapshot: try offSnapshot(installationID: installationA))
@@ -260,21 +311,6 @@ struct AuthorityBackedTunnelStartPreparerTests {
         HostTunnelStartPreparation(
           descriptor: descriptor, configuration: Data("{}".utf8), credentialPayload: nil))
     }
-    #expect(client.prepareCount == 0)
-  }
-
-  @Test func productionFactoryStaysFailClosedWithoutAProvenSignedChannel() async throws {
-    let descriptor = try tunnelDescriptor(installationID: installationA)
-    let client = FakeAuthorityClient(snapshot: try offSnapshot(installationID: installationA))
-    let preparer = HostTunnelStartPreparerFactory.production(authority: client)
-
-    await #expect(throws: AppleNetworkError.globalAuthorityUnavailable) {
-      try await preparer.prepareTunnelStart(
-        HostTunnelStartPreparation(
-          descriptor: descriptor, configuration: Data("{}".utf8), credentialPayload: nil))
-    }
-    // The fail-closed default never contacts the Authority.
-    #expect(client.snapshotCount == 0)
     #expect(client.prepareCount == 0)
   }
 

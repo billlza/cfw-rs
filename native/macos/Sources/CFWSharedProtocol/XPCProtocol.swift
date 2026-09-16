@@ -1,5 +1,13 @@
 import Foundation
 
+public enum SystemProxyAuthorizationFailure: Int, Sendable {
+  case denied = 1
+  case pending = 2
+  case internalFailure = 3
+
+  public static let domain = "com.bill.clashformac.system-proxy-authorization"
+}
+
 @objc public protocol CFWGlobalAuthorityXPCProtocol {
   func handshake(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func prepareStart(
@@ -11,9 +19,14 @@ import Foundation
     reply: @escaping (Data?, Data?, Data?, NSError?) -> Void)
   func attestReady(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func beginStop(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
+  func completeStop(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
+  func reconcileOff(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func attestStopped(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func cancelPrepared(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func snapshot(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
+  /// Renews only the liveness of the already authenticated, already bound owner.
+  /// No role, operation, lease, or caller identity is accepted from wire bytes.
+  func ownerHeartbeat(_ reply: @escaping (NSError?) -> Void)
 }
 
 @objc public protocol CFWGlobalAuthorityEventSinkProtocol {
@@ -21,11 +34,36 @@ import Foundation
 }
 
 @objc public protocol CFWProxyAgentXPCProtocol {
+  /// Bounded outbound-only application requests. No listener or OS integration
+  /// may be created. Credentials remain in the separate in-memory Data argument.
+  func testProfileProxies(
+    _ configuration: Data, proxies: Data, timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  )
+
+  /// Requests only the macOS network-preferences right. It starts no engine,
+  /// acquires no Authority lease, and carries no credential material over XPC.
+  func authorizeSystemProxy(restorationOnly: Bool, withReply reply: @escaping (NSError?) -> Void)
+
   /// Executes one versioned command envelope. A malformed envelope is returned
   /// as an NSError because it cannot be safely correlated to a trusted request
   /// identifier. Domain failures use a typed ResponseEnvelope instead.
   func execute(
     _ request: Data,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  )
+
+  /// Starts System Proxy with one Authority-issued owner capability. The
+  /// capability remains a separate bounded Data argument; `context` carries
+  /// only canonical non-secret operation/lease metadata, `configuration`
+  /// carries bounded runtime bytes in memory only, and `request` carries the
+  /// exact configuration descriptor.
+  func startSystemProxy(
+    _ capability: Data,
+    context: Data,
+    configuration: Data,
+    request: Data,
     withReply reply: @escaping (Data?, NSError?) -> Void
   )
 

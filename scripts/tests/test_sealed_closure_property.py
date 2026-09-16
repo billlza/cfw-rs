@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Property-based fail-closed test for the sealed source/license/SBOM closure.
 
-This exercises ``publication.sealed_closure`` as a black box (Task 12.1,
-Requirements 4.1, 5.1, 6.5). It is deterministic: the stdlib ``random`` module
-is seeded with fixed integers so any failure reproduces exactly. ``hypothesis``
-is intentionally not required; at least 100 generated closures are validated per
-property and, on failure, the reproducing seed and offending document are
-printed.
+This exercises the public ``publication.sealed_closure`` build/validate surface
+(Task 12.1, Requirements 4.1, 5.1, 6.5). It is deterministic: the stdlib
+``random`` module is seeded with fixed integers so any failure reproduces
+exactly. ``hypothesis`` is intentionally not required; at least 100 generated
+closures are validated per property and, on failure, the reproducing seed and
+offending document are printed. The unchanged repository source closure is
+validated for real at property-class entry and exit, then served from one
+strict test-only snapshot inside the high-cardinality loop. Dedicated source
+drift and TOCTOU suites remain uncached.
 
 Two properties are checked:
 
@@ -27,6 +30,7 @@ import random
 import unittest
 from pathlib import Path
 
+from scripts.publication import sealed_closure as sealed_closure_module
 from scripts.publication.common import PublicationError, canonical_json
 from scripts.publication.sealed_closure import (
     BLOCKED,
@@ -34,6 +38,7 @@ from scripts.publication.sealed_closure import (
     build_sealed_closure,
     validate_sealed_closure,
 )
+from scripts.tests.release_property_snapshots import StrictReleasePropertySnapshots
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 ACCEPT_CASES = 120
@@ -196,7 +201,26 @@ MUTATORS = (
 )
 
 
-class SealedClosureRoundTripProperty(unittest.TestCase):
+class _SourceSnapshotProperty(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._property_snapshots = StrictReleasePropertySnapshots(
+            repository=REPOSITORY,
+            source_deriver=sealed_closure_module.derive_supply_chain,
+            source_consumers=((sealed_closure_module, "derive_supply_chain"),),
+        )
+        cls._property_snapshots.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        try:
+            cls._property_snapshots.__exit__(None, None, None)
+        finally:
+            super().tearDownClass()
+
+
+class SealedClosureRoundTripProperty(_SourceSnapshotProperty):
     def test_full_closures_build_and_validate(self) -> None:
         blocked_hits = {name: 0 for name in PHYSICAL}
         sealed_hits = 0
@@ -230,7 +254,7 @@ class SealedClosureRoundTripProperty(unittest.TestCase):
             self.assertGreater(hits, 0, f"blocked input {name} was never exercised")
 
 
-class SealedClosureFailClosedProperty(unittest.TestCase):
+class SealedClosureFailClosedProperty(_SourceSnapshotProperty):
     def test_single_defect_closures_are_rejected(self) -> None:
         mutator_hits = {m.__name__: 0 for m in MUTATORS}
         cases = 0

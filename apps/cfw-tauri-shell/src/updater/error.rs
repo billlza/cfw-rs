@@ -1,16 +1,12 @@
 use thiserror::Error;
 
-use super::archive::UpdateArchiveError;
 use super::contract::UpdateContractError;
-use super::install_admission::InstallAdmissionError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DownloadFailureStage {
     ClientBuild,
     MetadataRequest,
     MetadataBody,
-    Request,
-    ResponseBody,
 }
 
 impl std::fmt::Display for DownloadFailureStage {
@@ -19,8 +15,6 @@ impl std::fmt::Display for DownloadFailureStage {
             Self::ClientBuild => "client-build",
             Self::MetadataRequest => "metadata-request",
             Self::MetadataBody => "metadata-body",
-            Self::Request => "request",
-            Self::ResponseBody => "response-body",
         })
     }
 }
@@ -53,31 +47,17 @@ impl std::fmt::Display for NetworkFailureCategory {
 #[derive(Debug, Error)]
 pub(super) enum UpdateError {
     #[error(transparent)]
-    Archive(#[from] UpdateArchiveError),
-    #[error(transparent)]
     Contract(#[from] UpdateContractError),
-    #[error("no validated update check authorizes this installation")]
+    #[error("no validated update check authorizes this release page")]
     MissingAuthorization,
     #[error("the update changed after it was presented; check for updates again")]
     AuthorizationChanged,
-    #[error("an update download is already active")]
-    DownloadAlreadyActive,
-    #[error("the update download was cancelled")]
-    DownloadCancelled,
-    #[error("the update can no longer be cancelled because commit preparation has started")]
-    InstallationAlreadyStarted,
-    #[error("cannot stop the network engine before update commit")]
-    EngineStop,
-    #[error("network engine did not reach a proven Off state before update commit")]
-    EngineNotOff,
-    #[error("the update cannot reserve its exclusive network maintenance barrier")]
-    EngineMaintenanceUnavailable,
-    #[error(transparent)]
-    InstallAdmission(#[from] InstallAdmissionError),
     #[error("updater state lock failed")]
     StateLock,
     #[error("updater state counter is exhausted")]
     StateCounterExhausted,
+    #[error("an update check or release-page authorization is already in progress")]
+    Busy,
     #[error("no rustls crypto provider is available for the bounded update client")]
     TlsProviderUnavailable,
     #[error(
@@ -100,32 +80,12 @@ pub(super) enum UpdateError {
     MetadataLengthMismatch { declared: u64, actual: u64 },
     #[error("update metadata is not valid strict JSON: {0}")]
     InvalidMetadata(String),
-    #[error("update redirect violates the release download policy: {0}")]
-    Redirect(String),
-    #[error("update Content-Length {declared} exceeds the {maximum}-byte limit")]
-    DeclaredArchiveTooLarge { declared: u64, maximum: u64 },
-    #[error("update archive exceeds the {maximum}-byte limit")]
-    ArchiveTooLarge { maximum: u64 },
-    #[error("cannot allocate the bounded update archive buffer")]
-    ArchiveAllocation,
-    #[error("update archive is empty")]
-    EmptyArchive,
-    #[error("update Content-Length was {declared}, but {actual} bytes were received")]
-    ContentLengthMismatch { declared: u64, actual: u64 },
-    #[error("embedded updater public key is invalid")]
-    InvalidPublicKey,
-    #[error("update signature is invalid")]
-    InvalidSignature,
-    #[error("update signature trusted comment is invalid")]
-    InvalidSignatureComment,
-    #[error("update signature is bound to a different archive")]
-    SignatureArchiveMismatch,
-    #[error("update signature verification failed")]
-    SignatureVerification,
-    #[error("failed to publish update progress")]
+    #[error("update metadata contains a non-canonical release version")]
+    InvalidReleaseVersion,
+    #[error("failed to publish the update result")]
     ProgressEvent,
-    #[error("the bounded update installation worker terminated unexpectedly")]
-    InstallationWorkerFailed,
+    #[error("the official update release page could not be opened")]
+    OpenReleasePage,
 }
 
 pub(super) type Result<T> = std::result::Result<T, UpdateError>;

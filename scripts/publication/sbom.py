@@ -25,6 +25,7 @@ EXPECTED_BUILD_TOOLS = {
     "go",
     "gomobile",
     "node",
+    "npm",
     "rust",
     "swift",
     "tauri-cli",

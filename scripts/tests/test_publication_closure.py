@@ -11,7 +11,10 @@ from scripts.publication.artifact_preparation import (
 from scripts.publication.closure import (
     ALLOWED_CODE_PATHS,
     REQUIRED_ARTIFACT_KINDS,
+    REQUIRED_ECOSYSTEMS,
+    REQUIRED_GRAPH_KINDS,
     scan_app_code,
+    validate_production_sets,
 )
 from scripts.publication.common import PublicationError
 
@@ -27,6 +30,34 @@ EXPECTED_CODE_PATHS = {
 
 
 class PublicationClosureTests(unittest.TestCase):
+    def validate_tool_inventory(self, names: tuple[str, ...]) -> None:
+        validate_production_sets(
+            [{"ecosystem": value} for value in REQUIRED_ECOSYSTEMS],
+            [{"name": name} for name in names],
+            [{"kind": value} for value in REQUIRED_ARTIFACT_KINDS],
+            [{"kind": value} for value in REQUIRED_GRAPH_KINDS],
+        )
+
+    def test_current_external_tool_inventory_includes_independent_npm(self) -> None:
+        # The dependency refresh installs npm separately from the Node archive.
+        # This is the observed producer inventory, independent of the consumer set.
+        self.validate_tool_inventory((
+            "@esbuild/darwin-arm64", "esbuild", "go", "gomobile", "node", "npm",
+            "rust", "swift", "tauri-cli", "xcode", "xcodegen",
+        ))
+
+    def test_external_tool_inventory_rejects_missing_duplicate_and_extra_tools(self) -> None:
+        complete = (
+            "@esbuild/darwin-arm64", "esbuild", "go", "gomobile", "node", "npm",
+            "rust", "swift", "tauri-cli", "xcode", "xcodegen",
+        )
+        for name in complete:
+            with self.subTest(missing=name), self.assertRaisesRegex(PublicationError, "build-tool provenance"):
+                self.validate_tool_inventory(tuple(value for value in complete if value != name))
+        for unexpected in ("npm", "unreviewed-tool"):
+            with self.subTest(extra=unexpected), self.assertRaisesRegex(PublicationError, "build-tool provenance"):
+                self.validate_tool_inventory((*complete, unexpected))
+
     def make_app_code(self, app: Path) -> None:
         for relative in EXPECTED_CODE_PATHS:
             path = app / relative

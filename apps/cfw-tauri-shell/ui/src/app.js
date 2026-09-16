@@ -2779,6 +2779,7 @@ const PERSISTED_TOGGLES = new Set([
 
 async function applyToggle(key, checked, source) {
   if (key === "allowLan") return runtimeSettingsUI.toggleLAN(checked);
+  if (key === "ipv6DNS") return runtimeSettingsUI.toggleIPv6DNS(checked);
   const isEngineMutation = key === "coreRunning" || key === "systemProxy" || key === "tunMode";
   if (PERSISTED_TOGGLES.has(key) && state.settingsUnavailableReason) {
     throw new Error(state.settingsUnavailableReason);
@@ -3553,7 +3554,6 @@ async function reloadPayload() {
   if (!state.migrationHandoff) await loadBootPayload();
   state.lastRefresh = "Just now";
   await loadSettingsSnapshot();
-  await runtimeSettingsUI.load();
   await loadPlatformDesign();
   await loadEngineStatus();
   await loadRetirementStatus();
@@ -3710,6 +3710,9 @@ async function loadPlatformDesign() {
 /// inbound and controller endpoint instead of a remembered preference. Without a
 /// selected profile there is no projection, which is reported, not invented.
 async function loadRuntimeProjection() {
+  // Effective DNS may change with the selected profile even when the saved
+  // user preferences have not changed.
+  await runtimeSettingsUI.load();
   if (state.profilesUnavailableReason) {
     state.projection = {
       mixedPort: null,
@@ -3983,7 +3986,6 @@ async function bootstrap() {
   await loadBootPayload();
   if (state.migrationHandoff) state.activePage = "general";
   await loadSettingsSnapshot();
-  await runtimeSettingsUI.load();
   await loadPlatformDesign();
   await loadEngineStatus();
   await loadRetirementStatus();

@@ -100,8 +100,8 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
         <div class="cfw-row">
           <div class="cfw-row-left">IPv6 DNS</div>
           <div class="cfw-row-right">
-            <button type="button" class="cfw-text-button" data-action="open-runtime-settings"${settingsReason || state.engineMutationBusy ? " disabled" : ""}>${settingsView?.effective.ipv6_dns_enabled === true ? "On" : settingsView?.effective.ipv6_dns_enabled === false ? "IPv4 only" : "unavailable"}</button>
-            ${renderRowNote("DNS answers", "Configure IPv6 DNS answers for the proxy exit. TUN packet capture is unchanged.")}
+            <span class="cfw-link-value">${settingsView?.effective.ipv6_dns_enabled === true ? "On" : settingsView?.effective.ipv6_dns_enabled === false ? "Off" : "unavailable"}</span>
+            ${renderInlineSwitch("ipv6DNS", "IPv6 DNS", { reason: settingsReason, disabled: state.engineMutationBusy, title: "Enable IPv6 address resolution. Changes are applied and saved; existing connections may reconnect." })}
           </div>
         </div>
 

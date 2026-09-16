@@ -153,6 +153,18 @@ impl ProjectedConfig {
 }
 
 impl ValidatedSingBoxProfile {
+    /// A manual DNS choice wins over the imported policy without changing
+    /// the profile or the Tunnel's IPv6 packet-capture setting.
+    pub fn effective_ipv6_dns_enabled(&self, settings: &EngineSettings) -> bool {
+        settings.enable_ipv6
+            && settings.ipv6_dns_enabled.unwrap_or_else(|| {
+                self.document
+                    .dns
+                    .as_ref()
+                    .is_none_or(|policy| policy.ipv6 != Some(false))
+            })
+    }
+
     pub fn project(
         &self,
         profile_id: &str,
@@ -366,13 +378,7 @@ impl ValidatedSingBoxProfile {
             inbounds.push(crate::lan::inbound(lan));
         }
         root.insert("inbounds".into(), Value::Array(inbounds));
-        let dns_ipv6 = settings.enable_ipv6
-            && settings.ipv6_dns_enabled
-            && self
-                .document
-                .dns
-                .as_ref()
-                .is_none_or(|policy| policy.ipv6 != Some(false));
+        let dns_ipv6 = self.effective_ipv6_dns_enabled(settings);
         root.insert(
             "dns".into(),
             json!({

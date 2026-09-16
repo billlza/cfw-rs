@@ -400,6 +400,32 @@ function savedToolbarPolicy() {
   ] };
 }
 
+test("General exposes IPv6 as a direct switch rather than a settings-dialog button", async () => {
+  const html = await renderPage("general");
+  const row = html.match(/<div class="cfw-row-left">IPv6 DNS<\/div>([\s\S]*?)<div class="cfw-row">/u)?.[1];
+  assert.ok(row);
+  assert.match(row, /data-toggle="ipv6DNS"/u);
+  assert.doesNotMatch(row, /data-action="open-runtime-settings"/u);
+});
+
+test("a refreshed projection updates the inherited IPv6 switch", async () => {
+  const original = responses.read_runtime_settings_snapshot;
+  try {
+    responses.read_runtime_settings_snapshot = {
+      ...original,
+      effective: { ...original.effective, ipv6_dns_enabled:false },
+    };
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
+    assert.equal(state.toggles.ipv6DNS, false);
+    assert.equal(state.runtimeSettings.effective.ipv6_dns_enabled, false);
+    const html = await renderPage("general");
+    assert.doesNotMatch(html, /data-toggle="ipv6DNS"[^>]*checked/u);
+  } finally {
+    responses.read_runtime_settings_snapshot = original;
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
+  }
+});
+
 test("offline locator reveals the saved selection even when filter and list hide it", async () => {
   const original = responses.engine_snapshot;
   try {

@@ -6,7 +6,9 @@ use crate::{
     settings_store,
 };
 use cfw_core::RuntimeSettingsSnapshot;
-use cfw_singbox_config::{EngineLogLevel, EngineSettings, LanProxySettings, RuntimePreferences};
+use cfw_singbox_config::{
+    EngineLogLevel, EngineSettings, LanProxySettings, RuntimePreferences, ValidatedSingBoxProfile,
+};
 use serde::Serialize;
 use tauri::State;
 
@@ -26,25 +28,41 @@ pub(crate) struct RuntimeSettingsEffective {
     lan_proxy: Option<LanProxySettings>,
 }
 
-impl From<EngineSettings> for RuntimeSettingsEffective {
-    fn from(value: EngineSettings) -> Self {
+impl RuntimeSettingsEffective {
+    fn for_profile(value: EngineSettings, profile: &ValidatedSingBoxProfile) -> Self {
+        let ipv6_dns_enabled = profile.effective_ipv6_dns_enabled(&value);
         Self {
             mixed_port: value.mixed_port,
             log_level: value.log_level,
             tunnel_mtu: value.tunnel_mtu,
-            ipv6_dns_enabled: value.ipv6_dns_enabled,
+            ipv6_dns_enabled,
             lan_proxy: value.lan_proxy,
         }
     }
 }
 
-pub(super) async fn snapshot(engine: &ManagedEngine) -> Result<RuntimeSettingsView, String> {
+pub(super) async fn snapshot(
+    engine: &ManagedEngine,
+    profiles: &ManagedProfiles,
+) -> Result<RuntimeSettingsView, String> {
     let store = settings_store()?;
-    let saved: RuntimeSettingsSnapshot<RuntimePreferences> =
-        tauri::async_runtime::spawn_blocking(move || store.runtime_settings())
-            .await
-            .map_err(|error| error.to_string())?
+    let repository = profiles.repository().clone();
+    let settings = engine.engine_settings()?;
+    let (saved, effective) = tauri::async_runtime::spawn_blocking(move || {
+        let saved: RuntimeSettingsSnapshot<RuntimePreferences> = store
+            .runtime_settings()
             .map_err(|error| error.to_string())?;
+        let profile = repository
+            .load_selected()
+            .map_err(|error| error.to_string())?
+            .map_or_else(ValidatedSingBoxProfile::direct, |stored| stored.profile);
+        Ok::<_, String>((
+            saved,
+            RuntimeSettingsEffective::for_profile(settings, &profile),
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     saved
         .settings
         .validate()
@@ -52,15 +70,16 @@ pub(super) async fn snapshot(engine: &ManagedEngine) -> Result<RuntimeSettingsVi
     Ok(RuntimeSettingsView {
         settings: saved.settings,
         revision: saved.revision,
-        effective: engine.engine_settings()?.into(),
+        effective,
     })
 }
 
 #[tauri::command]
 pub(crate) async fn read_runtime_settings_snapshot(
     engine: State<'_, ManagedEngine>,
+    profiles: State<'_, ManagedProfiles>,
 ) -> Result<RuntimeSettingsView, String> {
-    snapshot(&engine).await
+    snapshot(&engine, &profiles).await
 }
 
 #[tauri::command]
@@ -72,7 +91,7 @@ pub(crate) async fn write_runtime_settings_snapshot(
     revision: Option<String>,
 ) -> Result<RuntimeSettingsView, String> {
     change_runtime_preferences(&engine, &retirement, &profiles, settings, revision).await?;
-    snapshot(&engine).await
+    snapshot(&engine, &profiles).await
 }
 
 pub(super) async fn update(
@@ -81,11 +100,11 @@ pub(super) async fn update(
     profiles: &ManagedProfiles,
     change: impl FnOnce(&mut RuntimePreferences) -> Result<(), String>,
 ) -> Result<RuntimeSettingsView, String> {
-    let mut saved = snapshot(engine).await?;
+    let mut saved = snapshot(engine, profiles).await?;
     change(&mut saved.settings)?;
     change_runtime_preferences(engine, retirement, profiles, saved.settings, saved.revision)
         .await?;
-    snapshot(engine).await
+    snapshot(engine, profiles).await
 }
 
 pub(super) fn log_level(value: &str) -> Result<EngineLogLevel, String> {

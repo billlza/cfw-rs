@@ -10,12 +10,15 @@ function integer(text, minimum, maximum, label) {
   return Number(value);
 }
 
-export function runtimeDraft(settings) {
+export function runtimeDraft(settings, effective = null) {
+  const ipv6DNS = settings.ipv6_dns_enabled ?? effective?.ipv6_dns_enabled ?? true;
   return {
     port: settings.preferred_mixed_port === null ? "" : String(settings.preferred_mixed_port),
     level: settings.log_level,
     mtu: String(settings.tunnel_mtu),
-    ipv6DNS: settings.ipv6_dns_enabled ?? true,
+    ipv6DNS,
+    initialIPv6DNS: ipv6DNS,
+    ipv6DNSInherited: settings.ipv6_dns_enabled === undefined,
     allow: settings.allow_lan,
     lanAddress: settings.lan_proxy?.listen ?? "0.0.0.0",
     lanPort: String(settings.lan_proxy?.port ?? 7898),
@@ -25,7 +28,7 @@ export function runtimeDraft(settings) {
 
 export function preferencesFromRuntimeDraft(draft) {
   if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error("Choose a supported log level");
-  if (typeof draft.ipv6DNS !== "boolean") throw new Error("Choose whether to request IPv6 DNS answers");
+  if (typeof draft.ipv6DNS !== "boolean") throw new Error("Choose whether to enable IPv6 DNS");
   const sources = draft.lanSources.split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
   if (draft.allow && !sources.length) throw new Error("Enter the trusted LAN source ranges before enabling sharing");
   const lan = sources.length ? {
@@ -42,7 +45,7 @@ export function preferencesFromRuntimeDraft(draft) {
     preferred_mixed_port: preferred,
     log_level: draft.level,
     tunnel_mtu: integer(draft.mtu, 1280, 9000, "TUN MTU"),
-    ...(draft.ipv6DNS ? {} : { ipv6_dns_enabled: false }),
+    ...(draft.ipv6DNSInherited && draft.ipv6DNS === draft.initialIPv6DNS ? {} : { ipv6_dns_enabled: draft.ipv6DNS }),
     allow_lan: draft.allow === true,
     lan_proxy: lan,
   };
@@ -50,7 +53,7 @@ export function preferencesFromRuntimeDraft(draft) {
 
 export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, refreshRuntime, dismissOtherDialogs }) {
   let request = 0;
-  function accept(snapshot) {
+  function validateSnapshot(snapshot) {
     if (!snapshot || typeof snapshot.settings !== "object" || typeof snapshot.effective !== "object"
       || !RUNTIME_LOG_LEVELS.includes(snapshot.settings.log_level)
       || typeof snapshot.settings.allow_lan !== "boolean"
@@ -59,9 +62,13 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       || !(snapshot.revision === null || typeof snapshot.revision === "string")) {
       throw new TypeError("Runtime settings response is invalid");
     }
+  }
+  function accept(snapshot) {
+    validateSnapshot(snapshot);
     state.runtimeSettings = snapshot;
     state.runtimeSettingsError = null;
     state.toggles.allowLan = snapshot.settings.allow_lan;
+    state.toggles.ipv6DNS = snapshot.effective.ipv6_dns_enabled;
     state.logLevel = snapshot.effective.log_level;
   }
   async function load() {
@@ -80,7 +87,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     if (state.engineMutationBusy || state.migrationHandoff) return;
     if (!await load()) { renderPage(); return; }
     dismissOtherDialogs();
-    const draft = runtimeDraft(state.runtimeSettings.settings);
+    const draft = runtimeDraft(state.runtimeSettings.settings, state.runtimeSettings.effective);
     if (enableLAN) draft.allow = true;
     state.runtimeSettingsDialog = { draft, revision: state.runtimeSettings.revision, saving: false, error: null };
     renderPage();
@@ -123,6 +130,15 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     if (!await load()) throw new Error(state.runtimeSettingsError);
     return save({ ...state.runtimeSettings.settings, allow_lan: false }, state.runtimeSettings.revision);
   }
+  async function toggleIPv6DNS(enabled) {
+    if (typeof enabled !== "boolean") throw new TypeError("IPv6 DNS must be enabled or disabled");
+    if (state.engineMutationBusy || state.migrationHandoff) throw new Error("Another network operation is in progress");
+    const snapshot = await invoke("read_runtime_settings_snapshot");
+    validateSnapshot(snapshot);
+    // A background refresh cannot cancel a user's choice. Bind the write to
+    // the exact snapshot read for this action; the backend enforces its revision.
+    return save({ ...snapshot.settings, ipv6_dns_enabled: enabled }, snapshot.revision);
+  }
   function renderDialog() {
     const dialog = state.runtimeSettingsDialog;
     if (!dialog) return "";
@@ -135,7 +151,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
         <label class="glass-input-label">Local proxy port <input class="glass-input" data-runtime-field="port" inputmode="numeric" placeholder="Automatic" value="${escapeHtml(d.port)}"${disabled}></label>
         <label class="glass-input-label">Log level <select class="glass-input" data-runtime-field="level"${disabled}>${RUNTIME_LOG_LEVELS.map((level) => `<option value="${level}"${d.level === level ? " selected" : ""}>${level}</option>`).join("")}</select></label>
         <label class="glass-input-label">TUN MTU <input class="glass-input" data-runtime-field="mtu" inputmode="numeric" value="${escapeHtml(d.mtu)}"${disabled}></label>
-        <label class="glass-input-label"><input type="checkbox" data-runtime-field="ipv6DNS"${d.ipv6DNS ? " checked" : ""}${disabled}> Request IPv6 DNS answers</label>
+        <label class="glass-input-label"><input type="checkbox" data-runtime-field="ipv6DNS"${d.ipv6DNS ? " checked" : ""}${disabled}> Enable IPv6 DNS</label>
         <p class="glass-dialog-copy">Turn off for a proxy server with a broken IPv6 exit. TUN still captures IPv6 traffic.</p>
         <label class="glass-input-label"><input type="checkbox" data-runtime-field="allow"${d.allow ? " checked" : ""}${disabled}> Share with trusted LAN devices</label>
         <p class="glass-dialog-copy">LAN devices use a separate port. Enter the private source networks allowed to use it.</p>
@@ -152,6 +168,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       const key = input.dataset.runtimeField;
       if (!dialog || dialog.saving || !Object.hasOwn(dialog.draft, key)) return;
       dialog.draft[key] = key === "allow" || key === "ipv6DNS" ? input.checked : input.value;
+      if (key === "ipv6DNS") dialog.draft.ipv6DNSInherited = false;
     }));
     document.querySelectorAll("[data-runtime-dismiss]").forEach((button) => button.addEventListener("click", () => { close(); renderPage(); }));
     document.querySelectorAll("[data-runtime-save]").forEach((button) => button.addEventListener("click", async () => {
@@ -171,5 +188,5 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       } catch (error) { appendLog("error", "settings", errorText(error)); renderPage(); }
     }));
   }
-  return { load, open, close, save, toggleLAN, renderDialog, bindDialog, bindPage };
+  return { load, open, close, save, toggleLAN, toggleIPv6DNS, renderDialog, bindDialog, bindPage };
 }

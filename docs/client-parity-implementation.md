@@ -576,6 +576,21 @@ The predecessor's signed bytes remain frozen. 40065 carries these actual native
 and UI changes and still requires its own installation and network acceptance.
 System Proxy authorization and combined-mode acceptance remain unproven.
 
+### Direct IPv6 DNS control
+
+The General page now exposes IPv6 DNS as a direct switch using the existing
+runtime-settings transaction. A successful save updates the displayed state;
+a rejected write rereads the actual preferences and leaves an error visible in
+the log. No IPv6-specific permission or approval workflow is introduced.
+
+An absent `ipv6_dns_enabled` preference continues to inherit the imported DNS
+policy, preserving older stored bytes and behavior. Explicit `true` and `false`
+choices are persisted and take precedence over that policy. Editing an unrelated
+network setting does not turn an inherited choice into a manual override.
+The effective state is computed by the same policy function used for projection
+and refreshed when the selected profile changes. These DNS choices do not remove
+IPv6 from the Tunnel's protected packet-capture routes.
+
 ## Installed combined mode and completed-stop reconciliation
 
 40065 passed installed local and pure-TUN TCP/download/UDP, IPv4 DNS answers

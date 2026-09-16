@@ -599,6 +599,7 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
 
     def test_identity_resolution_uses_absolute_rust_and_apple_tools(self) -> None:
         environment = _current_release_environment(self.repository, self.pins)
+        selected_version, selected_build = ci_lanes.selected_apple_identity(self.pins, environment)
         rustc_bin = Path(environment["CFW_RELEASE_RUSTC_EXECUTABLE"])
         cargo_bin = Path(environment["CFW_RELEASE_CARGO_EXECUTABLE"])
         calls: list[list[str]] = []
@@ -629,8 +630,8 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
                 return f"Version: {self.pins['XCODEGEN_VERSION']}"
             if argv == [ci_lanes.APPLE_XCODEBUILD, "-version"]:
                 return (
-                    f"Xcode {self.pins['XCODE_VERSION']}; "
-                    f"Build version {self.pins['XCODE_BUILD_VERSION']}"
+                    f"Xcode {selected_version}; "
+                    f"Build version {selected_build}"
                 )
             if len(argv) == 3 and argv[1].endswith("/bin/npm-cli.js"):
                 return self.pins["NPM_VERSION"]

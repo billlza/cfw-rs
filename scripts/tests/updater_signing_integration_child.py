@@ -106,6 +106,7 @@ def main(argv: list[str]) -> int:
                 return launcher._verify_pinned_tauri_signer_with_runtime(
                     repository,
                     validation_runtime,
+                    unsigned_validation=True,
                 )
 
             launcher._launch_updater_signer(

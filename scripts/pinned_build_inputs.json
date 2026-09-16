@@ -2041,7 +2041,10 @@
       "TAURI_PRIVATE_KEY_PATH",
       "O_NOFOLLOW",
       "/dev/fd",
-      "os.execve"
+      "os.execve",
+      "def _signer_toolchain_metadata(",
+      "if not unsigned_validation:",
+      "unsigned_runtime_apple_identity("
     ],
     "scripts/validate_updater_archive.py": [
       "sha256-tree-v2",
@@ -3344,7 +3347,10 @@
       "production refuses an unsigned-validation Xcode selection",
       "present != VALIDATION_KEYS",
       "CFW_UNSIGNED_VALIDATION_PYTHON",
-      "version_tuple(selected_version)"
+      "version_tuple(selected_version)",
+      "def unsigned_runtime_apple_identity(",
+      "require_closed_release_runtime(allow_unsigned_validation=True)",
+      "selected.resolve(strict=True) != runtime"
     ],
     "scripts/apple_validation_policy.sh": [
       "cfw_apply_validation_apple_toolchain()",
@@ -3392,7 +3398,7 @@
     "scripts/dmg_notarization_transaction.py": "9f472927720d153df58fb4b3c9df41c064565ab1b63c689fd463accdfd5fd6e6",
     "scripts/release_artifact_set.py": "e2419beb95953c8418e04b0a0c7d19c5cc4adbee81635e3ecb2fc11391039f37",
     "scripts/release_apple_toolchain.py": "b4ff7cc330566f7d60efd75f3aa7f1e33647f913c0a9a4ad70a71babd422bf7f",
-    "scripts/repository_source_identity.py": "10edd7480b2d8a4e6dea25af4b58e154ba2f4553fb5974f7a6c6f3ac2f13422a",
+    "scripts/repository_source_identity.py": "5e7a6838a589b55c3a387f10a9f3eb7ee168abc5d166bc97b5e8d3552faa2bb4",
     "scripts/release_git.py": "1cfdf6620923863f20f46f20830e0ded8240401117ef4d1464007be8ffee656e",
     "scripts/hash_artifact.py": "fd524dc2d44bbb00cfeadfe3052ed3c8c7871c632d8b8ad704c728a0d3b17f66",
     "scripts/hash_native_build_inputs.py": "7e7d327c3a1c3edd6a7c33cdf544d22d349ce40646e4c5ed26651e060f5bb0fa",
@@ -3427,7 +3433,7 @@
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
     "RELEASE.md": "5c46931ba7e352bd97fed80d510d036ffa58e14913e370347355b2be570ecf09",
-    "scripts/updater_signing_launcher.py": "b6240012d2539077dcfa6969e5fb3118486f0469b75c75d4e984075d4c18b974",
+    "scripts/updater_signing_launcher.py": "dad1c4307f05adc05a9ec729abe3a2871d6a53c5375ea323845694c4f8898f60",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "0189ac29728266fbc36e8945f60ea44c6b1f583c96d64e93e57bd36fe8e70cb3",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
@@ -3533,7 +3539,7 @@
     "scripts/archive_install_history.py": "ebcce5f7d7b8e91192cebb0227abba10f04daa697bcde802118159f43e4d090b",
     "scripts/run_archive_install_history.sh": "574a14e1b9eef0ba92baffc9f10a47b8492096dd33bb214b475167783093636e",
     "scripts/select_ci_xcode.py": "183fdbd5b184ed88f990f6ba601e0b8a56c443e986a539a6bbcd0f6e321d07e5",
-    "scripts/apple_validation_policy.py": "0d973cd2591684d7ab6817b2fab0517a04b5d78f5446c68841e80ad6502b7047",
+    "scripts/apple_validation_policy.py": "62bac572b87c0e96324b34215990809c6a08dc1d0e308fd68af94bc955af68da",
     "scripts/apple_validation_policy.sh": "7858530b4243c2edbb64fdc4db77d1d8fa13cbd2509af5cceeb780b1636bb56a"
   }
 }

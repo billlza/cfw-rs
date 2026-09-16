@@ -471,6 +471,7 @@ CI_VALIDATION_SOURCE_PATHS = frozenset({
     "scripts/pinned_build_inputs.json",
     "scripts/github_hosted_ci_receipt.py",
     "scripts/ga_runtime_acceptance.py",
+    "scripts/updater_signing_launcher.py",
     "scripts/repository_source_identity.py",
 })
 

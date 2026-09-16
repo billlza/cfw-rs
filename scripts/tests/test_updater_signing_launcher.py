@@ -495,6 +495,35 @@ class UnsignedValidationRuntimeTests(unittest.TestCase):
 
 
 class PinnedSignerVerificationTests(unittest.TestCase):
+    def test_production_metadata_never_adopts_cloud_selection(self) -> None:
+        with mock.patch.dict(os.environ, {"CFW_UNSIGNED_VALIDATION_XCODE_VERSION": "27.0", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION": "27A5252f"}, clear=True):
+            self.assertEqual(
+                launcher._signer_toolchain_metadata(Path(sys.executable), unsigned_validation=False),
+                launcher.PINNED_TAURI_METADATA,
+            )
+
+    def test_validation_metadata_requires_admission_and_changes_only_apple_identity(self) -> None:
+        runtime = Path(sys.executable).resolve(strict=True)
+        environment = {"CFW_UNSIGNED_VALIDATION_PYTHON": str(runtime),
+                       "CFW_UNSIGNED_VALIDATION_XCODE_VERSION": "27.0",
+                       "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION": "27A5252f"}
+        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(integration_child.runtime_admission, "require_closed_release_runtime") as admit:
+            selected = launcher._signer_toolchain_metadata(runtime, unsigned_validation=True)
+        admit.assert_called_once_with(allow_unsigned_validation=True)
+        self.assertEqual(set(selected) - set(launcher.PINNED_TAURI_METADATA), {"xcodeBuild=27A5252f"})
+        self.assertEqual(set(launcher.PINNED_TAURI_METADATA) - set(selected), {"xcodeBuild=27A266a"})
+        self.assertIn("xcodeBuild=27A266a", launcher.PINNED_TAURI_METADATA)
+        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(integration_child.runtime_admission, "require_closed_release_runtime", side_effect=integration_child.runtime_admission.ReleasePythonRuntimeError("rejected")):
+            with self.assertRaisesRegex(launcher.UpdaterSigningLaunchError, "toolchain admission failed"):
+                launcher._signer_toolchain_metadata(runtime, unsigned_validation=True)
+
+    def test_validation_metadata_rejects_missing_or_partial_selection(self) -> None:
+        runtime = Path(sys.executable).resolve(strict=True)
+        for environment in ({}, {"CFW_UNSIGNED_VALIDATION_PYTHON": str(runtime), "CFW_UNSIGNED_VALIDATION_XCODE_VERSION": "27.0"}):
+            with self.subTest(environment=environment), mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(integration_child.runtime_admission, "require_closed_release_runtime"):
+                with self.assertRaises(launcher.UpdaterSigningLaunchError):
+                    launcher._signer_toolchain_metadata(runtime, unsigned_validation=True)
+
     def _repository(self, root: Path, signer_bytes: bytes) -> tuple[Path, Path, Path]:
         repository = root / "repository"
         scripts = repository / "scripts"
@@ -1239,6 +1268,11 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
                     name: source_environment[name]
                     for name in UNSIGNED_VALIDATION_ENVIRONMENT_NAMES
                 }
+                child_environment.update({
+                    name: source_environment[name]
+                    for name in ("DEVELOPER_DIR", "CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION")
+                    if name in source_environment
+                })
             child_command = [
                 sys.executable,
                 "-I",

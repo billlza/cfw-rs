@@ -79,6 +79,8 @@ class PinnedNpmBoundaryFixture:
         self.empty_path.mkdir()
         self.ambient_bin.mkdir()
         for relative in (
+            "apple_validation_policy.sh",
+            "apple_validation_policy.py",
             "build_ui_with_pinned_node.sh",
             "dependency_pins.env",
             "hash_artifact.py",
@@ -88,6 +90,9 @@ class PinnedNpmBoundaryFixture:
             "verify_artifact_manifest.py",
         ):
             shutil.copy2(SCRIPTS / relative, self.scripts / relative)
+        (self.scripts / "publication").mkdir()
+        for relative in ("__init__.py", "graph_model.py", "common.py", "bounded_process.py"):
+            shutil.copy2(SCRIPTS / "publication" / relative, self.scripts / "publication" / relative)
         shutil.copy2(
             REPOSITORY / "apps/cfw-tauri-shell/package-lock.json",
             self.shell_root / "package-lock.json",

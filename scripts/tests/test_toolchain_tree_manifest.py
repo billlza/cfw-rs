@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from scripts.apple_validation_policy import selected_apple_identity
+
 from scripts.publication.common import PublicationError
 from scripts.publication.ci_lanes import Lane, lane_environment, release_tool_environment
 from scripts.publication.release_toolchains import verified_release_toolchain_trees
@@ -1930,6 +1932,7 @@ class PublicationToolchainBindingTests(unittest.TestCase):
             REPOSITORY, self.pins, dict(os.environ), role=role
         )
         self.release_environment["CFW_TOOLCHAIN_ROOT"] = str(self.root)
+        self.xcode_version, self.xcode_build = selected_apple_identity(self.pins, self.release_environment)
 
     def _tree(self, relative: str, manifest_name: str, metadata: list[str]) -> Path:
         root = self.root / relative
@@ -2046,8 +2049,8 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                     f"sourceArchiveSha256={self.pins['XCODEGEN_SOURCE_SHA256']}",
                     f"sourceCommit={self.pins['XCODEGEN_COMMIT']}",
                     f"version={self.pins['XCODEGEN_VERSION']}",
-                    f"xcodeBuild={self.pins['XCODE_BUILD_VERSION']}",
-                    f"xcodeVersion={self.pins['XCODE_VERSION']}",
+                    f"xcodeBuild={self.xcode_build}",
+                    f"xcodeVersion={self.xcode_version}",
                 ],
             ),
             "tauri-cli": self._tree(
@@ -2069,8 +2072,8 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                     f"spinVersion={self.pins['TAURI_CLI_SPIN_VERSION']}",
                     f"upstreamCargoLockSha256={self.pins['TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256']}",
                     f"version={self.pins['TAURI_CLI_VERSION']}",
-                    f"xcodeBuild={self.pins['XCODE_BUILD_VERSION']}",
-                    f"xcodeVersion={self.pins['XCODE_VERSION']}",
+                    f"xcodeBuild={self.xcode_build}",
+                    f"xcodeVersion={self.xcode_version}",
                 ],
             ),
             "go-release-tools": self._tree(

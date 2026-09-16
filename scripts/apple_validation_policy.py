@@ -59,6 +59,24 @@ def selected_apple_identity(
     return selected_version, selected_build
 
 
+def unsigned_runtime_apple_identity(
+    pins: Mapping[str, str], runtime: Path
+) -> tuple[str, str]:
+    """Admit one CI runtime before verifying a tool built by that runtime."""
+    if __package__:
+        from .release_python_runtime import ReleasePythonRuntimeError, require_closed_release_runtime
+    else:
+        from release_python_runtime import ReleasePythonRuntimeError, require_closed_release_runtime
+    try:
+        require_closed_release_runtime(allow_unsigned_validation=True)
+        selected = Path(os.environ["CFW_UNSIGNED_VALIDATION_PYTHON"])
+        if not selected.is_absolute() or selected.resolve(strict=True) != runtime:
+            raise AppleValidationPolicyError("validation tool runtime differs from its admitted Python")
+        return selected_apple_identity(pins, os.environ, role="unsigned-validation")
+    except (ReleasePythonRuntimeError, KeyError, OSError) as error:
+        raise AppleValidationPolicyError("unsigned-validation runtime admission failed") from error
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)

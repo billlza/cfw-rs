@@ -11,6 +11,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+from scripts.apple_validation_policy import selected_apple_identity
+from scripts.publication.graph_model import load_pins
+
 from scripts.release_apple_toolchain import (
     APPLE_TOOLCHAIN_DOCUMENT,
     APPLE_TOOLCHAIN_SCHEMA_VERSION,
@@ -55,6 +58,18 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
         cls.environment = {
             "DEVELOPER_DIR": str(cls.developer_directory),
         }
+        cls.environment.update({
+            name: os.environ[name]
+            for name in ("CFW_UNSIGNED_VALIDATION_PYTHON", "CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION")
+            if name in os.environ
+        })
+        cls.expected_version, cls.expected_build = selected_apple_identity(
+            load_pins(REPOSITORY / "scripts/dependency_pins.env"), cls.environment
+        )
+        cls.sdk_version = subprocess.check_output(
+            ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"],
+            env=cls.environment, text=True, timeout=30,
+        ).strip()
         cls.observed = capture_release_apple_toolchain(
             REPOSITORY, cls.environment
         )
@@ -73,8 +88,8 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
             DEVELOPER_DIRECTORY_PLACEHOLDER,
         )
         self.assertEqual(binding["deployment_target"], "15.0")
-        self.assertEqual(binding["xcode_version"], "27.0")
-        self.assertEqual(binding["xcode_build_version"], "27A266a")
+        self.assertEqual(binding["xcode_version"], self.expected_version)
+        self.assertEqual(binding["xcode_build_version"], self.expected_build)
         self.assertEqual(
             binding["clang"]["path"],
             str(self.observed.clang.relative_to(self.developer_directory)),
@@ -96,10 +111,10 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
 
     def test_official_versioned_sdk_alias_is_bound_to_its_real_target(self) -> None:
         sdk = self.observed.binding["sdk"]
-        self.assertEqual(sdk["version"], "27.0")
+        self.assertEqual(sdk["version"], self.sdk_version)
         self.assertEqual(
             sdk["selected_path"],
-            "Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk",
+            f"Platforms/MacOSX.platform/Developer/SDKs/MacOSX{self.sdk_version}.sdk",
         )
         self.assertEqual(
             sdk["resolved_path"],

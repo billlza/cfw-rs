@@ -435,10 +435,37 @@ def verify_pinned_tauri_signer(
     )
 
 
+def _signer_toolchain_metadata(
+    python: Path, *, unsigned_validation: bool
+) -> tuple[str, ...]:
+    """Keep production pins fixed while checking CI's actual tool build."""
+    if not unsigned_validation:
+        return PINNED_TAURI_METADATA
+    if __package__:
+        from .apple_validation_policy import AppleValidationPolicyError, unsigned_runtime_apple_identity
+    else:
+        from apple_validation_policy import AppleValidationPolicyError, unsigned_runtime_apple_identity
+    try:
+        pinned = dict(item.split("=", 1) for item in PINNED_TAURI_METADATA)
+        version, build = unsigned_runtime_apple_identity(
+            {"XCODE_VERSION": pinned["xcodeVersion"], "XCODE_BUILD_VERSION": pinned["xcodeBuild"]},
+            python,
+        )
+    except (AppleValidationPolicyError, KeyError) as error:
+        raise UpdaterSigningLaunchError("validation signer toolchain admission failed") from error
+    return tuple(
+        f"xcodeVersion={version}" if item.startswith("xcodeVersion=")
+        else f"xcodeBuild={build}" if item.startswith("xcodeBuild=")
+        else item
+        for item in PINNED_TAURI_METADATA
+    )
+
+
 def _verify_pinned_tauri_signer_with_runtime(
     repository: Path,
     python: Path,
     *,
+    unsigned_validation: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
 ) -> HeldSigner:
     """Verify the signer with a caller-admitted canonical Python runtime."""
@@ -475,6 +502,7 @@ def _verify_pinned_tauri_signer_with_runtime(
             f"{python} (mode={python_mode:04o}, uid={python_identity.owner}, "
             f"gid={python_identity.group}, links={python_identity.links})"
         )
+    metadata = _signer_toolchain_metadata(python, unsigned_validation=unsigned_validation)
     toolchain = repository / "target/toolchains" / f"tauri-cli-{TAURI_CLI_VERSION}"
     manifest = toolchain.with_name(f"{toolchain.name}.manifest.json")
     verifier = repository / "scripts/verify_artifact_manifest.py"
@@ -526,8 +554,8 @@ def _verify_pinned_tauri_signer_with_runtime(
             "--print-entry",
             "bin/cargo-tauri",
         ]
-        for metadata in PINNED_TAURI_METADATA:
-            command.extend(("--metadata", metadata))
+        for binding in metadata:
+            command.extend(("--metadata", binding))
         result = _run_without_input(
             runner,
             command,

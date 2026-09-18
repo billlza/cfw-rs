@@ -322,11 +322,29 @@ impl SecureDirectory {
     }
 
     fn lock(&self, operation: libc::c_int) -> Result<(), SettingsStoreError> {
-        let result = unsafe { libc::flock(self.file.as_raw_fd(), operation) };
-        if result == -1 {
-            Err(std::io::Error::last_os_error().into())
-        } else {
-            Ok(())
+        const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+        let deadline = std::time::Instant::now() + WAIT_LIMIT;
+        loop {
+            let result = unsafe { libc::flock(self.file.as_raw_fd(), operation | libc::LOCK_NB) };
+            if result == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                if std::time::Instant::now() >= deadline {
+                    return Err(SettingsStoreError::StoreBusy);
+                }
+                continue;
+            }
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(error.into());
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(SettingsStoreError::StoreBusy);
+            }
+            std::thread::sleep(RETRY_INTERVAL.min(deadline.saturating_duration_since(now)));
         }
     }
 }

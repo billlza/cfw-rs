@@ -3985,14 +3985,26 @@ async function bootstrap() {
   bindGlobalEvents();
   await loadBootPayload();
   if (state.migrationHandoff) state.activePage = "general";
-  await loadSettingsSnapshot();
-  await loadPlatformDesign();
-  await loadEngineStatus();
-  await loadRetirementStatus();
-  await loadNetworkDiagnostics();
+
+  // Paint a verified-identity shell before any optional OS or repository read.
+  // A slow SystemConfiguration/Keychain/filesystem boundary must never leave
+  // the WKWebView looking like a dead black window.
+  renderPage();
+  const networkDiagnostics = loadNetworkDiagnostics();
+  await Promise.all([
+    loadSettingsSnapshot(),
+    loadPlatformDesign(),
+    loadEngineStatus(),
+    loadRetirementStatus(),
+  ]);
+  // Provider availability is part of the engine snapshot, so profile/provider
+  // loading must remain ordered after loadEngineStatus rather than racing it.
   await loadProfilesSnapshot();
   await loadRuntimeProjection();
   renderPage();
+  void networkDiagnostics.finally(() => {
+    if (state.activePage === "settings") renderPage();
+  });
   void (async () => {
     if (await loadControllerSnapshotWithRetry()) {
       if (state.activePage === "rules") await loadRulesSnapshot();

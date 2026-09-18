@@ -37,7 +37,7 @@ pub(crate) use settings::{
     silent_start_enabled, write_settings_snapshot,
 };
 pub(crate) use shell_ops::{
-    force_quit_app, move_dashboard_to_nearest_monitor, network_diagnostics,
+    NetworkDiagnosticsGate, force_quit_app, move_dashboard_to_nearest_monitor, network_diagnostics,
     open_login_items_settings, open_page, open_trusted_external_url, parse_deep_links,
     refresh_tray_menu, reveal_home_directory, reveal_logs_directory, toggle_devtools,
 };

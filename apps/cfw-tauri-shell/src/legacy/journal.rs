@@ -633,13 +633,34 @@ impl Directory {
     }
 
     fn lock(&self) -> Result<(), String> {
-        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX) } == -1 {
-            Err(format!(
-                "failed to lock legacy cutover journal: {}",
-                std::io::Error::last_os_error()
-            ))
-        } else {
-            Ok(())
+        const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+        let deadline = std::time::Instant::now() + WAIT_LIMIT;
+        loop {
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "legacy cutover journal remained busy for 3 seconds; another process still owns its transaction lock"
+                            .into(),
+                    );
+                }
+                continue;
+            }
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(format!("failed to lock legacy cutover journal: {error}"));
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(
+                    "legacy cutover journal remained busy for 3 seconds; another process still owns its transaction lock"
+                        .into(),
+                );
+            }
+            std::thread::sleep(RETRY_INTERVAL.min(deadline.saturating_duration_since(now)));
         }
     }
 

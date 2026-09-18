@@ -61,7 +61,7 @@ use legacy::{
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use shell::{
     TrayMenuState, apply_silent_start, build_app_menu, build_tray, focus_main_window,
-    handle_app_menu_event, prepare_migration_handoff_window,
+    handle_app_menu_event,
 };
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
@@ -183,6 +183,7 @@ fn main() {
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
         .manage(commands::ManagedProviders::default())
+        .manage(commands::NetworkDiagnosticsGate::default())
         .manage(TrayMenuState::default())
         .manage(automation::ManagedAutomation::default())
         .manage(WindowBoundsManager::default())
@@ -328,7 +329,9 @@ fn main() {
             }
 
             if app.state::<LaunchContext>().is_migration_handoff() {
-                prepare_migration_handoff_window(app.handle()).map_err(std::io::Error::other)?;
+                // Keep the window hidden until the renderer proves that the
+                // migration UI and critical listeners are ready, then wait for
+                // the parent dashboard to exit before presenting it.
                 app.state::<LaunchContext>()
                     .mark_renderer_native_ready()
                     .map_err(std::io::Error::other)?;

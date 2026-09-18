@@ -49,6 +49,10 @@ const MAX_ENVELOPE_BYTES: usize = MAX_PROFILE_BYTES + 256 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ProfileError {
+    #[error(
+        "profile repository remained busy for 3 seconds; another process still owns its transaction lock"
+    )]
+    RepositoryBusy,
     #[error("profile repository I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("sing-box profile is invalid: {0}")]

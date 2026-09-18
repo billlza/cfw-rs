@@ -18,11 +18,6 @@
   takes precedence over older automatic work.
 - Restore action handlers and ordering for newly streamed connection rows; split
   dashboard, import and policy modules for maintainability.
-- Keep the ARM64 dashboard hidden until its static startup surface is loaded;
-  render verified identity before optional diagnostics, isolate SystemConfiguration
-  reads, and bound settings, profile, lineage, Keychain startup and migration waits
-  so a stalled OS or cross-process boundary becomes an explicit failure instead of
-  a black, permanently blocked window.
 
 ### Network operation and imported policy
 

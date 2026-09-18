@@ -72,11 +72,30 @@ impl RepositoryDirectory {
     }
 
     pub(crate) fn lock_exclusive(&self) -> Result<(), ProfileError> {
-        let result = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX) };
-        if result == -1 {
-            Err(ProfileError::Io(std::io::Error::last_os_error()))
-        } else {
-            Ok(())
+        const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+        let deadline = std::time::Instant::now() + WAIT_LIMIT;
+        loop {
+            let result =
+                unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                if std::time::Instant::now() >= deadline {
+                    return Err(ProfileError::RepositoryBusy);
+                }
+                continue;
+            }
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(ProfileError::Io(error));
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(ProfileError::RepositoryBusy);
+            }
+            std::thread::sleep(RETRY_INTERVAL.min(deadline.saturating_duration_since(now)));
         }
     }
 

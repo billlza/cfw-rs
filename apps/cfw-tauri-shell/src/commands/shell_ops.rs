@@ -164,8 +164,20 @@ pub(crate) fn parse_deep_links(urls: Vec<String>) -> Result<Vec<DeepLinkParseOut
     Ok(urls.into_iter().map(parse_one_deep_link).collect())
 }
 
-#[tauri::command]
-pub(crate) fn network_diagnostics() -> Result<NetworkDiagnostics, String> {
+#[derive(Default)]
+pub(crate) struct NetworkDiagnosticsGate {
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct NetworkDiagnosticsActivity(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for NetworkDiagnosticsActivity {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn collect_network_diagnostics() -> Result<NetworkDiagnostics, String> {
     let services = MacOsPlatformService
         .observe_network_services()
         .map_err(|error| error.to_string())?;
@@ -184,6 +196,38 @@ pub(crate) fn network_diagnostics() -> Result<NetworkDiagnostics, String> {
         services,
         unavailable: UNAVAILABLE_DIAGNOSTICS.to_vec(),
     })
+}
+
+#[tauri::command]
+pub(crate) async fn network_diagnostics(
+    gate: tauri::State<'_, NetworkDiagnosticsGate>,
+) -> Result<NetworkDiagnostics, String> {
+    if gate
+        .active
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return Err("macOS network diagnostics are already in progress".into());
+    }
+
+    let active = std::sync::Arc::clone(&gate.active);
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let _activity = NetworkDiagnosticsActivity(active);
+        collect_network_diagnostics()
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+        Ok(result) => result
+            .map_err(|error| format!("macOS network diagnostics task failed: {error}"))?,
+        Err(_) => Err(
+            "macOS network diagnostics timed out after 5 seconds; the isolated probe will not be duplicated while it is still running"
+                .into(),
+        ),
+    }
 }
 
 fn parse_one_deep_link(raw: String) -> DeepLinkParseOutcome {

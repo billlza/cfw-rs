@@ -2697,3 +2697,45 @@ pre {
 .automation-rule-row select, .automation-rule-row button { min-height: 34px; border-radius: 5px; padding: 4px 8px; }
 .automation-rule-row input { flex: 1; min-width: 160px; width: 160px; }
 .automation-settings-dialog input[type="checkbox"] { width: auto; margin-right: 8px; }
+
+/* This is present in index.html before JavaScript starts. A slow native
+ * bootstrap therefore has a painted, honest state instead of an empty WebView. */
+.startup-screen {
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--fgc);
+  background: var(--bgc);
+}
+
+.startup-screen strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 15px;
+}
+
+.startup-screen p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.startup-spinner {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 2px solid var(--bc);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: startup-spin 800ms linear infinite;
+}
+
+@keyframes startup-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-spinner { animation: none; }
+}

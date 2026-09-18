@@ -35,6 +35,10 @@ pub enum SettingsStoreError {
     RuntimeSettingsChanged,
     #[error("HOME is not available; cannot resolve Clash for Mac data directory")]
     MissingHome,
+    #[error(
+        "settings store remained busy for 3 seconds; another process still owns its transaction lock"
+    )]
+    StoreBusy,
     #[error("settings I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("settings JSON is invalid: {0}")]

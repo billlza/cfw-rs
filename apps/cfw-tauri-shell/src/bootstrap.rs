@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cfw_engine_api::EngineEvent;
@@ -19,6 +20,7 @@ pub(crate) struct LaunchContext {
     migration_handoff: bool,
     handoff_ticket: Option<ConsumedHandoffTicket>,
     _handoff_lease: Option<MigrationHandoffLease>,
+    initial_window_presented: AtomicBool,
     renderer_ready: RendererReadyGate,
 }
 
@@ -28,6 +30,7 @@ impl LaunchContext {
             migration_handoff: false,
             handoff_ticket: None,
             _handoff_lease: None,
+            initial_window_presented: AtomicBool::new(false),
             renderer_ready: RendererReadyGate::default(),
         }
     }
@@ -37,12 +40,21 @@ impl LaunchContext {
             migration_handoff: true,
             handoff_ticket: Some(ticket),
             _handoff_lease: Some(lease),
+            initial_window_presented: AtomicBool::new(false),
             renderer_ready: RendererReadyGate::default(),
         }
     }
 
     pub(crate) const fn is_migration_handoff(&self) -> bool {
         self.migration_handoff
+    }
+
+    fn claim_initial_window_presentation(&self) -> bool {
+        !self.migration_handoff
+            && self
+                .initial_window_presented
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 
     fn require_handoff_ticket(&self) -> Result<&ConsumedHandoffTicket, String> {
@@ -385,9 +397,13 @@ pub(crate) struct BootPayload {
 
 #[tauri::command]
 pub(crate) fn boot_payload(
+    window: WebviewWindow,
     launch: State<'_, LaunchContext>,
     lifecycle: State<'_, AppLifecycle>,
 ) -> Result<BootPayload, String> {
+    if launch.claim_initial_window_presentation() {
+        present_initial_dashboard(&window)?;
+    }
     Ok(BootPayload {
         product: ProductInfo {
             name: "Clash for Mac",
@@ -400,6 +416,30 @@ pub(crate) fn boot_payload(
         migration_handoff_status: lifecycle.migration_handoff_status()?,
         migration_handoff_renderer_ready: launch.migration_handoff_renderer_ready()?,
     })
+}
+
+fn present_initial_dashboard(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err("initial presentation is restricted to the main window".into());
+    }
+
+    match crate::commands::silent_start_enabled() {
+        Ok(true) => Ok(()),
+        Ok(false) => crate::shell::prepare_migration_handoff_window(window.app_handle()),
+        Err(settings_error) => {
+            // Do not strand the process as an invisible menu-bar app when
+            // startup preferences are unreadable. Present the static failure
+            // surface, then preserve the settings error for bootstrap().
+            match crate::shell::prepare_migration_handoff_window(window.app_handle()) {
+                Ok(()) => Err(format!(
+                    "silent-start state could not be verified: {settings_error}"
+                )),
+                Err(window_error) => Err(format!(
+                    "silent-start state could not be verified: {settings_error}; initial window presentation failed: {window_error}"
+                )),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -596,6 +636,7 @@ mod tests {
             migration_handoff: true,
             handoff_ticket: None,
             _handoff_lease: None,
+            initial_window_presented: AtomicBool::new(false),
             renderer_ready: RendererReadyGate::default(),
         };
         assert!(inconsistent.require_handoff_ticket().is_err());

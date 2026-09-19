@@ -1,9 +1,9 @@
 diff --git a/protocol/socks/client.go b/protocol/socks/client.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..b76b64208a34e88820a9e35201ce3813af5fa141
+index 0000000000000000000000000000000000000000..ddcb15ed6cb6bbe103147f0037d74b5bae2a9fd0
 --- /dev/null
 +++ b/protocol/socks/client.go
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,186 @@
 +package socks
 +
 +import (
@@ -39,7 +39,11 @@ index 0000000000000000000000000000000000000000..b76b64208a34e88820a9e35201ce3813
 +func (c *boundedClient) begin(ctx context.Context) (context.Context, *socks.Client, func(error) error) {
 +	timeout := c.timeout
 +	if timeout == 0 {
-+		timeout = C.TCPConnectTimeout
++		// Setup includes name resolution and several SOCKS round trips after
++		// TCP connects. Use the protocol-handshake budget, as TLS does, rather
++		// than applying the socket-connect budget to the whole negotiation.
++		// The underlying dialer still enforces TCPConnectTimeout per socket.
++		timeout = C.TCPTimeout
 +	}
 +	ctx, cancel := context.WithTimeout(ctx, timeout)
 +	scope := &handshakeDialer{Dialer: c.dialer, server: c.server, direct: c.direct}
@@ -224,10 +228,10 @@ index 344c798881eacbac2394e05a4d85f8e4c85e7d42..a0ff3b84092cc9b54310d573458ac4ad
  	if uotOptions.Enabled {
 diff --git a/protocol/socks/outbound_lifecycle_test.go b/protocol/socks/outbound_lifecycle_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..33c368d1f90c01d6bebc623a6180cbc270ee3cc0
+index 0000000000000000000000000000000000000000..9e3ffc7ebde119ee02ea0963ad03a87818290e9d
 --- /dev/null
 +++ b/protocol/socks/outbound_lifecycle_test.go
-@@ -0,0 +1,704 @@
+@@ -0,0 +1,749 @@
 +package socks
 +
 +import (
@@ -261,6 +265,7 @@ index 0000000000000000000000000000000000000000..33c368d1f90c01d6bebc623a6180cbc2
 +	tcp         net.Listener
 +	udp         net.PacketConn
 +	stall       string
++	phaseDelay  time.Duration
 +	stallFirst  bool
 +	bind        string
 +	zeroPort    bool
@@ -389,6 +394,9 @@ index 0000000000000000000000000000000000000000..33c368d1f90c01d6bebc623a6180cbc2
 +	return data, err
 +}
 +func (f *socksFixture) waitAt(conn net.Conn, id int, phase string) bool {
++	if f.phaseDelay > 0 {
++		time.Sleep(f.phaseDelay)
++	}
 +	if f.stall != phase || f.stallFirst && id != 1 {
 +		return false
 +	}
@@ -595,6 +603,47 @@ index 0000000000000000000000000000000000000000..33c368d1f90c01d6bebc623a6180cbc2
 +		t.Error("connect_timeout did not bound the SOCKS handshake")
 +		f.close()
 +		<-done
++	}
++}
++
++func TestSOCKSDefaultBudgetAllowsCompleteNegotiation(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		t.Run(network, func(t *testing.T) {
++			t.Parallel()
++			f := newSocksFixture(t, "")
++			// Model three successful round trips over a congested upstream.
++			// TCP connects immediately; protocol negotiation takes six seconds.
++			f.phaseDelay = 2 * time.Second
++			f.start()
++			outbound := fixtureOutbound(t, f, 0, context.Background(), "", "")
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			started := time.Now()
++			conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr("203.0.113.1:443"))
++			if err != nil {
++				t.Fatalf("working SOCKS negotiation cut short after %v: %v", time.Since(started), err)
++			}
++			defer conn.Close()
++			t.Logf("real %s negotiation completed in %v", network, time.Since(started))
++			cancel()
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			payload := []byte("retained-after-slow-negotiation")
++			if _, err = conn.Write(payload); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 4096)
++			var n int
++			if network == "tcp" {
++				n, err = io.ReadFull(conn, got[:len(payload)])
++			} else {
++				n, err = conn.Read(got)
++			}
++			if err != nil || !bytes.Equal(got[:n], payload) {
++				t.Fatalf("established connection did not retain payload: %q %v", got[:n], err)
++			}
++		})
 +	}
 +}
 +
@@ -1232,5 +1281,122 @@ index 0000000000000000000000000000000000000000..d94ef7435606a002d179f50fd2eb59f8
 +		if err = os.WriteFile(path, original[path], 0o600); err != nil {
 +			t.Fatal(err)
 +		}
++	}
++}
+diff --git a/dns/socks_setup_budget_test.go b/dns/socks_setup_budget_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d52c84a783d0235cb00d6ff489b00804a0f032f
+--- /dev/null
++++ b/dns/socks_setup_budget_test.go
+@@ -0,0 +1,111 @@
++package dns_test
++
++import (
++	"bufio"
++	"context"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	mdns "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/adapter"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++)
++
++func setupBudgetDNS(t *testing.T, answer bool) (int, *atomic.Int32) {
++	t.Helper()
++	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	seen := new(atomic.Int32)
++	ready, done := make(chan struct{}), make(chan error, 1)
++	server := &mdns.Server{PacketConn: conn, Net: "udp", NotifyStartedFunc: func() { close(ready) }, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, query *mdns.Msg) {
++		seen.Add(1)
++		if !answer {
++			return // A real UDP black hole: receive the query and send no reply.
++		}
++		response := new(mdns.Msg)
++		response.SetReply(query)
++		response.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: query.Question[0].Name, Rrtype: mdns.TypeA, Class: mdns.ClassINET}, A: net.ParseIP("127.0.0.1")}}
++		if err := w.WriteMsg(response); err != nil {
++			t.Error(err)
++		}
++	})}
++	go func() { done <- server.ActivateAndServe() }()
++	select {
++	case <-ready:
++	case err := <-done:
++		t.Fatalf("DNS fixture did not start: %v", err)
++	}
++	t.Cleanup(func() {
++		if err := server.Shutdown(); err != nil {
++			t.Error(err)
++		}
++		if err := <-done; err != nil {
++			t.Error(err)
++		}
++	})
++	return conn.LocalAddr().(*net.UDPAddr).Port, seen
++}
++
++func TestSOCKSBootstrapFallbackSurvivesPrimaryTimeout(t *testing.T) {
++	proxyPort := unusedDNSProbePort(t)
++	startPolicyBoxContext(t, map[string]any{
++		"log":       map[string]any{"disabled": true},
++		"inbounds":  []any{map[string]any{"type": "socks", "listen": "127.0.0.1", "listen_port": proxyPort}},
++		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++	})
++	primaryPort, primaryQueries := setupBudgetDNS(t, false)
++	fallbackPort, fallbackQueries := setupBudgetDNS(t, true)
++	ctx := startPolicyBoxContext(t, map[string]any{
++		"log": map[string]any{"disabled": true},
++		"dns": map[string]any{"strategy": "ipv4_only", "servers": []any{
++			map[string]any{"type": "udp", "tag": "primary", "server": "127.0.0.1", "server_port": primaryPort},
++			map[string]any{"type": "udp", "tag": "fallback", "server": "127.0.0.1", "server_port": fallbackPort},
++		}},
++		"outbounds": []any{map[string]any{"type": "socks", "tag": "node", "version": "5", "server": "proxy.invalid", "server_port": proxyPort,
++			"domain_resolver": map[string]any{"server": "primary", "fallback_server": "fallback", "strategy": "ipv4_only"}}},
++	})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "fallback-established") }))
++	defer server.Close()
++	outbound, exists := service.FromContext[adapter.OutboundManager](ctx).Outbound("node")
++	if !exists {
++		t.Fatal("fixture outbound missing")
++	}
++	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
++	defer cancel()
++	started := time.Now()
++	conn, err := outbound.DialContext(callCtx, "tcp", M.ParseSocksaddr(strings.TrimPrefix(server.URL, "http://")))
++	if err != nil {
++		t.Fatalf("bootstrap fallback never completed; elapsed=%v primary=%d fallback=%d: %v", time.Since(started), primaryQueries.Load(), fallbackQueries.Load(), err)
++	}
++	defer conn.Close()
++	if primaryQueries.Load() == 0 || fallbackQueries.Load() == 0 {
++		t.Fatal("both real DNS transports must be exercised")
++	}
++	t.Logf("real DNS fallback and SOCKS negotiation completed in %v", time.Since(started))
++	cancel()
++	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n"); err != nil {
++		t.Fatal(err)
++	}
++	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer response.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(response.Body, 1024))
++	if err != nil || response.StatusCode != 200 || string(body) != "fallback-established" {
++		t.Fatalf("established payload not retained: status=%d body=%q err=%v", response.StatusCode, body, err)
 +	}
 +}

@@ -27,6 +27,10 @@
 
 ### Network operation and imported policy
 
+- Give SOCKS protocol negotiation its own default handshake budget while
+  retaining the TCP socket timeout, explicit setup deadlines and cancellation.
+  Slow successful authentication and a failed primary DNS query no longer
+  consume the entire setup budget before negotiation or DNS fallback can finish.
 - Revalidate the same runtime after a transient read-only status-query failure,
   without restarting the core or interrupting its connections. Identity,
   permission and cleanup failures still require their existing explicit recovery.

@@ -24,14 +24,14 @@
       "path": "native/macos/patches/sing-box-v1.14.1-endpoint-conflict.patch",
       "sha256": "9e15e2d1dfd1c46deead734d40e6c6f021cfc400cdc9effaeb13420485b03565"
     },
-    "combinedDiffSha256": "40efd5359e142d419a0aecfd3f959179864831f4eba0b07aa9c6cd973a4a366c",
+    "combinedDiffSha256": "d7f06761d17ff6c7d78e0a7048d8d3d25901ab00d73a6f1cbd97b94d9e3895d1",
     "profileProbePatch": {
       "path": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
       "sha256": "2450102e3133f61b124ef2032a9dc96d12a04e32ebab56f5a5ab5eb053d26b34"
     },
     "socksLifecyclePatch": {
       "path": "native/macos/patches/sing-box-v1.14.1-socks-lifecycle.patch",
-      "sha256": "1e0e87f417fa683b0a6136fd002651056d1e490215d76bd88fc392fd6c2be829"
+      "sha256": "3c14ecdcb33c5fdc941a3b7ea3470174ae491c4c8d5444c21e67e3f9ce805ed2"
     }
   },
   "singBoxForAppleReference": {

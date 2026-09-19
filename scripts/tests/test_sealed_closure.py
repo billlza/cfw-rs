@@ -43,7 +43,7 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # This revision includes all six patches, the utun resolver, synchronized SOCKS
 # packet addresses and Go 1.27 debug-crash compatibility.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "40efd5359e142d419a0aecfd3f959179864831f4eba0b07aa9c6cd973a4a366c"
+    "d7f06761d17ff6c7d78e0a7048d8d3d25901ab00d73a6f1cbd97b94d9e3895d1"
 )
 
 

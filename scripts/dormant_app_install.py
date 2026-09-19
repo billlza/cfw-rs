@@ -391,6 +391,17 @@ INSTALLED_40070_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# The installed and retained notarized 40071 bundle was rehashed before this
+# successor was allocated. Its service vocabulary is unchanged.
+INSTALLED_40071_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40071",
+    tree_sha256="78dce25dc8db98498f5637c47ad37e297451a81fe2f53f841c225d5486fd4754",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
@@ -405,6 +416,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40068_PREDECESSOR.build_number: INSTALLED_40068_PREDECESSOR,
         INSTALLED_40069_PREDECESSOR.build_number: INSTALLED_40069_PREDECESSOR,
         INSTALLED_40070_PREDECESSOR.build_number: INSTALLED_40070_PREDECESSOR,
+        INSTALLED_40071_PREDECESSOR.build_number: INSTALLED_40071_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

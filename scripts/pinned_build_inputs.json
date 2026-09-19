@@ -3518,7 +3518,7 @@
     "scripts/physical_capture/identity.py": "b00724920a0df600b4609743244a3c9283fa153c43270540dc34c947826fd036",
     "scripts/run_release_app_verifier.sh": "92d16e0171f3c63b468ea9db72b6dea939b5eb123f19206db5cb131129e47643",
     "scripts/build_legacy_tombstone.sh": "292133d76c9ad233aac92ecc2ea19b426c6a77fedfbfacf592757b8766ece17e",
-    "scripts/verify_native_product_graph.py": "ee77a1efd4187493346749a37596fc3d5e9153ee6f138f2e43c84e99ad4452a8",
+    "scripts/verify_native_product_graph.py": "e1ba9e43bc09967d18bdb76b237d2bededa02c97763f3a08bbc811a476f9211e",
     "scripts/verify_notary_log.py": "3eccd50eed209e716d868332844783f915c1f559d1c117ce3f27df4ef44a571c",
     "scripts/physical_capture/packet_sender.py": "3c7bb07b72f533ed54f4faec3c5a6948622ff116abb7943faef61330a63b4087",
     "scripts/physical_capture/packet_host.py": "7d7ec61c8fe14780614c60bb733be344f0411584ce9e2d66d123fee428d554d2",

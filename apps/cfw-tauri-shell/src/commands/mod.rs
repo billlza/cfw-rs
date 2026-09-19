@@ -33,8 +33,8 @@ pub(crate) use runtime::{
     apply_active_profile, geoip_database_status, read_runtime_config_text, update_geoip_database,
 };
 pub(crate) use settings::{
-    read_settings_snapshot, sanitize_legacy_preferences, set_launch_at_login_enabled,
-    silent_start_enabled, write_settings_snapshot,
+    UiSettingsMutations, read_settings_snapshot, sanitize_legacy_preferences,
+    set_launch_at_login_enabled, write_settings_snapshot,
 };
 pub(crate) use shell_ops::{
     NetworkDiagnosticsGate, force_quit_app, move_dashboard_to_nearest_monitor, network_diagnostics,

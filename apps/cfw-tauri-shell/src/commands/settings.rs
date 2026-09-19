@@ -6,9 +6,21 @@ use tauri::{AppHandle, State};
 use crate::settings_store;
 use crate::window_state::WindowBoundsManager;
 
+#[derive(Default)]
+pub(crate) struct UiSettingsMutations(tokio::sync::Mutex<()>);
+
+impl UiSettingsMutations {
+    pub(crate) fn reserve(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        self.0
+            .try_lock()
+            .map_err(|_| "another settings change is still in progress".into())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UiLoginItemLiveStatus {
+    Checking,
     NotRegistered,
     Enabled,
     RequiresApproval,
@@ -58,7 +70,7 @@ fn launch_at_login_state(
     }
 }
 
-fn with_login_item_status(
+pub(super) fn with_login_item_status(
     snapshot: SettingsSnapshot,
     status: ServiceModeStatus,
 ) -> UiSettingsSnapshot {
@@ -115,37 +127,74 @@ pub(crate) fn sanitize_legacy_preferences(
     ))
 }
 
-pub(crate) fn silent_start_enabled() -> Result<bool, String> {
-    settings_store()?
-        .read_or_default()
-        .map(|preferences| preferences.silent_start)
-        .map_err(|error| error.to_string())
+#[tauri::command]
+pub(crate) async fn read_settings_snapshot(
+    app: AppHandle,
+    include_login_item_status: Option<bool>,
+) -> Result<UiSettingsSnapshot, String> {
+    let result = crate::startup_state::prepare_off_main(move || {
+        let store = settings_store()?;
+        if include_login_item_status == Some(false) {
+            let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+            Ok(UiSettingsSnapshot {
+                launch_at_login: UiLaunchAtLoginState {
+                    persisted_intent: snapshot.settings.launch_at_login,
+                    live_status: UiLoginItemLiveStatus::Checking,
+                    matches_persisted_intent: false,
+                },
+                settings: snapshot.settings,
+                persisted: snapshot.persisted,
+            })
+        } else {
+            settings_snapshot_with_live_status(&store)
+        }
+    })
+    .await;
+    if let Err(error) = &result {
+        crate::diagnostics::record(
+            &app,
+            cfw_core::DiagnosticTopic::Startup,
+            "settings_read_failed",
+            error,
+        );
+    }
+    result
 }
 
 #[tauri::command]
-pub(crate) fn read_settings_snapshot() -> Result<UiSettingsSnapshot, String> {
-    settings_snapshot_with_live_status(&settings_store()?)
-}
-
-#[tauri::command]
-pub(crate) fn write_settings_snapshot(
+pub(crate) async fn write_settings_snapshot(
     app: AppHandle,
     window_bounds: State<'_, WindowBoundsManager>,
+    mutations: State<'_, UiSettingsMutations>,
     settings: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
+    let _mutation = mutations.reserve()?;
     let store = settings_store()?;
     let retain_window_bounds = settings.retain_window_bounds;
-    window_bounds.commit_retention(&app, retain_window_bounds, || {
-        let snapshot = write_renderer_preferences(&store, settings)?;
+    let snapshot = window_bounds
+        .commit_retention(&app, retain_window_bounds, move || {
+            write_renderer_preferences(&store, settings)
+        })
+        .await?;
+    crate::startup_state::prepare_off_main(move || {
         Ok(with_login_item_status(
             snapshot,
             MacOsPlatformService.login_item_status(),
         ))
     })
+    .await
 }
 
 #[tauri::command]
-pub(crate) fn set_launch_at_login_enabled(enabled: bool) -> Result<UiSettingsSnapshot, String> {
+pub(crate) async fn set_launch_at_login_enabled(
+    mutations: State<'_, UiSettingsMutations>,
+    enabled: bool,
+) -> Result<UiSettingsSnapshot, String> {
+    let _mutation = mutations.reserve()?;
+    crate::startup_state::prepare_off_main(move || update_launch_at_login(enabled)).await
+}
+
+fn update_launch_at_login(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
     let mut preferences = store.read_or_default().map_err(|error| error.to_string())?;
     let platform = MacOsPlatformService;

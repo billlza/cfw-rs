@@ -18,31 +18,39 @@ const MIN_WINDOW_WIDTH: u32 = 850;
 const MIN_WINDOW_HEIGHT: u32 = 603;
 const WINDOW_BOUNDS_DEBOUNCE: Duration = Duration::from_millis(350);
 
-#[derive(Default)]
 pub(crate) struct WindowBoundsManager {
     state: Mutex<RetentionState>,
+    persistence: tokio::sync::Mutex<()>,
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for WindowBoundsManager {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(RetentionState::default()),
+            persistence: tokio::sync::Mutex::new(()),
+            changes: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 #[derive(Default)]
 struct RetentionState {
     enabled: bool,
     revision: u64,
-    pending: Option<tauri::async_runtime::JoinHandle<()>>,
+    worker_started: bool,
 }
 
 impl RetentionState {
-    fn cancel_pending(&mut self) {
+    fn invalidate_capture(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        if let Some(pending) = self.pending.take() {
-            pending.abort();
-        }
     }
 
     fn reserve_capture(&mut self) -> Option<u64> {
         if !self.enabled {
             return None;
         }
-        self.cancel_pending();
+        self.invalidate_capture();
         Some(self.revision)
     }
 }
@@ -59,48 +67,74 @@ impl WindowBoundsManager {
     fn configure(&self, enabled: bool) -> Result<(), String> {
         let mut state = self.lock()?;
         state.enabled = enabled;
-        state.cancel_pending();
+        state.invalidate_capture();
+        self.changes.send_replace(state.revision);
         Ok(())
     }
 
-    /// Serializes a preference update with all pending geometry writes. A failed
-    /// preference write leaves the previous in-memory policy in force.
-    pub(crate) fn commit_retention<T>(
+    /// Disk serialization is async and distinct from the short in-memory lock
+    /// used by AppKit events. An in-flight write is never aborted mid-I/O.
+    pub(crate) async fn commit_retention<T: Send + 'static>(
         &self,
         app: &AppHandle,
         enabled: bool,
-        operation: impl FnOnce() -> Result<T, String>,
+        operation: impl FnOnce() -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
-        let value = {
-            let mut state = self.lock()?;
-            let value = operation()?;
-            state.cancel_pending();
-            state.enabled = enabled;
-            value
-        };
+        let value = self.persist_retention(enabled, operation).await?;
         if enabled {
             self.schedule(app.clone())?;
         }
         Ok(value)
     }
 
+    async fn persist_retention<T: Send + 'static>(
+        &self,
+        enabled: bool,
+        operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let _persistence = self.persistence.lock().await;
+        let value = crate::startup_state::prepare_off_main(operation).await?;
+        self.configure(enabled)?;
+        Ok(value)
+    }
+
     pub(crate) fn schedule(&self, app: AppHandle) -> Result<(), String> {
-        let mut state = self.lock()?;
-        let Some(revision) = state.reserve_capture() else {
-            return Ok(());
+        let start_worker = {
+            let mut state = self.lock()?;
+            let Some(revision) = state.reserve_capture() else {
+                return Ok(());
+            };
+            self.changes.send_replace(revision);
+            let start = !state.worker_started;
+            state.worker_started = true;
+            start
         };
-        let task_app = app.clone();
-        state.pending = Some(tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(WINDOW_BOUNDS_DEBOUNCE).await;
-            let manager = task_app.state::<WindowBoundsManager>();
-            if let Err(error) = manager.capture_and_persist(&task_app, revision) {
-                publish_window_state_error(&task_app, "window_bounds_persist_failed", error);
-            }
-        }));
+        if start_worker {
+            let mut changes = self.changes.subscribe();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let revision = *changes.borrow_and_update();
+                    tokio::select! {
+                        _ = tokio::time::sleep(WINDOW_BOUNDS_DEBOUNCE) => {},
+                        changed = changes.changed() => {
+                            if changed.is_err() { return; }
+                            continue;
+                        }
+                    }
+                    let manager = app.state::<WindowBoundsManager>();
+                    if let Err(error) = manager.capture_and_persist(&app, revision).await {
+                        publish_window_state_error(&app, "window_bounds_persist_failed", error);
+                    }
+                    if changes.changed().await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
         Ok(())
     }
 
-    pub(crate) fn flush(&self, app: &AppHandle) -> Result<(), String> {
+    pub(crate) async fn flush(&self, app: &AppHandle) -> Result<(), String> {
         let revision = {
             let mut state = self.lock()?;
             let Some(revision) = state.reserve_capture() else {
@@ -108,20 +142,24 @@ impl WindowBoundsManager {
             };
             revision
         };
-        self.capture_and_persist(app, revision)
+        self.capture_and_persist(app, revision).await
     }
 
-    fn capture_and_persist(&self, app: &AppHandle, revision: u64) -> Result<(), String> {
-        let bounds = current_main_window_bounds(app)?;
-        let mut state = self.lock()?;
-        if !state.enabled || state.revision != revision {
-            return Ok(());
+    async fn capture_and_persist(&self, app: &AppHandle, revision: u64) -> Result<(), String> {
+        let _persistence = self.persistence.lock().await;
+        {
+            let state = self.lock()?;
+            if !state.enabled || state.revision != revision {
+                return Ok(());
+            }
         }
-        settings_store()?
-            .write_window_bounds(bounds)
-            .map_err(|error| error.to_string())?;
-        state.pending = None;
-        Ok(())
+        let bounds = current_main_window_bounds(app)?;
+        crate::startup_state::prepare_off_main(move || {
+            settings_store()?
+                .write_window_bounds(bounds)
+                .map_err(|error| error.to_string())
+        })
+        .await
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, RetentionState>, String> {
@@ -131,49 +169,61 @@ impl WindowBoundsManager {
     }
 }
 
-pub(crate) fn initialize_window_bounds(app: &AppHandle) -> Result<(), String> {
+pub(crate) struct InitialWindowSettings {
+    pub(crate) silent_start: bool,
+    retained: bool,
+    bounds: Result<Option<WindowBounds>, String>,
+}
+
+pub(crate) fn load_initial_window_settings() -> Result<InitialWindowSettings, String> {
     let store = settings_store()?;
-    let retained = store
-        .read_or_default()
-        .map_err(|error| error.to_string())?
-        .retain_window_bounds;
-    let manager = app.state::<WindowBoundsManager>();
-    manager.configure(retained)?;
-    if !retained {
-        return Ok(());
-    }
-    let Some(saved) = load_retained_bounds(retained, || {
+    let preferences = store.read_or_default().map_err(|error| error.to_string())?;
+    let bounds = load_retained_bounds(preferences.retain_window_bounds, || {
         store.window_bounds().map_err(|error| error.to_string())
-    })?
-    else {
-        return Ok(());
-    };
-    let window = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .ok_or_else(|| "main window is unavailable while restoring bounds".to_owned())?;
-    let work_areas = window
-        .available_monitors()
-        .map_err(|error| format!("available monitors could not be observed: {error}"))?
-        .into_iter()
-        .map(|monitor| {
-            let area = monitor.work_area();
-            WorkArea {
-                x: area.position.x,
-                y: area.position.y,
-                width: area.size.width,
-                height: area.size.height,
-            }
-        })
-        .collect::<Vec<_>>();
-    let visible = clamp_to_visible_work_area(saved, &work_areas)?;
-    window
-        .set_size(PhysicalSize::new(visible.width, visible.height))
-        .map_err(|error| format!("restored window size was rejected: {error}"))?;
-    window
-        .set_position(PhysicalPosition::new(visible.x, visible.y))
-        .map_err(|error| format!("restored window position was rejected: {error}"))?;
-    // Persist the clamped result after display topology changes. Programmatic
-    // move/resize events are coalesced into this same debounced capture.
+    });
+    Ok(InitialWindowSettings {
+        silent_start: preferences.silent_start,
+        retained: preferences.retain_window_bounds,
+        bounds,
+    })
+}
+
+pub(crate) fn restore_initial_window_bounds(
+    app: &AppHandle,
+    settings: &InitialWindowSettings,
+    explicitly_opened: bool,
+) -> Result<(), String> {
+    let manager = app.state::<WindowBoundsManager>();
+    manager.configure(settings.retained)?;
+    if !explicitly_opened {
+        let Some(saved) = settings.bounds.clone()? else {
+            return Ok(());
+        };
+        let window = app
+            .get_webview_window(MAIN_WINDOW_LABEL)
+            .ok_or_else(|| "main window is unavailable while restoring bounds".to_owned())?;
+        let work_areas = window
+            .available_monitors()
+            .map_err(|error| format!("available monitors could not be observed: {error}"))?
+            .into_iter()
+            .map(|monitor| {
+                let area = monitor.work_area();
+                WorkArea {
+                    x: area.position.x,
+                    y: area.position.y,
+                    width: area.size.width,
+                    height: area.size.height,
+                }
+            })
+            .collect::<Vec<_>>();
+        let visible = clamp_to_visible_work_area(saved, &work_areas)?;
+        window
+            .set_size(PhysicalSize::new(visible.width, visible.height))
+            .map_err(|error| format!("restored window size was rejected: {error}"))?;
+        window
+            .set_position(PhysicalPosition::new(visible.x, visible.y))
+            .map_err(|error| format!("restored window position was rejected: {error}"))?;
+    }
     manager.schedule(app.clone())
 }
 
@@ -286,6 +336,68 @@ fn publish_window_state_error(app: &AppHandle, code: &str, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_blocked_settings_write_never_holds_the_window_event_lock() {
+        use cfw_core::{MacOsAppPaths, SettingsStore, UiPreferences};
+        use std::os::fd::AsRawFd;
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path().join("app")));
+        store.write(&UiPreferences::default()).unwrap();
+        let file_lock = std::fs::File::open(&store.paths().app_home).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file_lock.as_raw_fd(), libc::LOCK_EX) },
+            0
+        );
+        let manager = Arc::new(WindowBoundsManager::default());
+        manager.configure(true).unwrap();
+        let writer = manager.clone();
+        let (entered, entered_io) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            writer
+                .persist_retention(false, move || {
+                    entered.send(()).unwrap();
+                    store
+                        .write(&UiPreferences {
+                            retain_window_bounds: false,
+                            ..UiPreferences::default()
+                        })
+                        .map_err(|error| error.to_string())
+                })
+                .await
+        });
+        entered_io.await.unwrap();
+        let observer = manager.clone();
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let observer = std::thread::spawn(move || {
+            let revision = observer.lock().unwrap().reserve_capture();
+            sent.send(revision).unwrap();
+        });
+        let observed = received.recv_timeout(Duration::from_millis(500));
+        drop(file_lock);
+        task.await.unwrap().unwrap();
+        observer.join().unwrap();
+        assert!(
+            matches!(observed, Ok(Some(_))),
+            "AppKit events waited on a blocked filesystem write"
+        );
+        assert!(!manager.lock().unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn failed_preference_write_preserves_the_existing_retention_policy() {
+        let manager = WindowBoundsManager::default();
+        manager.configure(true).unwrap();
+        assert_eq!(
+            manager
+                .persist_retention(false, || Err::<(), _>("disk error".into()))
+                .await,
+            Err("disk error".into())
+        );
+        assert!(manager.lock().unwrap().enabled);
+    }
 
     fn bounds(x: i32, y: i32, width: u32, height: u32) -> WindowBounds {
         WindowBounds::new(x, y, width, height).expect("valid test bounds")

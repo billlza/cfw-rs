@@ -186,10 +186,13 @@ fn project_for_mode(
 }
 
 #[tauri::command]
-pub(crate) fn geoip_database_status() -> Result<GeoIpDatabaseStatus, String> {
-    let store = settings_store()?;
-    store.ensure_layout().map_err(|error| error.to_string())?;
-    Ok(geoip_status(&store.paths().app_home))
+pub(crate) async fn geoip_database_status() -> Result<GeoIpDatabaseStatus, String> {
+    crate::startup_state::prepare_off_main(|| {
+        let store = settings_store()?;
+        store.ensure_layout().map_err(|error| error.to_string())?;
+        Ok(geoip_status(&store.paths().app_home))
+    })
+    .await
 }
 
 /// Refuses to fetch a GeoIP database.

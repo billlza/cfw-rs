@@ -88,17 +88,23 @@ pub(crate) fn open_page(app: AppHandle, page: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) fn reveal_home_directory() -> Result<(), String> {
-    let store = settings_store()?;
-    store.ensure_layout().map_err(|error| error.to_string())?;
-    reveal_owned_directory(&store.paths().app_home)
+pub(crate) async fn reveal_home_directory() -> Result<(), String> {
+    crate::startup_state::prepare_off_main(|| {
+        let store = settings_store()?;
+        store.ensure_layout().map_err(|error| error.to_string())?;
+        reveal_owned_directory(&store.paths().app_home)
+    })
+    .await
 }
 
 #[tauri::command]
-pub(crate) fn reveal_logs_directory() -> Result<(), String> {
-    let store = settings_store()?;
-    store.ensure_layout().map_err(|error| error.to_string())?;
-    reveal_owned_directory(&store.paths().logs_dir)
+pub(crate) async fn reveal_logs_directory() -> Result<(), String> {
+    crate::startup_state::prepare_off_main(|| {
+        let store = settings_store()?;
+        store.ensure_layout().map_err(|error| error.to_string())?;
+        reveal_owned_directory(&store.paths().logs_dir)
+    })
+    .await
 }
 
 #[tauri::command]

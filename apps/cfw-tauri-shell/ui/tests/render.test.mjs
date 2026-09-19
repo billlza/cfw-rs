@@ -344,6 +344,28 @@ function controllerSnapshotWith({ mode = "rule", selected = "HK", extraOptions =
 
 const invoked = [];
 const invocationDetails = [];
+const initialLiveSettings = responses.read_settings_snapshot;
+const slowLoginItemQuery = deferred();
+let initialLiveQueryPending = true;
+let bootstrapReady = false;
+globalThis.window.__CFM_STARTUP__ = { ready() { bootstrapReady = true; } };
+responses.read_settings_snapshot = (args) => {
+  if (args?.includeLoginItemStatus === false) {
+    return {
+      ...initialLiveSettings,
+      launch_at_login: {
+        persisted_intent: initialLiveSettings.settings.launch_at_login,
+        live_status: "checking",
+        matches_persisted_intent: false,
+      },
+    };
+  }
+  if (initialLiveQueryPending) {
+    initialLiveQueryPending = false;
+    return slowLoginItemQuery.promise;
+  }
+  return initialLiveSettings;
+};
 const rejected = {
   providers_snapshot: "controller capability `provider management` is unsupported by pinned engine sing-box 1.13.15",
 };
@@ -375,6 +397,14 @@ globalThis.window.__TAURI_INTERNALS__ = {
 const appModule = await import("../src/app.js");
 const { PAGES, state, runtime } = await import("../src/state.js");
 await new Promise((resolve) => setTimeout(resolve, 150));
+const responsiveBeforeLoginItemReply = bootstrapReady && listeners.has("cfw://page");
+const loginItemWasPending = state.launchAtLogin.liveStatus === "checking";
+// The remainder of this file exercises app.js's standalone fatal boundary;
+// startup.test.mjs separately executes the real independent startup guard.
+delete globalThis.window.__CFM_STARTUP__;
+slowLoginItemQuery.resolve(initialLiveSettings);
+responses.read_settings_snapshot = initialLiveSettings;
+await new Promise((resolve) => setTimeout(resolve, 20));
 
 const emit = async (event, payload) => {
   const result = listeners.get(event)?.({ event, payload });
@@ -613,6 +643,11 @@ test("bootstrap reaches the dashboard instead of the fatal handler", () => {
     "the ordinary dashboard never acknowledges handoff renderer readiness",
   );
   assert.equal(updateListenerWasReady, true, "automatic update check must start after its listener");
+});
+
+test("a stalled macOS Login Item query does not prevent dashboard readiness", () => {
+  assert.equal(responsiveBeforeLoginItemReply, true);
+  assert.equal(loginItemWasPending, true, "pending status must not look like an observed OS state");
 });
 
 test("global Reload refreshes the active projection and controller rules", async () => {

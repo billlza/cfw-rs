@@ -89,6 +89,7 @@ pub(crate) async fn run_coordinator(
         native_lease: None,
         quarantine: None,
         restart_spec: None,
+        status_recheck: None,
     };
     let mut startup_failure = match reconcile_initial_state(
         backend.as_ref(),

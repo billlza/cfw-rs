@@ -50,6 +50,23 @@ pub(crate) struct SecureDirectory {
 }
 
 impl SecureDirectory {
+    pub(crate) fn update_atomic<F>(
+        &self,
+        name: &str,
+        maximum: usize,
+        update: F,
+    ) -> Result<(), SettingsStoreError>
+    where
+        F: FnOnce(Option<&[u8]>) -> Result<Vec<u8>, SettingsStoreError>,
+    {
+        self.lock(libc::LOCK_EX)?;
+        let previous = self.read_optional_locked(name, maximum, FilePolicy::Private)?;
+        let bytes = update(previous.as_ref().map(|value| value.bytes.as_slice()))?;
+        // flock is associated with this descriptor; write_atomic keeps the same
+        // exclusive lock across read, transformation, rename and directory sync.
+        self.write_atomic(name, &bytes, maximum)
+    }
+
     pub(crate) fn compare_and_swap_atomic(
         &self,
         name: &str,

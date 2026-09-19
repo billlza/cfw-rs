@@ -1,10 +1,14 @@
 //! Small, data-plane-independent application primitives.
 
 mod control_session;
+mod diagnostics;
 mod legacy_settings;
 mod runtime_settings;
 mod settings;
 mod settings_storage;
+pub use diagnostics::{
+    DiagnosticEntry, DiagnosticJournal, DiagnosticTopic, redact_diagnostic_text,
+};
 pub use runtime_settings::RuntimeSettingsSnapshot;
 
 pub use control_session::{

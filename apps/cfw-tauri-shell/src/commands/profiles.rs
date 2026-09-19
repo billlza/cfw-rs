@@ -490,7 +490,7 @@ pub(crate) async fn select_profile(
 }
 
 #[tauri::command]
-pub(crate) fn delete_profile(
+pub(crate) async fn delete_profile(
     engine: State<'_, ManagedEngine>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
@@ -498,10 +498,11 @@ pub(crate) fn delete_profile(
     let _maintenance = engine
         .reserve_maintenance()
         .map_err(|error| error.to_string())?;
-    profiles
-        .repository
-        .delete(&id)
-        .map_err(|error| error.to_string())
+    let repository = profiles.repository.clone();
+    crate::startup_state::prepare_off_main(move || {
+        repository.delete(&id).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 fn snapshot_records(snapshot: ProfileRepositorySnapshot) -> Vec<UiProfileRecord> {

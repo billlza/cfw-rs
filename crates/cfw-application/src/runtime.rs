@@ -39,6 +39,10 @@ pub(crate) struct CoordinatorState {
     /// Last accepted source inputs, retained only by this process so a closed
     /// maintenance transaction can restore an exact active baseline.
     pub(crate) restart_spec: Option<EngineRestartSpec>,
+    /// Expected identity for continued, bounded read-only status observation.
+    /// It is never published as active until a fresh native attestation agrees.
+    /// Any transition failure, explicit Off or identity mismatch discards it.
+    pub(crate) status_recheck: Option<EngineSnapshot>,
 }
 
 /// Classifies a native failure whose only safe recovery is an explicit Off
@@ -98,20 +102,48 @@ pub(crate) async fn reconcile_active_runtime(
     snapshots: &watch::Sender<EngineSnapshot>,
     operation_timeout: Duration,
 ) -> Result<(), EngineCoordinatorError> {
-    let (expected_mode, expected_owner, expected_runtime) = match &state.snapshot.state {
+    if state.quarantine.is_some() {
+        state.status_recheck = None;
+        return Ok(());
+    }
+    let recovering = matches!(state.snapshot.state, EngineState::Failed { .. });
+    let baseline = if recovering {
+        let Some(previous) = state.status_recheck.take() else {
+            return Ok(());
+        };
+        if previous.generation != state.snapshot.generation
+            || previous.desired_mode != state.snapshot.desired_mode
+            || previous.config_digest != state.snapshot.config_digest
+        {
+            return Ok(());
+        }
+        previous
+    } else {
+        state.status_recheck = None;
+        state.snapshot.clone()
+    };
+    let (expected_mode, expected_owner, expected_runtime) = match &baseline.state {
         EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime } => (
-            state.snapshot.state.active_mode(),
+            baseline.state.active_mode(),
             EngineOwner::ProxyAgent,
             runtime.clone(),
         ),
         EngineState::TunnelActive { runtime }
         | EngineState::TunnelSystemProxyActive { runtime } => (
-            state.snapshot.state.active_mode(),
+            baseline.state.active_mode(),
             EngineOwner::PacketTunnelSystemExtension,
             runtime.clone(),
         ),
         _ => return Ok(()),
     };
+    if recovering
+        && !state
+            .native_lease
+            .as_ref()
+            .is_some_and(|lease| lease.context == expected_runtime.context)
+    {
+        return Ok(());
+    }
 
     let observation = match call_backend(
         operation_timeout,
@@ -122,9 +154,16 @@ pub(crate) async fn reconcile_active_runtime(
     {
         Ok(observation) => observation,
         Err(source) => {
+            let recheck = source.kind.retry_directive() == RetryDirective::IdempotentReadOnly;
             let error = backend_error(EngineOperation::QueryStatus, source);
             let generation = state.snapshot.generation;
             set_failed(state, snapshots, expected_mode, generation, &error);
+            if recheck {
+                // Keep the actor's existing cadence and query deadline. No
+                // start, stop, retry of a mutation or generation allocation is
+                // performed to recover a missed observation.
+                state.status_recheck = Some(baseline);
+            }
             return Err(error);
         }
     };
@@ -166,6 +205,10 @@ pub(crate) async fn reconcile_active_runtime(
         return Err(error);
     }
 
+    if recovering {
+        state.snapshot.state = baseline.state;
+        publish(state, snapshots);
+    }
     Ok(())
 }
 
@@ -371,6 +414,7 @@ pub(crate) fn backend_error(
 }
 
 pub(crate) fn set_off(state: &mut CoordinatorState, snapshots: &watch::Sender<EngineSnapshot>) {
+    state.status_recheck = None;
     state.snapshot.state = EngineState::Off;
     state.snapshot.config_digest = None;
     publish(state, snapshots);
@@ -383,6 +427,7 @@ pub(crate) fn set_failed(
     generation: u64,
     error: &EngineCoordinatorError,
 ) {
+    state.status_recheck = None;
     state.snapshot.state = EngineState::Failed {
         generation,
         target,

@@ -917,11 +917,17 @@ async fn run_log_stream(app: &AppHandle, binding: &StreamBinding) -> Result<(), 
                     if !stream_binding_is_current(app, binding) {
                         return Ok(());
                     }
+                    let line = log_line_from_structured(entry);
+                    if matches!(line.level.as_str(), "warning" | "error") {
+                        crate::diagnostics::record(app,
+                            if line.level == "error" { cfw_core::DiagnosticTopic::Network } else { cfw_core::DiagnosticTopic::NetworkWarnings },
+                            if line.level == "error" { "request_error" } else { "request_warning" }, &line.message);
+                    }
                     app.emit(
                         LOG_LINES_EVENT,
                         StreamEvent {
                             provenance: binding.clone(),
-                            payload: vec![log_line_from_structured(entry)],
+                            payload: vec![line],
                         },
                     )
                         .map_err(|error| format!("failed to publish log line: {error}"))?;

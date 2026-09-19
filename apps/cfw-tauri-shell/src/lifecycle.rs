@@ -77,6 +77,10 @@ pub(crate) struct HandoffLifecycleLease {
 }
 
 impl AppLifecycle {
+    pub(crate) fn startup_work_allowed(&self) -> bool {
+        self.shared.owner.load(Ordering::Acquire) == LIFECYCLE_IDLE
+    }
+
     pub(crate) fn exit_ready(&self) -> bool {
         self.shared.owner.load(Ordering::Acquire) == LIFECYCLE_EXIT_READY
     }
@@ -104,6 +108,19 @@ impl AppLifecycle {
                 lifecycle_owner_name(owner)
             )),
         }
+    }
+
+    fn mark_uninitialized_exit_ready(&self) -> Result<(), String> {
+        self.shared
+            .owner
+            .compare_exchange(
+                LIFECYCLE_SHUTDOWN,
+                LIFECYCLE_EXIT_READY,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| "startup shutdown lost lifecycle ownership".into())
     }
 
     fn begin_handoff_lease(&self) -> Result<HandoffLifecycleLease, String> {
@@ -220,7 +237,7 @@ pub(crate) async fn prepare_handoff_exit(
     app: AppHandle,
     lifecycle_lease: &mut HandoffLifecycleLease,
 ) -> Result<(), String> {
-    flush_window_bounds_for_exit(&app);
+    flush_window_bounds_for_exit(&app).await;
     let lifecycle = app.state::<AppLifecycle>();
     let outcome = match app.state::<ManagedEngine>().shutdown_to_completion().await {
         Ok(outcome) => outcome,
@@ -301,9 +318,17 @@ fn start_shutdown(app: AppHandle, exit_code: i32) -> Result<(), String> {
         }
         Err(error) => return Err(error),
     }
-    flush_window_bounds_for_exit(&app);
+    if app
+        .state::<crate::startup_state::NativeStartup>()
+        .cancel_uninstalled()?
+    {
+        lifecycle.mark_uninitialized_exit_ready()?;
+        app.exit(exit_code);
+        return Ok(());
+    }
 
     tauri::async_runtime::spawn(async move {
+        flush_window_bounds_for_exit(&app).await;
         let coordinator = app.state::<ManagedEngine>().coordinator.clone();
         let shutdown = app.state::<ManagedEngine>().shutdown_to_completion().await;
         match shutdown {
@@ -337,8 +362,8 @@ fn start_shutdown(app: AppHandle, exit_code: i32) -> Result<(), String> {
     Ok(())
 }
 
-fn flush_window_bounds_for_exit(app: &AppHandle) {
-    if let Err(error) = app.state::<WindowBoundsManager>().flush(app) {
+async fn flush_window_bounds_for_exit(app: &AppHandle) {
+    if let Err(error) = app.state::<WindowBoundsManager>().flush(app).await {
         emit_shutdown_error(app, "window_bounds_flush_failed", error);
     }
 }

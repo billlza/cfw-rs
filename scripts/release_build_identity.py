@@ -81,7 +81,7 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40070")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40071")
 FROZEN_GA_REPOSITORY_RELATIVE = Path(
     f"target/release-worktrees/{ACTIVE_RELEASE_IDENTITY.ga_build}"
 )

@@ -4,6 +4,12 @@
 
 ### Everyday proxy use and compatibility
 
+- Keep native initialization and settings I/O off the macOS main thread; a slow
+  Keychain or file lock no longer blocks window events or quitting. Cancelled
+  initialization cannot install a late engine, and window saving uses a single
+  background queue without holding the window-event lock during disk writes.
+- Load saved preferences independently of the optional macOS Login Item query,
+  and preserve newer user changes when that query finishes late.
 - Run the local core independently of System Proxy and TUN; keep an explicit full stop.
 - Import, update and select profiles while connected, validating candidates and
   restoring the previous runtime after failed replacement or catalog commit.
@@ -21,6 +27,9 @@
 
 ### Network operation and imported policy
 
+- Revalidate the same runtime after a transient read-only status-query failure,
+  without restarting the core or interrupting its connections. Identity,
+  permission and cleanup failures still require their existing explicit recovery.
 - Require the production libbox adapter at compilation so a signed application
   cannot silently omit its real runtime. Failed starts no longer paint active switches.
 - Allow System Proxy and TUN independently or together using one engine owner.

@@ -116,7 +116,7 @@ test("renderer pages are exactly the shared page contract", () => {
 
 test("every command the dashboard invokes exists in generate_handler!", () => {
   const handlers = handlerCommands();
-  assert.equal(handlers.size, 88, "the release command surface includes runtime and automation preferences");
+  assert.equal(handlers.size, 90, "the release command surface includes bounded startup diagnostics and admitted reload");
   const missing = [...invoked.keys()].filter((command) => !handlers.has(command));
   assert.deepEqual(missing, [], `dashboard invokes commands that do not exist: ${missing.join(", ")}`);
 });

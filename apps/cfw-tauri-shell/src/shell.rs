@@ -7,7 +7,7 @@ use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem,
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
-use crate::commands::{controller_client_for_app, silent_start_enabled};
+use crate::commands::controller_client_for_app;
 use crate::lifecycle::request_shutdown;
 use crate::updater::check_for_updates;
 
@@ -16,9 +16,13 @@ const TRAY_ID: &str = "cfw-tray";
 const APP_MENU_ABOUT_ID: &str = "about";
 const APP_MENU_CHECK_UPDATE_ID: &str = "check-update";
 const APP_MENU_QUIT_ID: &str = "quit";
+const APP_MENU_DIAGNOSTICS_ID: &str = "diagnostic-logs";
+const APP_MENU_RELOAD_ID: &str = "reload-dashboard";
 const TRAY_DASHBOARD_ID: &str = "dashboard";
 const TRAY_ABOUT_ID: &str = "tray-about";
 const TRAY_QUIT_ID: &str = "tray-quit";
+const TRAY_DIAGNOSTICS_ID: &str = "tray-diagnostic-logs";
+const TRAY_RELOAD_ID: &str = "tray-reload-dashboard";
 /// Bounds on what a controller response may add to the menu bar. A hostile or
 /// broken controller cannot grow the tray without limit.
 const MAX_TRAY_GROUPS: usize = 24;
@@ -55,6 +59,8 @@ enum AppMenuAction {
     OpenPage(MainPage),
     CheckForUpdates(MainPage),
     Quit,
+    OpenDiagnostics,
+    ReloadDashboard,
 }
 
 fn app_menu_action(id: &str) -> Option<AppMenuAction> {
@@ -62,6 +68,8 @@ fn app_menu_action(id: &str) -> Option<AppMenuAction> {
         APP_MENU_ABOUT_ID => Some(AppMenuAction::OpenPage(MainPage::Feedback)),
         APP_MENU_CHECK_UPDATE_ID => Some(AppMenuAction::CheckForUpdates(MainPage::Feedback)),
         APP_MENU_QUIT_ID => Some(AppMenuAction::Quit),
+        APP_MENU_DIAGNOSTICS_ID => Some(AppMenuAction::OpenDiagnostics),
+        APP_MENU_RELOAD_ID => Some(AppMenuAction::ReloadDashboard),
         _ => None,
     }
 }
@@ -72,6 +80,8 @@ enum TrayAction {
     Quit,
     ProxySelection,
     Engine(TrayEngineAction),
+    OpenDiagnostics,
+    ReloadDashboard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +98,8 @@ fn tray_action(id: &str) -> TrayAction {
         TRAY_DASHBOARD_ID => TrayAction::OpenPage(MainPage::General),
         TRAY_ABOUT_ID => TrayAction::OpenPage(MainPage::Feedback),
         TRAY_QUIT_ID => TrayAction::Quit,
+        TRAY_DIAGNOSTICS_ID => TrayAction::OpenDiagnostics,
+        TRAY_RELOAD_ID => TrayAction::ReloadDashboard,
         "core-start" => TrayAction::Engine(TrayEngineAction::StartCore),
         "core-stop" => TrayAction::Engine(TrayEngineAction::StopCore),
         "proxy-enable" => TrayAction::Engine(TrayEngineAction::SystemProxy(true)),
@@ -197,6 +209,20 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         &[
             &about,
             &check_update,
+            &MenuItem::with_id(
+                app,
+                APP_MENU_RELOAD_ID,
+                "Reload dashboard",
+                true,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                APP_MENU_DIAGNOSTICS_ID,
+                "Open diagnostic logs…",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -253,6 +279,8 @@ pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
             });
         }
         Some(AppMenuAction::Quit) => request_shell_shutdown(app, 0),
+        Some(AppMenuAction::OpenDiagnostics) => open_diagnostic_logs(app),
+        Some(AppMenuAction::ReloadDashboard) => request_dashboard_reload(app),
         None => {}
     }
 }
@@ -273,6 +301,8 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             TrayAction::Quit => request_shell_shutdown(app, 0),
             TrayAction::ProxySelection => handle_tray_proxy_event(app, event.id.as_ref()),
             TrayAction::Engine(action) => handle_tray_engine_event(app, action),
+            TrayAction::OpenDiagnostics => open_diagnostic_logs(app),
+            TrayAction::ReloadDashboard => request_dashboard_reload(app),
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -295,6 +325,38 @@ fn request_shell_shutdown(app: &AppHandle, exit_code: i32) {
     }
 }
 
+fn open_diagnostic_logs(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let worker = app.clone();
+        if let Err(error) = crate::startup_state::prepare_off_main(move || {
+            worker.state::<crate::diagnostics::Diagnostics>().flush()
+        })
+        .await
+        {
+            eprintln!("diagnostic export flush failed: {error}");
+        }
+        if let Err(error) = crate::commands::reveal_logs_directory().await {
+            emit_shell_error(&app, "diagnostic_folder_unavailable", error);
+        }
+    });
+}
+
+fn request_dashboard_reload(app: &AppHandle) {
+    if let Err(error) = reload_dashboard(app) {
+        emit_shell_error(app, "dashboard_reload_failed", error);
+    }
+}
+
+pub(crate) fn reload_dashboard(app: &AppHandle) -> Result<(), String> {
+    if app.state::<crate::LaunchContext>().is_migration_handoff() {
+        return Err("Reload is unavailable during migration handoff".into());
+    }
+    app.get_webview_window("main")
+        .ok_or_else(|| "main dashboard window is unavailable".to_owned())
+        .and_then(|window| window.reload().map_err(|error| error.to_string()))
+}
+
 fn build_tray_menu(
     app: &AppHandle,
     snapshot: &EngineSnapshot,
@@ -306,7 +368,23 @@ fn build_tray_menu(
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
 
-    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(dashboard)];
+    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![
+        Box::new(dashboard),
+        Box::new(MenuItem::with_id(
+            app,
+            TRAY_RELOAD_ID,
+            "Reload dashboard",
+            true,
+            None::<&str>,
+        )?),
+        Box::new(MenuItem::with_id(
+            app,
+            TRAY_DIAGNOSTICS_ID,
+            "Open diagnostic logs…",
+            true,
+            None::<&str>,
+        )?),
+    ];
     let ready = ready_mode(snapshot);
     items.push(Box::new(MenuItem::with_id(
         app,
@@ -517,6 +595,13 @@ fn start_tray_state_updates(app: AppHandle) {
 }
 
 pub(crate) fn handle_tray_engine_event(app: &AppHandle, action: TrayEngineAction) {
+    if let Err(error) = app
+        .state::<crate::startup_state::NativeStartup>()
+        .require_ready()
+    {
+        emit_shell_error(app, "native_initialization_pending", error);
+        return;
+    }
     if app.state::<crate::LaunchContext>().is_migration_handoff() {
         emit_shell_error(
             app,
@@ -565,6 +650,13 @@ pub(crate) fn handle_tray_engine_event(app: &AppHandle, action: TrayEngineAction
 }
 
 fn handle_tray_proxy_event(app: &AppHandle, id: &str) {
+    if let Err(error) = app
+        .state::<crate::startup_state::NativeStartup>()
+        .require_ready()
+    {
+        emit_shell_error(app, "native_initialization_pending", error);
+        return;
+    }
     if !id.starts_with(TRAY_PROXY_ID_PREFIX) {
         return;
     }
@@ -596,9 +688,6 @@ fn handle_tray_proxy_event(app: &AppHandle, id: &str) {
 }
 
 pub(crate) fn apply_silent_start(app: &AppHandle) -> Result<(), String> {
-    if !silent_start_enabled()? {
-        return Ok(());
-    }
     app.set_activation_policy(tauri::ActivationPolicy::Accessory)
         .map_err(|error| error.to_string())?;
     app.set_dock_visibility(false)
@@ -638,6 +727,7 @@ fn show_main_page_result(app: &AppHandle, page: MainPage) -> Result<(), String> 
         .ok_or_else(|| "main window is unavailable".to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
+    app.state::<crate::LaunchContext>().note_window_presented();
     app.emit("cfw://page", page.id())
         .map_err(|error| error.to_string())
 }

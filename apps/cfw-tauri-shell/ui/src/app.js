@@ -78,6 +78,7 @@ let migrationHandoffRendererReady = null;
 let criticalMigrationListenersBound = false;
 
 const LOGIN_ITEM_LIVE_STATUSES = new Set([
+  "checking",
   "enabled",
   "not_registered",
   "not_found",
@@ -275,6 +276,13 @@ function launchAtLoginPresentation() {
     };
   }
   const value = state.launchAtLogin;
+  if (value.observationError) {
+    return { hint: value.observationError, reason: value.observationError };
+  }
+  if (value.liveStatus === "checking") {
+    const reason = "Checking macOS Login Item status…";
+    return { hint: reason, reason };
+  }
   if (value.liveStatus === "unknown") {
     const reason = "Start at Login is unavailable because macOS returned an unknown Login Item state.";
     return { hint: reason, reason };
@@ -3757,9 +3765,25 @@ async function loadRuntimeProjection() {
   }
 }
 
-async function loadSettingsSnapshot() {
-  const snapshot = await invoke("read_settings_snapshot");
+async function loadSettingsSnapshot(includeLiveStatus = true) {
+  const snapshot = includeLiveStatus
+    ? await invoke("read_settings_snapshot")
+    : await invoke("read_settings_snapshot", { includeLoginItemStatus: false });
   applyPersistedSettings(snapshot);
+  return snapshot;
+}
+
+async function refreshStartupLoginItemStatus(expectedSettings) {
+  try {
+    const snapshot = await invoke("read_settings_snapshot");
+    if (state.settingsSnapshot === expectedSettings) applyPersistedSettings(snapshot);
+  } catch {
+    if (state.settingsSnapshot === expectedSettings) {
+      state.launchAtLogin.observationError = "macOS Login Item status could not be read. Reload to retry; the failure is recorded in local diagnostics.";
+      appendLog("warning", "settings", state.launchAtLogin.observationError);
+    }
+  }
+  if (["general", "settings"].includes(state.activePage)) renderPage();
 }
 
 async function loadNetworkDiagnostics() {
@@ -3991,8 +4015,9 @@ async function bootstrap() {
   // the WKWebView looking like a dead black window.
   renderPage();
   const networkDiagnostics = loadNetworkDiagnostics();
+  const startupSettings = loadSettingsSnapshot(false);
   await Promise.all([
-    loadSettingsSnapshot(),
+    startupSettings,
     loadPlatformDesign(),
     loadEngineStatus(),
     loadRetirementStatus(),
@@ -4156,6 +4181,8 @@ async function bootstrap() {
     renderPage();
   }
   await acknowledgeMigrationHandoffRendererReady();
+  window.__CFM_STARTUP__?.ready();
+  void startupSettings.then(refreshStartupLoginItemStatus);
 
   // Register every listener before the automatic check. The setup-time check
   // used to race this subscription and could lose the only availability event.
@@ -4195,6 +4222,10 @@ async function importProfileFromPath(path) {
 }
 
 export function renderFatalBootstrap() {
+  if (window.__CFM_STARTUP__) {
+    window.__CFM_STARTUP__.fail();
+    return;
+  }
   document.body.innerHTML = `<pre class="fatal">${escapeHtml("Clash for Mac could not start safely (startup_state_unverifiable). Review the application log before retrying.")}</pre>`;
 }
 

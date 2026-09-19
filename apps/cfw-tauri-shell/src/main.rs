@@ -1,7 +1,9 @@
 mod automation;
 mod bootstrap;
 mod commands;
+mod diagnostics;
 use automation::{read_automation_settings, request_wifi_name_access, write_automation_settings};
+use diagnostics::{Diagnostics, report_dashboard_startup};
 mod engine;
 mod launch;
 mod legacy;
@@ -13,6 +15,8 @@ mod packet_evidence_transport;
 mod release_observation;
 mod service_maintenance;
 mod shell;
+mod startup;
+mod startup_state;
 mod subscription_import;
 mod transport_security;
 mod updater;
@@ -22,14 +26,14 @@ mod window_state;
 pub use engine::{ManagedEngine, packet_evidence};
 
 use bootstrap::{
-    LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload, reopen_main_window,
+    LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload, reload_dashboard,
+    reopen_main_window,
 };
-use cfw_apple_network::NativeFrameworkBridge;
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
 use commands::{
-    LiveStreams, apply_active_profile, apply_restore_dns_servers, build_managed_profiles,
-    cancel_credential_gc, close_all_connections, close_connection, commit_credential_gc,
+    LiveStreams, apply_active_profile, apply_restore_dns_servers, cancel_credential_gc,
+    close_all_connections, close_connection, commit_credential_gc,
     commit_legacy_cfw_profile_migration, controller_snapshot, controller_version,
     current_platform_design, delete_profile, dns_query, flush_fake_ip_cache, force_quit_app,
     geoip_database_status, health_check_all_proxy_providers, health_check_proxy_provider,
@@ -50,22 +54,17 @@ use commands::{
     update_geoip_database, update_profile, update_profile_info, update_proxy_provider,
     update_rule_provider, write_runtime_settings_snapshot, write_settings_snapshot,
 };
-use engine::{
-    build_managed_engine, engine_snapshot, prepare_legacy_cutover, start_engine_event_forwarder,
-};
+use engine::{engine_snapshot, prepare_legacy_cutover};
 use launch::{LaunchMode, STARTUP_ADMISSION_EXIT_CODE, STARTUP_USAGE_EXIT_CODE, parse_launch_mode};
 use legacy::{
     ConsumedHandoffTicket, LegacyRetirementGate, MigrationHandoffLease, begin_migration_handoff,
-    disable_service_mode, legacy_retirement_status, recover_legacy_cutover, run_launch_preflight,
+    disable_service_mode, legacy_retirement_status, recover_legacy_cutover,
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
-use shell::{
-    TrayMenuState, apply_silent_start, build_app_menu, build_tray, focus_main_window,
-    handle_app_menu_event,
-};
+use shell::{TrayMenuState, build_app_menu, focus_main_window, handle_app_menu_event};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
-use window_state::{WindowBoundsManager, handle_window_bounds_event, initialize_window_bounds};
+use window_state::{WindowBoundsManager, handle_window_bounds_event};
 
 fn settings_store() -> Result<SettingsStore, String> {
     SettingsStore::default_for_current_user().map_err(|error| error.to_string())
@@ -78,6 +77,8 @@ fn migration_handoff_command_allowed(command: &str) -> bool {
         command,
         "acknowledge_migration_handoff_renderer_ready"
             | "boot_payload"
+            | "report_dashboard_startup"
+            | "reveal_logs_directory"
             | "engine_snapshot"
             | "legacy_retirement_status"
             | "prepare_legacy_cutover"
@@ -108,6 +109,7 @@ fn migration_handoff_command_allowed(command: &str) -> bool {
 }
 
 fn emit_startup_error(app: &tauri::AppHandle, kind: &str, message: String) {
+    diagnostics::record(app, cfw_core::DiagnosticTopic::Startup, kind, &message);
     if let Err(error) = app.emit(
         "cfw://engine-event",
         EngineEvent::boundary_failure(kind, message),
@@ -177,7 +179,20 @@ fn main() {
         }
     };
     let migration_handoff = launch.is_migration_handoff();
+    let diagnostics = Diagnostics::start();
+    diagnostics.record(
+        cfw_core::DiagnosticTopic::Startup,
+        "process_started",
+        &format!(
+            "version={} target={}-{}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        ),
+    );
     let builder = tauri::Builder::default()
+        .manage(diagnostics)
+        .manage(startup_state::NativeStartup::default())
         .manage(launch)
         .manage(LegacyRetirementGate::default())
         .manage(AppLifecycle::default())
@@ -187,6 +202,7 @@ fn main() {
         .manage(TrayMenuState::default())
         .manage(automation::ManagedAutomation::default())
         .manage(WindowBoundsManager::default())
+        .manage(commands::UiSettingsMutations::default())
         .manage(UpdaterSecurityState::default());
     // The explicit handoff instance must coexist with the still-running 0.3.5
     // GUI so it can validate 0.4.0 without asking the user to quit and trigger
@@ -205,6 +221,8 @@ fn main() {
         acknowledge_migration_handoff_renderer_ready,
         engine_snapshot,
         boot_payload,
+        report_dashboard_startup,
+        reload_dashboard,
         quit_app,
         read_settings_snapshot,
         read_runtime_settings_snapshot,
@@ -299,57 +317,45 @@ fn main() {
                     "command {command} is unavailable during migration handoff"
                 ));
                 true
+            } else if !startup::command_available_before_ready(invoke.message.command())
+                && let Err(error) = invoke
+                    .message
+                    .state_ref()
+                    .get::<startup_state::NativeStartup>()
+                    .require_ready()
+            {
+                invoke.resolver.reject(error);
+                true
             } else {
                 invoke_handler(invoke)
             }
         })
         .setup(|app| {
-            let native_bridge = NativeFrameworkBridge::load();
-            let managed_profiles =
-                build_managed_profiles(native_bridge.clone()).map_err(std::io::Error::other)?;
-            if !app.manage(managed_profiles) {
-                return Err(std::io::Error::other("managed profiles were registered twice").into());
-            }
-            let managed_engine =
-                build_managed_engine(native_bridge).map_err(std::io::Error::other)?;
-            if !app.manage(managed_engine) {
-                return Err(std::io::Error::other("managed engine was registered twice").into());
-            }
-            start_engine_event_forwarder(app.handle().clone());
-
+            diagnostics::record(
+                app.handle(),
+                cfw_core::DiagnosticTopic::Startup,
+                "native_setup_started",
+                "",
+            );
             app.set_menu(build_app_menu(app.handle())?)?;
-            run_launch_preflight(app.handle()).map_err(std::io::Error::other)?;
-
-            #[cfg(feature = "physical-release-evidence")]
-            if !app.state::<LaunchContext>().is_migration_handoff()
-                && let Err(error) =
-                    packet_evidence_transport::run_packet_evidence_transaction(app.handle().clone())
-            {
-                eprintln!("physical Packet evidence control is unavailable: {error}");
-            }
-
-            if app.state::<LaunchContext>().is_migration_handoff() {
-                // Keep the window hidden until the renderer proves that the
-                // migration UI and critical listeners are ready, then wait for
-                // the parent dashboard to exit before presenting it.
-                app.state::<LaunchContext>()
-                    .mark_renderer_native_ready()
-                    .map_err(std::io::Error::other)?;
-            } else {
-                build_tray(app.handle())?;
-                if let Err(error) = automation::initialize(app.handle()) {
-                    emit_startup_error(app.handle(), "automation_initialization_failed", error);
-                }
-                commands::start_provider_refresh(app.handle().clone())
-                    .map_err(std::io::Error::other)?;
-                if let Err(error) = initialize_window_bounds(app.handle()) {
-                    emit_startup_error(app.handle(), "window_bounds_restore_failed", error);
-                }
-                if let Err(error) = apply_silent_start(app.handle()) {
-                    emit_startup_error(app.handle(), "silent_start_failed", error);
-                }
-            }
+            startup::start(app.handle().clone());
             Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                let app = webview.app_handle();
+                diagnostics::record(app, cfw_core::DiagnosticTopic::Startup, "page_loaded", "");
+                if let Some(window) = app.get_webview_window("main") {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = bootstrap::present_loaded_dashboard(&window).await {
+                            emit_startup_error(&app, "window_presentation_failed", error);
+                        }
+                    });
+                }
+            }
         })
         .on_menu_event(|app, event| handle_app_menu_event(app, event.id().as_ref()))
         .on_window_event(|window, event| {
@@ -360,6 +366,10 @@ fn main() {
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                window
+                    .app_handle()
+                    .state::<LaunchContext>()
+                    .note_window_hidden();
                 if let Err(error) = window.hide() {
                     emit_startup_error(
                         window.app_handle(),
@@ -373,6 +383,11 @@ fn main() {
         .expect("failed to build Clash for Mac");
 
     application.run(|app, event| match event {
+        RunEvent::Exit => {
+            if let Err(error) = app.state::<Diagnostics>().flush() {
+                eprintln!("final diagnostic flush failed: {error}");
+            }
+        }
         RunEvent::ExitRequested { api, .. } => {
             let lifecycle = app.state::<AppLifecycle>();
             if !lifecycle.exit_ready() {
@@ -401,6 +416,8 @@ mod tests {
         for command in [
             "acknowledge_migration_handoff_renderer_ready",
             "boot_payload",
+            "report_dashboard_startup",
+            "reveal_logs_directory",
             "engine_snapshot",
             "prepare_legacy_cutover",
             "disable_service_mode",
@@ -420,6 +437,7 @@ mod tests {
             "open_available_update",
             "refresh_tray_menu",
             "begin_migration_handoff",
+            "reload_dashboard",
         ] {
             assert!(!migration_handoff_command_allowed(command), "{command}");
         }

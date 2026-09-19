@@ -64,15 +64,36 @@ fn report(app: &AppHandle, message: String) {
     }
 }
 
-pub(crate) fn initialize(app: &AppHandle) -> Result<(), String> {
-    let result = initialize_controls(app);
+pub(crate) async fn initialize(app: AppHandle) -> Result<(), String> {
+    let saved = crate::startup_state::prepare_off_main(|| {
+        crate::settings_store()?
+            .automation_settings::<AutomationPreferences>()
+            .map_err(|error| error.to_string())
+    })
+    .await?;
+    app.state::<crate::startup_state::NativeStartup>()
+        .wait()
+        .await?;
+    let result = crate::startup::on_main(&app, move |app| {
+        if !app
+            .state::<crate::lifecycle::AppLifecycle>()
+            .startup_work_allowed()
+        {
+            return Err("application exited before automation initialization".into());
+        }
+        initialize_controls(&app, saved)
+    })
+    .await;
     if let Err(error) = &result {
-        report(app, error.clone());
+        report(&app, error.clone());
     }
     result
 }
 
-fn initialize_controls(app: &AppHandle) -> Result<(), String> {
+fn initialize_controls(
+    app: &AppHandle,
+    saved: RuntimeSettingsSnapshot<AutomationPreferences>,
+) -> Result<(), String> {
     app.plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(|app, key, event| {
@@ -102,9 +123,6 @@ fn initialize_controls(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     network::start(app.clone());
-    let saved: RuntimeSettingsSnapshot<AutomationPreferences> = crate::settings_store()?
-        .automation_settings()
-        .map_err(|error| error.to_string())?;
     let keys = saved.settings.validate()?;
     hotkeys::replace_keys(app, &[], &keys, || Ok(())).map_err(|error| error.message)?;
     let state = app.state::<ManagedAutomation>();

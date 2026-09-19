@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use cfw_engine_api::EngineEvent;
@@ -15,12 +15,16 @@ use crate::lifecycle::{AppLifecycle, MigrationHandoffStatus};
 const MAIN_WINDOW_LABEL: &str = "main";
 const PARENT_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PARENT_EXIT_MAX_CHECKS: usize = 1_001;
+const WINDOW_VISIBILITY_DEFAULT: u8 = 0;
+const WINDOW_VISIBILITY_SHOW: u8 = 1;
+const WINDOW_VISIBILITY_HIDE: u8 = 2;
 
 pub(crate) struct LaunchContext {
     migration_handoff: bool,
     handoff_ticket: Option<ConsumedHandoffTicket>,
     _handoff_lease: Option<MigrationHandoffLease>,
     initial_window_presented: AtomicBool,
+    requested_visibility: AtomicU8,
     renderer_ready: RendererReadyGate,
 }
 
@@ -31,6 +35,7 @@ impl LaunchContext {
             handoff_ticket: None,
             _handoff_lease: None,
             initial_window_presented: AtomicBool::new(false),
+            requested_visibility: AtomicU8::new(WINDOW_VISIBILITY_DEFAULT),
             renderer_ready: RendererReadyGate::default(),
         }
     }
@@ -41,6 +46,7 @@ impl LaunchContext {
             handoff_ticket: Some(ticket),
             _handoff_lease: Some(lease),
             initial_window_presented: AtomicBool::new(false),
+            requested_visibility: AtomicU8::new(WINDOW_VISIBILITY_DEFAULT),
             renderer_ready: RendererReadyGate::default(),
         }
     }
@@ -49,12 +55,42 @@ impl LaunchContext {
         self.migration_handoff
     }
 
+    pub(crate) fn note_window_presented(&self) {
+        if !self.migration_handoff {
+            self.requested_visibility
+                .store(WINDOW_VISIBILITY_SHOW, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn note_window_hidden(&self) {
+        if !self.migration_handoff {
+            self.requested_visibility
+                .store(WINDOW_VISIBILITY_HIDE, Ordering::Release);
+        }
+    }
+
     fn claim_initial_window_presentation(&self) -> bool {
         !self.migration_handoff
             && self
                 .initial_window_presented
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
+    }
+
+    fn present_initial_with<F>(&self, present: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        if self.claim_initial_window_presentation()
+            && let Err(error) = present()
+        {
+            // A failed native show must remain retryable by the other startup
+            // entry point; claiming it is not evidence that a window appeared.
+            self.initial_window_presented
+                .store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn require_handoff_ticket(&self) -> Result<&ConsumedHandoffTicket, String> {
@@ -396,14 +432,17 @@ pub(crate) struct BootPayload {
 }
 
 #[tauri::command]
-pub(crate) fn boot_payload(
+pub(crate) async fn boot_payload(
     window: WebviewWindow,
     launch: State<'_, LaunchContext>,
     lifecycle: State<'_, AppLifecycle>,
 ) -> Result<BootPayload, String> {
-    if launch.claim_initial_window_presentation() {
-        present_initial_dashboard(&window)?;
-    }
+    present_loaded_dashboard(&window).await?;
+    window
+        .app_handle()
+        .state::<crate::startup_state::NativeStartup>()
+        .wait()
+        .await?;
     Ok(BootPayload {
         product: ProductInfo {
             name: "Clash for Mac",
@@ -418,14 +457,37 @@ pub(crate) fn boot_payload(
     })
 }
 
-fn present_initial_dashboard(window: &WebviewWindow) -> Result<(), String> {
+fn present_initial_dashboard(
+    window: &WebviewWindow,
+    settings: Result<crate::window_state::InitialWindowSettings, String>,
+) -> Result<(), String> {
     if window.label() != MAIN_WINDOW_LABEL {
         return Err("initial presentation is restricted to the main window".into());
     }
 
-    match crate::commands::silent_start_enabled() {
-        Ok(true) => Ok(()),
-        Ok(false) => crate::shell::prepare_migration_handoff_window(window.app_handle()),
+    match settings {
+        Ok(settings) => {
+            let app = window.app_handle();
+            let visibility = app
+                .state::<LaunchContext>()
+                .requested_visibility
+                .load(Ordering::Acquire);
+            let explicitly_opened = visibility != WINDOW_VISIBILITY_DEFAULT;
+            if let Err(error) = crate::window_state::restore_initial_window_bounds(
+                app,
+                &settings,
+                explicitly_opened,
+            ) {
+                crate::emit_startup_error(app, "window_bounds_restore_failed", error);
+            }
+            if visibility == WINDOW_VISIBILITY_HIDE {
+                window.hide().map_err(|error| error.to_string())
+            } else if settings.silent_start && !explicitly_opened {
+                crate::shell::apply_silent_start(app)
+            } else {
+                crate::shell::prepare_migration_handoff_window(app)
+            }
+        }
         Err(settings_error) => {
             // Do not strand the process as an invisible menu-bar app when
             // startup preferences are unreadable. Present the static failure
@@ -440,6 +502,38 @@ fn present_initial_dashboard(window: &WebviewWindow) -> Result<(), String> {
             }
         }
     }
+}
+
+/// Page load is a native event: it still occurs when main.js cannot be loaded
+/// or evaluated. Presentation must not depend exclusively on renderer IPC.
+pub(crate) async fn present_loaded_dashboard(window: &WebviewWindow) -> Result<(), String> {
+    if window
+        .app_handle()
+        .state::<LaunchContext>()
+        .is_migration_handoff()
+    {
+        return Ok(());
+    }
+    let settings =
+        crate::startup_state::prepare_off_main(crate::window_state::load_initial_window_settings)
+            .await;
+    let window = window.clone();
+    crate::startup::on_main(window.app_handle(), {
+        let window = window.clone();
+        move |app| {
+            app.state::<LaunchContext>()
+                .present_initial_with(|| present_initial_dashboard(&window, settings))
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) fn reload_dashboard(window: WebviewWindow) -> Result<(), String> {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err("dashboard reload is restricted to the main window".into());
+    }
+    crate::shell::reload_dashboard(window.app_handle())
 }
 
 #[tauri::command]
@@ -462,6 +556,30 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn failed_initial_window_presentation_can_be_retried_without_representing_success() {
+        let launch = LaunchContext::dashboard();
+        let calls = AtomicUsize::new(0);
+        assert!(
+            launch
+                .present_initial_with(|| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Err("window unavailable".into())
+                })
+                .is_err()
+        );
+        launch
+            .present_initial_with(|| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+            .unwrap();
+        launch
+            .present_initial_with(|| panic!("already presented"))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
 
     fn challenges() -> Vec<RendererReadyChallenge> {
         (1..=3)
@@ -637,6 +755,7 @@ mod tests {
             handoff_ticket: None,
             _handoff_lease: None,
             initial_window_presented: AtomicBool::new(false),
+            requested_visibility: AtomicU8::new(WINDOW_VISIBILITY_DEFAULT),
             renderer_ready: RendererReadyGate::default(),
         };
         assert!(inconsistent.require_handoff_ticket().is_err());

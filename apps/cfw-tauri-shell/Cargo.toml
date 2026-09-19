@@ -18,6 +18,11 @@ name = "service_maintenance_main_run_loop"
 path = "tests/service_maintenance_main_run_loop.rs"
 harness = false
 
+[[test]]
+name = "startup_main_run_loop"
+path = "tests/startup_main_run_loop.rs"
+harness = false
+
 [dependencies]
 cfw-application = { path = "../../crates/cfw-application" }
 cfw-apple-network = { path = "../../crates/cfw-apple-network" }

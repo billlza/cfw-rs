@@ -436,6 +436,181 @@ async fn periodic_query_failure_invalidates_active_snapshot_without_releasing_ow
 }
 
 #[tokio::test]
+async fn periodic_read_only_status_failure_recovers_without_native_restart() {
+    for mode in [
+        EngineMode::LocalProxy,
+        EngineMode::SystemProxy,
+        EngineMode::Tunnel,
+        EngineMode::TunnelSystemProxy,
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        let coordinator = coordinator(backend.clone());
+        let active = coordinator
+            .set_mode(
+                mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await
+            .unwrap();
+        *backend.fail_query.lock().unwrap() = true;
+        wait_for_failed(&coordinator).await;
+        *backend.fail_query.lock().unwrap() = false;
+        let mut changes = coordinator.subscribe();
+        let recovered = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let current = changes.borrow_and_update().clone();
+                if current.state.active_mode() == mode {
+                    break current;
+                }
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("a read-only observation must resume after its transient failure");
+        assert_eq!(
+            recovered, active,
+            "only the previously attested runtime may recover"
+        );
+        assert_eq!(
+            backend.proxy_requests().len() + backend.tunnel_requests().len(),
+            1,
+            "observation recovery cannot start a replacement core"
+        );
+        assert!(backend.proxy_stop_contexts().is_empty());
+        assert!(backend.tunnel_stop_contexts().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn status_observation_does_not_retry_identity_or_policy_failures() {
+    for kind in [
+        BackendErrorKind::IdentityRejected,
+        BackendErrorKind::PermissionDenied,
+        BackendErrorKind::JournalCorrupt,
+        BackendErrorKind::Internal,
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        let coordinator = coordinator(backend.clone());
+        coordinator
+            .set_mode(
+                EngineMode::SystemProxy,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await
+            .unwrap();
+        *backend.query_error.lock().unwrap() = Some(kind);
+        wait_for_failed(&coordinator).await;
+        let queries = backend.query_count();
+        *backend.query_error.lock().unwrap() = None;
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert!(matches!(
+            coordinator.snapshot().state,
+            EngineState::Failed { .. }
+        ));
+        assert_eq!(
+            backend.query_count(),
+            queries,
+            "{kind:?} is not read-only retry authorization"
+        );
+    }
+}
+
+#[tokio::test]
+async fn transient_status_recovery_rejects_another_generation_and_stays_failed() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    let active = coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .unwrap();
+    let EngineState::ProxyActive { runtime } = active.state else {
+        panic!("proxy must be active")
+    };
+    *backend.fail_query.lock().unwrap() = true;
+    wait_for_failed(&coordinator).await;
+    let mut foreign = runtime.clone();
+    foreign.context.generation += 1;
+    backend.set_native_status(NativeEngineStatus::SystemProxy { runtime: foreign });
+    *backend.fail_query.lock().unwrap() = false;
+    let mut changes = coordinator.subscribe();
+    tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if matches!(&changes.borrow_and_update().state, EngineState::Failed { error, .. } if error.contains("identity mismatch")) { break; }
+            changes.changed().await.unwrap();
+        }
+    }).await.expect("foreign runtime must be rejected");
+    let queries = backend.query_count();
+    backend.set_native_status(NativeEngineStatus::SystemProxy { runtime });
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+    assert_eq!(
+        backend.query_count(),
+        queries,
+        "identity drift terminates automatic status recovery"
+    );
+    assert_eq!(backend.proxy_requests().len(), 1);
+    assert!(backend.proxy_stop_contexts().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_off_discards_pending_status_recovery_and_retains_its_stop_barrier() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .unwrap();
+    *backend.fail_query.lock().unwrap() = true;
+    wait_for_failed(&coordinator).await;
+    assert!(
+        coordinator
+            .set_mode(
+                EngineMode::Off,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default()
+            )
+            .await
+            .is_err()
+    );
+    *backend.fail_query.lock().unwrap() = false;
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    assert_eq!(coordinator.snapshot().desired_mode, EngineMode::Off);
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+    coordinator
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(coordinator.snapshot().state, EngineState::Off);
+    assert_eq!(backend.proxy_requests().len(), 1);
+}
+
+#[tokio::test]
 async fn same_digest_request_reconciles_immediately_before_idempotent_success() {
     let backend = Arc::new(FakeBackend::default());
     let coordinator = EngineModeCoordinator::spawn_with_options(

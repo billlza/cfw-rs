@@ -18,6 +18,28 @@ fn test_store(name: &str) -> (PathBuf, SettingsStore) {
 }
 
 #[test]
+fn a_contended_settings_lock_times_out_without_inventing_defaults() {
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
+
+    let (root, store) = test_store("contended-startup");
+    store.write(&UiPreferences::default()).unwrap();
+    let guard = fs::File::open(&store.paths().app_home).unwrap();
+    assert_eq!(unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let (reply, result) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        reply.send(store.read_or_default()).unwrap();
+    });
+    let observed = result.recv_timeout(Duration::from_secs(5));
+    // Release even on failure so this regression also terminates against the
+    // old, unbounded flock implementation.
+    drop(guard);
+    reader.join().unwrap();
+    assert!(matches!(observed, Ok(Err(SettingsStoreError::StoreBusy))));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn runtime_settings_compare_and_swap_preserves_ui_preferences_and_rejects_stale_writes() {
     let (root, store) = test_store("runtime-cas");
     store.write(&UiPreferences::default()).unwrap();

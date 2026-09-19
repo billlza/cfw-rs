@@ -12,6 +12,8 @@ export const UI_COMMANDS = Object.freeze([
   "apply_active_profile",
   "begin_migration_handoff",
   "boot_payload",
+  "report_dashboard_startup",
+  "reload_dashboard",
   "cancel_credential_gc",
   "check_for_updates",
   "close_all_connections",

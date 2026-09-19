@@ -4,7 +4,7 @@
 //! path. Online settings changes replace a validated projection and restore the
 //! previous runtime if start or commit fails. UI-only preferences remain local.
 
-use cfw_core::{SettingsStore, UiPreferences};
+use cfw_core::UiPreferences;
 #[cfg(test)]
 use cfw_engine_api::EngineSnapshot;
 use cfw_engine_api::{EngineMode, EngineState};
@@ -334,14 +334,14 @@ pub(crate) async fn set_log_level(
 /// configuration is exactly what the validated projection forbids, so mixin can
 /// only be off.
 #[tauri::command]
-pub(crate) fn set_mixin_enabled(enabled: bool) -> Result<UiSettingsSnapshot, String> {
+pub(crate) async fn set_mixin_enabled(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     if enabled {
         return Err(
             "profile mixin cannot be honoured: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy, so nothing was changed"
                 .into(),
         );
     }
-    settings_snapshot()
+    crate::startup_state::prepare_off_main(settings_snapshot).await
 }
 
 /// Validates a restore-DNS request without touching host DNS.
@@ -408,29 +408,35 @@ fn parse_restore_dns_servers(servers: &str) -> Result<RestoreDnsRequest, String>
 /// that only the transactional Login Item command may change, so resetting it
 /// here would leave the stored preference and the system state disagreeing.
 #[tauri::command]
-pub(crate) fn reset_settings_snapshot(
+pub(crate) async fn reset_settings_snapshot(
     app: AppHandle,
     window_bounds: State<'_, WindowBoundsManager>,
+    mutations: State<'_, super::UiSettingsMutations>,
 ) -> Result<UiSettingsSnapshot, String> {
-    let store = settings_store()?;
-    let current = store.read_or_default().map_err(|error| error.to_string())?;
-    let defaults = UiPreferences {
-        launch_at_login: current.launch_at_login,
-        ..UiPreferences::default()
-    };
-    window_bounds.commit_retention(&app, defaults.retain_window_bounds, || {
-        write_defaults(&store, defaults)
+    let _mutation = mutations.reserve()?;
+    let snapshot = window_bounds
+        .commit_retention(
+            &app,
+            UiPreferences::default().retain_window_bounds,
+            move || {
+                let store = settings_store()?;
+                let current = store.read_or_default().map_err(|error| error.to_string())?;
+                let defaults = UiPreferences {
+                    launch_at_login: current.launch_at_login,
+                    ..UiPreferences::default()
+                };
+                store.write(&defaults).map_err(|error| error.to_string())?;
+                store.snapshot().map_err(|error| error.to_string())
+            },
+        )
+        .await?;
+    crate::startup_state::prepare_off_main(move || {
+        Ok(super::settings::with_login_item_status(
+            snapshot,
+            cfw_platform::MacOsPlatformService.login_item_status(),
+        ))
     })
-}
-
-fn write_defaults(
-    store: &SettingsStore,
-    preferences: UiPreferences,
-) -> Result<UiSettingsSnapshot, String> {
-    store
-        .write(&preferences)
-        .map_err(|error| error.to_string())?;
-    settings_snapshot_with_live_status(store)
+    .await
 }
 
 fn settings_snapshot() -> Result<UiSettingsSnapshot, String> {
@@ -833,9 +839,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn runtime_levels_are_supported_while_untyped_mixin_remains_rejected() {
-        let mixin = set_mixin_enabled(true).expect_err("untyped mixin must be refused");
+    #[tokio::test]
+    async fn runtime_levels_are_supported_while_untyped_mixin_remains_rejected() {
+        let mixin = set_mixin_enabled(true)
+            .await
+            .expect_err("untyped mixin must be refused");
         assert!(mixin.contains("nothing was changed"));
         assert_eq!(
             super::super::runtime_settings::log_level(" INFO ").unwrap(),

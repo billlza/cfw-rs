@@ -263,7 +263,7 @@ pub(crate) async fn update_profile(
 /// Renames a profile and rebinds its subscription URL. The validated document
 /// is untouched, so neither the digest nor the selection changes.
 #[tauri::command]
-pub(crate) fn update_profile_info(
+pub(crate) async fn update_profile_info(
     engine: State<'_, ManagedEngine>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
@@ -279,15 +279,18 @@ pub(crate) fn update_profile_info(
     let _maintenance = engine
         .reserve_maintenance()
         .map_err(|error| error.to_string())?;
-    profiles
-        .repository()
-        .update_metadata(
-            &id,
-            Some(&name),
-            source_url.as_ref().map(|url| url.as_str()),
-        )
-        .map(|_record| ())
-        .map_err(|error| error.to_string())
+    let repository = profiles.repository().clone();
+    crate::startup_state::prepare_off_main(move || {
+        repository
+            .update_metadata(
+                &id,
+                Some(&name),
+                source_url.as_ref().map(|url| url.as_str()),
+            )
+            .map(|_record| ())
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]

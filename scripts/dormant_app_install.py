@@ -377,6 +377,18 @@ INSTALLED_40069_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Installed 40070 and its retained notarized app independently match this tree.
+# The bounded dashboard-startup correction changes product bytes while keeping
+# the current engine v6 / Authority v1.1 maintenance vocabulary.
+INSTALLED_40070_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40070",
+    tree_sha256="9adab1e77ce478799253e7fa5fc9e0314e2ee2b9b5a8ec8830782fcbb1b9e03f",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
@@ -390,6 +402,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40067_PREDECESSOR.build_number: INSTALLED_40067_PREDECESSOR,
         INSTALLED_40068_PREDECESSOR.build_number: INSTALLED_40068_PREDECESSOR,
         INSTALLED_40069_PREDECESSOR.build_number: INSTALLED_40069_PREDECESSOR,
+        INSTALLED_40070_PREDECESSOR.build_number: INSTALLED_40070_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

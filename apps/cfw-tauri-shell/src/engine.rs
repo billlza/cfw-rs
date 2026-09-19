@@ -370,44 +370,16 @@ impl ManagedEngine {
     }
 }
 
-const ENGINE_LINEAGE_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Keeps synchronous Keychain access from holding Tauri's setup callback
-/// forever. A timeout never invents lineage: the coordinator falls back to its
-/// existing cleanup-only, journal-unavailable state while this one isolated
-/// worker is allowed to finish and release Security.framework resources.
-struct StartupBoundedGenerationStore {
-    inner: Arc<dyn cfw_engine_api::EngineGenerationStore>,
+/// Preparing filesystem / Keychain state never starts the coordinator. The
+/// startup owner admits this task only after checking for an intervening quit.
+pub(crate) struct PreparedEngine {
+    pub(crate) engine: ManagedEngine,
+    pub(crate) task: cfw_application::CoordinatorTask,
 }
 
-impl cfw_engine_api::EngineGenerationStore for StartupBoundedGenerationStore {
-    fn load(&self) -> Result<cfw_engine_api::EngineLineage, String> {
-        let inner = Arc::clone(&self.inner);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new()
-            .name("cfw-engine-lineage-load".into())
-            .spawn(move || {
-                std::mem::drop(sender.send(inner.load()));
-            })
-            .map_err(|error| format!("cannot start engine lineage load worker: {error}"))?;
-        match receiver.recv_timeout(ENGINE_LINEAGE_STARTUP_TIMEOUT) {
-            Ok(result) => result,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
-                "authoritative engine lineage load timed out after 5 seconds; network starts remain disabled until relaunch"
-                    .into(),
-            ),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err("engine lineage load worker stopped without a result".into())
-            }
-        }
-    }
-
-    fn reserve_next(&self, expected_generation: u64) -> Result<u64, String> {
-        self.inner.reserve_next(expected_generation)
-    }
-}
-
-pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<ManagedEngine, String> {
+pub(crate) fn prepare_managed_engine(
+    bridge: NativeFrameworkBridge,
+) -> Result<PreparedEngine, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
     let (settings, cursor) = match load_replacement_engine_settings(&store.paths().app_home)? {
@@ -438,17 +410,16 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
     let preflight_backend: Arc<dyn CutoverPreflightBackend> = concrete_backend;
     let generation_store =
         KeychainEngineGenerationStore::new(store.paths().app_home.join("engine"));
+    let mut prepared_task = None;
     let persisted = match generation_store {
         Ok(generation_store) => {
             let generation_store: Arc<dyn cfw_engine_api::EngineGenerationStore> =
                 Arc::new(generation_store);
             EngineModeCoordinator::spawn_persisted_with(
                 engine_backend.clone(),
-                Arc::new(StartupBoundedGenerationStore {
-                    inner: generation_store,
-                }),
+                generation_store,
                 NATIVE_BRIDGE_OUTER_WATCHDOG,
-                spawn_coordinator_task,
+                |task| prepared_task = Some(task),
             )
         }
         Err(error) => Err(cfw_application::EngineCoordinatorError::Journal(
@@ -463,13 +434,13 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
                 engine_backend,
                 message.clone(),
                 NATIVE_BRIDGE_OUTER_WATCHDOG,
-                spawn_coordinator_task,
+                |task| prepared_task = Some(task),
             );
             (coordinator, Some(message))
         }
     };
 
-    Ok(ManagedEngine {
+    let engine = ManagedEngine {
         coordinator,
         capabilities: EngineCapabilities {
             local_proxy: native_available && lineage_failure.is_none(),
@@ -490,11 +461,9 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
             cursor,
             active: None,
         })),
-    })
-}
-
-fn spawn_coordinator_task(task: cfw_application::CoordinatorTask) {
-    std::mem::drop(tauri::async_runtime::spawn(task));
+    };
+    let task = prepared_task.ok_or("engine preparation produced no coordinator task")?;
+    Ok(PreparedEngine { engine, task })
 }
 
 pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
@@ -517,6 +486,19 @@ pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         while snapshots.changed().await.is_ok() {
             let snapshot = snapshots.borrow().clone();
+            if let EngineState::Failed {
+                generation,
+                target,
+                error,
+            } = &snapshot.state
+            {
+                crate::diagnostics::record(
+                    &app,
+                    cfw_core::DiagnosticTopic::Network,
+                    "engine_failed",
+                    &format!("generation={generation} target={target:?}: {error}"),
+                );
+            }
             // Evidence transactions may temporarily use a source-owned settings
             // variant (notably IPv6-disabled and exact Off). Ask the serialized
             // actor for the settings it accepted for this exact snapshot instead

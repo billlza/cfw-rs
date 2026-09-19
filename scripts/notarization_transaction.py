@@ -530,6 +530,17 @@ MACOS_27_26A5425A_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     kernel_release="27.0.0",
     architecture="arm64",
 )
+# On this release build, strict codesign verification passes and distribution
+# reports only the missing pre-submission ticket, while notary-submission emits
+# the same exact finding. The later Apple and Gatekeeper checks still apply.
+MACOS_27_26A428_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+    product_name="macOS",
+    product_version="27.0",
+    build_version="26A428",
+    kernel_name="Darwin",
+    kernel_release="27.0.0",
+    architecture="arm64",
+)
 MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
     {
         MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
@@ -537,6 +548,7 @@ MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
         MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
         MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
         MACOS_27_26A5425A_COMPATIBILITY_IDENTITY,
+        MACOS_27_26A428_COMPATIBILITY_IDENTITY,
     }
 )
 

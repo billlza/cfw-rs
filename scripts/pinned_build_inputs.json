@@ -3400,7 +3400,7 @@
     "scripts/dormant_app_install.py": "bac1e46720e5990c51b069393295781fcee0258d93badc88e2b75332ea2f48e7",
     "scripts/current_service_transaction.py": "8fdfaced5ee24fde78d79bda18286367b4cc1efd940daa72abb7f46f3304b343",
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
-    "scripts/notarization_transaction.py": "e8e248483ffc25cb43170aa419d940cd7cf3372277c7b69c1a22fb39a4830bd3",
+    "scripts/notarization_transaction.py": "97552c4e0208e5121545149016b2dca04a750b139296438ee7a24dc6e76bc764",
     "scripts/notarization_executor.py": "15a2065c0f7792d3b0609082471d557136b26575d3d7244b15434cc461e50005",
     "scripts/run_notarization_transaction.sh": "8ee5288ff7e441cf34c0295b0f8debe78c057c9cde1b1393c9f7ef77b401de0e",
     "scripts/dmg_notarization_transaction.py": "9f472927720d153df58fb4b3c9df41c064565ab1b63c689fd463accdfd5fd6e6",

@@ -528,7 +528,7 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
                     ],
                 )
 
-    def test_accepts_each_reviewed_macOS_27_seed_with_exact_corroboration(
+    def test_accepts_each_reviewed_macOS_27_build_with_exact_corroboration(
         self,
     ) -> None:
         self.assertEqual(
@@ -548,6 +548,7 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
                     "26A5416b",
                     "26A5421a",
                     "26A5425a",
+                    "26A428",
                 )
             ),
         )

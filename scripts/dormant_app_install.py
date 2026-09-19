@@ -138,6 +138,8 @@ PAYLOAD_NAME: Final = TARGET_NAME
 PARTIAL_PAYLOAD_NAME: Final = ".Clash for Mac.app.partial"
 JOURNAL_NAME: Final = ".com.bill.clashformac.dormant-install.json"
 JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.dormant-install.pending"
+SERVICE_DNS_CONTINUATION_NAME: Final = "dns-observation-continuation.json"
+SERVICE_DNS_CONTINUATION_PENDING: Final = ".dns-observation-continuation.pending"
 LOCK_NAME: Final = ".com.bill.clashformac.dormant-install.lock"
 MAINTENANCE_LOCK_NAME: Final = ".com.bill.clashformac.release-maintenance-v1.lock"
 STAGING_PREFIX: Final = ".com.bill.clashformac.dormant-install."
@@ -2911,6 +2913,54 @@ def _read_private_service_document(
     return value, data
 
 
+def validate_service_dns_continuation(
+    value: dict[str, Any],
+    intent: dict[str, Any],
+    events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    """Bind an observed DNS-only gap between completed teardown and installation.
+
+    The four teardown events keep their original guard and hashes. This record
+    does not claim that DNS stayed unchanged across the idle gap. Subsequent
+    mutations must retain the newly observed complete guard without changes.
+    """
+    fields = {
+        "document", "schema_version", "transaction_id", "intent_sha256",
+        "decommissioned_event_sha256", "guard_before", "guard_after",
+    }
+    if not isinstance(value, dict) or set(value) != fields or len(events) < 4:
+        raise InstallError("service_dns_continuation_invalid", "DNS continuation shape is invalid")
+    before = _validate_guard(value["guard_before"])
+    after = _validate_guard(value["guard_after"])
+    if (
+        value["document"] != "cfm-service-dns-observation-continuation-v1"
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["transaction_id"] != intent["transaction_id"]
+        or value["intent_sha256"] != _sha256_bytes(_canonical_json(intent))
+        or value["decommissioned_event_sha256"] != _sha256_bytes(_canonical_json(events[3]))
+        or events[3]["phase"] != "decommissioned"
+        or before != events[0]["guard_after"]
+        or not before["cfw_processes"]
+        or {key for key in before if before[key] != after[key]} != {"dns_sha256"}
+    ):
+        raise InstallError("service_dns_continuation_invalid", "DNS continuation does not bind the completed teardown and an exclusive DNS change")
+    return after
+
+
+def service_dns_continuation_guard(
+    directory_fd: int,
+    intent: dict[str, Any],
+    events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    if SERVICE_DNS_CONTINUATION_NAME not in os.listdir(directory_fd):
+        return events[0]["guard_after"]
+    value, _data = _read_private_service_document(
+        directory_fd, SERVICE_DNS_CONTINUATION_NAME, "DNS observation continuation"
+    )
+    return validate_service_dns_continuation(value, intent, events)
+
+
 def require_retired_service_transaction_names_absent(parent_fd: int) -> None:
     """Prove every retired service-transaction name is absent beneath one fd."""
 
@@ -2999,6 +3049,8 @@ def require_decommissioned_service_transaction(
         }
         if authority_recovery_prepared:
             expected_inventory.add(AUTHORITY_RECOVERY_INTENT_NAME)
+        if SERVICE_DNS_CONTINUATION_NAME in inventory:
+            expected_inventory.add(SERVICE_DNS_CONTINUATION_NAME)
         if (
             AUTHORITY_RECOVERY_PENDING_INTENT_NAME in inventory
             or inventory != expected_inventory
@@ -3176,6 +3228,7 @@ def require_decommissioned_service_transaction(
                     "Authority recovery intent lineage is invalid",
                 )
 
+        continued_guard = service_dns_continuation_guard(directory_fd, intent, validated_events)
         visible_after = os.stat(
             directory_name,
             dir_fd=parent_fd,
@@ -3195,7 +3248,7 @@ def require_decommissioned_service_transaction(
                 "service_decommission_evidence_invalid",
                 "service transaction has no CFW guard baseline",
             )
-        _assert_guard_unchanged(baseline_guard, expected_guard)
+        _assert_guard_unchanged(continued_guard, expected_guard)
         return normalized_environment
     except InstallError as error:
         if error.code == "journal_invalid":

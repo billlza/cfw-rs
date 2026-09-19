@@ -1187,6 +1187,26 @@ wire proof.
    scripts/run_ga_acceptance_journal_export.sh --export
    ```
 
+   If only the DNS observation changes after a completed decommission and
+   before an installation journal exists, use the explicit continuation:
+
+   ```bash
+   scripts/run_current_service_transaction.sh --continue-after-dns-change
+   ```
+
+   This command changes no network setting, registration or application. It
+   revalidates both exact applications, the unchanged environment, dormant CFM,
+   and two matching live CFW observations. CFW processes, binaries, proxy,
+   routes and TUN must still match the original teardown; only the DNS digest
+   may differ, and the live guard still requires CFW's exact DNS binding.
+   A separate immutable record binds the old and new guards to the original
+   intent and completed decommission event. It explicitly records a gap; it
+   never reports unchanged DNS across that gap or rewrites old events.
+   Installation and subsequent service actions each protect the new complete
+   guard before and after every mutation. Export retains both guard segments
+   and the continuation. Changed identities, other network changes, an already
+   started installation, or a second differing continuation remain blockers.
+
    The history step is needed when the preceding completed installation still
    occupies the fixed producer paths. It validates both terminal journals and
    the exact installed predecessor under the existing maintenance, service and

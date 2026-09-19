@@ -535,6 +535,8 @@ def validate_terminal_snapshot_files(
             else set()
         ),
     }
+    if install.SERVICE_DNS_CONTINUATION_NAME in files:
+        expected_names.add(install.SERVICE_DNS_CONTINUATION_NAME)
     if set(files) != expected_names:
         raise install.InstallError(
             "service_journal_invalid",
@@ -576,6 +578,11 @@ def validate_terminal_snapshot_files(
     baseline_guard: dict[str, Any] | None = None
     events: list[dict[str, Any]] = []
     for sequence, name in enumerate(event_names):
+        if sequence == 4 and install.SERVICE_DNS_CONTINUATION_NAME in files:
+            baseline_guard = install.validate_service_dns_continuation(
+                _strict_json_bytes(files[install.SERVICE_DNS_CONTINUATION_NAME], "DNS observation continuation"),
+                intent, events,
+            )
         allowed_actions, allowed_profiles = bound.service_event_contract(
             sequence,
             authority_recovery_prepared=authority_recovery_prepared,
@@ -1219,6 +1226,10 @@ class ServiceEventStore:
         directory_fd = self._open_transaction_directory(name)
         try:
             names = os.listdir(directory_fd)
+            dns_continuation = install.SERVICE_DNS_CONTINUATION_NAME in names
+            dns_pending = install.SERVICE_DNS_CONTINUATION_PENDING in names
+            if dns_continuation and dns_pending:
+                raise install.InstallError("service_journal_invalid", "published and pending DNS continuations coexist")
             authority_recovery_prepared = AUTHORITY_RECOVERY_INTENT_NAME in names
             authority_recovery_pending = (
                 AUTHORITY_RECOVERY_PENDING_INTENT_NAME in names
@@ -1256,6 +1267,8 @@ class ServiceEventStore:
                         if authority_recovery_pending
                         else set()
                     ),
+                    *({install.SERVICE_DNS_CONTINUATION_NAME} if dns_continuation else set()),
+                    *({install.SERVICE_DNS_CONTINUATION_PENDING} if dns_pending else set()),
                 }
                 or len(pending_names) > 1
                 or not 1 <= len(event_names) <= min(MAX_EVENTS, len(PHASES))
@@ -1268,6 +1281,8 @@ class ServiceEventStore:
                 raise install.InstallError(
                     "service_journal_invalid", "service event sequence has a gap"
                 )
+            if (dns_continuation and len(event_names) < 4) or (dns_pending and (len(event_names) != 4 or pending_names)):
+                raise install.InstallError("service_journal_invalid", "DNS continuation is outside the completed teardown boundary")
             intent = validate_intent(
                 _strict_json_bytes(
                     self._read(directory_fd, INTENT_NAME, "service intent"),
@@ -1389,6 +1404,8 @@ class ServiceEventStore:
                 event_names[initial_count:],
                 start=initial_count,
             ):
+                if sequence == 4 and dns_continuation:
+                    baseline_guard = install.service_dns_continuation_guard(directory_fd, intent, events)
                 data = self._read(directory_fd, event_name, "service event")
                 allowed_actions, allowed_profiles = bound.service_event_contract(
                     sequence,
@@ -1407,6 +1424,17 @@ class ServiceEventStore:
                 if baseline_guard is None:
                     baseline_guard = event["guard_after"]
                 previous_digest = _sha256(data)
+            if dns_pending:
+                value, _data = install._read_private_service_document(
+                    directory_fd, install.SERVICE_DNS_CONTINUATION_PENDING, "pending DNS observation continuation"
+                )
+                install.validate_service_dns_continuation(value, intent, events)
+                self._publish_pending_event(
+                    directory_fd, install.SERVICE_DNS_CONTINUATION_PENDING, install.SERVICE_DNS_CONTINUATION_NAME
+                )
+                dns_continuation = True
+            if dns_continuation:
+                baseline_guard = install.service_dns_continuation_guard(directory_fd, intent, events)
             if pending_names:
                 sequence = len(events)
                 expected_pending = (
@@ -1548,6 +1576,8 @@ class ServiceEventStore:
                     "service_journal_pending",
                     "terminal service snapshot refuses pending journal entries",
                 )
+            if install.SERVICE_DNS_CONTINUATION_PENDING in names:
+                raise install.InstallError("service_journal_pending", "terminal service snapshot refuses a pending DNS continuation")
         finally:
             os.close(directory_fd)
 
@@ -1678,7 +1708,7 @@ class ServiceEventStore:
                 },
                 expected_sequence=sequence,
                 previous_event_sha256=_sha256(previous_data),
-                expected_guard=events[0]["guard_after"],
+                expected_guard=install.service_dns_continuation_guard(directory_fd, intent, events),
                 intent_sha256=events[0]["intent_sha256"],
                 expected_actions=allowed_actions,
                 expected_off_proof_profiles=allowed_profiles,
@@ -1690,6 +1720,15 @@ class ServiceEventStore:
             self._write_new(directory_fd, pending_name, event)
             self._publish_pending_event(directory_fd, pending_name, final_name)
             return event
+        finally:
+            os.close(directory_fd)
+
+    def effective_guard(
+        self, intent: dict[str, Any], events: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        directory_fd = self._open_transaction_directory()
+        try:
+            return install.service_dns_continuation_guard(directory_fd, intent, events)
         finally:
             os.close(directory_fd)
 
@@ -2077,7 +2116,7 @@ class CurrentServiceTransaction:
         after_action: Callable[[], None] | None = None,
     ) -> None:
         self._require_environment(intent)
-        baseline = events[0]["guard_after"]
+        baseline = store.effective_guard(intent, events)
         before = self.runtime.capture_guard()
         install._assert_guard_unchanged(baseline, before)
         receipt = _service_receipt(self.runtime, executable, action)
@@ -2108,7 +2147,8 @@ class CurrentServiceTransaction:
         events: list[dict[str, Any]],
     ) -> dict[str, Any]:
         self._require_environment(intent)
-        baseline = events[0]["guard_after"]
+        with ServiceEventStore(self.paths) as store:
+            baseline = store.effective_guard(intent, events)
         before = self.runtime.capture_guard()
         install._assert_guard_unchanged(baseline, before)
         install.require_cfm_dormant(
@@ -2131,7 +2171,8 @@ class CurrentServiceTransaction:
         uid: int,
     ) -> dict[str, Any]:
         self._require_environment(intent)
-        baseline = events[0]["guard_after"]
+        with ServiceEventStore(self.paths) as store:
+            baseline = store.effective_guard(intent, events)
         before = self.runtime.capture_guard()
         install._assert_guard_unchanged(baseline, before)
         proof = _service_receipt(self.runtime, executable, "prove-off")
@@ -2144,6 +2185,62 @@ class CurrentServiceTransaction:
         install._assert_guard_unchanged(before, after)
         self._require_environment(intent)
         return after
+
+    def continue_after_dns_change(self) -> None:
+        """Record a DNS-only observation gap before any installation begins.
+
+        This deliberately performs no registration or network mutation. Old
+        teardown events remain immutable; the continued guard is revalidated
+        by installation and every subsequent service mutation.
+        """
+        with ServiceEventStore(self.paths) as store:
+            with store.locked(require_existing=True):
+                loaded = store.load()
+                if loaded is None:
+                    raise install.InstallError("service_journal_missing", "completed teardown is absent")
+                intent, events = loaded
+                if len(events) != 4 or events[-1]["phase"] != "decommissioned":
+                    raise install.InstallError("service_dns_continuation_ineligible", "DNS continuation requires exactly completed teardown")
+                for name in (self.paths.install_paths.journal_name, self.paths.install_paths.journal_pending_name):
+                    if name in os.listdir(store.parent_fd):
+                        raise install.InstallError("service_dns_continuation_ineligible", "installation has already started")
+                candidate, previous = self._identity_pair()
+                self._require_intent_matches(intent, candidate, previous)
+                self._require_environment(intent)
+                before = self.runtime.capture_guard()
+                install.require_single_interactive_local_user(self.runtime.runner, _uid_from_guard(before))
+                install.require_cfm_dormant(
+                    before, self.runtime.runner,
+                    executable=self.paths.install_paths.candidate_executable,
+                )
+                after = self.runtime.capture_guard()
+                install._assert_guard_unchanged(before, after)
+                self._require_environment(intent)
+                value = {
+                    "document": "cfm-service-dns-observation-continuation-v1",
+                    "schema_version": 1,
+                    "transaction_id": intent["transaction_id"],
+                    "intent_sha256": _sha256(_canonical_json(intent)),
+                    "decommissioned_event_sha256": _sha256(_canonical_json(events[3])),
+                    "guard_before": events[0]["guard_after"],
+                    "guard_after": after,
+                }
+                install.validate_service_dns_continuation(value, intent, events)
+                directory_fd = store._open_transaction_directory()
+                try:
+                    if install.SERVICE_DNS_CONTINUATION_NAME in os.listdir(directory_fd):
+                        existing, _data = install._read_private_service_document(
+                            directory_fd, install.SERVICE_DNS_CONTINUATION_NAME, "DNS observation continuation"
+                        )
+                        if existing != value:
+                            raise install.InstallError("service_dns_continuation_invalid", "an existing DNS continuation binds a different observation")
+                        return
+                    store._write_new(directory_fd, install.SERVICE_DNS_CONTINUATION_PENDING, value)
+                    store._publish_pending_event(
+                        directory_fd, install.SERVICE_DNS_CONTINUATION_PENDING, install.SERVICE_DNS_CONTINUATION_NAME
+                    )
+                finally:
+                    os.close(directory_fd)
 
     def decommission(self) -> dict[str, Any]:
         with ServiceEventStore(self.paths) as store:
@@ -2438,6 +2535,7 @@ def main() -> None:
     mode.add_argument("--decommission", action="store_true")
     mode.add_argument("--recommission", action="store_true")
     mode.add_argument("--recover", action="store_true")
+    mode.add_argument("--continue-after-dns-change", action="store_true")
     if "--final" in sys.argv[1:]:
         parser.error(
             "--final is retired; "
@@ -2447,6 +2545,10 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         transaction = _transaction()
+        if arguments.continue_after_dns_change:
+            transaction.continue_after_dns_change()
+            print("DNS observation continuation recorded; network settings, registrations and application bytes were not changed")
+            return
         if arguments.preflight:
             candidate, previous, _guard = transaction.preflight()
             print(

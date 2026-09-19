@@ -97,25 +97,32 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
             if let Err(error) = crate::automation::initialize(optional.clone()).await {
                 crate::emit_startup_error(&optional, "automation_initialization_failed", error);
             }
-            #[cfg(feature = "physical-release-evidence")]
-            {
-                let worker = optional.clone();
-                if let Err(error) = prepare_off_main(move || {
-                    if !worker
-                        .state::<crate::lifecycle::AppLifecycle>()
-                        .startup_work_allowed()
-                    {
-                        return Err("application is exiting".into());
-                    }
-                    crate::packet_evidence_transport::run_packet_evidence_transaction(worker)
-                        .map_err(|error| error.to_string())
-                })
-                .await
-                {
-                    crate::emit_startup_error(&optional, "evidence_control_unavailable", error);
-                }
-            }
         });
+        #[cfg(feature = "physical-release-evidence")]
+        {
+            let evidence = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let worker = evidence.clone();
+                let result = async {
+                    worker.state::<NativeStartup>().wait().await?;
+                    prepare_off_main(move || {
+                        if !worker
+                            .state::<crate::lifecycle::AppLifecycle>()
+                            .startup_work_allowed()
+                        {
+                            return Err("application is exiting".into());
+                        }
+                        crate::packet_evidence_transport::run_packet_evidence_transaction(worker)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await
+                }
+                .await;
+                if let Err(error) = result {
+                    crate::emit_startup_error(&evidence, "evidence_control_unavailable", error);
+                }
+            });
+        }
     }
     crate::diagnostics::record(
         &app,

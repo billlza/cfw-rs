@@ -353,6 +353,36 @@ cfw_build_tauri_host_skeleton() {
 }
 """
 
+    def test_async_startup_module_must_be_declared_called_and_reach_the_transport(self) -> None:
+        rust = {
+            readiness.HOST_MAIN_PATH: "mod startup; fn main() { startup::start(); }",
+            readiness.HOST_STARTUP_PATH: "fn start() { initialize(); } async fn initialize() { crate::packet_evidence_transport::run_packet_evidence_transaction(); }",
+            readiness.HOST_PACKET_TRANSPORT_PATH: "fn run_packet_evidence_transaction() { engine.run_packet_evidence_staged_transaction(); }",
+            readiness.HOST_PACKET_ENGINE_PATH: "fn run_packet_evidence_staged_transaction() {}",
+        }
+        self.assertEqual(readiness._host_issues(self.cargo, self.build, rust)[1], [])
+        for main in (
+            "mod startup; fn main() {} fn unused() { startup::start(); }",
+            "fn main() { startup::start(); }",
+            "#[cfg(test)] mod startup; fn main() { startup::start(); }",
+            "#[cfg(test)] mod tests { mod startup; } fn main() { startup::start(); }",
+            "fn nested() { let value = 1; mod startup; } fn main() { startup::start(); }",
+        ):
+            with self.subTest(main=main):
+                changed = {**rust, readiness.HOST_MAIN_PATH: main}
+                self.assertTrue(readiness._host_issues(self.cargo, self.build, changed)[1])
+        for startup in (
+            "fn start() {} fn unused() { crate::packet_evidence_transport::run_packet_evidence_transaction(); }",
+            "fn start() { foreign::initialize(); } fn initialize() { crate::packet_evidence_transport::run_packet_evidence_transaction(); }",
+            'fn start() { println!("crate::packet_evidence_transport::run_packet_evidence_transaction()"); }',
+            "fn start() {} #[cfg(test)] mod tests { fn initialize() { crate::packet_evidence_transport::run_packet_evidence_transaction(); } }",
+            "#[cfg(test)] fn start() { crate::packet_evidence_transport::run_packet_evidence_transaction(); }",
+            "fn start() { initialize(); } #[tokio::test] async fn initialize() { crate::packet_evidence_transport::run_packet_evidence_transaction(); }",
+        ):
+            with self.subTest(startup=startup):
+                changed = {**rust, readiness.HOST_STARTUP_PATH: startup}
+                self.assertTrue(readiness._host_issues(self.cargo, self.build, changed)[1])
+
     def test_feature_build_argv_and_reachable_non_test_caller_pass(self) -> None:
         rust = {
             "apps/cfw-tauri-shell/src/main.rs": """

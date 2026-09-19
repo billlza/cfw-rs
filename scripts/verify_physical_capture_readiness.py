@@ -56,6 +56,7 @@ HOST_CARGO_PATH: Final = "apps/cfw-tauri-shell/Cargo.toml"
 HOST_BUILD_PATH: Final = "scripts/tauri_host_skeleton.sh"
 HOST_SOURCE_ROOT: Final = "apps/cfw-tauri-shell/src"
 HOST_MAIN_PATH: Final = f"{HOST_SOURCE_ROOT}/main.rs"
+HOST_STARTUP_PATH: Final = f"{HOST_SOURCE_ROOT}/startup.rs"
 HOST_PACKET_TRANSPORT_PATH: Final = f"{HOST_SOURCE_ROOT}/packet_evidence_transport.rs"
 HOST_PACKET_ENGINE_PATH: Final = f"{HOST_SOURCE_ROOT}/engine/packet_evidence.rs"
 
@@ -1196,12 +1197,16 @@ def _matching_brace(source: str, opening: int) -> int | None:
 
 def _rust_test_ranges(source: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
-    pattern = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub\s+)?mod\s+\w+\s*\{")
-    for match in pattern.finditer(source):
-        opening = source.find("{", match.start(), match.end())
-        closing = _matching_brace(source, opening)
-        if closing is not None:
-            ranges.append((match.start(), closing + 1))
+    patterns = (
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub\s+)?mod\s+\w+\s*\{",
+        r"#\s*\[\s*(?:cfg\s*\(\s*test\s*\)|(?:tokio::)?test(?:\([^]]*\))?)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+[^;{]*\{",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, source):
+            opening = source.find("{", match.start(), match.end())
+            closing = _matching_brace(source, opening)
+            if closing is not None:
+                ranges.append((match.start(), closing + 1))
     return ranges
 
 
@@ -1256,10 +1261,23 @@ def _host_control_path_ready(rust_sources: Mapping[str, str]) -> bool:
         return False
 
     main_functions = _rust_functions(rust_sources[HOST_MAIN_PATH])
-    main_calls = _rust_reachable_calls(main_functions, "main")
+    main_calls = _rust_module_calls(main_functions, "main", "")
+    entrypoint = f"packet_evidence_transport::{HOST_PACKET_ENTRYPOINT}"
+    production_calls = set(main_calls)
     if (
-        f"packet_evidence_transport::{HOST_PACKET_ENTRYPOINT}" not in main_calls
-        or "packet_evidence_transport::run_packet_evidence_unavailable" in main_calls
+        {"startup::start", "crate::startup::start"} & main_calls
+        and HOST_STARTUP_PATH in rust_sources
+        and _rust_unconditional_module(rust_sources[HOST_MAIN_PATH], "startup")
+    ):
+        production_calls.update(
+            _rust_module_calls(_rust_functions(rust_sources[HOST_STARTUP_PATH]), "start", "startup")
+        )
+    if (
+        not {entrypoint, f"crate::{entrypoint}"} & production_calls
+        or {
+            "packet_evidence_transport::run_packet_evidence_unavailable",
+            "crate::packet_evidence_transport::run_packet_evidence_unavailable",
+        } & production_calls
     ):
         return False
 
@@ -1277,6 +1295,42 @@ def _host_control_path_ready(rust_sources: Mapping[str, str]) -> bool:
 
     engine_functions = _rust_functions(rust_sources[HOST_PACKET_ENGINE_PATH])
     return HOST_PACKET_ENGINE_ENTRYPOINT in engine_functions
+
+
+def _rust_module_calls(
+    functions: Mapping[str, set[str]], root: str, module: str
+) -> set[str]:
+    """Follow only calls belonging to this module, not another module's namesakes."""
+    qualifiers = ("", "self::", f"crate::{module}::" if module else "crate::")
+    graph = {
+        name: {
+            target for target in functions
+            if any(f"{prefix}{target}" in calls for prefix in qualifiers)
+        }
+        for name, calls in functions.items()
+    }
+    return {
+        call for name in _reachable_names(graph, root)
+        for call in functions.get(name, set())
+    }
+
+
+def _rust_unconditional_module(source: str, module: str) -> bool:
+    sanitized = _rust_sanitized(source)
+    ranges = _rust_test_ranges(sanitized)
+    for match in re.finditer(rf"\bmod\s+{re.escape(module)}\s*;", sanitized):
+        if _inside_ranges(match.start(), ranges):
+            continue
+        preceding = sanitized[:match.start()]
+        if preceding.count("{") != preceding.count("}"):
+            continue
+        boundary = max(sanitized.rfind(";", 0, match.start()), sanitized.rfind("}", 0, match.start()))
+        # Only the known unconditional out-of-line module is supported. A cfg
+        # attribute or a nested declaration cannot authorize production reachability.
+        prefix = sanitized[boundary + 1:match.start()]
+        if not any(token in prefix for token in ("#", "{")):
+            return True
+    return False
 
 
 def _host_issues(

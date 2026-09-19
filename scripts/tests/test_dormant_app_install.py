@@ -1895,6 +1895,16 @@ class InstallPredecessorTests(unittest.TestCase):
             resolve_predecessor(AppIdentity("0.4.0", "40069", "f" * 64), "40071")
         self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
+    def test_installed_40070_requires_its_retained_exact_signed_tree(self) -> None:
+        identity = AppIdentity(
+            "0.4.0", "40070",
+            "9adab1e77ce478799253e7fa5fc9e0314e2ee2b9b5a8ec8830782fcbb1b9e03f",
+        )
+        self.assertEqual(resolve_predecessor(identity, "40071"), install.INSTALLED_40070_PREDECESSOR)
+        with self.assertRaises(InstallError) as raised:
+            resolve_predecessor(AppIdentity("0.4.0", "40070", "f" * 64), "40071")
+        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
+
     def test_foreign_product_version_is_rejected(self) -> None:
         with self.assertRaises(InstallError) as raised:
             resolve_predecessor(
@@ -1946,6 +1956,7 @@ class InstallPredecessorTests(unittest.TestCase):
                 "40067": install.INSTALLED_40067_PREDECESSOR,
                 "40068": install.INSTALLED_40068_PREDECESSOR,
                 "40069": install.INSTALLED_40069_PREDECESSOR,
+                "40070": install.INSTALLED_40070_PREDECESSOR,
             },
         )
         with self.assertRaises(TypeError):
@@ -1965,6 +1976,7 @@ class InstallPredecessorTests(unittest.TestCase):
             install.INSTALLED_40067_PREDECESSOR,
             install.INSTALLED_40068_PREDECESSOR,
             install.INSTALLED_40069_PREDECESSOR,
+            install.INSTALLED_40070_PREDECESSOR,
         ):
             with self.subTest(previous=predecessor.build_number):
                 bound = install.BoundInstallProfile(GA_INSTALL_PROFILE, predecessor)

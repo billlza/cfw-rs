@@ -4,7 +4,7 @@
 This module deliberately does not accept a caller-selected evidence path and it
 does not accept a list of boolean outcomes. Collection starts only after the
 existing dormant-install and current-service owners have closed their
-40071 -> 40073 journals. ``collect`` creates a durable CSPRNG challenge intent,
+40072 -> 40073 journals. ``collect`` creates a durable CSPRNG challenge intent,
 owns every runtime command and packet byte, atomically publishes the exact
 raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore;
 it never duplicates either installation state machine. ``verify`` reopens
@@ -51,6 +51,7 @@ if __package__:
         ACCEPTANCE_ROOT_RELATIVE as JOURNAL_EXPORT_ACCEPTANCE_ROOT_RELATIVE,
         ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE,
         INSTALL_RELATIVE as JOURNAL_EXPORT_INSTALL_RELATIVE,
+        PREVIOUS_BUILD,
     )
     from .harness.packet_capture import (
         ALLOWED_LINK_TYPES,
@@ -113,6 +114,7 @@ else:
         ACCEPTANCE_ROOT_RELATIVE as JOURNAL_EXPORT_ACCEPTANCE_ROOT_RELATIVE,
         ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE,
         INSTALL_RELATIVE as JOURNAL_EXPORT_INSTALL_RELATIVE,
+        PREVIOUS_BUILD,
     )
     from scripts.harness.packet_capture import (
         ALLOWED_LINK_TYPES,
@@ -180,7 +182,7 @@ PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
 
 PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 TO_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
-FROM_BUILD: Final = "40071"
+FROM_BUILD: Final = PREVIOUS_BUILD
 TEAM_ID: Final = "YKUPL7Z869"
 APP_BUNDLE_ID: Final = "com.bill.clashformac"
 PACKET_EXTENSION_BUNDLE_ID: Final = "com.bill.clashformac.packet-tunnel"
@@ -974,7 +976,9 @@ def _installed_candidate_tree(repository: Path, expected: dict[str, Any]) -> str
         or normalized["candidate"]["build_number"] != TO_BUILD
         or normalized["previous"]["build_number"] != FROM_BUILD
     ):
-        raise _error("GA install journal is not the completed 40071 to 40073 install")
+        raise _error(
+            f"GA install journal is not the completed {FROM_BUILD} to {TO_BUILD} install"
+        )
     try:
         installed = dormant_app_install.read_app_identity(INSTALLED_APP)
     except dormant_app_install.InstallError as error:
@@ -3679,7 +3683,7 @@ def self_check() -> None:
     except OSError as error:
         raise _error("GA runtime collector source/build registry is unavailable") from error
     if (
-        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40071", "40073")
+        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40072", "40073")
         or (MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS)
         != (15 * 60, 30 * 60)
         or len(CHECKS) != 12

@@ -22,11 +22,11 @@ from scripts.publication.durable_file import (
 )
 
 
-# The recorded predecessor is the installed 40071 with its real frozen tree
+# The recorded predecessor is the installed 40072 with its real frozen tree
 # identity; the install journal is only readable against the exact predecessor
 # it names, and that predecessor selects the current service vocabulary.
 PREVIOUS = install.AppIdentity(
-    "0.4.0", "40071", install.INSTALLED_40071_PREDECESSOR.tree_sha256
+    "0.4.0", "40072", install.INSTALLED_40072_PREDECESSOR.tree_sha256
 )
 CANDIDATE = install.CandidateIdentity(
     app=install.AppIdentity("0.4.0", "40073", "b" * 64),
@@ -244,6 +244,7 @@ class GAAcceptanceJournalExportTests(unittest.TestCase):
         for predecessor in (
             install.INSTALLED_40019_PREDECESSOR,
             install.INSTALLED_40041_PREDECESSOR,
+            install.INSTALLED_40071_PREDECESSOR,
         ):
             with self.subTest(previous=predecessor.build_number):
                 fixture = JournalExportFixture(
@@ -888,7 +889,7 @@ class JournalExportSourceContractTests(unittest.TestCase):
                 journal_export.PREVIOUS_BUILD,
                 journal_export.GA_BUILD,
             ),
-            ("0.4.0", "40071", "40073"),
+            ("0.4.0", "40072", "40073"),
         )
         self.assertEqual(
             journal_export.ENVIRONMENT_RELATIVE,

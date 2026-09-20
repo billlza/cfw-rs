@@ -37,8 +37,10 @@ from .sbom import (
 )
 from .source_archive import verify_source_archive
 if __package__.startswith("scripts."):
+    from scripts.candidate_freeze import FreezeVerifier
     from scripts.release_build_identity import bundle_build_identity
 else:
+    from candidate_freeze import FreezeVerifier
     from release_build_identity import bundle_build_identity
 
 
@@ -49,7 +51,8 @@ def _verify_evidence_manifest(root: Path) -> None:
         "publication evidence manifest",
     )
     if (
-        manifest["schema_version"] != 1
+        type(manifest["schema_version"]) is not int
+        or manifest["schema_version"] != 1
         or manifest["algorithm"] != "sha256-tree-v1"
         or manifest["root"] != "publication-evidence"
     ):
@@ -102,6 +105,8 @@ def _verify_artifact_inputs(
     artifacts: list[dict[str, Any]],
     app: Path,
     build_number: str,
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> None:
     from .release_contract import native_products_root
 
@@ -110,6 +115,10 @@ def _verify_artifact_inputs(
         native_products_root(repository, build_number),
         app,
         build_number,
+        # This argument controls release_git reads. None selects that adapter's
+        # fixed minimal environment, never the caller's ambient Git state.
+        None,
+        freeze_verifier=freeze_verifier,
     )
     by_kind = {item["kind"]: item for item in artifacts}
     if set(by_kind) != set(expected):
@@ -130,7 +139,8 @@ def _verify_inventory(
 ) -> None:
     app_manifest = machine["app"]
     if (
-        inventory["schema_version"] != 1
+        type(inventory["schema_version"]) is not int
+        or inventory["schema_version"] != 1
         or inventory["fixture"] is not fixture
         or inventory["product"] != identity
         or inventory["bundle_build_number"] != identity["build_number"]
@@ -145,7 +155,16 @@ def _verify_inventory(
         raise PublicationError("publication inventory binding mismatch")
 
 
-def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
+def verify_evidence(
+    root: Path,
+    app: Path,
+    fixture: bool,
+    *,
+    repository: Path | None = None,
+    freeze_verifier: FreezeVerifier | None = None,
+) -> None:
+    if not fixture and repository is None:
+        raise PublicationError("production verification requires an explicit artifact repository")
     _verify_evidence_manifest(root)
     machine = require_exact_keys(
         load_json(root / "machine-closure.json"),
@@ -163,7 +182,11 @@ def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
         },
         "machine closure",
     )
-    if machine["schema_version"] != 1 or machine["fixture"] is not fixture:
+    if (
+        type(machine["schema_version"]) is not int
+        or machine["schema_version"] != 1
+        or machine["fixture"] is not fixture
+    ):
         raise PublicationError("machine closure mode/version mismatch")
     identity = product(machine["product"], fixture)
     if not fixture:
@@ -205,13 +228,13 @@ def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
             if sha256_file(path) != item["sha256"]:
                 raise PublicationError(f"{collection_name} evidence differs from its binding")
     if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
         _verify_artifact_inputs(
             repository,
             root,
             artifacts,
             app,
             identity["build_number"],
+            freeze_verifier=freeze_verifier,
         )
 
     spdx = load_json(root / "sbom.spdx.json")
@@ -251,11 +274,16 @@ def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
     )
 
 
-def verify(root: Path, app: Path, fixture: bool) -> None:
+def verify(
+    root: Path, app: Path, fixture: bool, *, repository: Path | None = None
+) -> None:
+    if not fixture:
+        if repository is None:
+            raise PublicationError("production verification requires an explicit artifact repository")
+        require_fixed_path(
+            root, evidence_root(repository), "publication evidence", repository=repository
+        )
+        require_fixed_path(app, signed_app(repository), "signed app", repository=repository)
     root = root.resolve(strict=True)
     app = app.resolve(strict=True)
-    if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
-        require_fixed_path(root, evidence_root(repository), "publication evidence")
-        require_fixed_path(app, signed_app(repository), "signed app")
-    verify_evidence(root, app, fixture)
+    verify_evidence(root, app, fixture, repository=repository)

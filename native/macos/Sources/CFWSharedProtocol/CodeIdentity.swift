@@ -83,7 +83,10 @@ public struct CodeIdentityRequirement: Sendable {
       expectedBundleIdentifiers
       .map { "identifier \"\($0)\"" }
       .joined(separator: " or ")
-    return "anchor apple generic and certificate leaf[subject.OU] = \"\(expectedTeamIdentifier)\" "
+    return "anchor apple generic "
+      + "and certificate 1[field.1.2.840.113635.100.6.2.6] exists "
+      + "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists "
+      + "and certificate leaf[subject.OU] = \"\(expectedTeamIdentifier)\" "
       + "and (\(identifiers))"
   }
 

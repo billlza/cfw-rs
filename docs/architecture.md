@@ -2,15 +2,18 @@
 
 ## Product boundary
 
-The product supports Apple Silicon and macOS 15 or newer. It has two mutually
-exclusive network modes:
+The product supports Apple Silicon and macOS 15 or newer. Its two network
+integrations have independent switches:
 
 - System Proxy: a signed, non-root user ProxyAgent owns one libbox mixed
   inbound and applies SystemConfiguration preferences transactionally.
 - Tunnel: a Packet Tunnel System Extension owns one libbox instance and uses
   public Network Extension packet-flow methods.
+- Combined: that same Packet Tunnel engine also owns the loopback mixed inbound;
+  its `NEPacketTunnelNetworkSettings` includes HTTP/HTTPS proxy settings.
 
-Every Proxy-to-Tunnel or Tunnel-to-Proxy change passes through Off. The old root
+Changes between these engine configurations pass through Off. One owner and one
+engine remain active; toggling either integration preserves the other intent. The old root
 helper and external Clash-compatible core are retired and never act as a
 fallback.
 
@@ -40,6 +43,7 @@ Off
 ProxyStarting -> ProxyActive -> ProxyStopping -> Off
 TunnelInstalling -> AwaitingApproval -> TunnelStarting
   -> TunnelActive -> TunnelStopping -> Off
+  -> TunnelSystemProxyActive -> TunnelStopping -> Off
 Failed
 ```
 
@@ -50,9 +54,9 @@ observable; a failed start becomes Failed and never tries another engine.
 The actual Agent or System Extension process must hold one globally arbitrated
 engine lease for the full libbox lifetime. A user App Group file cannot provide
 that arbitration for a system extension: the system extension runs as root and
-resolves the same App Group identifier into a different container. The current
-prototype therefore blocks Tunnel startup until a signed, identity-checked XPC
-state transport and global lease service replace that false-sharing design.
+resolves the same App Group identifier into a different container. Signed,
+identity-checked XPC state transport and the Global Authority lease service own
+that cross-context boundary.
 Intent and observed-state journals remain single-writer, versioned, and
 protected by installation ID, configuration epoch, generation, length, and
 SHA-256 digest.
@@ -64,19 +68,57 @@ separate Proxy and Tunnel projections. Business configuration is not copied
 into two independent models.
 
 The validator accepts a deliberately closed local JSON schema: one to 128
-uniquely tagged `direct`, `block`, Shadowsocks, VMess, VLESS/Reality, Trojan,
-or Hysteria2 outbounds and, optionally, `route.final` naming a declared tag.
-Protocol fields, TLS, transports, endpoint syntax, limits, and credential kind
-are typed and unknown fields fail closed. User-managed DNS/services,
+uniquely tagged `direct`, `block`, SOCKS5, Shadowsocks, VMess, VLESS/Reality, Trojan,
+Hysteria2, AnyTLS, TUIC v5 or selector outbounds, plus ordered typed routing rules
+and `route.final` naming a declared tag. Selector graphs are acyclic. Protocol
+fields, TLS, transports, endpoint syntax, limits, and
+credential kind are typed and unknown fields fail closed. TUIC owns separate
+UUID and password slots; Hysteria2/TUIC QUIC TLS rejects uTLS and Reality while
+AnyTLS follows the standard TLS path. The projection layer owns a TLS 1.2
+minimum for every enabled remote TLS transport and authenticated DoH server;
+normal negotiation prefers TLS 1.3 and QUIC still requires TLS 1.3. Projection
+also emits TUIC with 0-RTT disabled; neither control is profile input.
+User-managed DNS/services,
 subscriptions and remote resources, scripts, executable paths, and raw secret
 values remain forbidden. This is not full sing-box compatibility.
+
+SOCKS5 is projected by the existing engine adapter, not a separate proxy stack.
+It is either anonymous or carries one typed username/password reference pair;
+both Rust and native credential boundaries enforce RFC 1929's 1..255-byte
+limit. TCP/UDP restrictions are preserved. The stored `socks5` type projects
+to sing-box `socks` version 5, with no TLS or UDP-over-TCP extension. SOCKS5
+itself supplies no transport encryption.
+
+The subscription source boundary accepts only a restricted upstream sing-box
+`outbounds` document, a Clash/Mihomo `proxies` list, Shadowsocks SIP008 JSON,
+or a bounded URI bundle. VMess accepts traditional base64 JSON and the
+URL-shaped AEAD form; the latter cannot carry legacy `alterId` state.
+Hysteria2 multi-port sources normalize into a bounded non-overlapping port set
+and an optional fixed-second hop interval before projection to sing-box 1.13.
+Shadowsocks 2022 sources normalize the method first and validate each
+standard-base64 key in a single- or multi-user PSK chain before allocating any
+credential reference; SIP002 URI input additionally rejects Base64 userinfo.
+SOCKS5 source normalization is shared by URI, Clash, and sing-box adapters.
+Local files and text use the same converter and vault-first import transaction
+as downloaded sources. Only local canonical reference-only profiles retain
+the existing manual-provisioning path; source refresh remains vault-confirmed.
+It extracts source secrets before constructing the closed profile and rejects
+root-level sing-box DNS, inbounds, routes, selectors, scripts, and unknown
+fields. Source refresh reuses references in outbound order when possible; an
+exact immutable-material conflict is the sole authorization to rotate IDs.
+Repository-bound vault garbage collection runs before and after refresh so an
+old audience cannot accumulate silently or be deleted while still live.
+The repository revalidates the exact stored profile under the same lock before
+any refresh can provision a new audience. A missing vault is a clean no-op only
+when the repository has no live credential references.
 
 Profile files store only canonical `credential_ref` objects. Deterministic
 projection removes those references from libbox JSON, leaves an empty string
 at each exact secret target, and emits a separate closed credential-slot list.
 The configuration identity covers the secret-free template and slot
-references, never secret-derived bytes. References are immutable: provisioning
-an existing UUID is allowed only for the same kind and byte-identical secret;
+references, never secret-derived bytes. References are immutable across all
+profile audiences: provisioning an existing UUID is allowed only for the same
+kind and byte-identical secret;
 rotation creates a new UUID and updates the profile. The UI queries presence
 and submits only the missing subset, while the native transaction also receives
 the profile's full reference set and rejects every missing, extra, duplicate,

@@ -53,6 +53,8 @@ REQUIRED_GRAPH_KINDS = {
     "xcode-modules",
 }
 REQUIRED_ARTIFACT_KINDS = {
+    "candidate-freeze-intent",
+    "ga-product-input",
     "libbox-manifest",
     "legacy-tombstone-manifest",
     "native-host-bridge-manifest",
@@ -61,16 +63,15 @@ REQUIRED_ARTIFACT_KINDS = {
     "notarization-result",
     "notarization-submission-manifest",
     "signed-app-manifest",
-    "validated-candidate-app-manifest",
-    "validated-candidate-notarization",
-    "validated-candidate-review",
-    "validated-candidate-runtime-recovery",
+    "signing-transformation",
+    "hosted-ci-receipt",
 }
 ALLOWED_CODE_PATHS = {
     "Contents/MacOS/clash-for-mac",
     "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/CFWNativeBridge",
+    "Contents/Library/HelperTools/CFWGlobalAuthority",
     "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent",
-    "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
+    "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
     "Contents/Library/HelperTools/cfw-helper-tombstone",
 }
 MACHO_MAGICS = {
@@ -246,11 +247,16 @@ def scan_app_code(app: Path, fixture: bool) -> None:
         raise PublicationError(f"signed app code closure is incomplete: {sorted(ALLOWED_CODE_PATHS - observed)}")
 
 
-def build_machine_closure(prepared: Path, app: Path, fixture: bool) -> dict[str, Any]:
+def build_machine_closure(
+    prepared: Path, app: Path, fixture: bool, *, repository: Path | None = None
+) -> dict[str, Any]:
     if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
-        require_fixed_path(prepared, prepared_root(repository), "prepared evidence")
-        require_fixed_path(app, signed_app(repository), "signed app")
+        if repository is None:
+            raise PublicationError("production closure requires an explicit artifact repository")
+        require_fixed_path(
+            prepared, prepared_root(repository), "prepared evidence", repository=repository
+        )
+        require_fixed_path(app, signed_app(repository), "signed app", repository=repository)
     specification = require_exact_keys(
         load_json(prepared / "closure-components.json"),
         {
@@ -265,7 +271,11 @@ def build_machine_closure(prepared: Path, app: Path, fixture: bool) -> dict[str,
         },
         "prepared publication closure",
     )
-    if specification["schema_version"] != 1 or specification["fixture"] is not fixture:
+    if (
+        type(specification["schema_version"]) is not int
+        or specification["schema_version"] != 1
+        or specification["fixture"] is not fixture
+    ):
         raise PublicationError("prepared publication closure mode/version mismatch")
     identity = product(specification["product"], fixture)
     components = _normalize_components(prepared, specification["components"])

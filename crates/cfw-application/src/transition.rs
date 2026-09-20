@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use cfw_engine_api::{
-    BackendError, EngineBackend, EngineCommandContext, EngineGenerationStore, EngineMode,
-    EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
+    BackendError, BackendErrorKind, EngineBackend, EngineCommandContext, EngineGenerationStore,
+    EngineMode, EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
 };
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use tokio::sync::watch;
@@ -22,6 +22,7 @@ pub(crate) async fn transition(
     context: TransitionContext<'_>,
     state: &mut CoordinatorState,
     target: EngineMode,
+    profile_id: &str,
     profile: &ValidatedSingBoxProfile,
     settings: &EngineSettings,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
@@ -31,6 +32,7 @@ pub(crate) async fn transition(
         session,
         generation_store,
         operation_timeout,
+        authorization_timeout,
         status_query_timeout,
     } = context;
     if target == EngineMode::Off {
@@ -51,16 +53,29 @@ pub(crate) async fn transition(
         return Err(quarantine.clone());
     }
     let projected = match target {
-        EngineMode::SystemProxy => profile.project(ProjectionMode::SystemProxy, settings)?,
-        EngineMode::Tunnel => profile.project(ProjectionMode::Tunnel, settings)?,
+        EngineMode::LocalProxy => {
+            profile.project(profile_id, ProjectionMode::LocalProxy, settings)?
+        }
+        EngineMode::SystemProxy => {
+            profile.project(profile_id, ProjectionMode::SystemProxy, settings)?
+        }
+        EngineMode::Tunnel => profile.project(profile_id, ProjectionMode::Tunnel, settings)?,
+        EngineMode::TunnelSystemProxy => {
+            profile.project(profile_id, ProjectionMode::TunnelSystemProxy, settings)?
+        }
         EngineMode::Off => unreachable!("off returned before projection"),
     };
 
     let is_same_active_runtime = match &state.snapshot.state {
-        EngineState::ProxyActive { runtime } if target == EngineMode::SystemProxy => {
+        EngineState::LocalProxyActive { runtime } | EngineState::ProxyActive { runtime }
+            if target == state.snapshot.state.active_mode() =>
+        {
             runtime.config_digest == projected.digest() && runtime.ready
         }
-        EngineState::TunnelActive { runtime } if target == EngineMode::Tunnel => {
+        EngineState::TunnelActive { runtime }
+        | EngineState::TunnelSystemProxyActive { runtime }
+            if target == state.snapshot.state.active_mode() =>
+        {
             runtime.config_digest == projected.digest() && runtime.ready
         }
         _ => false,
@@ -93,19 +108,37 @@ pub(crate) async fn transition(
     let request = start_request(&projected, settings, context.clone());
 
     match target {
-        EngineMode::SystemProxy => {
+        EngineMode::LocalProxy | EngineMode::SystemProxy => {
+            let local = target == EngineMode::LocalProxy;
+            let operation = if local {
+                EngineOperation::StartLocalProxy
+            } else {
+                EngineOperation::StartSystemProxy
+            };
             state.native_lease = Some(NativeLease {
-                kind: NativeLeaseKind::SystemProxy,
+                kind: if local {
+                    NativeLeaseKind::LocalProxy
+                } else {
+                    NativeLeaseKind::SystemProxy
+                },
                 context: context.clone(),
             });
-            state.snapshot.state = EngineState::ProxyStarting { generation };
+            state.snapshot.state = if local {
+                EngineState::LocalProxyStarting { generation }
+            } else {
+                EngineState::ProxyStarting { generation }
+            };
             state.snapshot.config_digest = Some(request.config_digest.clone());
             publish(state, snapshots);
 
             let runtime = match call_backend(
                 operation_timeout,
-                EngineOperation::StartSystemProxy,
-                backend.start_system_proxy(request.clone()),
+                operation,
+                if local {
+                    backend.start_local_proxy(request.clone())
+                } else {
+                    backend.start_system_proxy(request.clone())
+                },
             )
             .await
             {
@@ -115,9 +148,10 @@ pub(crate) async fn transition(
                         backend,
                         state,
                         snapshots,
-                        EngineOperation::StartSystemProxy,
+                        operation,
                         source,
                         operation_timeout,
+                        status_query_timeout,
                     )
                     .await;
                 }
@@ -128,11 +162,23 @@ pub(crate) async fn transition(
                 &context,
                 &request.config_digest,
             ) {
-                return fail_identity(backend, state, snapshots, error, operation_timeout).await;
+                return fail_identity(
+                    backend,
+                    state,
+                    snapshots,
+                    error,
+                    operation_timeout,
+                    status_query_timeout,
+                )
+                .await;
             }
-            state.snapshot.state = EngineState::ProxyActive { runtime };
+            state.snapshot.state = if local {
+                EngineState::LocalProxyActive { runtime }
+            } else {
+                EngineState::ProxyActive { runtime }
+            };
         }
-        EngineMode::Tunnel => {
+        EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
             state.native_lease = Some(NativeLease {
                 kind: NativeLeaseKind::TunnelInstallation,
                 context: context.clone(),
@@ -158,6 +204,7 @@ pub(crate) async fn transition(
                         operation,
                         source,
                         operation_timeout,
+                        status_query_timeout,
                     )
                     .await;
                 }
@@ -169,12 +216,34 @@ pub(crate) async fn transition(
                 return Ok(state.snapshot.clone());
             }
 
-            state.snapshot.state = EngineState::TunnelStarting { generation };
-            publish(state, snapshots);
+            // Human consent saves only a disabled descriptor. Keep it outside
+            // the ordinary start budget and before credentials or tickets exist.
+            state.snapshot.state = EngineState::AwaitingApproval { generation };
             state.native_lease = Some(NativeLease {
                 kind: NativeLeaseKind::TunnelRuntime,
                 context: context.clone(),
             });
+            publish(state, snapshots);
+            if let Err(source) = call_backend(
+                authorization_timeout,
+                EngineOperation::AuthorizeTunnelConfiguration,
+                backend.authorize_tunnel_configuration(request.clone()),
+            )
+            .await
+            {
+                return fail_backend(
+                    backend,
+                    state,
+                    snapshots,
+                    EngineOperation::AuthorizeTunnelConfiguration,
+                    source,
+                    operation_timeout,
+                    status_query_timeout,
+                )
+                .await;
+            }
+            state.snapshot.state = EngineState::TunnelStarting { generation };
+            publish(state, snapshots);
             let runtime = match call_backend(
                 operation_timeout,
                 EngineOperation::StartTunnel,
@@ -191,6 +260,7 @@ pub(crate) async fn transition(
                         EngineOperation::StartTunnel,
                         source,
                         operation_timeout,
+                        status_query_timeout,
                     )
                     .await;
                 }
@@ -201,13 +271,36 @@ pub(crate) async fn transition(
                 &context,
                 &request.config_digest,
             ) {
-                return fail_identity(backend, state, snapshots, error, operation_timeout).await;
+                return fail_identity(
+                    backend,
+                    state,
+                    snapshots,
+                    error,
+                    operation_timeout,
+                    status_query_timeout,
+                )
+                .await;
             }
-            state.snapshot.state = EngineState::TunnelActive { runtime };
+            state.snapshot.state = if target == EngineMode::TunnelSystemProxy {
+                EngineState::TunnelSystemProxyActive { runtime }
+            } else {
+                EngineState::TunnelActive { runtime }
+            };
         }
         EngineMode::Off => unreachable!("off returned before native start"),
     }
 
+    if let Err(error) = crate::controller::restore_proxy_selections(profile, settings).await {
+        return fail_identity(
+            backend,
+            state,
+            snapshots,
+            error,
+            operation_timeout,
+            status_query_timeout,
+        )
+        .await;
+    }
     publish(state, snapshots);
     Ok(state.snapshot.clone())
 }
@@ -223,17 +316,33 @@ pub(crate) async fn stop_owned_runtime(
     };
 
     let (operation, result) = match lease.kind {
-        NativeLeaseKind::SystemProxy => {
-            state.snapshot.state = EngineState::ProxyStopping {
-                generation: lease.context.generation,
+        NativeLeaseKind::LocalProxy | NativeLeaseKind::SystemProxy => {
+            let local = matches!(lease.kind, NativeLeaseKind::LocalProxy);
+            let operation = if local {
+                EngineOperation::StopLocalProxy
+            } else {
+                EngineOperation::StopSystemProxy
+            };
+            state.snapshot.state = if local {
+                EngineState::LocalProxyStopping {
+                    generation: lease.context.generation,
+                }
+            } else {
+                EngineState::ProxyStopping {
+                    generation: lease.context.generation,
+                }
             };
             publish(state, snapshots);
             (
-                EngineOperation::StopSystemProxy,
+                operation,
                 call_backend(
                     operation_timeout,
-                    EngineOperation::StopSystemProxy,
-                    backend.stop_system_proxy(lease.context.clone()),
+                    operation,
+                    if local {
+                        backend.stop_local_proxy(lease.context.clone())
+                    } else {
+                        backend.stop_system_proxy(lease.context.clone())
+                    },
                 )
                 .await,
             )
@@ -289,6 +398,7 @@ async fn fail_backend(
     operation: EngineOperation,
     source: BackendError,
     operation_timeout: Duration,
+    status_query_timeout: Duration,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let target = state.snapshot.desired_mode;
     let generation = state.snapshot.generation;
@@ -302,8 +412,46 @@ async fn fail_backend(
         set_failed(state, snapshots, target, generation, &error);
         return Err(error);
     }
+    let endpoint_conflict = matches!(
+        (operation, source.kind),
+        (
+            EngineOperation::StartLocalProxy | EngineOperation::StartSystemProxy,
+            BackendErrorKind::MixedEndpointInUse | BackendErrorKind::ControllerEndpointInUse
+        ) | (
+            EngineOperation::StartTunnel,
+            BackendErrorKind::MixedEndpointInUse | BackendErrorKind::ControllerEndpointInUse
+        )
+    ) && (source.kind != BackendErrorKind::MixedEndpointInUse
+        || matches!(
+            target,
+            EngineMode::LocalProxy | EngineMode::SystemProxy | EngineMode::TunnelSystemProxy
+        ));
     let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
-        Ok(()) => backend_error(operation, source),
+        Ok(()) => {
+            let start_error = source.clone();
+            match prove_global_off(backend, state, snapshots, status_query_timeout).await {
+                Ok(()) if endpoint_conflict => {
+                    set_off(state, snapshots);
+                    return Err(EngineCoordinatorError::StartEndpointConflictAfterOff {
+                        operation,
+                        conflict: source.kind,
+                    });
+                }
+                Ok(())
+                    if operation == EngineOperation::StartTunnel
+                        && source.kind == BackendErrorKind::TicketExpired =>
+                {
+                    set_off(state, snapshots);
+                    return Err(EngineCoordinatorError::StartTicketExpiredAfterOff);
+                }
+                Ok(()) => backend_error(operation, source),
+                Err(proof_error) => EngineCoordinatorError::StartAndOffProofFailed {
+                    start_operation: operation,
+                    start_error,
+                    proof_error: Box::new(proof_error),
+                },
+            }
+        }
         Err(EngineCoordinatorError::Backend {
             operation: cleanup_operation,
             source: cleanup_error,
@@ -325,6 +473,7 @@ async fn fail_identity(
     snapshots: &watch::Sender<EngineSnapshot>,
     error: EngineCoordinatorError,
     operation_timeout: Duration,
+    status_query_timeout: Duration,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let target = state.snapshot.desired_mode;
     let generation = state.snapshot.generation;
@@ -346,6 +495,16 @@ async fn fail_identity(
         set_failed(state, snapshots, target, generation, &combined);
         return Err(combined);
     }
+    if let Err(proof_error) =
+        prove_global_off(backend, state, snapshots, status_query_timeout).await
+    {
+        let combined = EngineCoordinatorError::ValidationAndOffProofFailed {
+            validation_error: Box::new(error),
+            proof_error: Box::new(proof_error),
+        };
+        set_failed(state, snapshots, target, generation, &combined);
+        return Err(combined);
+    }
     set_failed(state, snapshots, target, generation, &error);
     Err(error)
 }
@@ -357,15 +516,17 @@ pub(crate) async fn transition_to_off(
     operation_timeout: Duration,
     generation_store: Option<&dyn EngineGenerationStore>,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
-    let was_already_off = state.native_lease.is_none() && state.snapshot.state == EngineState::Off;
+    let was_already_off = state.native_lease.is_none()
+        && state.quarantine.is_none()
+        && state.snapshot.state == EngineState::Off;
     state.snapshot.desired_mode = EngineMode::Off;
-    let owned_previous_runtime = state.native_lease.is_some();
+    let requires_off_proof = state.native_lease.is_some() || state.quarantine.is_some();
     stop_owned_runtime(backend, state, snapshots, operation_timeout).await?;
     // Route stop through owner revocation/stopped attestation (the stop above)
     // and an independent OS-state observation before committing Off. A lingering
     // owner or an unavailable observation keeps the coordinator fail-closed and
     // leaves any quarantine in place; it never becomes Off from ambiguity.
-    if owned_previous_runtime {
+    if requires_off_proof {
         prove_global_off(backend, state, snapshots, operation_timeout).await?;
     }
     // The stop barrier plus the proven Off observation above are the explicit

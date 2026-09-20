@@ -19,7 +19,8 @@
 
 use cfw_engine_api::authority_v1::*;
 use cfw_engine_api::{
-    CredentialKind, CredentialRef, CredentialSlot, CredentialTarget, TunnelNetworkOptions,
+    CredentialAudience, CredentialKind, CredentialRef, CredentialSlot, CredentialTarget,
+    DirectIpv4HostRoutes, TunnelNetworkOptions,
 };
 use uuid::Uuid;
 
@@ -175,7 +176,9 @@ fn configuration_of(
         Some(TunnelNetworkOptions {
             ipv6_enabled: true,
             bypass_private_networks: false,
+            direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
             mtu: choices.mtu as u16,
+            system_proxy_port: None,
         })
     } else {
         None
@@ -183,6 +186,11 @@ fn configuration_of(
     ConfigurationDescriptor {
         byte_count: choices.byte_count as u32,
         config_sha256: operation.config_sha256.clone(),
+        credential_audience: CredentialAudience::new(
+            operation.root.installation_id.hyphenated().to_string(),
+            operation.identity_sha256.clone(),
+        )
+        .expect("canonical credential audience"),
         credential_slots: credential_slots(choices),
         identity_sha256: operation.identity_sha256.clone(),
         tunnel_options,
@@ -229,7 +237,9 @@ fn build_command(choices: &CaseChoices) -> Command {
         4 => {
             let (owner_role, packet_pump_limits) = match mode {
                 AuthorityMode::Tunnel => (AuthorityRole::Provider, Some(packet_pump_limits())),
-                AuthorityMode::SystemProxy => (AuthorityRole::ProxyAgent, None),
+                AuthorityMode::LocalProxy | AuthorityMode::SystemProxy => {
+                    (AuthorityRole::ProxyAgent, None)
+                }
             };
             Command::AttestReady(ReadyAttestation {
                 lease_id,
@@ -237,7 +247,11 @@ fn build_command(choices: &CaseChoices) -> Command {
                 operation,
                 owner_role,
                 packet_pump_limits,
-                ready_flags: 0b111,
+                ready_flags: if mode == AuthorityMode::LocalProxy {
+                    0b011
+                } else {
+                    0b111
+                },
                 runtime_digest: digest_from(choices.entropy, 6),
             })
         }
@@ -317,7 +331,7 @@ fn malformed_envelopes(choices: &CaseChoices, canonical: &[u8]) -> Vec<(String, 
     if let Some(bytes) = replace_once(canonical, "\"major\":1", "\"major\":9") {
         cases.push(("unsupported_major".into(), bytes));
     }
-    if let Some(bytes) = replace_once(canonical, "\"minor\":0", "\"minor\":7") {
+    if let Some(bytes) = replace_once(canonical, "\"minor\":1", "\"minor\":7") {
         cases.push(("unsupported_minor".into(), bytes));
     }
     if let Some(bytes) = replace_once(
@@ -329,7 +343,7 @@ fn malformed_envelopes(choices: &CaseChoices, canonical: &[u8]) -> Vec<(String, 
     }
 
     // Invalid type: a fractional number where an integer is required.
-    if let Some(bytes) = replace_once(canonical, "\"minor\":0", "\"minor\":0.0") {
+    if let Some(bytes) = replace_once(canonical, "\"minor\":1", "\"minor\":1.0") {
         cases.push(("float_number".into(), bytes));
     }
 
@@ -376,7 +390,7 @@ fn snapshot_of(choices: &CaseChoices) -> AuthoritySnapshot {
         last_failure: None,
         lease_view: None,
         protocol_version: ProtocolVersion::v1(),
-        replay_cursor: replay_cursor_of(choices),
+        replay_cursor: Some(replay_cursor_of(choices)),
         revision: choices.revision + choices.revision_delta,
         state: AuthorityState::Off,
     }
@@ -644,7 +658,7 @@ fn canonical_bounded_protocol_round_trips_and_rejects_malformed() {
         covered_commands.insert(choices.command_index);
         match mode_for(&choices) {
             AuthorityMode::Tunnel => tunnel_cases += 1,
-            AuthorityMode::SystemProxy => proxy_cases += 1,
+            AuthorityMode::LocalProxy | AuthorityMode::SystemProxy => proxy_cases += 1,
         }
         successful_cases += 1;
     }

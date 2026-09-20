@@ -296,7 +296,10 @@ def validate_evidence_manifest(value: Any) -> dict[str, Any]:
         {"schema_version", "manifest_version", "identity", "reports", "capabilities"},
         "Evidence_Manifest",
     )
-    if document["schema_version"] != SCHEMA_VERSION:
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != SCHEMA_VERSION
+    ):
         raise EvidenceManifestError(f"Evidence_Manifest schema_version must be {SCHEMA_VERSION}")
     if document["manifest_version"] != MANIFEST_VERSION:
         raise EvidenceManifestError(f"Evidence_Manifest manifest_version must be {MANIFEST_VERSION!r}")

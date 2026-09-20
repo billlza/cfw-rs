@@ -228,7 +228,9 @@ private struct BoundedTerminalSecretErasureProperty {
       identitySHA256: identityDigest, ownerUID: 501, authorityRevision: 1)
     let descriptor = try AuthorityConfigurationDescriptor(
       byteCount: UInt32(configurationData.count), configSHA256: configurationDigest,
-      identitySHA256: identityDigest, credentialSlots: credentialSlots,
+      identitySHA256: identityDigest,
+      credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+      credentialSlots: credentialSlots,
       tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
     let request = try PrepareStartRequest(
       operation: operation, expectedRevision: 1, configuration: descriptor)
@@ -360,8 +362,7 @@ private struct BoundedTerminalSecretErasureProperty {
     switch scenario.kind {
     case .success:
       let ticket = try providerTicket(from: issued)
-      let redeemed = try lifecycle.redeem(
-        ticket: ticket, operation: fixture.request.operation, leaseID: fixture.leaseID)
+      let redeemed = try lifecycle.redeem(ticket: ticket)
       try redeemed.withMaterial { _, _ in () }
       if !redeemed.isErasedForTesting {
         return "success path left redeemed transport buffers retained"
@@ -374,10 +375,7 @@ private struct BoundedTerminalSecretErasureProperty {
     case .ticketExpiry:
       let ticket = try providerTicket(from: issued)
       clock.advance(by: 10_000)
-      if (try? lifecycle.redeem(
-        ticket: ticket, operation: fixture.request.operation,
-        leaseID: fixture.leaseID)) != nil
-      {
+      if (try? lifecycle.redeem(ticket: ticket)) != nil {
         return "expired ticket was redeemed instead of rejected"
       }
 
@@ -391,8 +389,7 @@ private struct BoundedTerminalSecretErasureProperty {
 
     case .ownerCrash:
       let ticket = try providerTicket(from: issued)
-      let redeemed = try lifecycle.redeem(
-        ticket: ticket, operation: fixture.request.operation, leaseID: fixture.leaseID)
+      let redeemed = try lifecycle.redeem(ticket: ticket)
       // Owner crashes before injecting: the transport erases without consumption.
       redeemed.erase()
       if !redeemed.isErasedForTesting {

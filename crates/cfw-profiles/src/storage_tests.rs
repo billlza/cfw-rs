@@ -119,11 +119,11 @@ fn repository_capacity_allows_reads_at_the_limit_but_rejects_another_write() {
 
 #[test]
 fn directory_enumeration_reserves_bounded_crash_recovery_capacity() {
-    ensure_directory_entry_capacity(crate::MAX_REPOSITORY_ENTRIES + MAX_ABANDONED_TEMPORARIES)
-        .expect("profiles, selection, and final recovery entry fit");
+    ensure_directory_entry_capacity(crate::MAX_REPOSITORY_ENTRIES + MAX_ABANDONED_TEMPORARIES + 1)
+        .expect("profiles, selection, transaction intent, and final recovery entry fit");
     assert!(matches!(
         ensure_directory_entry_capacity(
-            crate::MAX_REPOSITORY_ENTRIES + MAX_ABANDONED_TEMPORARIES + 1
+            crate::MAX_REPOSITORY_ENTRIES + MAX_ABANDONED_TEMPORARIES + 2
         ),
         Err(ProfileError::TooManyEntries)
     ));

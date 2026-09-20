@@ -109,6 +109,14 @@ class ReleaseRuntimeEvidenceTests(unittest.TestCase):
     def test_complete_bounded_recovery_evidence_passes(self) -> None:
         self.assertEqual(validate_runtime_evidence(fixture())["schema_version"], 1)
 
+    def test_schema_version_requires_a_json_integer(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                value = fixture()
+                value["schema_version"] = invalid
+                with self.assertRaisesRegex(RuntimeEvidenceError, "schema_version must be 1"):
+                    validate_runtime_evidence(value)
+
     def test_generation_drift_fails_closed(self) -> None:
         value = copy.deepcopy(fixture())
         value["cases"][0]["after"]["generation"] = 8

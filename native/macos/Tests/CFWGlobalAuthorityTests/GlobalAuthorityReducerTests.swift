@@ -30,7 +30,10 @@ private func prepareFixture(
     authorityRevision: revision)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: 3, configSHA256: reducerConfigDigest,
-    identitySHA256: reducerIdentityDigest, credentialSlots: [],
+    identitySHA256: reducerIdentityDigest,
+    credentialAudience: CredentialAudience(
+      profileID: UUID(), profileDigest: reducerIdentityDigest),
+    credentialSlots: [],
     tunnelOptions: mode == .tunnel ? TunnelNetworkOptions(ipv6Enabled: true) : nil)
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: revision, configuration: descriptor)
@@ -75,7 +78,7 @@ private func binding(
 private func readyAttestation(_ fixture: PrepareFixture) throws -> ReadyAttestation {
   try ReadyAttestation(
     operation: fixture.operation, leaseID: fixture.leaseID,
-    runtimeDigest: reducerConfigDigest,
+    runtimeDigest: reducerIdentityDigest,
     ownerRole: fixture.operation.mode == .tunnel ? .provider : .proxyAgent,
     readyFlags: .all,
     packetPumpLimits: fixture.operation.mode == .tunnel
@@ -105,7 +108,7 @@ private func stoppedAttestation(_ fixture: PrepareFixture) throws -> StoppedAtte
   #expect(reducer.state == .preparing)
   #expect(reducer.lease?.operation == first.operation)
   #expect(reducer.replayCursor?.acceptedGeneration == 1)
-  #expect(reducer.lastMutation == .enrollAndPrepare)
+  #expect(reducer.lastMutation == .prepare)
 
   let concurrent = try prepareFixture(
     installationID: installation, epoch: 1, generation: 2,
@@ -184,23 +187,25 @@ private func stoppedAttestation(_ fixture: PrepareFixture) throws -> StoppedAtte
       == .globalAuthorityIdentityRejected)
   try reducer.bindOwner(binding(fixture))
 
-  let ready = try readyAttestation(fixture)
-  let wrongOS = AuthorityOSReadyObservation(
-    operation: fixture.operation, configSHA256: reducerConfigDigest,
-    state: .managedTunnelConnected)
+  let wrongReady = try ReadyAttestation(
+    operation: fixture.operation,
+    leaseID: fixture.leaseID,
+    runtimeDigest: otherReducerNonce,
+    ownerRole: .proxyAgent,
+    readyFlags: .all,
+    packetPumpLimits: nil,
+    monotonicTimestamp: 10)
   #expect(
     authorityErrorCode {
       try reducer.attestReady(
-        ready, osObservation: wrongOS, ownerUID: 501,
+        wrongReady, ownerUID: 501,
         connectionNonce: reducerNonce)
     } == .staleOperation)
   #expect(reducer.state == .starting)
 
-  let exactOS = AuthorityOSReadyObservation(
-    operation: fixture.operation, configSHA256: reducerConfigDigest,
-    state: .systemProxyEffective)
+  let ready = try readyAttestation(fixture)
   try reducer.attestReady(
-    ready, osObservation: exactOS, ownerUID: 501,
+    ready, ownerUID: 501,
     connectionNonce: reducerNonce)
   #expect(reducer.state == .active)
   #expect(reducer.lease?.state == .active)
@@ -222,6 +227,35 @@ private func stoppedAttestation(_ fixture: PrepareFixture) throws -> StoppedAtte
   try reducer.attestStopped(
     stoppedAttestation(fixture), ownerUID: 501,
     connectionNonce: reducerNonce)
+}
+
+@Test func boundStartingOwnerCanAtomicallyAttestStoppedAndRetryIdempotently() throws {
+  let fixture = try prepareFixture(
+    installationID: AuthorityIdentifier(UUID()), epoch: 1, generation: 1,
+    revision: 1, mode: .tunnel)
+  var reducer = try GlobalAuthorityReducer.unEnrolledOff()
+  try reducer.prepare(fixture.input)
+  try reducer.bindOwner(binding(fixture))
+  #expect(reducer.state == .starting)
+  #expect(reducer.retainsCapabilityOrTicket)
+  #expect(reducer.retainsSecretBuffer)
+
+  let revisionBeforeStop = reducer.revision
+  let stopped = try stoppedAttestation(fixture)
+  let firstRevision = try reducer.attestStopped(
+    stopped, ownerUID: 501, connectionNonce: reducerNonce)
+  #expect(firstRevision == revisionBeforeStop + 1)
+  #expect(reducer.state == .stopping)
+  #expect(reducer.lease?.state == .stopping)
+  #expect(!reducer.retainsCapabilityOrTicket)
+  #expect(!reducer.retainsSecretBuffer)
+  #expect(reducer.ownerStopped)
+  #expect(reducer.lastMutation == .ownerStopped)
+
+  let retryRevision = try reducer.attestStopped(
+    stopped, ownerUID: 501, connectionNonce: reducerNonce)
+  #expect(retryRevision == firstRevision)
+  #expect(reducer.revision == firstRevision)
 }
 @Test func anyOffAmbiguityQuarantinesAndCannotAdmitAnotherOwner() throws {
   let installation = AuthorityIdentifier(UUID())

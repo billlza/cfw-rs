@@ -37,6 +37,7 @@ const result = await build({
   bundle: true,
   charset: "utf8",
   entryPoints: {
+    startup: path.join(sourceRoot, "src", "startup.js"),
     main: path.join(sourceRoot, "src", "main.js"),
     styles: path.join(sourceRoot, "styles.css"),
   },

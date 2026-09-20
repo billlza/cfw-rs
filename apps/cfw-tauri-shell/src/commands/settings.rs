@@ -1,14 +1,103 @@
 use cfw_core::{SettingsSnapshot, SettingsStore, UiPreferences};
 use cfw_platform::{MacOsPlatformService, ServiceModeStatus};
+use serde::Serialize;
+use tauri::{AppHandle, State};
 
 use crate::settings_store;
+use crate::window_state::WindowBoundsManager;
 
-pub(crate) type UiSettingsSnapshot = SettingsSnapshot;
+#[derive(Default)]
+pub(crate) struct UiSettingsMutations(tokio::sync::Mutex<()>);
+
+impl UiSettingsMutations {
+    pub(crate) fn reserve(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        self.0
+            .try_lock()
+            .map_err(|_| "another settings change is still in progress".into())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UiLoginItemLiveStatus {
+    Checking,
+    NotRegistered,
+    Enabled,
+    RequiresApproval,
+    NotFound,
+    Unknown,
+}
+
+impl From<ServiceModeStatus> for UiLoginItemLiveStatus {
+    fn from(status: ServiceModeStatus) -> Self {
+        match status {
+            ServiceModeStatus::NotRegistered => Self::NotRegistered,
+            ServiceModeStatus::Enabled => Self::Enabled,
+            ServiceModeStatus::RequiresApproval => Self::RequiresApproval,
+            ServiceModeStatus::NotFound => Self::NotFound,
+            ServiceModeStatus::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiLaunchAtLoginState {
+    persisted_intent: bool,
+    live_status: UiLoginItemLiveStatus,
+    matches_persisted_intent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiSettingsSnapshot {
+    settings: UiPreferences,
+    persisted: bool,
+    launch_at_login: UiLaunchAtLoginState,
+    resolved_locale: cfw_core::UiLanguage,
+}
+
+fn launch_at_login_state(
+    persisted_intent: bool,
+    status: ServiceModeStatus,
+) -> UiLaunchAtLoginState {
+    let matches_persisted_intent = match status {
+        ServiceModeStatus::Enabled => persisted_intent,
+        ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound => !persisted_intent,
+        ServiceModeStatus::RequiresApproval | ServiceModeStatus::Unknown => false,
+    };
+    UiLaunchAtLoginState {
+        persisted_intent,
+        live_status: status.into(),
+        matches_persisted_intent,
+    }
+}
+
+pub(super) fn with_login_item_status(
+    snapshot: SettingsSnapshot,
+    status: ServiceModeStatus,
+) -> UiSettingsSnapshot {
+    let launch_at_login = launch_at_login_state(snapshot.settings.launch_at_login, status);
+    UiSettingsSnapshot {
+        resolved_locale: crate::i18n::resolve(snapshot.settings.language),
+        settings: snapshot.settings,
+        persisted: snapshot.persisted,
+        launch_at_login,
+    }
+}
+
+pub(crate) fn settings_snapshot_with_live_status(
+    store: &SettingsStore,
+) -> Result<UiSettingsSnapshot, String> {
+    let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+    Ok(with_login_item_status(
+        snapshot,
+        MacOsPlatformService.login_item_status(),
+    ))
+}
 
 fn write_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
-) -> Result<UiSettingsSnapshot, String> {
+) -> Result<SettingsSnapshot, String> {
     store
         .write(&preferences)
         .map_err(|error| error.to_string())?;
@@ -18,7 +107,7 @@ fn write_preferences(
 fn write_renderer_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
-) -> Result<UiSettingsSnapshot, String> {
+) -> Result<SettingsSnapshot, String> {
     let current = store.read_or_default().map_err(|error| error.to_string())?;
     if preferences.launch_at_login != current.launch_at_login {
         return Err(
@@ -29,58 +118,88 @@ fn write_renderer_preferences(
     write_preferences(store, preferences)
 }
 
-fn require_completed_migration(store: &SettingsStore) -> Result<(), String> {
-    if store
-        .legacy_retirement_completed()
-        .map_err(|error| error.to_string())?
-    {
-        Ok(())
-    } else {
-        Err("legacy settings migration is still pending; preferences remain read-only".into())
-    }
-}
-
 pub(crate) fn sanitize_legacy_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
-    write_preferences(store, preferences)
-}
-
-pub(crate) fn silent_start_enabled() -> Result<bool, String> {
-    settings_store()?
-        .read_or_default()
-        .map(|preferences| preferences.silent_start)
-        .map_err(|error| error.to_string())
-}
-
-pub(crate) fn automatic_updates_enabled() -> Result<bool, String> {
-    settings_store()?
-        .read_or_default()
-        .map(|preferences| preferences.check_for_updates)
-        .map_err(|error| error.to_string())
+    let snapshot = write_preferences(store, preferences)?;
+    Ok(with_login_item_status(
+        snapshot,
+        MacOsPlatformService.login_item_status(),
+    ))
 }
 
 #[tauri::command]
-pub(crate) fn read_settings_snapshot() -> Result<UiSettingsSnapshot, String> {
-    settings_store()?
-        .snapshot()
-        .map_err(|error| error.to_string())
+pub(crate) async fn read_settings_snapshot(
+    app: AppHandle,
+    include_login_item_status: Option<bool>,
+) -> Result<UiSettingsSnapshot, String> {
+    let result = crate::startup_state::prepare_off_main(move || {
+        let store = settings_store()?;
+        if include_login_item_status == Some(false) {
+            let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+            Ok(UiSettingsSnapshot {
+                resolved_locale: crate::i18n::resolve(snapshot.settings.language),
+                launch_at_login: UiLaunchAtLoginState {
+                    persisted_intent: snapshot.settings.launch_at_login,
+                    live_status: UiLoginItemLiveStatus::Checking,
+                    matches_persisted_intent: false,
+                },
+                settings: snapshot.settings,
+                persisted: snapshot.persisted,
+            })
+        } else {
+            settings_snapshot_with_live_status(&store)
+        }
+    })
+    .await;
+    if let Err(error) = &result {
+        crate::diagnostics::record(
+            &app,
+            cfw_core::DiagnosticTopic::Startup,
+            "settings_read_failed",
+            error,
+        );
+    }
+    result
 }
 
 #[tauri::command]
-pub(crate) fn write_settings_snapshot(
+pub(crate) async fn write_settings_snapshot(
+    app: AppHandle,
+    window_bounds: State<'_, WindowBoundsManager>,
+    mutations: State<'_, UiSettingsMutations>,
     settings: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
+    let _mutation = mutations.reserve()?;
     let store = settings_store()?;
-    require_completed_migration(&store)?;
-    write_renderer_preferences(&store, settings)
+    let retain_window_bounds = settings.retain_window_bounds;
+    let snapshot = window_bounds
+        .commit_retention(&app, retain_window_bounds, move || {
+            write_renderer_preferences(&store, settings)
+        })
+        .await?;
+    crate::i18n::apply(&app, snapshot.settings.language).await?;
+    crate::startup_state::prepare_off_main(move || {
+        Ok(with_login_item_status(
+            snapshot,
+            MacOsPlatformService.login_item_status(),
+        ))
+    })
+    .await
 }
 
 #[tauri::command]
-pub(crate) fn set_launch_at_login_enabled(enabled: bool) -> Result<UiSettingsSnapshot, String> {
+pub(crate) async fn set_launch_at_login_enabled(
+    mutations: State<'_, UiSettingsMutations>,
+    enabled: bool,
+) -> Result<UiSettingsSnapshot, String> {
+    let _mutation = mutations.reserve()?;
+    crate::startup_state::prepare_off_main(move || update_launch_at_login(enabled)).await
+}
+
+fn update_launch_at_login(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
-    require_completed_migration(&store)?;
     let mut preferences = store.read_or_default().map_err(|error| error.to_string())?;
     let platform = MacOsPlatformService;
     let original_status = platform.login_item_status();
@@ -126,7 +245,10 @@ pub(crate) fn set_launch_at_login_enabled(enabled: bool) -> Result<UiSettingsSna
     }
     preferences.launch_at_login = enabled;
     match write_preferences(&store, preferences) {
-        Ok(snapshot) => Ok(snapshot),
+        Ok(snapshot) => Ok(with_login_item_status(
+            snapshot,
+            platform.login_item_status(),
+        )),
         Err(persist_error) => match restore_login_item_status(&platform, original_status) {
             Ok(()) => Err(format!(
                 "failed to persist the Login Item preference; restored the previous macOS state: {persist_error}"
@@ -224,6 +346,7 @@ mod tests {
         let preferences = serde_json::from_value::<UiPreferences>(serde_json::json!({
             "theme": "dark",
             "font_family": "SF Mono",
+            "language": "ja",
             "retain_window_bounds": false,
             "launch_at_login": true,
             "silent_start": true,
@@ -263,6 +386,94 @@ mod tests {
     }
 
     #[test]
+    fn login_item_snapshot_keeps_persisted_intent_and_live_status_distinct() {
+        let cases = [
+            (
+                false,
+                ServiceModeStatus::NotRegistered,
+                UiLoginItemLiveStatus::NotRegistered,
+                true,
+            ),
+            (
+                true,
+                ServiceModeStatus::NotFound,
+                UiLoginItemLiveStatus::NotFound,
+                false,
+            ),
+            (
+                false,
+                ServiceModeStatus::Enabled,
+                UiLoginItemLiveStatus::Enabled,
+                false,
+            ),
+            (
+                true,
+                ServiceModeStatus::Enabled,
+                UiLoginItemLiveStatus::Enabled,
+                true,
+            ),
+            (
+                true,
+                ServiceModeStatus::RequiresApproval,
+                UiLoginItemLiveStatus::RequiresApproval,
+                false,
+            ),
+            (
+                false,
+                ServiceModeStatus::Unknown,
+                UiLoginItemLiveStatus::Unknown,
+                false,
+            ),
+        ];
+        for (intent, status, live_status, matches_persisted_intent) in cases {
+            assert_eq!(
+                launch_at_login_state(intent, status),
+                UiLaunchAtLoginState {
+                    persisted_intent: intent,
+                    live_status,
+                    matches_persisted_intent,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn login_item_snapshot_has_a_stable_typed_wire_shape() {
+        let expected_locale = crate::i18n::resolve(cfw_core::UiLanguage::System);
+        let snapshot = with_login_item_status(
+            SettingsSnapshot {
+                settings: UiPreferences {
+                    launch_at_login: true,
+                    ..UiPreferences::default()
+                },
+                persisted: true,
+            },
+            ServiceModeStatus::RequiresApproval,
+        );
+        assert_eq!(
+            serde_json::to_value(snapshot).expect("serialize settings snapshot"),
+            serde_json::json!({
+                "settings": {
+                    "theme": "system",
+                    "font_family": "",
+                    "language": "system",
+                    "retain_window_bounds": true,
+                    "launch_at_login": true,
+                    "silent_start": false,
+                    "check_for_updates": false
+                },
+                "persisted": true,
+                "resolved_locale": expected_locale,
+                "launch_at_login": {
+                    "persisted_intent": true,
+                    "live_status": "requires_approval",
+                    "matches_persisted_intent": false
+                }
+            })
+        );
+    }
+
+    #[test]
     fn renderer_settings_cannot_bypass_login_item_transaction() {
         let (root, store) = test_settings_store("login-item-boundary");
         store
@@ -293,6 +504,32 @@ mod tests {
         assert_eq!(snapshot.settings.theme, AppearanceTheme::Dark);
         assert!(!snapshot.settings.launch_at_login);
 
+        fs::remove_dir_all(root).expect("remove settings test root");
+    }
+
+    #[test]
+    fn modern_preferences_are_writable_without_retiring_legacy_settings() {
+        let (root, store) = test_settings_store("independent-preferences");
+        store.ensure_layout().expect("modern layout");
+        let old = b"legacy content is not a prerequisite for modern preferences";
+        fs::write(&store.paths().legacy_settings_file, old).expect("retained legacy settings");
+        let changed = UiPreferences {
+            theme: AppearanceTheme::Dark,
+            silent_start: true,
+            ..UiPreferences::default()
+        };
+        let result = write_renderer_preferences(&store, changed).expect("modern preferences write");
+        assert_eq!(result.settings.theme, AppearanceTheme::Dark);
+        assert!(result.settings.silent_start);
+        assert!(
+            !store
+                .legacy_retirement_completed()
+                .expect("no retirement marker")
+        );
+        assert_eq!(
+            fs::read(&store.paths().legacy_settings_file).expect("retained source"),
+            old
+        );
         fs::remove_dir_all(root).expect("remove settings test root");
     }
 }

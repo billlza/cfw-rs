@@ -10,6 +10,7 @@
     {"code":"global_authority_interrupted","retry":"idempotent_read_only","message":"The Authority connection was interrupted."},
     {"code":"busy","retry":"fresh_snapshot_after_off","message":"Global Authority mutation is busy."},
     {"code":"resource_exhausted","retry":"idempotent_read_only","message":"Global Authority read capacity is exhausted."},
+    {"code":"journal_capacity_exhausted","retry":"maintenance_required","message":"The Global Authority journal reached its fixed capacity and requires maintenance."},
     {"code":"global_lease_conflict","retry":"fresh_snapshot_after_off","message":"A conflicting Global Authority lease exists."},
     {"code":"replay_rejected","retry":"fresh_context","message":"Authority replay protection rejected the context."},
     {"code":"stale_operation","retry":"fresh_context","message":"Authority operation context is stale."},

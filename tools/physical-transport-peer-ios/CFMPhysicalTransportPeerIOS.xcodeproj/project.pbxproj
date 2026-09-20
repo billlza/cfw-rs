@@ -1,0 +1,395 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		283146D0AF63632258EBDB11 /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C71CFD4100AFEF43139AC553 /* CryptoKit.framework */; };
+		3A6E6B6A34554CAA815F5EF1 /* PeerStreamProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3824F810E5F25C60A95CF355 /* PeerStreamProtocol.swift */; };
+		4D480A643AABAA65A8B7595E /* PacketLanPeerRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0E57ACC1B251B4F800BEAC /* PacketLanPeerRuntime.swift */; };
+		59805C883E6F70B1B6C7CEF8 /* PeerIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF660F9DC17548E38A8F4486 /* PeerIdentity.swift */; };
+		5B187EC8D3701A3080E350CF /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2DE485EAABDDB51F2B848DF /* Network.framework */; };
+		6605B0CF58624D94952BC856 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F710C11F14F1ED6ED4E0CB71 /* Security.framework */; };
+		84F5A76EB807A0FF5BA2D9DF /* PeerRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 615177FC941AACFC27A97819 /* PeerRuntime.swift */; };
+		9B3FDA7CFE31AA4B0670FE18 /* PeerContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8F0585B5118DCE739977880 /* PeerContract.swift */; };
+		A1D1BF17FA51F19CEBEBFF24 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 816D819F3B6F657601D37AFE /* AppDelegate.swift */; };
+		D74E4E0F661BDB2FFA0D860B /* PeerNetworkIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78E54CC8DAB89AE73A73A57F /* PeerNetworkIdentity.swift */; };
+		DE6B3E8ACEF101A3D3F6EFF6 /* PacketLanPeerContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17F0A34CFD7AA26B1A93CF18 /* PacketLanPeerContract.swift */; };
+		E068FA881F03603067600CC7 /* PacketLanPeerIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D195C5A06F2558E7C135687 /* PacketLanPeerIdentity.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		17F0A34CFD7AA26B1A93CF18 /* PacketLanPeerContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketLanPeerContract.swift; sourceTree = "<group>"; };
+		2E7808937FAEBFA562898436 /* CFMPhysicalTransportPeer.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CFMPhysicalTransportPeer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3824F810E5F25C60A95CF355 /* PeerStreamProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerStreamProtocol.swift; sourceTree = "<group>"; };
+		615177FC941AACFC27A97819 /* PeerRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerRuntime.swift; sourceTree = "<group>"; };
+		78E54CC8DAB89AE73A73A57F /* PeerNetworkIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerNetworkIdentity.swift; sourceTree = "<group>"; };
+		816D819F3B6F657601D37AFE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		9D195C5A06F2558E7C135687 /* PacketLanPeerIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketLanPeerIdentity.swift; sourceTree = "<group>"; };
+		B2DE485EAABDDB51F2B848DF /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		C71CFD4100AFEF43139AC553 /* CryptoKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CryptoKit.framework; path = System/Library/Frameworks/CryptoKit.framework; sourceTree = SDKROOT; };
+		C8F0585B5118DCE739977880 /* PeerContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerContract.swift; sourceTree = "<group>"; };
+		DF660F9DC17548E38A8F4486 /* PeerIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerIdentity.swift; sourceTree = "<group>"; };
+		F710C11F14F1ED6ED4E0CB71 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		FF0E57ACC1B251B4F800BEAC /* PacketLanPeerRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketLanPeerRuntime.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		09B8C4D7E75FF16F8B2E49B1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5B187EC8D3701A3080E350CF /* Network.framework in Frameworks */,
+				6605B0CF58624D94952BC856 /* Security.framework in Frameworks */,
+				283146D0AF63632258EBDB11 /* CryptoKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		444EC1E85D02936C8E3B05F1 /* TransportPeerCore */ = {
+			isa = PBXGroup;
+			children = (
+				17F0A34CFD7AA26B1A93CF18 /* PacketLanPeerContract.swift */,
+				9D195C5A06F2558E7C135687 /* PacketLanPeerIdentity.swift */,
+				FF0E57ACC1B251B4F800BEAC /* PacketLanPeerRuntime.swift */,
+				C8F0585B5118DCE739977880 /* PeerContract.swift */,
+				DF660F9DC17548E38A8F4486 /* PeerIdentity.swift */,
+				78E54CC8DAB89AE73A73A57F /* PeerNetworkIdentity.swift */,
+				615177FC941AACFC27A97819 /* PeerRuntime.swift */,
+				3824F810E5F25C60A95CF355 /* PeerStreamProtocol.swift */,
+			);
+			name = TransportPeerCore;
+			path = Sources/TransportPeerCore;
+			sourceTree = "<group>";
+		};
+		50B348778477E37F57B99A97 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				816D819F3B6F657601D37AFE /* AppDelegate.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		7A2D5AB3C62C0F622A45848B /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C71CFD4100AFEF43139AC553 /* CryptoKit.framework */,
+				B2DE485EAABDDB51F2B848DF /* Network.framework */,
+				F710C11F14F1ED6ED4E0CB71 /* Security.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		8DF3E8D7F2D9B26684F6EDA2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				2E7808937FAEBFA562898436 /* CFMPhysicalTransportPeer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E0A1EA6C416F23A488FDA6AE = {
+			isa = PBXGroup;
+			children = (
+				50B348778477E37F57B99A97 /* App */,
+				444EC1E85D02936C8E3B05F1 /* TransportPeerCore */,
+				7A2D5AB3C62C0F622A45848B /* Frameworks */,
+				8DF3E8D7F2D9B26684F6EDA2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AAF0EB6D184E6BE36577FA66 /* CFMPhysicalTransportPeer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FE98FA3CD3EFCA96853B8C4A /* Build configuration list for PBXNativeTarget "CFMPhysicalTransportPeer" */;
+			buildPhases = (
+				6CC1B1BEA8E05CFB52BADBD8 /* Sources */,
+				09B8C4D7E75FF16F8B2E49B1 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CFMPhysicalTransportPeer;
+			packageProductDependencies = (
+			);
+			productName = CFMPhysicalTransportPeer;
+			productReference = 2E7808937FAEBFA562898436 /* CFMPhysicalTransportPeer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		28F3541F97E8051C0CED5F43 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					AAF0EB6D184E6BE36577FA66 = {
+						DevelopmentTeam = "$(CFM_IOS_PEER_DEVELOPMENT_TEAM)";
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = 0A3DE777DFA82E76B0B15542 /* Build configuration list for PBXProject "CFMPhysicalTransportPeerIOS" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = E0A1EA6C416F23A488FDA6AE;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 8DF3E8D7F2D9B26684F6EDA2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AAF0EB6D184E6BE36577FA66 /* CFMPhysicalTransportPeer */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6CC1B1BEA8E05CFB52BADBD8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1D1BF17FA51F19CEBEBFF24 /* AppDelegate.swift in Sources */,
+				DE6B3E8ACEF101A3D3F6EFF6 /* PacketLanPeerContract.swift in Sources */,
+				E068FA881F03603067600CC7 /* PacketLanPeerIdentity.swift in Sources */,
+				4D480A643AABAA65A8B7595E /* PacketLanPeerRuntime.swift in Sources */,
+				9B3FDA7CFE31AA4B0670FE18 /* PeerContract.swift in Sources */,
+				59805C883E6F70B1B6C7CEF8 /* PeerIdentity.swift in Sources */,
+				D74E4E0F661BDB2FFA0D860B /* PeerNetworkIdentity.swift in Sources */,
+				84F5A76EB807A0FF5BA2D9DF /* PeerRuntime.swift in Sources */,
+				3A6E6B6A34554CAA815F5EF1 /* PeerStreamProtocol.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		2D74D6F81EB478BF3E1D8325 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "$(CFM_IOS_PEER_DEVELOPMENT_TEAM)";
+				ENABLE_BITCODE = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = NO;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(CFM_IOS_PEER_PROVISIONING_PROFILE_SPECIFIER)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_EMIT_CONST_VALUE_PROTOCOLS = "";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		3191529D1C0912A333F3C960 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.cfm.physical-transport-peer";
+				PRODUCT_NAME = CFMPhysicalTransportPeer;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		86435200CDD84E5C4E05C3A3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.cfm.physical-transport-peer";
+				PRODUCT_NAME = CFMPhysicalTransportPeer;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		BF47FC5EBE6058CD9BA6245B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "$(CFM_IOS_PEER_DEVELOPMENT_TEAM)";
+				ENABLE_BITCODE = NO;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = NO;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(CFM_IOS_PEER_PROVISIONING_PROFILE_SPECIFIER)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_CONST_VALUE_PROTOCOLS = "";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0A3DE777DFA82E76B0B15542 /* Build configuration list for PBXProject "CFMPhysicalTransportPeerIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2D74D6F81EB478BF3E1D8325 /* Debug */,
+				BF47FC5EBE6058CD9BA6245B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FE98FA3CD3EFCA96853B8C4A /* Build configuration list for PBXNativeTarget "CFMPhysicalTransportPeer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				86435200CDD84E5C4E05C3A3 /* Debug */,
+				3191529D1C0912A333F3C960 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 28F3541F97E8051C0CED5F43 /* Project object */;
+}

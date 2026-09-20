@@ -17,12 +17,18 @@ use crate::{CoordinatorOptions, EngineModeCoordinator};
 
 #[derive(Default)]
 pub(super) struct FakeBackend {
+    pub(super) configuration_check_error: Mutex<Option<BackendErrorKind>>,
+    pub(super) configuration_check_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) fail_proxy_start_once: Mutex<bool>,
     operations: Mutex<Vec<&'static str>>,
     proxy_requests: Mutex<Vec<EngineStartRequest>>,
     proxy_stop_contexts: Mutex<Vec<EngineCommandContext>>,
     tunnel_install_contexts: Mutex<Vec<EngineCommandContext>>,
     tunnel_cancel_contexts: Mutex<Vec<EngineCommandContext>>,
     tunnel_requests: Mutex<Vec<EngineStartRequest>>,
+    pub(super) tunnel_authorization_requests: Mutex<Vec<EngineStartRequest>>,
+    pub(super) tunnel_authorization_gate: Mutex<Option<Arc<Notify>>>,
+    pub(super) tunnel_authorization_error: Mutex<Option<BackendErrorKind>>,
     tunnel_stop_contexts: Mutex<Vec<EngineCommandContext>>,
     native_status: Mutex<NativeEngineStatus>,
     query_count: AtomicUsize,
@@ -31,12 +37,17 @@ pub(super) struct FakeBackend {
     pub(super) awaiting_approval: Mutex<bool>,
     pub(super) fail_proxy_start: Mutex<bool>,
     pub(super) fail_proxy_stop: Mutex<bool>,
+    /// Reproduce the native explicit-stop boundary after an OS-originated stop:
+    /// a released owner has no active descriptor matching the old generation.
+    pub(super) reject_stop_after_native_off: Mutex<bool>,
     pub(super) fail_query: Mutex<bool>,
+    pub(super) query_error: Mutex<Option<BackendErrorKind>>,
     /// When true, a successful stop attests the owner stopped (returns `Ok`) but
     /// does not clear the native observation, so a subsequent independent
     /// OS-state query still reports the prior owner. Models a stop whose owner
     /// stopped attestation succeeds while the Global Off barrier stays unproven.
     pub(super) stop_leaves_owner_present: Mutex<bool>,
+    pub(super) start_error_leaves_owner_present: Mutex<bool>,
     pub(super) proxy_start_error: Mutex<Option<BackendErrorKind>>,
     pub(super) tunnel_install_error: Mutex<Option<BackendErrorKind>>,
     pub(super) tunnel_start_error: Mutex<Option<BackendErrorKind>>,
@@ -46,6 +57,21 @@ pub(super) struct FakeBackend {
 }
 
 impl FakeBackend {
+    fn require_present_stop_owner(&self) -> Result<(), BackendError> {
+        if *self
+            .reject_stop_after_native_off
+            .lock()
+            .expect("stop owner policy lock")
+            && *self.native_status.lock().expect("native status lock") == NativeEngineStatus::Off
+        {
+            return Err(BackendError::new(
+                BackendErrorKind::IdentityRejected,
+                "the native owner stop does not match an active generation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn operations(&self) -> Vec<&'static str> {
         self.operations.lock().expect("operations lock").clone()
     }
@@ -155,6 +181,48 @@ impl EngineGenerationStore for MemoryGenerationStore {
 }
 
 impl EngineBackend for FakeBackend {
+    fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push("check_configuration");
+            let gate = self
+                .configuration_check_gate
+                .lock()
+                .expect("check gate lock")
+                .clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            if let Some(kind) = *self
+                .configuration_check_error
+                .lock()
+                .expect("check error lock")
+            {
+                return Err(BackendError::new(kind, "candidate rejected"));
+            }
+            Ok(())
+        })
+    }
+    fn start_local_proxy(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
+        assert_eq!(request.mode, cfw_engine_api::EngineStartMode::LocalProxy);
+        Box::pin(async move {
+            let result = self.start_system_proxy(request).await;
+            let mut status = self.native_status.lock().expect("native status lock");
+            if let NativeEngineStatus::SystemProxy { runtime } = &*status {
+                *status = NativeEngineStatus::LocalProxy {
+                    runtime: runtime.clone(),
+                };
+            }
+            result
+        })
+    }
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
+        self.stop_system_proxy(context)
+    }
+
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
         Box::pin(async move {
             self.query_count.fetch_add(1, Ordering::AcqRel);
@@ -162,6 +230,12 @@ impl EngineBackend for FakeBackend {
                 return Err(BackendError::new(
                     BackendErrorKind::Unavailable,
                     "native status unavailable",
+                ));
+            }
+            if let Some(kind) = *self.query_error.lock().expect("query error lock") {
+                return Err(BackendError::new(
+                    kind,
+                    "native status reported a typed backend error",
                 ));
             }
             Ok(self
@@ -185,6 +259,17 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("proxy requests lock")
                 .push(request.clone());
+            if std::mem::take(
+                &mut *self
+                    .fail_proxy_start_once
+                    .lock()
+                    .expect("one-shot failure lock"),
+            ) {
+                return Err(BackendError::new(
+                    BackendErrorKind::ConfigurationRejected,
+                    "candidate start failed",
+                ));
+            }
             if *self.hang_proxy_start.lock().expect("hang start lock") {
                 std::future::pending::<()>().await;
             }
@@ -203,6 +288,21 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("proxy start error lock")
             {
+                if *self
+                    .start_error_leaves_owner_present
+                    .lock()
+                    .expect("start error owner lock")
+                {
+                    *self.native_status.lock().expect("native status lock") =
+                        NativeEngineStatus::SystemProxy {
+                            runtime: RuntimeIdentity {
+                                owner: EngineOwner::ProxyAgent,
+                                context: request.context.clone(),
+                                config_digest: request.config_digest.clone(),
+                                ready: true,
+                            },
+                        };
+                }
                 return Err(BackendError::new(
                     kind,
                     "proxy start reported a typed backend error",
@@ -248,6 +348,7 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("proxy stop contexts lock")
                 .push(context);
+            self.require_present_stop_owner()?;
             if *self.fail_proxy_stop.lock().expect("fail stop lock") {
                 return Err(BackendError::new(
                     BackendErrorKind::Internal,
@@ -311,6 +412,31 @@ impl EngineBackend for FakeBackend {
         })
     }
 
+    fn authorize_tunnel_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.tunnel_authorization_requests
+                .lock()
+                .expect("authorization lock")
+                .push(request);
+            let gate = self
+                .tunnel_authorization_gate
+                .lock()
+                .expect("authorization gate")
+                .clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            if let Some(kind) = *self
+                .tunnel_authorization_error
+                .lock()
+                .expect("authorization error")
+            {
+                return Err(BackendError::new(kind, "VPN authorization failed"));
+            }
+            Ok(())
+        })
+    }
+
     fn start_tunnel(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
         Box::pin(async move {
             self.operations
@@ -355,6 +481,7 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("tunnel stop contexts lock")
                 .push(context);
+            self.require_present_stop_owner()?;
             if !*self
                 .stop_leaves_owner_present
                 .lock()
@@ -380,6 +507,7 @@ pub(super) fn coordinator(backend: Arc<FakeBackend>) -> EngineModeCoordinator {
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(100),
+            authorization_timeout: Duration::from_millis(100),
             status_query_timeout: Duration::from_millis(100),
             status_reconciliation_interval: Duration::from_millis(20),
             initial_generation: 0,

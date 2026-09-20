@@ -15,7 +15,7 @@ mod generation_store;
 mod native_bridge;
 
 pub use generation_store::{GenerationStoreError, KeychainEngineGenerationStore};
-pub use native_bridge::NativeFrameworkBridge;
+pub use native_bridge::{NATIVE_BRIDGE_OUTER_WATCHDOG, NativeFrameworkBridge};
 
 pub type NativeBridgeFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, NativeBridgeError>> + Send + 'a>>;
@@ -24,13 +24,24 @@ pub type NativeBridgeFuture<'a, T> =
 pub enum NativeBridgeErrorCode {
     Busy,
     ResourceExhausted,
+    JournalCapacityExhausted,
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
+    SystemExtensionValidationFailed,
+    SystemProxyConfigurationFailed,
+    SystemProxyRuntimeFailed,
+    SystemProxyPreferencesFailed,
+    SystemProxyJournalFailed,
+    SystemProxyAuthorityFailed,
+    ExistingSystemProxy,
     CredentialsUnavailable,
     CredentialConflict,
     CredentialVaultMissing,
+    CredentialVaultCorrupt,
+    CredentialMigrationRequired,
     CredentialGcConflict,
+    ProxyAgentApprovalRequired,
     GlobalAuthorityUnavailable,
     GlobalAuthorityRegistrationRequired,
     GlobalAuthorityApprovalRequired,
@@ -56,6 +67,8 @@ pub enum NativeBridgeErrorCode {
     IdentityRejected,
     Timeout,
     Unavailable,
+    MixedEndpointInUse,
+    ControllerEndpointInUse,
     Internal,
 }
 
@@ -64,13 +77,30 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
         match code {
             NativeBridgeErrorCode::Busy => Self::Busy,
             NativeBridgeErrorCode::ResourceExhausted => Self::ResourceExhausted,
+            NativeBridgeErrorCode::JournalCapacityExhausted => Self::JournalCapacityExhausted,
             NativeBridgeErrorCode::PermissionDenied => Self::PermissionDenied,
             NativeBridgeErrorCode::ApprovalDenied => Self::ApprovalDenied,
             NativeBridgeErrorCode::ConfigurationRejected => Self::ConfigurationRejected,
+            NativeBridgeErrorCode::SystemExtensionValidationFailed => {
+                Self::SystemExtensionValidationFailed
+            }
+            NativeBridgeErrorCode::SystemProxyConfigurationFailed => {
+                Self::SystemProxyConfigurationFailed
+            }
+            NativeBridgeErrorCode::SystemProxyRuntimeFailed => Self::SystemProxyRuntimeFailed,
+            NativeBridgeErrorCode::SystemProxyPreferencesFailed => {
+                Self::SystemProxyPreferencesFailed
+            }
+            NativeBridgeErrorCode::SystemProxyJournalFailed => Self::SystemProxyJournalFailed,
+            NativeBridgeErrorCode::SystemProxyAuthorityFailed => Self::SystemProxyAuthorityFailed,
+            NativeBridgeErrorCode::ExistingSystemProxy => Self::ExistingSystemProxy,
             NativeBridgeErrorCode::CredentialsUnavailable => Self::CredentialsUnavailable,
             NativeBridgeErrorCode::CredentialConflict => Self::CredentialConflict,
             NativeBridgeErrorCode::CredentialVaultMissing => Self::CredentialVaultMissing,
+            NativeBridgeErrorCode::CredentialVaultCorrupt => Self::CredentialVaultCorrupt,
+            NativeBridgeErrorCode::CredentialMigrationRequired => Self::CredentialMigrationRequired,
             NativeBridgeErrorCode::CredentialGcConflict => Self::CredentialGcConflict,
+            NativeBridgeErrorCode::ProxyAgentApprovalRequired => Self::ProxyAgentApprovalRequired,
             NativeBridgeErrorCode::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
             NativeBridgeErrorCode::GlobalAuthorityRegistrationRequired => {
                 Self::GlobalAuthorityRegistrationRequired
@@ -104,6 +134,8 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
             NativeBridgeErrorCode::IdentityRejected => Self::IdentityRejected,
             NativeBridgeErrorCode::Timeout => Self::Timeout,
             NativeBridgeErrorCode::Unavailable => Self::Unavailable,
+            NativeBridgeErrorCode::MixedEndpointInUse => Self::MixedEndpointInUse,
+            NativeBridgeErrorCode::ControllerEndpointInUse => Self::ControllerEndpointInUse,
             NativeBridgeErrorCode::Internal => Self::Internal,
         }
     }
@@ -114,13 +146,28 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
         match kind {
             BackendErrorKind::Busy => Self::Busy,
             BackendErrorKind::ResourceExhausted => Self::ResourceExhausted,
+            BackendErrorKind::JournalCapacityExhausted => Self::JournalCapacityExhausted,
             BackendErrorKind::PermissionDenied => Self::PermissionDenied,
             BackendErrorKind::ApprovalDenied => Self::ApprovalDenied,
             BackendErrorKind::ConfigurationRejected => Self::ConfigurationRejected,
+            BackendErrorKind::SystemExtensionValidationFailed => {
+                Self::SystemExtensionValidationFailed
+            }
+            BackendErrorKind::SystemProxyConfigurationFailed => {
+                Self::SystemProxyConfigurationFailed
+            }
+            BackendErrorKind::SystemProxyRuntimeFailed => Self::SystemProxyRuntimeFailed,
+            BackendErrorKind::SystemProxyPreferencesFailed => Self::SystemProxyPreferencesFailed,
+            BackendErrorKind::SystemProxyJournalFailed => Self::SystemProxyJournalFailed,
+            BackendErrorKind::SystemProxyAuthorityFailed => Self::SystemProxyAuthorityFailed,
+            BackendErrorKind::ExistingSystemProxy => Self::ExistingSystemProxy,
             BackendErrorKind::CredentialsUnavailable => Self::CredentialsUnavailable,
             BackendErrorKind::CredentialConflict => Self::CredentialConflict,
             BackendErrorKind::CredentialVaultMissing => Self::CredentialVaultMissing,
+            BackendErrorKind::CredentialVaultCorrupt => Self::CredentialVaultCorrupt,
+            BackendErrorKind::CredentialMigrationRequired => Self::CredentialMigrationRequired,
             BackendErrorKind::CredentialGcConflict => Self::CredentialGcConflict,
+            BackendErrorKind::ProxyAgentApprovalRequired => Self::ProxyAgentApprovalRequired,
             BackendErrorKind::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
             BackendErrorKind::GlobalAuthorityRegistrationRequired => {
                 Self::GlobalAuthorityRegistrationRequired
@@ -154,6 +201,8 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
             BackendErrorKind::IdentityRejected => Self::IdentityRejected,
             BackendErrorKind::Timeout => Self::Timeout,
             BackendErrorKind::Unavailable => Self::Unavailable,
+            BackendErrorKind::MixedEndpointInUse => Self::MixedEndpointInUse,
+            BackendErrorKind::ControllerEndpointInUse => Self::ControllerEndpointInUse,
             BackendErrorKind::Internal => Self::Internal,
         }
     }
@@ -180,9 +229,20 @@ impl NativeBridgeError {
 /// successful stop is a barrier and must match the complete command context;
 /// stale stop requests must fail instead of terminating a newer runtime.
 pub trait NativeBridge: Send + Sync + 'static {
+    /// Request macOS network authorization without starting an engine or lease.
+    fn authorize_system_proxy(&self, restoration_only: bool) -> NativeBridgeFuture<'_, ()>;
     /// Queries ProxyAgent and Packet Tunnel status as one mutually-exclusive
     /// observation. Simultaneous owners or unverified native state are errors.
     fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus>;
+
+    fn check_configuration(&self, request: EngineStartRequest) -> NativeBridgeFuture<'_, ()>;
+
+    fn start_local_proxy(
+        &self,
+        request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity>;
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()>;
 
     fn start_system_proxy(
         &self,
@@ -197,6 +257,11 @@ pub trait NativeBridge: Send + Sync + 'static {
     ) -> NativeBridgeFuture<'_, TunnelInstallOutcome>;
 
     fn cancel_tunnel_install(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()>;
+
+    fn authorize_tunnel_configuration(
+        &self,
+        request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, ()>;
 
     fn start_tunnel(&self, request: EngineStartRequest) -> NativeBridgeFuture<'_, RuntimeIdentity>;
 
@@ -223,8 +288,34 @@ impl<B> AppleNetworkBackend<B> {
 }
 
 impl<B: NativeBridge> EngineBackend for AppleNetworkBackend<B> {
+    fn check_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.bridge
+                .check_configuration(request)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
         Box::pin(async move { self.bridge.query_status().await.map_err(map_bridge_error) })
+    }
+
+    fn start_local_proxy(&self, request: EngineStartRequest) -> BackendFuture<'_, RuntimeIdentity> {
+        Box::pin(async move {
+            self.bridge
+                .start_local_proxy(request)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
+
+    fn stop_local_proxy(&self, context: EngineCommandContext) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.bridge
+                .stop_local_proxy(context)
+                .await
+                .map_err(map_bridge_error)
+        })
     }
 
     fn start_system_proxy(
@@ -264,6 +355,15 @@ impl<B: NativeBridge> EngineBackend for AppleNetworkBackend<B> {
         Box::pin(async move {
             self.bridge
                 .cancel_tunnel_install(context)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
+
+    fn authorize_tunnel_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.bridge
+                .authorize_tunnel_configuration(request)
                 .await
                 .map_err(map_bridge_error)
         })
@@ -320,6 +420,24 @@ impl MissingNativeBridge {
 }
 
 impl NativeBridge for MissingNativeBridge {
+    fn check_configuration(&self, _request: EngineStartRequest) -> NativeBridgeFuture<'_, ()> {
+        Self::unavailable()
+    }
+    fn start_local_proxy(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+        Self::unavailable()
+    }
+
+    fn stop_local_proxy(&self, _context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+        Self::unavailable()
+    }
+
+    fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
+        Self::unavailable()
+    }
+
     fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus> {
         Self::unavailable()
     }
@@ -346,6 +464,13 @@ impl NativeBridge for MissingNativeBridge {
         Self::unavailable()
     }
 
+    fn authorize_tunnel_configuration(
+        &self,
+        _request: EngineStartRequest,
+    ) -> NativeBridgeFuture<'_, ()> {
+        Self::unavailable()
+    }
+
     fn start_tunnel(
         &self,
         _request: EngineStartRequest,
@@ -369,7 +494,7 @@ impl NativeBridge for MissingNativeBridge {
 mod tests {
     use std::sync::Mutex;
 
-    use cfw_engine_api::{EngineOwner, TunnelNetworkOptions};
+    use cfw_engine_api::{DirectIpv4HostRoutes, EngineOwner, TunnelNetworkOptions};
 
     use super::*;
 
@@ -379,6 +504,33 @@ mod tests {
     }
 
     impl NativeBridge for RecordingBridge {
+        fn check_configuration(&self, _request: EngineStartRequest) -> NativeBridgeFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn start_local_proxy(
+            &self,
+            request: EngineStartRequest,
+        ) -> NativeBridgeFuture<'_, RuntimeIdentity> {
+            self.start_system_proxy(request)
+        }
+
+        fn stop_local_proxy(&self, context: EngineCommandContext) -> NativeBridgeFuture<'_, ()> {
+            self.stop_system_proxy(context)
+        }
+        fn authorize_tunnel_configuration(
+            &self,
+            request: EngineStartRequest,
+        ) -> NativeBridgeFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().expect("calls lock").push(request.context);
+                Ok(())
+            })
+        }
+
+        fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
         fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus> {
             Box::pin(async { Ok(NativeEngineStatus::Off) })
         }
@@ -466,6 +618,7 @@ mod tests {
                         .config_digest
                         .clone(),
                     tunnel_config_digest: request.tunnel_request().config_digest.clone(),
+                    credential_audience: request.tunnel_request().credential_audience.clone(),
                 })
             })
         }
@@ -481,7 +634,13 @@ mod tests {
 
     fn tunnel_request() -> EngineStartRequest {
         EngineStartRequest {
+            mode: cfw_engine_api::EngineStartMode::Tunnel,
             context: context(),
+            credential_audience: cfw_engine_api::CredentialAudience::new(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "c".repeat(64),
+            )
+            .expect("audience"),
             config_json: "{\"inbounds\":[]}".to_owned(),
             config_content_digest: "b".repeat(64),
             config_digest: "a".repeat(64),
@@ -489,7 +648,9 @@ mod tests {
             tunnel_options: Some(TunnelNetworkOptions {
                 ipv6_enabled: true,
                 bypass_private_networks: true,
+                direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1_500,
+                system_proxy_port: None,
             }),
         }
     }
@@ -500,6 +661,14 @@ mod tests {
             let bridge = NativeBridgeErrorCode::from(kind);
             assert_eq!(BackendErrorKind::from(bridge), kind);
         }
+    }
+
+    #[test]
+    fn proxy_agent_approval_mapping_is_one_to_one() {
+        let kind = BackendErrorKind::ProxyAgentApprovalRequired;
+        let bridge = NativeBridgeErrorCode::from(kind);
+        assert_eq!(bridge, NativeBridgeErrorCode::ProxyAgentApprovalRequired);
+        assert_eq!(BackendErrorKind::from(bridge), kind);
     }
 
     #[tokio::test]

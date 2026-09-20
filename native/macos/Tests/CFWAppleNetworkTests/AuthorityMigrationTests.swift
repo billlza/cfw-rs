@@ -25,6 +25,7 @@ private func tunnelDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: installationID,
     epoch: epoch,
     generation: generation,

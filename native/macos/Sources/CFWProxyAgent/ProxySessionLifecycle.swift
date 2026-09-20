@@ -1,14 +1,15 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
+import OSLog
 
 protocol ProxyEngineLeaseHolding: AnyObject {
   func release() throws
   func markStopFailed() throws
 }
 
-struct PreparedProxyConfiguration {
-  let configuration: Data
+struct PreparedProxyOwnership {
   let lease: any ProxyEngineLeaseHolding
 }
 
@@ -18,14 +19,18 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case startupCancelled
   case staleStopRequest
   case recoveryBlocked(String)
+  case authorizationRequired
   case engineLease(String)
+  case authority(AuthorityErrorCode)
   case configuration(String)
   case engineCreation(String)
   case engineStart(String)
+  case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case listenerReadinessTimedOut
   case engineStop(String)
   case engineFailed(ProxyEngineFailure)
   case preferences(String)
+  case existingSystemProxy
   case ownershipJournal(String)
   case ownershipConflict([ProxyOwnershipConflict])
   case cleanupFailed(original: String, cleanup: [String])
@@ -38,14 +43,19 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
     case .startupCancelled: code = "proxy-startup-cancelled"
     case .staleStopRequest: code = "stale-stop-request"
     case .recoveryBlocked: code = "proxy-recovery-blocked"
+    case .authorizationRequired: code = "system-proxy-authorization-required"
     case .engineLease: code = "proxy-engine-lease-failed"
+    case .authority(let failure): code = "authority-\(failure.rawValue)"
     case .configuration: code = "proxy-configuration-failed"
     case .engineCreation: code = "proxy-engine-creation-failed"
     case .engineStart: code = "proxy-engine-start-failed"
+    case .endpointConflict(let role, _):
+      code = role == .mixed ? "mixed-endpoint-in-use" : "controller-endpoint-in-use"
     case .listenerReadinessTimedOut: code = "proxy-listener-readiness-timeout"
     case .engineStop: code = "proxy-engine-stop-failed"
     case .engineFailed: code = "proxy-engine-crashed"
     case .preferences: code = "system-proxy-preferences-failed"
+    case .existingSystemProxy: code = "existing-system-proxy"
     case .ownershipJournal: code = "proxy-ownership-journal-failed"
     case .ownershipConflict: code = "system-proxy-ownership-conflict"
     case .cleanupFailed: code = "proxy-cleanup-failed"
@@ -69,14 +79,20 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy stop does not match the active generation."
     case .recoveryBlocked:
       "System Proxy recovery is blocked until owned settings can be restored safely."
+    case .authorizationRequired:
+      "Approve macOS network authorization before starting System Proxy."
     case .engineLease:
       "The machine-wide engine lease operation failed."
+    case .authority(let failure):
+      failure.stableMessage
     case .configuration:
       "System Proxy configuration validation failed."
     case .engineCreation:
       "System Proxy runtime creation failed."
     case .engineStart:
       "System Proxy runtime startup failed."
+    case .endpointConflict(let role, let port):
+      "The System Proxy \(role.rawValue) endpoint could not bind to port \(port)."
     case .listenerReadinessTimedOut:
       "System Proxy listener did not become ready before the bounded timeout."
     case .engineStop:
@@ -85,6 +101,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy runtime exited unexpectedly."
     case .preferences:
       "System proxy preference transaction failed."
+    case .existingSystemProxy:
+      "Another system proxy is enabled. Existing proxy settings were not changed."
     case .ownershipJournal:
       "System proxy ownership journal operation failed."
     case .ownershipConflict:
@@ -96,7 +114,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
 }
 
 struct ProxySessionDependencies: @unchecked Sendable {
-  let prepareConfiguration: (ConfigurationDescriptor) throws -> PreparedProxyConfiguration
+  let prepareOwnership: (ConfigurationDescriptor) throws -> PreparedProxyOwnership
   let resolveConfiguration: (Data, ConfigurationDescriptor) throws -> Data
   let recoverCleanupLease: (ConfigurationDescriptor) throws -> any ProxyEngineLeaseHolding
   let engineFactory: any ProxyEngineFactory
@@ -105,7 +123,7 @@ struct ProxySessionDependencies: @unchecked Sendable {
   let readinessTimeout: TimeInterval
 
   init(
-    prepareConfiguration: @escaping (ConfigurationDescriptor) throws -> PreparedProxyConfiguration,
+    prepareOwnership: @escaping (ConfigurationDescriptor) throws -> PreparedProxyOwnership,
     resolveConfiguration: @escaping (Data, ConfigurationDescriptor) throws -> Data = {
       configuration,
       _ in configuration
@@ -116,7 +134,7 @@ struct ProxySessionDependencies: @unchecked Sendable {
     journalStore: any ProxyOwnershipJournalStoring,
     readinessTimeout: TimeInterval
   ) {
-    self.prepareConfiguration = prepareConfiguration
+    self.prepareOwnership = prepareOwnership
     self.resolveConfiguration = resolveConfiguration
     self.recoverCleanupLease = recoverCleanupLease
     self.engineFactory = engineFactory
@@ -146,6 +164,8 @@ private final class ProxyOperationCompletion: @unchecked Sendable {
 }
 
 final class ProxySessionLifecycle: @unchecked Sendable {
+  private static let logger = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-restoration")
   private final class Session {
     let id: UUID
     let configuration: ConfigurationDescriptor
@@ -192,7 +212,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   }
 
   func start(
-    configuration: ConfigurationDescriptor,
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
     completionHandler:
       @escaping @Sendable (
         Result<Void, ProxySessionLifecycleError>
@@ -200,7 +221,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   ) {
     let completion = ProxyOperationCompletion(completionHandler)
     stateQueue.async { [self] in
-      beginStart(configuration: configuration, completion: completion)
+      beginStart(
+        configuration: configuration,
+        descriptor: descriptor,
+        completion: completion)
     }
   }
 
@@ -244,10 +268,12 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   }
 
   private func beginStart(
-    configuration: ConfigurationDescriptor,
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
     completion: ProxyOperationCompletion
   ) {
-    guard configuration.slot == .systemProxy else {
+    defer { configuration.erase() }
+    guard descriptor.slot.isProxyAgent else {
       completion.finish(.failure(.invalidConfigurationSlot))
       return
     }
@@ -264,17 +290,31 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     lifecycle = .starting(sessionID)
     startCompletion = completion
     sequence &+= 1
-    currentSnapshot = .proxyStarting(configuration: configuration, sequence: sequence)
+    currentSnapshot = .proxyStarting(configuration: descriptor, sequence: sequence)
     lastStoppedConfiguration = nil
     lastFailedConfiguration = nil
 
-    let prepared: PreparedProxyConfiguration
+    if descriptor.slot == .systemProxy {
+      do {
+        try dependencies.preferences.requireAuthorization()
+      } catch SystemProxyPreferencesError.authorizationDenied {
+        failStartWithoutOwnedSession(
+          .authorizationRequired, configuration: descriptor, completion: completion)
+        return
+      } catch {
+        failStartWithoutOwnedSession(
+          .preferences(error.localizedDescription), configuration: descriptor,
+          completion: completion)
+        return
+      }
+    }
+    let prepared: PreparedProxyOwnership
     do {
-      prepared = try dependencies.prepareConfiguration(configuration)
+      prepared = try dependencies.prepareOwnership(descriptor)
     } catch {
       failStartWithoutOwnedSession(
         .engineLease(error.localizedDescription),
-        configuration: configuration,
+        configuration: descriptor,
         completion: completion
       )
       return
@@ -282,45 +322,53 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
     let startingSession = Session(
       id: sessionID,
-      configuration: configuration,
+      configuration: descriptor,
       engine: nil,
       lease: prepared.lease,
       journal: nil
     )
     session = startingSession
     do {
-      var resolvedConfiguration: Data
-      do {
-        resolvedConfiguration = try dependencies.resolveConfiguration(
-          prepared.configuration,
-          configuration
-        )
-      } catch {
-        throw ProxySessionLifecycleError.configuration(error.localizedDescription)
-      }
-      let sensitiveConfiguration = SensitiveDataBuffer(copying: resolvedConfiguration)
-      resolvedConfiguration.resetBytes(
-        in: resolvedConfiguration.startIndex..<resolvedConfiguration.endIndex
-      )
-      resolvedConfiguration.removeAll(keepingCapacity: false)
-      try sensitiveConfiguration.withErasingData { configurationData in
-        let engine: any ProxyEngine
+      try configuration.withErasingData { template in
+        var resolvedConfiguration: Data
         do {
-          engine = try dependencies.engineFactory.makeEngine(
-            configuration: configurationData
+          resolvedConfiguration = try dependencies.resolveConfiguration(
+            template,
+            descriptor
           )
         } catch {
-          throw ProxySessionLifecycleError.engineCreation(error.localizedDescription)
+          throw ProxySessionLifecycleError.configuration(error.localizedDescription)
         }
-        startingSession.engine = engine
-        do {
-          try engine.start(configuration: configurationData) { [weak self] event in
-            self?.stateQueue.async { [weak self] in
-              self?.handleEngineEvent(event, sessionID: sessionID)
-            }
+        let sensitiveResolvedConfiguration = SensitiveDataBuffer(
+          copying: resolvedConfiguration)
+        resolvedConfiguration.resetBytes(
+          in: resolvedConfiguration.startIndex..<resolvedConfiguration.endIndex
+        )
+        resolvedConfiguration.removeAll(keepingCapacity: false)
+        try sensitiveResolvedConfiguration.withErasingData { runtimeConfiguration in
+          let engine: any ProxyEngine
+          do {
+            engine = try dependencies.engineFactory.makeEngine(
+              configuration: runtimeConfiguration
+            )
+          } catch {
+            throw ProxySessionLifecycleError.engineCreation(error.localizedDescription)
           }
-        } catch {
-          throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          startingSession.engine = engine
+          do {
+            try engine.start(configuration: runtimeConfiguration) { [weak self] event in
+              self?.stateQueue.async { [weak self] in
+                self?.handleEngineEvent(event, sessionID: sessionID)
+              }
+            }
+          } catch let error as ProxyEngineError {
+            if case .endpointConflict(let role, let port) = error {
+              throw ProxySessionLifecycleError.endpointConflict(role: role, port: port)
+            }
+            throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          } catch {
+            throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          }
         }
       }
       stateQueue.asyncAfter(deadline: .now() + dependencies.readinessTimeout) { [weak self] in
@@ -347,7 +395,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       else {
         return
       }
-      activateSystemProxy(session: session, endpoint: endpoint)
+      if session.configuration.slot == .localProxy {
+        completeActivation(session)
+      } else {
+        activateSystemProxy(session: session, endpoint: endpoint)
+      }
     case .failed(let failure):
       guard session.engine != nil else {
         return
@@ -377,6 +429,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
           configuration: session.configuration,
           endpoint: endpoint
         )
+      } catch SystemProxyPreferencesError.existingProxyConfiguration {
+        throw ProxySessionLifecycleError.existingSystemProxy
       } catch {
         throw ProxySessionLifecycleError.preferences(error.localizedDescription)
       }
@@ -389,6 +443,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
       do {
         try dependencies.preferences.apply(preparedJournal)
+      } catch SystemProxyPreferencesError.existingProxyConfiguration {
+        throw ProxySessionLifecycleError.existingSystemProxy
       } catch {
         throw ProxySessionLifecycleError.preferences(error.localizedDescription)
       }
@@ -400,15 +456,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       }
       session.journal = appliedJournal
 
-      lifecycle = .active(session.id)
-      sequence &+= 1
-      currentSnapshot = .proxyActive(
-        configuration: session.configuration,
-        sequence: sequence
-      )
-      let completion = startCompletion
-      startCompletion = nil
-      completion?.finish(.success(()))
+      completeActivation(session)
     } catch let error as ProxySessionLifecycleError {
       failOwnedSession(session, originalError: error)
     } catch {
@@ -417,6 +465,15 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         originalError: .preferences(String(describing: error))
       )
     }
+  }
+
+  private func completeActivation(_ session: Session) {
+    lifecycle = .active(session.id)
+    sequence &+= 1
+    currentSnapshot = .proxyActive(configuration: session.configuration, sequence: sequence)
+    let completion = startCompletion
+    startCompletion = nil
+    completion?.finish(.success(()))
   }
 
   private func handleEngineFailure(
@@ -466,6 +523,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     cleanupErrors: [ProxySessionLifecycleError]
   ) {
     let terminalError = combinedError(original: originalError, cleanup: cleanupErrors)
+    let cleanupCodes = cleanupErrors.map { $0.engineFailure.code }.joined(separator: ",")
+    Self.logger.error(
+      "System Proxy start failed: stage=\(originalError.engineFailure.code, privacy: .public) cleanup=\(cleanupCodes, privacy: .public)"
+    )
     if failedSession.engine == nil, failedSession.journal == nil, failedSession.lease == nil {
       session = nil
       lifecycle = .idle
@@ -488,7 +549,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     expectedConfiguration: ConfigurationDescriptor,
     completion: ProxyOperationCompletion
   ) {
-    guard expectedConfiguration.slot == .systemProxy else {
+    guard expectedConfiguration.slot.isProxyAgent else {
       completion.finish(.failure(.invalidConfigurationSlot))
       return
     }
@@ -579,6 +640,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       let result = try dependencies.preferences.restore(journal)
       guard result.isComplete else {
         return [.ownershipConflict(result.conflicts)]
+      }
+      if !result.preservedExternalChanges.isEmpty {
+        Self.logger.notice(
+          "Preserving \(result.preservedExternalChanges.count, privacy: .public) externally changed proxy fields after verifying that the listener is no longer selected."
+        )
       }
       do {
         try dependencies.journalStore.remove()

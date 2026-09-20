@@ -4,6 +4,8 @@ all-features = true
 
 [advisories]
 ignore = []
+yanked = "deny"
+disable-yank-checking = false
 
 [licenses]
 allow = [

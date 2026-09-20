@@ -1,0 +1,12 @@
+diff --git a/Sources/XcodeGenKit/SettingsBuilder.swift b/Sources/XcodeGenKit/SettingsBuilder.swift
+--- a/Sources/XcodeGenKit/SettingsBuilder.swift
++++ b/Sources/XcodeGenKit/SettingsBuilder.swift
+@@ -226,8 +226,7 @@ extension SettingsPresetFile {
+             relativePath,
+             bundlePath + relativePath,
+             bundlePath + "../share/xcodegen/\(relativePath)",
+-            Path(#file).parent().parent().parent() + relativePath,
+         ]
+
+         if let resourcePath = Bundle.main.resourcePath {
+             possibleSettingsPaths.append(Path(resourcePath) + relativePath)

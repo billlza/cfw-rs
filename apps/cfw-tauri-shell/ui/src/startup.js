@@ -1,6 +1,14 @@
+import { t, setLocale, resolveLocale } from "./i18n.js";
 // This entry point must load before, and independently of, the dashboard bundle.
 // A module evaluation failure cannot be caught by bootstrap().catch().
 (() => {
+  setLocale(resolveLocale());
+  function localizeStartup() {
+    document.querySelectorAll("[data-i18n]").forEach((element) => { element.textContent = t(element.dataset.i18n); });
+    const screen = document.querySelector(".startup-screen");
+    screen?.setAttribute("aria-label", t("Starting Clash for Mac"));
+  }
+  localizeStartup();
   const deadlineMs = 15000;
   let finished = false;
   let failed = false;
@@ -22,7 +30,7 @@
     return invoke("report_dashboard_startup", { code }).catch(() => {
       diagnosticsUnavailable = true;
       const note = document.getElementById("startup-diagnostic-status");
-      if (note) note.textContent = "The diagnostic event could not be saved. Use the application menu to open available logs.";
+      if (note) note.textContent = t("The diagnostic event could not be saved. Use the application menu to open available logs.");
     });
   }
 
@@ -33,32 +41,32 @@
     panel.className = "startup-recovery";
     panel.setAttribute("role", "alert");
     const heading = document.createElement("h1");
-    heading.textContent = "The dashboard could not finish starting";
+    heading.textContent = t("The dashboard could not finish starting");
     const detail = document.createElement("p");
-    detail.textContent = "Reload the dashboard to retry. This does not restart the running network core.";
+    detail.textContent = t("Reload the dashboard to retry. This does not restart the running network core.");
     const code = document.createElement("p");
-    code.textContent = `Diagnostic code: ${failureCode}`;
+    code.textContent = t("Diagnostic code: {code}", { code: failureCode });
     const status = document.createElement("p");
     status.id = "startup-diagnostic-status";
     status.textContent = diagnosticsUnavailable
-      ? "The diagnostic event could not be saved. Use the application menu to open available logs."
-      : "Diagnostic events are kept locally. You can also open them from the application menu.";
+      ? t("The diagnostic event could not be saved. Use the application menu to open available logs.")
+      : t("Diagnostic events are kept locally. You can also open them from the application menu.");
     const reload = document.createElement("button");
     reload.type = "button";
-    reload.textContent = "Reload dashboard";
+    reload.textContent = t("Reload dashboard");
     reload.addEventListener("click", () => {
       // The native command owns migration-session admission as well as the
       // window. A failed command must never fall back to an unchecked reload.
       invoke("reload_dashboard").catch(() => {
-        status.textContent = "The dashboard could not be reloaded. Reload is unavailable during migration recovery. Open diagnostic logs for details.";
+        status.textContent = t("The dashboard could not be reloaded. Reload is unavailable during migration recovery. Open diagnostic logs for details.");
       });
     });
     const logs = document.createElement("button");
     logs.type = "button";
-    logs.textContent = "Open diagnostic logs";
+    logs.textContent = t("Open diagnostic logs");
     logs.addEventListener("click", () => {
       invoke("reveal_logs_directory").catch(() => {
-        status.textContent = "Logs could not be opened. Use Clash for Mac → Open diagnostic logs from the macOS menu bar.";
+        status.textContent = t("Logs could not be opened. Use Clash for Mac → Open diagnostic logs from the macOS menu bar.");
       });
     });
     panel.append(heading, detail, code, reload, logs, status);
@@ -84,6 +92,14 @@
   window.addEventListener("unhandledrejection", rejectionListener);
   timer = window.setTimeout(() => fail("startup_timeout"), deadlineMs);
   window.__CFM_STARTUP__ = Object.freeze({
+    setLanguage(value) {
+      setLocale(value);
+      localizeStartup();
+      if (failed && !finished) {
+        document.getElementById("startup-recovery")?.remove();
+        showFailure();
+      }
+    },
     ready() {
       if (finished || (failed && failureCode !== "startup_timeout")) return;
       // Slow native preparation may finish after the watchdog. Only the real

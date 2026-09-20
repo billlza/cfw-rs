@@ -1,3 +1,4 @@
+import { t, formatDate } from "./i18n.js";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 
@@ -299,28 +300,28 @@ export function normalizeEngineStatus(value) {
 }
 
 export function engineStateLabel(engine) {
-  return ENGINE_STATE_TEXT[engine?.state] ?? "Unknown";
+  return t(ENGINE_STATE_TEXT[engine?.state] ?? "Unknown");
 }
 
 export function systemProxyValueLabel(engine) {
-  if (!engine) return "Unknown";
-  if (engine.state === "TunnelSystemProxyActive") return "On";
-  if (engine.desiredMode === "tunnel-system-proxy" && ["TunnelInstalling", "AwaitingApproval", "TunnelStarting", "TunnelStopping"].includes(engine.state)) return ENGINE_STATE_TEXT[engine.state];
+  if (!engine) return t("Unknown");
+  if (engine.state === "TunnelSystemProxyActive") return t("On");
+  if (engine.desiredMode === "tunnel-system-proxy" && ["TunnelInstalling", "AwaitingApproval", "TunnelStarting", "TunnelStopping"].includes(engine.state)) return t(ENGINE_STATE_TEXT[engine.state]);
   if (["ProxyStarting", "ProxyActive", "ProxyStopping"].includes(engine.state)) {
-    return ENGINE_STATE_TEXT[engine.state];
+    return t(ENGINE_STATE_TEXT[engine.state]);
   }
-  if (engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)) return "Failed";
-  return "Off";
+  if (engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)) return t("Failed");
+  return t("Off");
 }
 
 /// Value shown next to the TUN switch: the tunnel's own lifecycle when it owns
 /// the engine, otherwise the plain off state.
 export function tunnelValueLabel(engine) {
-  if (!engine) return "Unknown";
+  if (!engine) return t("Unknown");
   const tunnelStates = ["TunnelInstalling", "AwaitingApproval", "TunnelStarting", "TunnelActive", "TunnelSystemProxyActive", "TunnelStopping"];
-  if (tunnelStates.includes(engine.state)) return ENGINE_STATE_TEXT[engine.state];
-  if (engine.state === "Failed" && modeHasTunnel(engine.desiredMode)) return "Failed";
-  return "Off";
+  if (tunnelStates.includes(engine.state)) return t(ENGINE_STATE_TEXT[engine.state]);
+  if (engine.state === "Failed" && modeHasTunnel(engine.desiredMode)) return t("Failed");
+  return t("Off");
 }
 
 export function summarizeEngineEvent(payload) {
@@ -331,8 +332,8 @@ export function summarizeEngineEvent(payload) {
 }
 
 export function formatGeoipLabel(status) {
-  if (!status) return "Unavailable";
-  if (!status.present) return "Not present";
+  if (!status) return t("Unavailable");
+  if (!status.present) return t("Not present");
   if (status.mtime_ms == null) return status.file_name || "Present";
   const date = new Date(status.mtime_ms);
   if (Number.isNaN(date.getTime())) return status.file_name || "Present";
@@ -359,16 +360,16 @@ export function formatRate(mbPerSecond) {
 }
 
 export function formatRelativeUpdated(epochSecs) {
-  if (!Number.isFinite(epochSecs) || epochSecs <= 0) return "unknown";
+  if (!Number.isFinite(epochSecs) || epochSecs <= 0) return t("unknown");
   const deltaMs = Date.now() - epochSecs * 1000;
-  if (deltaMs < 0) return new Date(epochSecs * 1000).toLocaleString();
+  if (deltaMs < 0) return formatDate(new Date(epochSecs * 1000), { dateStyle: "short", timeStyle: "medium" });
   const seconds = Math.floor(deltaMs / 1000);
-  if (seconds < 45) return "a few seconds";
-  if (seconds < 90) return "1 minute";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes`;
-  if (seconds < 5400) return "1 hour";
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours`;
-  return new Date(epochSecs * 1000).toLocaleString();
+  if (seconds < 45) return t("a few seconds");
+  if (seconds < 90) return t("1 minute");
+  if (seconds < 3600) return t("{count} minutes", { count: Math.floor(seconds / 60) });
+  if (seconds < 5400) return t("1 hour");
+  if (seconds < 86400) return t("{count} hours", { count: Math.floor(seconds / 3600) });
+  return formatDate(new Date(epochSecs * 1000), { dateStyle: "short", timeStyle: "medium" });
 }
 
 export function providerActionKey(scope, name) {
@@ -392,7 +393,7 @@ export function providerBatchSucceeded(result) {
 }
 
 export function delayFailureLabel(kind) {
-  return {
+  return t({
     timeout: "Timeout",
     not_found: "Not found",
     probe_failed: "Probe failed",
@@ -401,7 +402,7 @@ export function delayFailureLabel(kind) {
     invalid_response: "Invalid response",
     invalid_request: "Invalid target",
     unsupported: "Unsupported",
-  }[kind] ?? "Probe failed";
+  }[kind] ?? "Probe failed");
 }
 
 export function latestDelay(history = []) {

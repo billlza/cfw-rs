@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { escapeHtml, errorText } from "./format.js";
 
 export const RUNTIME_LOG_LEVELS = Object.freeze(["trace", "debug", "info", "warn", "error", "fatal", "silent"]);
@@ -5,7 +6,7 @@ export const RUNTIME_LOG_LEVELS = Object.freeze(["trace", "debug", "info", "warn
 function integer(text, minimum, maximum, label) {
   const value = String(text).trim();
   if (!/^\d+$/u.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < minimum || Number(value) > maximum) {
-    throw new Error(`${label} must be ${minimum}–${maximum}`);
+    throw new Error(t("{label} must be {minimum}–{maximum}", { label: label, minimum: minimum, maximum: maximum }));
   }
   return Number(value);
 }
@@ -27,20 +28,20 @@ export function runtimeDraft(settings, effective = null) {
 }
 
 export function preferencesFromRuntimeDraft(draft) {
-  if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error("Choose a supported log level");
-  if (typeof draft.ipv6DNS !== "boolean") throw new Error("Choose whether to enable IPv6 DNS");
+  if (!RUNTIME_LOG_LEVELS.includes(draft.level)) throw new Error(t("Choose a supported log level"));
+  if (typeof draft.ipv6DNS !== "boolean") throw new Error(t("Choose whether to enable IPv6 DNS"));
   const sources = draft.lanSources.split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
-  if (draft.allow && !sources.length) throw new Error("Enter the trusted LAN source ranges before enabling sharing");
+  if (draft.allow && !sources.length) throw new Error(t("Enter the trusted LAN source ranges before enabling sharing"));
   const lan = sources.length ? {
     listen: draft.lanAddress.trim(),
-    port: integer(draft.lanPort, 1024, 65535, "LAN port"),
+    port: integer(draft.lanPort, 1024, 65535, t("LAN port")),
     allowed_source_cidrs: sources,
   } : null;
   if (lan && (!/^\d{1,3}(?:\.\d{1,3}){3}$/u.test(lan.listen) || sources.length > 32)) {
-    throw new Error("Enter an IPv4 listener and at most 32 trusted source ranges");
+    throw new Error(t("Enter an IPv4 listener and at most 32 trusted source ranges"));
   }
-  const preferred = String(draft.port).trim() ? integer(draft.port, 1024, 65535, "Proxy port") : null;
-  if (lan && lan.port === preferred) throw new Error("The local and LAN proxy ports must be different");
+  const preferred = String(draft.port).trim() ? integer(draft.port, 1024, 65535, t("Proxy port")) : null;
+  if (lan && lan.port === preferred) throw new Error(t("The local and LAN proxy ports must be different"));
   return {
     preferred_mixed_port: preferred,
     log_level: draft.level,
@@ -97,7 +98,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     state.runtimeSettingsDialog = null;
   }
   async function save(settings, revision, dialog = null) {
-    if (state.engineMutationBusy || state.migrationHandoff) throw new Error("Another network operation is in progress");
+    if (state.engineMutationBusy || state.migrationHandoff) throw new Error(t("Another network operation is in progress"));
     state.engineMutationBusy = true;
     if (dialog) { dialog.saving = true; dialog.error = null; }
     renderPage();
@@ -108,16 +109,16 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
       accept(snapshot);
       saved = true;
       if (state.runtimeSettingsDialog === dialog) state.runtimeSettingsDialog = null;
-      appendLog("info", "settings", "Runtime settings applied and saved");
+      appendLog("info", "settings", t("Runtime settings applied and saved"));
     } catch (error) {
       if (dialog) dialog.error = errorText(error);
-      appendLog("error", "settings", `Runtime settings were not applied: ${errorText(error)}`);
+      appendLog("error", "settings", t("Runtime settings were not applied: {error}", { error: errorText(error) }));
       await load();
     } finally {
       // A failed candidate may have restored the old core under a new identity.
       // Refresh that state on both outcomes instead of predicting a rollback.
       try { await refreshRuntime(); } catch (error) {
-        appendLog("error", "settings", `Could not refresh runtime status: ${errorText(error)}`);
+        appendLog("error", "settings", t("Could not refresh runtime status: {error}", { error: errorText(error) }));
       }
       state.engineMutationBusy = false;
       if (dialog) dialog.saving = false;
@@ -132,7 +133,7 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
   }
   async function toggleIPv6DNS(enabled) {
     if (typeof enabled !== "boolean") throw new TypeError("IPv6 DNS must be enabled or disabled");
-    if (state.engineMutationBusy || state.migrationHandoff) throw new Error("Another network operation is in progress");
+    if (state.engineMutationBusy || state.migrationHandoff) throw new Error(t("Another network operation is in progress"));
     const snapshot = await invoke("read_runtime_settings_snapshot");
     validateSnapshot(snapshot);
     // A background refresh cannot cancel a user's choice. Bind the write to
@@ -146,20 +147,20 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     const disabled = dialog.saving ? " disabled" : "";
     return `<div class="glass-dialog-backdrop" data-runtime-dismiss></div>
       <section class="glass-dialog runtime-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="runtime-settings-title">
-        <h2 id="runtime-settings-title">Network settings</h2>
-        <p class="glass-dialog-copy">Changes apply to the current core. Existing connections may reconnect.</p>
-        <label class="glass-input-label">Local proxy port <input class="glass-input" data-runtime-field="port" inputmode="numeric" placeholder="Automatic" value="${escapeHtml(d.port)}"${disabled}></label>
-        <label class="glass-input-label">Log level <select class="glass-input" data-runtime-field="level"${disabled}>${RUNTIME_LOG_LEVELS.map((level) => `<option value="${level}"${d.level === level ? " selected" : ""}>${level}</option>`).join("")}</select></label>
+        <h2 id="runtime-settings-title">${escapeHtml(t("Network settings"))}</h2>
+        <p class="glass-dialog-copy">${escapeHtml(t("Changes apply to the current core. Existing connections may reconnect."))}</p>
+        <label class="glass-input-label">${escapeHtml(t("Local proxy port"))} <input class="glass-input" data-runtime-field="port" inputmode="numeric" placeholder="${escapeHtml(t("Automatic"))}" value="${escapeHtml(d.port)}"${disabled}></label>
+        <label class="glass-input-label">${escapeHtml(t("Log level"))} <select class="glass-input" data-runtime-field="level"${disabled}>${RUNTIME_LOG_LEVELS.map((level) => `<option value="${level}"${d.level === level ? " selected" : ""}>${level}</option>`).join("")}</select></label>
         <label class="glass-input-label">TUN MTU <input class="glass-input" data-runtime-field="mtu" inputmode="numeric" value="${escapeHtml(d.mtu)}"${disabled}></label>
-        <label class="glass-input-label"><input type="checkbox" data-runtime-field="ipv6DNS"${d.ipv6DNS ? " checked" : ""}${disabled}> Enable IPv6 DNS</label>
-        <p class="glass-dialog-copy">Turn off for a proxy server with a broken IPv6 exit. TUN still captures IPv6 traffic.</p>
-        <label class="glass-input-label"><input type="checkbox" data-runtime-field="allow"${d.allow ? " checked" : ""}${disabled}> Share with trusted LAN devices</label>
-        <p class="glass-dialog-copy">LAN devices use a separate port. Enter the private source networks allowed to use it.</p>
-        <label class="glass-input-label">LAN listener <input class="glass-input" data-runtime-field="lanAddress" value="${escapeHtml(d.lanAddress)}"${disabled}></label>
-        <label class="glass-input-label">LAN port <input class="glass-input" data-runtime-field="lanPort" inputmode="numeric" value="${escapeHtml(d.lanPort)}"${disabled}></label>
-        <label class="glass-input-label">Trusted source ranges <textarea class="glass-textarea" data-runtime-field="lanSources" rows="3" placeholder="192.168.1.0/24"${disabled}>${escapeHtml(d.lanSources)}</textarea></label>
+        <label class="glass-input-label"><input type="checkbox" data-runtime-field="ipv6DNS"${d.ipv6DNS ? " checked" : ""}${disabled}> ${escapeHtml(t("Enable IPv6 DNS"))}</label>
+        <p class="glass-dialog-copy">${escapeHtml(t("Turn off for a proxy server with a broken IPv6 exit. TUN still captures IPv6 traffic."))}</p>
+        <label class="glass-input-label"><input type="checkbox" data-runtime-field="allow"${d.allow ? " checked" : ""}${disabled}> ${escapeHtml(t("Share with trusted LAN devices"))}</label>
+        <p class="glass-dialog-copy">${escapeHtml(t("LAN devices use a separate port. Enter the private source networks allowed to use it."))}</p>
+        <label class="glass-input-label">${escapeHtml(t("LAN listener"))} <input class="glass-input" data-runtime-field="lanAddress" value="${escapeHtml(d.lanAddress)}"${disabled}></label>
+        <label class="glass-input-label">${escapeHtml(t("LAN port"))} <input class="glass-input" data-runtime-field="lanPort" inputmode="numeric" value="${escapeHtml(d.lanPort)}"${disabled}></label>
+        <label class="glass-input-label">${escapeHtml(t("Trusted source ranges"))} <textarea class="glass-textarea" data-runtime-field="lanSources" rows="3" placeholder="192.168.1.0/24"${disabled}>${escapeHtml(d.lanSources)}</textarea></label>
         ${dialog.error ? `<p class="glass-dialog-copy warning" role="alert">${escapeHtml(dialog.error)}</p>` : ""}
-        <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-runtime-dismiss${disabled}>Cancel</button><button type="button" class="glass-btn primary" data-runtime-save${disabled}>${dialog.saving ? "Applying…" : "Apply"}</button></div>
+        <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-runtime-dismiss${disabled}>${escapeHtml(t("Cancel"))}</button><button type="button" class="glass-btn primary" data-runtime-save${disabled}>${dialog.saving ? t("Applying…") : t("Apply")}</button></div>
       </section>`;
   }
   function bindDialog() {

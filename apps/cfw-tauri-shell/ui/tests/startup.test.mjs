@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = readFileSync(new URL("../src/startup.js", import.meta.url), "utf8");
+const source = readFileSync(new URL("../dist/startup.js", import.meta.url), "utf8");
 
 function launch({ nativeFailure = false } = {}) {
   const elements = new Map();
@@ -36,7 +36,7 @@ function launch({ nativeFailure = false } = {}) {
     clearTimeout(id) { timers.delete(id); },
     location: { reload() { reloaded += 1; } },
   };
-  vm.runInNewContext(source, { window, document: { body, createElement: element, getElementById: (id) => elements.get(id) }, Promise, Object, Error });
+  vm.runInNewContext(source, { window, document: { body, documentElement: element("html"), querySelectorAll: () => [], querySelector: () => null, createElement: element, getElementById: (id) => elements.get(id) }, Promise, Object, Error });
   return { window, body, elements, listeners, timers, calls, reloadCount: () => reloaded };
 }
 
@@ -106,4 +106,15 @@ test("a rejected native reload never falls back to an unchecked renderer reload"
   await Promise.resolve();
   assert.equal(app.reloadCount(), 0);
   assert.match(app.elements.get("startup-diagnostic-status").textContent, /could not be reloaded/u);
+});
+
+test("independent startup recovery uses the chosen language without invoking network controls", () => {
+  for (const [locale, heading] of [["zh-Hans", "界面未能完成启动"], ["zh-Hant", "介面無法完成啟動"], ["ja", "画面の起動を完了できませんでした"]]) {
+    const app = launch();
+    app.window.__CFM_STARTUP__.setLanguage(locale);
+    app.window.__CFM_STARTUP__.fail();
+    const recovery = app.elements.get("startup-recovery");
+    assert.equal(recovery.children[0].textContent, heading);
+    assert.ok(app.calls.every(({ command }) => ["report_dashboard_startup", "reveal_logs_directory", "reload_dashboard"].includes(command)));
+  }
 });

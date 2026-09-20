@@ -24,7 +24,7 @@ pub(crate) fn start(app: AppHandle) {
 
 async fn initialize(app: AppHandle) -> Result<(), String> {
     let worker = app.clone();
-    let (profiles, prepared) = prepare_off_main(move || {
+    let (profiles, prepared, language) = prepare_off_main(move || {
         let diagnostics = worker.state::<Diagnostics>();
         let bridge = diagnostics
             .startup_step("native_bridge", || {
@@ -44,7 +44,11 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
         let engine = diagnostics.startup_step("engine_manager", || {
             crate::engine::prepare_managed_engine(bridge)
         })?;
-        Ok((profiles, engine))
+        let language = crate::settings_store()?
+            .read_or_default()
+            .map_err(|error| error.to_string())?
+            .language;
+        Ok((profiles, engine, language))
     })
     .await?;
 
@@ -62,6 +66,7 @@ async fn initialize(app: AppHandle) -> Result<(), String> {
     })
     .await?;
 
+    crate::i18n::apply(&app, language).await?;
     let worker = app.clone();
     prepare_off_main(move || {
         crate::engine::start_engine_event_forwarder(worker.clone());

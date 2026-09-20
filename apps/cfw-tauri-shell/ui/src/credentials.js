@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 /// Credential-vault payload validation.
 ///
 /// A 0.4.0 profile can only reference a secret by immutable `credential_ref`, so
@@ -31,6 +32,12 @@ export const CREDENTIAL_KINDS = Object.freeze([
 
 const KINDS = new Set(CREDENTIAL_KINDS);
 const CREDENTIAL_LABELS = Object.freeze({
+  shadowsocks_password: "Shadowsocks Password",
+  vmess_uuid: "VMess UUID",
+  vless_uuid: "VLESS UUID",
+  trojan_password: "Trojan Password",
+  hysteria2_password: "Hysteria2 Password",
+  hysteria2_obfs_password: "Hysteria2 Obfs Password",
   socks5_username: "SOCKS5 Username",
   socks5_password: "SOCKS5 Password",
   http_proxy_username: "HTTP Proxy Username",
@@ -47,7 +54,7 @@ function isRecord(value) {
 }
 
 export function credentialLabel(kind) {
-  if (Object.hasOwn(CREDENTIAL_LABELS, kind)) return CREDENTIAL_LABELS[kind];
+  if (Object.hasOwn(CREDENTIAL_LABELS, kind)) return t(CREDENTIAL_LABELS[kind]);
   return String(kind)
     .split("_")
     .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))

@@ -8,11 +8,13 @@
 use serde::{Deserialize, Serialize};
 
 mod bounded_command;
+mod language;
 mod launchctl;
 mod legacy_observation;
 mod legacy_proxy;
 mod legacy_service;
 mod login_item;
+pub use language::preferred_languages;
 mod network_context;
 mod network_observation;
 pub use network_context::{

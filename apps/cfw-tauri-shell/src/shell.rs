@@ -12,7 +12,7 @@ use crate::lifecycle::request_shutdown;
 use crate::updater::check_for_updates;
 
 const PRODUCT_NAME: &str = "Clash for Mac";
-const TRAY_ID: &str = "cfw-tray";
+pub(crate) const TRAY_ID: &str = "cfw-tray";
 const APP_MENU_ABOUT_ID: &str = "about";
 const APP_MENU_CHECK_UPDATE_ID: &str = "check-update";
 const APP_MENU_QUIT_ID: &str = "quit";
@@ -184,21 +184,21 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let about = MenuItem::with_id(
         app,
         APP_MENU_ABOUT_ID,
-        "About Clash for Mac",
+        crate::i18n::text(app, "About Clash for Mac"),
         true,
         None::<&str>,
     )?;
     let check_update = MenuItem::with_id(
         app,
         APP_MENU_CHECK_UPDATE_ID,
-        "Check for Update…",
+        crate::i18n::text(app, "Check for Update…"),
         true,
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(
         app,
         APP_MENU_QUIT_ID,
-        "Quit Clash for Mac",
+        crate::i18n::text(app, "Quit Clash for Mac"),
         true,
         Some("CmdOrCtrl+Q"),
     )?;
@@ -212,47 +212,47 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &MenuItem::with_id(
                 app,
                 APP_MENU_RELOAD_ID,
-                "Reload dashboard",
+                crate::i18n::text(app, "Reload dashboard"),
                 true,
                 None::<&str>,
             )?,
             &MenuItem::with_id(
                 app,
                 APP_MENU_DIAGNOSTICS_ID,
-                "Open diagnostic logs…",
+                crate::i18n::text(app, "Open diagnostic logs…"),
                 true,
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::services(app, Some(&crate::i18n::text(app, "Services")))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, None)?,
-            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::hide(app, Some(&crate::i18n::text(app, "Hide Clash for Mac")))?,
+            &PredefinedMenuItem::hide_others(app, Some(&crate::i18n::text(app, "Hide Others")))?,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
     )?;
     let edit = Submenu::with_items(
         app,
-        "Edit",
+        crate::i18n::text(app, "Edit"),
         true,
         &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::undo(app, Some(&crate::i18n::text(app, "Undo")))?,
+            &PredefinedMenuItem::redo(app, Some(&crate::i18n::text(app, "Redo")))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::cut(app, None)?,
-            &PredefinedMenuItem::copy(app, None)?,
-            &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
+            &PredefinedMenuItem::cut(app, Some(&crate::i18n::text(app, "Cut")))?,
+            &PredefinedMenuItem::copy(app, Some(&crate::i18n::text(app, "Copy")))?,
+            &PredefinedMenuItem::paste(app, Some(&crate::i18n::text(app, "Paste")))?,
+            &PredefinedMenuItem::select_all(app, Some(&crate::i18n::text(app, "Select All")))?,
         ],
     )?;
     let window = Submenu::with_items(
         app,
-        "Window",
+        crate::i18n::text(app, "Window"),
         true,
         &[
-            &PredefinedMenuItem::minimize(app, None)?,
-            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::minimize(app, Some(&crate::i18n::text(app, "Minimize")))?,
+            &PredefinedMenuItem::maximize(app, Some(&crate::i18n::text(app, "Zoom")))?,
         ],
     )?;
     Menu::with_items(app, &[&app_menu, &edit, &window])
@@ -363,9 +363,27 @@ fn build_tray_menu(
     groups: &[TrayProxyGroup],
     route_mode: Option<&str>,
 ) -> tauri::Result<Menu<Wry>> {
-    let dashboard = MenuItem::with_id(app, TRAY_DASHBOARD_ID, "Dashboard", true, None::<&str>)?;
-    let about = MenuItem::with_id(app, TRAY_ABOUT_ID, "About", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
+    let dashboard = MenuItem::with_id(
+        app,
+        TRAY_DASHBOARD_ID,
+        crate::i18n::text(app, "Dashboard"),
+        true,
+        None::<&str>,
+    )?;
+    let about = MenuItem::with_id(
+        app,
+        TRAY_ABOUT_ID,
+        crate::i18n::text(app, "About"),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(
+        app,
+        TRAY_QUIT_ID,
+        crate::i18n::text(app, "Quit"),
+        true,
+        None::<&str>,
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
 
     let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![
@@ -373,14 +391,14 @@ fn build_tray_menu(
         Box::new(MenuItem::with_id(
             app,
             TRAY_RELOAD_ID,
-            "Reload dashboard",
+            crate::i18n::text(app, "Reload dashboard"),
             true,
             None::<&str>,
         )?),
         Box::new(MenuItem::with_id(
             app,
             TRAY_DIAGNOSTICS_ID,
-            "Open diagnostic logs…",
+            crate::i18n::text(app, "Open diagnostic logs…"),
             true,
             None::<&str>,
         )?),
@@ -389,14 +407,14 @@ fn build_tray_menu(
     items.push(Box::new(MenuItem::with_id(
         app,
         "core-start",
-        "Start local core",
+        crate::i18n::text(app, "Start local core"),
         snapshot.desired_mode == EngineMode::Off,
         None::<&str>,
     )?));
     items.push(Box::new(MenuItem::with_id(
         app,
         "core-stop",
-        "Stop core",
+        crate::i18n::text(app, "Stop core"),
         snapshot.desired_mode != EngineMode::Off || snapshot.state != EngineState::Off,
         None::<&str>,
     )?));
@@ -417,7 +435,7 @@ fn build_tray_menu(
         items.push(Box::new(CheckMenuItem::with_id(
             app,
             if active { disabled_id } else { enabled_id },
-            label,
+            crate::i18n::text(app, label),
             true,
             active,
             None::<&str>,
@@ -432,7 +450,7 @@ fn build_tray_menu(
         route_items.push(Box::new(CheckMenuItem::with_id(
             app,
             id,
-            label,
+            crate::i18n::text(app, label),
             ready.is_some(),
             route_mode.is_some_and(|mode| mode.eq_ignore_ascii_case(label)),
             None::<&str>,
@@ -444,7 +462,7 @@ fn build_tray_menu(
         .collect::<Vec<&dyn IsMenuItem<Wry>>>();
     items.push(Box::new(Submenu::with_items(
         app,
-        "Routing mode",
+        crate::i18n::text(app, "Routing mode"),
         ready.is_some(),
         &route_references,
     )?));

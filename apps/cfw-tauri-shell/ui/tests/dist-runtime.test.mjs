@@ -99,10 +99,11 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
       migration_handoff_renderer_ready: null,
     },
     read_settings_snapshot: {
+      resolved_locale: "en",
       persisted: true,
       settings: {
         theme: "system",
-        font_family: "",
+        font_family: "", language: "system",
         retain_window_bounds: true,
         launch_at_login: false,
         silent_start: false,

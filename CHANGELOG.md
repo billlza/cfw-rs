@@ -1,5 +1,7 @@
 # Changelog
 
+- Add Simplified Chinese, Traditional Chinese, English and Japanese with Settings → Appearance → Language, system-language matching, and localized native menus. Language changes preserve the active network session.
+
 ## 0.4.0 - Unreleased
 
 ### Everyday proxy use and compatibility

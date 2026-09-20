@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 // Connection presentation owns incremental row reconciliation and row events.
 // Engine identity and close commands remain in the shared controller pipeline.
 export function createConnectionsView({
@@ -70,8 +71,8 @@ function connectionRowHtml(connection, showProcess) {
         <small data-conn-speed>${escapeHtml(connection.speed ?? "0 B/s")}</small>
       </div>
       <div class="conn-actions">
-        <button data-connection-detail="${escapeHtml(connection.id)}">Info</button>
-        <button data-close-connection="${escapeHtml(connection.id)}" ${state.closingConnectionIds.has(connection.id) ? "disabled" : ""}>${state.closingConnectionIds.has(connection.id) ? "Closing" : "Close"}</button>
+        <button data-connection-detail="${escapeHtml(connection.id)}">${escapeHtml(t("Info"))}</button>
+        <button data-close-connection="${escapeHtml(connection.id)}" ${state.closingConnectionIds.has(connection.id) ? "disabled" : ""}>${state.closingConnectionIds.has(connection.id) ? t("Closing") : t("Close")}</button>
       </div>
     </article>
   `;
@@ -87,13 +88,13 @@ function renderConnections() {
   return `
     <div class="connections-layout" data-connections-root>
       <section class="cfw-conn-header">
-        <h1>Connections</h1>
+        <h1>${escapeHtml(t("Connections"))}</h1>
         <div class="cfw-conn-search">
           <span>●</span>
-          <input value="${escapeHtml(state.connectionSearch)}" data-connection-search aria-label="Search connections" placeholder="Search connections" />
+          <input value="${escapeHtml(state.connectionSearch)}" data-connection-search aria-label="${escapeHtml(t("Search connections"))}" placeholder="${escapeHtml(t("Search connections"))}" />
           ${state.connectionSearch ? '<button data-action="clear-connection-search">×</button>' : ""}
         </div>
-        <strong data-conn-totals>Total: ↑ ${totalUp} ↓ ${totalDown}</strong>
+        <strong data-conn-totals>${escapeHtml(t("Total: ↑ {upload} ↓ {download}", { upload: totalUp, download: totalDown }))}</strong>
       </section>
 
       <section class="cfw-conn-controls">
@@ -108,8 +109,8 @@ function renderConnections() {
           <button class="${state.connectionSort === sort ? "selected" : ""}" data-connection-sort="${sort}">${label}</button>
         `).join("")}
         <span></span>
-        <button class="danger" data-action="toggle-connection-stream">${state.connectionPaused ? "Resume" : "Pause"}</button>
-        <button class="danger" data-action="close-all" data-conn-close-all ${state.closingAllConnections ? "disabled" : ""}>${state.closingAllConnections ? "Closing..." : `Close All (${connections.length})`}</button>
+        <button class="danger" data-action="toggle-connection-stream">${state.connectionPaused ? t("Resume") : t("Pause")}</button>
+        <button class="danger" data-action="close-all" data-conn-close-all ${state.closingAllConnections ? "disabled" : ""}>${state.closingAllConnections ? t("Closing...") : t("Close All ({count})", { count: connections.length })}</button>
       </section>
 
       <section class="cfw-conn-scroll" data-conn-scroll>
@@ -132,14 +133,14 @@ function patchConnectionsDom() {
   const showProcess = state.toggles.showProcess !== false;
   const totals = root.querySelector("[data-conn-totals]");
   if (totals) {
-    totals.textContent = `Total: ↑ ${formatBytes(state.connectionStream.uploadTotal)} ↓ ${formatBytes(state.connectionStream.downloadTotal)}`;
+    totals.textContent = t("Total: ↑ {upload} ↓ {download}", { upload: formatBytes(state.connectionStream.uploadTotal), download: formatBytes(state.connectionStream.downloadTotal) });
   }
   const closeAll = root.querySelector("[data-conn-close-all]");
   if (closeAll) {
     closeAll.disabled = Boolean(state.closingAllConnections);
     closeAll.textContent = state.closingAllConnections
-      ? "Closing..."
-      : `Close All (${connections.length})`;
+      ? t("Closing...")
+      : t("Close All ({count})", { count: connections.length });
   }
 
   if (!(runtime.connectionRowEls instanceof Map)) {
@@ -176,7 +177,7 @@ function patchConnectionsDom() {
     if (closeBtn) {
       const closing = state.closingConnectionIds.has(connection.id);
       closeBtn.disabled = closing;
-      closeBtn.textContent = closing ? "Closing" : "Close";
+      closeBtn.textContent = closing ? t("Closing") : t("Close");
     }
     const expected = scroll.children[index];
     if (expected !== el) {
@@ -223,11 +224,11 @@ function connectionFacets(connections) {
 function renderConnectionDetail(connection) {
   const metadata = connection.metadata ?? {};
   const rows = [
-    ["Host", connection.host],
-    ["Rule", connection.rule],
-    ["Chains", (connection.chains ?? []).join(" / ")],
-    ["Upload", connection.upload],
-    ["Download", connection.download],
+    [t("Host"), connection.host],
+    [t("Rule"), connection.rule],
+    [t("Chains"), (connection.chains ?? []).join(" / ")],
+    [t("Upload"), connection.upload],
+    [t("Download"), connection.download],
     ["Speed", connection.speed],
     ...Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined && value !== ""),
   ];
@@ -235,7 +236,7 @@ function renderConnectionDetail(connection) {
     <div class="modal-backdrop" data-action="close-connection-detail">
       <section class="connection-info-modal" data-modal-stop>
         <div class="modal-head">
-          <h2>Connection Info</h2>
+          <h2>${escapeHtml(t("Connection Info"))}</h2>
           <button data-action="close-connection-detail">×</button>
         </div>
         <dl>
@@ -243,7 +244,7 @@ function renderConnectionDetail(connection) {
             <div>
               <dt>${escapeHtml(key)}</dt>
               <dd>${escapeHtml(String(value ?? ""))}</dd>
-              <button data-copy-text="${escapeHtml(String(value ?? ""))}">Copy</button>
+              <button data-copy-text="${escapeHtml(String(value ?? ""))}">${escapeHtml(t("Copy"))}</button>
             </div>
           `).join("")}
         </dl>
@@ -263,7 +264,7 @@ function bindConnectionRowEvents(scope) {
   scope.querySelectorAll("[data-close-connection]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       const id = event.currentTarget.dataset.closeConnection;
-      if (!controllerActionAllowed(`Closing connection ${id}`, "connection")) return;
+      if (!controllerActionAllowed(t("Closing connection {id}", { id: id }), "connection")) return;
       const token = captureEngineIdentityToken();
       state.closingConnectionIds.add(id);
       renderPage();
@@ -272,11 +273,11 @@ function bindConnectionRowEvents(scope) {
         if (!engineIdentityTokenIsCurrent(token)) return;
         await loadControllerSnapshot(true, token);
         if (!engineIdentityTokenIsCurrent(token)) return;
-        appendLog("info", "connection", `Connection ${id} closed`);
+        appendLog("info", "connection", t("Connection {id} closed", { id: id }));
       } catch (error) {
         if (!engineIdentityTokenIsCurrent(token)) return;
         state.controllerStatus = "controller offline";
-        appendLog("error", "connection", `Controller close failed for ${id}: ${errorText(error)}`);
+        appendLog("error", "connection", t("Controller close failed for {id}: {error}", { id: id, error: errorText(error) }));
       } finally {
         if (engineIdentityTokenIsCurrent(token)) state.closingConnectionIds.delete(id);
       }

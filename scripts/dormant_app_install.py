@@ -402,6 +402,16 @@ INSTALLED_40071_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Exact installed and retained notarized predecessor; service vocabulary unchanged.
+INSTALLED_40072_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40072",
+    tree_sha256="5951216697f671fc241605cb97b895e5ad8a668ca6601c92ab2efdaa5173beb1",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
@@ -417,6 +427,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40069_PREDECESSOR.build_number: INSTALLED_40069_PREDECESSOR,
         INSTALLED_40070_PREDECESSOR.build_number: INSTALLED_40070_PREDECESSOR,
         INSTALLED_40071_PREDECESSOR.build_number: INSTALLED_40071_PREDECESSOR,
+        INSTALLED_40072_PREDECESSOR.build_number: INSTALLED_40072_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

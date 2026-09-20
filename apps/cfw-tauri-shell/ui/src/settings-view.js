@@ -1,3 +1,4 @@
+import { t, LANGUAGE_OPTIONS } from "./i18n.js";
 // Settings and read-only network diagnostics rendering. Commands and
 // transactional settings dialogs own all mutations.
 export function createSettingsView({ state, defaultSettingsSnapshot, defaultSettings, engineIsOff, launchAtLoginPresentation, escapeHtml, renderToggle, THEME_OPTIONS, FONT_OPTIONS, REASONS, engineStateLabel, serviceProxyLabel }) {
@@ -6,7 +7,7 @@ function renderSettingsGroup(title, rows) {
     <section class="panel settings-group">
       <div class="section-heading">
         <div>
-          <p class="label">Settings</p>
+          <p class="label">${escapeHtml(t("Settings"))}</p>
           <h3>${escapeHtml(title)}</h3>
         </div>
       </div>
@@ -35,7 +36,7 @@ function renderSettingSelect(label, value, options, hint, dataAttribute, reason 
         <small>${escapeHtml(reason ?? hint)}</small>
       </span>
       <select class="setting-input" ${dataAttribute} ${reason ? `disabled title="${escapeHtml(reason)}"` : ""}>
-        ${options.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === value ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+        ${options.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === value ? "selected" : ""}>${escapeHtml(t(option.label))}</option>`).join("")}
       </select>
     </label>
   `;
@@ -67,104 +68,105 @@ function renderSettings() {
   const settingsReason = state.settingsUnavailableReason;
   const listenAddress = projection.mixedPort
     ? `${projection.listenAddress ?? "127.0.0.1"}:${projection.mixedPort}`
-    : "unavailable";
+    : t("unavailable");
   return `
     <div class="settings-layout">
       <section class="panel toolbar-panel settings-toolbar">
         <div>
-          <p class="label">Preferences</p>
-          <h3>${settingsReason ? "Preferences unavailable" : snapshot.persisted ? "Preferences saved" : "Default preferences"}</h3>
-          <p class="muted">${escapeHtml(settingsReason ?? "Save appearance and startup preferences here. Network and background controls apply in their own dialogs.")}</p>
+          <p class="label">${escapeHtml(t("Preferences"))}</p>
+          <h3>${settingsReason ? t("Preferences unavailable") : snapshot.persisted ? t("Preferences saved") : t("Default preferences")}</h3>
+          <p class="muted">${escapeHtml(settingsReason ?? t("Save appearance and startup preferences here. Network and background controls apply in their own dialogs."))}</p>
         </div>
         <div class="toolbar-actions">
-          <button class="button ghost danger" data-action="reset-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>Reset Preferences</button>
-          <button class="button" data-action="save-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>Save Preferences</button>
-          <button class="button ghost" data-action="reload-settings">Reload From Disk</button>
-          <button class="button ghost" data-action="force-quit-app">Force Quit</button>
-          <button class="button ghost" data-action="quit-app">Quit</button>
+          <button class="button ghost danger" data-action="reset-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>${escapeHtml(t("Reset Preferences"))}</button>
+          <button class="button" data-action="save-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>${escapeHtml(t("Save Preferences"))}</button>
+          <button class="button ghost" data-action="reload-settings">${escapeHtml(t("Reload From Disk"))}</button>
+          <button class="button ghost" data-action="force-quit-app">${escapeHtml(t("Force Quit"))}</button>
+          <button class="button ghost" data-action="quit-app">${escapeHtml(t("Quit"))}</button>
         </div>
       </section>
 
-      ${renderSettingsGroup("General", [
-        renderToggle("startAtLogin", "Start at Login", launchAtLogin.hint, { reason: launchAtLogin.reason }),
-        renderToggle("silentStart", "Silent Start", "Start hidden in the menu bar without a Dock icon.", { reason: settingsReason }),
-        renderToggle("checkForUpdates", "Check for updates", "Check GitHub for a newer official release at launch.", { reason: settingsReason }),
-        renderToggle("retainWindowBounds", "Retain window bounds", "Restore the dashboard window position between launches.", { reason: settingsReason }),
-        renderSettingAction("Updates", "GitHub Releases", "Check the official release feed now.", "check-for-updates", "Check for Updates"),
+      ${renderSettingsGroup(t("General"), [
+        renderToggle("startAtLogin", t("Start at Login"), launchAtLogin.hint, { reason: launchAtLogin.reason }),
+        renderToggle("silentStart", t("Silent Start"), t("Start hidden in the menu bar without a Dock icon."), { reason: settingsReason }),
+        renderToggle("checkForUpdates", t("Check for updates"), t("Check GitHub for a newer official release at launch."), { reason: settingsReason }),
+        renderToggle("retainWindowBounds", t("Retain window bounds"), t("Restore the dashboard window position between launches."), { reason: settingsReason }),
+        renderSettingAction(t("Updates"), "GitHub Releases", t("Check the official release feed now."), "check-for-updates", t("Check for Updates")),
       ])}
 
-      ${renderSettingsGroup("Appearance", [
-        renderSettingSelect("Theme", persisted.theme ?? "system", THEME_OPTIONS, "Applied immediately and persisted.", "data-theme-setting", settingsReason),
-        renderSettingSelect("Font", persisted.font_family ?? "", FONT_OPTIONS, "The preference store accepts these families only.", "data-font-family", settingsReason),
+      ${renderSettingsGroup(t("Appearance"), [
+        renderSettingSelect(t("Language"), persisted.language, LANGUAGE_OPTIONS, t("Applied immediately and saved. Follow system uses your macOS language preferences."), "data-language-setting", settingsReason),
+        renderSettingSelect(t("Theme"), persisted.theme ?? "system", THEME_OPTIONS, t("Applied immediately and persisted."), "data-theme-setting", settingsReason),
+        renderSettingSelect(t("Font"), persisted.font_family ?? "", FONT_OPTIONS, t("The preference store accepts these families only."), "data-font-family", settingsReason),
       ])}
 
-      ${renderSettingsGroup("Engine", [
-        renderSettingAction("Local proxy port", state.runtimeSettings?.effective.mixed_port ?? listenAddress, "Configure local port, log level, TUN MTU and LAN access.", "open-runtime-settings", "Configure", state.runtimeSettingsError),
-        renderSettingValue("Controller", projection.controller ?? "not running", "App-owned loopback controller of the running engine. Its secret is never shown."),
-        renderSettingValue("Engine state", `${engineStateLabel(engine)} · desired ${engine.desiredMode}`, engine.availabilityReason ?? "Live state of the Authority-mediated engine."),
-        renderSettingValue("Log level", projection.logLevel ?? "info", REASONS.logLevel),
-        renderToggle("allowLan", "Allow LAN", REASONS.allowLan, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
-        renderToggle("mixin", "Mixin", "", { reason: REASONS.mixin }),
+      ${renderSettingsGroup(t("Engine"), [
+        renderSettingAction(t("Local proxy port"), state.runtimeSettings?.effective.mixed_port ?? listenAddress, t("Configure local port, log level, TUN MTU and LAN access."), "open-runtime-settings", t("Configure"), state.runtimeSettingsError),
+        renderSettingValue(t("Controller"), projection.controller ?? "not running", t("App-owned loopback controller of the running engine. Its secret is never shown.")),
+        renderSettingValue(t("Engine state"), t("{state} · desired {desiredMode}", { state: engineStateLabel(engine), desiredMode: engine.desiredMode }), engine.availabilityReason ?? t("Live state of the Authority-mediated engine.")),
+        renderSettingValue(t("Log level"), projection.logLevel ?? "info", REASONS.logLevel),
+        renderToggle("allowLan", t("Allow LAN"), REASONS.allowLan, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
+        renderToggle("mixin", t("Mixin"), "", { reason: REASONS.mixin }),
       ])}
 
-      ${renderSettingsGroup("Background controls", [
-        renderSettingAction("Shortcuts & network rules", "Global shortcuts and automatic connection", "Choose global hotkeys and opt-in rules for Wi-Fi or wired networks.", "open-automation-settings", "Configure"),
+      ${renderSettingsGroup(t("Background controls"), [
+        renderSettingAction(t("Shortcuts & network rules"), t("Global shortcuts and automatic connection"), t("Choose global hotkeys and opt-in rules for Wi-Fi or wired networks."), "open-automation-settings", t("Configure")),
       ])}
 
-      ${renderSettingsGroup("Proxies", [
-        renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed the latency test. Session only: this build persists no view options."),
-        renderSettingValue("Delay test target", "controlled HTTPS", "No delay-test URL preference exists in this build; probes use the fixed HTTPS connectivity target."),
+      ${renderSettingsGroup(t("Proxies"), [
+        renderToggle("hideUnavailable", t("Hide timed-out proxies"), t("Hide nodes that failed the latency test. Session only: this build persists no view options.")),
+        renderSettingValue(t("Delay test target"), t("controlled HTTPS"), t("No delay-test URL preference exists in this build; probes use the fixed HTTPS connectivity target.")),
       ])}
 
-      ${renderSettingsGroup("Connections", [
-        renderToggle("breakOnProxyChange", "Break connections", "Close open connections after a proxy, mode or profile change. Session only."),
-        renderToggle("showProcess", "Show Process", "Show the process name the engine reports for a connection. Session only."),
+      ${renderSettingsGroup(t("Connections"), [
+        renderToggle("breakOnProxyChange", t("Break connections"), t("Close open connections after a proxy, mode or profile change. Session only.")),
+        renderToggle("showProcess", t("Show Process"), t("Show the process name the engine reports for a connection. Session only.")),
       ])}
 
-      ${renderSettingsGroup("Credentials", [
-        renderSettingValue("Profile credentials", "Keychain vault", "A profile references secrets by immutable id only. Open a profile's context menu → Credentials to store missing values."),
+      ${renderSettingsGroup(t("Credentials"), [
+        renderSettingValue(t("Profile credentials"), t("Keychain vault"), t("A profile references secrets by immutable id only. Open a profile's context menu → Credentials to store missing values.")),
         renderSettingAction(
-          "Unused credentials",
-          "Vault cleanup",
-          "Review Keychain entries that no stored profile references.",
+          t("Unused credentials"),
+          t("Vault cleanup"),
+          t("Review Keychain entries that no stored profile references."),
           "preview-credential-gc",
-          "Review",
+          t("Review"),
           engineOff ? null : REASONS.engineNotOff,
         ),
       ])}
 
-      ${renderSettingsGroup("Legacy maintenance", [
+      ${renderSettingsGroup(t("Legacy maintenance"), [
         renderSettingAction(
-          "Older Clash for Mac",
-          "Optional",
-          "Review cleanup of older CFM components and managed data, or recover an unfinished operation. Normal System Proxy and TUN starts are independent of cleanup.",
+          t("Older Clash for Mac"),
+          t("Optional"),
+          t("Review cleanup of older CFM components and managed data, or recover an unfinished operation. Normal System Proxy and TUN starts are independent of cleanup."),
           "open-legacy-maintenance",
-          "Open maintenance",
+          t("Open maintenance"),
         ),
       ])}
 
-      ${renderSettingsGroup("Paths", [
-        renderSettingAction("Home Directory", "Application Support", "Open the application home directory in Finder.", "open-home-directory", "Open Folder"),
-        renderSettingAction("Logs", "logs", "Open the log directory in Finder.", "reveal-logs", "Open Folder"),
+      ${renderSettingsGroup(t("Paths"), [
+        renderSettingAction(t("Home Directory"), t("Application Support"), t("Open the application home directory in Finder."), "open-home-directory", t("Open Folder")),
+        renderSettingAction(t("Logs"), "logs", t("Open the log directory in Finder."), "reveal-logs", t("Open Folder")),
       ])}
 
       ${renderSettingsGroup("DNS", [
-        renderSettingAction("System DNS", "never written", REASONS.restoreDns, "tun-restore-dns-info", "Details"),
+        renderSettingAction(t("System DNS"), t("never written"), REASONS.restoreDns, "tun-restore-dns-info", t("Details")),
       ])}
 
-      ${renderSettingsGroup("Cache", [
-        renderSettingAction("Fake IP Cache", "Controller-backed", "Flush the engine fake-ip cache.", "flush-fake-ip-cache", "Flush"),
+      ${renderSettingsGroup(t("Cache"), [
+        renderSettingAction(t("Fake IP Cache"), t("Controller-backed"), t("Flush the engine fake-ip cache."), "flush-fake-ip-cache", t("Flush")),
       ])}
 
       ${platform ? renderSettingsGroup("macOS", [
-        renderSettingValue("Minimum macOS", platform.minimum_macos ?? "15.0", "ARM64-only app baseline."),
-        renderSettingValue("Intel support", platform.intel_supported ? "Enabled" : "Disabled", "Removed to keep the Apple Silicon runtime lean."),
-        renderSettingValue("System proxy", platform.system_proxy_strategy ?? "", "How the system proxy is applied."),
-        renderSettingValue("Tunnel", platform.tun_strategy ?? "", "How the packet tunnel runs."),
-        renderSettingValue("Helper", platform.helper_strategy ?? "", "Privileged helper strategy."),
-        renderSettingValue("launchd", platform.launchd_strategy ?? "", "No product-layer ad-hoc scripts."),
+        renderSettingValue(t("Minimum macOS"), platform.minimum_macos ?? "15.0", t("ARM64-only app baseline.")),
+        renderSettingValue(t("Intel support"), platform.intel_supported ? t("Enabled") : t("Disabled"), t("Removed to keep the Apple Silicon runtime lean.")),
+        renderSettingValue(t("System proxy"), t(platform.system_proxy_strategy ?? ""), t("How the system proxy is applied.")),
+        renderSettingValue(t("Tunnel"), t(platform.tun_strategy ?? ""), t("How the packet tunnel runs.")),
+        renderSettingValue(t("Helper"), t(platform.helper_strategy ?? ""), t("Privileged helper strategy.")),
+        renderSettingValue("launchd", t(platform.launchd_strategy ?? ""), t("No product-layer ad-hoc scripts.")),
       ]) : renderSettingsGroup("macOS", [
-        renderSettingValue("Platform design", "Unavailable", "The platform design could not be read."),
+        renderSettingValue(t("Platform design"), t("Unavailable"), t("The platform design could not be read.")),
       ])}
 
       ${renderNetworkDiagnostics()}
@@ -175,8 +177,8 @@ function renderSettings() {
 function renderNetworkDiagnostics() {
   const diagnostics = state.networkDiagnostics;
   if (!diagnostics) {
-    return renderSettingsGroup("Network Diagnostics", [
-      renderSettingValue("Services", "Unavailable", "macOS network services could not be observed."),
+    return renderSettingsGroup(t("Network Diagnostics"), [
+      renderSettingValue(t("Services"), t("Unavailable"), "macOS network services could not be observed."),
     ]);
   }
   const services = diagnostics.services ?? [];
@@ -184,29 +186,29 @@ function renderNetworkDiagnostics() {
   const unavailable = diagnostics.unavailable ?? [];
   const rows = [
     renderSettingValue(
-      "Service order",
-      services.length ? `${services.length} service(s)` : "none",
-      "Read from SystemConfiguration only; no child process is spawned.",
+      t("Service order"),
+      services.length ? t("{count} service(s)", { count: services.length }) : "none",
+      t("Read from SystemConfiguration only; no child process is spawned."),
     ),
     renderSettingValue(
-      "Services carrying a proxy",
+      t("Services carrying a proxy"),
       proxied.length ? proxied.join(", ") : "none",
-      "Any service with a proxy setting enabled, whoever owns it. Ownership is not reported.",
+      t("Any service with a proxy setting enabled, whoever owns it. Ownership is not reported."),
     ),
     ...services.map((service) => renderSettingValue(
-      service.display_name ?? service.service_id ?? "unknown",
+      service.display_name ?? service.service_id ?? t("unknown"),
       serviceProxyLabel(service),
-      `set order ${service.order ?? "-"}`,
+      t("set order {value1}", { value1: service.order ?? "-" }),
     )),
   ];
   if (unavailable.length) {
     rows.push(renderSettingValue(
-      "Unavailable fields",
+      t("Unavailable fields"),
       unavailable.join(", "),
-      "Reported unavailable by the backend: the child-process tools that produced them are retired.",
+      t("Reported unavailable by the backend: the child-process tools that produced them are retired."),
     ));
   }
-  return renderSettingsGroup("Network Diagnostics", rows);
+  return renderSettingsGroup(t("Network Diagnostics"), rows);
 }
 
 

@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 // Local source admission only. Parsing and credential extraction remain in
 // the native import boundary; source text never enters the renderer store.
 export const MAX_PROFILE_SOURCE_BYTES = 4 * 1024 * 1024;
@@ -20,20 +21,20 @@ export function isProfileSourcePath(path) {
 
 export async function readProfileSourceFile(file) {
   if (/\.xlsx?$/iu.test(file.name)) {
-    throw new Error("Excel workbooks are not profile documents. Import the YAML/JSON file or paste its node link.");
+    throw new Error(t("Excel workbooks are not profile documents. Import the YAML/JSON file or paste its node link."));
   }
   if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_PROFILE_SOURCE_BYTES) {
-    throw new Error(`Profile source exceeds the ${MAX_PROFILE_SOURCE_BYTES}-byte limit.`);
+    throw new Error(t("Profile source exceeds the {maximum}-byte limit.", { maximum: MAX_PROFILE_SOURCE_BYTES }));
   }
   const bytes = await file.arrayBuffer();
   if (bytes.byteLength > MAX_PROFILE_SOURCE_BYTES) {
-    throw new Error(`Profile source exceeds the ${MAX_PROFILE_SOURCE_BYTES}-byte limit.`);
+    throw new Error(t("Profile source exceeds the {maximum}-byte limit.", { maximum: MAX_PROFILE_SOURCE_BYTES }));
   }
   // File.text() replaces malformed UTF-8 and can therefore alter credentials.
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
     if (!(error instanceof TypeError)) throw error;
-    throw new Error("Profile source must be UTF-8 JSON, YAML, WireGuard, or node-link text.");
+    throw new Error(t("Profile source must be UTF-8 JSON, YAML, WireGuard, or node-link text."));
   }
 }

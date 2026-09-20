@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 // Proxy presentation and bounded latency-result updates. Network operations
 // stay in the shared command/identity pipeline.
 export const PROXY_PAGE_SIZE = 96;
@@ -52,8 +53,8 @@ function delayClass(delay, failure = null) {
 
 function delayLabel(delay, failure = null) {
   if (failure) return delayFailureLabel(failure);
-  if (delay === null || delay === undefined) return state.toggles.testingDelays ? "Testing…" : "Not tested";
-  if (delay <= 0) return "Probe failed";
+  if (delay === null || delay === undefined) return state.toggles.testingDelays ? "Testing…" : t("Not tested");
+  if (delay <= 0) return t("Probe failed");
   return `${delay} ms`;
 }
 
@@ -66,7 +67,7 @@ function delayConcurrency() {
 function cancelDelayTest() {
   runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1;
   state.toggles.testingDelays = false;
-  if (runtime.delayBatchInFlight) state.proxyDelayMessage = "Stopping latency test after the current batch…";
+  if (runtime.delayBatchInFlight) state.proxyDelayMessage = t("Stopping latency test after the current batch…");
 }
 
 function visibleProxyNodeNames() {
@@ -123,7 +124,7 @@ function patchProxyDelayLabels(names) {
   const tool = document.querySelector('[data-action="delay-test"]');
   if (tool) {
     tool.classList.toggle("active", Boolean(state.toggles.testingDelays));
-    tool.title = state.toggles.testingDelays ? "Cancel latency test" : "Test latency";
+    tool.title = state.toggles.testingDelays ? "Cancel latency test" : t("Test latency");
     tool.disabled = Boolean(runtime.delayBatchInFlight && !state.toggles.testingDelays);
   }
 }
@@ -218,14 +219,14 @@ function renderProxies() {
   const blinkNode = state.proxyBlinkNode;
   const emptyMessage = controllerLive && state.proxyGroups.length === 0
     ? "Active profile has no proxy groups. Switch to a subscription with nodes."
-    : state.savedProfilePolicyError ?? "No saved nodes are available. Select or import a profile.";
+    : state.savedProfilePolicyError ?? t("No saved nodes are available. Select or import a profile.");
   const modeUnavailableTitle = controllerLive
     ? "Switch proxy mode"
-    : "Start the engine and wait for a live controller snapshot to switch mode";
+    : t("Start the engine and wait for a live controller snapshot to switch mode");
   const modeSwitch = `
-      <div class="mode-switch proxy-mode-header" role="group" aria-label="Proxy mode">
+      <div class="mode-switch proxy-mode-header" role="group" aria-label="${escapeHtml(t("Proxy mode"))}">
         ${["Global", "Rule", "Direct"].map((mode) => `
-          <button class="${state.mode === mode ? "selected" : ""}" data-mode="${mode}" title="${modeUnavailableTitle}" ${controllerLive ? "" : "disabled"}>${mode} <span>${modeIcon(mode)}</span></button>
+          <button class="${state.mode === mode ? "selected" : ""}" data-mode="${mode}" title="${modeUnavailableTitle}" ${controllerLive ? "" : "disabled"}>${escapeHtml(t(mode))} <span>${modeIcon(mode)}</span></button>
         `).join("")}
       </div>`;
   return `
@@ -233,7 +234,7 @@ function renderProxies() {
       ${modeSwitch}
 
       <div class="cfw-proxy-page">
-        ${!controllerLive && state.savedProfilePolicy ? `<p class="muted">Saved configuration · ${escapeHtml(state.savedProfilePolicy.name)}. Engine: ${escapeHtml(engineStateLabel(state.engine))}. ${engineIsOff() ? "Selections apply on the next start." : escapeHtml(state.engine.availabilityReason ?? "Live status is unavailable.")}</p>` : ""}
+        ${!controllerLive && state.savedProfilePolicy ? `<p class="muted">${escapeHtml(t("Saved configuration: {name}. Engine: {state}.", { name: state.savedProfilePolicy.name, state: engineStateLabel(state.engine) }))} ${engineIsOff() ? t("Selections apply on the next start.") : escapeHtml(state.engine.availabilityReason ?? t("Live status is unavailable."))}</p>` : ""}
         ${activeGroup ? `
           <div class="cfw-proxy-head">
             <div class="cfw-proxy-title">
@@ -242,11 +243,11 @@ function renderProxies() {
               <b>${escapeHtml(activeGroup.now ?? "")}</b>
             </div>
             <div class="cfw-proxy-tools">
-              <input class="proxy-filter" data-proxy-filter placeholder="Filter" value="${escapeHtml(state.proxyFilter)}" aria-label="Filter proxies" />
-              <button class="proxy-tool" data-action="scroll-to-selected-proxy" title="Scroll to selected proxy">${proxyToolIcon("scroll")}</button>
-              <button class="proxy-tool ${hideTimedOut ? "active" : ""}" data-action="toggle-hide-timed-out" title="Show/Hide timed-out proxies">${proxyToolIcon(hideTimedOut ? "report-off" : "report")}</button>
-              <button class="proxy-tool ${state.toggles.testingDelays ? "active" : ""}" data-action="delay-test" title="${state.toggles.testingDelays ? "Cancel latency test" : "Test latency"}" ${runtime.delayBatchInFlight && !state.toggles.testingDelays ? "disabled" : ""}>${proxyToolIcon("delay")}</button>
-              <button class="proxy-tool ${showProxiesList ? "active" : ""}" data-action="toggle-show-proxies" title="Show/hide proxies">${proxyToolIcon(showProxiesList ? "eye" : "eye-off")}</button>
+              <input class="proxy-filter" data-proxy-filter placeholder="${escapeHtml(t("Filter"))}" value="${escapeHtml(state.proxyFilter)}" aria-label="${escapeHtml(t("Filter proxies"))}" />
+              <button class="proxy-tool" data-action="scroll-to-selected-proxy" title="${escapeHtml(t("Scroll to selected proxy"))}">${proxyToolIcon("scroll")}</button>
+              <button class="proxy-tool ${hideTimedOut ? "active" : ""}" data-action="toggle-hide-timed-out" title="${escapeHtml(t("Show/Hide timed-out proxies"))}">${proxyToolIcon(hideTimedOut ? "report-off" : "report")}</button>
+              <button class="proxy-tool ${state.toggles.testingDelays ? "active" : ""}" data-action="delay-test" title="${state.toggles.testingDelays ? "Cancel latency test" : t("Test latency")}" ${runtime.delayBatchInFlight && !state.toggles.testingDelays ? "disabled" : ""}>${proxyToolIcon("delay")}</button>
+              <button class="proxy-tool ${showProxiesList ? "active" : ""}" data-action="toggle-show-proxies" title="${escapeHtml(t("Show/hide proxies"))}">${proxyToolIcon(showProxiesList ? "eye" : "eye-off")}</button>
             </div>
           </div>
           ${state.proxyDelayMessage ? `<p role="status" class="muted">${escapeHtml(state.proxyDelayMessage)}</p>` : ""}
@@ -254,7 +255,7 @@ function renderProxies() {
             ${showProxiesList ? `
             <div class="cfw-node-grid" data-proxy-node-grid>
               ${page.nodes.map((node) => `
-                <button class="cfw-node-card ${activeGroup.now === node.name ? "selected" : ""} ${blinkNode === node.name ? "blink" : ""} ${manual ? "" : "readonly"}" data-proxy-node="${escapeHtml(node.name)}" ${manual ? `data-group="${escapeHtml(activeGroup.name)}" data-node="${escapeHtml(node.name)}"` : "disabled"} title="${manual ? "Select proxy" : "This group type is chosen by the engine, not by the dashboard"}">
+                <button class="cfw-node-card ${activeGroup.now === node.name ? "selected" : ""} ${blinkNode === node.name ? "blink" : ""} ${manual ? "" : "readonly"}" data-proxy-node="${escapeHtml(node.name)}" ${manual ? `data-group="${escapeHtml(activeGroup.name)}" data-node="${escapeHtml(node.name)}"` : "disabled"} title="${manual ? "Select proxy" : t("This group type is chosen by the engine, not by the dashboard")}">
                   <i></i>
                   <span>
                     <strong>${nodePrefix(node.label ?? node.name)}${escapeHtml(node.label ?? node.name)}</strong>
@@ -263,9 +264,9 @@ function renderProxies() {
                   <b class="${delayClass(node.delay, node.delayFailure)}" data-proxy-delay="${escapeHtml(node.name)}">${delayLabel(node.delay, node.delayFailure)}</b>
                 </button>
               `).join("")}
-              ${page.pages > 1 ? `<nav class="proxy-pagination" aria-label="Proxy pages"><button data-proxy-page="-1"${page.page === 0 ? " disabled" : ""}>Previous</button><span>${page.page + 1} / ${page.pages} · ${page.total} nodes</span><button data-proxy-page="1"${page.page + 1 === page.pages ? " disabled" : ""}>Next</button></nav>` : ""}
+              ${page.pages > 1 ? `<nav class="proxy-pagination" aria-label="${escapeHtml(t("Proxy pages"))}"><button data-proxy-page="-1"${page.page === 0 ? " disabled" : ""}>${escapeHtml(t("Previous"))}</button><span>${escapeHtml(t("Page {page} / {pages} · Nodes: {count}", { page: page.page + 1, pages: page.pages, count: page.total }))}</span><button data-proxy-page="1"${page.page + 1 === page.pages ? " disabled" : ""}>${escapeHtml(t("Next"))}</button></nav>` : ""}
             </div>
-            ` : `<p class="empty proxy-list-hidden">Proxies hidden — click the eye to show this group’s nodes.</p>`}
+            ` : `<p class="empty proxy-list-hidden">${escapeHtml(t("Proxies hidden — click the eye to show this group’s nodes."))}</p>`}
             <aside class="cfw-group-rail">
               ${groups.map((group) => `
                 <button class="${group.name === activeGroup.name ? "active" : ""}" data-proxy-group-tab="${escapeHtml(group.name)}" title="${escapeHtml(group.name)}">${escapeHtml(groupRailLabel(group.name))}</button>

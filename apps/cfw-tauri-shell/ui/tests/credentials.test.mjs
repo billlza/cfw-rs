@@ -127,7 +127,7 @@ test("credential kinds are labelled for a person, not for a schema", () => {
   assert.equal(credentialLabel("socks5_username"), "SOCKS5 Username");
   assert.equal(credentialLabel("socks5_password"), "SOCKS5 Password");
   assert.equal(credentialLabel("hysteria2_obfs_password"), "Hysteria2 Obfs Password");
-  assert.equal(credentialLabel("vmess_uuid"), "Vmess Uuid");
+  assert.equal(credentialLabel("vmess_uuid"), "VMess UUID");
   assert.equal(credentialLabel("anytls_password"), "AnyTLS Password");
   assert.equal(credentialLabel("tuic_uuid"), "TUIC UUID");
   assert.equal(credentialLabel("tuic_password"), "TUIC Password");

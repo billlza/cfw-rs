@@ -2117,6 +2117,23 @@ dd {
   grid-column: 1 / -1;
 }
 
+/* Translated actions keep readable words at the minimum window width. */
+.settings-toolbar {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-toolbar .toolbar-actions {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.settings-toolbar .toolbar-actions .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .settings-list {
   display: grid;
   gap: 8px;

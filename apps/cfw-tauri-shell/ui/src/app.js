@@ -1,3 +1,4 @@
+import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
   defaultEngineStatus,
@@ -88,6 +89,7 @@ const LOGIN_ITEM_LIVE_STATUSES = new Set([
 const SETTINGS_FIELDS = Object.freeze([
   "check_for_updates",
   "font_family",
+  "language",
   "launch_at_login",
   "retain_window_bounds",
   "silent_start",
@@ -98,17 +100,17 @@ const SETTINGS_FIELDS = Object.freeze([
 /// Each one states what the product does instead, so a disabled switch is never
 /// unexplained and never silently does nothing.
 const REASONS = Object.freeze({
-  allowLan: "LAN sharing uses a separate listener restricted to explicitly trusted private source networks.",
-  bindAddress: "The local proxy and controller stay on loopback. LAN devices use their own listener address and port.",
-  logLevel: "Changes apply through a validated runtime replacement and are saved for the next launch.",
-  mixin: "Mixin is unavailable: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy.",
-  geoip: "Country rules use sing-box rule sets, downloaded on first start and refreshed daily while the engine runs. An existing Clash Country.mmdb file is not used.",
-  restoreDns: "This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS.",
-  engineNotOff: "Stop the core before credential maintenance or legacy migration.",
+  get allowLan() { return t("LAN sharing uses a separate listener restricted to explicitly trusted private source networks."); },
+  get bindAddress() { return t("The local proxy and controller stay on loopback. LAN devices use their own listener address and port."); },
+  get logLevel() { return t("Changes apply through a validated runtime replacement and are saved for the next launch."); },
+  get mixin() { return t("Mixin is unavailable: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy."); },
+  get geoip() { return t("Country rules use sing-box rule sets, downloaded on first start and refreshed daily while the engine runs. An existing Clash Country.mmdb file is not used."); },
+  get restoreDns() { return t("This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS."); },
+  get engineNotOff() { return t("Stop the core before credential maintenance or legacy migration."); },
 });
 
 
-/// Applies a `SettingsSnapshot`. The 0.4.0 preference store holds exactly six
+/// Applies a `SettingsSnapshot`. The preference store holds exactly seven
 /// renderer-owned fields; everything the 0.3.5 file used to carry now lives in
 /// the projected engine configuration and is read, never written, from there.
 import { createProviderUI } from "./providers.js";
@@ -172,11 +174,15 @@ function applyPersistedSettings(snapshot) {
   state.toggles.checkForUpdates = Boolean(settings.check_for_updates);
   state.toggles.retainWindowBounds = Boolean(settings.retain_window_bounds);
   applyAppearance(settings);
+  setLocale(snapshot.resolved_locale);
+  window.__CFM_STARTUP__?.setLanguage?.(snapshot.resolved_locale);
+  localizeShell();
 }
 
 function resetPersistedSettingsToSafeState() {
   state.settingsSnapshot = {
     persisted: defaultSettingsSnapshot.persisted,
+    resolved_locale: getLocale(),
     settings: { ...defaultSettingsSnapshot.settings },
     launch_at_login: { ...defaultSettingsSnapshot.launch_at_login },
   };
@@ -197,7 +203,7 @@ function normalizeSettingsSnapshot(snapshot) {
     throw new TypeError("settings snapshot is not an object");
   }
   const snapshotFields = Object.keys(snapshot).sort();
-  if (snapshotFields.join("\0") !== ["launch_at_login", "persisted", "settings"].join("\0")) {
+  if (snapshotFields.join("\0") !== ["launch_at_login", "persisted", "resolved_locale", "settings"].join("\0")) {
     throw new TypeError("settings snapshot field set is invalid");
   }
   if (typeof snapshot.persisted !== "boolean") {
@@ -215,6 +221,11 @@ function normalizeSettingsSnapshot(snapshot) {
   }
   if (!FONT_OPTIONS.some((option) => option.value === settings.font_family)) {
     throw new TypeError("settings font family is invalid");
+  }
+  if (!LANGUAGE_OPTIONS.some((option) => option.value === settings.language)
+      || !SUPPORTED_LOCALES.includes(snapshot.resolved_locale)
+      || (settings.language !== "system" && settings.language !== snapshot.resolved_locale)) {
+    throw new TypeError("settings display language is invalid");
   }
   for (const field of [
     "retain_window_bounds",
@@ -280,11 +291,11 @@ function launchAtLoginPresentation() {
     return { hint: value.observationError, reason: value.observationError };
   }
   if (value.liveStatus === "checking") {
-    const reason = "Checking macOS Login Item status…";
+    const reason = t("Checking macOS Login Item status…");
     return { hint: reason, reason };
   }
   if (value.liveStatus === "unknown") {
-    const reason = "Start at Login is unavailable because macOS returned an unknown Login Item state.";
+    const reason = t("Start at Login is unavailable because macOS returned an unknown Login Item state.");
     return { hint: reason, reason };
   }
   if (value.liveStatus === "requires_approval") {
@@ -300,30 +311,33 @@ function launchAtLoginPresentation() {
         reason: null,
       };
     }
-    const status = value.liveStatus === "not_found" ? "cannot find the signed app" : "reports it is not registered";
+    const status = value.liveStatus === "not_found" ? t("cannot find the signed app") : t("reports it is not registered");
     return {
-      hint: `The saved preference says On, but macOS ${status}. Switching On retries registration without silently changing the preference.`,
+      hint: t("The saved preference says On, but macOS {status}. Switching On retries registration without silently changing the preference.", { status: status }),
       reason: null,
     };
   }
   return {
     hint: value.liveStatus === "enabled"
-      ? "Enabled by macOS and requested by the saved preference."
-      : "Disabled by macOS and by the saved preference.",
+      ? t("Enabled by macOS and requested by the saved preference.")
+      : t("Disabled by macOS and by the saved preference."),
     reason: null,
   };
 }
 
-/// The six renderer-owned preference fields, and nothing else: the preference
+/// The seven renderer-owned preference fields, and nothing else: the preference
 /// store rejects an unknown field, and `launch_at_login` may only be changed by
 /// the transactional Login Item command, so it is echoed back unchanged.
 function persistedSettingsFromUi() {
   const current = state.settingsSnapshot?.settings ?? defaultSettings;
   const theme = document.querySelector("[data-theme-setting]")?.value ?? current.theme ?? "system";
   const fontFamily = document.querySelector("[data-font-family]")?.value ?? current.font_family ?? "";
+  const language = document.querySelector("[data-language-setting]")?.value ?? current.language;
+  if (!LANGUAGE_OPTIONS.some((option) => option.value === language)) throw new TypeError("Invalid language preference");
   return {
     theme: THEME_OPTIONS.some((option) => option.value === theme) ? theme : "system",
     font_family: FONT_OPTIONS.some((option) => option.value === fontFamily) ? fontFamily : "",
+    language,
     retain_window_bounds: state.toggles.retainWindowBounds,
     launch_at_login: Boolean(current.launch_at_login),
     silent_start: state.toggles.silentStart,
@@ -342,6 +356,14 @@ function applyAppearance(settings) {
     "--sans",
     font ? `"${font}", "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif` : '"Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif',
   );
+}
+
+function localizeShell() {
+  document.querySelectorAll("[data-i18n]").forEach((element) => { element.textContent = t(element.dataset.i18n); });
+  const nav = document.getElementById("nav");
+  nav?.setAttribute("aria-label", t("Primary navigation"));
+  const reload = document.getElementById("reload-button");
+  reload?.setAttribute("title", t("Reload dashboard"));
 }
 
 function applyControllerSnapshot(snapshot) {
@@ -481,12 +503,12 @@ function renderLogStreamHtml() {
               ${(line.fields ?? []).length ? `<small>${line.fields.map((field) => `${escapeHtml(field.key)}=${escapeHtml(field.value)}`).join(" · ")}</small>` : ""}
             </p>
           </article>
-        `).join("") || `<p class="empty">No ${state.logFilter === "all" ? "" : `${state.logFilter.toUpperCase()} `}logs for this filter.</p>`;
+        `).join("") || `<p class="empty">${escapeHtml(t("No logs for this filter."))}</p>`;
 }
 
 function logCountLabel(visibleCount) {
-  const total = state.logs.length > visibleCount ? ` of ${state.logs.length}` : "";
-  return `${visibleCount}${total} log entries${state.logsPaused ? " paused" : ""}`;
+  return t("Log entries: {visible} / {total}", { visible: visibleCount, total: state.logs.length })
+    + (state.logsPaused ? ` · ${t("Paused")}` : "");
 }
 
 function patchLogStream() {
@@ -518,7 +540,7 @@ function renderNav() {
       return `
         <button class="nav-item${active}" data-page="${escapeHtml(page.id)}">
           <span>${index + 1}</span>
-          <b>${escapeHtml(page.title)}</b>
+          <b>${escapeHtml(t(page.title))}</b>
         </button>
       `;
     })
@@ -692,15 +714,15 @@ function openProductAboutDialog(options = {}) {
 function productAboutStatusText(payload) {
   const phase = payload?.phase ?? (payload?.checking ? "checking" : "idle");
   const update = payload?.update;
-  if (phase === "checking") return "Checking for updates…";
-  if (update?.error) return `Update failed: ${update.error}`;
+  if (phase === "checking") return t("Checking for updates…");
+  if (update?.error) return t("Update failed: {error}", { error: update.error });
   if (update?.available && update?.version) {
-    return `Update available: v${update.version}`;
+    return t("Update available: v{version}", { version: update.version });
   }
   if (update && update.available === false) {
-    return `You’re up to date (v${update.current ?? state.payload?.product?.version ?? "—"})`;
+    return t("You’re up to date (v{value1})", { value1: update.current ?? state.payload?.product?.version ?? "—" });
   }
-  return "Check GitHub releases for new builds.";
+  return t("Check GitHub releases for new builds.");
 }
 
 
@@ -737,14 +759,14 @@ function renderMigrationBanner() {
   if (route === "none") return "";
   const close = state.legacyMaintenanceOpen && !state.migrationHandoff
     && legacyMaintenanceRoute(retirement, false) === "none"
-    ? `<button type="button" class="cfw-text-button" data-action="close-legacy-maintenance">Close maintenance</button>`
+    ? `<button type="button" class="cfw-text-button" data-action="close-legacy-maintenance">${escapeHtml(t("Close maintenance"))}</button>`
     : "";
   if (route === "complete") {
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>Legacy CFM maintenance is complete</strong>
-          <small>No legacy cleanup is pending.</small>
+          <strong>${escapeHtml(t("Legacy CFM maintenance is complete"))}</strong>
+          <small>${escapeHtml(t("No legacy cleanup is pending."))}</small>
           ${close}
         </div>
       </div>
@@ -753,7 +775,7 @@ function renderMigrationBanner() {
   let cutover = state.cutover;
   if (cutover.receiptId && !cutoverReceiptIsCurrent(cutover)) {
     state.cutover = clearCutoverReceipt(cutover, {
-      message: "The cutover preparation expired. Prepare the replacement again.",
+      message: t("The cutover preparation expired. Prepare the replacement again."),
     });
     cutover = state.cutover;
   }
@@ -762,8 +784,8 @@ function renderMigrationBanner() {
     return `
       <div class="cfw-migration-banner cfw-migration-unverifiable" role="alert">
         <div class="cfw-migration-copy">
-          <strong>Legacy CFM maintenance state cannot be verified</strong>
-          <small>${escapeHtml(retirement.message ?? "The legacy operation state could not be read. Reload before requesting maintenance.")}</small>
+          <strong>${escapeHtml(t("Legacy CFM maintenance state cannot be verified"))}</strong>
+          <small>${escapeHtml(retirement.message ?? t("The legacy operation state could not be read. Reload before requesting maintenance."))}</small>
         </div>
       </div>
     `;
@@ -773,8 +795,8 @@ function renderMigrationBanner() {
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>Legacy CFM maintenance is in progress</strong>
-          <small>The confirmed legacy operation must finish before another network start.</small>
+          <strong>${escapeHtml(t("Legacy CFM maintenance is in progress"))}</strong>
+          <small>${escapeHtml(t("The confirmed legacy operation must finish before another network start."))}</small>
         </div>
       </div>
     `;
@@ -794,24 +816,24 @@ function renderMigrationBanner() {
       : recovery
         ? "Review and resume the previous legacy CFM operation in its signed maintenance session."
         : profileUnavailable
-          ? `Profile state could not be verified: ${profileUnavailable}. Open Profiles and reload it before legacy maintenance.`
+          ? t("Profile state could not be verified: {profileUnavailable}. Open Profiles and reload it before legacy maintenance.", { profileUnavailable: profileUnavailable })
           : selectedProfileMissing
             ? "Import and select a replacement profile on Profiles before retiring older CFM components. Normal networking uses the System Proxy and TUN switches."
-            : "Optional maintenance retires older Clash for Mac components and managed data. Opening its signed session stops the current CFM engine and closes this dashboard; retirement still requires a separate confirmation. Use the network switches for normal starts.";
+            : t("Optional maintenance retires older Clash for Mac components and managed data. Opening its signed session stops the current CFM engine and closes this dashboard; retirement still requires a separate confirmation. Use the network switches for normal starts.");
     const button = starting
-      ? "Starting…"
+      ? t("Starting…")
       : failure
-        ? (recovery ? "Retry Recovery…" : "Retry Maintenance…")
+        ? (recovery ? t("Retry Recovery…") : t("Retry Maintenance…"))
         : (profileUnavailable || selectedProfileMissing)
-          ? "Open Profiles"
-          : (recovery ? "Open Recovery…" : "Open Legacy Maintenance…");
+          ? t("Open Profiles")
+          : (recovery ? t("Open Recovery…") : t("Open Legacy Maintenance…"));
     const action = profileUnavailable || selectedProfileMissing
       ? "open-migration-profiles"
       : "begin-migration-handoff";
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>${starting ? "Legacy CFM maintenance session is starting" : recovery ? "Legacy CFM recovery" : "Optional legacy CFM maintenance"}</strong>
+          <strong>${starting ? t("Legacy CFM maintenance session is starting") : recovery ? t("Legacy CFM recovery") : t("Optional legacy CFM maintenance")}</strong>
           <small>${escapeHtml(detail)}</small>
           ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
           ${failure ? `<small>${escapeHtml(failure)}</small>` : ""}
@@ -826,46 +848,46 @@ function renderMigrationBanner() {
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>Recover the legacy CFM operation</strong>
-          <small>${escapeHtml(retirement.message ?? "The unfinished legacy transaction requires explicit recovery.")}</small>
+          <strong>${escapeHtml(t("Recover the legacy CFM operation"))}</strong>
+          <small>${escapeHtml(retirement.message ?? t("The unfinished legacy transaction requires explicit recovery."))}</small>
           ${cutover.message ? `<small>${escapeHtml(cutover.message)}</small>` : ""}
         </div>
-        <button type="button" class="cfw-big-button" data-action="recover-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Recovering…" : "Recover Replacement"}</button>
+        <button type="button" class="cfw-big-button" data-action="recover-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Recovering…" : t("Recover Replacement")}</button>
       </div>
     `;
   }
 
   const target = cutover.target;
-  const targetLabel = target === "tunnel" ? "TUN" : "System Proxy";
+  const targetLabel = target === "tunnel" ? t("TUN") : t("System Proxy");
   const ready = cutoverReceiptIsCurrent(cutover);
   const step = ready
     ? `
         <label class="cfw-migration-confirm">
           <input type="checkbox" data-cutover-confirm ${cutover.confirmedReceiptId === cutover.receiptId ? "checked" : ""} />
-          <span>I understand this one-way cutover retires older CFM components and managed data and cannot be undone.</span>
+          <span>${escapeHtml(t("I understand this one-way cutover retires older CFM components and managed data and cannot be undone."))}</span>
         </label>
         <label class="cfw-migration-confirm">
           <input type="checkbox" data-cutover-dns-review ${cutover.dnsReviewedReceiptId === cutover.receiptId ? "checked" : ""} />
-          <span>I have reviewed DNS for every active service in System Settings.</span>
+          <span>${escapeHtml(t("I have reviewed DNS for every active service in System Settings."))}</span>
         </label>
-        <button type="button" class="cfw-big-button danger" data-action="confirm-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Migrating…" : `Confirm one-way cutover to ${escapeHtml(targetLabel)}`}</button>
+        <button type="button" class="cfw-big-button danger" data-action="confirm-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? t("Migrating…") : t("Confirm one-way cutover to {value1}", { value1: escapeHtml(targetLabel) })}</button>
       `
     : `
-        <button type="button" class="cfw-big-button" data-action="prepare-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Preparing…" : `Prepare cutover to ${escapeHtml(targetLabel)}`}</button>
+        <button type="button" class="cfw-big-button" data-action="prepare-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Preparing…" : t("Prepare cutover to {value1}", { value1: escapeHtml(targetLabel) })}</button>
       `;
   const approvalNote = cutover.awaitingApproval
-    ? `<small>System Extension approval is required in System Settings. Approve it, then Prepare again.</small>`
+    ? `<small>${escapeHtml(t("System Extension approval is required in System Settings. Approve it, then Prepare again."))}</small>`
     : "";
   return `
     <div class="cfw-migration-banner" role="status">
       <div class="cfw-migration-copy">
-        <strong>Legacy CFM maintenance session</strong>
-        <small>This optional operation retires older Clash for Mac components and starts the selected replacement mode. Prepare validates that operation; retirement requires your explicit confirmation.</small>
+        <strong>${escapeHtml(t("Legacy CFM maintenance session"))}</strong>
+        <small>${escapeHtml(t("This optional operation retires older Clash for Mac components and starts the selected replacement mode. Prepare validates that operation; retirement requires your explicit confirmation."))}</small>
         <label class="cfw-migration-target">
-          <span>Replacement</span>
+          <span>${escapeHtml(t("Replacement"))}</span>
           <select data-cutover-target ${ready || cutover.busy ? "disabled" : ""}>
-            <option value="system_proxy" ${target === "system_proxy" ? "selected" : ""}>System Proxy</option>
-            <option value="tunnel" ${target === "tunnel" ? "selected" : ""}>TUN</option>
+            <option value="system_proxy" ${target === "system_proxy" ? "selected" : ""}>${escapeHtml(t("System Proxy"))}</option>
+            <option value="tunnel" ${target === "tunnel" ? "selected" : ""}>${escapeHtml(t("TUN"))}</option>
           </select>
         </label>
         ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
@@ -931,18 +953,18 @@ function setLogStreamRunning(running) {
 /// the URL is known here; when that read fails the item is shown disabled with
 /// the reason instead of being hidden.
 const PROFILE_MENU_ACTIONS = [
-  { id: "select", label: "Select", icon: "check", needsInactive: true },
-  { id: "edit", label: "Edit", icon: "edit" },
-  { id: "edit-external", label: "Edit externally", icon: "edit" },
-  { id: "update", label: "Update", icon: "refresh", remoteOnly: true },
-  { id: "reveal", label: "Show in folder", icon: "folder" },
-  { id: "outbounds", label: "Edit outbounds section", icon: "send" },
-  { id: "route", label: "Edit route section", icon: "rules" },
-  { id: "copy", label: "Copy", icon: "copy" },
+  { id: "select", get label() { return t("Select"); }, icon: "check", needsInactive: true },
+  { id: "edit", get label() { return t("Edit"); }, icon: "edit" },
+  { id: "edit-external", get label() { return t("Edit externally"); }, icon: "edit" },
+  { id: "update", get label() { return t("Update"); }, icon: "refresh", remoteOnly: true },
+  { id: "reveal", get label() { return t("Show in folder"); }, icon: "folder" },
+  { id: "outbounds", get label() { return t("Edit outbounds section"); }, icon: "send" },
+  { id: "route", get label() { return t("Edit route section"); }, icon: "rules" },
+  { id: "copy", get label() { return t("Copy"); }, icon: "copy" },
   { id: "qrcode", label: "QRCode", icon: "qr", remoteOnly: true },
-  { id: "credentials", label: "Credentials", icon: "gear", needsEngineOff: true },
-  { id: "settings", label: "Settings", icon: "gear" },
-  { id: "delete", label: "Delete", icon: "trash", danger: true },
+  { id: "credentials", get label() { return t("Credentials"); }, icon: "gear", needsEngineOff: true },
+  { id: "settings", get label() { return t("Settings"); }, icon: "gear" },
+  { id: "delete", get label() { return t("Delete"); }, icon: "trash", danger: true },
 ];
 
 function profileMenuIcon(kind) {
@@ -982,31 +1004,31 @@ function engineToggleCapability(key) {
   if ((key === "coreRunning" || key === "systemProxy" || key === "tunMode") && state.migrationHandoff) {
     return {
       available: false,
-      label: key === "coreRunning" ? "Core" : key === "systemProxy" ? "System Proxy" : "TUN Mode",
-      reason: "This window owns legacy CFM maintenance. Use its explicit maintenance or recovery controls.",
+      label: key === "coreRunning" ? t("Core") : key === "systemProxy" ? t("System Proxy") : t("TUN Mode"),
+      reason: t("This window owns legacy CFM maintenance. Use its explicit maintenance or recovery controls."),
     };
   }
   if (key === "coreRunning") {
     return {
       available: state.engine.localProxyAvailable === true,
-      label: "Core",
-      reason: state.engine.availabilityReason ?? "The signed ProxyAgent has not reported local proxy capability.",
+      label: t("Core"),
+      reason: state.engine.availabilityReason ?? t("The signed ProxyAgent has not reported local proxy capability."),
     };
   }
   if (key === "systemProxy") {
     return {
       available: state.engine.systemProxyAvailable === true,
-      label: "System Proxy",
+      get label() { return t("System Proxy"); },
       reason: state.engine.availabilityReason
-        ?? "The signed ProxyAgent has not reported capability.",
+        ?? t("The signed ProxyAgent has not reported capability."),
     };
   }
   if (key === "tunMode") {
     return {
       available: state.engine.tunnelAvailable === true,
-      label: "TUN Mode",
+      get label() { return t("TUN Mode"); },
       reason: state.engine.availabilityReason
-        ?? "The signed Packet Tunnel System Extension has not reported capability.",
+        ?? t("The signed Packet Tunnel System Extension has not reported capability."),
     };
   }
   return null;
@@ -1022,7 +1044,7 @@ function engineToggleChangeAllowed(key, checked, source) {
     return false;
   }
   if (!capability || !checked || capability.available) return true;
-  appendLog("info", source, `${capability.label} cannot be enabled: ${capability.reason}`);
+  appendLog("info", source, t("{label} cannot be enabled: {reason}", { label: capability.label, reason: capability.reason }));
   return false;
 }
 
@@ -1032,7 +1054,7 @@ function engineToggleChangeAllowed(key, checked, source) {
 function controllerActionAllowed(action, source = "controller") {
   if (state.engine.active) return true;
   state.controllerStatus = "engine off";
-  appendLog("info", source, `${action} is unavailable while the engine is Off`);
+  appendLog("info", source, t("{action} is unavailable while the engine is Off", { action: action }));
   return false;
 }
 
@@ -1041,11 +1063,11 @@ function controllerActionAllowed(action, source = "controller") {
 /// selection remain distinct fail-closed reasons.
 function runtimeProjectionActionAllowed(action, source = "profile") {
   if (state.profilesUnavailableReason) {
-    appendLog("error", source, `${action} is unavailable because the profile repository could not be read: ${state.profilesUnavailableReason}`);
+    appendLog("error", source, t("{action} is unavailable because the profile repository could not be read: {profilesUnavailableReason}", { action: action, profilesUnavailableReason: state.profilesUnavailableReason }));
     return false;
   }
   if (!state.profiles.some((profile) => profile.active === true)) {
-    appendLog("info", source, `${action} requires a selected profile`);
+    appendLog("info", source, t("{action} requires a selected profile", { action: action }));
     return false;
   }
   return true;
@@ -1227,19 +1249,19 @@ async function drainControllerMutationQueue() {
 
       if (mutationError) {
         const readback = controllerReadable
-          ? `controller readback reports ${observed ?? "unavailable"}`
+          ? t("controller readback reports {value1}", { value1: observed ?? "unavailable" })
           : "controller readback was unavailable";
         appendLog("error", entry.source, `${entry.failureLabel}: ${errorText(mutationError)}; ${readback}`);
         finishControllerMutationEntry(entry, false);
         continue;
       }
       if (!controllerReadable) {
-        appendLog("error", entry.source, `${entry.failureLabel}: controller readback was unavailable`);
+        appendLog("error", entry.source, t("{failureLabel}: controller readback was unavailable", { failureLabel: entry.failureLabel }));
         finishControllerMutationEntry(entry, false);
         continue;
       }
       if (!confirmed) {
-        appendLog("error", entry.source, `${entry.failureLabel}: controller readback reported ${observed ?? "unavailable"}`);
+        appendLog("error", entry.source, t("{failureLabel}: controller readback reported {value2}", { failureLabel: entry.failureLabel, value2: observed ?? "unavailable" }));
         finishControllerMutationEntry(entry, false);
         continue;
       }
@@ -1315,7 +1337,7 @@ async function resolveProfileSource(id) {
     profile.sourceError = null;
   } catch (error) {
     profile.sourceError = errorText(error);
-    appendLog("error", "profile", `Could not read ${profile.name} source metadata: ${profile.sourceError}`);
+    appendLog("error", "profile", t("Could not read {name} source metadata: {sourceError}", { name: profile.name, sourceError: profile.sourceError }));
   }
   return profile.sourceUrl;
 }
@@ -1345,10 +1367,10 @@ function renderGlassOverlays() {
           if (action.remoteOnly) {
             if (profile.sourceUrl === undefined) {
               reason = profile.sourceError
-                ? `Subscription URL could not be read: ${profile.sourceError}`
-                : "Reading this profile…";
+                ? t("Subscription URL could not be read: {sourceError}", { sourceError: profile.sourceError })
+                : t("Reading this profile…");
             } else if (profile.sourceUrl === null) {
-              reason = "This profile was imported locally and has no subscription URL.";
+              reason = t("This profile was imported locally and has no subscription URL.");
             }
           }
           if (!reason && action.needsEngineOff && !engineOff) reason = REASONS.engineNotOff;
@@ -1367,7 +1389,7 @@ function renderGlassOverlays() {
             ${menuHtml}
           </div>
           <div class="glass-menu-more" data-glass-menu-more hidden>
-            <span>scroll to view more</span>
+            <span>${escapeHtml(t("scroll to view more"))}</span>
             <span aria-hidden="true">▾</span>
           </div>
         </div>
@@ -1381,62 +1403,62 @@ function renderGlassOverlays() {
     if (profile && dialog.kind === "copy") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Copy profile">
-          <h3>Copy profile</h3>
-          <label>Name<input data-glass-copy-name value="${escapeHtml(`${profile.name} copy`)}" /></label>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Copy profile"))}">
+          <h3>${escapeHtml(t("Copy profile"))}</h3>
+          <label>${escapeHtml(t("Name"))}<input data-glass-copy-name value="${escapeHtml(t("{name} copy", { name: profile.name }))}" /></label>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
-            <button type="button" class="glass-btn" data-glass-copy-confirm="${escapeHtml(profile.id)}">Copy</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Cancel"))}</button>
+            <button type="button" class="glass-btn" data-glass-copy-confirm="${escapeHtml(profile.id)}">${escapeHtml(t("Copy"))}</button>
           </div>
         </div>
       `);
     } else if (profile && dialog.kind === "settings") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Edit profile information">
-          <h3>Edit profile information</h3>
-          <label>Name<input data-glass-settings-name value="${escapeHtml(profile.name)}" /></label>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Edit profile information"))}">
+          <h3>${escapeHtml(t("Edit profile information"))}</h3>
+          <label>${escapeHtml(t("Name"))}<input data-glass-settings-name value="${escapeHtml(profile.name)}" /></label>
           <label>URL<input data-glass-settings-url value="${escapeHtml(profile.sourceUrl ?? "")}" placeholder="https://..." /></label>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
-            <button type="button" class="glass-btn" data-glass-settings-confirm="${escapeHtml(profile.id)}">Save</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Cancel"))}</button>
+            <button type="button" class="glass-btn" data-glass-settings-confirm="${escapeHtml(profile.id)}">${escapeHtml(t("Save"))}</button>
           </div>
         </div>
       `);
     } else if (profile && dialog.kind === "delete") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Delete profile">
-          <h3>Delete profile</h3>
-          <p class="glass-dialog-copy">Are you sure to delete “${escapeHtml(profile.name)}”? This removes the managed profile envelope from the repository.</p>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Delete profile"))}">
+          <h3>${escapeHtml(t("Delete profile"))}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(t("Delete “{name}”? This removes the managed profile from the repository.", { name: profile.name }))}</p>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
-            <button type="button" class="glass-btn danger" data-glass-delete-confirm="${escapeHtml(profile.id)}">Yes</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("No"))}</button>
+            <button type="button" class="glass-btn danger" data-glass-delete-confirm="${escapeHtml(profile.id)}">${escapeHtml(t("Yes"))}</button>
           </div>
         </div>
       `);
     } else if (dialog.kind === "reset-settings") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Reset settings">
-          <h3>Reset all settings</h3>
-          <p class="glass-dialog-copy">Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept.</p>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Reset settings"))}">
+          <h3>${escapeHtml(t("Reset all settings"))}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(t("Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept."))}</p>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
-            <button type="button" class="glass-btn danger" data-glass-reset-confirm>Yes</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("No"))}</button>
+            <button type="button" class="glass-btn danger" data-glass-reset-confirm>${escapeHtml(t("Yes"))}</button>
           </div>
         </div>
       `);
     } else if (dialog.kind === "preview-config") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="Projected configuration preview">
-          <h3>Projected configuration</h3>
-          <p class="glass-dialog-copy">The selected profile projected for the current mode. The app-owned controller secret is redacted.</p>
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(t("Projected configuration preview"))}">
+          <h3>${escapeHtml(t("Projected configuration"))}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(t("The selected profile projected for the current mode. The app-owned controller secret is redacted."))}</p>
           <pre class="glass-code">${escapeHtml(dialog.payload ?? "")}</pre>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
-            <button type="button" class="glass-btn" data-glass-copy-text>Copy</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button>
+            <button type="button" class="glass-btn" data-glass-copy-text>${escapeHtml(t("Copy"))}</button>
           </div>
         </div>
       `);
@@ -1449,56 +1471,56 @@ function renderGlassOverlays() {
         </tr>`).join("");
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="Network services">
-          <h3>Network services</h3>
-          <p class="glass-dialog-copy">Read from SystemConfiguration only. The default-route interface, hardware port and BSD device are not reported: the child-process tools that supplied them are gone.</p>
-          <div class="glass-table-wrap"><table class="glass-table"><thead><tr><th>Service</th><th>Order</th><th>Proxy</th></tr></thead><tbody>${rows || '<tr><td colspan="3">No services</td></tr>'}</tbody></table></div>
-          ${dialog.unavailable?.length ? `<p class="glass-dialog-copy">Unavailable fields: ${escapeHtml(dialog.unavailable.join(", "))}</p>` : ""}
-          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(t("Network services"))}">
+          <h3>${escapeHtml(t("Network services"))}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(t("Read from SystemConfiguration only. The default-route interface, hardware port and BSD device are not reported: the child-process tools that supplied them are gone."))}</p>
+          <div class="glass-table-wrap"><table class="glass-table"><thead><tr><th>${escapeHtml(t("Service"))}</th><th>${escapeHtml(t("Order"))}</th><th>${escapeHtml(t("Proxy"))}</th></tr></thead><tbody>${rows || `<tr><td colspan="3">${escapeHtml(t("No services"))}</td></tr>`}</tbody></table></div>
+          ${dialog.unavailable?.length ? `<p class="glass-dialog-copy">${escapeHtml(t("Unavailable fields"))}: ${escapeHtml(dialog.unavailable.join(", "))}</p>` : ""}
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button></div>
         </div>
       `);
     } else if (dialog.kind === "dns-query") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="DNS query">
-          <h3>Resolve through the running engine</h3>
-          <label>Name<input data-glass-dns-name value="${escapeHtml(dialog.payload?.name ?? "www.gstatic.com")}" /></label>
-          <label>Type<input data-glass-dns-type value="${escapeHtml(dialog.payload?.type ?? "A")}" /></label>
-          <pre class="glass-code">${escapeHtml(dialog.payload?.result ?? "Enter a name and Query.")}</pre>
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(t("DNS query"))}">
+          <h3>${escapeHtml(t("Resolve through the running engine"))}</h3>
+          <label>${escapeHtml(t("Name"))}<input data-glass-dns-name value="${escapeHtml(dialog.payload?.name ?? "www.gstatic.com")}" /></label>
+          <label>${escapeHtml(t("Type"))}<input data-glass-dns-type value="${escapeHtml(dialog.payload?.type ?? "A")}" /></label>
+          <pre class="glass-code">${escapeHtml(dialog.payload?.result ?? t("Enter a name and Query."))}</pre>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
-            <button type="button" class="glass-btn" data-glass-dns-confirm>Query</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button>
+            <button type="button" class="glass-btn" data-glass-dns-confirm>${escapeHtml(t("Query"))}</button>
           </div>
         </div>
       `);
     } else if (dialog.kind === "credentials") {
       const setup = state.credentialSetup;
       const body = !setup
-        ? `<p class="glass-dialog-copy">Reading credential requirements…</p>`
+        ? `<p class="glass-dialog-copy">${escapeHtml(t("Reading credential requirements…"))}</p>`
         : !setup.vaultAvailable
-          ? `<p class="glass-dialog-copy">Credential presence could not be verified, so nothing is being requested and nothing is assumed missing: ${escapeHtml(setup.error ?? "the credential vault is unavailable")}</p>`
+          ? `<p class="glass-dialog-copy">${escapeHtml(t("Credential presence could not be verified, so nothing is being requested and nothing is assumed missing: {error}", { error: setup.error ?? t("The credential vault is unavailable.") }))}</p>`
           : setup.missing.length === 0
             ? `<p class="glass-dialog-copy">${setup.requiredCount === 0
-                ? "This profile references no credentials."
-                : `All ${setup.requiredCount} credential reference(s) are already present in the vault.`}</p>`
+                ? t("This profile references no credentials.")
+                : t("All {requiredCount} credential reference(s) are already present in the vault.", { requiredCount: setup.requiredCount })}</p>`
             : `
-              <p class="glass-dialog-copy">${escapeHtml(String(setup.presentCount))} of ${escapeHtml(String(setup.requiredCount))} reference(s) are already present. Enter every missing value once; the batch goes straight to the signed native Keychain vault and is never written to the profile, the log, or the configuration digest.</p>
+              <p class="glass-dialog-copy">${escapeHtml(t("{present} of {required} reference(s) are already present. Enter every missing value once; the batch goes straight to the signed native Keychain vault and is never written to the profile, the log, or the configuration digest.", { present: setup.presentCount, required: setup.requiredCount }))}</p>
               ${setup.missing.map((reference, index) => `
                 <label>${escapeHtml(credentialLabel(reference.kind))}
-                  <input type="password" autocomplete="new-password" data-credential-secret data-credential-index="${index}" aria-label="${escapeHtml(credentialLabel(reference.kind))} secret" />
+                  <input type="password" autocomplete="new-password" data-credential-secret data-credential-index="${index}" aria-label="${escapeHtml(t("Secret for {credential}", { credential: credentialLabel(reference.kind) }))}" />
                 </label>
               `).join("")}
             `;
       const canSubmit = Boolean(setup?.vaultAvailable && setup.missing.length && engineIsOff());
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Profile credentials">
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Profile credentials"))}">
           <h3>Credentials${setup?.profileName ? ` · ${escapeHtml(setup.profileName)}` : ""}</h3>
           ${body}
           ${setup?.missing?.length && !engineIsOff() ? `<p class="glass-dialog-copy">${escapeHtml(REASONS.engineNotOff)}</p>` : ""}
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
-            ${canSubmit ? `<button type="button" class="glass-btn" data-glass-credentials-confirm="${escapeHtml(setup.profileId)}">Store credentials</button>` : ""}
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button>
+            ${canSubmit ? `<button type="button" class="glass-btn" data-glass-credentials-confirm="${escapeHtml(setup.profileId)}">${escapeHtml(t("Store credentials"))}</button>` : ""}
           </div>
         </div>
       `);
@@ -1509,15 +1531,15 @@ function renderGlassOverlays() {
         .join("");
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Credential cleanup">
-          <h3>Unused credentials</h3>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Credential cleanup"))}">
+          <h3>${escapeHtml(t("Unused credentials"))}</h3>
           <p class="glass-dialog-copy">${preview
-            ? `${escapeHtml(String(preview.orphanCount))} Keychain entr${preview.orphanCount === 1 ? "y is" : "ies are"} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.`
-            : "The credential vault has no unused references."}</p>
+            ? escapeHtml(t("Unused Keychain entries: {count}. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.", { count: preview.orphanCount }))
+            : t("The credential vault has no unused references.")}</p>
           ${references ? `<ul class="glass-list">${references}</ul>` : ""}
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-credential-gc-cancel>Close</button>
-            ${preview ? `<button type="button" class="glass-btn danger" data-glass-credential-gc-confirm>Delete unused credentials</button>` : ""}
+            <button type="button" class="glass-btn ghost" data-glass-credential-gc-cancel>${escapeHtml(t("Close"))}</button>
+            ${preview ? `<button type="button" class="glass-btn danger" data-glass-credential-gc-confirm>${escapeHtml(t("Delete unused credentials"))}</button>` : ""}
           </div>
         </div>
       `);
@@ -1525,23 +1547,23 @@ function renderGlassOverlays() {
       const preview = dialog.payload;
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Migrate legacy subscription">
-          <h3>Migrate selected legacy subscription</h3>
-          <p class="glass-dialog-copy">Convert the ${escapeHtml(formatBytes(preview.legacy_bytes))} legacy YAML snapshot saved on this Mac for “${escapeHtml(preview.name)}”. Migration does not download a newer subscription; ${escapeHtml(preview.source_host)} is retained only as the HTTPS update source. The cached YAML is never executed, and the converted profile and Keychain credentials are validated before selection.</p>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Migrate legacy subscription"))}">
+          <h3>${escapeHtml(t("Migrate selected legacy subscription"))}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(t("Convert the {size} legacy YAML snapshot saved on this Mac for “{name}”. Migration does not download a newer subscription; {host} is retained only as the HTTPS update source. The cached YAML is never executed, and the converted profile and Keychain credentials are validated before selection.", { size: formatBytes(preview.legacy_bytes), name: preview.name, host: preview.source_host }))}</p>
           ${dialog.error ? `<p class="glass-dialog-copy" role="alert">${escapeHtml(dialog.error)}</p>` : ""}
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss ${dialog.busy ? "disabled" : ""}>Cancel</button>
-            <button type="button" class="glass-btn" data-glass-legacy-migration-confirm data-preview-id="${escapeHtml(preview.preview_id)}" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "Migrating…" : "Import and select"}</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss ${dialog.busy ? "disabled" : ""}>${escapeHtml(t("Cancel"))}</button>
+            <button type="button" class="glass-btn" data-glass-legacy-migration-confirm data-preview-id="${escapeHtml(preview.preview_id)}" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? t("Migrating…") : t("Import and select")}</button>
           </div>
         </div>
       `);
     } else if (dialog.kind === "info") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog" role="dialog" aria-label="Info">
-          <h3>${escapeHtml(dialog.payload?.title ?? "Info")}</h3>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Info"))}">
+          <h3>${escapeHtml(dialog.payload?.title ?? t("Info"))}</h3>
           <p class="glass-dialog-copy">${escapeHtml(dialog.payload?.body ?? "")}</p>
-          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button></div>
         </div>
       `);
     } else if (dialog.kind === "product-about") {
@@ -1556,14 +1578,14 @@ function renderGlassOverlays() {
       const primaryLabel = phase === "checking"
         ? "Checking…"
         : canOpen
-          ? `Open Download v${escapeHtml(String(update.version))}`
+          ? t("Open Download v{value1}", { value1: escapeHtml(String(update.version)) })
           : "";
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog product-about" role="dialog" aria-label="About Clash for Mac">
+        <div class="glass-dialog product-about" role="dialog" aria-label="${escapeHtml(t("About Clash for Mac"))}">
           <div class="product-about-icon">${renderCatLogo()}</div>
           <div class="product-about-name">Clash for Mac</div>
-          <div class="product-about-sub">Powered by sing-box</div>
+          <div class="product-about-sub">${escapeHtml(t("Powered by sing-box"))}</div>
           <div class="product-about-meta">
             <div>版本 ${escapeHtml(String(version))}</div>
             <div>${escapeHtml(String(product.architecture ?? "arm64"))} · macOS ${escapeHtml(String(product.minimum_macos ?? "15.0"))}+</div>
@@ -1573,8 +1595,8 @@ function renderGlassOverlays() {
           <div class="glass-dialog-actions column">
             ${canOpen ? `<button type="button" class="glass-btn" data-glass-open-update>${primaryLabel}</button>` : ""}
             ${busy && !canOpen ? `<button type="button" class="glass-btn" disabled>${primaryLabel}</button>` : ""}
-            <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : "Check for Update"}</button>
-            <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>Close</button>
+            <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : t("Check for Update")}</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>${escapeHtml(t("Close"))}</button>
           </div>
           <div class="product-about-copy">© Clash for Mac · ${escapeHtml(String(product.license ?? "GPL-3.0-or-later"))}</div>
         </div>
@@ -1630,7 +1652,7 @@ function bindGlassOverlayEvents() {
       try {
         await runProfileMenuAction(action, id);
       } catch (error) {
-        appendLog("error", "profile", `${action} failed: ${errorText(error)}`);
+        appendLog("error", "profile", t("{action} failed: {error}", { action: action, error: errorText(error) }));
       }
       renderPage();
     });
@@ -1646,9 +1668,9 @@ function bindGlassOverlayEvents() {
         const result = await invokeProfileChange("import_profile_text", { name, body: text.body });
         await loadProfilesSnapshot();
         closeGlassOverlays();
-        appendLog("info", "profile", `Copied profile to ${result.name}; select it to make it active`);
+        appendLog("info", "profile", t("Copied profile to {name}; select it to make it active", { name: result.name }));
       } catch (error) {
-        appendLog("error", "profile", `Copy failed: ${errorText(error)}`);
+        appendLog("error", "profile", t("Copy failed: {error}", { error: errorText(error) }));
       }
       renderPage();
     });
@@ -1663,9 +1685,9 @@ function bindGlassOverlayEvents() {
         await invoke("update_profile_info", { id, name, url });
         await loadProfilesSnapshot();
         closeGlassOverlays();
-        appendLog("info", "profile", `Profile settings saved: ${name}`);
+        appendLog("info", "profile", t("Profile settings saved: {name}", { name: name }));
       } catch (error) {
-        appendLog("error", "profile", `Settings failed: ${errorText(error)}`);
+        appendLog("error", "profile", t("Settings failed: {error}", { error: errorText(error) }));
       }
       renderPage();
     });
@@ -1684,10 +1706,10 @@ function bindGlassOverlayEvents() {
         appendLog(
           deleted ? "warning" : "info",
           "profile",
-          deleted ? `Profile deleted: ${profile?.name ?? id}` : `Profile already missing: ${id}`,
+          deleted ? t("Profile deleted: {value1}", { value1: profile?.name ?? id }) : t("Profile already missing: {id}", { id: id }),
         );
       } catch (error) {
-        appendLog("error", "profile", `Delete failed: ${errorText(error)}`);
+        appendLog("error", "profile", t("Delete failed: {error}", { error: errorText(error) }));
       }
       renderPage();
     });
@@ -1702,9 +1724,9 @@ function bindGlassOverlayEvents() {
         applyPersistedSettings(snapshot);
         await loadProfilesSnapshot();
         closeGlassOverlays();
-        appendLog("warning", "settings", "Preferences reset to defaults");
+        appendLog("warning", "settings", t("Preferences reset to defaults"));
       } catch (error) {
-        appendLog("error", "settings", `Reset failed: ${errorText(error)}`);
+        appendLog("error", "settings", t("Reset failed: {error}", { error: errorText(error) }));
       }
       renderPage();
     });
@@ -1715,7 +1737,7 @@ function bindGlassOverlayEvents() {
       const textValue = state.glassDialog?.payload ?? document.querySelector(".glass-code")?.textContent ?? "";
       try {
         await navigator.clipboard.writeText(String(textValue));
-        appendLog("info", "clipboard", "Copied dialog text");
+        appendLog("info", "clipboard", t("Copied dialog text"));
       } catch (error) {
         appendLog("warning", "clipboard", errorText(error));
       }
@@ -1726,8 +1748,8 @@ function bindGlassOverlayEvents() {
     button.addEventListener("click", async () => {
       const name = document.querySelector("[data-glass-dns-name]")?.value?.trim() ?? "";
       const type = document.querySelector("[data-glass-dns-type]")?.value?.trim() || "A";
-      if (!controllerActionAllowed("DNS query", "dns")) {
-        state.glassDialog = { kind: "dns-query", payload: { name, type, result: "Engine is Off; start the engine before querying DNS." } };
+      if (!controllerActionAllowed(t("DNS query"), "dns")) {
+        state.glassDialog = { kind: "dns-query", payload: { name, type, result: t("Engine is Off; start the engine before querying DNS.") } };
         renderGlassOverlays();
         return;
       }
@@ -1740,7 +1762,7 @@ function bindGlassOverlayEvents() {
       } catch (error) {
         if (!engineIdentityTokenIsCurrent(token)) return;
         const message = errorText(error);
-        appendLog("error", "dns", `DNS query failed: ${message}`);
+        appendLog("error", "dns", t("DNS query failed: {message}", { message: message }));
         state.glassDialog = { kind: "dns-query", payload: { name, type, result: message } };
         renderGlassOverlays();
       }
@@ -1774,11 +1796,11 @@ function bindGlassOverlayEvents() {
         );
         committed = true;
         await loadProfilesSnapshot();
-        await applyActiveProfile(`migrating ${outcome.name}`);
+        await applyActiveProfile(t("migrating {name}", { name: outcome.name }));
         appendLog(
           "info",
           "migration",
-          `${outcome.name} ${outcome.reused ? "recovered" : "imported"}, credentials verified, and selected`,
+          t("{name} {value2}, credentials verified, and selected", { name: outcome.name, value2: outcome.reused ? "recovered" : "imported" }),
         );
         state.legacyProfileMigrationPreview = null;
         closeGlassOverlays();
@@ -1787,19 +1809,19 @@ function bindGlassOverlayEvents() {
         appendLog(
           "error",
           "migration",
-          `${committed ? "Migrated profile staging failed" : "Legacy profile migration failed"}: ${message}`,
+          `${committed ? "Migrated profile staging failed" : t("Legacy profile migration failed")}: ${message}`,
         );
         state.legacyProfileMigrationPreview = null;
         state.glassDialog = {
           kind: "info",
           payload: committed
             ? {
-              title: "Profile migrated; activation failed",
-              body: `${message} Reload Profiles and review the selected staged profile; do not resubmit the consumed preview.`,
+              title: t("Profile migrated; activation failed"),
+              body: t("{message} Reload Profiles and review the selected staged profile; do not resubmit the consumed preview.", { message: message }),
             }
             : {
-              title: "Legacy migration failed",
-              body: `${message} The one-shot preview is no longer trusted; preview the legacy profile again before retrying.`,
+              title: t("Legacy migration failed"),
+              body: t("{message} The one-shot preview is no longer trusted; preview the legacy profile again before retrying.", { message: message }),
             },
         };
         renderGlassOverlays();
@@ -1824,7 +1846,7 @@ function bindGlassOverlayEvents() {
           credentials: batch,
         });
         normalizeCredentialReceipt(receipt, profileId);
-        appendLog("info", "credentials", `Stored ${batch.length} credential reference(s) for ${setup.profileName}`);
+        appendLog("info", "credentials", t("Stored {count} credential reference(s) for {profileName}", { count: batch.length, profileName: setup.profileName }));
         closeGlassOverlays();
         state.credentialSetup = null;
       } catch (error) {
@@ -1845,7 +1867,7 @@ function bindGlassOverlayEvents() {
       try {
         const receipt = await invoke("commit_credential_gc", { previewId: preview.previewId });
         normalizeGcReceipt(receipt, preview.orphanCount);
-        appendLog("info", "credentials", `Removed ${receipt.removed_count} unused credential reference(s)`);
+        appendLog("info", "credentials", t("Removed {removed_count} unused credential reference(s)", { removed_count: receipt.removed_count }));
       } catch (error) {
         appendLog("error", "credentials", errorText(error));
       } finally {
@@ -1883,12 +1905,12 @@ function bindGlassOverlayEvents() {
           result?.available ? "info" : "info",
           "updater",
           result?.available
-            ? `Update ${result.version} available`
-            : `Already up to date (${result?.current ?? "current"})`,
+            ? t("Update {version} available", { version: result.version })
+            : t("Already up to date ({value1})", { value1: result?.current ?? "current" }),
         );
         openProductAboutDialog({ autoCheck: true, phase: "idle", result });
       } catch (error) {
-        appendLog("error", "updater", `Update check failed: ${errorText(error)}`);
+        appendLog("error", "updater", t("Update check failed: {error}", { error: errorText(error) }));
         const result = invalidateUpdateAuthorization(error);
         openProductAboutDialog({
           autoCheck: true,
@@ -1904,13 +1926,13 @@ function bindGlassOverlayEvents() {
       const targetVersion = state.updateInfo?.version;
       try {
         if (!targetVersion) throw new Error("No validated update is available");
-        appendLog("info", "updater", `Opening the official v${targetVersion} download page…`);
+        appendLog("info", "updater", t("Opening the official v{targetVersion} download page…", { targetVersion: targetVersion }));
         await invoke("open_available_update", { expectedVersion: targetVersion });
-        appendLog("info", "updater", `Official v${targetVersion} download page opened`);
+        appendLog("info", "updater", t("Official v{targetVersion} download page opened", { targetVersion: targetVersion }));
         invalidateUpdateAuthorization();
         closeGlassOverlays();
       } catch (error) {
-        appendLog("error", "updater", `Could not open update: ${errorText(error)}`);
+        appendLog("error", "updater", t("Could not open update: {error}", { error: errorText(error) }));
         const result = invalidateUpdateAuthorization(error);
         openProductAboutDialog({
           autoCheck: true,
@@ -1924,7 +1946,7 @@ function bindGlassOverlayEvents() {
 
 async function runProfileMenuAction(action, id) {
   const profile = state.profiles.find((item) => item.id === id);
-  if (!profile) throw new Error(`profile not found: ${id}`);
+  if (!profile) throw new Error(t("profile not found: {id}", { id: id }));
 
   switch (action) {
     case "select":
@@ -1932,36 +1954,36 @@ async function runProfileMenuAction(action, id) {
       return;
     case "edit":
       await openProfileInspector(id, "edit");
-      appendLog("info", "profile", `edit editor opened for ${profile.name}`);
+      appendLog("info", "profile", t("edit editor opened for {name}", { name: profile.name }));
       return;
     case "outbounds":
       await openProfileInspector(id, "edit", "outbounds");
-      appendLog("info", "profile", `outbounds section editor opened for ${profile.name}`);
+      appendLog("info", "profile", t("outbounds section editor opened for {name}", { name: profile.name }));
       return;
     case "route":
       await openProfileInspector(id, "edit", "route");
-      appendLog("info", "profile", `route section editor opened for ${profile.name}`);
+      appendLog("info", "profile", t("route section editor opened for {name}", { name: profile.name }));
       return;
     case "edit-external":
       await invoke("open_profile_externally", { id });
-      appendLog("info", "profile", `Opened ${profile.name} externally`);
+      appendLog("info", "profile", t("Opened {name} externally", { name: profile.name }));
       return;
     case "update": {
       const result = await invokeProfileChange("update_profile", { id });
       await loadProfilesSnapshot();
-      appendLog("info", "profile", `${result.name} subscription updated`);
+      appendLog("info", "profile", t("{name} subscription updated", { name: result.name }));
       if (result.credential_cleanup_pending) {
         appendLog(
           "warning",
           "profile",
-          `${result.name} updated. Old credentials are retained for recovery.${result.credential_cleanup_error ? ` Cleanup: ${result.credential_cleanup_error}` : ""}`,
+          t("{name} updated. Old credentials are retained for recovery.{value2}", { name: result.name, value2: result.credential_cleanup_error ? t(" Cleanup: {error}", { error: result.credential_cleanup_error }) : "" }),
         );
       }
       return;
     }
     case "reveal":
       await invoke("reveal_profile", { id });
-      appendLog("info", "profile", `Show in folder: ${profile.name}`);
+      appendLog("info", "profile", t("Show in folder: {name}", { name: profile.name }));
       return;
     case "copy":
       state.glassDialog = { kind: "copy", id };
@@ -1969,7 +1991,7 @@ async function runProfileMenuAction(action, id) {
       return;
     case "qrcode":
       await openProfileInspector(id, "qrcode");
-      appendLog("info", "profile", `QRCode opened for ${profile.name}`);
+      appendLog("info", "profile", t("QRCode opened for {name}", { name: profile.name }));
       return;
     case "credentials":
       await openCredentialSetup(id);
@@ -1984,7 +2006,7 @@ async function runProfileMenuAction(action, id) {
       renderGlassOverlays();
       return;
     default:
-      throw new Error(`unknown profile menu action: ${action}`);
+      throw new Error(t("unknown profile menu action: {action}", { action: action }));
   }
 }
 
@@ -1993,7 +2015,7 @@ async function runProfileMenuAction(action, id) {
 /// when the vault cannot answer.
 async function openCredentialSetup(id) {
   const profile = state.profiles.find((item) => item.id === id);
-  if (!profile) throw new Error(`profile not found: ${id}`);
+  if (!profile) throw new Error(t("profile not found: {id}", { id: id }));
   state.credentialSetup = null;
   state.glassDialog = { kind: "credentials", id };
   renderGlassOverlays();
@@ -2031,14 +2053,14 @@ async function openCredentialSetup(id) {
       vaultAvailable: false,
       error: message,
     };
-    appendLog("error", "credentials", `Could not verify credentials for ${profile.name}: ${message}`);
+    appendLog("error", "credentials", t("Could not verify credentials for {name}: {message}", { name: profile.name, message: message }));
   }
   if (state.glassDialog?.kind === "credentials") renderGlassOverlays();
 }
 
 function renderProfiles() {
   const repositoryReason = state.profilesUnavailableReason
-    ? `Profile repository unavailable: ${state.profilesUnavailableReason}`
+    ? t("Profile repository unavailable: {profilesUnavailableReason}", { profilesUnavailableReason: state.profilesUnavailableReason })
     : null;
   const mutationReason = repositoryReason;
   const blocked = mutationReason ? `disabled title="${escapeHtml(mutationReason)}"` : "";
@@ -2046,39 +2068,39 @@ function renderProfiles() {
     <div class="profiles-layout">
       <section class="cfw-profile-remote">
         <div class="cfw-url-box">
-          <input data-profile-url placeholder="HTTPS subscription or node link" aria-label="Subscription URL or node link" ${blocked} />
-          <button class="paste-icon" data-action="paste-profile-url" title="Paste URL" ${blocked}>▣</button>
+          <input data-profile-url placeholder="${escapeHtml(t("HTTPS subscription or node link"))}" aria-label="${escapeHtml(t("Subscription URL or node link"))}" ${blocked} />
+          <button class="paste-icon" data-action="paste-profile-url" title="${escapeHtml(t("Paste URL"))}" ${blocked}>▣</button>
         </div>
-        <button class="cfw-big-button" data-action="import-profile" ${blocked}>Import Link</button>
-        <button class="cfw-big-button" data-action="update-all-profiles" ${blocked}>Update All</button>
-        <button class="cfw-big-button" data-action="import-profile-file" ${blocked}>Import File</button>
-        <input class="profile-file-hidden" data-profile-file type="file" accept="${PROFILE_SOURCE_ACCEPT}" aria-label="Local JSON, YAML, WireGuard, or node-link profile" ${blocked} />
+        <button class="cfw-big-button" data-action="import-profile" ${blocked}>${escapeHtml(t("Import Link"))}</button>
+        <button class="cfw-big-button" data-action="update-all-profiles" ${blocked}>${escapeHtml(t("Update All"))}</button>
+        <button class="cfw-big-button" data-action="import-profile-file" ${blocked}>${escapeHtml(t("Import File"))}</button>
+        <input class="profile-file-hidden" data-profile-file type="file" accept="${PROFILE_SOURCE_ACCEPT}" aria-label="${escapeHtml(t("Local JSON, YAML, WireGuard, or node-link profile"))}" ${blocked} />
       </section>
 
-      <p class="profile-note">Clash YAML imports nodes, groups, supported routing rules, DNS, and hosts. Unsupported policies are reported before saving.</p>
+      <p class="profile-note">${escapeHtml(t("Clash YAML imports nodes, groups, supported routing rules, DNS, and hosts. Unsupported policies are reported before saving."))}</p>
       ${mutationReason ? `<p class="profile-note">${escapeHtml(mutationReason)}</p>` : ""}
 
       <section class="cfw-profile-list">
         ${repositoryReason ? `
           <div class="empty-profile-state" role="alert">
             <p>${escapeHtml(repositoryReason)}</p>
-            <button data-action="reload-dashboard">Reload profile repository</button>
+            <button data-action="reload-dashboard">${escapeHtml(t("Reload profile repository"))}</button>
           </div>
         ` : state.profiles.length ? state.profiles.map((profile) => `
           <article class="cfw-profile-card ${profile.active ? "active" : ""}" data-profile-card="${escapeHtml(profile.id)}" ${profile.active ? 'aria-current="true"' : ""}>
             <i></i>
             <div class="profile-card-main">
               <h3>${escapeHtml(profile.name)}</h3>
-              <p title="Time since this profile was saved in Clash for Mac">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
+              <p title="${escapeHtml(t("Time since this profile was saved in Clash for Mac"))}">${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
             </div>
             <div class="profile-card-primary">
-              <button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="Open this profile">‹›</button>
+              <button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="${escapeHtml(t("Open this profile"))}">‹›</button>
             </div>
           </article>
         `).join("") : `
           <div class="empty-profile-state">
-            <p>No profiles found in the managed profiles directory.</p>
-            <button data-action="migrate-legacy-profiles">Migrate selected legacy subscription</button>
+            <p>${escapeHtml(t("No profiles found in the managed profiles directory."))}</p>
+            <button data-action="migrate-legacy-profiles">${escapeHtml(t("Migrate selected legacy subscription"))}</button>
           </div>
         `}
       </section>
@@ -2089,7 +2111,7 @@ function renderProfiles() {
 
 function profileSourceLabel(profile) {
   switch (profile.sourceKind) {
-    case "local": return "local file";
+    case "local": return t("local file");
     case "subscription": return "subscription";
     default: throw new TypeError("profile snapshot has an invalid source kind");
   }
@@ -2105,28 +2127,28 @@ function renderProfileInspector() {
   if (inspector.mode === "edit") {
     body = `
       <dl class="detail-grid">
-        <div><dt>Source URL</dt><dd>${escapeHtml(sourceUrl ?? "local file")}</dd></div>
-        <div><dt>Size</dt><dd>${escapeHtml(formatBytes(profile.bytes ?? 0))}</dd></div>
-        <div><dt>Active</dt><dd>${profile.active ? "yes" : "no"}</dd></div>
+        <div><dt>${escapeHtml(t("Source URL"))}</dt><dd>${escapeHtml(sourceUrl ?? t("local file"))}</dd></div>
+        <div><dt>${escapeHtml(t("Size"))}</dt><dd>${escapeHtml(formatBytes(profile.bytes ?? 0))}</dd></div>
+        <div><dt>${escapeHtml(t("Active"))}</dt><dd>${profile.active ? "yes" : "no"}</dd></div>
       </dl>
       <textarea class="profile-editor" data-profile-editor spellcheck="false">${escapeHtml(profile.body ?? "")}</textarea>
       <div class="row-actions">
-        <button class="button" data-action="save-profile-editor">Save JSON</button>
-        ${sourceUrl ? `<button class="button ghost" data-action="update-profile-from-inspector">Update from subscription</button>` : ""}
-        <button class="button ghost" data-action="close-profile-inspector">Close</button>
+        <button class="button" data-action="save-profile-editor">${escapeHtml(t("Save JSON"))}</button>
+        ${sourceUrl ? `<button class="button ghost" data-action="update-profile-from-inspector">${escapeHtml(t("Update from subscription"))}</button>` : ""}
+        <button class="button ghost" data-action="close-profile-inspector">${escapeHtml(t("Close"))}</button>
       </div>
-      <p class="muted">Changes are validated before switching the running core. Existing connections may reconnect.</p>
+      <p class="muted">${escapeHtml(t("Changes are validated before switching the running core. Existing connections may reconnect."))}</p>
     `;
   } else if (inspector.mode === "qrcode") {
     body = inspector.svg
       ? `<div class="profile-qr">${inspector.svg}</div><p class="muted">${escapeHtml(sourceUrl ?? "")}</p>`
-      : `<p class="empty">${escapeHtml(inspector.error ?? "This local profile has no subscription URL.")}</p>`;
+      : `<p class="empty">${escapeHtml(inspector.error ?? t("This local profile has no subscription URL."))}</p>`;
   } else {
     body = `
       <dl class="detail-grid">
-        <div><dt>ID</dt><dd>${escapeHtml(profile.id ?? inspector.id)}</dd></div>
-        <div><dt>Active</dt><dd>${profile.active ? "yes" : "no"}</dd></div>
-        <div><dt>Source URL</dt><dd>${escapeHtml(sourceUrl ?? "local file")}</dd></div>
+        <div><dt>${escapeHtml(t("ID"))}</dt><dd>${escapeHtml(profile.id ?? inspector.id)}</dd></div>
+        <div><dt>${escapeHtml(t("Active"))}</dt><dd>${profile.active ? "yes" : "no"}</dd></div>
+        <div><dt>${escapeHtml(t("Source URL"))}</dt><dd>${escapeHtml(sourceUrl ?? t("local file"))}</dd></div>
       </dl>
     `;
   }
@@ -2135,10 +2157,10 @@ function renderProfileInspector() {
     <section class="panel profile-inspector">
       <div class="section-heading">
         <div>
-          <p class="label">Profile Inspector</p>
+          <p class="label">${escapeHtml(t("Profile Inspector"))}</p>
           <h3>${escapeHtml(title)}</h3>
         </div>
-        <button class="button ghost" data-action="close-profile-inspector">Close</button>
+        <button class="button ghost" data-action="close-profile-inspector">${escapeHtml(t("Close"))}</button>
       </div>
       ${body}
     </section>
@@ -2152,11 +2174,11 @@ function renderLogs() {
     <div class="logs-layout">
       <section class="panel toolbar-panel">
         <div>
-          <p class="label">Diagnostics</p>
+          <p class="label">${escapeHtml(t("Diagnostics"))}</p>
           <h3>${logCountLabel(logs.length)}</h3>
         </div>
         <div class="search-box">
-          <input value="${escapeHtml(state.logSearch)}" data-log-search aria-label="Search logs" placeholder="Search logs or regex" />
+          <input value="${escapeHtml(state.logSearch)}" data-log-search aria-label="${escapeHtml(t("Search logs"))}" placeholder="${escapeHtml(t("Search logs or regex"))}" />
         </div>
         <div class="segmented" data-log-filters>
           ${["all", "info", "debug", "warning", "error"].map((level) => `
@@ -2164,10 +2186,10 @@ function renderLogs() {
           `).join("")}
         </div>
         <div class="toolbar-actions">
-          <button type="button" class="button ghost" data-action="toggle-log-stream">${state.logsPaused ? "Start" : "Stop"}</button>
-          <button type="button" class="button ghost" data-action="copy-logs">Copy</button>
-          <button type="button" class="button ghost" data-action="reveal-logs">Open Folder</button>
-          <button type="button" class="button ghost" data-action="clear-logs">Clear</button>
+          <button type="button" class="button ghost" data-action="toggle-log-stream">${state.logsPaused ? t("Start") : t("Stop")}</button>
+          <button type="button" class="button ghost" data-action="copy-logs">${escapeHtml(t("Copy"))}</button>
+          <button type="button" class="button ghost" data-action="reveal-logs">${escapeHtml(t("Open Folder"))}</button>
+          <button type="button" class="button ghost" data-action="clear-logs">${escapeHtml(t("Clear"))}</button>
         </div>
       </section>
 
@@ -2183,47 +2205,47 @@ function renderFeedback() {
   const version = product.version ?? "—";
   const update = state.updateInfo;
   const updateLine = update?.available && update?.version
-    ? `New version available: v${escapeHtml(String(update.version))} (current v${escapeHtml(String(update.current ?? version))}).`
-    : `Current build v${escapeHtml(String(version))} — the menu bar Clash for Mac → Check for Update… also works.`;
+    ? t("New version available: v{value1} (current v{value2}).", { value1: escapeHtml(String(update.version)), value2: escapeHtml(String(update.current ?? version)) })
+    : t("Current build v{value1} — the menu bar Clash for Mac → Check for Update… also works.", { value1: escapeHtml(String(version)) });
   const platform = state.platform;
   return `
     <div class="feedback-layout">
       <section class="panel hero-panel">
         <div>
-          <p class="label">About</p>
+          <p class="label">${escapeHtml(t("About"))}</p>
           <h3>${escapeHtml(product.name ?? "Clash for Mac")} v${escapeHtml(String(version))}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
           <p class="muted">${escapeHtml(product.license ?? "GPL-3.0-or-later")} · ${escapeHtml(product.architecture ?? "arm64")} · macOS ${escapeHtml(product.minimum_macos ?? "15.0")} or later</p>
         </div>
-        <span class="badge">ARM64 macOS only</span>
+        <span class="badge">${escapeHtml(t("ARM64 macOS only"))}</span>
       </section>
 
       <section class="panel">
-        <p class="label">Updates</p>
-        <h3>Check for Updates</h3>
+        <p class="label">${escapeHtml(t("Updates"))}</p>
+        <h3>${escapeHtml(t("Check for Updates"))}</h3>
         <p class="muted">${updateLine}</p>
         <div class="toolbar-actions">
-          <button class="button" data-action="check-for-updates">Check for Updates</button>
+          <button class="button" data-action="check-for-updates">${escapeHtml(t("Check for Updates"))}</button>
         </div>
       </section>
 
       <section class="panel">
-        <p class="label">Architecture</p>
-        <h3>How this build runs the network</h3>
+        <p class="label">${escapeHtml(t("Architecture"))}</p>
+        <h3>${escapeHtml(t("How this build runs the network"))}</h3>
         ${platform ? `
           <dl class="ports-list feedback-list">
-            <div><dt>system proxy</dt><dd>${escapeHtml(platform.system_proxy_strategy ?? "")}</dd></div>
+            <div><dt>${escapeHtml(t("system proxy"))}</dt><dd>${escapeHtml(platform.system_proxy_strategy ?? "")}</dd></div>
             <div><dt>tunnel</dt><dd>${escapeHtml(platform.tun_strategy ?? "")}</dd></div>
             <div><dt>helper</dt><dd>${escapeHtml(platform.helper_strategy ?? "")}</dd></div>
             <div><dt>launchd</dt><dd>${escapeHtml(platform.launchd_strategy ?? "")}</dd></div>
           </dl>
-        ` : `<p class="muted">Platform design is unavailable.</p>`}
+        ` : `<p class="muted">${escapeHtml(t("Platform design is unavailable."))}</p>`}
       </section>
 
       <section class="panel">
-        <p class="label">Dashboard</p>
-        <h3>Layout reference</h3>
+        <p class="label">${escapeHtml(t("Dashboard"))}</p>
+        <h3>${escapeHtml(t("Layout reference"))}</h3>
         <dl class="ports-list feedback-list">
-          <div><dt>window</dt><dd>850 x 603 minimum baseline</dd></div>
+          <div><dt>window</dt><dd>${escapeHtml(t("850 x 603 minimum baseline"))}</dd></div>
           <div><dt>pages</dt><dd>${escapeHtml(PAGES.map((page) => page.id).join(" / "))}</dd></div>
         </dl>
       </section>
@@ -2269,12 +2291,12 @@ function renderPageContent() {
   const productName = document.getElementById("product-name");
   if (productName) productName.textContent = state.payload.product?.name ?? "Clash for Mac";
   const statusTitle = document.getElementById("status-title");
-  if (statusTitle) statusTitle.textContent = state.mode ? `${page.title} - ${state.mode} Mode` : page.title;
-  document.getElementById("page-title").textContent = page.title;
-  document.getElementById("page-summary").textContent = page.summary;
+  if (statusTitle) statusTitle.textContent = state.mode ? t("{title} - {mode} Mode", { title: t(page.title), mode: t(state.mode) }) : t(page.title);
+  document.getElementById("page-title").textContent = t(page.title);
+  document.getElementById("page-summary").textContent = t(page.summary);
   const running = state.engine.active;
   const sidebarStatus = document.getElementById("sidebar-status");
-  if (sidebarStatus) sidebarStatus.textContent = running ? "Connected" : "Disconnected";
+  if (sidebarStatus) sidebarStatus.textContent = running ? t("Connected") : t("Disconnected");
   const sidebarDot = document.getElementById("sidebar-status-dot");
   if (sidebarDot) sidebarDot.className = running ? "on" : "";
   updateStatusBar();
@@ -2316,9 +2338,9 @@ function scheduleRender() {
 /// nothing is written to the preference store here.
 async function applyProxyMode(mode) {
   if (!["Global", "Rule", "Direct"].includes(mode)) throw new TypeError("Proxy mode is invalid");
-  if (!controllerActionAllowed(`Proxy mode ${mode}`, "mode")) return;
+  if (!controllerActionAllowed(t("Proxy mode {mode}", { mode: t(mode) }), "mode")) return;
   if (!freshProxyControllerSnapshotAvailable()) {
-    appendLog("info", "mode", `Proxy mode ${mode} requires a fresh controller snapshot`);
+    appendLog("info", "mode", t("Proxy mode {mode} requires a fresh controller snapshot", { mode: t(mode) }));
     return false;
   }
   const invokeMutation = () => invoke("set_proxy_mode", { mode });
@@ -2327,8 +2349,8 @@ async function applyProxyMode(mode) {
     kind: "mode",
     target: mode,
     source: "mode",
-    failureLabel: `Proxy mode ${mode} was not applied`,
-    successMessage: `Proxy mode switched to ${mode}`,
+    failureLabel: t("Proxy mode {mode} was not applied", { mode: t(mode) }),
+    successMessage: t("Proxy mode switched to {mode}", { mode: t(mode) }),
     breakConnectionsReason: "mode",
     invokeMutation,
     readObserved: controllerModeFromSnapshot,
@@ -2350,7 +2372,7 @@ async function applyProxySelection(groupName, proxyName) {
       if (observed?.profileId !== policy.profileId || observed.groups.find((item) => item.name === groupName)?.now !== proxyName) {
         throw new Error("Saved proxy selection could not be confirmed");
       }
-      appendLog("info", "proxy", `Saved ${proxyName} for ${groupName}; it will apply on the next start`);
+      appendLog("info", "proxy", t("Saved {proxyName} for {groupName}; it will apply on the next start", { proxyName: proxyName, groupName: groupName }));
       return true;
     } catch (error) {
       appendLog("error", "proxy", errorText(error));
@@ -2364,21 +2386,21 @@ async function applyProxySelection(groupName, proxyName) {
   if (!group) return false;
   if (!freshProxyControllerSnapshotAvailable()) {
     if (!state.engine.active) {
-      controllerActionAllowed(`Selecting proxy in ${groupName}`, "proxy");
+      controllerActionAllowed(t("Selecting proxy in {groupName}", { groupName: groupName }), "proxy");
     } else {
-      appendLog("info", "proxy", "Proxy selection requires a fresh controller snapshot");
+      appendLog("info", "proxy", t("Proxy selection requires a fresh controller snapshot"));
     }
     return false;
   }
   if (!isManualProxyGroup(group.type)) {
-    appendLog("error", "proxy", "The current proxy group is selected by the engine and is read-only");
+    appendLog("error", "proxy", t("The current proxy group is selected by the engine and is read-only"));
     return false;
   }
   if (!group.options.some((item) => item.name === proxyName)) {
-    appendLog("error", "proxy", "Proxy selection is not an option in the current controller snapshot");
+    appendLog("error", "proxy", t("Proxy selection is not an option in the current controller snapshot"));
     return false;
   }
-  if (!controllerActionAllowed(`Selecting proxy in ${groupName}`, "proxy")) return false;
+  if (!controllerActionAllowed(t("Selecting proxy in {groupName}", { groupName: groupName }), "proxy")) return false;
   const invokeMutation = () => invoke("select_proxy", { group: groupName, proxy: proxyName });
   return enqueueControllerMutation({
     lane: `proxy-selector:${groupName}`,
@@ -2386,8 +2408,8 @@ async function applyProxySelection(groupName, proxyName) {
     groupName,
     target: proxyName,
     source: "proxy",
-    failureLabel: `Proxy selection ${groupName} → ${proxyName} was not applied`,
-    successMessage: `Proxy group ${groupName} switched to ${proxyName}`,
+    failureLabel: t("Proxy selection {groupName} → {proxyName} was not applied", { groupName: groupName, proxyName: proxyName }),
+    successMessage: t("Proxy group {groupName} switched to {proxyName}", { groupName: groupName, proxyName: proxyName }),
     breakConnectionsReason: groupName,
     invokeMutation,
     readObserved: (snapshot) => controllerSelectorFromSnapshot(snapshot, groupName),
@@ -2408,7 +2430,7 @@ async function applyActiveProfile(context) {
   appendLog(
     "info",
     "profile",
-    `${applied.name}: projection ${applied.applied ? "applied and engine restarted" : "validated and staged (engine is off)"} (${formatBytes(applied.bytes ?? 0)})${context ? ` after ${context}` : ""}`,
+    t("{name}: projection {value2} ({value3}){value4}", { name: applied.name, value2: applied.applied ? t("applied and engine restarted") : t("validated and staged (engine is off)"), value3: formatBytes(applied.bytes ?? 0), value4: context ? t(" after {context}", { context }) : "" }),
   );
   await loadRuntimeProjection();
   return applied;
@@ -2418,7 +2440,7 @@ async function invokeProfileChange(command, args) {
   try {
     const result = await invoke(command, args);
     if (result?.reset_proxy_groups?.length) {
-      appendLog("warning", "profile", `Saved nodes were removed from these groups; the new defaults apply: ${result.reset_proxy_groups.join(", ")}`);
+      appendLog("warning", "profile", t("Saved nodes were removed from these groups; the new defaults apply: {value1}", { value1: result.reset_proxy_groups.join(", ") }));
     }
     return result;
   } finally {
@@ -2431,13 +2453,13 @@ async function invokeProfileChange(command, args) {
 
 async function selectProfileById(id) {
   const profile = state.profiles.find((item) => item.id === id);
-  if (!profile) throw new Error(`profile not found: ${id}`);
+  if (!profile) throw new Error(t("profile not found: {id}", { id: id }));
   if (profile.active) {
-    appendLog("info", "profile", `${profile.name} is already active`);
+    appendLog("info", "profile", t("{name} is already active", { name: profile.name }));
     return false;
   }
   await invokeProfileChange("select_profile", { id });
-  appendLog("info", "profile", `${profile.name} selected`);
+  appendLog("info", "profile", t("{name} selected", { name: profile.name }));
   return true;
 }
 
@@ -2449,13 +2471,13 @@ function bindPageEvents() {
       try {
         await applyToggle(key, checked, "ui");
       } catch (error) {
-        appendLog("error", "ui", `${key} refused: ${errorText(error)}`);
+        appendLog("error", "ui", t("{key} refused: {error}", { key: key, error: errorText(error) }));
       }
       renderPage();
     });
   });
 
-  document.querySelectorAll("[data-theme-setting], [data-font-family]").forEach((input) => {
+  document.querySelectorAll("[data-theme-setting], [data-font-family], [data-language-setting]").forEach((input) => {
     input.addEventListener("change", async () => {
       if (state.settingsUnavailableReason) {
         appendLog("warning", "settings", state.settingsUnavailableReason);
@@ -2465,15 +2487,15 @@ function bindPageEvents() {
       try {
         const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
         applyPersistedSettings(snapshot);
-        appendLog("info", "settings", "Appearance saved");
+        appendLog("info", "settings", t("Appearance saved"));
       } catch (error) {
-        appendLog("error", "settings", `Appearance refused: ${errorText(error)}`);
+        appendLog("error", "settings", t("Appearance refused: {error}", { error: errorText(error) }));
         try {
           await loadSettingsSnapshot();
         } catch (refreshError) {
           resetPersistedSettingsToSafeState();
-          state.settingsUnavailableReason = "Preferences are unavailable because the native settings snapshot could not be verified. Reload from disk before changing them.";
-          appendLog("error", "settings", `Appearance recovery failed: ${errorText(refreshError)}`);
+          state.settingsUnavailableReason = t("Preferences are unavailable because the native settings snapshot could not be verified. Reload from disk before changing them.");
+          appendLog("error", "settings", t("Appearance recovery failed: {error}", { error: errorText(refreshError) }));
         }
       }
       renderPage();
@@ -2591,9 +2613,9 @@ function bindPageEvents() {
       const id = event.currentTarget.dataset.profileId;
       try {
         await openProfileInspector(id, action);
-        appendLog("info", "profile", `${action} opened for ${id}`);
+        appendLog("info", "profile", t("{action} opened for {id}", { action: action, id: id }));
       } catch (error) {
-        appendLog("error", "profile", `${action} failed for ${id}: ${errorText(error)}`);
+        appendLog("error", "profile", t("{action} failed for {id}: {error}", { action: action, id: id, error: errorText(error) }));
       }
       renderPage();
     });
@@ -2676,9 +2698,9 @@ function bindPageEvents() {
       const value = event.currentTarget.dataset.copyText ?? "";
       try {
         await navigator.clipboard.writeText(value);
-        appendLog("info", "clipboard", "Connection field copied");
+        appendLog("info", "clipboard", t("Connection field copied"));
       } catch (_error) {
-        appendLog("warning", "clipboard", "Clipboard API refused copy");
+        appendLog("warning", "clipboard", t("Clipboard API refused copy"));
       }
       renderPage();
     });
@@ -2751,7 +2773,7 @@ function bindGlobalEvents() {
     if (!isEditable && pageShortcuts[key]) {
       event.preventDefault();
       state.activePage = pageShortcuts[key];
-      appendLog("info", "shortcut", `Opened ${pageById(state.activePage).title}`);
+      appendLog("info", "shortcut", t("Opened {value1}", { value1: pageById(state.activePage).title }));
       renderPage();
       return;
     }
@@ -2832,15 +2854,15 @@ async function applyToggle(key, checked, source) {
       const snapshot = await invoke("set_launch_at_login_enabled", { enabled: checked });
       applyPersistedSettings(snapshot);
     } else if (SESSION_TOGGLES.has(key)) {
-      appendLog("info", source, `${key} changed to ${checked ? "on" : "off"} for this session`);
+      appendLog("info", source, t("{key} changed to {value2} for this session", { key: key, value2: checked ? "on" : "off" }));
       return;
     } else {
       const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
       applyPersistedSettings(snapshot);
     }
     appendLog("info", source, isEngineMutation
-      ? `${key} request completed; engine ${engineStateLabel(state.engine)}`
-      : `${key} changed to ${checked ? "on" : "off"}`);
+      ? t("{key} request completed; engine {state}", { key: key, state: engineStateLabel(state.engine) })
+      : t("{key} changed to {value2}", { key: key, value2: checked ? "on" : "off" }));
     return true;
   } catch (error) {
     state.toggles[key] = previous;
@@ -2848,14 +2870,14 @@ async function applyToggle(key, checked, source) {
       try {
         await loadSettingsSnapshot();
       } catch (refreshError) {
-        appendLog("error", "settings", `Could not refresh the Login Item state after refusal: ${errorText(refreshError)}`);
+        appendLog("error", "settings", t("Could not refresh the Login Item state after refusal: {error}", { error: errorText(refreshError) }));
       }
     }
     if (isEngineMutation) {
       try {
         await loadEngineStatus();
       } catch (refreshError) {
-        appendLog("error", "engine", `Could not refresh mode state after refusal: ${errorText(refreshError)}`);
+        appendLog("error", "engine", t("Could not refresh mode state after refusal: {error}", { error: errorText(refreshError) }));
       }
       state.engineMutationError = errorText(error).slice(0, 512);
     }
@@ -2902,15 +2924,15 @@ export async function handleAction(action) {
     renderPage();
     try {
       await invoke("begin_migration_handoff");
-      appendLog("info", "migration", "Launching the signed migration session…");
-      state.cutover.message = "The verified migration window is ready. This dashboard will now close.";
+      appendLog("info", "migration", t("Launching the signed migration session…"));
+      state.cutover.message = t("The verified migration window is ready. This dashboard will now close.");
     } catch (error) {
       try {
         await loadBootPayload();
       } catch (refreshError) {
         markHandoffStatusUnverifiable(refreshError);
       }
-      appendLog("error", "migration", `Could not start the migration session: ${errorText(error)}`);
+      appendLog("error", "migration", t("Could not start the migration session: {error}", { error: errorText(error) }));
     }
   }
   if (action === "prepare-cutover") {
@@ -2930,17 +2952,17 @@ export async function handleAction(action) {
         state.cutover.receiptIssuedAt = preparation.issuedAt;
         state.cutover.receiptExpiresAt = preparation.expiresAt;
         state.cutover.awaitingApproval = false;
-        state.cutover.message = "Replacement staged and validated. Confirm the one-way cutover to proceed.";
+        state.cutover.message = t("Replacement staged and validated. Confirm the one-way cutover to proceed.");
       } else if (preparation.status === "awaiting_approval") {
         state.cutover.awaitingApproval = true;
-        state.cutover.message = "System Extension approval is pending.";
+        state.cutover.message = t("System Extension approval is pending.");
       }
     } catch (error) {
       state.cutover = clearCutoverReceipt(state.cutover, {
         targetValue: requestedTarget,
         message: errorText(error),
       });
-      appendLog("error", "migration", `Prepare cutover failed: ${errorText(error)}`);
+      appendLog("error", "migration", t("Prepare cutover failed: {error}", { error: errorText(error) }));
     } finally {
       state.cutover.busy = false;
     }
@@ -2964,13 +2986,13 @@ export async function handleAction(action) {
       renderPage();
       try {
         await invoke("disable_service_mode", confirmArgs);
-        state.cutover = newCutoverState(state.cutover.target, "Cutover complete. Replacement networking is active.");
-        appendLog("info", "migration", "Legacy network retired; replacement is active.");
+        state.cutover = newCutoverState(state.cutover.target, t("Cutover complete. Replacement networking is active."));
+        appendLog("info", "migration", t("Legacy network retired; replacement is active."));
         await loadEngineStatus();
         await loadRetirementStatus();
       } catch (error) {
         state.cutover = clearCutoverReceipt(state.cutover, { message: errorText(error) });
-        appendLog("error", "migration", `Cutover failed: ${errorText(error)}`);
+        appendLog("error", "migration", t("Cutover failed: {error}", { error: errorText(error) }));
         await loadRetirementStatus();
       } finally {
         state.cutover.busy = false;
@@ -2983,13 +3005,13 @@ export async function handleAction(action) {
     renderPage();
     try {
       await invoke("recover_legacy_cutover");
-      state.cutover.message = "Recovery complete.";
-      appendLog("info", "migration", "Interrupted cutover recovered.");
+      state.cutover.message = t("Recovery complete.");
+      appendLog("info", "migration", t("Interrupted cutover recovered."));
       await loadEngineStatus();
       await loadRetirementStatus();
     } catch (error) {
       state.cutover.message = errorText(error);
-      appendLog("error", "migration", `Recovery failed: ${errorText(error)}`);
+      appendLog("error", "migration", t("Recovery failed: {error}", { error: errorText(error) }));
       await loadRetirementStatus();
     } finally {
       state.cutover.busy = false;
@@ -2999,7 +3021,7 @@ export async function handleAction(action) {
     const group = activeProxyGroup();
     const selected = group?.now;
     if (!selected) {
-      appendLog("warning", "proxy", "No selected proxy to scroll to");
+      appendLog("warning", "proxy", t("No selected proxy to scroll to"));
       return;
     }
     state.toggles.showProxiesList = true;
@@ -3035,17 +3057,17 @@ export async function handleAction(action) {
     if (!state.toggles.showProxyFilter) state.proxyFilter = "";
   }
   if (action === "break-proxy-connections") {
-    if (!controllerActionAllowed("Breaking proxy connections", "proxy")) return;
+    if (!controllerActionAllowed(t("Breaking proxy connections"), "proxy")) return;
     const token = captureEngineIdentityToken();
     const count = state.connections.length;
     try {
       await invoke("close_all_connections");
       if (!engineIdentityTokenIsCurrent(token)) return;
-      appendLog("warning", "proxy", `Broke ${count} connection(s)`);
+      appendLog("warning", "proxy", t("Broke {count} connection(s)", { count: count }));
       await loadControllerSnapshot(true, token);
     } catch (error) {
       if (!engineIdentityTokenIsCurrent(token)) return;
-      appendLog("error", "proxy", `Break connections failed: ${errorText(error)}`);
+      appendLog("error", "proxy", t("Break connections failed: {error}", { error: errorText(error) }));
     }
   }
   if (action === "open-providers") {
@@ -3056,7 +3078,7 @@ export async function handleAction(action) {
     await loadRulesSnapshot();
   }
   if (action === "close-all") {
-    if (!controllerActionAllowed("Closing all connections", "connection")) return;
+    if (!controllerActionAllowed(t("Closing all connections"), "connection")) return;
     const token = captureEngineIdentityToken();
     const count = state.connections.length;
     state.closingAllConnections = true;
@@ -3064,12 +3086,12 @@ export async function handleAction(action) {
     try {
       await invoke("close_all_connections");
       if (!engineIdentityTokenIsCurrent(token)) return;
-      appendLog("warning", "connection", `Closed ${count} active connections`);
+      appendLog("warning", "connection", t("Closed {count} active connections", { count: count }));
       await loadControllerSnapshot(true, token);
     } catch (error) {
       if (!engineIdentityTokenIsCurrent(token)) return;
       state.controllerStatus = "controller offline";
-      appendLog("error", "connection", `Controller close-all failed; keeping local rows: ${errorText(error)}`);
+      appendLog("error", "connection", t("Controller close-all failed; keeping local rows: {error}", { error: errorText(error) }));
     } finally {
       if (engineIdentityTokenIsCurrent(token)) state.closingAllConnections = false;
     }
@@ -3078,14 +3100,14 @@ export async function handleAction(action) {
     await runProxyDelayTest();
   }
   if (action === "reload-proxies") {
-    if (!controllerActionAllowed("Reloading proxies", "proxy")) return;
+    if (!controllerActionAllowed(t("Reloading proxies"), "proxy")) return;
     const live = await loadControllerSnapshot();
-    appendLog(live ? "info" : "error", "proxy", live ? "Controller snapshot reloaded" : "Controller unavailable; keeping local data");
+    appendLog(live ? "info" : "error", "proxy", live ? "Controller snapshot reloaded" : t("Controller unavailable; keeping local data"));
   }
   if (action === "copy-proxy-exports") {
     const port = state.projection.mixedPort;
     if (!port) {
-      appendLog("warning", "shell", `The projected inbound port is unavailable: ${state.projection.error ?? "no active profile is selected"}`);
+      appendLog("warning", "shell", t("The projected inbound port is unavailable: {value1}", { value1: state.projection.error ?? "no active profile is selected" }));
       renderPage();
       return;
     }
@@ -3096,7 +3118,7 @@ export async function handleAction(action) {
     ].join("\n");
     try {
       await navigator.clipboard.writeText(exports);
-      appendLog("info", "shell", "Copied proxy export commands for Terminal");
+      appendLog("info", "shell", t("Copied proxy export commands for Terminal"));
     } catch (error) {
       appendLog("warning", "clipboard", errorText(error));
     }
@@ -3105,7 +3127,7 @@ export async function handleAction(action) {
     state.glassDialog = {
       kind: "info",
       payload: {
-        title: "Allow LAN",
+        title: t("Allow LAN"),
         body: REASONS.allowLan,
       },
     };
@@ -3128,14 +3150,14 @@ export async function handleAction(action) {
     }
   }
   if (action === "preview-runtime-config") {
-    if (!runtimeProjectionActionAllowed("Configuration preview")) return;
+    if (!runtimeProjectionActionAllowed(t("Configuration preview"))) return;
     try {
       const body = await invoke("read_runtime_config_text");
       state.glassDialog = { kind: "preview-config", payload: body };
       renderGlassOverlays();
       return;
     } catch (error) {
-      appendLog("error", "engine", `Configuration preview failed: ${errorText(error)}`);
+      appendLog("error", "engine", t("Configuration preview failed: {error}", { error: errorText(error) }));
     }
   }
   if (action === "dns-query") {
@@ -3147,8 +3169,8 @@ export async function handleAction(action) {
     state.glassDialog = {
       kind: "info",
       payload: {
-        title: "TUN Mode",
-        body: "TUN Mode runs the packet tunnel as a signed NetworkExtension System Extension. macOS asks for approval once, under System Settings › General › Login Items & Extensions; until it is approved the switch stays unavailable.",
+        title: t("TUN Mode"),
+        body: t("TUN Mode runs the packet tunnel as a signed NetworkExtension System Extension. macOS asks for approval once, under System Settings › General › Login Items & Extensions; until it is approved the switch stays unavailable."),
       },
     };
     renderGlassOverlays();
@@ -3158,7 +3180,7 @@ export async function handleAction(action) {
     state.glassDialog = {
       kind: "info",
       payload: {
-        title: "Mixin",
+        title: t("Mixin"),
         body: REASONS.mixin,
       },
     };
@@ -3168,9 +3190,9 @@ export async function handleAction(action) {
   if (action === "open-home-directory") {
     try {
       await invoke("reveal_home_directory");
-      appendLog("info", "shell", "Home Directory opened in Finder");
+      appendLog("info", "shell", t("Home Directory opened in Finder"));
     } catch (error) {
-      appendLog("error", "shell", `Open Folder failed: ${errorText(error)}`);
+      appendLog("error", "shell", t("Open Folder failed: {error}", { error: errorText(error) }));
     }
   }
   if (action === "retry-system-proxy") {
@@ -3194,17 +3216,17 @@ export async function handleAction(action) {
       }
       if (state.engine.state === "AwaitingApproval") {
         await invoke("open_login_items_settings");
-        appendLog("info", "shell", "Opened System Settings › General › Login Items & Extensions");
+        appendLog("info", "shell", t("Opened System Settings › General › Login Items & Extensions"));
       }
     } catch (error) {
-      appendLog("error", "engine", `TUN retry failed: ${errorText(error)}`);
+      appendLog("error", "engine", t("TUN retry failed: {error}", { error: errorText(error) }));
     }
     renderPage();
   }
   if (action === "tun-restore-dns-info") {
     state.glassDialog = {
       kind: "info",
-      payload: { title: "System DNS", body: REASONS.restoreDns },
+      payload: { title: t("System DNS"), body: REASONS.restoreDns },
     };
     renderGlassOverlays();
     return;
@@ -3223,7 +3245,7 @@ export async function handleAction(action) {
   if (action === "update-profile-from-inspector") {
     const id = state.profileInspector?.profile?.id ?? state.profileInspector?.id;
     if (!id) {
-      appendLog("warning", "profile", "No profile is open");
+      appendLog("warning", "profile", t("No profile is open"));
     } else {
       await runProfileMenuAction("update", id);
       await openProfileInspector(id, "edit");
@@ -3233,7 +3255,7 @@ export async function handleAction(action) {
     const input = document.querySelector("[data-profile-url]");
     const url = input?.value?.trim();
     if (!url) {
-      appendLog("warning", "profile", "A subscription URL or node link is required before import");
+      appendLog("warning", "profile", t("A subscription URL or node link is required before import"));
     } else {
       const subscription = isSubscriptionSource(url);
       const result = subscription
@@ -3241,7 +3263,7 @@ export async function handleAction(action) {
         : await invokeProfileChange("import_profile_text", { name: null, body: url });
       input.value = "";
       await loadProfilesSnapshot();
-      appendLog("info", "profile", `Profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
+      appendLog("info", "profile", t("Profile imported: {name} ({value2})", { name: result.name, value2: formatBytes(result.bytes ?? 0) }));
       if (!subscription) {
         await selectProfileById(result.id);
       }
@@ -3253,9 +3275,9 @@ export async function handleAction(action) {
     try {
       const text = await navigator.clipboard.readText();
       if (input) input.value = text.trim();
-      appendLog("info", "profile", "Profile URL pasted from clipboard");
+      appendLog("info", "profile", t("Profile URL pasted from clipboard"));
     } catch (_error) {
-      appendLog("warning", "profile", "Clipboard read was refused");
+      appendLog("warning", "profile", t("Clipboard read was refused"));
     }
   }
   if (action === "import-profile-file") {
@@ -3269,7 +3291,7 @@ export async function handleAction(action) {
       const body = await readProfileSourceFile(file);
       const result = await invokeProfileChange("import_profile_text", { name: file.name, body });
       await loadProfilesSnapshot();
-      appendLog("info", "profile", `Local profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
+      appendLog("info", "profile", t("Local profile imported: {name} ({value2})", { name: result.name, value2: formatBytes(result.bytes ?? 0) }));
       await selectProfileById(result.id);
       await openCredentialSetup(result.id);
     } finally {
@@ -3278,7 +3300,7 @@ export async function handleAction(action) {
   }
   if (action === "migrate-legacy-profiles") {
     if (state.profilesUnavailableReason) {
-      appendLog("error", "profile", `Profile repository is unavailable: ${state.profilesUnavailableReason}`);
+      appendLog("error", "profile", t("Profile repository is unavailable: {profilesUnavailableReason}", { profilesUnavailableReason: state.profilesUnavailableReason }));
       renderPage();
       return;
     }
@@ -3297,20 +3319,20 @@ export async function handleAction(action) {
       } else if (preview.status === "not_subscription") {
         state.glassDialog = {
           kind: "info",
-          payload: { title: "Legacy profile is local", body: preview.reason },
+          payload: { title: t("Legacy profile is local"), body: preview.reason },
         };
       } else {
         state.glassDialog = {
           kind: "info",
-          payload: { title: "No selected legacy subscription", body: "The legacy settings file does not select a profile that can be migrated." },
+          payload: { title: t("No selected legacy subscription"), body: t("The legacy settings file does not select a profile that can be migrated.") },
         };
       }
       renderGlassOverlays();
       return;
     } catch (error) {
       const message = errorText(error);
-      appendLog("error", "migration", `Legacy profile preview failed: ${message}`);
-      state.glassDialog = { kind: "info", payload: { title: "Legacy migration failed", body: message } };
+      appendLog("error", "migration", t("Legacy profile preview failed: {message}", { message: message }));
+      state.glassDialog = { kind: "info", payload: { title: t("Legacy migration failed"), body: message } };
       renderGlassOverlays();
       return;
     }
@@ -3335,30 +3357,30 @@ export async function handleAction(action) {
           appendLog(
             "warning",
             "profile",
-            `${profile.name} updated. Old credentials are retained for recovery.${result.credential_cleanup_error ? ` Cleanup: ${result.credential_cleanup_error}` : ""}`,
+            t("{name} updated. Old credentials are retained for recovery.{value2}", { name: profile.name, value2: result.credential_cleanup_error ? t(" Cleanup: {error}", { error: result.credential_cleanup_error }) : "" }),
           );
         }
       } catch (error) {
         failed += 1;
-        appendLog("error", "profile", `Update failed for ${profile.name}: ${errorText(error)}`);
+        appendLog("error", "profile", t("Update failed for {name}: {error}", { name: profile.name, error: errorText(error) }));
       }
     }
     await loadProfilesSnapshot();
     appendLog(
       failed ? "error" : "info",
       "profile",
-      `Update All completed: ${updated} updated${failed ? `, ${failed} failed` : ""}${cleanupPending ? `, ${cleanupPending} cleanup pending` : ""}${local ? `, ${local} without a subscription URL` : ""}`,
+      t("Update All completed: {updated} updated{value2}{value3}{value4}", { updated: updated, value2: failed ? t(", {count} failed", { count: failed }) : "", value3: cleanupPending ? t(", {count} cleanup pending", { count: cleanupPending }) : "", value4: local ? t(", {count} without a subscription URL", { count: local }) : "" }),
     );
   }
   if (action === "save-profile-editor") {
     const editor = document.querySelector("[data-profile-editor]");
     const inspector = state.profileInspector;
     if (!editor || !inspector?.profile?.id) {
-      appendLog("warning", "profile", "No profile editor is open");
+      appendLog("warning", "profile", t("No profile editor is open"));
     } else {
       const result = await invokeProfileChange("save_profile_text", { id: inspector.profile.id, expectedDigest: inspector.profile.digest, body: editor.value });
       await loadProfilesSnapshot();
-      appendLog("info", "profile", `Profile JSON saved: ${formatBytes(result.bytes ?? 0)}`);
+      appendLog("info", "profile", t("Profile JSON saved: {value1}", { value1: formatBytes(result.bytes ?? 0) }));
       await openProfileInspector(result.id, "edit");
       await openCredentialSetup(result.id);
     }
@@ -3371,35 +3393,35 @@ export async function handleAction(action) {
     return;
   }
   if (action === "flush-fake-ip-cache") {
-    if (!controllerActionAllowed("Fake IP cache flush", "cache")) return;
+    if (!controllerActionAllowed(t("Fake IP cache flush"), "cache")) return;
     const token = captureEngineIdentityToken();
     try {
       await invoke("flush_fake_ip_cache");
       if (!engineIdentityTokenIsCurrent(token)) return;
-      appendLog("info", "cache", "Fake IP cache flushed through the engine controller");
+      appendLog("info", "cache", t("Fake IP cache flushed through the engine controller"));
     } catch (error) {
       if (!engineIdentityTokenIsCurrent(token)) return;
       state.controllerStatus = "controller offline";
-      appendLog("error", "cache", `Fake IP cache flush failed: ${errorText(error)}`);
+      appendLog("error", "cache", t("Fake IP cache flush failed: {error}", { error: errorText(error) }));
     }
   }
   if (action === "reload-rules") {
-    if (!controllerActionAllowed("Rules reload", "rules")) return;
+    if (!controllerActionAllowed(t("Rules reload"), "rules")) return;
     const loaded = await loadRulesSnapshot();
-    appendLog(loaded ? "info" : "error", "rules", loaded ? `Loaded ${state.rules.length} controller rules` : "Rules controller endpoint unavailable");
+    appendLog(loaded ? "info" : "error", "rules", loaded ? t("Loaded {count} controller rules", { count: state.rules.length }) : t("Rules controller endpoint unavailable"));
   }
   if (action === "toggle-log-stream") {
     const pause = !state.logsPaused;
-    if (!pause && !controllerActionAllowed("Starting request logs", "logs")) return;
+    if (!pause && !controllerActionAllowed(t("Starting request logs"), "logs")) return;
     const previous = state.logsPaused;
     state.logsPaused = pause;
     try {
       const changed = await setLogStreamRunning(!pause);
       if (!changed) return;
-      appendLog("info", "logs", `Request logs ${pause ? "stopped" : "started"}`);
+      appendLog("info", "logs", t("Request logs {value1}", { value1: pause ? "stopped" : "started" }));
     } catch (error) {
       if (!pause) state.logsPaused = previous;
-      appendLog("error", "logs", `Log stream change failed: ${errorText(error)}`);
+      appendLog("error", "logs", t("Log stream change failed: {error}", { error: errorText(error) }));
     }
   }
   if (action === "clear-logs") {
@@ -3414,31 +3436,31 @@ export async function handleAction(action) {
     }).join("\n");
     try {
       await navigator.clipboard.writeText(text || "(no logs)");
-      appendLog("info", "logs", `Copied ${state.logs.length} log line(s) to clipboard`);
+      appendLog("info", "logs", t("Copied {count} log line(s) to clipboard", { count: state.logs.length }));
     } catch (error) {
-      appendLog("warning", "logs", `Copy logs refused: ${errorText(error)}`);
+      appendLog("warning", "logs", t("Copy logs refused: {error}", { error: errorText(error) }));
     }
   }
   if (action === "reveal-logs") {
     try {
       await invoke("reveal_logs_directory");
-      appendLog("info", "logs", "Logs folder opened in Finder");
+      appendLog("info", "logs", t("Logs folder opened in Finder"));
     } catch (error) {
-      appendLog("error", "logs", `Open Folder failed: ${errorText(error)}`);
+      appendLog("error", "logs", t("Open Folder failed: {error}", { error: errorText(error) }));
     }
   }
   if (action === "toggle-connection-stream") {
     const pause = !state.connectionPaused;
-    if (!pause && !controllerActionAllowed("Starting connection stream", "connections")) return;
+    if (!pause && !controllerActionAllowed(t("Starting connection stream"), "connections")) return;
     const previous = state.connectionPaused;
     state.connectionPaused = pause;
     try {
       const changed = await setConnectionsStreamRunning(!pause);
       if (!changed) return;
-      appendLog("info", "connections", `Connection stream ${pause ? "stopped" : "started"}`);
+      appendLog("info", "connections", t("Connection stream {value1}", { value1: pause ? "stopped" : "started" }));
     } catch (error) {
       if (!pause) state.connectionPaused = previous;
-      appendLog("error", "connections", `Connection stream change failed: ${errorText(error)}`);
+      appendLog("error", "connections", t("Connection stream change failed: {error}", { error: errorText(error) }));
     }
   }
   if (action === "close-connection-detail") {
@@ -3451,7 +3473,7 @@ export async function handleAction(action) {
     if (state.settingsUnavailableReason) throw new Error(state.settingsUnavailableReason);
     const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
     applyPersistedSettings(snapshot);
-    appendLog("info", "settings", "Preferences saved");
+    appendLog("info", "settings", t("Preferences saved"));
   }
   if (action === "check-for-updates") {
     try {
@@ -3459,7 +3481,7 @@ export async function handleAction(action) {
       const result = await invoke("check_for_updates");
       await promptAvailableUpdate(result);
     } catch (error) {
-      appendLog("error", "updater", `Update check failed: ${errorText(error)}`);
+      appendLog("error", "updater", t("Update check failed: {error}", { error: errorText(error) }));
       const result = invalidateUpdateAuthorization(error);
       openProductAboutDialog({
         autoCheck: true,
@@ -3470,7 +3492,7 @@ export async function handleAction(action) {
   }
   if (action === "reload-settings") {
     await loadSettingsSnapshot();
-    appendLog("info", "settings", "Preferences reloaded from disk");
+    appendLog("info", "settings", t("Preferences reloaded from disk"));
   }
   if (action === "reset-settings") {
     if (state.settingsUnavailableReason) throw new Error(state.settingsUnavailableReason);
@@ -3518,12 +3540,12 @@ async function closeConnectionsAfterProxyChange(
     if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) return false;
     state.connections = [];
     state.connectionStream.rows = new Map();
-    appendLog("warning", "connection", `Closed ${count} connection(s) after ${reason} switch`);
+    appendLog("warning", "connection", t("Closed {count} connection(s) after {reason} switch", { count: count, reason: reason }));
     return true;
   } catch (error) {
     if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) return false;
     state.controllerStatus = "controller offline";
-    appendLog("error", "connection", `Connection cleanup after ${reason} switch failed: ${errorText(error)}`);
+    appendLog("error", "connection", t("Connection cleanup after {reason} switch failed: {error}", { reason: reason, error: errorText(error) }));
     return false;
   }
 }
@@ -3536,7 +3558,7 @@ async function openProfileInspector(id, mode, focusKey = null) {
       inspector.svg = await invoke("profile_qrcode_svg", { id });
     } catch (error) {
       inspector.error = errorText(error);
-      appendLog("error", "profile", `Could not render the profile QR code: ${inspector.error}`);
+      appendLog("error", "profile", t("Could not render the profile QR code: {error}", { error: inspector.error }));
     }
   }
   state.profileInspector = inspector;
@@ -3560,7 +3582,7 @@ function focusProfileEditorSection(key) {
 
 async function reloadPayload() {
   if (!state.migrationHandoff) await loadBootPayload();
-  state.lastRefresh = "Just now";
+  state.lastRefresh = t("Just now");
   await loadSettingsSnapshot();
   await loadPlatformDesign();
   await loadEngineStatus();
@@ -3575,7 +3597,7 @@ async function reloadPayload() {
   if (controllerReady) {
     if (state.activePage === "rules") await loadRulesSnapshot();
   }
-  appendLog("info", "shell", "Dashboard reloaded");
+  appendLog("info", "shell", t("Dashboard reloaded"));
   renderPage();
 }
 
@@ -3594,9 +3616,9 @@ function markHandoffStatusUnverifiable(error) {
   state.migrationHandoffStatus = {
     state: "failed",
     code: "migration_handoff_task_failed",
-    message: "Migration handoff status could not be verified. Review the application log before retrying.",
+    message: t("Migration handoff status could not be verified. Review the application log before retrying."),
   };
-  appendLog("error", "migration", `Migration handoff state could not be trusted: ${errorText(error)}`);
+  appendLog("error", "migration", t("Migration handoff state could not be trusted: {error}", { error: errorText(error) }));
 }
 
 async function loadBootPayload() {
@@ -3632,7 +3654,7 @@ function applyEngineStatus(payload) {
     next = normalizeEngineStatus(payload);
   } catch (error) {
     next = { ...defaultEngineStatus, availabilityReason: errorText(error) };
-    appendLog("error", "engine", `Engine state could not be trusted: ${errorText(error)}`);
+    appendLog("error", "engine", t("Engine state could not be trusted: {error}", { error: errorText(error) }));
   }
   state.engine = next;
   if (engineRuntimeIdentityChanged(previous, next)) {
@@ -3669,13 +3691,13 @@ async function loadEngineStatus() {
     if (requestId !== runtime.engineStatusRequestId) return false;
     state.engine = { ...defaultEngineStatus, availabilityReason: errorText(error) };
     invalidateEngineBoundState(false);
-    appendLog("error", "engine", `Unable to read the engine state: ${errorText(error)}`);
+    appendLog("error", "engine", t("Unable to read the engine state: {error}", { error: errorText(error) }));
   }
   try {
     state.geoipStatus = await invoke("geoip_database_status");
   } catch (error) {
     state.geoipStatus = null;
-    appendLog("error", "geoip", `Unable to read the GeoIP database status: ${errorText(error)}`);
+    appendLog("error", "geoip", t("Unable to read the GeoIP database status: {error}", { error: errorText(error) }));
   }
   if (state.engine.active) {
     const token = captureEngineIdentityToken();
@@ -3685,7 +3707,7 @@ async function loadEngineStatus() {
     } catch (error) {
       if (!engineIdentityTokenIsCurrent(token)) return false;
       state.controllerVersion = null;
-      appendLog("error", "controller", `Unable to read the controller version: ${errorText(error)}`);
+      appendLog("error", "controller", t("Unable to read the controller version: {error}", { error: errorText(error) }));
     }
   } else {
     state.controllerVersion = null;
@@ -3701,7 +3723,7 @@ async function loadRetirementStatus() {
     state.retirement = normalizeRetirementStatus(await invoke("legacy_retirement_status"));
   } catch (error) {
     state.retirement = unverifiableRetirementStatus(errorText(error));
-    appendLog("error", "engine", `Unable to read the legacy retirement state: ${errorText(error)}`);
+    appendLog("error", "engine", t("Unable to read the legacy retirement state: {error}", { error: errorText(error) }));
   }
 }
 
@@ -3710,7 +3732,7 @@ async function loadPlatformDesign() {
     state.platform = await invoke("current_platform_design");
   } catch (error) {
     state.platform = null;
-    appendLog("error", "shell", `Unable to read the platform design: ${errorText(error)}`);
+    appendLog("error", "shell", t("Unable to read the platform design: {error}", { error: errorText(error) }));
   }
 }
 
@@ -3727,7 +3749,7 @@ async function loadRuntimeProjection() {
       listenAddress: null,
       controller: null,
       logLevel: null,
-      error: `profile state is unavailable: ${state.profilesUnavailableReason}`,
+      error: t("profile state is unavailable: {profilesUnavailableReason}", { profilesUnavailableReason: state.profilesUnavailableReason }),
     };
     return false;
   }
@@ -3760,7 +3782,7 @@ async function loadRuntimeProjection() {
       logLevel: null,
       error: errorText(error),
     };
-    appendLog("error", "profile", `Active profile projection could not be read: ${state.projection.error}`);
+    appendLog("error", "profile", t("Active profile projection could not be read: {error}", { error: state.projection.error }));
     return false;
   }
 }
@@ -3791,7 +3813,7 @@ async function loadNetworkDiagnostics() {
     state.networkDiagnostics = await invoke("network_diagnostics");
   } catch (error) {
     state.networkDiagnostics = null;
-    appendLog("error", "network", `Unable to inspect macOS network services: ${errorText(error)}`);
+    appendLog("error", "network", t("Unable to inspect macOS network services: {error}", { error: errorText(error) }));
   }
 }
 
@@ -3816,7 +3838,7 @@ async function loadControllerSnapshot(
     if (!snapshot) {
       clearControllerBackedState();
       state.controllerStatus = "controller offline";
-      if (reportFailure) appendLog("error", "controller", "Running engine returned no controller snapshot");
+      if (reportFailure) appendLog("error", "controller", t("Running engine returned no controller snapshot"));
       return false;
     }
     if (observe) observe(snapshot);
@@ -3824,7 +3846,7 @@ async function loadControllerSnapshot(
     applyPendingControllerIntents();
     invoke("refresh_tray_menu").catch((error) => {
       if (engineIdentityTokenIsCurrent(token) && publishAllowed()) {
-        appendLog("error", "tray", `Tray refresh failed: ${errorText(error)}`);
+        appendLog("error", "tray", t("Tray refresh failed: {error}", { error: errorText(error) }));
       }
     });
     return true;
@@ -4000,7 +4022,7 @@ async function startLiveStreams() {
       if (engineEpoch !== runtime.engineIdentityEpoch) return;
     } catch (error) {
       if (engineEpoch !== runtime.engineIdentityEpoch) return;
-      appendLog("error", name, `Live stream unavailable: ${errorText(error)}`);
+      appendLog("error", name, t("Live stream unavailable: {error}", { error: errorText(error) }));
     }
   }
 }
@@ -4047,14 +4069,14 @@ async function bootstrap() {
     try {
       applyPersistedSettings(event.payload);
     } catch (error) {
-      appendLog("error", "settings", `Rejected an invalid settings update: ${errorText(error)}`);
+      appendLog("error", "settings", t("Rejected an invalid settings update: {error}", { error: errorText(error) }));
       try {
         await loadSettingsSnapshot();
-        appendLog("warning", "settings", "Preferences were recovered from the native store after an invalid update event.");
+        appendLog("warning", "settings", t("Preferences were recovered from the native store after an invalid update event."));
       } catch (refreshError) {
         resetPersistedSettingsToSafeState();
-        state.settingsUnavailableReason = "Preferences are unavailable because the native settings snapshot could not be verified. Reload from disk before changing them.";
-        appendLog("error", "settings", `Native settings recovery failed: ${errorText(refreshError)}`);
+        state.settingsUnavailableReason = t("Preferences are unavailable because the native settings snapshot could not be verified. Reload from disk before changing them.");
+        appendLog("error", "settings", t("Native settings recovery failed: {error}", { error: errorText(refreshError) }));
       }
     }
     await loadEngineStatus();
@@ -4163,7 +4185,7 @@ async function bootstrap() {
     const profilePaths = paths.filter(isProfileSourcePath);
     if (!profilePaths.length) {
       if (paths.length) {
-        appendLog("warning", "profile", "Drag-drop requires a JSON, YAML, or node-link text profile");
+        appendLog("warning", "profile", t("Drag-drop requires a JSON, YAML, or node-link text profile"));
       }
       return;
     }
@@ -4190,7 +4212,7 @@ async function bootstrap() {
     try {
       applyUpdateInfo(await invoke("check_for_updates"));
     } catch (error) {
-      appendLog("error", "updater", `Automatic update check failed: ${errorText(error)}`);
+      appendLog("error", "updater", t("Automatic update check failed: {error}", { error: errorText(error) }));
       invalidateUpdateAuthorization(error);
     }
   }
@@ -4213,11 +4235,11 @@ async function importProfileFromPath(path) {
   try {
     const result = await invokeProfileChange("import_profile_file", { path, name: null, activate: true });
     await loadProfilesSnapshot();
-    appendLog("info", "profile", `Dropped profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
+    appendLog("info", "profile", t("Dropped profile imported: {name} ({value2})", { name: result.name, value2: formatBytes(result.bytes ?? 0) }));
     await openCredentialSetup(result.id);
     scheduleRender();
   } catch (error) {
-    appendLog("error", "profile", `Drag-drop import failed: ${errorText(error)}`);
+    appendLog("error", "profile", t("Drag-drop import failed: {error}", { error: errorText(error) }));
   }
 }
 
@@ -4226,7 +4248,7 @@ export function renderFatalBootstrap() {
     window.__CFM_STARTUP__.fail();
     return;
   }
-  document.body.innerHTML = `<pre class="fatal">${escapeHtml("Clash for Mac could not start safely (startup_state_unverifiable). Review the application log before retrying.")}</pre>`;
+  document.body.innerHTML = `<pre class="fatal">${escapeHtml(t("Clash for Mac could not start safely (startup_state_unverifiable). Review the application log before retrying."))}</pre>`;
 }
 
 bootstrap().catch(() => {

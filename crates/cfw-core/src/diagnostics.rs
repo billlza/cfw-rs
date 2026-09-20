@@ -249,9 +249,12 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
+    static TEST_DIRECTORY_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "cfm-diagnostic-test-{}-{}",
+            "cfm-diagnostic-test-{}-{}-{}",
+            TEST_DIRECTORY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

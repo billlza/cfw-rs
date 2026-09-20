@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { escapeHtml, errorText, formatRelativeUpdated, providerActionKey, providerBatchSummary, providerBatchSucceeded } from "./format.js";
 
 // Resource operations are bound to the selected profile, not a transient core
@@ -19,17 +20,17 @@ export function createProviderUI({ state, invoke, appendLog, renderPage, refresh
   }
   function allowed(action) {
     if (state.engine.providerManagementAvailable === true && profileId() && !state.profilesUnavailableReason) return true;
-    appendLog("info", "provider", `${action} requires an available selected profile`);
+    appendLog("info", "provider", t("{action} requires an available selected profile", { action: action }));
     return false;
   }
   function applyProvidersSnapshot(snapshot) {
     if (!Array.isArray(snapshot?.proxy_providers) || !Array.isArray(snapshot?.rule_providers)) throw new TypeError("provider snapshot is invalid");
     const common = (provider) => ({ name: provider.name, type: provider.kind, vehicle: provider.vehicle_type,
-      updated: provider.extra?.updated_epoch_secs ? formatRelativeUpdated(provider.extra.updated_epoch_secs) : provider.updated_at ?? "unknown",
+      updated: provider.extra?.updated_epoch_secs ? formatRelativeUpdated(provider.extra.updated_epoch_secs) : provider.updated_at ?? t("unknown"),
       updatable: provider.extra?.updatable === true, error: provider.extra?.update_error ?? null,
     });
     state.providers = snapshot.proxy_providers.map((provider) => ({ ...common(provider),
-      health: provider.extra?.health ?? "Not tested", proxies: provider.proxies?.length ?? 0,
+      health: provider.extra?.health ?? t("Not tested"), proxies: provider.proxies?.length ?? 0,
     }));
     state.ruleProviders = snapshot.rule_providers.map((provider) => ({ ...common(provider),
       behavior: provider.behavior ?? provider.vehicle_type, rules: provider.rules?.length ?? 0,
@@ -41,7 +42,7 @@ export function createProviderUI({ state, invoke, appendLog, renderPage, refresh
     const epoch = ++snapshotEpoch;
     if (!captured.profileId || state.engine.providerManagementAvailable !== true) {
       state.providers = []; state.ruleProviders = [];
-      state.providerCapabilityError = state.engine.providerManagementAvailable === true ? null : "Provider management is unavailable in this application.";
+      state.providerCapabilityError = state.engine.providerManagementAvailable === true ? null : t("Provider management is unavailable in this application.");
       return false;
     }
     try {
@@ -71,10 +72,10 @@ export function createProviderUI({ state, invoke, appendLog, renderPage, refresh
       await loadProvidersSnapshot();
       if (!current(captured)) return;
       appendLog(result ? (providerBatchSucceeded(result) ? "info" : "error") : "info", "provider",
-        result ? providerBatchSummary(action, result) : `${action} completed`);
+        result ? providerBatchSummary(action, result) : t("{action} completed", { action: action }));
     } catch (error) {
       if (!current(captured)) return;
-      appendLog("error", "provider", `${action} failed: ${errorText(error)}`);
+      appendLog("error", "provider", t("{action} failed: {error}", { action: action, error: errorText(error) }));
       await loadProvidersSnapshot();
     } finally {
       if (current(captured)) { pending.delete(key); renderPage(); }
@@ -85,25 +86,25 @@ export function createProviderUI({ state, invoke, appendLog, renderPage, refresh
       button.addEventListener("click", async (event) => {
         const { providerUpdate, ruleProviderUpdate } = event.currentTarget.dataset;
         const name = providerUpdate ?? ruleProviderUpdate;
-        await run(`${name} update`, providerActionKey(providerUpdate ? "proxy-update" : "rule-update", name), false,
+        await run(t("{name} update", { name: name }), providerActionKey(providerUpdate ? "proxy-update" : "rule-update", name), false,
           () => providerUpdate ? invoke("update_proxy_provider", { name }) : invoke("update_rule_provider", { name }), true);
       });
     });
     document.querySelectorAll("[data-provider-health]").forEach((button) => {
       button.addEventListener("click", async (event) => {
         const name = event.currentTarget.dataset.providerHealth;
-        await run(`${name} health check`, providerActionKey("proxy-health", name), false,
+        await run(t("{name} health check", { name: name }), providerActionKey("proxy-health", name), false,
           () => invoke("health_check_proxy_provider", { name }), false);
       });
     });
   }
   async function handleProviderAction(action) {
     if (action === "update-all-providers") {
-      await run("Update All", action, true, () => invoke("update_all_providers"), true);
+      await run(t("Update All"), action, true, () => invoke("update_all_providers"), true);
       return true;
     }
     if (action === "health-check-all") {
-      await run("Health Check All", action, true, () => invoke("health_check_all_proxy_providers"), false);
+      await run(t("Health Check All"), action, true, () => invoke("health_check_all_proxy_providers"), false);
       return true;
     }
     return false;
@@ -112,24 +113,24 @@ function renderProviders() {
   const updatingAll = state.providerBulkActions.has("update-all-providers");
   const healthAll = state.providerBulkActions.has("health-check-all");
   const providerUnavailable = Boolean(state.providerCapabilityError) || state.engine.providerManagementAvailable !== true || !profileId();
-  const providerUnavailableReason = state.providerCapabilityError ?? "Select a profile containing providers.";
+  const providerUnavailableReason = state.providerCapabilityError ?? t("Select a profile containing providers.");
   return `
     <div class="providers-layout">
       <section class="panel toolbar-panel">
         <div>
-          <p class="label">Providers</p>
-          <h3>Proxy Providers</h3>
-          <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Resources in the selected profile. Updates retain the current configuration if validation fails."}</p>
+          <p class="label">${escapeHtml(t("Providers"))}</p>
+          <h3>${escapeHtml(t("Proxy Providers"))}</h3>
+          <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : t("Resources in the selected profile. Updates retain the current configuration if validation fails.")}</p>
         </div>
         <div class="toolbar-actions">
-          <button class="button" data-action="update-all-providers" ${updatingAll || providerUnavailable || ![...state.providers, ...state.ruleProviders].some((provider) => provider.updatable) ? "disabled" : ""}>${updatingAll ? "Updating..." : "Update All"}</button>
-          <button class="button ghost" data-action="health-check-all" ${healthAll || providerUnavailable || state.providers.length === 0 ? "disabled" : ""}>${healthAll ? "Checking..." : "Health Check All"}</button>
-          <button class="button ghost" data-action="open-rules">Rules</button>
+          <button class="button" data-action="update-all-providers" ${updatingAll || providerUnavailable || ![...state.providers, ...state.ruleProviders].some((provider) => provider.updatable) ? "disabled" : ""}>${updatingAll ? "Updating..." : t("Update All")}</button>
+          <button class="button ghost" data-action="health-check-all" ${healthAll || providerUnavailable || state.providers.length === 0 ? "disabled" : ""}>${healthAll ? "Checking..." : t("Health Check All")}</button>
+          <button class="button ghost" data-action="open-rules">${escapeHtml(t("Rules"))}</button>
         </div>
       </section>
 
       <section class="provider-section">
-        <div class="section-title">Proxy Providers</div>
+        <div class="section-title">${escapeHtml(t("Proxy Providers"))}</div>
         ${state.providers.length ? state.providers.map((provider) => {
           const updateKey = providerActionKey("proxy-update", provider.name);
           const healthKey = providerActionKey("proxy-health", provider.name);
@@ -140,28 +141,28 @@ function renderProviders() {
               <div>
                 <p class="label">${escapeHtml(provider.vehicle)}</p>
                 <h3>${escapeHtml(provider.name)}</h3>
-                <p class="muted">${provider.proxies} proxies · ${escapeHtml(provider.health)} · updated ${escapeHtml(provider.updated)}</p>
+                <p class="muted">${escapeHtml(t("Proxies: {count} · {health} · Updated: {updated}", { count: provider.proxies, health: provider.health, updated: provider.updated }))}</p>
                 ${provider.error ? `<p class="error">${escapeHtml(provider.error)}</p>` : ""}
               </div>
               <div class="row-actions">
-                <button class="button ghost" data-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
-                <button class="button" data-provider-health="${escapeHtml(provider.name)}" ${checking || providerUnavailable ? "disabled" : ""}>${checking ? "Checking" : "Health Check"}</button>
+                <button class="button ghost" data-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${updating ? "Updating" : t("Update")}</button>
+                <button class="button" data-provider-health="${escapeHtml(provider.name)}" ${checking || providerUnavailable ? "disabled" : ""}>${checking ? t("Checking") : t("Health Check")}</button>
               </div>
             </article>
           `;
         }).join("") : `
           <article class="panel provider-row empty-state">
             <div>
-              <p class="label">Selected profile</p>
-              <h3>${providerUnavailable ? "Proxy provider management unavailable" : "No proxy providers loaded"}</h3>
-              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Import a configuration containing proxy-providers to manage its nodes here."}</p>
+              <p class="label">${escapeHtml(t("Selected profile"))}</p>
+              <h3>${providerUnavailable ? "Proxy provider management unavailable" : t("No proxy providers loaded")}</h3>
+              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : t("Import a configuration containing proxy-providers to manage its nodes here.")}</p>
             </div>
           </article>
         `}
       </section>
 
       <section class="provider-section">
-        <div class="section-title">Rule Providers</div>
+        <div class="section-title">${escapeHtml(t("Rule Providers"))}</div>
         ${state.ruleProviders.length ? state.ruleProviders.map((provider) => {
           const updateKey = providerActionKey("rule-update", provider.name);
           const updating = state.providerActions.has(updateKey);
@@ -170,20 +171,20 @@ function renderProviders() {
               <div>
                 <p class="label">${escapeHtml(provider.behavior)}</p>
                 <h3>${escapeHtml(provider.name)}</h3>
-                <p class="muted">${provider.rules.toLocaleString()} rules · updated ${escapeHtml(provider.updated)}</p>
+                <p class="muted">${escapeHtml(t("Rules: {count} · Updated: {updated}", { count: provider.rules.toLocaleString(), updated: provider.updated }))}</p>
                 ${provider.error ? `<p class="error">${escapeHtml(provider.error)}</p>` : ""}
               </div>
               <div class="row-actions">
-                <button class="button ghost" data-rule-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
+                <button class="button ghost" data-rule-provider-update="${escapeHtml(provider.name)}" ${updating || providerUnavailable || !provider.updatable ? "disabled" : ""}>${updating ? "Updating" : t("Update")}</button>
               </div>
             </article>
           `;
         }).join("") : `
           <article class="panel provider-row empty-state">
             <div>
-              <p class="label">Selected profile</p>
-              <h3>${providerUnavailable ? "Rule provider management unavailable" : "No rule providers loaded"}</h3>
-              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Import a configuration containing rule-providers to manage its rules here."}</p>
+              <p class="label">${escapeHtml(t("Selected profile"))}</p>
+              <h3>${providerUnavailable ? "Rule provider management unavailable" : t("No rule providers loaded")}</h3>
+              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : t("Import a configuration containing rule-providers to manage its rules here.")}</p>
             </div>
           </article>
         `}

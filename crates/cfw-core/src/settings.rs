@@ -20,7 +20,7 @@ pub const LOGS_DIR_NAME: &str = "logs";
 pub const LEGACY_CORES_DIR_NAME: &str = "cores";
 pub const LEGACY_HELPERS_DIR_NAME: &str = "helpers";
 
-const PREFERENCES_SCHEMA_VERSION: u16 = 1;
+const PREFERENCES_SCHEMA_VERSION: u16 = 2;
 const MAX_PREFERENCES_BYTES: usize = 16 * 1024;
 const WINDOW_STATE_SCHEMA_VERSION: u16 = 1;
 const MAX_WINDOW_STATE_BYTES: usize = 1024;
@@ -94,6 +94,7 @@ pub enum FontFamily {
 pub struct UiPreferences {
     pub theme: AppearanceTheme,
     pub font_family: FontFamily,
+    pub language: UiLanguage,
     pub retain_window_bounds: bool,
     pub launch_at_login: bool,
     pub silent_start: bool,
@@ -105,10 +106,117 @@ impl Default for UiPreferences {
         Self {
             theme: AppearanceTheme::System,
             font_family: FontFamily::System,
+            language: UiLanguage::System,
             retain_window_bounds: true,
             launch_at_login: false,
             silent_start: false,
             check_for_updates: false,
+        }
+    }
+}
+
+/// Closed language preferences. System selection is resolved at presentation
+/// time, so changing the macOS preferred languages does not rewrite settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UiLanguage {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-Hans")]
+    SimplifiedChinese,
+    #[serde(rename = "zh-Hant")]
+    TraditionalChinese,
+    #[serde(rename = "ja")]
+    Japanese,
+}
+
+impl UiLanguage {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::English => "en",
+            Self::SimplifiedChinese => "zh-Hans",
+            Self::TraditionalChinese => "zh-Hant",
+            Self::Japanese => "ja",
+        }
+    }
+
+    pub fn resolve(self, preferred: &[String]) -> Self {
+        if self != Self::System {
+            return self;
+        }
+        for language in preferred {
+            let normalized = language.replace('_', "-").to_ascii_lowercase();
+            let parts: Vec<_> = normalized.split('-').collect();
+            match parts.first().copied() {
+                Some("en") => return Self::English,
+                Some("ja") => return Self::Japanese,
+                Some("zh") => {
+                    return if parts.contains(&"hans") {
+                        Self::SimplifiedChinese
+                    } else if parts.contains(&"hant")
+                        || parts.iter().any(|part| matches!(*part, "tw" | "hk" | "mo"))
+                    {
+                        Self::TraditionalChinese
+                    } else {
+                        Self::SimplifiedChinese
+                    };
+                }
+                _ => {}
+            }
+        }
+        Self::English
+    }
+}
+
+/// The exact v1 shape is retained only for lossless, read-only migration.
+/// Canonical bytes and unknown fields are checked before adding the new field.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyUiPreferences {
+    theme: AppearanceTheme,
+    font_family: FontFamily,
+    retain_window_bounds: bool,
+    launch_at_login: bool,
+    silent_start: bool,
+    check_for_updates: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyAppPreferences {
+    schema_version: u16,
+    preferences: LegacyUiPreferences,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredPreferences {
+    Current(AppPreferences),
+    Legacy(LegacyAppPreferences),
+}
+
+impl StoredPreferences {
+    fn into_preferences(self) -> Result<UiPreferences, SettingsStoreError> {
+        match self {
+            Self::Current(value) => Ok(value.validate()?.preferences),
+            Self::Legacy(value) => {
+                if value.schema_version != 1 {
+                    return Err(SettingsStoreError::UnsupportedSchema(value.schema_version));
+                }
+                let old = value.preferences;
+                Ok(UiPreferences {
+                    theme: old.theme,
+                    font_family: old.font_family,
+                    language: UiLanguage::System,
+                    retain_window_bounds: old.retain_window_bounds,
+                    launch_at_login: old.launch_at_login,
+                    silent_start: old.silent_start,
+                    check_for_updates: old.check_for_updates,
+                })
+            }
         }
     }
 }
@@ -372,11 +480,11 @@ impl SettingsStore {
         else {
             return Ok((None, false));
         };
-        let application = serde_json::from_slice::<AppPreferences>(&stored.bytes)?.validate()?;
+        let application = serde_json::from_slice::<StoredPreferences>(&stored.bytes)?;
         if serde_json::to_vec(&application)? != stored.bytes {
             return Err(SettingsStoreError::NonCanonicalJson);
         }
-        Ok((Some(application.preferences), true))
+        Ok((Some(application.into_preferences()?), true))
     }
 }
 

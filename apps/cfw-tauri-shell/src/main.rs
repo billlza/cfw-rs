@@ -5,6 +5,7 @@ mod diagnostics;
 use automation::{read_automation_settings, request_wifi_name_access, write_automation_settings};
 use diagnostics::{Diagnostics, report_dashboard_startup};
 mod engine;
+mod i18n;
 mod launch;
 mod legacy;
 mod lifecycle;
@@ -192,6 +193,7 @@ fn main() {
     );
     let builder = tauri::Builder::default()
         .manage(diagnostics)
+        .manage(i18n::NativeLanguage::default())
         .manage(startup_state::NativeStartup::default())
         .manage(launch)
         .manage(LegacyRetirementGate::default())

@@ -10,6 +10,7 @@ export const PAGES = pageDefinitions;
 export const defaultSettings = {
   theme: "system",
   font_family: "",
+  language: "system",
   retain_window_bounds: true,
   launch_at_login: false,
   silent_start: false,
@@ -18,6 +19,7 @@ export const defaultSettings = {
 
 export const defaultSettingsSnapshot = {
   persisted: false,
+  resolved_locale: "en",
   settings: { ...defaultSettings },
   launch_at_login: {
     persisted_intent: false,

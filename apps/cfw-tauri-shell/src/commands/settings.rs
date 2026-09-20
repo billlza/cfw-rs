@@ -52,6 +52,7 @@ pub(crate) struct UiSettingsSnapshot {
     settings: UiPreferences,
     persisted: bool,
     launch_at_login: UiLaunchAtLoginState,
+    resolved_locale: cfw_core::UiLanguage,
 }
 
 fn launch_at_login_state(
@@ -76,6 +77,7 @@ pub(super) fn with_login_item_status(
 ) -> UiSettingsSnapshot {
     let launch_at_login = launch_at_login_state(snapshot.settings.launch_at_login, status);
     UiSettingsSnapshot {
+        resolved_locale: crate::i18n::resolve(snapshot.settings.language),
         settings: snapshot.settings,
         persisted: snapshot.persisted,
         launch_at_login,
@@ -137,6 +139,7 @@ pub(crate) async fn read_settings_snapshot(
         if include_login_item_status == Some(false) {
             let snapshot = store.snapshot().map_err(|error| error.to_string())?;
             Ok(UiSettingsSnapshot {
+                resolved_locale: crate::i18n::resolve(snapshot.settings.language),
                 launch_at_login: UiLaunchAtLoginState {
                     persisted_intent: snapshot.settings.launch_at_login,
                     live_status: UiLoginItemLiveStatus::Checking,
@@ -176,6 +179,7 @@ pub(crate) async fn write_settings_snapshot(
             write_renderer_preferences(&store, settings)
         })
         .await?;
+    crate::i18n::apply(&app, snapshot.settings.language).await?;
     crate::startup_state::prepare_off_main(move || {
         Ok(with_login_item_status(
             snapshot,
@@ -342,6 +346,7 @@ mod tests {
         let preferences = serde_json::from_value::<UiPreferences>(serde_json::json!({
             "theme": "dark",
             "font_family": "SF Mono",
+            "language": "ja",
             "retain_window_bounds": false,
             "launch_at_login": true,
             "silent_start": true,
@@ -434,6 +439,7 @@ mod tests {
 
     #[test]
     fn login_item_snapshot_has_a_stable_typed_wire_shape() {
+        let expected_locale = crate::i18n::resolve(cfw_core::UiLanguage::System);
         let snapshot = with_login_item_status(
             SettingsSnapshot {
                 settings: UiPreferences {
@@ -450,12 +456,14 @@ mod tests {
                 "settings": {
                     "theme": "system",
                     "font_family": "",
+                    "language": "system",
                     "retain_window_bounds": true,
                     "launch_at_login": true,
                     "silent_start": false,
                     "check_for_updates": false
                 },
                 "persisted": true,
+                "resolved_locale": expected_locale,
                 "launch_at_login": {
                     "persisted_intent": true,
                     "live_status": "requires_approval",

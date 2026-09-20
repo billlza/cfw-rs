@@ -430,6 +430,7 @@ pub(crate) async fn reset_settings_snapshot(
             },
         )
         .await?;
+    crate::i18n::apply(&app, snapshot.settings.language).await?;
     crate::startup_state::prepare_off_main(move || {
         Ok(super::settings::with_login_item_status(
             snapshot,

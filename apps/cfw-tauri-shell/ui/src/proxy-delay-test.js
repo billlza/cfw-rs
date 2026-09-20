@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 // One bounded latency run. Identity changes and explicit cancellation stop
 // further batches; untested nodes remain untested when the run budget expires.
 export const MAX_DELAY_TEST_MILLISECONDS = 120_000;
@@ -13,7 +14,7 @@ export function createProxyDelayTest({ state, runtime, view, invoke, activeProfi
 
     if (state.toggles.testingDelays) {
       cancelDelayTest();
-      state.proxyDelayMessage = runtime.delayBatchInFlight ? "Stopping latency test after the current batch…" : "Latency test cancelled.";
+      state.proxyDelayMessage = runtime.delayBatchInFlight ? t("Stopping latency test after the current batch…") : t("Latency test cancelled.");
       appendLog("info", "proxy", state.proxyDelayMessage);
       renderPage();
       patchProxyDelayLabels();
@@ -21,7 +22,7 @@ export function createProxyDelayTest({ state, runtime, view, invoke, activeProfi
     }
     if (runtime.delayBatchInFlight) return;
     const offline = engineIsOff();
-    if (!offline && !controllerActionAllowed("Delay test", "proxy")) return;
+    if (!offline && !controllerActionAllowed(t("Delay test"), "proxy")) return;
     const activeGroup = activeProxyGroup();
     const policyEpoch = runtime.savedProfilePolicyEpoch;
     const engineToken = captureEngineIdentityToken();
@@ -32,14 +33,14 @@ export function createProxyDelayTest({ state, runtime, view, invoke, activeProfi
         .filter((name) => !["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"].includes(String(name).toUpperCase())),
     );
     if (!names.length) {
-      appendLog("warning", "proxy", "No proxy nodes available for delay test");
+      appendLog("warning", "proxy", t("No proxy nodes available for delay test"));
     } else {
       const generation = (runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1);
       const isCurrent = () => generation === runtime.delayTestGeneration
         && (offline ? engineIsOff() && policyEpoch === runtime.savedProfilePolicyEpoch
           && profileId === state.savedProfilePolicy?.profileId : engineIdentityTokenIsCurrent(engineToken));
       state.toggles.testingDelays = true;
-      state.proxyDelayMessage = "Testing latency…";
+      state.proxyDelayMessage = t("Testing latency…");
       state.toggles.showProxiesList = true;
       if (activeGroup) {
         const testedNames = new Set(names);
@@ -106,7 +107,7 @@ export function createProxyDelayTest({ state, runtime, view, invoke, activeProfi
             + names.slice(0, offset).filter((name) => !delayByName.has(name) && !failureByName.has(name)).length;
           const ok = delayByName.size;
           const untested = names.length - offset;
-          const remaining = untested ? ` ${untested} not tested: the two-minute test limit was reached.` : "";
+          const remaining = untested ? t(" {untested} not tested: the two-minute test limit was reached.", { untested: untested }) : "";
           const failures = new Map();
           for (const kind of failureByName.values()) {
             failures.set(kind, (failures.get(kind) ?? 0) + 1);
@@ -114,24 +115,24 @@ export function createProxyDelayTest({ state, runtime, view, invoke, activeProfi
           const failureSummary = [...failures.entries()]
             .map(([kind, count]) => `${count} ${delayFailureLabel(kind).toLowerCase()}`)
             .join(", ");
-          state.proxyDelayMessage = `${ok} passed, ${failed} failed${failureSummary ? ` (${failureSummary})` : ""}.${remaining}`;
+          state.proxyDelayMessage = t("{ok} passed, {failed} failed{value3}.{remaining}", { ok: ok, failed: failed, value3: failureSummary ? ` (${failureSummary})` : "", remaining: remaining });
           appendLog(
             failed ? "error" : "info",
             "proxy",
-            `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} failed${failureSummary ? ` (${failureSummary})` : ""}` : ""} · concurrency ${delayConcurrency()}`,
+            t("Delay test ({value1}): {ok} ok{value3} · concurrency {value4}", { value1: activeGroup?.name ?? "group", ok: ok, value3: failed ? t(", {count} failed", { count: failed }) + (failureSummary ? ` (${failureSummary})` : "") : "", value4: delayConcurrency() }),
           );
         }
       } catch (error) {
         if (isCurrent()) {
           finalizeDelayTestNames(names.slice(0, offset));
-          state.proxyDelayMessage = `Latency test failed: ${errorText(error)}`;
-          appendLog("error", "proxy", `Delay test failed: ${errorText(error)}`);
+          state.proxyDelayMessage = t("Latency test failed: {error}", { error: errorText(error) });
+          appendLog("error", "proxy", t("Delay test failed: {error}", { error: errorText(error) }));
         }
       } finally {
         if ((runtime.delayTestGeneration ?? 0) === generation) {
           state.toggles.testingDelays = false;
-        } else if (!state.toggles.testingDelays && state.proxyDelayMessage?.startsWith("Stopping latency")) {
-          state.proxyDelayMessage = "Latency test cancelled.";
+        } else if (!state.toggles.testingDelays && state.proxyDelayMessage?.startsWith(t("Stopping latency"))) {
+          state.proxyDelayMessage = t("Latency test cancelled.");
         }
         if (state.activePage === "proxies") renderPage();
       }

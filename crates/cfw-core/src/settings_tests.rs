@@ -129,6 +129,7 @@ fn strict_json_round_trip_is_private_and_atomic() {
     let preferences = UiPreferences {
         theme: AppearanceTheme::Dark,
         font_family: FontFamily::SfMono,
+        language: UiLanguage::Japanese,
         retain_window_bounds: false,
         launch_at_login: true,
         silent_start: true,
@@ -161,6 +162,61 @@ fn strict_json_round_trip_is_private_and_atomic() {
             .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
     );
     fs::remove_dir_all(root).expect("remove test root");
+}
+
+#[test]
+fn v1_preferences_upgrade_without_mutating_the_original_on_read() {
+    let (root, store) = test_store("v1-language-upgrade");
+    store.ensure_layout().expect("create layout");
+    let original = br#"{"schema_version":1,"preferences":{"theme":"dark","font_family":"SF Mono","retain_window_bounds":false,"launch_at_login":true,"silent_start":true,"check_for_updates":false}}"#;
+    fs::write(&store.paths.preferences_file, original).expect("write v1");
+    fs::set_permissions(
+        &store.paths.preferences_file,
+        fs::Permissions::from_mode(0o600),
+    )
+    .expect("private v1");
+    let mut snapshot = store.snapshot().expect("read v1");
+    assert!(snapshot.persisted);
+    assert_eq!(snapshot.settings.language, UiLanguage::System);
+    assert_eq!(snapshot.settings.theme, AppearanceTheme::Dark);
+    assert_eq!(snapshot.settings.font_family, FontFamily::SfMono);
+    assert!(snapshot.settings.launch_at_login && snapshot.settings.silent_start);
+    assert!(!snapshot.settings.retain_window_bounds);
+    assert_eq!(fs::read(&store.paths.preferences_file).unwrap(), original);
+    snapshot.settings.language = UiLanguage::TraditionalChinese;
+    store.write(&snapshot.settings).expect("save v2");
+    assert_eq!(store.snapshot().unwrap().settings, snapshot.settings);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&store.paths.preferences_file).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], 2);
+    assert_eq!(saved["preferences"]["language"], "zh-Hant");
+    fs::remove_dir_all(root).expect("remove test root");
+}
+
+#[test]
+fn language_preferences_are_closed_and_system_selection_obeys_order_and_script() {
+    for (preferred, expected) in [
+        (vec!["zh-Hans-TW"], UiLanguage::SimplifiedChinese),
+        (vec!["zh-Hant-CN"], UiLanguage::TraditionalChinese),
+        (vec!["zh_HK"], UiLanguage::TraditionalChinese),
+        (vec!["zh-MO"], UiLanguage::TraditionalChinese),
+        (vec!["zh-SG"], UiLanguage::SimplifiedChinese),
+        (vec!["fr-FR", "ja-JP", "en-US"], UiLanguage::Japanese),
+        (vec!["en-GB", "zh-CN"], UiLanguage::English),
+        (vec!["de-DE"], UiLanguage::English),
+        (vec![], UiLanguage::English),
+    ] {
+        let preferred: Vec<_> = preferred.into_iter().map(str::to_owned).collect();
+        assert_eq!(UiLanguage::System.resolve(&preferred), expected);
+        assert_eq!(
+            UiLanguage::Japanese.resolve(&preferred),
+            UiLanguage::Japanese
+        );
+    }
+    assert!(serde_json::from_str::<UiLanguage>("\"fr\"").is_err());
+    let mut invalid = serde_json::to_value(UiPreferences::default()).unwrap();
+    invalid["language"] = serde_json::json!("<script>");
+    assert!(serde_json::from_value::<UiPreferences>(invalid).is_err());
 }
 
 #[test]

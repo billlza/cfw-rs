@@ -7,6 +7,7 @@
 // therefore fails in CI instead of in the app.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { t, getLocale } from "../src/i18n.js";
 
 const listeners = new Map();
 const callbacks = new Map();
@@ -237,10 +238,11 @@ const responses = {
     effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null },
   },
   read_settings_snapshot: {
+      resolved_locale: "en",
     persisted: true,
     settings: {
       theme: "system",
-      font_family: "",
+      font_family: "", language: "system",
       retain_window_bounds: true,
       launch_at_login: false,
       silent_start: false,
@@ -2298,7 +2300,7 @@ test("invalid settings events recover from native state or disable persistence",
     assert.equal(state.settingsSnapshot.persisted, false);
     assert.deepEqual(state.settingsSnapshot.settings, {
       theme: "system",
-      font_family: "",
+      font_family: "", language: "system",
       retain_window_bounds: true,
       launch_at_login: false,
       silent_start: false,
@@ -2981,5 +2983,79 @@ test("background controls render through the dashboard and Escape dismisses the 
     state.automationDialog = null;
     delete responses.read_automation_settings;
     await renderPage("settings");
+  }
+});
+
+test("all dashboard pages render in each language without changing network identity or modes", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const forbidden = new Set(["apply_active_profile", "select_proxy", "select_profile", "set_proxy_mode", "set_core_enabled", "set_system_proxy_enabled", "set_tun_enabled", "write_runtime_settings_snapshot", "write_automation_settings"]);
+  try {
+    await setEngine(RUNNING_ENGINE);
+    const identity = structuredClone(state.engine.runtimeIdentity);
+    const before = invoked.length;
+    for (const language of ["zh-Hans", "zh-Hant", "ja", "en"]) {
+      responses.read_settings_snapshot = { ...original, settings: { ...original.settings, language }, resolved_locale: language };
+      await emit("cfw://settings-changed", responses.read_settings_snapshot);
+      assert.equal(documentStub.documentElement.lang, language);
+      for (const entry of PAGES) {
+        const html = await renderPage(entry.id);
+        assert.ok(html.trim(), `${language}: ${entry.id}`);
+        assert.doesNotMatch(html, /\{(?:count|name|error|number|title|mode)\}/u);
+      }
+      const general = await renderPage("general");
+      assert.ok(general.includes(t("System Proxy")), language);
+      assert.ok(general.includes(t("Home Directory")), language);
+      const settings = await renderPage("settings");
+      assert.ok(settings.includes(t("Language")), language);
+      assert.match(settings, new RegExp(`value="${language}" selected`, "u"));
+      assert.deepEqual(state.engine.runtimeIdentity, identity);
+      assert.equal(state.engine.desiredMode, "system-proxy");
+    }
+    assert.deepEqual(invoked.slice(before).filter((command) => forbidden.has(command)), []);
+  } finally {
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
+test("language selection saves only UI preferences and a refused save restores the verified language", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const originalWriter = responses.write_settings_snapshot;
+  const handlers = new Map();
+  const selector = "[data-theme-setting], [data-font-family], [data-language-setting]";
+  const input = element("select");
+  input.value = "ja";
+  input.addEventListener = (type, handler) => handlers.set(type, handler);
+  querySelectorElements.set("[data-language-setting]", input);
+  querySelectorAllElements.set(selector, [input]);
+  responses.write_settings_snapshot = ({ settings }) => {
+    const snapshot = { ...original, settings: structuredClone(settings), resolved_locale: settings.language };
+    responses.read_settings_snapshot = snapshot;
+    return snapshot;
+  };
+  try {
+    await renderPage("settings");
+    const before = invocationDetails.length;
+    await handlers.get("change")();
+    assert.equal(getLocale(), "ja");
+    assert.equal(state.settingsSnapshot.settings.language, "ja");
+    const writes = invocationDetails.slice(before).filter(({ command }) => command.startsWith("write_") || command.startsWith("set_") || command === "apply_active_profile");
+    assert.deepEqual(writes.map(({ command }) => command), ["write_settings_snapshot"]);
+    assert.deepEqual(writes[0].args.settings, { ...original.settings, language: "ja" });
+    rejected.write_settings_snapshot = "disk busy";
+    input.value = "zh-Hant";
+    await handlers.get("change")();
+    assert.equal(getLocale(), "ja");
+    assert.equal(state.settingsSnapshot.settings.language, "ja");
+    assert.ok(state.logs.some(({ message }) => message.includes("disk busy")));
+    assert.match(page.innerHTML, /value="ja" selected/u);
+  } finally {
+    delete rejected.write_settings_snapshot;
+    if (originalWriter === undefined) delete responses.write_settings_snapshot;
+    else responses.write_settings_snapshot = originalWriter;
+    querySelectorElements.delete("[data-language-setting]");
+    querySelectorAllElements.delete(selector);
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
   }
 });

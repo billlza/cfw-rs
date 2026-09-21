@@ -5,6 +5,8 @@ mod diagnostics;
 use automation::{read_automation_settings, request_wifi_name_access, write_automation_settings};
 use diagnostics::{Diagnostics, report_dashboard_startup};
 mod engine;
+#[cfg(feature = "native-dashboard")]
+mod native_dashboard;
 mod i18n;
 mod launch;
 mod legacy;

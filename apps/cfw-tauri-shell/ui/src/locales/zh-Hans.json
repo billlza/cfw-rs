@@ -714,5 +714,6 @@
   "{state} · desired {desiredMode}": "{state} · 请求模式 {desiredMode}",
   "{title} - {mode} Mode": "{title} - {mode}模式",
   "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.": "有 {value1} 项钥匙串记录未被任何配置文件引用。清理会重新验证配置库快照和凭据库版本后，执行一次原子删除。{value2}",
-  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 条日志{value3}"
+  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 条日志{value3}",
+  "Native Overview": "原生总览"
 }

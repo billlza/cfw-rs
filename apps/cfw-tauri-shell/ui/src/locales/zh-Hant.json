@@ -714,5 +714,6 @@
   "{state} · desired {desiredMode}": "{state} · 要求模式 {desiredMode}",
   "{title} - {mode} Mode": "{title} - {mode}模式",
   "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.": "有 {value1} 項鑰匙圈記錄未被任何設定檔參照。清理會重新驗證設定檔庫快照與憑證庫版本後，執行一次不可分割的刪除。{value2}",
-  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 行日誌{value3}"
+  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 行日誌{value3}",
+  "Native Overview": "原生總覽"
 }

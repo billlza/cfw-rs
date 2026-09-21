@@ -297,6 +297,16 @@ impl EngineModeCoordinator {
         self.snapshots.borrow().clone()
     }
 
+    /// The typed failure of the latest startup reconciliation, if any.
+    /// Reading this value does not query or mutate native services. A successful
+    /// explicit retry clears it through the existing reconciliation channel.
+    pub fn startup_failure(&self) -> Option<EngineCoordinatorError> {
+        match self.reconciliation.borrow().as_ref() {
+            Some(Err(error)) => Some(error.clone()),
+            None | Some(Ok(_)) => None,
+        }
+    }
+
     /// Serializes native preparation, candidate validation, runtime replacement
     /// and the storage commit with status polling and mode changes. Fetch remote
     /// input before calling this method. The actor reads the current mode when

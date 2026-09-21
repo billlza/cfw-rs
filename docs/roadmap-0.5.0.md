@@ -1,7 +1,9 @@
 # Clash for Mac 0.5.0
 
-Prepared 2026-09-20. Status: implementation plan; no 0.5.0 application or
-performance result is claimed. The functional comparison baseline is the frozen
+Prepared 2026-09-20; implementation started 2026-09-22. The development-only
+SwiftUI observation window now uses the existing Rust coordinator. Full UI parity,
+standalone native hosting, installed acceptance and product performance gains
+remain open; see [implementation status](planning/0.5.0-implementation-status.md). The functional comparison baseline is the frozen
 0.4.0 build 40073, source `9e2f76cdd7ffb286614a7bc6fe55e75d3fc7a5b2`.
 Its GA publication has its own evidence requirements and remains separate work.
 
@@ -202,5 +204,7 @@ project those into the stable 1.14.1 build.
    documented before any persistent format change.
 
 0.5.0 is ready only when functional parity, visual/accessibility review and measured
-performance improvements all have evidence. Preparation does not change the current
-application version, dependency locks, network settings or installed application.
+performance improvements all have evidence. The first development integration does not change the current application version,
+dependency locks, network settings or installed application. On 2026-09-22 the user
+authorized 0.4.0 remediation and 0.5.0 implementation to proceed in parallel;
+0.4.0 publication is no longer a prerequisite for development work.

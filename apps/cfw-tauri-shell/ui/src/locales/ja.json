@@ -714,5 +714,6 @@
   "{state} · desired {desiredMode}": "{state} · 要求モード {desiredMode}",
   "{title} - {mode} Mode": "{title} - {mode}モード",
   "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.": "どのプロファイルからも参照されていないキーチェーン項目が {value1} 件あります。ストアのスナップショットと認証情報のリビジョンを再検証してから、一度のアトミックな削除を行います。{value2}",
-  "{visibleCount}{total} log entries{value3}": "ログ {visibleCount}{total} 件{value3}"
+  "{visibleCount}{total} log entries{value3}": "ログ {visibleCount}{total} 件{value3}",
+  "Native Overview": "ネイティブ概要"
 }

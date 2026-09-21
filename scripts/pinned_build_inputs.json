@@ -3369,7 +3369,7 @@
     ]
   },
   "artifactSourceSha256": {
-    "apps/cfw-tauri-shell/build.rs": "6864c96fba57d710073f094ea1cdda320f124bee6aa565231d7e30023d3de1f5",
+    "apps/cfw-tauri-shell/build.rs": "dad2bf888b5732d39eab2bf02602c177b58c2132082ffbdc6f12e316afd0a62f",
     "apps/cfw-tauri-shell/build_support/native_product_input.rs": "8114f1310026e5578d721b9bafb6ed8178c71c0720f359d434bcb02b41079a1c",
     "scripts/libbox_source_contract.sh": "f8c208e43a4589a563147e23437b6dac0d819a52665d5f965ea922eb74c4db5d",
     "scripts/build_libbox.sh": "f37bc8e6e03eebcf7fdb1e0d56b798c97ed89a5102796a744e3ee13f53752421",

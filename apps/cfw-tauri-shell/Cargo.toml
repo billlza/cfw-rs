@@ -8,6 +8,7 @@ autobins = false
 
 [features]
 physical-release-evidence = []
+native-dashboard = []
 
 [[bin]]
 name = "clash-for-mac"
@@ -22,6 +23,12 @@ harness = false
 name = "startup_main_run_loop"
 path = "tests/startup_main_run_loop.rs"
 harness = false
+
+[[test]]
+name = "native_dashboard_ffi"
+path = "tests/native_dashboard_ffi.rs"
+harness = false
+required-features = ["native-dashboard"]
 
 [dependencies]
 cfw-application = { path = "../../crates/cfw-application" }

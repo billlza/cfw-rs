@@ -167,6 +167,87 @@ fn main() {
         .ancestors()
         .nth(2)
         .expect("Tauri manifest must remain under apps/cfw-tauri-shell");
+    if std::env::var_os("CARGO_FEATURE_NATIVE_DASHBOARD").is_some() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!(
+                "native-dashboard is a development integration; signed candidate composition is not yet admitted"
+            );
+        }
+        let package = repository_root.join("native/dashboard");
+        println!(
+            "cargo:rerun-if-changed={}",
+            package.join("Package.swift").display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            package.join("Sources").display()
+        );
+        let build = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo build output"))
+            .join("swift-dashboard");
+        let status = std::process::Command::new("/usr/bin/xcrun")
+            .args([
+                "swift",
+                "build",
+                "--configuration",
+                "debug",
+                "--product",
+                "CFMNativeDashboard",
+                "--package-path",
+            ])
+            .arg(&package)
+            .arg("--scratch-path")
+            .arg(&build)
+            .args(["-Xswiftc", "-warnings-as-errors"])
+            .status()
+            .expect("run selected Xcode Swift compiler");
+        assert!(status.success(), "native SwiftUI library build failed");
+        let output = std::process::Command::new("/usr/bin/xcrun")
+            .args([
+                "swift",
+                "build",
+                "--configuration",
+                "debug",
+                "--show-bin-path",
+                "--package-path",
+            ])
+            .arg(&package)
+            .arg("--scratch-path")
+            .arg(&build)
+            .output()
+            .expect("resolve Swift build product directory");
+        assert!(
+            output.status.success(),
+            "Swift build product directory is unavailable"
+        );
+        let library = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("Swift output path is UTF-8")
+                .trim(),
+        );
+        assert!(
+            library.join("libCFMNativeDashboard.dylib").is_file(),
+            "Swift dashboard library is missing"
+        );
+        // SwiftPM's resource accessor resolves from the executable bundle for
+        // a dylib host. Keep development resources alongside both Cargo bins
+        // and test executables; never write into the installed application.
+        let target_directory = build.ancestors().nth(4).expect("Cargo target directory");
+        let bundle = "CFMNativeDashboard_CFMNativeDashboard.bundle";
+        for destination in [
+            target_directory.to_path_buf(),
+            target_directory.join("deps"),
+        ] {
+            let status = std::process::Command::new("/usr/bin/ditto")
+                .arg(library.join(bundle))
+                .arg(destination.join(bundle))
+                .status()
+                .expect("copy native dashboard development resources");
+            assert!(status.success(), "native dashboard resource copy failed");
+        }
+        println!("cargo:rustc-link-search=native={}", library.display());
+        println!("cargo:rustc-link-lib=dylib=CFMNativeDashboard");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", library.display());
+    }
     println!(
         "cargo:rerun-if-changed={}",
         repository_root

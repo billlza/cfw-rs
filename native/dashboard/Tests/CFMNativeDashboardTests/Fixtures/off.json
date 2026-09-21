@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "sequence": 1,
+  "session": 1,
+  "locale": "en",
+  "phase": "off",
+  "core": "inactive",
+  "systemProxy": "inactive",
+  "tunnel": "inactive",
+  "failure": null
+}

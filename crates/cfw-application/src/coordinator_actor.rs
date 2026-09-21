@@ -122,7 +122,13 @@ pub(crate) async fn run_coordinator(
                 let Some(command) = command else {
                     break;
                 };
-                if startup_failure
+                // RestartSpec is also read by the snapshot forwarder. Retrying
+                // startup here would publish another failure snapshot and feed
+                // an unbounded read/retry/event loop. Shutdown must reach its
+                // existing ownership-aware exit boundary without opening a new
+                // status observation against an unavailable service first.
+                if !matches!(&command, Command::RestartSpec { .. } | Command::Shutdown { .. })
+                    && startup_failure
                     .as_ref()
                     .is_some_and(|failure| failure.allows_explicit_retry())
                 {

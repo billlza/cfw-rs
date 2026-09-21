@@ -714,5 +714,6 @@
   "{state} · desired {desiredMode}": "{state} · desired {desiredMode}",
   "{title} - {mode} Mode": "{title} - {mode} Mode",
   "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.": "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.",
-  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} log entries{value3}"
+  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} log entries{value3}",
+  "Native Overview": "Native Overview"
 }

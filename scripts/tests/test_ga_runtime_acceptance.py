@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import tempfile
 from typing import Any
@@ -824,6 +825,101 @@ class RuntimeFixture:
             )
 
 
+class GAInstalledApplicationIdentityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.repository = Path(temporary.name).resolve()
+        self.app = self.repository / "installed.app"
+        executable_root = self.app / "Contents/MacOS"
+        executable_root.mkdir(parents=True)
+        self.binary = executable_root / "clash-for-mac"
+        self.binary.write_bytes(b"application identity fixture\n")
+        self.binary.chmod(0o755)
+        for relative in (
+            "Contents/Info.plist",
+            "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/Resources/Info.plist",
+            "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/Info.plist",
+            "Contents/Library/SystemExtensions/"
+            "com.bill.clashformac.packet-tunnel.systemextension/Contents/Info.plist",
+        ):
+            path = self.app / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(plistlib.dumps({
+                "CFBundleShortVersionString": PRODUCT_VERSION,
+                "CFBundleVersion": TO_BUILD,
+            }))
+            path.chmod(0o644)
+        install = ga_runtime.dormant_app_install
+        self.identity = install.read_app_identity(self.app)
+        candidate = install.CandidateIdentity(
+            app=self.identity,
+            manifest_sha256="a" * 64,
+            repository_commit="b" * 40,
+            release_source_sha256="c" * 64,
+        )
+        predecessor = install.SUPPORTED_PREDECESSORS[FROM_BUILD]
+        transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        self.document = {
+            "candidate": candidate.document(),
+            "document": install.DOCUMENT,
+            "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
+            "guards": [{"after": guard(), "before": guard(), "operation": "install"}],
+            "phase": "installed",
+            "previous": install.AppIdentity(
+                PRODUCT_VERSION, FROM_BUILD, predecessor.tree_sha256
+            ).document(),
+            "schema_version": install.SCHEMA_VERSION,
+            "sequence": 4,
+            "staging_name": install.GA_INSTALL_PROFILE.staging_prefix + transaction_id,
+            "transaction_id": transaction_id,
+        }
+        install.validate_journal(self.document, install.GA_INSTALL_PROFILE)
+        self.journal = self.repository.joinpath(*INSTALL_JOURNAL_RELATIVE.parts)
+        self.journal.parent.mkdir(parents=True, mode=0o700)
+        self.write_journal(self.document)
+        self.expected = {"install_journal_sha256": sha256_bytes(self.journal.read_bytes())}
+        installed_path = patch("scripts.ga_runtime_acceptance.INSTALLED_APP", self.app)
+        installed_path.start()
+        self.addCleanup(installed_path.stop)
+
+    def write_journal(self, document: dict[str, Any]) -> None:
+        self.journal.write_bytes(canonical_json(document))
+        self.journal.chmod(0o600)
+
+    def test_real_application_matches_a_complete_candidate_journal(self) -> None:
+        before = self.journal.read_bytes()
+        self.assertEqual(
+            ga_runtime._installed_candidate_tree(self.repository, self.expected),
+            self.identity.tree_sha256,
+        )
+        self.assertEqual(self.journal.read_bytes(), before)
+
+    def test_changed_application_bytes_are_rejected(self) -> None:
+        self.binary.write_bytes(b"changed application fixture\n")
+        with self.assertRaisesRegex(GARuntimeAcceptanceError, "installed application bytes differ"):
+            ga_runtime._installed_candidate_tree(self.repository, self.expected)
+
+    def test_provenance_changes_still_break_the_bound_journal(self) -> None:
+        for field in ("manifest_sha256", "repository_commit", "release_source_sha256"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(self.document)
+                changed["candidate"][field] = "d" * len(changed["candidate"][field])
+                self.write_journal(changed)
+                with self.assertRaisesRegex(GARuntimeAcceptanceError, "journal differs from the runtime binding"):
+                    ga_runtime._installed_candidate_tree(self.repository, self.expected)
+
+    def test_malformed_candidate_provenance_is_not_ignored(self) -> None:
+        for field in ("manifest_sha256", "repository_commit", "release_source_sha256"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(self.document)
+                changed["candidate"][field] = "invalid"
+                self.write_journal(changed)
+                expected = {"install_journal_sha256": sha256_bytes(self.journal.read_bytes())}
+                with self.assertRaisesRegex(GARuntimeAcceptanceError, "GA install journal is invalid"):
+                    ga_runtime._installed_candidate_tree(self.repository, expected)
+
+
 class GARuntimeDmgLauncherTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -952,7 +1048,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40071", "40073"))
+        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40072", "40073"))
         self.assertEqual(
             (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
             (15 * 60, 30 * 60),

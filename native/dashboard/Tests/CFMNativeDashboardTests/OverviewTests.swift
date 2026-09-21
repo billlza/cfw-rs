@@ -12,7 +12,7 @@ private func fixture() throws -> Data {
 
 private func payload(_ fields: [String: Any]) throws -> Data {
   var value = try #require(JSONSerialization.jsonObject(with: fixture()) as? [String: Any])
-  fields.forEach { value[$0.key] = $0.value }
+  for (key, field) in fields { value[key] = field }
   return try JSONSerialization.data(withJSONObject: value)
 }
 

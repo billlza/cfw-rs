@@ -983,7 +983,10 @@ def _installed_candidate_tree(repository: Path, expected: dict[str, Any]) -> str
         installed = dormant_app_install.read_app_identity(INSTALLED_APP)
     except dormant_app_install.InstallError as error:
         raise _error("installed 40073 application tree cannot be identified") from error
-    if installed.document() != normalized["candidate"]:
+    # The full candidate also binds source provenance, which is not part of
+    # the installed bundle's three-field application identity.
+    candidate = dormant_app_install._candidate_from_journal(normalized)
+    if installed != candidate.app:
         raise _error("installed application bytes differ from the closed install journal")
     return installed.tree_sha256
 

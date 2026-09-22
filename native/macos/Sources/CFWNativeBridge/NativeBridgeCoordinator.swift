@@ -285,11 +285,17 @@ actor NativeBridgeCoordinator {
       return .profileDelays(try await testProfileDelays(request))
     }
     // Proxy authorization only obtains rights and needs no mutation lease.
+    // Registration status only reads SMAppService metadata. It must remain
+    // observable when another Host is busy; it cannot attest engine Off or
+    // authorize service mutation. All proof, repair and runtime queries below
+    // still acquire the existing cross-process operation lease.
     // Tunnel authorization writes a disabled manager, so it keeps the existing
     // cross-process preference-mutation lease through the bounded user wait.
     let operationLease: (any NativeHostOperationLeaseHolding)?
     do {
-      if command == .authorizeSystemProxy || command == .authorizeSystemProxyRestoration {
+      if command == .authorizeSystemProxy || command == .authorizeSystemProxyRestoration
+        || command == .maintainCurrentServices(.status)
+      {
         operationLease = nil
       } else {
         operationLease = try hostOperationLease.acquire()

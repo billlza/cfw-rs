@@ -936,6 +936,60 @@ private actor RegistrationRecoveryLease: NativeEngineLeaseInspecting {
   #expect(maintainer.registerCalls == 0)
 }
 
+@Test func maintenanceRegistrationStatusRemainsReadableWhileAnotherHostOwnsTheLease() async throws {
+  let maintainer = StubServiceMaintainer(proxy: .requiresApproval, authority: .notRegistered)
+  let runtimeObserver = StubServiceRuntimeObserver(onObservation: { _ in
+    Issue.record("registration status must not inspect native runtime ownership")
+  })
+  let subject = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .active, lease: nil),
+    onAuthorityObservation: { Issue.record("registration status must not call Authority") },
+    serviceMaintainer: maintainer,
+    serviceRuntimeObserver: runtimeObserver,
+    hostOperationLease: BusyNativeHostOperationLease()
+  )
+  guard
+    case .serviceMaintenance(let result) = try await subject.execute(
+      .maintainCurrentServices(.status))
+  else {
+    Issue.record("registration status returned the wrong result")
+    return
+  }
+  #expect(result.proxyAgent == .requiresApproval)
+  #expect(result.globalAuthority == .notRegistered)
+  #expect(result.engineStatus == nil)
+  #expect(result.offProofProfile == nil)
+  #expect(maintainer.registerCalls == 0)
+  #expect(maintainer.unregisterCalls == 0)
+  #expect(runtimeObserver.observations.isEmpty)
+}
+
+@Test func maintenanceStatusExemptionNeverAdmitsProofMutationOrEngineQuery() async {
+  let maintainer = StubServiceMaintainer()
+  let subject = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    onAuthorityObservation: { Issue.record("contended operation must stop before Authority") },
+    serviceMaintainer: maintainer,
+    hostOperationLease: BusyNativeHostOperationLease()
+  )
+  let actions: [NativeServiceMaintenanceAction] = [
+    .retireOrphanedServices, .proveOff, .proveInstalled40019Off,
+    .unregisterProxyAgent, .unregisterInstalled40019ProxyAgent,
+    .unregisterGlobalAuthority, .unregisterInstalled40019GlobalAuthority,
+    .recoverInstalled40019GlobalAuthority, .registerGlobalAuthority, .registerProxyAgent,
+  ]
+  for action in actions {
+    #expect(await maintenanceErrorCode(subject, action: action) == .busy)
+  }
+  #expect(await statusErrorCode(subject) == .busy)
+  #expect(maintainer.registerCalls == 0)
+  #expect(maintainer.unregisterCalls == 0)
+}
+
 @Test func everyUnprovenAuthorityStateBlocksBeforeServiceMutation() async {
   for state in [
     AuthorityState.preparing, .starting, .active, .stopping, .recovering, .quarantined,

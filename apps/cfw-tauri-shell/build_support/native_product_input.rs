@@ -1,7 +1,39 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
+/// Cargo's DEP_* metadata can contain names that Bash cannot represent (for
+/// example Tauri permission keys containing ':'). Pass only the release inputs
+/// the verifier consumes, then let its normal production seal validate them.
+pub fn native_ui_verifier_command(
+    script: &Path,
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Command {
+    const INPUTS: &[&str] = &[
+        "CFW_BUILD_NUMBER",
+        "CFW_NATIVE_PRODUCTS_OUTPUT",
+        "CFW_RELEASE_RUST_TOOLCHAIN",
+        "CFW_TOOLCHAIN_ROOT",
+        "CFW_REPOSITORY_COMMIT",
+        "CFW_RELEASE_SOURCE_SHA256",
+        "DEVELOPER_DIR",
+        // Preserve explicit refusal of validation-only compiler selections.
+        "CFW_UNSIGNED_VALIDATION_PYTHON",
+        "CFW_UNSIGNED_VALIDATION_XCODE_VERSION",
+        "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION",
+    ];
+    let mut command = Command::new("/bin/bash");
+    command.arg("-p").arg(script).arg("--verify");
+    command.env_clear().envs(
+        environment
+            .into_iter()
+            .filter(|(key, _)| key.to_str().is_some_and(|name| INPUTS.contains(&name))),
+    );
+    command
+}
 
 const UNSIGNED_RELATIVE_ROOT: &str = "unsigned/native-products";
 const UNSIGNED_BUILD_NUMBER: &str = "40000";
@@ -10,8 +42,8 @@ const GA_PRE_SIGN_RELATIVE_ROOT: &str = "ga-preflight/40073/native-products";
 const GA_BUILD_NUMBER: &str = "40073";
 const GA_PRE_SIGNING_MODE: &str = "pre-sign";
 const PREVIEW_CANDIDATE_ROOT: &str = "target/candidates/0.5.0";
-const PREVIEW_PRE_SIGN_RELATIVE_ROOT: &str = "preview-preflight/50002/native-products";
-const PREVIEW_BUILD_NUMBER: &str = "50002";
+const PREVIEW_PRE_SIGN_RELATIVE_ROOT: &str = "preview-preflight/50003/native-products";
+const PREVIEW_BUILD_NUMBER: &str = "50003";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeProductContext {
@@ -299,16 +331,56 @@ mod preview_tests {
     }
 
     #[test]
+    fn native_ui_verifier_does_not_inherit_cargo_or_loader_environment() {
+        let environment = [
+            ("CFW_BUILD_NUMBER", "50003"),
+            ("CFW_NATIVE_PRODUCTS_OUTPUT", "/candidate/native-products"),
+            ("CFW_RELEASE_RUST_TOOLCHAIN", "private"),
+            ("CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "reject-me"),
+            (
+                "DEP_TAURI_CORE:MENU__CORE_PLUGIN___PERMISSION_FILES_PATH",
+                "/permissions",
+            ),
+            ("CARGO_HOME", "/unrelated-cargo"),
+            ("BASH_ENV", "/injected-shell"),
+            ("DYLD_INSERT_LIBRARIES", "/injected-library"),
+            ("PATH", "/injected-path"),
+        ];
+        let command = native_ui_verifier_command(
+            Path::new("/repo/scripts/build_native_ui.sh"),
+            environment.map(|(key, value)| (key.into(), value.into())),
+        );
+        let passed = command
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            passed,
+            BTreeMap::from([
+                ("CFW_BUILD_NUMBER", "50003"),
+                ("CFW_NATIVE_PRODUCTS_OUTPUT", "/candidate/native-products"),
+                ("CFW_RELEASE_RUST_TOOLCHAIN", "private"),
+                ("CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "reject-me"),
+            ])
+        );
+        assert_eq!(command.get_program(), "/bin/bash");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-p", "/repo/scripts/build_native_ui.sh", "--verify"]
+        );
+    }
+
+    #[test]
     fn preview_path_build_and_manifest_are_one_exact_identity() {
         let fixture = Fixture::new();
         let root = fixture.root("0.5.0");
         let output = fixture.output("0.5.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT);
-        let resolved = CandidateNativeProducts::resolve(&root, &output, "50002").unwrap();
+        let resolved = CandidateNativeProducts::resolve(&root, &output, "50003").unwrap();
         assert_eq!(resolved.context, NativeProductContext::PreviewPreSign);
-        assert_eq!(resolved.context.expected_build_number(), "50002");
+        assert_eq!(resolved.context.expected_build_number(), "50003");
         assert_eq!(resolved.context.expected_signing_mode(), "pre-sign");
         let metadata = BTreeMap::from([
-            ("buildNumber".into(), "50002".into()),
+            ("buildNumber".into(), "50003".into()),
             ("signingMode".into(), "pre-sign".into()),
         ]);
         resolved
@@ -317,7 +389,7 @@ mod preview_tests {
             .unwrap();
         for (key, value) in [
             ("buildNumber", "40073"),
-            ("buildNumber", "50003"),
+            ("buildNumber", "50004"),
             ("signingMode", "unsigned-validation"),
             ("signingMode", "developer-id"),
         ] {
@@ -346,11 +418,12 @@ mod preview_tests {
             "40073",
             "40000",
             "50001",
-            "50003",
-            "050002",
+            "50002",
+            "50004",
+            "050003",
             "0",
-            "+50002",
-            "50002\n",
+            "+50003",
+            "50003\n",
             "9223372036854775808",
         ] {
             assert!(
@@ -361,18 +434,18 @@ mod preview_tests {
         for relative in [
             UNSIGNED_RELATIVE_ROOT,
             GA_PRE_SIGN_RELATIVE_ROOT,
-            "preview-preflight/50003/native-products",
-            "preview/50002/signing-output/signed-native-products",
+            "preview-preflight/50004/native-products",
+            "preview/50003/signing-output/signed-native-products",
         ] {
             let wrong = fixture.output("0.5.0", relative);
             assert!(
-                CandidateNativeProducts::resolve(&root, &wrong, "50002").is_err(),
+                CandidateNativeProducts::resolve(&root, &wrong, "50003").is_err(),
                 "{relative}"
             );
         }
         let old_root = fixture.root("0.4.0");
         let wrong = fixture.output("0.4.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT);
-        assert!(CandidateNativeProducts::resolve(&old_root, &wrong, "50002").is_err());
+        assert!(CandidateNativeProducts::resolve(&old_root, &wrong, "50003").is_err());
         for (relative, build, expected) in [
             (
                 GA_PRE_SIGN_RELATIVE_ROOT,
@@ -393,7 +466,7 @@ mod preview_tests {
                 expected
             );
             assert!(CandidateNativeProducts::resolve(&root, &old, build).is_err());
-            assert!(CandidateNativeProducts::resolve(&old_root, &old, "50002").is_err());
+            assert!(CandidateNativeProducts::resolve(&old_root, &old, "50003").is_err());
         }
     }
 
@@ -436,7 +509,7 @@ mod preview_tests {
             output.replace("preview-preflight/", "preview-preflight/./"),
             format!("{output}/"),
         ] {
-            assert!(CandidateNativeProducts::resolve(&root, &wrong, "50002").is_err());
+            assert!(CandidateNativeProducts::resolve(&root, &wrong, "50003").is_err());
         }
         let raw_root = root
             .to_str()
@@ -444,11 +517,11 @@ mod preview_tests {
             .replace("candidates/", "candidates//");
         let raw_output = format!("{raw_root}/{PREVIEW_PRE_SIGN_RELATIVE_ROOT}");
         assert!(
-            CandidateNativeProducts::resolve(Path::new(&raw_root), &raw_output, "50002").is_err()
+            CandidateNativeProducts::resolve(Path::new(&raw_root), &raw_output, "50003").is_err()
         );
         let moved = root.with_file_name("moved-preview");
         fs::rename(&root, &moved).unwrap();
         std::os::unix::fs::symlink(&moved, &root).unwrap();
-        assert!(CandidateNativeProducts::resolve(&root, &output, "50002").is_err());
+        assert!(CandidateNativeProducts::resolve(&root, &output, "50003").is_err());
     }
 }

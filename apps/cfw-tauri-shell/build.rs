@@ -346,10 +346,7 @@ fn verify_release_native_ui(repository_root: &Path) -> Result<(), String> {
     // Reuse the artifact verifier with the sealed production interpreter and
     // compiler selection. It checks source, toolchain, Mach-O load paths and
     // localization resources, rather than accepting a caller's digest string.
-    let result = std::process::Command::new("/bin/bash")
-        .arg("-p")
-        .arg(&script)
-        .arg("--verify")
+    let result = native_product_input::native_ui_verifier_command(&script, std::env::vars_os())
         .output()
         .map_err(|error| format!("run native UI artifact verifier: {error}"))?;
     if !result.status.success() {

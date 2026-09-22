@@ -1,4 +1,4 @@
-# Native overview integration
+# Native UI components and retained overview experiment
 
 **Status — user rejected this visual direction on 2026-09-22.** The one-page
 Overview and sample-data preview are retained only as integration experiments.
@@ -115,3 +115,27 @@ preview for side-by-side inspection. It uses this exact presentation library,
 shows a persistent sample-data notice and disables every network control. It
 never starts the production Rust host or its native networking services. See
 `Preview/README.md` for scope, packaging and the actual AppKit self-check.
+
+
+## Corrected in-place components
+
+The `native-ui` feature enables the original Profiles menu and Network settings
+form as native components. It does not expose the rejected Overview menu entry.
+The existing nine pages and command handlers remain the product surface.
+`ProfileMenu.swift` and `RuntimeSettings.swift`, with matching C headers, receive
+bounded, versioned display frames and return intent to the original JS/Rust
+application handlers. Neither component invokes networking or changes permissions.
+
+The menu preserves action order, source/engine disabled reasons and content-window
+positioning. The form preserves field order, labels, checkboxes, draft/error state,
+revision-based submission and busy cancellation rules. Both follow the effective
+page theme. Supported systems use native SwiftUI glass for appropriate controls;
+older systems and accessibility settings retain standard readable materials.
+
+The corresponding Rust adapter is `apps/cfw-tauri-shell/src/native_components/`.
+Frontend adapters live beside the original handlers, and retain all business
+validation there. Run host checks with `--features native-ui`; the normal Swift
+package suite includes both new components. See the implementation status for
+actual test counts and unresolved installed/visual/accessibility gates. The
+historical `Preview/build-preview.sh` is the rejected sample UI and must not be
+installed or handed over as the corrected 0.5 preview.

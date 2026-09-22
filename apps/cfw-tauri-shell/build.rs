@@ -167,10 +167,10 @@ fn main() {
         .ancestors()
         .nth(2)
         .expect("Tauri manifest must remain under apps/cfw-tauri-shell");
-    if std::env::var_os("CARGO_FEATURE_NATIVE_DASHBOARD").is_some() {
+    if std::env::var_os("CARGO_FEATURE_NATIVE_UI").is_some() {
         if std::env::var("PROFILE").as_deref() == Ok("release") {
             panic!(
-                "native-dashboard is a development integration; signed candidate composition is not yet admitted"
+                "native-ui is a development integration; signed candidate composition is not yet admitted"
             );
         }
         let package = repository_root.join("native/dashboard");

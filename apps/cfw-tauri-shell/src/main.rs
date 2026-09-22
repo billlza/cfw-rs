@@ -12,6 +12,7 @@ mod legacy;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod main_run_loop_driver;
+mod native_components;
 #[cfg(feature = "native-dashboard")]
 mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
@@ -65,6 +66,13 @@ use legacy::{
     disable_service_mode, legacy_retirement_status, recover_legacy_cutover,
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
+use native_components::runtime_settings::{
+    dismiss_native_runtime_settings, present_native_runtime_settings,
+    update_native_runtime_settings,
+};
+use native_components::{
+    dismiss_native_profile_menu, present_native_profile_menu, update_native_profile_menu,
+};
 use shell::{TrayMenuState, build_app_menu, focus_main_window, handle_app_menu_event};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
@@ -313,7 +321,17 @@ fn main() {
         force_quit_app,
         parse_deep_links,
         network_diagnostics,
+        present_native_profile_menu,
+        update_native_profile_menu,
+        dismiss_native_profile_menu,
+        present_native_runtime_settings,
+        update_native_runtime_settings,
+        dismiss_native_runtime_settings,
     ]);
+    #[cfg(feature = "native-ui")]
+    let builder = builder
+        .manage(native_components::NativeProfileMenuState::default())
+        .manage(native_components::runtime_settings::RuntimeSettingsState::default());
     let application = builder
         .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
             if migration_handoff && !migration_handoff_command_allowed(invoke.message.command()) {
@@ -347,6 +365,14 @@ fn main() {
             Ok(())
         })
         .on_page_load(|webview, payload| {
+            #[cfg(feature = "native-ui")]
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                native_components::cancel_for_window(webview.app_handle(), webview.label());
+                native_components::runtime_settings::cancel_for_reload(
+                    webview.app_handle(),
+                    webview.label(),
+                );
+            }
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
@@ -370,6 +396,8 @@ fn main() {
                 emit_startup_error(window.app_handle(), "window_bounds_schedule_failed", error);
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
+                #[cfg(feature = "native-ui")]
+                native_components::cancel_for_window(window.app_handle(), window.label());
                 api.prevent_close();
                 window
                     .app_handle()

@@ -1,3 +1,6 @@
+import { Channel } from "@tauri-apps/api/core";
+import { profileMenuItems, nativeMenuItems, createNativeProfileMenu } from "./native-profile-menu.js";
+import { createNativeRuntimeSettings } from "./native-runtime-settings.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
@@ -77,6 +80,20 @@ import {
 
 let migrationHandoffRendererReady = null;
 let criticalMigrationListenersBound = false;
+const nativeProfileMenu = createNativeProfileMenu({ invoke, makeChannel: (handler) => new Channel(handler), onError: reportProfileMenuFailure });
+const nativeRuntimeSettings = createNativeRuntimeSettings({
+  enabled: () => state.payload?.native_ui?.runtime_settings === true,
+  invoke, makeChannel: (handler) => new Channel(handler),
+  onError: (error) => appendLog("error", "settings", t("{action} failed: {error}", { action: t("Network settings"), error: errorText(error) })),
+});
+
+function nativeProfileMenuEnabled() { return state.payload?.native_ui?.profile_menu === true; }
+function reportProfileMenuFailure(error) {
+  appendLog("error", "profile", t("{action} failed: {error}", { action: t("Profiles"), error: errorText(error) }));
+}
+function dismissNativeProfileMenu() {
+  if (nativeProfileMenuEnabled()) void nativeProfileMenu.dismiss().catch(reportProfileMenuFailure);
+}
 
 const LOGIN_ITEM_LIVE_STATUSES = new Set([
   "checking",
@@ -136,7 +153,7 @@ const { renderSettings, renderNetworkDiagnostics } = createSettingsView({ state,
 
 import { createAutomationSettingsUI } from "./automation-settings.js";
 const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderPage, appendLog,
-  dismissOtherDialogs: () => { runtimeSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; } });
+  dismissOtherDialogs: () => { dismissNativeProfileMenu(); runtimeSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; } });
 
 import { createProxyDelayTest } from "./proxy-delay-test.js";
 const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView, invoke, activeProfile, engineIsOff,
@@ -144,7 +161,8 @@ const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView
 const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
 
 const runtimeSettingsUI = createRuntimeSettingsUI({ state, invoke, appendLog, renderPage,
-  dismissOtherDialogs: () => { automationSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; },
+  nativeDialog: nativeRuntimeSettings,
+  dismissOtherDialogs: () => { dismissNativeProfileMenu(); automationSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; },
   refreshRuntime: async () => {
     await loadEngineStatus();
     await loadRuntimeProjection();
@@ -988,6 +1006,7 @@ function profileMenuIcon(kind) {
 }
 
 function closeGlassOverlays() {
+  dismissNativeProfileMenu();
   runtimeSettingsUI.close();
   automationSettingsUI.close();
   state.profileContextMenu = null;
@@ -1342,40 +1361,97 @@ async function resolveProfileSource(id) {
   return profile.sourceUrl;
 }
 
+function currentProfileMenuItems(profile) {
+  return profileMenuItems(PROFILE_MENU_ACTIONS, profile, { engineOff: engineIsOff(), engineNotOffReason: REASONS.engineNotOff, t });
+}
+
+function nativeProfileMenuRequest(context, profile) {
+  return { requestId: context.requestId, revision: context.revision, locale: getLocale(),
+    appearance: document.documentElement.dataset.theme,
+    moreLabel: t("scroll to view more"), point: context.point, items: nativeMenuItems(currentProfileMenuItems(profile)) };
+}
+
+async function acceptNativeProfileMenu(context, result) {
+  if (state.profileContextMenu !== context) return;
+  state.profileContextMenu = null;
+  if (result.error) { reportProfileMenuFailure(result.error); renderPage(); return; }
+  if (result.action === null) return;
+  const profile = state.profiles.find((item) => item.id === context.id);
+  const action = profile && currentProfileMenuItems(profile).find((item) => item.id === result.action);
+  if (!action || action.reason) {
+    reportProfileMenuFailure(action?.reason ?? "The profile action is no longer available");
+    renderPage(); return;
+  }
+  try { await runProfileMenuAction(result.action, context.id); }
+  catch (error) { reportProfileMenuFailure(error); }
+  renderPage();
+}
+
 async function openProfileContextMenu(id, clientX, clientY) {
   state.glassDialog = null;
-  state.profileContextMenu = { id, x: clientX, y: clientY };
+  const context = { id, x: clientX, y: clientY };
+  state.profileContextMenu = context;
+  if (nativeProfileMenuEnabled()) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile) { state.profileContextMenu = null; return; }
+    Object.assign(context, { requestId: crypto.randomUUID(), revision: 1, ready: false,
+      point: { x: clientX, y: clientY, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight } });
+    try {
+      const request = nativeProfileMenuRequest(context, profile);
+      context.projection = JSON.stringify({ locale: request.locale, appearance: request.appearance, items: request.items });
+      context.ready = await nativeProfileMenu.present(request, (result) => {
+        void acceptNativeProfileMenu(context, result).catch(reportProfileMenuFailure);
+      });
+      if (state.profileContextMenu !== context) return;
+      await resolveProfileSource(id);
+      if (state.profileContextMenu === context) renderGlassOverlays();
+    } catch (error) {
+      if (state.profileContextMenu === context) {
+        state.profileContextMenu = null;
+        dismissNativeProfileMenu();
+      }
+      reportProfileMenuFailure(error);
+    }
+    return;
+  }
   renderGlassOverlays();
   await resolveProfileSource(id);
-  if (state.profileContextMenu?.id === id) renderGlassOverlays();
+  if (state.profileContextMenu === context) renderGlassOverlays();
+}
+
+function syncNativeProfileMenu() {
+  const context = state.profileContextMenu;
+  if (!context?.ready || !context.requestId) return;
+  const profile = state.profiles.find((item) => item.id === context.id);
+  if (!profile || state.activePage !== "profiles" || state.glassDialog || state.runtimeSettingsDialog || state.automationDialog) {
+    dismissNativeProfileMenu();
+    state.profileContextMenu = null;
+    return;
+  }
+  const request = nativeProfileMenuRequest(context, profile);
+  const projection = JSON.stringify({ locale: request.locale, appearance: request.appearance, items: request.items });
+  if (projection === context.projection) return;
+  context.projection = projection;
+  request.revision = ++context.revision;
+  void nativeProfileMenu.update(request).catch((error) => {
+    if (state.profileContextMenu !== context) return;
+    state.profileContextMenu = null;
+    dismissNativeProfileMenu();
+    reportProfileMenuFailure(error);
+  });
 }
 
 
 function renderGlassOverlays() {
+  if (nativeProfileMenuEnabled()) syncNativeProfileMenu();
   const root = document.getElementById("glass-menu-root");
   if (!root) return;
 
   const parts = [];
-  if (state.profileContextMenu) {
+  if (state.profileContextMenu && !nativeProfileMenuEnabled()) {
     const profile = state.profiles.find((item) => item.id === state.profileContextMenu.id);
     if (profile) {
-      const engineOff = engineIsOff();
-      const items = PROFILE_MENU_ACTIONS
-        .filter((action) => !(action.needsInactive && profile.active))
-        .map((action) => {
-          let reason = null;
-          if (action.remoteOnly) {
-            if (profile.sourceUrl === undefined) {
-              reason = profile.sourceError
-                ? t("Subscription URL could not be read: {sourceError}", { sourceError: profile.sourceError })
-                : t("Reading this profile…");
-            } else if (profile.sourceUrl === null) {
-              reason = t("This profile was imported locally and has no subscription URL.");
-            }
-          }
-          if (!reason && action.needsEngineOff && !engineOff) reason = REASONS.engineNotOff;
-          return { ...action, reason };
-        });
+      const items = currentProfileMenuItems(profile);
       const menuHtml = items.map((action) => `
         <button type="button" class="glass-menu-item ${action.danger ? "danger" : ""}" data-profile-menu="${action.id}" data-profile-id="${escapeHtml(profile.id)}" ${action.reason ? `disabled title="${escapeHtml(action.reason)}"` : ""}>
           <span class="glass-menu-icon">${profileMenuIcon(action.icon)}</span>
@@ -3603,7 +3679,7 @@ async function reloadPayload() {
 
 function applyBootPayload(payload) {
   const normalized = normalizeBootPayload(payload);
-  state.payload = { product: normalized.product };
+  state.payload = { product: normalized.product, native_ui: normalized.native_ui };
   state.migrationHandoff = normalized.migration_handoff;
   state.migrationHandoffStatus = normalized.migration_handoff_status;
   if (state.migrationHandoff || state.migrationHandoffStatus.state === "in_progress") {

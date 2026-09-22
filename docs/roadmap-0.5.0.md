@@ -1,16 +1,18 @@
 # Clash for Mac 0.5.0
 
-Prepared 2026-09-20; implementation started 2026-09-22. The development-only
-SwiftUI observation window now uses the existing Rust coordinator. Full UI parity,
-standalone native hosting, installed acceptance and product performance gains
-remain open; see [implementation status](planning/0.5.0-implementation-status.md). The functional comparison baseline is the frozen
-0.4.0 build 40073, source `9e2f76cdd7ffb286614a7bc6fe55e75d3fc7a5b2`.
-Its GA publication has its own evidence requirements and remains separate work.
+Prepared 2026-09-20; direction corrected by the user on 2026-09-22.
+The prior single-page native Overview and its sample-data preview were rejected:
+they changed the UI and interaction model. They remain engineering experiments,
+not the accepted 0.5 design. The required reference is 0.4.0 build 40073, source
+`9e2f76cdd7ffb286614a7bc6fe55e75d3fc7a5b2`. Its publication remains separate work.
+See the [binding UI fidelity contract](planning/0.5.0-ui-fidelity-contract.md)
+and [current status](planning/0.5.0-implementation-status.md).
 
 ## Product contract
 
 Make the application attractive, quick and practical with a native SwiftUI
-interface and Apple's Liquid Glass controls. Preserve every supported 0.4.0
+component implementation and Apple's Liquid Glass controls **without changing
+the overall 0.4.0 UI, layout details, navigation or interaction paths**. Preserve every supported 0.4.0
 operation, persisted user choice and network/security contract. UI work must not
 change routing, silently choose a node, restart the engine, weaken authentication,
 or reinterpret imported profiles. Dependency and network improvements have
@@ -21,35 +23,29 @@ system supports it (macOS 26+); earlier supported systems use standard SwiftUI
 materials with the same functions. A visual improvement must not require users
 to give up an otherwise supported OS or accessibility setting.
 
-## Interface direction
+## Interface direction — preserve 0.4 in place
 
-Use a native sidebar, toolbar, content area and optional inspector. Lead with
-connection state, selected profile/node and useful traffic information. Make
-routine actions easy to find and keep advanced controls available in context.
+The existing UI is the specification, not inspiration for a new layout. Keep the
+nine page names/order, 170 px sidebar with traffic/runtime sections, branding,
+General's twelve rows, information density and each control's existing location.
+Keep all current page-specific dialogs, menus, shortcuts and operation sequences.
+In particular, keep Engine Start/Stop as its original text action, with TUN and
+System Proxy in their original rows. Do not replace General with a status hero,
+collapse the app into three switches, add a new power/close toolbar, or combine
+Rules/Providers. The [fidelity inventory](planning/0.5.0-ui-fidelity-contract.json)
+records frozen source hashes, order, dimensions and rejected changes.
 
-| Area | Intended experience |
-| --- | --- |
-| Overview | Clear connection state and separate core, System Proxy and TUN controls; useful upload/download history; actionable errors |
-| Proxies | Searchable groups and nodes; current selection; cancellable latency tests; favorites only if they preserve selection semantics |
-| Profiles | File, URL, text and supported legacy imports; editable profiles, QR sharing, refresh status and credential prompts |
-| Connections | Native table, search, sorting, inspect/close actions and bounded live updates |
-| Rules and providers | Explain rule order and provider state; refresh and health checks without changing fallback/group semantics |
-| Logs and diagnostics | Level filtering, pause/resume, retained errors, copy/export with the existing secret-redaction boundary |
-| Settings | Native forms for runtime, DNS/IPv6, ports/LAN, startup, language, appearance, shortcuts and Wi-Fi automation |
-| Menu bar | Fast status, profile/node selection and existing network actions; keyboard access and localized labels |
+Native SwiftUI and Liquid Glass affect suitable existing components and their
+material/interaction feedback. They do not grant permission to redesign workflows.
+Use supported system controls and accessibility behavior, keep dense content
+readable, and avoid excessive concurrent glass effects. Preserve Reduce Motion,
+Reduce Transparency, increased contrast, keyboard and VoiceOver access. Compare
+all four languages, light/dark modes and the existing 850 × 603 minimum window.
 
-Use system typography, SF Symbols, semantic colors and standard focus, selection,
-menus, sheets and alerts. Apply Liquid Glass to navigation and important controls;
-use solid or standard-material surfaces for dense tables, logs and settings.
-Group nearby custom glass controls in `GlassEffectContainer`. Do not stack blur
-layers or run decorative animations while the window is hidden. Respect Reduce
-Motion, Reduce Transparency, increased contrast, VoiceOver and keyboard-only use.
-Verify light/dark appearance and all four languages at the existing minimum
-850 × 603 window size, large windows and multiple display scales.
-
-These choices follow Apple's [materials guidance](https://developer.apple.com/design/human-interface-guidelines/materials),
-[Liquid Glass adoption guidance](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass),
-and [GlassEffectContainer contract](https://developer.apple.com/documentation/swiftui/glasseffectcontainer).
+Follow Apple's [adoption guidance](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)
+and [custom-view guidance](https://developer.apple.com/documentation/swiftui/applying-liquid-glass-to-custom-views)
+within this product constraint. Do not substitute a mock or disabled sample screen
+for real layout, action and network parity.
 
 ## Architecture and migration boundary
 
@@ -193,8 +189,10 @@ project those into the stable 1.14.1 build.
    installed screenshots and performance traces without altering active networking.
 2. **Application facade:** extract the necessary Tauri orchestration, build the
    Swift/Rust boundary and prove real read-only snapshots, cancellation and shutdown.
-3. **Native interface:** implement design tokens and all screen families with real
-   state; complete language, accessibility and action parity before changing default UI.
+3. **Native components in place:** preserve the 0.4 page/layout/action baseline,
+   replace one component family at a time with real state, and compare both the
+   whole page and its operation sequence before moving to the next family. Full
+   fidelity, language, accessibility and action parity precede any default-UI change.
 4. **Performance and stable dependencies:** optimize observed bottlenecks, update
    compatible inputs in separately reviewable changes, and repeat parity/network tests.
 5. **Additive VPN work:** implement only capabilities that pass complete config-to-

@@ -1,5 +1,12 @@
 # Local 0.5 UI preview
 
+**Status — user rejected this visual direction on 2026-09-22.** The one-page
+Overview and sample-data preview are retained only as integration experiments.
+They are not the requested 0.5 UI. Preserve the complete 0.4 layout, details and
+interaction paths while adopting native component materials; the binding contract
+is `docs/planning/0.5.0-ui-fidelity-contract.md`. Do not present this experiment as
+the corrected design or expand it into a replacement workflow.
+
 This independently installed AppKit launcher loads the same `CFMNativeDashboard`
 library as the real native host integration. It is a UI review application, not
 a functional VPN client or a signed release candidate. The default state says it

@@ -1,6 +1,13 @@
 # Native overview integration
 
-This is the implemented 0.5.0 overview and network-control slice. It is a real SwiftUI
+**Status — user rejected this visual direction on 2026-09-22.** The one-page
+Overview and sample-data preview are retained only as integration experiments.
+They are not the requested 0.5 UI. Preserve the complete 0.4 layout, details and
+interaction paths while adopting native component materials; the binding contract
+is `docs/planning/0.5.0-ui-fidelity-contract.md`. Do not present this experiment as
+the corrected design or expand it into a replacement workflow.
+
+This directory retains the rejected overview layout and reusable network-control integration. It is a real SwiftUI
 library and AppKit window hosted by the existing application process. The
 `native-dashboard` Cargo feature adds **Window → Native Overview** (⇧⌘O).
 The native view controls core, System Proxy and TUN through the same Rust use cases

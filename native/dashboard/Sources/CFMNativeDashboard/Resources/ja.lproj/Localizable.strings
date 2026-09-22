@@ -16,4 +16,14 @@
 "unknown" = "不明";
 "needsAttention" = "確認が必要です";
 "deliveryFailed" = "状態の更新に失敗しました。前回の情報は古い可能性があります。";
-"observationOnly" = "このネイティブ画面は現在のセッションを表示します。ネットワーク設定はメイン画面で変更してください。この画面を閉じても接続は変わりません。";
+"startCore" = "コアを起動";
+"stopCore" = "コアを停止";
+"applyingChange" = "変更を適用中…";
+"changeFailed" = "変更を適用できませんでした";
+"requestRejected" = "要求は受け付けられませんでした。最新の状態を確認して再試行してください。";
+"anotherChangePending" = "別の変更が進行中です。";
+"controlsHelp" = "プロファイルとノードはメイン画面で管理します。この画面を閉じても、受け付けたネットワーク変更は取り消されません。";
+"continueApproval" = "承認を続ける";
+"retryChange" = "再試行";
+"developmentPreview" = "開発プレビュー";
+"approvalHelp" = "「承認を続ける」でシステム設定を開きます。求められた場合は Clash for Mac のバックグラウンド動作やネットワーク機能拡張を許可し、戻って再試行してください。";

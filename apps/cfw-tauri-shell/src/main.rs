@@ -5,14 +5,15 @@ mod diagnostics;
 use automation::{read_automation_settings, request_wifi_name_access, write_automation_settings};
 use diagnostics::{Diagnostics, report_dashboard_startup};
 mod engine;
-#[cfg(feature = "native-dashboard")]
-mod native_dashboard;
+mod engine_controls;
 mod i18n;
 mod launch;
 mod legacy;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod main_run_loop_driver;
+#[cfg(feature = "native-dashboard")]
+mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
 mod release_observation;

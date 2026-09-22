@@ -16,4 +16,14 @@
 "unknown" = "Unknown";
 "needsAttention" = "Needs attention";
 "deliveryFailed" = "Live state delivery failed. The last observation may be stale.";
-"observationOnly" = "This native overview observes the existing session. Use the main dashboard to change network settings. Closing this window keeps the connection unchanged.";
+"startCore" = "Start core";
+"stopCore" = "Stop core";
+"applyingChange" = "Applying change…";
+"changeFailed" = "Change could not be applied";
+"requestRejected" = "The request was not accepted. Check the latest state and try again.";
+"anotherChangePending" = "Another change is in progress.";
+"controlsHelp" = "Manage profiles and nodes in the main dashboard. Closing this window does not cancel an accepted network change.";
+"continueApproval" = "Continue approval";
+"retryChange" = "Retry";
+"developmentPreview" = "Development preview";
+"approvalHelp" = "Choose Continue approval to open System Settings. Allow Clash for Mac background activity or its network extension when requested, then return and retry.";

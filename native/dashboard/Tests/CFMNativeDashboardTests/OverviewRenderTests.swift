@@ -4,41 +4,57 @@ import Testing
 
 @testable import CFMNativeDashboard
 
+private let renderControls = """
+  {"core":{"enabled":false,"available":true,"reason":null,"retry":false},"systemProxy":{"enabled":false,"available":true,"reason":null,"retry":false},"tunnel":{"enabled":false,"available":true,"reason":null,"retry":false}}
+  """
+
 @Test @MainActor func rendersFourLanguagesInLightAndDarkAtMinimumSize() throws {
-  for locale in ["en", "zh-Hans", "zh-Hant", "ja"] {
-    for dark in [false, true] {
-      let model = OverviewModel()
-      let data = Data(
-        """
-        {"version":1,"sequence":1,"session":1,"locale":"\(locale)","phase":"failed",
-         "core":"unknown","systemProxy":"unknown","tunnel":"unknown",
-         "failure":"native operation query_status failed: Unavailable"}
-        """.utf8)
-      try model.accept(OverviewFrame.decode(data))
-      let view = NSHostingView(
-        rootView: OverviewView(model: model, onClose: {})
-          .preferredColorScheme(dark ? .dark : .light))
-      let window = NSWindow(
-        contentRect: NSRect(x: -20000, y: -20000, width: 850, height: 603),
-        styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-      window.isReleasedWhenClosed = false
-      window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-      window.contentView = view
-      defer { window.close() }
-      window.orderFront(nil)
-      RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
-      view.layoutSubtreeIfNeeded()
-      let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-      window.effectiveAppearance.performAsCurrentDrawingAppearance {
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-      }
-      #expect(bitmap.pixelsWide >= 850)
-      #expect(bitmap.pixelsHigh >= 603)
-      if let output = ProcessInfo.processInfo.environment["CFM_NATIVE_RENDER_DIR"] {
-        let png = try #require(bitmap.representation(using: .png, properties: [:]))
-        let file = URL(fileURLWithPath: output).appendingPathComponent(
-          "overview-\(locale)-\(dark ? "dark" : "light").png")
-        try png.write(to: file)
+  for phase in ["failed", "approval"] {
+    for locale in ["en", "zh-Hans", "zh-Hant", "ja"] {
+      for dark in [false, true] {
+        let model = OverviewModel()
+        let controls =
+          phase == "approval"
+          ? """
+          {"core":{"enabled":true,"available":true,"reason":null,"retry":true},"systemProxy":{"enabled":false,"available":true,"reason":null,"retry":false},"tunnel":{"enabled":true,"available":true,"reason":null,"retry":true}}
+          """ : renderControls
+        let state = phase == "approval" ? "pending" : "unknown"
+        let failure =
+          phase == "approval" ? "null" : "\"native operation query_status failed: Unavailable\""
+        let data = Data(
+          """
+          {"version":2,"sequence":1,"session":1,"locale":"\(locale)","phase":"\(phase)",
+           "core":"\(state)","systemProxy":"\(state)","tunnel":"\(state)",
+           "failure":\(failure), "controls": \(controls), "command":null}
+          """.utf8)
+        try model.accept(OverviewFrame.decode(data))
+        // Rendering fixtures exercise available controls without executing a network intent.
+        model.bindControl { _, _, _, _, _ in 0 }
+        let view = NSHostingView(
+          rootView: OverviewView(model: model, onClose: {})
+            .preferredColorScheme(dark ? .dark : .light))
+        let window = NSWindow(
+          contentRect: NSRect(x: -20000, y: -20000, width: 850, height: 603),
+          styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        window.contentView = view
+        defer { window.close() }
+        window.orderFront(nil)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        view.layoutSubtreeIfNeeded()
+        let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        window.effectiveAppearance.performAsCurrentDrawingAppearance {
+          view.cacheDisplay(in: view.bounds, to: bitmap)
+        }
+        #expect(bitmap.pixelsWide >= 850)
+        #expect(bitmap.pixelsHigh >= 603)
+        if let output = ProcessInfo.processInfo.environment["CFM_NATIVE_RENDER_DIR"] {
+          let png = try #require(bitmap.representation(using: .png, properties: [:]))
+          let file = URL(fileURLWithPath: output).appendingPathComponent(
+            "overview-\(phase)-\(locale)-\(dark ? "dark" : "light").png")
+          try png.write(to: file)
+        }
       }
     }
   }
@@ -55,8 +71,8 @@ import Testing
   for index in 1...count {
     let data = Data(
       """
-      {"version":1,"sequence":\(index),"session":1,"locale":"en","phase":"off",
-       "core":"inactive","systemProxy":"inactive","tunnel":"inactive","failure":null}
+      {"version":2,"sequence":\(index),"session":1,"locale":"en","phase":"off",
+       "core":"inactive","systemProxy":"inactive","tunnel":"inactive","failure":null, "controls": \(renderControls), "command":null}
       """.utf8)
     let start = clock.now
     try model.accept(OverviewFrame.decode(data))

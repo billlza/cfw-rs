@@ -16,4 +16,14 @@
 "unknown" = "未知";
 "needsAttention" = "需要處理";
 "deliveryFailed" = "即時狀態更新失敗，上一次觀察結果可能已過期。";
-"observationOnly" = "此原生總覽顯示現有工作階段。網路設定請在主介面操作；關閉此視窗不會改變連線。";
+"startCore" = "啟動核心";
+"stopCore" = "停止核心";
+"applyingChange" = "正在套用變更…";
+"changeFailed" = "無法完成變更";
+"requestRejected" = "要求未被接受，請確認最新狀態後重試。";
+"anotherChangePending" = "另一項變更正在進行。";
+"controlsHelp" = "設定檔與節點仍在主介面管理。關閉此視窗不會取消已接受的網路變更。";
+"continueApproval" = "繼續授權";
+"retryChange" = "重試";
+"developmentPreview" = "開發預覽";
+"approvalHelp" = "點選「繼續授權」開啟系統設定，依提示允許 Clash for Mac 背景活動或網路延伸功能，再返回重試。";

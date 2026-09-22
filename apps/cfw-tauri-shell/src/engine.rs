@@ -131,7 +131,7 @@ pub(crate) struct EngineCapabilities {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct EngineStatusPayload {
-    snapshot: EngineSnapshot,
+    pub(crate) snapshot: EngineSnapshot,
     capabilities: EngineCapabilities,
     cutover_ready: bool,
     cutover_unavailable_reason: Option<String>,

@@ -2,7 +2,7 @@ import AppKit
 import Observation
 import SwiftUI
 
-typealias ProfileMenuCallback = @convention(c) (UInt, UInt64, UInt32) -> Void
+public typealias ProfileMenuCallback = @convention(c) (UInt, UInt64, UInt32) -> Void
 
 enum ProfileMenuAction: String, Codable, CaseIterable {
   case select, edit
@@ -472,7 +472,7 @@ final class ProfileMenuWindow: NSObject, NSWindowDelegate {
 @MainActor private var newestProfileMenuSession: UInt64 = 0
 
 @_cdecl("cfm_profile_menu_present_v1")
-func profileMenuPresent(
+public func profileMenuPresent(
   _ bytes: UnsafePointer<UInt8>?, _ count: Int, _ callback: ProfileMenuCallback?, _ context: UInt
 ) -> Int32 {
   guard Thread.isMainThread else { return 3 }
@@ -495,7 +495,7 @@ func profileMenuPresent(
 }
 
 @_cdecl("cfm_profile_menu_update_v1")
-func profileMenuUpdate(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> Int32 {
+public func profileMenuUpdate(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> Int32 {
   guard Thread.isMainThread else { return 3 }
   guard let bytes, count > 0, count <= ProfileMenuFrame.maximumBytes else { return 0 }
   let data = Data(bytes: bytes, count: count)
@@ -507,7 +507,7 @@ func profileMenuUpdate(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> Int32 {
 }
 
 @_cdecl("cfm_profile_menu_dismiss_v1")
-func profileMenuDismiss(_ session: UInt64) -> Int32 {
+public func profileMenuDismiss(_ session: UInt64) -> Int32 {
   guard Thread.isMainThread else { return 3 }
   return MainActor.assumeIsolated {
     guard let profileMenu, profileMenu.model.frame.session == session else { return 2 }
@@ -519,7 +519,7 @@ func profileMenuDismiss(_ session: UInt64) -> Int32 {
 /// The host supplies the actual WKWebView obtained from Tauri's with_webview
 /// callback. The pointer is borrowed for this call; it is never retained.
 @_cdecl("cfm_profile_menu_anchor_v1")
-func profileMenuAnchor(
+public func profileMenuAnchor(
   _ borrowedView: UnsafeMutableRawPointer?, _ clientX: Double, _ clientY: Double,
   _ viewportWidth: Double, _ viewportHeight: Double,
   _ windowNumber: UnsafeMutablePointer<Int64>?, _ screenX: UnsafeMutablePointer<Double>?,

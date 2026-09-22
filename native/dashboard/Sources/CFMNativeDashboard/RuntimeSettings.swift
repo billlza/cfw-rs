@@ -2,9 +2,9 @@ import AppKit
 import Observation
 import SwiftUI
 
-typealias RuntimeSettingsEventCallback =
+public typealias RuntimeSettingsEventCallback =
   @convention(c) (UInt, UInt64, UnsafePointer<UInt8>?, Int) -> Int32
-typealias RuntimeSettingsClosedCallback = @convention(c) (UInt, UInt64) -> Void
+public typealias RuntimeSettingsClosedCallback = @convention(c) (UInt, UInt64) -> Void
 
 struct RuntimeSettingsDraft: Codable, Equatable {
   enum Level: String, Codable, CaseIterable { case trace, debug, info, warn, error, fatal, silent }
@@ -567,7 +567,7 @@ final class RuntimeSettingsWindow: NSObject, NSWindowDelegate {
 @MainActor private var newestRuntimeSettingsSession: UInt64 = 0
 
 @_cdecl("cfm_runtime_settings_present_v1")
-func runtimeSettingsPresent(
+public func runtimeSettingsPresent(
   _ bytes: UnsafePointer<UInt8>?, _ count: Int,
   _ event: RuntimeSettingsEventCallback?, _ closed: RuntimeSettingsClosedCallback?,
   _ context: UInt
@@ -597,7 +597,7 @@ func runtimeSettingsPresent(
 }
 
 @_cdecl("cfm_runtime_settings_update_v1")
-func runtimeSettingsUpdate(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> Int32 {
+public func runtimeSettingsUpdate(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> Int32 {
   guard Thread.isMainThread else { return 3 }
   guard let bytes, count > 0, count <= RuntimeSettingsFrame.maximumBytes else { return 0 }
   let data = Data(bytes: bytes, count: count)
@@ -609,7 +609,7 @@ func runtimeSettingsUpdate(_ bytes: UnsafePointer<UInt8>?, _ count: Int) -> Int3
 }
 
 @_cdecl("cfm_runtime_settings_dismiss_v1")
-func runtimeSettingsDismiss(_ session: UInt64) -> Int32 {
+public func runtimeSettingsDismiss(_ session: UInt64) -> Int32 {
   guard Thread.isMainThread else { return 3 }
   return MainActor.assumeIsolated {
     guard let runtimeSettingsWindow, runtimeSettingsWindow.model.frame.session == session else {

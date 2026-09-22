@@ -34,6 +34,12 @@ SOURCE_PATHS = (
     "scripts/build_native_ui.sh", "scripts/dependency_pins.env",
 )
 LOCALES = frozenset({"en", "ja", "zh-Hans", "zh-Hant"})
+COMPONENT_EXPORTS = frozenset({
+    "cfm_profile_menu_present_v1", "cfm_profile_menu_update_v1",
+    "cfm_profile_menu_dismiss_v1", "cfm_profile_menu_anchor_v1",
+    "cfm_runtime_settings_present_v1", "cfm_runtime_settings_update_v1",
+    "cfm_runtime_settings_dismiss_v1",
+})
 METADATA_KEYS = frozenset({
     "productVersion", "buildNumber", "configuration", "target", "signingMode", "buildSystem",
     "uiSourceSha256", "repositoryCommit", "releaseSourceSha256",
@@ -151,6 +157,16 @@ def verify_load_paths(load_commands: str, linked_libraries: str) -> None:
             raise NativeUiArtifactError(f"UI library has a non-system runtime dependency: {dependency}")
 
 
+def verify_component_exports(symbols: str) -> None:
+    exports = {line.split()[-1][1:] for line in symbols.splitlines()
+               if line.split() and line.split()[-1].startswith("_cfm_")}
+    if exports != COMPONENT_EXPORTS:
+        raise NativeUiArtifactError(
+            "Release UI C exports differ from the component ABI: "
+            f"missing={sorted(COMPONENT_EXPORTS - exports)}, extra={sorted(exports - COMPONENT_EXPORTS)}"
+        )
+
+
 def verify_library(library: Path) -> None:
     regular(library, mode=0o755)
     if command(["/usr/bin/lipo", "-archs", str(library)]).strip() != "arm64":
@@ -160,6 +176,7 @@ def verify_library(library: Path) -> None:
         raise NativeUiArtifactError("UI library must support macOS 15.0")
     verify_load_paths(command(["/usr/bin/otool", "-l", str(library)]),
                       command(["/usr/bin/otool", "-L", str(library)]))
+    verify_component_exports(command(["/usr/bin/nm", "-gU", str(library)]))
 
 
 def remove_build_rpaths(library: Path) -> None:

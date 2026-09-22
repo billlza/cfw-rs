@@ -52,7 +52,7 @@ class CandidateFixture:
         self.context = context
         self.preview = context in bundle.PREVIEW_CONTEXTS
         self.version = "0.5.0" if self.preview else "0.4.0"
-        self.build = "50003" if self.preview else "40000"
+        self.build = "50004" if self.preview else "40000"
         self.signing = "pre-sign"
         private = []
         if context is ids.CandidateBundleContext.PREVIEW_PRE_SIGN:
@@ -183,6 +183,7 @@ class CandidateFixture:
         self.ui_dependencies = [ui.INSTALL_NAME, "/usr/lib/libSystem.B.dylib"]
         self.host_rpaths = ["@executable_path/../Frameworks"]
         self.ui_rpaths = ["@loader_path", "/usr/lib/swift"]
+        self.ui_exports = set(ui.COMPONENT_EXPORTS)
         for path in (self.app, *[p for p in self.app.rglob("*") if p.is_dir()]):
             path.chmod(0o755)
         for path in private:
@@ -202,6 +203,8 @@ class CandidateFixture:
             return "arm64\n"
         if tool == "vtool":
             return "platform MACOS\nminos 15.0\n"
+        if tool == "nm" and arguments[1] == "-gU" and path.name == ui.LIBRARY:
+            return "\n".join(f"0000000000010000 T _{name}" for name in sorted(self.ui_exports))
         if tool == "otool" and "-L" in arguments:
             dependencies = self.ui_dependencies if path.name == ui.LIBRARY else self.host_dependencies if path.name == "clash-for-mac" else ["/usr/lib/libSystem.B.dylib"]
             return linked(*dependencies)
@@ -248,6 +251,14 @@ class PreviewCandidateBundleTests(unittest.TestCase):
         fixture = self.fixture(ids.CandidateBundleContext.UNSIGNED_HOST)
         self.assertEqual(self.verify(fixture), 1)
         self.assertFalse((fixture.app / "Contents/Frameworks" / ui.LIBRARY).exists())
+
+    def test_preview_rejects_missing_or_unexpected_component_exports(self) -> None:
+        fixture = self.fixture()
+        for exports in (set(), set(ui.COMPONENT_EXPORTS) - {"cfm_profile_menu_present_v1"},
+                        set(ui.COMPONENT_EXPORTS) | {"cfm_unexpected"}):
+            fixture.ui_exports = exports
+            with self.subTest(exports=exports), self.assertRaisesRegex(bundle.CandidateError, "C exports differ"):
+                self.verify(fixture)
 
     def test_preview_and_release_contexts_cannot_be_crossed(self) -> None:
         preview = self.fixture()

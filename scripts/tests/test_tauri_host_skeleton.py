@@ -185,24 +185,24 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
 
     def test_preview_build_is_explicit_and_does_not_enable_rejected_dashboard(self) -> None:
         self.write_config({"version": "0.5.0", "bundle": {"macOS": {}}})
-        override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50004"}}})
-        completed = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50004"})
+        override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50005"}}})
+        completed = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50005"})
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         self.assertIn(b"[--features]\n[physical-release-evidence,native-ui]", completed.stdout)
         self.assertNotIn(b"native-dashboard", completed.stdout)
         for environment, config in [
             ({"CFW_BUILD_NUMBER": "40073"}, override),
-            ({"CFW_BUILD_NUMBER": "50005"}, override),
+            ({"CFW_BUILD_NUMBER": "50006"}, override),
             ({"CFW_BUILD_NUMBER": None}, override),
-            ({"CFW_BUILD_NUMBER": "50004"}, self.override),
-            ({"CFW_BUILD_NUMBER": "50004", "APPLE_SIGNING_IDENTITY": "unexpected"}, override),
+            ({"CFW_BUILD_NUMBER": "50005"}, self.override),
+            ({"CFW_BUILD_NUMBER": "50005", "APPLE_SIGNING_IDENTITY": "unexpected"}, override),
         ]:
             with self.subTest(environment=environment, override=config):
                 denied = self.run_contract(preview=True, override=config, environment_updates=environment)
                 self.assertNotEqual(denied.returncode, 0)
                 self.assertNotIn(b"[build]", denied.stdout)
         self.write_config({"version": "0.4.0", "bundle": {"macOS": {}}})
-        denied = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50004"})
+        denied = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50005"})
         self.assertNotEqual(denied.returncode, 0)
         self.assertNotIn(b"[build]", denied.stdout)
 

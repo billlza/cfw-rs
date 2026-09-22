@@ -309,6 +309,7 @@ struct RuntimeSettingsForm: View {
           GlassEffectContainer(spacing: 8) {
             HStack(spacing: 8) {
               Button(model.frame.labels.cancel, action: cancel).buttonStyle(.glass)
+                .keyboardShortcut(.cancelAction)
               Button(model.busy ? model.frame.labels.applying : model.frame.labels.apply) {
                 model.submit()
               }.buttonStyle(.glassProminent)
@@ -316,6 +317,7 @@ struct RuntimeSettingsForm: View {
           }
         } else {
           Button(model.frame.labels.cancel, action: cancel).buttonStyle(.bordered)
+            .keyboardShortcut(.cancelAction)
           Button(model.busy ? model.frame.labels.applying : model.frame.labels.apply) {
             model.submit()
           }.buttonStyle(.borderedProminent)

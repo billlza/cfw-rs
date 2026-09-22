@@ -446,9 +446,10 @@ mod tests {
     fn actual_parser_events_enforce_exact_resource_boundary() {
         assert_eq!(MAX_YAML_EVENTS, 200_000);
         let event_count = |body: &str| {
-            Parser::new_from_str(body)
-                .map(|step| step.expect("budget fixture must be valid YAML"))
-                .count()
+            Parser::new_from_str(body).fold(0, |count, step| {
+                step.expect("budget fixture must be valid YAML");
+                count + 1
+            })
         };
         let envelope_events = event_count("[]");
         assert_eq!(event_count("[x]"), envelope_events + 1);

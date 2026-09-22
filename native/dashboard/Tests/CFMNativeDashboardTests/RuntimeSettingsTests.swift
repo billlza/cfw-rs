@@ -323,6 +323,47 @@ struct RuntimeSettingsTests {
     #expect(ids == [1, 2])
   }
 
+  @Test @MainActor func escapeKeyEquivalentClosesWithoutFieldFocusAndRefusesBusyCancel() throws {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    let parent = NSWindow(
+      contentRect: NSRect(x: 100, y: 100, width: 850, height: 603),
+      styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    parent.isReleasedWhenClosed = false
+    parent.orderFront(nil)
+    defer { parent.close() }
+    let frame = try RuntimeSettingsFrame.decode(
+      runtimePayload(["windowNumber": parent.windowNumber]))
+    let probe = RuntimeProbe()
+    let controller = RuntimeSettingsWindow(
+      frame: frame, parent: parent, event: runtimeEvent,
+      closed: runtimeClosed, context: probe.context)
+    #expect(controller.show())
+    defer { controller.finish() }
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+    #expect(controller.panel.makeFirstResponder(nil))
+    let escape = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+        windowNumber: controller.panel.windowNumber, context: nil,
+        characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+    #expect(controller.model.submit() == 1)
+    _ = controller.panel.performKeyEquivalent(with: escape)
+    #expect(probe.closedSessions.isEmpty)
+    #expect(controller.panel.isVisible)
+    #expect(
+      controller.update(
+        try RuntimeSettingsFrame.decode(
+          runtimePayload([
+            "windowNumber": parent.windowNumber, "sequence": 2, "error": "Port is occupied",
+            "acknowledgedSubmission": 1,
+          ]))) == 1)
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+    #expect(controller.panel.performKeyEquivalent(with: escape))
+    #expect(probe.closedSessions == [1])
+    #expect(!controller.panel.isVisible)
+    #expect(probe.payloads.count == 1)
+  }
+
   @Test @MainActor func actualDialogRetainsDraftWhileHiddenAndRefusesBusyCancel() throws {
     NSApplication.shared.setActivationPolicy(.prohibited)
     let parent = NSWindow(

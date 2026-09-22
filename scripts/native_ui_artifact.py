@@ -89,6 +89,24 @@ def source_digest(repository: Path) -> str:
     return digest.hexdigest()
 
 
+def swift_compiler_version() -> str:
+    result = subprocess.run(
+        ["/usr/bin/xcrun", "swift", "--version"], check=False,
+        capture_output=True, text=True, timeout=30,
+    )
+    # Apple's driver writes its version banner on stderr even when --version
+    # succeeds. Admit that exact banner, while retaining rejection of warnings,
+    # failed commands and unexpected compiler/target output.
+    driver = result.stderr.strip()
+    if (
+        result.returncode != 0
+        or (driver and re.fullmatch(r"swift-driver version: [0-9]+(?:\.[0-9]+)+", driver) is None)
+        or re.fullmatch(r"Apple Swift version [^\r\n]+\nTarget: arm64-apple-macosx[0-9.]+\n", result.stdout) is None
+    ):
+        raise NativeUiArtifactError(f"Swift compiler identity failed ({result.returncode}): {result.stderr.strip()}")
+    return result.stdout.strip() + ("\n" + driver if driver else "")
+
+
 def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool) -> dict[str, str]:
     if __package__:
         from .release_build_identity import SIGNED_PREVIEW_IDENTITY
@@ -107,7 +125,7 @@ def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool
         "uiSourceSha256": source_digest(repository),
         **current_identity(repository, require_clean=clean),
         "xcodeVersion": pins["XCODE_VERSION"], "xcodeBuildVersion": pins["XCODE_BUILD_VERSION"],
-        "swiftVersion": command(["/usr/bin/xcrun", "swift", "--version"]).strip(),
+        "swiftVersion": swift_compiler_version(),
     }
 
 

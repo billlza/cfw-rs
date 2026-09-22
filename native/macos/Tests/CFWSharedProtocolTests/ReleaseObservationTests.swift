@@ -7,12 +7,12 @@ import Testing
 struct ReleaseObservationTests {
   @Test("preview observation requires its explicit version and build")
   func fixedPreviewIdentity() throws {
-    let candidate = try ReleaseObservationCandidate(version: "0.5.0", buildNumber: "50001")
+    let candidate = try ReleaseObservationCandidate(version: "0.5.0", buildNumber: "50002")
     #expect(candidate.version == "0.5.0")
-    #expect(candidate.buildNumber == "50001")
+    #expect(candidate.buildNumber == "50002")
     for (version, build) in [
-      ("0.5.0", "40073"), ("0.5.0", "50002"), ("0.5.1", "50001"),
-      ("0.5.0", "050001"), ("0.5.0", "５０００１"),
+      ("0.5.0", "40073"), ("0.5.0", "50001"), ("0.5.0", "50003"), ("0.5.1", "50002"),
+      ("0.5.0", "050002"), ("0.5.0", "５０００２"),
     ] {
       #expect(throws: ReleaseObservationError.invalidCandidate) {
         _ = try ReleaseObservationCandidate(version: version, buildNumber: build)

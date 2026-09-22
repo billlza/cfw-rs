@@ -1,0 +1,120 @@
+{
+  "boot_payload": {
+    "native_ui": {
+      "profile_menu": true,
+      "runtime_settings": true
+    },
+    "product": {
+      "name": "Clash for Mac",
+      "version": "0.5.0-test",
+      "license": "GPL-3.0-or-later",
+      "minimum_macos": "15.0",
+      "architecture": "arm64"
+    },
+    "migration_handoff": false,
+    "migration_handoff_status": {
+      "state": "idle"
+    },
+    "migration_handoff_renderer_ready": null
+  },
+  "read_settings_snapshot": {
+    "resolved_locale": "zh-Hans",
+    "persisted": true,
+    "settings": {
+      "theme": "light",
+      "font_family": "",
+      "language": "zh-Hans",
+      "retain_window_bounds": true,
+      "launch_at_login": false,
+      "silent_start": false,
+      "check_for_updates": false
+    },
+    "launch_at_login": {
+      "persisted_intent": false,
+      "live_status": "not_registered",
+      "matches_persisted_intent": true
+    }
+  },
+  "current_platform_design": {
+    "target": "macos-arm64",
+    "system_proxy_strategy": "TEST DATA — no system proxy access",
+    "helper_strategy": "TEST DATA — no helper",
+    "launchd_strategy": "TEST DATA — no launch service access",
+    "tun_strategy": "TEST DATA — no NetworkExtension",
+    "intel_supported": false,
+    "minimum_macos": "15.0"
+  },
+  "engine_snapshot": {
+    "snapshot": {
+      "desired_mode": "off",
+      "generation": 0,
+      "config_digest": null,
+      "state": {
+        "state": "off"
+      }
+    },
+    "capabilities": {
+      "system_proxy": true,
+      "tunnel": true,
+      "provider_management": false
+    },
+    "cutover_ready": false,
+    "cutover_unavailable_reason": "TEST DATA — no production engine",
+    "unavailable_reason": null
+  },
+  "geoip_database_status": {
+    "present": false,
+    "file_name": "geoip.metadb",
+    "path": null,
+    "mtime_ms": null,
+    "size_bytes": null
+  },
+  "legacy_retirement_status": {
+    "state": "cleared"
+  },
+  "network_diagnostics": {
+    "default_route_interface": null,
+    "service_order": [],
+    "services": [],
+    "recommended_clash_proxy_services": [],
+    "proxied_services": [],
+    "unavailable": [
+      "default_route_interface"
+    ]
+  },
+  "read_runtime_settings_snapshot": {
+    "settings": {
+      "preferred_mixed_port": null,
+      "log_level": "info",
+      "tunnel_mtu": 1500,
+      "allow_lan": false,
+      "lan_proxy": null
+    },
+    "revision": "fixture-runtime-0",
+    "effective": {
+      "mixed_port": 7890,
+      "log_level": "info",
+      "tunnel_mtu": 1500,
+      "ipv6_dns_enabled": true,
+      "lan_proxy": null
+    }
+  },
+  "profiles_snapshot": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "TEST DATA · 本地配置 A",
+      "active": true,
+      "bytes": 180,
+      "updated_epoch_secs": 1790000000,
+      "source_kind": "local"
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "TEST DATA · 本地配置 B",
+      "active": false,
+      "bytes": 180,
+      "updated_epoch_secs": 1790000000,
+      "source_kind": "local"
+    }
+  ]
+}

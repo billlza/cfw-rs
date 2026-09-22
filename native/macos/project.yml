@@ -9,7 +9,7 @@ options:
 settings:
   base:
     ARCHS: arm64
-    CFW_BUILD_NUMBER: 40000
+    CFW_BUILD_NUMBER: 50001
     # Release products provide a reviewed entitlement file (or none). Never let
     # Xcode inject development-only grants such as get-task-allow into a
     # Developer ID build driven by the `build` action.
@@ -26,7 +26,7 @@ settings:
     LM_FORCE_LINK_GENERATION: true
     GCC_TREAT_WARNINGS_AS_ERRORS: true
     MACOSX_DEPLOYMENT_TARGET: "15.0"
-    MARKETING_VERSION: 0.4.0
+    MARKETING_VERSION: 0.5.0
     ONLY_ACTIVE_ARCH: false
     SUPPORTS_MACCATALYST: false
     SWIFT_STRICT_CONCURRENCY: complete

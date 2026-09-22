@@ -62,7 +62,13 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             / "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/Info.plist",
         )
 
-    def make_app(self, root: Path, builds: tuple[str, str, str, str]) -> Path:
+    def make_app(
+        self,
+        root: Path,
+        builds: tuple[str, str, str, str],
+        *,
+        version: str = "0.4.0",
+    ) -> Path:
         app = root / "Clash for Mac.app"
         paths = self.identity_plists(app)
         for path, build in zip(paths, builds, strict=True):
@@ -70,7 +76,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             path.write_bytes(
                 plistlib.dumps(
                     {
-                        "CFBundleShortVersionString": "0.4.0",
+                        "CFBundleShortVersionString": version,
                         "CFBundleVersion": build,
                     }
                 )
@@ -1044,6 +1050,265 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             repository / "scripts/build_legacy_tombstone.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("--algorithm sha256-tree-v1", legacy_source)
+
+
+class SignedPreviewIdentityTests(unittest.TestCase):
+    identity_plists = staticmethod(ReleaseBuildIdentityTests.identity_plists)
+    make_app = ReleaseBuildIdentityTests.make_app
+    contexts = (
+        CandidateBundleContext.PREVIEW_PRE_SIGN,
+        CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK,
+        CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY,
+        CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT,
+    )
+
+    def make_pair(
+        self,
+        repository: Path,
+        context: CandidateBundleContext,
+        *,
+        attempt_id: str = "00000001",
+        builds: tuple[str, str, str, str] = ("50001",) * 4,
+        version: str = "0.5.0",
+    ) -> tuple[Path, Path, Path]:
+        ids = release_build_identity
+        if context is CandidateBundleContext.PREVIEW_PRE_SIGN:
+            output = ids.preview_preflight_root(repository)
+            app_root = output / "pre-sign"
+            native = ids.preview_native_products_root(repository)
+        elif context is CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT:
+            output = ids.preview_signing_output_root(repository)
+            app_root = ids.preview_signed_root(repository)
+            native = ids.preview_signed_native_products_root(repository)
+        else:
+            output = ids.preview_signing_attempt_output_root(repository, attempt_id, context)
+            app_root = output / "signing-input"
+            native = output / "signed-native-products"
+        native.mkdir(parents=True)
+        app_root.mkdir(parents=True, exist_ok=True)
+        if context is not CandidateBundleContext.PREVIEW_PRE_SIGN:
+            for path in (output, native):
+                path.chmod(0o700)
+            if context is not CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT:
+                for path in (app_root, output.parent, output.parent.parent, output.parent.parent.parent):
+                    path.chmod(0o700)
+        app = self.make_app(app_root, builds, version=version)
+        return app, native, output
+
+    def test_preview_identity_is_independent_and_exact(self) -> None:
+        ids = release_build_identity
+        self.assertEqual(ids.PRODUCT_VERSION, "0.4.0")
+        self.assertEqual(ids.ACTIVE_RELEASE_IDENTITY, ReleaseIdentity("0.4.0", "40073"))
+        self.assertEqual(ids.SIGNED_PREVIEW_IDENTITY.product_version, "0.5.0")
+        self.assertEqual(ids.SIGNED_PREVIEW_IDENTITY.build_number, "50001")
+        for version, build in (("0.4.0", "50001"), ("0.5.0", "40073"), ("0.5.0", "50002"), ("0.5.0", "050001")):
+            with self.subTest(version=version, build=build), self.assertRaises(BuildIdentityError):
+                ids.SignedPreviewIdentity(version, build)
+        repository = Path("/repository")
+        preflight = repository / "target/candidates/0.5.0/preview-preflight/50001"
+        root = repository / "target/candidates/0.5.0/preview/50001"
+        self.assertEqual(ids.preview_preflight_root(repository), preflight)
+        self.assertEqual(ids.preview_root(repository), root)
+        self.assertEqual(ids.preview_native_products_root(repository), preflight / "native-products")
+        self.assertEqual(ids.preview_signed_root(repository), root / "signed")
+        self.assertEqual(ids.preview_signing_input_root(repository), root / "signing-output/signing-input")
+        self.assertEqual(ids.preview_signed_native_products_root(repository), root / "signing-output/signed-native-products")
+        self.assertEqual(ids.preview_signing_attempts_root(repository), root / "transactions/signing-attempts")
+
+    def test_preview_bundle_requires_explicit_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(Path(directory), ("50001",) * 4, version="0.5.0")
+            self.assertEqual(
+                bundle_build_identity(app, expected_product_version="0.5.0"),
+                BundleBuildIdentity("0.5.0", "50001"),
+            )
+            with self.assertRaises(BuildIdentityError):
+                bundle_build_identity(app)
+            with self.assertRaises(BuildIdentityError):
+                bundle_build_identity(app, expected_product_version="0.6.0")
+
+    def test_all_preview_contexts_accept_exact_pairs(self) -> None:
+        for context in self.contexts:
+            with self.subTest(context=context), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                app, native, output = self.make_pair(repository, context)
+                value = candidate_bundle_verification_paths(repository, app, native, context)
+                self.assertEqual(value.build_identity, BundleBuildIdentity("0.5.0", "50001"))
+                self.assertEqual(value.context, context)
+                if context is not CandidateBundleContext.PREVIEW_PRE_SIGN:
+                    self.assertEqual(release_build_identity.preview_signing_output(repository, output).context, context)
+                    with self.assertRaises(BuildIdentityError):
+                        release_build_identity.candidate_signing_output(repository, output)
+
+    def test_preview_each_component_must_match_version_and_build(self) -> None:
+        for context in self.contexts:
+            for index in range(4):
+                for field, value in (("CFBundleVersion", "40073"), ("CFBundleShortVersionString", "0.4.0")):
+                    with self.subTest(context=context, index=index, field=field), tempfile.TemporaryDirectory() as directory:
+                        repository = Path(directory).resolve()
+                        app, native, _ = self.make_pair(repository, context)
+                        path = self.identity_plists(app)[index]
+                        document = plistlib.loads(path.read_bytes())
+                        document[field] = value
+                        path.write_bytes(plistlib.dumps(document))
+                        with self.assertRaises(BuildIdentityError):
+                            candidate_bundle_verification_paths(repository, app, native, context)
+
+    def test_preview_rejects_uniform_wrong_or_noncanonical_builds(self) -> None:
+        for build in ("40073", "40000", "50002", "050001", "50001\n", "0", "+50001", "9223372036854775808"):
+            with self.subTest(build=build), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                context = CandidateBundleContext.PREVIEW_PRE_SIGN
+                app, native, _ = self.make_pair(repository, context, builds=(build,) * 4)
+                with self.assertRaises(BuildIdentityError):
+                    candidate_bundle_verification_paths(repository, app, native, context)
+
+    def test_preview_native_output_has_exact_unallocated_root(self) -> None:
+        ids = release_build_identity
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            native = ids.preview_native_products_root(repository)
+            self.assertEqual(candidate_native_products_output(repository, str(native), "50001"), native)
+            derived = native.parent / "xcode-derived-data"
+            self.assertEqual(candidate_native_derived_data_output(repository, str(native), str(derived), "50001"), derived)
+            self.assertFalse((repository / "target").exists())
+            for build, output in (
+                ("40073", native), ("40000", native), ("050001", native), ("50002", native),
+                ("50001", ga_pre_sign_native_products_root(repository)),
+                ("50001", repository / "target/candidates/0.5.0/unsigned/native-products"),
+                ("50001", repository / "target/candidates/0.5.0/ga-preflight/50001/native-products"),
+                ("50001", native.parent / "nested/native-products"),
+            ):
+                with self.subTest(build=build, output=output), self.assertRaises(BuildIdentityError):
+                    candidate_native_products_output(repository, str(output), build)
+            with self.assertRaises(BuildIdentityError):
+                candidate_native_derived_data_output(repository, str(native), str(ga_preflight_root(repository) / "xcode-derived-data"), "50001")
+
+    def test_preview_pre_sign_only_accepts_two_exact_host_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            context = CandidateBundleContext.PREVIEW_PRE_SIGN
+            _, native, preflight = self.make_pair(repository, context)
+            built = self.make_app(preflight / "cargo/release/bundle/macos", ("50001",) * 4, version="0.5.0")
+            candidate_bundle_verification_paths(repository, built, native, context)
+            for root in (preflight / "other", release_build_identity.preview_signed_root(repository), repository / "outside"):
+                app = self.make_app(root, ("50001",) * 4, version="0.5.0")
+                with self.subTest(root=root), self.assertRaises(BuildIdentityError):
+                    candidate_bundle_verification_paths(repository, app, native, context)
+
+    def test_preview_and_ga_contexts_cannot_be_crossed(self) -> None:
+        for context in self.contexts:
+            with self.subTest(context=context), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                app, native, _ = self.make_pair(repository, context)
+                for old in (CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.SIGNING_ATTEMPT_WORK, CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY, CandidateBundleContext.CANONICAL_NATIVE_CONTENT):
+                    with self.subTest(old=old), self.assertRaises(BuildIdentityError):
+                        candidate_bundle_verification_paths(repository, app, native, old)
+                ga_app = self.make_app(ga_signed_root(repository), ("50001",) * 4, version="0.5.0")
+                with self.assertRaisesRegex(BuildIdentityError, "GA paths"):
+                    candidate_bundle_verification_paths(repository, ga_app, native, context)
+
+    def test_preview_attempts_refuse_stage_attempt_and_provenance_mixing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            work = CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
+            ready = CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY
+            app1, native1, _ = self.make_pair(repository, work)
+            app2, native2, _ = self.make_pair(repository, work, attempt_id="00000002")
+            app3, native3, _ = self.make_pair(repository, ready)
+            canonical = CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT
+            app4, native4, _ = self.make_pair(repository, canonical)
+            for app, native, context in (
+                (app1, native2, work), (app2, native1, work),
+                (app1, native3, work), (app3, native1, ready),
+                (app1, native1, ready), (app3, native3, work),
+                (app1, native4, canonical), (app4, native1, work),
+                (app1, native4, work),
+            ):
+                with self.subTest(app=app, native=native, context=context), self.assertRaises(BuildIdentityError):
+                    candidate_bundle_verification_paths(repository, app, native, context)
+
+    def test_preview_attempt_ids_and_context_are_closed(self) -> None:
+        fn = release_build_identity.preview_signing_attempt_output_root
+        context = CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
+        for attempt in ("00000000", "1", "000000001", "0000000x", "0000000１", "00000001\n", "../00000001"):
+            with self.subTest(attempt=attempt), self.assertRaises(BuildIdentityError):
+                fn(Path("/repo"), attempt, context)
+        for wrong in (CandidateBundleContext.PREVIEW_PRE_SIGN, CandidateBundleContext.SIGNING_ATTEMPT_WORK, "preview-signing-attempt-work"):
+            with self.subTest(context=wrong), self.assertRaises(BuildIdentityError):
+                fn(Path("/repo"), "00000001", wrong)
+        with self.assertRaises(BuildIdentityError):
+            ga_signing_attempt_output_root(Path("/repo"), "00000001", context)
+
+    def test_preview_private_directories_preserve_mode_and_owner_checks(self) -> None:
+        for level in range(6):
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                context = CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
+                app, native, output = self.make_pair(repository, context)
+                paths = (output, native, app.parent, output.parent, output.parent.parent, output.parent.parent.parent)
+                paths[level].chmod(0o755)
+                with self.assertRaisesRegex(BuildIdentityError, "0700"):
+                    candidate_bundle_verification_paths(repository, app, native, context)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            context = CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
+            _, _, output = self.make_pair(repository, context)
+            with patch("scripts.release_build_identity.os.geteuid", return_value=os.geteuid() + 1), self.assertRaisesRegex(BuildIdentityError, "current-user"):
+                release_build_identity.preview_signing_output(repository, output)
+
+    def test_preview_identity_files_keep_link_rejection(self) -> None:
+        for index in range(4):
+            for kind in ("symlink", "hardlink"):
+                with self.subTest(index=index, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    repository = Path(directory).resolve()
+                    context = CandidateBundleContext.PREVIEW_PRE_SIGN
+                    app, native, _ = self.make_pair(repository, context)
+                    path = self.identity_plists(app)[index]
+                    alias = path.with_name("linked.plist")
+                    if kind == "symlink":
+                        path.rename(alias)
+                        path.symlink_to(alias)
+                    else:
+                        os.link(path, alias)
+                    with self.assertRaisesRegex(BuildIdentityError, "single-link"):
+                        candidate_bundle_verification_paths(repository, app, native, context)
+
+    def test_preview_paths_reject_aliases_and_symlink_ancestors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            context = CandidateBundleContext.PREVIEW_PRE_SIGN
+            app, native, _ = self.make_pair(repository, context)
+            for alias in (str(app.parent) + "/./" + app.name, str(app.parent) + "//" + app.name):
+                with self.subTest(alias=alias), self.assertRaisesRegex(BuildIdentityError, "canonical absolute"):
+                    candidate_bundle_verification_paths(repository, alias, native, context)
+            original = native.parent
+            moved = original.with_name("relocated")
+            original.rename(moved)
+            original.symlink_to(moved, target_is_directory=True)
+            with self.assertRaises(BuildIdentityError):
+                candidate_bundle_verification_paths(repository, app, native, context)
+            with self.assertRaises(BuildIdentityError):
+                candidate_native_products_output(repository, str(native), "50001")
+
+    def test_preview_canonical_allows_verified_copies_not_preflight_or_ga_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            context = CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT
+            _, native, _ = self.make_pair(repository, context)
+            copy = self.make_app(repository / "target/notarization/preview-copy", ("50001",) * 4, version="0.5.0")
+            candidate_bundle_verification_paths(repository, copy, native, context)
+            pre_sign, _, _ = self.make_pair(repository, CandidateBundleContext.PREVIEW_PRE_SIGN)
+            with self.assertRaises(BuildIdentityError):
+                candidate_bundle_verification_paths(repository, pre_sign, native, context)
+            false_ga = self.make_app(repository / "target/candidates/0.5.0/ga/50001/signed", ("50001",) * 4, version="0.5.0")
+            with self.assertRaisesRegex(BuildIdentityError, "another candidate namespace"):
+                candidate_bundle_verification_paths(repository, false_ga, native, context)
+            ga_output = release_build_identity.ga_signing_output_root(repository)
+            ga_output.mkdir(parents=True)
+            ga_output.chmod(0o700)
+            with self.assertRaises(BuildIdentityError):
+                release_build_identity.preview_signing_output(repository, ga_output)
 
 
 if __name__ == "__main__":

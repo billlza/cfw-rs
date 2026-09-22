@@ -24,4 +24,4 @@ pub use settings::{
 };
 
 pub const PRODUCT_NAME: &str = "Clash for Mac";
-pub const PRODUCT_VERSION: &str = "0.4.0";
+pub const PRODUCT_VERSION: &str = "0.5.0";

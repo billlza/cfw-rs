@@ -105,10 +105,10 @@ REQUIRED_SWIFT_TARGET_INFO_PROBE = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "e10113e967081dcc4bbd4b6eeff5d6d1e5a739b1eabfd773584f9b9e95bacc41"
+    "4ebb87cf406067ed44ac7850b0281265c3566f8546698e1fc7d57f1886e10137"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "9ba5e2d3e600bee869f959a9e7ef32c12a7acbda329a2c39cf07f2834b7dc71c"
+    "132898156c66f2d3bf022cb3801de41a80f23a17a0d83f6506af3027bda6825d"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a

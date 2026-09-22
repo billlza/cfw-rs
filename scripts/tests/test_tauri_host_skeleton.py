@@ -63,6 +63,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         errexit: bool = True,
         readonly_caller_tauri: Path | None = None,
         runtime_verifier_failure_call: int | None = None,
+        preview: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         environment = dict(os.environ)
         for variable in SIGNING_VARIABLES:
@@ -110,8 +111,8 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
                 'readonly config_override="$4"; '
                 'readonly variable="caller-variable"; '
             )
+        shell += 'cfw_build_tauri_host_skeleton "$2" "$3" "$4"' + (' "$9"; ' if preview else '; ')
         shell += (
-            'cfw_build_tauri_host_skeleton "$2" "$3" "$4"; '
             "contract_test_status=$?; "
             'if [[ "$contract_test_status" -eq 0 && '
             '"$contract_test_runtime_verification_count" -ne 2 ]]; then '
@@ -134,6 +135,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             str(self.cargo_home),
             str(readonly_caller_tauri) if readonly_caller_tauri else "",
             str(runtime_verifier_failure_call or 0),
+            *( ["--native-ui-preview"] if preview else [] ),
         ]
         return subprocess.run(
             command,
@@ -180,6 +182,29 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             arguments,
         )
         self.assertNotIn("--no-sign", arguments)
+
+    def test_preview_build_is_explicit_and_does_not_enable_rejected_dashboard(self) -> None:
+        self.write_config({"version": "0.5.0", "bundle": {"macOS": {}}})
+        override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50001"}}})
+        completed = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50001"})
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertIn(b"[--features]\n[physical-release-evidence,native-ui]", completed.stdout)
+        self.assertNotIn(b"native-dashboard", completed.stdout)
+        for environment, config in [
+            ({"CFW_BUILD_NUMBER": "40073"}, override),
+            ({"CFW_BUILD_NUMBER": "50002"}, override),
+            ({"CFW_BUILD_NUMBER": None}, override),
+            ({"CFW_BUILD_NUMBER": "50001"}, self.override),
+            ({"CFW_BUILD_NUMBER": "50001", "APPLE_SIGNING_IDENTITY": "unexpected"}, override),
+        ]:
+            with self.subTest(environment=environment, override=config):
+                denied = self.run_contract(preview=True, override=config, environment_updates=environment)
+                self.assertNotEqual(denied.returncode, 0)
+                self.assertNotIn(b"[build]", denied.stdout)
+        self.write_config({"version": "0.4.0", "bundle": {"macOS": {}}})
+        denied = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50001"})
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertNotIn(b"[build]", denied.stdout)
 
     def test_runner_isolated_from_readonly_caller_variables_without_errexit(self) -> None:
         caller_tauri = self.root / "caller-tauri"

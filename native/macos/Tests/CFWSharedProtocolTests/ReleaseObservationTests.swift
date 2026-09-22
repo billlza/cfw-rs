@@ -5,6 +5,21 @@ import Testing
 
 @Suite("Release observation")
 struct ReleaseObservationTests {
+  @Test("preview observation requires its explicit version and build")
+  func fixedPreviewIdentity() throws {
+    let candidate = try ReleaseObservationCandidate(version: "0.5.0", buildNumber: "50001")
+    #expect(candidate.version == "0.5.0")
+    #expect(candidate.buildNumber == "50001")
+    for (version, build) in [
+      ("0.5.0", "40073"), ("0.5.0", "50002"), ("0.5.1", "50001"),
+      ("0.5.0", "050001"), ("0.5.0", "５０００１"),
+    ] {
+      #expect(throws: ReleaseObservationError.invalidCandidate) {
+        _ = try ReleaseObservationCandidate(version: version, buildNumber: build)
+      }
+    }
+  }
+
   @Test("candidate build number accepts ASCII decimal digits only")
   func candidateBuildNumberIsASCIIDecimal() throws {
     #expect(

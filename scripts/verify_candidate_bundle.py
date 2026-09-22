@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate an unsigned or signed 0.4.0 app skeleton without launching it."""
+"""Validate a release or explicitly scoped signed-preview bundle without launching it."""
 
 from __future__ import annotations
 
@@ -16,10 +16,13 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
+    from . import native_ui_artifact
     from .hash_artifact import build_manifest
     from .hash_native_build_inputs import build_digest as native_build_digest
     from .release_build_identity import (
         CandidateBundleContext,
+        PRODUCT_VERSION,
+        SIGNED_PREVIEW_IDENTITY,
         candidate_bundle_verification_paths,
     )
     from .repository_source_identity import (
@@ -27,10 +30,13 @@ if __package__:
         current_identity as repository_source_identity,
     )
 else:
+    import native_ui_artifact
     from hash_artifact import build_manifest
     from hash_native_build_inputs import build_digest as native_build_digest
     from release_build_identity import (
         CandidateBundleContext,
+        PRODUCT_VERSION,
+        SIGNED_PREVIEW_IDENTITY,
         candidate_bundle_verification_paths,
     )
     from repository_source_identity import (
@@ -39,7 +45,14 @@ else:
     )
 
 
-EXPECTED_VERSION = "0.4.0"
+EXPECTED_VERSION = PRODUCT_VERSION
+PREVIEW_CONTEXTS = frozenset({
+    CandidateBundleContext.PREVIEW_PRE_SIGN,
+    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK,
+    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY,
+    CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT,
+})
+NATIVE_BRIDGE_INSTALL_NAME = "@rpath/CFWNativeBridge.framework/Versions/A/CFWNativeBridge"
 EXPECTED_APP_ID = "com.bill.clashformac"
 EXPECTED_AGENT_ID = "com.bill.clashformac.proxy-agent"
 EXPECTED_EXTENSION_ID = "com.bill.clashformac.packet-tunnel"
@@ -405,6 +418,71 @@ def classify_binary(path: Path) -> bool:
     return macho
 
 
+def verify_preview_ui(
+    repository: Path,
+    app: Path,
+    native_products: Path,
+    *,
+    context: CandidateBundleContext,
+) -> None:
+    if context not in PREVIEW_CONTEXTS:
+        raise CandidateError("native UI bundle verification requires a preview context")
+    signing = "pre-sign" if context is CandidateBundleContext.PREVIEW_PRE_SIGN else "developer-id"
+    build = SIGNED_PREVIEW_IDENTITY.build_number
+    try:
+        # Validate the staged bytes and their exact source/toolchain metadata
+        # before comparing the embedded copies against those same manifests.
+        native_ui_artifact.verify_products(
+            repository, native_products, build=build, signing=signing
+        )
+        metadata = native_ui_artifact.expected_metadata(
+            repository, build, signing=signing, clean=False
+        )
+        library = app / "Contents/Frameworks" / native_ui_artifact.LIBRARY
+        resources = app / "Contents/Resources" / native_ui_artifact.RESOURCES
+        native_ui_artifact.verify_library(library)
+        native_ui_artifact.verify_resources(resources)
+        verify_embedded_file(
+            library,
+            native_products / (native_ui_artifact.LIBRARY + ".manifest.json"),
+            build,
+            metadata,
+        )
+        verify_embedded_tree(
+            resources,
+            native_products / (native_ui_artifact.RESOURCES + ".manifest.json"),
+            build,
+            metadata,
+        )
+    except (ValueError, OSError, SourceIdentityError, subprocess.SubprocessError) as error:
+        raise CandidateError(f"preview UI artifact verification failed: {error}") from error
+
+
+def verify_preview_host_links(linked_libraries: str, load_commands: str) -> None:
+    dependencies = [
+        line.strip().split(" (", 1)[0] for line in linked_libraries.splitlines()[1:]
+    ]
+    for required in (NATIVE_BRIDGE_INSTALL_NAME, native_ui_artifact.INSTALL_NAME):
+        if dependencies.count(required) != 1:
+            raise CandidateError(f"preview Host must link exactly once to {required}")
+    for dependency in dependencies:
+        if dependency in {NATIVE_BRIDGE_INSTALL_NAME, native_ui_artifact.INSTALL_NAME}:
+            continue
+        if (
+            not dependency.startswith(("/System/Library/", "/usr/lib/"))
+            or any(part in {".", ".."} for part in dependency.split("/"))
+            or "//" in dependency
+        ):
+            raise CandidateError(f"preview Host has an unexpected runtime dependency: {dependency}")
+    paths = re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.+?) \(offset \d+\)", load_commands)
+    if (
+        paths.count("@executable_path/../Frameworks") != 1
+        or len(paths) != len(set(paths))
+        or any(path not in {"@executable_path/../Frameworks", "/usr/lib/swift"} for path in paths)
+    ):
+        raise CandidateError("preview Host has missing, duplicate or unexpected runtime search paths")
+
+
 def verify_candidate(
     repository: Path,
     app: str | Path,
@@ -424,13 +502,15 @@ def verify_candidate(
     app = verification_paths.app
     native_products = verification_paths.native_products
     build_identity = verification_paths.build_identity
+    preview = context in PREVIEW_CONTEXTS
+    expected_version = SIGNED_PREVIEW_IDENTITY.product_version if preview else EXPECTED_VERSION
     native_metadata = current_native_build_metadata(repository)
 
     tauri = json.loads(
         (repository / "apps/cfw-tauri-shell/tauri.conf.json").read_text(encoding="utf-8")
     )
-    if tauri.get("version") != EXPECTED_VERSION:
-        raise CandidateError("Tauri configuration version differs from the 0.4.0 release contract")
+    if tauri.get("version") != expected_version:
+        raise CandidateError(f"Tauri configuration version differs from the {expected_version} contract")
 
     contents = app / "Contents"
     info_path = contents / "Info.plist"
@@ -459,7 +539,7 @@ def verify_candidate(
         extension_binary,
     ):
         require_regular_file(file_path)
-    if context is CandidateBundleContext.UNSIGNED_HOST:
+    if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.PREVIEW_PRE_SIGN}:
         verify_unsigned_host_skeleton(app)
 
     system_extensions_root = contents / "Library/SystemExtensions"
@@ -492,7 +572,7 @@ def verify_candidate(
     ):
         require_plist_value(plist, "CFBundleIdentifier", identifier, path)
         require_plist_value(plist, "CFBundlePackageType", package_type, path)
-        require_plist_value(plist, "CFBundleShortVersionString", EXPECTED_VERSION, path)
+        require_plist_value(plist, "CFBundleShortVersionString", expected_version, path)
         require_plist_value(plist, "LSMinimumSystemVersion", EXPECTED_MINIMUM_SYSTEM, path)
 
     network_extension = extension_info.get("NetworkExtension")
@@ -551,6 +631,8 @@ def verify_candidate(
         build_identity.build_version,
         native_metadata,
     )
+    if preview:
+        verify_preview_ui(repository, app, native_products, context=context)
     staged_tombstone = native_products / "CFWLegacyTombstone/cfw-helper-tombstone"
     require_regular_file(staged_tombstone)
     if sha256(tombstone) != sha256(staged_tombstone):
@@ -629,15 +711,17 @@ def verify_candidate(
         verify_macho(binary)
 
     main_links = command_output(["otool", "-L", str(main_binary)])
-    if "@rpath/CFWNativeBridge.framework/Versions/A/CFWNativeBridge" not in main_links:
+    if NATIVE_BRIDGE_INSTALL_NAME not in main_links:
         raise CandidateError("host executable is not linked to the fixed native bridge")
     load_commands = command_output(["otool", "-l", str(main_binary)])
     if "path @executable_path/../Frameworks" not in load_commands:
         raise CandidateError("host executable has no bundle-relative Frameworks rpath")
+    if preview:
+        verify_preview_host_links(main_links, load_commands)
 
     print(f"candidate bundle verified: {app}")
     print(
-        f"identity: {EXPECTED_VERSION} ({build_identity.build_version}) / "
+        f"identity: {expected_version} ({build_identity.build_version}) / "
         f"arm64 / macOS {EXPECTED_MINIMUM_SYSTEM}+"
     )
     print(f"Mach-O objects: {len(macho_files)}")

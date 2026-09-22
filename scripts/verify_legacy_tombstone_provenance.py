@@ -22,6 +22,7 @@ if __package__:
         CandidateBundleContext,
         candidate_bundle_verification_paths,
         ga_root,
+        preview_native_products_root,
     )
     from .release_regular_file import (
         ReleaseRegularFileError,
@@ -38,6 +39,7 @@ else:
         CandidateBundleContext,
         candidate_bundle_verification_paths,
         ga_root,
+        preview_native_products_root,
     )
     from release_regular_file import (
         ReleaseRegularFileError,
@@ -62,6 +64,17 @@ RETIRED_MARKERS: Final = (
     b"core install",
     b"want_core",
 )
+SIGNED_PREVIEW_CONTEXTS: Final = frozenset({
+    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK,
+    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY,
+    CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT,
+})
+SIGNED_CONTEXTS: Final = frozenset({
+    CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+    CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
+    CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+    *SIGNED_PREVIEW_CONTEXTS,
+})
 
 
 class LegacyTombstoneProvenanceError(ValueError):
@@ -192,7 +205,7 @@ def verify_legacy_tombstone_provenance(
         raise LegacyTombstoneProvenanceError("Rust version is not canonical")
     if (
         not isinstance(context, CandidateBundleContext)
-        or context is CandidateBundleContext.UNSIGNED_HOST
+        or context not in SIGNED_CONTEXTS
     ):
         raise LegacyTombstoneProvenanceError(
             "legacy tombstone requires one signed candidate bundle context"
@@ -210,9 +223,15 @@ def verify_legacy_tombstone_provenance(
         (signed_artifact, "signed legacy tombstone root"),
     ):
         _require_owned_directory(artifact_root, label=label)
-    if unsigned_artifact.parent != ga_root(repository) / "native-products":
+    preview = context in SIGNED_PREVIEW_CONTEXTS
+    expected_pre_sign_root = (
+        preview_native_products_root(repository)
+        if preview else ga_root(repository) / "native-products"
+    )
+    if unsigned_artifact.parent != expected_pre_sign_root:
         raise LegacyTombstoneProvenanceError(
-            "pre-sign native-products root is not the fixed active GA root"
+            "pre-sign native-products root is not the fixed "
+            + ("preview preflight root" if preview else "active GA root")
         )
     try:
         verification_paths = candidate_bundle_verification_paths(
@@ -366,7 +385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=tuple(
             context.value
             for context in CandidateBundleContext
-            if context is not CandidateBundleContext.UNSIGNED_HOST
+            if context in SIGNED_CONTEXTS
         ),
         required=True,
     )

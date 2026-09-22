@@ -476,7 +476,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cfw-apple-network"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cfw-engine-api",
  "core-foundation",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-application"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cfw-controller",
  "cfw-engine-api",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-controller"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-engine-api"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cfw-singbox-config",
  "serde",
@@ -543,11 +543,11 @@ dependencies = [
 
 [[package]]
 name = "cfw-legacy-tombstone"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "cfw-platform"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-profiles"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cfw-singbox-config",
  "libc",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-release-verifier"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "minisign-verify",
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-singbox-config"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "regex",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-tauri-shell"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "cc",

@@ -39,7 +39,7 @@ impl LaunchRecoveryFailureCategory {
                 "Recovery must run in the signed migration session. Select Open Recovery to start that session; no recovery action ran in this dashboard."
             }
             Self::Admission => {
-                "The migration session could not verify the installed, signed, notarized 0.4.0 app. Reinstall the release in /Applications and ensure Gatekeeper is enabled, then reopen Recovery; no recovery action ran."
+                "The migration session could not verify the installed, signed, notarized application. Reinstall the release in /Applications and ensure Gatekeeper is enabled, then reopen Recovery; no recovery action ran."
             }
             Self::Recovery => {
                 "The interrupted pre-network cutover could not prove the legacy network intact, durably seal NetworkRetiring, or safely finish the journal-bound legacy GUI exit. Do not relaunch the legacy app or change network settings; review the local migration log, then retry Recovery."

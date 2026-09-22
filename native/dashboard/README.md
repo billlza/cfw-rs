@@ -100,3 +100,11 @@ not establish any performance improvement over the full 40073 application.
 Remaining: migrate profiles, nodes, settings, connections, rules and diagnostics; native app lifecycle,
 menu bar and update/migration composition; screen-reader and oldest-OS tests;
 installed real-state validation and full comparative performance/network evidence.
+
+## Inspecting the UI locally
+
+`Preview/build-preview.sh` produces an independently named, locally signed UI
+preview for side-by-side inspection. It uses this exact presentation library,
+shows a persistent sample-data notice and disables every network control. It
+never starts the production Rust host or its native networking services. See
+`Preview/README.md` for scope, packaging and the actual AppKit self-check.

@@ -180,9 +180,23 @@ struct OverviewView: View {
 }
 
 enum DashboardStrings {
+  // Packaged hosts carry resources inside Contents/Resources. Unbundled
+  // development and test executables retain SwiftPM's standard lookup.
+  private static var resourceBundle: Bundle? {
+    if Bundle.main.bundleURL.pathExtension == "app" {
+      guard
+        let url = Bundle.main.url(
+          forResource: "CFMNativeDashboard_CFMNativeDashboard", withExtension: "bundle")
+      else { return nil }
+      return Bundle(url: url)
+    }
+    return Bundle.module
+  }
+
   static func text(_ key: String, locale: String) -> String {
     guard
-      let url = Bundle.module.url(
+      let resources = resourceBundle,
+      let url = resources.url(
         forResource: "Localizable", withExtension: "strings", subdirectory: nil,
         localization: locale),
       let bundle = Bundle(url: url.deletingLastPathComponent())

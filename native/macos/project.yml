@@ -9,7 +9,7 @@ options:
 settings:
   base:
     ARCHS: arm64
-    CFW_BUILD_NUMBER: 50005
+    CFW_BUILD_NUMBER: 50006
     # Release products provide a reviewed entitlement file (or none). Never let
     # Xcode inject development-only grants such as get-task-allow into a
     # Developer ID build driven by the `build` action.

@@ -31,7 +31,7 @@ class SignedPreviewShellTests(unittest.TestCase):
     def test_signed_contexts_select_fixed_independent_version_and_preflight_paths(self) -> None:
         for prefix, version, build, preflight in (
             ("", "0.4.0", "40073", "target/candidates/0.4.0/ga/40073"),
-            ("preview-", "0.5.0", "50005", "target/candidates/0.5.0/preview-preflight/50005"),
+            ("preview-", "0.5.0", "50006", "target/candidates/0.5.0/preview-preflight/50006"),
         ):
             for stage in ("signing-attempt-work", "signing-attempt-publish-ready", "canonical-native-content"):
                 context = prefix + stage

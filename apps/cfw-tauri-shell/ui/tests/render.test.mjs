@@ -351,7 +351,12 @@ const initialLiveSettings = responses.read_settings_snapshot;
 const slowLoginItemQuery = deferred();
 let initialLiveQueryPending = true;
 let bootstrapReady = false;
-globalThis.window.__CFM_STARTUP__ = { ready() { bootstrapReady = true; } };
+let bootstrapFailed = false;
+const bootstrapOutcome = deferred();
+globalThis.window.__CFM_STARTUP__ = {
+  ready() { bootstrapReady = true; bootstrapOutcome.resolve(); },
+  fail() { bootstrapFailed = true; bootstrapOutcome.resolve(); },
+};
 responses.read_settings_snapshot = (args) => {
   if (args?.includeLoginItemStatus === false) {
     return {
@@ -381,7 +386,13 @@ globalThis.window.__TAURI_INTERNALS__ = {
   },
   async invoke(command, args) {
     if (command === "plugin:event|listen") {
+      if (args.event === "cfw://engine-event" && startupRaceCase === "listen-refused") {
+        throw new Error("engine listener registration refused");
+      }
       listeners.set(args.event, callbacks.get(args.handler));
+      if (args.event === "cfw://engine-event" && startupRaceCase === "after-subscribe") {
+        await completeInitialNativeReconciliation();
+      }
       return nextCallbackId;
     }
     if (command === "plugin:event|unlisten") return null;
@@ -397,9 +408,64 @@ globalThis.window.__TAURI_INTERNALS__ = {
   },
 };
 
+// Execute the real bootstrap under deterministic native/event timing. The
+// matrix test runs this harness in fresh Node processes for the other cases.
+const startupRaceCase = process.env.CFM_TEST_STARTUP_RACE ?? "running";
+assert.ok(["running", "off", "failed", "listen-refused", "after-subscribe", "stale-read"].includes(startupRaceCase));
+const initialProfilesSnapshot = responses.profiles_snapshot;
+let nativeCompletionBeforeListener = false;
+let initialCompletionDelivered = false;
+const pendingEngine = {
+  ...OFF_ENGINE,
+  snapshot: { desired_mode: "off", generation: 1, config_digest: null,
+    state: { state: "failed", generation: 1, target: "off",
+      error: "native startup reconciliation is pending" } },
+};
+const failedReconciliation = {
+  ...pendingEngine,
+  snapshot: { ...pendingEngine.snapshot,
+    state: { ...pendingEngine.snapshot.state, error: "native service status unavailable" } },
+};
+responses.engine_snapshot = pendingEngine;
+async function completeInitialNativeReconciliation() {
+  if (initialCompletionDelivered) return;
+  initialCompletionDelivered = true;
+  responses.profiles_snapshot = initialProfilesSnapshot;
+  responses.engine_snapshot = startupRaceCase === "off" ? OFF_ENGINE
+    : startupRaceCase === "failed" ? failedReconciliation : RUNNING_ENGINE;
+  const listener = listeners.get("cfw://engine-event");
+  nativeCompletionBeforeListener = !listener;
+  if (startupRaceCase === "stale-read") {
+    responses.engine_snapshot = () => {
+      const delayed = deferred();
+      responses.engine_snapshot = RUNNING_ENGINE;
+      queueMicrotask(async () => {
+        try {
+          await listeners.get("cfw://engine-event")({ event: "cfw://engine-event", payload: { type: "snapshot_changed" } });
+          delayed.resolve(OFF_ENGINE);
+        } catch (error) { delayed.reject(error); }
+      });
+      return delayed.promise;
+    };
+  }
+  if (listener) await listener({ event: "cfw://engine-event", payload: { type: "snapshot_changed" } });
+}
+responses.profiles_snapshot = async () => {
+  if (startupRaceCase !== "after-subscribe") await completeInitialNativeReconciliation();
+  return initialProfilesSnapshot;
+};
+
 const appModule = await import("../src/app.js");
 const { PAGES, state, runtime } = await import("../src/state.js");
-await new Promise((resolve) => setTimeout(resolve, 150));
+let bootstrapDeadline;
+try {
+  await Promise.race([
+    bootstrapOutcome.promise,
+    new Promise((_, reject) => { bootstrapDeadline = setTimeout(() => reject(new Error("bootstrap did not settle")), 2000); }),
+  ]);
+} finally { clearTimeout(bootstrapDeadline); }
+const startupObservedEngine = structuredClone(state.engine);
+const startupInvocationCommands = invoked.slice();
 const responsiveBeforeLoginItemReply = bootstrapReady && listeners.has("cfw://page");
 const loginItemWasPending = state.launchAtLogin.liveStatus === "checking";
 // The remainder of this file exercises app.js's standalone fatal boundary;
@@ -634,6 +700,24 @@ function interactiveElement(tag = "button") {
   });
   return node;
 }
+
+test("startup engine snapshot handshake retains authoritative state", () => {
+  assert.equal(nativeCompletionBeforeListener, startupRaceCase !== "after-subscribe");
+  assert.equal(bootstrapReady, startupRaceCase !== "listen-refused");
+  assert.equal(bootstrapFailed, startupRaceCase === "listen-refused");
+  const expectedActive = ["running", "after-subscribe", "stale-read"].includes(startupRaceCase);
+  assert.equal(startupObservedEngine.active, expectedActive);
+  if (startupRaceCase === "failed") {
+    assert.equal(startupObservedEngine.availabilityReason, "native service status unavailable");
+  } else if (startupRaceCase === "listen-refused") {
+    assert.equal(startupObservedEngine.availabilityReason, "native startup reconciliation is pending");
+  } else {
+    assert.equal(startupObservedEngine.availabilityReason, null);
+  }
+  for (const command of ["apply_active_profile", "set_core_enabled", "set_system_proxy_enabled", "set_tun_enabled", "set_proxy_mode", "select_profile", "select_proxy", "write_runtime_settings_snapshot", "write_automation_settings"]) {
+    assert.equal(startupInvocationCommands.includes(command), false, `startup observation must not invoke ${command}`);
+  }
+});
 
 test("bootstrap reaches the dashboard instead of the fatal handler", () => {
   assert.equal(documentStub.body.innerHTML.includes("fatal"), false);

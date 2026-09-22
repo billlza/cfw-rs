@@ -4128,11 +4128,6 @@ async function bootstrap() {
   void networkDiagnostics.finally(() => {
     if (state.activePage === "settings") renderPage();
   });
-  void (async () => {
-    if (await loadControllerSnapshotWithRetry()) {
-      if (state.activePage === "rules") await loadRulesSnapshot();
-    }
-  })().finally(renderPage);
 
   document.getElementById("reload-button").addEventListener("click", reloadPayload);
 
@@ -4271,6 +4266,18 @@ async function bootstrap() {
   });
 
   criticalMigrationListenersBound = true;
+  // Native reconciliation can finish after the first snapshot but before the
+  // event subscriptions above. Events have no replay, so close that interval
+  // with one current read after both engine listeners are installed. Future
+  // transitions use the listeners; reads never retry native reconciliation.
+  await loadEngineStatus();
+  await loadRuntimeProjection();
+  renderPage();
+  void (async () => {
+    if (await loadControllerSnapshotWithRetry()) {
+      if (state.activePage === "rules") await loadRulesSnapshot();
+    }
+  })().finally(renderPage);
   if (state.migrationHandoff) {
     // Close the snapshot/listener gap without requesting another boot challenge
     // in this renderer lifetime. A real WebView reload receives the next

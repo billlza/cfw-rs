@@ -88,7 +88,9 @@ def _resolve_dns(
             0,
         )
     except socket.gaierror as error:
-        raise PacketSendError("product DNS resolution did not complete") from error
+        raise PacketSendError(
+            f"product DNS resolution did not complete (getaddrinfo errno={error.errno})"
+        ) from error
     addresses: set[str] = set()
     for record in records:
         if len(record) != 5 or not isinstance(record[4], tuple) or not record[4]:

@@ -491,6 +491,12 @@ else:
         self.assertNotIn("unbounded internal cleanup detail", primary_error.__notes__[0])
 
     def test_aborted_host_state_still_invokes_exactly_one_terminal_cleanup(self) -> None:
+        self._check_aborted_host_cleanup()
+
+    def test_aborted_final_mismatch_retains_callback_and_validated_protocol_frames(self) -> None:
+        self._check_aborted_host_cleanup(finish_fails=True)
+
+    def _check_aborted_host_cleanup(self, *, finish_fails: bool = False) -> None:
         terminal_messages: list[dict[str, object]] = []
         worker: threading.Thread | None = None
 
@@ -568,11 +574,14 @@ else:
             return 4242
 
         cleanup_calls = 0
+        callback_error = RuntimeError("fixture terminal callback failed")
 
         def finish(terminal: object) -> PacketCaptureDisposition:
             nonlocal cleanup_calls
             self.assertIsInstance(terminal, packet_host.PacketHostAborted)
             cleanup_calls += 1
+            if finish_fails:
+                raise callback_error
             return PacketCaptureDisposition.COMPLETE
 
         with patch.object(packet_host, "_validate_host_executable"), patch.object(
@@ -588,17 +597,29 @@ else:
         if worker is not None:
             worker.join(timeout=2)
             self.assertFalse(worker.is_alive())
-        self.assertEqual(raised.exception.code, "observation_failed")
+        self.assertEqual(raised.exception.code, "host_result_inconsistent" if finish_fails else "observation_failed")
+        if finish_fails:
+            self.assertIs(raised.exception.__cause__, callback_error)
+            context = raised.exception.protocol_context
+            self.assertEqual(context["expected_failure_code"], "capture_cancelled")
+            self.assertEqual(context["terminal"]["document"], "cfw-packet-host-capture-aborted-v5")
+            self.assertEqual(context["final"]["code"], "observation_failed")
         self.assertEqual(cleanup_calls, 1)
         self.assertEqual(
             [message["document"] for message in terminal_messages],
             [
                 "cfw-packet-collector-capture-started-v5",
-                "cfw-packet-collector-capture-completed-v5",
+                "cfw-packet-collector-capture-complete-failed-v5" if finish_fails else "cfw-packet-collector-capture-completed-v5",
             ],
         )
 
     def test_failed_begin_still_invokes_exactly_one_terminal_cleanup(self) -> None:
+        self._check_failed_begin_cleanup()
+
+    def test_begin_final_mismatch_retains_callback_and_validated_protocol_frames(self) -> None:
+        self._check_failed_begin_cleanup(mismatch=True)
+
+    def _check_failed_begin_cleanup(self, *, mismatch: bool = False) -> None:
         stage_messages: list[dict[str, object]] = []
         worker: threading.Thread | None = None
 
@@ -664,7 +685,7 @@ else:
                         channel,
                         {
                             "case_id": request["case_id"],
-                            "code": "capture_cancelled",
+                            "code": "app_control_invalid" if mismatch else "capture_cancelled",
                             "document": "cfw-packet-host-failed-v5",
                             "schema_version": 5,
                             "sequence": 8,
@@ -679,6 +700,12 @@ else:
             return 4243
 
         cleanup_calls = 0
+        callback_error = RuntimeError("fixture start callback failed")
+
+        def begin(_baseline: object) -> PacketCaptureDisposition:
+            if mismatch:
+                raise callback_error
+            return PacketCaptureDisposition.CANCELLED
 
         def finish(terminal: object) -> PacketCaptureDisposition:
             nonlocal cleanup_calls
@@ -692,14 +719,20 @@ else:
             with self.assertRaises(PacketHostError) as raised:
                 run_fixed_host_transaction(
                     case_id="tcp-ipv4",
-                    begin_capture=lambda _ready: PacketCaptureDisposition.CANCELLED,
+                    begin_capture=begin,
                     exercise_test=lambda _ready: self.fail("test stage must not run"),
                     finish_capture=finish,
                 )
         if worker is not None:
             worker.join(timeout=2)
             self.assertFalse(worker.is_alive())
-        self.assertEqual(raised.exception.code, "capture_cancelled")
+        self.assertEqual(raised.exception.code, "host_result_inconsistent" if mismatch else "capture_cancelled")
+        if mismatch:
+            self.assertIs(raised.exception.__cause__, callback_error)
+            context = raised.exception.protocol_context
+            self.assertEqual(context["expected_failure_code"], "capture_cancelled")
+            self.assertEqual(context["terminal"]["document"], "cfw-packet-host-baseline-restored-v5")
+            self.assertEqual(context["final"]["code"], "app_control_invalid")
         self.assertEqual(cleanup_calls, 1)
         self.assertEqual(
             [message["document"] for message in stage_messages],

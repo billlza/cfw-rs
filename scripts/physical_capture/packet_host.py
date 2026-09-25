@@ -148,6 +148,7 @@ class PacketHostError(RuntimeError):
         self.code = code
         self.cleanup_code: str | None = None
         self.cleanup_context: str | None = None
+        self.protocol_context: dict[str, Any] | None = None
 
     def attach_cleanup_context(self, cleanup_error: BaseException) -> None:
         """Retain this primary failure while exposing a secondary cleanup failure."""
@@ -1158,10 +1159,16 @@ def run_fixed_host_transaction(
                 finish_disposition=finish_disposition,
             )
             if failure["code"] != expected_failure:
-                raise PacketHostError(
+                mismatch = PacketHostError(
                     "host_result_inconsistent",
                     "Packet Host failure differs from begin or terminal cleanup",
                 )
+                mismatch.protocol_context = {
+                    "expected_failure_code": expected_failure,
+                    "terminal": progress,
+                    "final": final,
+                }
+                raise mismatch from (callback_errors[0] if callback_errors else None)
             if callback_errors and failure["code"] == "capture_cancelled":
                 raise PacketHostError(
                     "capture_callback_failed",
@@ -1259,10 +1266,16 @@ def run_fixed_host_transaction(
                 finish_disposition=finish_disposition,
             )
             if expected_failure is not None and failure["code"] != expected_failure:
-                raise PacketHostError(
+                mismatch = PacketHostError(
                     "host_result_inconsistent",
                     "Packet Host terminal failure differs from its cleanup disposition",
                 )
+                mismatch.protocol_context = {
+                    "expected_failure_code": expected_failure,
+                    "terminal": restore_frame if test is not None else progress,
+                    "final": final,
+                }
+                raise mismatch from (callback_errors[0] if callback_errors else None)
             if callback_errors and failure["code"] == "capture_cancelled":
                 raise PacketHostError(
                     "capture_callback_failed",

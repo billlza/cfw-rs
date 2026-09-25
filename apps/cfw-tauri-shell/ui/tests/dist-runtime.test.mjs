@@ -87,7 +87,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
 
   const responses = {
     boot_payload: {
-      native_ui: { profile_menu: false, runtime_settings: false },
+      native_ui: { profile_menu: false, runtime_settings: false, general_switches: false },
       product: {
         name: "Clash for Mac",
         version: "0.4.0",

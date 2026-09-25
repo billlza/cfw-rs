@@ -75,6 +75,37 @@ private let runtimeClosed: CFMRuntimeSettingsClosed = { context, session in
   }
 }
 
+private let generalInput: CFMGeneralSwitchInput = {
+  context, session, sequence, submission, key, action, value in
+  guard let pointer = UnsafeRawPointer(bitPattern: context) else { return 0 }
+  let completion = Unmanaged<Completion>.fromOpaque(pointer).takeUnretainedValue()
+  return MainActor.assumeIsolated {
+    guard completion.session == session, let host = completion.host, host.epoch == completion.epoch
+    else { return 0 }
+    completion.send(
+      [
+        "kind": "input", "requestId": completion.requestID, "sequence": sequence,
+        "submission": submission, "key": key, "action": action, "value": value == 1,
+      ], end: false)
+    host.record(
+      "general_input",
+      [
+        "session": session, "sequence": sequence, "submission": submission,
+        "key": key, "action": action, "value": value == 1,
+      ])
+    return 1
+  }
+}
+
+private let generalClosed: CFMGeneralSwitchClosed = { context in
+  guard let pointer = UnsafeRawPointer(bitPattern: context) else { return }
+  let completion = Unmanaged<Completion>.fromOpaque(pointer).takeRetainedValue()
+  MainActor.assumeIsolated {
+    completion.host?.completions.removeValue(forKey: completion.requestID)
+    completion.send(["kind": "closed", "requestId": completion.requestID], end: true)
+  }
+}
+
 @MainActor
 private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDelegate,
   WKScriptMessageHandlerWithReply, WKNavigationDelegate
@@ -89,6 +120,7 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
   private var currentPage = "general"
   private var observations = 0
   private var appKitDiagnosticCount = 0
+  private var generalFrameCount = 0
   private var appKitEventMonitor: Any?
   private var appKitObservers: [NSObjectProtocol] = []
   private var fixtures: [String: Any] = [:]
@@ -373,6 +405,19 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
       return NSNull()
     case "present_native_profile_menu", "present_native_runtime_settings":
       return try present(command, args)
+    case "sync_native_general_switches":
+      return try syncGeneral(args)
+    case "focus_native_general_switch":
+      guard let id = args["requestId"] as? String, let completion = completions[id],
+        completion.kind == "general", let sequence = args["sequence"] as? UInt64,
+        let key = args["key"] as? UInt32
+      else { return false }
+      return cfm_general_switches_focus_v1(completion.session, sequence, key) == 1
+    case "dismiss_native_general_switches":
+      guard let id = args["requestId"] as? String, let completion = completions[id],
+        completion.kind == "general"
+      else { return false }
+      return cfm_general_switches_dismiss_v1(completion.session) == 1
     case "update_native_profile_menu", "update_native_runtime_settings":
       return try update(command, args)
     case "dismiss_native_profile_menu", "dismiss_native_runtime_settings":
@@ -532,7 +577,7 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
     frame.removeValue(forKey: "requestId")
     frame["version"] = 1
     frame["session"] = session
-    frame["windowNumber"] = window.windowNumber
+    if kind != "general" { frame["windowNumber"] = window.windowNumber }
     if kind == "profile" {
       guard let point = frame.removeValue(forKey: "point") as? [String: Any],
         let x = point["x"] as? Double, let y = point["y"] as? Double,
@@ -550,6 +595,68 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
     }
     return frame
   }
+  private func syncGeneral(_ args: [String: Any]) throws -> Any {
+    guard let web, let request = args["request"] as? [String: Any],
+      let id = request["requestId"] as? String, UUID(uuidString: id) != nil
+    else { throw Failure("Invalid General presentation") }
+    if generalFrameCount < 16 {
+      generalFrameCount += 1
+      record("general_frame", ["frame": request])
+    }
+    if let completion = completions[id] {
+      guard completion.kind == "general" else { throw Failure("Component request type changed") }
+      guard args["completion"] is NSNull else {
+        throw Failure("General updates must retain the original Tauri Channel")
+      }
+      let data = try JSONSerialization.data(
+        withJSONObject: envelope(request, kind: "general", session: completion.session))
+      let status = data.withUnsafeBytes { bytes in
+        cfm_general_switches_sync_v1(
+          Unmanaged.passUnretained(web).toOpaque(),
+          bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, nil, nil, 0)
+      }
+      if status == 2 {
+        record("general_geometry_pending", ["sequence": request["sequence"] as Any])
+        return false
+      }
+      guard status == 1 else { throw Failure("Native General update rejected: \(status)") }
+      record(
+        "general_update", ["session": completion.session, "sequence": request["sequence"] as Any])
+      return true
+    }
+    guard let channelText = args["completion"] as? String, channelText.hasPrefix("__CHANNEL__:"),
+      let channel = Int(channelText.dropFirst(12))
+    else { throw Failure("Missing initial General Channel") }
+    let session = nextSession
+    nextSession += 1
+    let completion = Completion(
+      host: self, requestID: id, channel: channel, session: session, kind: "general")
+    let data = try JSONSerialization.data(
+      withJSONObject: envelope(request, kind: "general", session: session))
+    let pointer = Unmanaged.passRetained(completion).toOpaque()
+    completions[id] = completion
+    let status = data.withUnsafeBytes { bytes in
+      cfm_general_switches_sync_v1(
+        Unmanaged.passUnretained(web).toOpaque(),
+        bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, generalInput, generalClosed,
+        UInt(bitPattern: pointer))
+    }
+    guard status == 1 else {
+      completions.removeValue(forKey: id)
+      Unmanaged<Completion>.fromOpaque(pointer).release()
+      // Match Tauri ChannelInner::drop for a rejected initial presentation.
+      // A subsequent initial attempt must supply a fresh JavaScript callback.
+      deliver(channel: channel, packets: [["index": 0, "end": true]])
+      if status == 2 {
+        record("general_geometry_pending", ["sequence": request["sequence"] as Any])
+        return false
+      }
+      throw Failure("Native General presentation rejected: \(status)")
+    }
+    record("native_present", ["kind": "general", "session": session, "requestId": id])
+    return true
+  }
+
   private func present(_ command: String, _ args: [String: Any]) throws -> Any {
     guard let request = args["request"] as? [String: Any], let id = request["requestId"] as? String,
       UUID(uuidString: id) != nil, let channelText = args["completion"] as? String,
@@ -620,6 +727,8 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
     for completion in Array(completions.values) {
       if completion.kind == "profile" {
         _ = cfm_profile_menu_dismiss_v1(completion.session)
+      } else if completion.kind == "general" {
+        _ = cfm_general_switches_dismiss_v1(completion.session)
       } else {
         _ = cfm_runtime_settings_dismiss_v1(completion.session)
       }

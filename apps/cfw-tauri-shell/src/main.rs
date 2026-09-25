@@ -66,6 +66,9 @@ use legacy::{
     disable_service_mode, legacy_retirement_status, recover_legacy_cutover,
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
+use native_components::general_switches::{
+    dismiss_native_general_switches, focus_native_general_switch, sync_native_general_switches,
+};
 use native_components::runtime_settings::{
     dismiss_native_runtime_settings, present_native_runtime_settings,
     update_native_runtime_settings,
@@ -327,11 +330,15 @@ fn main() {
         present_native_runtime_settings,
         update_native_runtime_settings,
         dismiss_native_runtime_settings,
+        sync_native_general_switches,
+        focus_native_general_switch,
+        dismiss_native_general_switches,
     ]);
     #[cfg(feature = "native-ui")]
     let builder = builder
         .manage(native_components::NativeProfileMenuState::default())
-        .manage(native_components::runtime_settings::RuntimeSettingsState::default());
+        .manage(native_components::runtime_settings::RuntimeSettingsState::default())
+        .manage(native_components::general_switches::GeneralSwitchesState::default());
     let application = builder
         .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
             if migration_handoff && !migration_handoff_command_allowed(invoke.message.command()) {
@@ -369,6 +376,10 @@ fn main() {
             if payload.event() == tauri::webview::PageLoadEvent::Started {
                 native_components::cancel_for_window(webview.app_handle(), webview.label());
                 native_components::runtime_settings::cancel_for_reload(
+                    webview.app_handle(),
+                    webview.label(),
+                );
+                native_components::general_switches::cancel_for_reload(
                     webview.app_handle(),
                     webview.label(),
                 );

@@ -3609,7 +3609,7 @@
     "scripts/apple_validation_policy.py": "62bac572b87c0e96324b34215990809c6a08dc1d0e308fd68af94bc955af68da",
     "scripts/apple_validation_policy.sh": "7858530b4243c2edbb64fdc4db77d1d8fa13cbd2509af5cceeb780b1636bb56a",
     "scripts/build_native_ui.sh": "3c2033522b0fc787bd1f79681f5ed5b2dcd3a0404a835b111e65d2dca263d6d6",
-    "scripts/native_ui_artifact.py": "acecd5b5765dec5dffd9121a839a61736c19ae0795d986b5647f03e991b4c50f",
+    "scripts/native_ui_artifact.py": "a0489a9cf3f76129b41716603e19dbf2c4ceec5b6f1456c76ea12d620ed6a4a4",
     "scripts/prepare_preview_candidate.sh": "2003f5b675c06fcd10e7a64fe9cf0b3cd49467dda61f536795a43204f3363704"
   }
 }

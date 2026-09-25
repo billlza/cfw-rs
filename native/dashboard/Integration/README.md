@@ -67,3 +67,18 @@ cancel, redirect, synthesize, or await events. Each document records at most 100
 observations; identifier/key fields are capped at 64 Unicode scalars, error text
 at 512. Envelope rejection reasons are separately recorded. No production scripts,
 handlers, CSS, or DOM layout are modified by this instrumentation.
+
+
+The General switch lane presents all six original inline switches. It calls the
+unchanged frontend toggle handlers against the same in-memory fixture. LAN first
+opens the existing Network settings form; cancelling leaves the fixture listener
+Off. IPv6 settings can change only the fixture snapshot. TUN/System Proxy/startup
+commands remain explicitly rejected and never access production services.
+
+Check forward/reverse Tab across native switches and adjacent original buttons,
+Space activation, focus after modal cancellation, page departure/return, both
+appearances, four languages, error-state scrolling, and window resize. An initial
+missing theme defers native presentation until the original settings load. The
+first 16 General frames are recorded as TEST DATA to distinguish stale viewport
+geometry from malformed frames. Geometry-pending responses retain their sequence
+and context rules and are not treated as successful visibility.

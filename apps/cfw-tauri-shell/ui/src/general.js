@@ -47,7 +47,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const migrationBanner = renderMigrationBanner();
   const engineReason = state.engineMutationError ?? engine.availabilityReason;
   return `
-    <div class="cfw-general-view">
+    <div class="cfw-general-view${state.payload?.native_ui?.general_switches === true && !state.migrationHandoff ? " native-general-switches" : ""}">
       <section class="cfw-header">
         <div class="cfw-app-mark">${renderCatLogo()}</div>
         <div class="cfw-title">
@@ -59,6 +59,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
       <section class="cfw-content${migrationBanner ? " cfw-content-migration" : ""}">
         ${migrationBanner}
         ${engineReason ? renderRowReason(engineReason) : ""}
+        ${state.nativeGeneralPresentationError ? renderRowReason(state.nativeGeneralPresentationError) : ""}
         <div class="cfw-row">
           <div class="cfw-row-left">
             <span>${escapeHtml(t("Port"))}</span>

@@ -2,7 +2,8 @@
   "boot_payload": {
     "native_ui": {
       "profile_menu": true,
-      "runtime_settings": true
+      "runtime_settings": true,
+      "general_switches": true
     },
     "product": {
       "name": "Clash for Mac",

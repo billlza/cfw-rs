@@ -4,18 +4,21 @@
   "product": "Clash for Mac",
   "target_version": "0.5.0",
   "captured_at": "2026-09-22T02:58:40.618504+00:00",
-  "worktree": "/Users/bill/.codex/worktrees/swiftui-050-plan/cfw-rs",
+  "worktree": "/Users/bill/.codex/worktrees/native-general-controls/cfw-rs",
   "inspected_head": "9ce00dce5cfddc108a9dce9bc3c23c4b09bcc03d",
   "baseline_commit": "9e2f76cdd7ffb286614a7bc6fe55e75d3fc7a5b2",
   "baseline_command_count": 90,
-  "current_registered_command_count": 96,
+  "current_registered_command_count": 99,
   "additional_current_registered_commands": [
     "present_native_profile_menu",
     "update_native_profile_menu",
     "dismiss_native_profile_menu",
     "present_native_runtime_settings",
     "update_native_runtime_settings",
-    "dismiss_native_runtime_settings"
+    "dismiss_native_runtime_settings",
+    "sync_native_general_switches",
+    "focus_native_general_switch",
+    "dismiss_native_general_switches"
   ],
   "baseline_registered_order_preserved": true,
   "resolved_baseline_command_count": 90,
@@ -107,7 +110,7 @@
     },
     {
       "path": "apps/cfw-tauri-shell/src/main.rs",
-      "sha256": "e18659396adce983593aab40a49425a20938116183b25bc0bd70d77a8bd36a07"
+      "sha256": "64490aad610e463095d081318c8fada8f0aa3bcd53d249fc195e7864f07cd372"
     },
     {
       "path": "apps/cfw-tauri-shell/src/shell.rs",
@@ -381,12 +384,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 12
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3740
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3720
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 12
         }
       ]
     },
@@ -444,20 +447,20 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3783
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
           "line": 30
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 240
+          "line": 243
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/state.js",
           "line": 75
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3763
         }
       ]
     },
@@ -523,6 +526,10 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3721
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
           "line": 15
         },
@@ -537,10 +544,6 @@
         {
           "path": "apps/cfw-tauri-shell/ui/src/state.js",
           "line": 91
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3701
         }
       ]
     },
@@ -726,12 +729,20 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 60
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3601
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3581
+          "line": 3605
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 32
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 63
         }
       ]
     },
@@ -794,20 +805,20 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3888
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3889
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3896
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 63
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3868
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3869
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3876
+          "line": 66
         }
       ]
     },
@@ -863,7 +874,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 64
+          "line": 67
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/runtime-settings.js",
@@ -958,7 +969,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 93
+          "line": 96
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/runtime-settings.js",
@@ -1012,16 +1023,16 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 65
-        },
-        {
           "path": "apps/cfw-tauri-shell/ui/src/automation-settings.js",
           "line": 36
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/automation-settings.js",
           "line": 105
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 68
         }
       ]
     },
@@ -1095,12 +1106,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 94
-        },
-        {
           "path": "apps/cfw-tauri-shell/ui/src/automation-settings.js",
           "line": 49
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 97
         }
       ]
     },
@@ -1151,12 +1162,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 66
-        },
-        {
           "path": "apps/cfw-tauri-shell/ui/src/automation-settings.js",
           "line": 100
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 69
         }
       ]
     },
@@ -1231,20 +1242,20 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2575
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2956
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3570
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 92
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2564
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2936
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3550
+          "line": 95
         }
       ]
     },
@@ -1293,16 +1304,16 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3819
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
           "line": 39
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/state.js",
           "line": 94
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3799
         }
       ]
     },
@@ -1361,12 +1372,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 14
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3022
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3002
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 14
         }
       ]
     },
@@ -1449,12 +1460,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 53
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3043
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3023
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 56
         }
       ]
     },
@@ -1564,12 +1575,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 28
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3084
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3064
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 28
         }
       ]
     },
@@ -1648,12 +1659,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 67
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3103
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3083
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 70
         }
       ]
     },
@@ -1716,12 +1727,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 77
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2950
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2930
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 80
         }
       ]
     },
@@ -1809,20 +1820,20 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1758
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3359
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3388
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
           "line": 37
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1744
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3339
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3368
         }
       ]
     },
@@ -1873,12 +1884,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 57
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 4063
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 4043
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 60
         }
       ]
     },
@@ -1939,12 +1950,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 55
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2114
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2100
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 58
         }
       ]
     },
@@ -2005,12 +2016,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 54
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2120
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2106
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 57
         }
       ]
     },
@@ -2088,12 +2099,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 59
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1934
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1920
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 62
         }
       ]
     },
@@ -2150,12 +2161,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 51
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3332
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3312
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 54
         }
       ]
     },
@@ -2223,12 +2234,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 22
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1958
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1944
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 22
         }
       ]
     },
@@ -2290,12 +2301,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 18
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1979
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1965
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 18
         }
       ]
     },
@@ -2370,12 +2381,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 75
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2553
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2537
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 78
         }
       ]
     },
@@ -2442,12 +2453,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 27
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1793
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1779
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 27
         }
       ]
     },
@@ -2501,40 +2512,40 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 121
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 206
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 266
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 376
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1992
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3577
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 4316
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
           "line": 19
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/state.js",
           "line": 17
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 107
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 192
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 252
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 362
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1978
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3557
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 4289
         }
       ]
     },
@@ -2599,12 +2610,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 48
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2020
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2006
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 51
         }
       ]
     },
@@ -2657,12 +2668,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 24
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3932
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3912
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 24
         }
       ]
     },
@@ -2715,12 +2726,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 25
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3801
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3781
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 25
         }
       ]
     },
@@ -2777,7 +2788,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 58
+          "line": 61
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/providers.js",
@@ -2834,12 +2845,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 73
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 4005
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3985
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 76
         }
       ]
     },
@@ -2928,16 +2939,16 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2461
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2496
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 76
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2445
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2480
+          "line": 79
         }
       ]
     },
@@ -3046,7 +3057,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 86
+          "line": 89
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/proxy-delay-test.js",
@@ -3279,7 +3290,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 90
+          "line": 93
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/providers.js",
@@ -3354,7 +3365,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 87
+          "line": 90
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/providers.js",
@@ -3506,7 +3517,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 91
+          "line": 94
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/providers.js",
@@ -3637,12 +3648,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 83
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 976
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 962
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 86
         }
       ]
     },
@@ -3703,12 +3714,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 82
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 968
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 954
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 85
         }
       ]
     },
@@ -3773,12 +3784,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 85
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 977
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 963
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 88
         }
       ]
     },
@@ -3843,12 +3854,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 84
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 969
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 955
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 87
         }
       ]
     },
@@ -3912,7 +3923,7 @@
       "existing_frontend_text_references": [
         {
           "path": "apps/cfw-tauri-shell/ui/src/connections.js",
-          "line": 272
+          "line": 274
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
@@ -3968,20 +3979,20 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3160
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3183
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3635
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
           "line": 20
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3140
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3163
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3615
         }
       ]
     },
@@ -4054,12 +4065,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 29
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1848
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1834
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 29
         }
       ]
     },
@@ -4111,12 +4122,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 31
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3495
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3475
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 31
         }
       ]
     },
@@ -4179,24 +4190,24 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1368
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1757
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3650
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 4037
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 61
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1354
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1743
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3630
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 4017
+          "line": 64
         }
       ]
     },
@@ -4291,12 +4302,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 74
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3477
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3457
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 77
         }
       ]
     },
@@ -4353,16 +4364,16 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3251
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3863
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 62
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3231
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3843
+          "line": 65
         }
       ]
     },
@@ -4426,12 +4437,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 13
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2521
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2505
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 13
         }
       ]
     },
@@ -4529,12 +4540,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 38
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3358
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3338
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 38
         }
       ]
     },
@@ -4632,12 +4643,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 36
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 4339
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 4312
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 36
         }
       ]
     },
@@ -4714,16 +4725,24 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1775
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2062
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3449
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 88
+          "line": 91
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2048
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3429
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 92
         }
       ]
     },
@@ -4811,12 +4830,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 89
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1775
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1761
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 92
         }
       ]
     },
@@ -4877,12 +4896,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 56
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3654
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3634
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 59
         }
       ]
     },
@@ -4944,12 +4963,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 72
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2075
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2061
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 75
         }
       ]
     },
@@ -5011,12 +5030,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 50
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2058
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2044
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 53
         }
       ]
     },
@@ -5058,12 +5077,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 33
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3793
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3773
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 33
         }
       ]
     },
@@ -5173,12 +5192,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 52
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3410
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3390
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 55
         }
       ]
     },
@@ -5258,12 +5277,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 23
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1882
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1868
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 23
         }
       ]
     },
@@ -5340,12 +5359,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 79
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2931
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2911
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 82
         }
       ]
     },
@@ -5422,12 +5441,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 80
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2937
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2917
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 83
         }
       ]
     },
@@ -5548,12 +5567,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 81
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2944
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2924
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 84
         }
       ]
     },
@@ -5659,12 +5678,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 78
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2438
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2422
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 81
         }
       ]
     },
@@ -6046,12 +6065,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 69
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 1813
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 1799
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 72
         }
       ]
     },
@@ -6092,12 +6111,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 26
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3828
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3808
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 26
         }
       ]
     },
@@ -6158,20 +6177,20 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2647
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 2996
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3014
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 49
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2636
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2976
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 2994
+          "line": 52
         }
       ]
     },
@@ -6216,12 +6235,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 70
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3288
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3268
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 73
         }
       ]
     },
@@ -6266,16 +6285,16 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3542
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 71
+          "line": 74
         },
         {
           "path": "apps/cfw-tauri-shell/ui/src/startup.js",
           "line": 68
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3522
         }
       ]
     },
@@ -6317,12 +6336,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 47
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3314
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3294
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 50
         }
       ]
     },
@@ -6416,12 +6435,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 68
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3943
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3923
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 71
         }
       ]
     },
@@ -6517,12 +6536,12 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
-          "path": "apps/cfw-tauri-shell/ui/src/format.js",
-          "line": 32
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3605
         },
         {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3585
+          "path": "apps/cfw-tauri-shell/ui/src/format.js",
+          "line": 32
         }
       ]
     },
@@ -6622,16 +6641,16 @@
       "native_full_UI_implementation": "not_established_by_inventory",
       "existing_frontend_text_references": [
         {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3235
+        },
+        {
+          "path": "apps/cfw-tauri-shell/ui/src/app.js",
+          "line": 3909
+        },
+        {
           "path": "apps/cfw-tauri-shell/ui/src/format.js",
           "line": 40
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3215
-        },
-        {
-          "path": "apps/cfw-tauri-shell/ui/src/app.js",
-          "line": 3889
         }
       ]
     }
@@ -6639,25 +6658,25 @@
   "global_source_evidence": [
     {
       "path": "apps/cfw-tauri-shell/src/main.rs",
-      "line": 87,
+      "line": 90,
       "symbol_or_anchor": "fn migration_handoff_command_allowed",
       "supports": "migration allowlist"
     },
     {
       "path": "apps/cfw-tauri-shell/src/main.rs",
-      "line": 336,
+      "line": 343,
       "symbol_or_anchor": ".invoke_handler(move",
       "supports": "outer command admission"
     },
     {
       "path": "apps/cfw-tauri-shell/src/main.rs",
-      "line": 398,
+      "line": 409,
       "symbol_or_anchor": "if let WindowEvent::CloseRequested",
       "supports": "close-to-hide"
     },
     {
       "path": "apps/cfw-tauri-shell/src/main.rs",
-      "line": 424,
+      "line": 435,
       "symbol_or_anchor": "RunEvent::ExitRequested",
       "supports": "coordinated quit"
     },
@@ -6738,14 +6757,13 @@
     "startup_and_migration_allowlists_unchanged": true
   },
   "source_alignment": {
-    "aligned_at": "2026-09-22T03:45:22.622443+00:00",
-    "aligned_head": "9ce00dce5cfddc108a9dce9bc3c23c4b09bcc03d",
-    "previous_alignment_at": "2026-09-22T03:11:06.072567+00:00",
+    "aligned_at": "2026-09-25T18:39:54.765936+00:00",
+    "aligned_head": "5e9a7954b7992e190a9e7fa6b475e5e842209426",
+    "previous_alignment_at": "2026-09-22T03:45:22.622443+00:00",
     "original_captured_at_preserved": "2026-09-22T02:58:40.618504+00:00",
     "original_inspected_head_preserved": "9ce00dce5cfddc108a9dce9bc3c23c4b09bcc03d",
     "uncommitted_changes_present": true,
     "tracked_dirty_inventory_source_files": [
-      "apps/cfw-tauri-shell/src/bootstrap.rs",
       "apps/cfw-tauri-shell/src/main.rs"
     ],
     "identity_note": "captured_at and inspected_head identify the original inventory capture. Source hashes, command ranges and definitions, evidence anchors and frontend references were refreshed from current working-tree bytes at aligned_at. Dirty bytes are not claimed to equal HEAD. This is source alignment, not product implementation or runtime verification.",
@@ -6829,5 +6847,5 @@
       "network_diagnostics"
     ]
   },
-  "additional_commands_scope": "Six presentation-only commands for in-place native profile context menu and runtime settings dialog. They are listed separately from the frozen 90-command baseline and do not establish complete native UI parity."
+  "additional_commands_scope": "Nine presentation-only commands for the existing profile context menu, runtime settings dialog and six in-place General switches. The 90 original business commands are unchanged; this inventory does not establish installed fidelity or network acceptance."
 }

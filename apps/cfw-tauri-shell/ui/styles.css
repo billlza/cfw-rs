@@ -468,6 +468,8 @@ input::placeholder {
   flex-direction: column;
   justify-content: flex-start;
   overflow: hidden;
+  overflow-y: auto;
+  min-height: 0;
   padding: 0;
 }
 
@@ -2796,3 +2798,12 @@ pre {
   cursor: pointer;
 }
 .startup-recovery button:focus-visible { outline: 3px solid #2861bf; outline-offset: 3px; }
+
+/* The native switch owns hit testing and accessibility; retain only DOM geometry. */
+.inline-switch.native-switch-ready { visibility: hidden; }
+.native-general-switches .inline-switch {
+  width: 54px;
+  height: 24px;
+  flex: 0 0 54px;
+  justify-content: flex-end;
+}

@@ -25,7 +25,7 @@ const CHALLENGE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 function bootPayload({ handoff = false, rendererReady = null } = {}) {
   return {
-    native_ui: { profile_menu: false, runtime_settings: false },
+    native_ui: { profile_menu: false, runtime_settings: false, general_switches: false },
     product: {
       name: "Clash for Mac",
       version: "0.4.0",

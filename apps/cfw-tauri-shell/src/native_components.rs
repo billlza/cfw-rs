@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, WebviewWindow};
 
+pub(crate) mod general_switches;
 #[cfg(feature = "native-ui")]
 mod profile_menu;
 pub(crate) mod runtime_settings;
@@ -25,12 +26,14 @@ pub(crate) const PROFILE_ACTIONS: [&str; 12] = [
 pub(crate) struct NativeUiCapabilities {
     pub profile_menu: bool,
     pub runtime_settings: bool,
+    pub general_switches: bool,
 }
 impl NativeUiCapabilities {
     pub fn current() -> Self {
         Self {
             profile_menu: cfg!(feature = "native-ui"),
             runtime_settings: cfg!(feature = "native-ui"),
+            general_switches: cfg!(feature = "native-ui"),
         }
     }
 }

@@ -1,6 +1,7 @@
 import { Channel } from "@tauri-apps/api/core";
 import { profileMenuItems, nativeMenuItems, createNativeProfileMenu } from "./native-profile-menu.js";
 import { createNativeRuntimeSettings } from "./native-runtime-settings.js";
+import { createNativeGeneralSwitches } from "./native-general-switches.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
@@ -85,6 +86,19 @@ const nativeRuntimeSettings = createNativeRuntimeSettings({
   enabled: () => state.payload?.native_ui?.runtime_settings === true,
   invoke, makeChannel: (handler) => new Channel(handler),
   onError: (error) => appendLog("error", "settings", t("{action} failed: {error}", { action: t("Network settings"), error: errorText(error) })),
+});
+const nativeGeneralSwitches = createNativeGeneralSwitches({
+  enabled: () => state.payload?.native_ui?.general_switches === true && !state.migrationHandoff,
+  isGeneral: () => state.activePage === "general",
+  visible: () => state.activePage === "general" && !state.glassDialog && !state.runtimeSettingsDialog
+    && !state.automationDialog && !state.profileInspector,
+  locale: getLocale, invoke, makeChannel: (handler) => new Channel(handler),
+  onToggle: applyUiToggle,
+  onError: (error) => {
+    state.nativeGeneralPresentationError = t("{action} failed: {error}", { action: t("General"), error: errorText(error) });
+    appendLog("error", "ui", state.nativeGeneralPresentationError);
+    scheduleRender();
+  },
 });
 
 function nativeProfileMenuEnabled() { return state.payload?.native_ui?.profile_menu === true; }
@@ -2358,6 +2372,7 @@ function renderPage() {
 }
 
 function renderPageContent() {
+  nativeGeneralSwitches.beforeRender();
   const page = pageById(state.activePage);
   const renderer = pageRenderers[page.id];
   if (typeof renderer !== "function") {
@@ -2381,6 +2396,7 @@ function renderPageContent() {
   document.getElementById("page").innerHTML = renderer();
   bindPageEvents();
   renderGlassOverlays();
+  nativeGeneralSwitches.refresh();
   if (state.profileInspector?.mode === "edit" && state.profileInspector.focusKey) {
     requestAnimationFrame(() => focusProfileEditorSection(state.profileInspector.focusKey));
   }
@@ -2544,12 +2560,7 @@ function bindPageEvents() {
     input.addEventListener("change", async (event) => {
       const key = event.currentTarget.dataset.toggle;
       const checked = event.currentTarget.checked;
-      try {
-        await applyToggle(key, checked, "ui");
-      } catch (error) {
-        appendLog("error", "ui", t("{key} refused: {error}", { key: key, error: errorText(error) }));
-      }
-      renderPage();
+      await applyUiToggle(key, checked);
     });
   });
 
@@ -2882,6 +2893,15 @@ const PERSISTED_TOGGLES = new Set([
   "checkForUpdates",
   "retainWindowBounds",
 ]);
+
+async function applyUiToggle(key, checked) {
+  try {
+    await applyToggle(key, checked, "ui");
+  } catch (error) {
+    appendLog("error", "ui", t("{key} refused: {error}", { key, error: errorText(error) }));
+  }
+  renderPage();
+}
 
 async function applyToggle(key, checked, source) {
   if (key === "allowLan") return runtimeSettingsUI.toggleLAN(checked);

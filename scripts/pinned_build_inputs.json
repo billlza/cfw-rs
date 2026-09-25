@@ -584,7 +584,7 @@
       "GA native inputs refuse unsigned-validation toolchain selection",
       "unsigned-validation Apple identity is incomplete",
       "PreviewPreSign",
-      "const PREVIEW_BUILD_NUMBER: &str = \"50008\";",
+      "const PREVIEW_BUILD_NUMBER: &str = \"50009\";",
       "pub fn native_ui_verifier_command(",
       "command.env_clear().envs(",
       "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION"
@@ -2120,7 +2120,7 @@
       "--features physical-release-evidence --config",
       "--native-ui-preview",
       "--features physical-release-evidence,native-ui --config",
-      "native UI Host requires exact preview version/build 0.5.0/50008"
+      "native UI Host requires exact preview version/build 0.5.0/50009"
     ],
     "scripts/verify_candidate_bundle.py": [
       "CandidateBundleContext",
@@ -3429,7 +3429,7 @@
   },
   "artifactSourceSha256": {
     "apps/cfw-tauri-shell/build.rs": "9d00211ddc75de1028dc87cbe37a1e060c6dcc007319bc8bc0b57181fece6157",
-    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "938de6040a39984c33c53f28b83191951d0a7eccd40db2e005f46e35a4cc2b83",
+    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "2fb7aa0594acb139fbbc196d928e8e51ddd72a0ed43315a82b9a72cd9c18b084",
     "scripts/libbox_source_contract.sh": "f8c208e43a4589a563147e23437b6dac0d819a52665d5f965ea922eb74c4db5d",
     "scripts/build_libbox.sh": "f37bc8e6e03eebcf7fdb1e0d56b798c97ed89a5102796a744e3ee13f53752421",
     "scripts/build_native_products.sh": "37d375ff2ed3a7ee394b9de48f8e29a6ef51dbf2cc7443b4866998d95413f16c",
@@ -3473,7 +3473,7 @@
     "scripts/release_cargo_inputs.sh": "548f5279e951c90492aba0e6cf8162705d8bad140d899a4eb963aabbea58f7aa",
     "scripts/release_python_launcher.sh": "80c2be4bc813785a9be4e3abed1f360a5c09a72a95ff96629a9fd568bd1600e2",
     "scripts/release_python_runtime.py": "f73d2b9e2fec9925931588ba33961004282623697421007e3b6b45377b3cab32",
-    "scripts/release_build_identity.py": "6bb24ed4f1808660f580f0d0a4f2a111127c00d059b582b5d447dd808fde1417",
+    "scripts/release_build_identity.py": "3f4af5c9b888d11fbc9727ddb0b7447426fb25f4aa58e65a0269001c0b4113fd",
     "scripts/release_regular_file.py": "9b623ad7d818abb35400e33a92bd408d200451aa20b8bbaf06319f73571190f0",
     "scripts/release_bundle_codesign.sh": "98b4c8e66b76dc4fe5d638ab79e36473304850feca36c035fe41a5169d4d4555",
     "scripts/release_policy_tool_directory.sh": "7f8e7653b7cfc0f61d73cac3b881a4b74c1e44a7313ef0141e2da8db5bc9851c",
@@ -3505,7 +3505,7 @@
     "CHANGELOG.md": "8be87402efabcde91e7bec25c75e24f43766d2d9b6a5c1b54fce2f4ca1d9d8fe",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
     "scripts/validate_notary_archive.py": "099ff41742da304d34ec8b92dd3b3c4f96d064f21bde697b21f5c99c2393f283",
-    "scripts/tauri_host_skeleton.sh": "f3ccd369984a598932549e623dcf3e0806119ec983e3a05fd0f55429067eae9c",
+    "scripts/tauri_host_skeleton.sh": "85b84b1fbb9c0efec36855622b3e09ba3c421d2637c97a6213110953ac659ba6",
     "scripts/verify_candidate_bundle.py": "4ff243b9c5ee212e48eeae711d2a776df5c0491365ab1f5f9f39be19754ebe05",
     "scripts/verify_candidate_bundle.sh": "67323fbd170c6131a0a2aac37655d38c210c48a3ace3b62d98197b5528d4eb8c",
     "scripts/verify_artifact_manifest.py": "084eae16e377a84ff766d8379804709685b2ee9bf16fe38ffc2ae0f9124abe59",
@@ -3548,7 +3548,7 @@
     "scripts/validated_candidate_evidence.py": "c2161502ddae3b874449b30553ffe291e47ea8f7295fe6649d7776b108d85e90",
     "scripts/sealed_evidence_manifest.py": "f024d80654bf27fc534fa17215d1fd00e134314182d9a28bdef77827873ec363",
     "scripts/physical_capture/packet.py": "2cf1c0ccd2a61d8ff5fe6b15a026d0a3bcfd1ec8c8fc049906381b82c951bbca",
-    "scripts/verify_release_app.sh": "76c1671cf4ca3fc24b4781cbcd3a94afe87e4f0e8d0b980ce31dbd4e55668af0",
+    "scripts/verify_release_app.sh": "d60e3c5fcd6a04f0e029c3a3405de5474c0e876f6712641344239839939a9238",
     "scripts/candidate_freeze.py": "9de77fc6d62a7f9045459b0399c8ed0ad5aef974a7dd8ad6517e4b5ca320dcf2",
     "scripts/release_signing_plan.py": "8a32ce3302081bd17090828bdb2f629898089bd4f39955cd5d6f28e6a2c21d27",
     "scripts/release_signing_preflight.py": "3913448110a6149a7af609299adbc0657efdef452463e1c769ce49a2b77b012d",
@@ -3565,7 +3565,7 @@
     "scripts/github_hosted_ci_receipt.py": "6148ffc144cc71247d6ba6a689dcf0592fbfb79ddbea451f7920433ac90874a7",
     "scripts/ga_acceptance_environment.py": "e5c656e24a3d3f11a196c7620c4ce318fc092fba90bf8f5e295544e242c3e5ea",
     "scripts/ga_acceptance_journal_export.py": "08aa573a947753390288618232623abb704a7f2574200f2a1a9a6add53e35926",
-    "scripts/ga_runtime_acceptance.py": "acfda25b5bae77fee8110652c47f6654b695428b8a3b1f510e88e570f9ca90db",
+    "scripts/ga_runtime_acceptance.py": "512db06d05268e5d9b8b645195039ef129e1773fcfd4d0292ff856a87c4f619b",
     "scripts/ga_runtime_acceptance_cli.py": "3e66925c25ed096a7a37b580ef050479bda99430e8d5158fa837e33ad785a7fd",
     "scripts/release_artifact_set_cli.py": "e53e44e432eb5fc839ef8aacdff40b70e2bd07a29b60bb7cc948714f665bb735",
     "scripts/run_ga_runtime_acceptance.sh": "2d1caafb53431e4970f41502e8ae1157d9580cb0c047d6ae9a4930cdb8d2a5be",
@@ -3579,8 +3579,8 @@
     "scripts/build_legacy_tombstone.sh": "292133d76c9ad233aac92ecc2ea19b426c6a77fedfbfacf592757b8766ece17e",
     "scripts/verify_native_product_graph.py": "b05742650a5038576f5e76213e4eb60b6eebb84878b9a7d67ba57734357641ff",
     "scripts/verify_notary_log.py": "3eccd50eed209e716d868332844783f915c1f559d1c117ce3f27df4ef44a571c",
-    "scripts/physical_capture/packet_sender.py": "3c7bb07b72f533ed54f4faec3c5a6948622ff116abb7943faef61330a63b4087",
-    "scripts/physical_capture/packet_host.py": "7d7ec61c8fe14780614c60bb733be344f0411584ce9e2d66d123fee428d554d2",
+    "scripts/physical_capture/packet_sender.py": "559e1b7cc9394b6871899759ae2b04bfff2fd9e4b480b102d0264faabd77488c",
+    "scripts/physical_capture/packet_host.py": "86c76a6d0c3d1bc26f995f8f32d64db93acb5e50c8f0890ad5847cd2096a04fd",
     "scripts/harness/packet_capture.py": "d17b1a57f5569f7268ede8174aa739daa366adeda974d7a71fd9ea71f0945b39",
     "scripts/harness/packet_evidence.py": "85ba0afcdfeb4aabeaae8b80871661992b604016368c80bb9c79b0d1269f8e5b",
     "scripts/publication/common.py": "7b320f7529f5a7b1903d69cb75b0aa064eaf53e9a74e6e744fdd9dc46f9e2659",
@@ -3610,6 +3610,6 @@
     "scripts/apple_validation_policy.sh": "7858530b4243c2edbb64fdc4db77d1d8fa13cbd2509af5cceeb780b1636bb56a",
     "scripts/build_native_ui.sh": "3c2033522b0fc787bd1f79681f5ed5b2dcd3a0404a835b111e65d2dca263d6d6",
     "scripts/native_ui_artifact.py": "acecd5b5765dec5dffd9121a839a61736c19ae0795d986b5647f03e991b4c50f",
-    "scripts/prepare_preview_candidate.sh": "ce3ad76f17f77602054c646b171cf907386d06bb2fe925e57013e6789cab99cc"
+    "scripts/prepare_preview_candidate.sh": "2003f5b675c06fcd10e7a64fe9cf0b3cd49467dda61f536795a43204f3363704"
   }
 }

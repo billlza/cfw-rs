@@ -52,7 +52,7 @@ class CandidateFixture:
         self.context = context
         self.preview = context in bundle.PREVIEW_CONTEXTS
         self.version = "0.5.0" if self.preview else "0.4.0"
-        self.build = "50009" if self.preview else "40000"
+        self.build = "50010" if self.preview else "40000"
         self.signing = "pre-sign"
         private = []
         if context is ids.CandidateBundleContext.PREVIEW_PRE_SIGN:

@@ -9,7 +9,7 @@ use cfw_platform::{
 };
 
 const RELEASE_VERSION: &str = "0.5.0";
-const RELEASE_BUILD: &str = "50006";
+const RELEASE_BUILD: &str = "50007";
 const RELEASE_TEAM_ID: &str = "YKUPL7Z869";
 const MAX_BUNDLE_ENTRIES: usize = 4096;
 const GLOBAL_AUTHORITY_IDENTIFIER: &str = "com.bill.clashformac.global-authority";
@@ -607,20 +607,20 @@ mod tests {
     fn handoff_identity_requires_exact_current_preview_not_just_a_positive_build() {
         assert!(installed_product_identity_is_current(
             Some("0.5.0"),
-            Some("50006")
+            Some("50007")
         ));
         for (version, build) in [
             (Some("0.4.0"), Some("40073")),
-            (Some("0.4.0"), Some("50006")),
+            (Some("0.4.0"), Some("50007")),
             (Some("0.5.0"), Some("40073")),
             (Some("0.5.0"), Some("50001")),
             (Some("0.5.0"), Some("50002")),
             (Some("0.5.0"), Some("50003")),
-            (Some("0.5.0"), Some("50007")),
-            (Some("0.5.0"), Some("050006")),
+            (Some("0.5.0"), Some("50008")),
+            (Some("0.5.0"), Some("050007")),
             (Some("0.5.0"), Some("0")),
-            (Some("0.5.0-preview"), Some("50006")),
-            (None, Some("50006")),
+            (Some("0.5.0-preview"), Some("50007")),
+            (None, Some("50007")),
             (Some("0.5.0"), None),
         ] {
             assert!(

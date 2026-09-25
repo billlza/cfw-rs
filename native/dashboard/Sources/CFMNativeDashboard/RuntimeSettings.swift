@@ -362,6 +362,13 @@ struct RuntimeSettingsForm: View {
               .frame(minHeight: 34)
           } else if field == .lanSources {
             TextEditor(text: text(field)).font(.system(size: 12))
+              .overlay(alignment: .topLeading) {
+                if model.draft.lanSources.isEmpty {
+                  Text("192.168.1.0/24").font(.system(size: 12))
+                    .foregroundStyle(.tertiary).padding(.leading, 5).padding(.top, 8)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+                }
+              }
               .frame(height: model.textAreaHeight - 16).scrollContentBackground(.hidden)
               .padding(8).background(.background, in: RoundedRectangle(cornerRadius: 8))
               .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
@@ -443,6 +450,25 @@ private struct RuntimeSettingsSurface: View {
 private final class RuntimeSettingsPanel: NSPanel {
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
+
+  override func sendEvent(_ event: NSEvent) {
+    // A source-range list is a form field, not a document editor. Preserve the
+    // original textarea's Tab navigation while leaving text/IME commands alone.
+    if event.type == .keyDown, event.keyCode == 48,
+      event.windowNumber == windowNumber,
+      event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+      let editor = firstResponder as? NSTextView, editor.window === self,
+      !editor.isFieldEditor, !editor.hasMarkedText()
+    {
+      if event.modifierFlags.contains(.shift) {
+        selectPreviousKeyView(nil)
+      } else {
+        selectNextKeyView(nil)
+      }
+      return
+    }
+    super.sendEvent(event)
+  }
 }
 
 @MainActor

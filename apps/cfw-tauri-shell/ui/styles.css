@@ -646,6 +646,20 @@ input::placeholder {
   color: #111;
 }
 
+:root[data-theme="dark"] .cfw-row-left {
+  color: var(--general-title-c);
+}
+
+:where(:root[data-theme="dark"]) .general-icon {
+  color: var(--menu-fgc);
+}
+
+:where(:root[data-theme="dark"]) .general-icon:hover,
+:where(:root[data-theme="dark"]) .general-icon.active {
+  background: var(--general-item-bgc);
+  color: var(--fgc);
+}
+
 .general-icon.ok { color: #41b883; }
 .general-icon.warn { color: #e74c3c; }
 .general-icon.muted { color: #b3b3b3; cursor: default; }

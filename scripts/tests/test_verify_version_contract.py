@@ -92,7 +92,7 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository, preview=True)
             source = repository / "apps/cfw-tauri-shell/src/legacy/admission.rs"
-            source.write_text(source.read_text().replace("50006", "50007"))
+            source.write_text(source.read_text().replace("50007", "50008"))
             with self.assertRaisesRegex(ValueError, "runtime migration admission RELEASE_BUILD"):
                 verify(repository, preview=True)
 
@@ -160,17 +160,17 @@ class VersionContractTests(unittest.TestCase):
                 verify(repository, preview=True)
 
     def test_preview_build_is_exact_and_canonical(self) -> None:
-        for build in ("40073", "50001", "50002", "50003", "50004", "50005", "50007", "050006", "５０００６"):
+        for build in ("40073", "50001", "50002", "50003", "50004", "50005", "50006", "50008", "050007", "５０００７"):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository, preview=True)
                 project = repository / "native/macos/project.yml"
-                project.write_text(project.read_text().replace("50006", build))
+                project.write_text(project.read_text().replace("50007", build))
                 with self.assertRaisesRegex(ValueError, "preview build|canonical positive"):
                     verify(repository, preview=True)
 
     def test_preview_observation_identity_is_checked(self) -> None:
-        for original, replacement in (("50006", "40073"), ("0.5.0", "0.4.0")):
+        for original, replacement in (("50007", "40073"), ("0.5.0", "0.4.0")):
             with self.subTest(original=original), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository, preview=True)

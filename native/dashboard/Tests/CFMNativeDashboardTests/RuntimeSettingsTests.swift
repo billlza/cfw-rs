@@ -426,6 +426,73 @@ struct RuntimeSettingsTests {
     #expect(!controller.panel.isVisible)
   }
 
+  @Test @MainActor func multilineTabNavigatesWithoutChangingDraft() throws {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    let parent = NSWindow(
+      contentRect: NSRect(x: 100, y: 100, width: 850, height: 603),
+      styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    parent.isReleasedWhenClosed = false
+    parent.orderFront(nil)
+    defer { parent.close() }
+    let probe = RuntimeProbe()
+    let controller = RuntimeSettingsWindow(
+      frame: try RuntimeSettingsFrame.decode(runtimePayload(["windowNumber": parent.windowNumber])),
+      parent: parent, event: runtimeEvent, closed: runtimeClosed, context: probe.context)
+    #expect(controller.show())
+    defer { controller.finish() }
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+    let content = try #require(controller.panel.contentView)
+    content.layoutSubtreeIfNeeded()
+    @MainActor func descendants(_ view: NSView) -> [NSView] {
+      [view] + view.subviews.flatMap { descendants($0) }
+    }
+    let editor = try #require(
+      descendants(content).compactMap { $0 as? NSTextView }.first { !$0.isFieldEditor })
+    let initial = controller.model.draft
+    for modifiers: NSEvent.ModifierFlags in [[], [.shift]] {
+      #expect(controller.panel.makeFirstResponder(editor))
+      editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+      let event = try #require(
+        NSEvent.keyEvent(
+          with: .keyDown, location: .zero, modifierFlags: modifiers,
+          timestamp: ProcessInfo.processInfo.systemUptime,
+          windowNumber: controller.panel.windowNumber, context: nil,
+          characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48))
+      controller.panel.sendEvent(event)
+      RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+      #expect(editor.string == initial.lanSources)
+      #expect(controller.model.draft == initial)
+      #expect(controller.panel.firstResponder !== editor)
+      #expect(controller.panel.firstResponder is NSView)
+    }
+    #expect(probe.payloads.isEmpty)
+    #expect(controller.panel.makeFirstResponder(editor))
+    let newline = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: controller.panel.windowNumber, context: nil,
+        characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+    controller.panel.sendEvent(newline)
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+    #expect(editor.string == initial.lanSources + "\n")
+    #expect(controller.model.draft.lanSources == initial.lanSources + "\n")
+    #expect(probe.payloads.isEmpty)
+    editor.setMarkedText(
+      "入力", selectedRange: NSRange(location: 2, length: 0),
+      replacementRange: NSRange(location: NSNotFound, length: 0))
+    #expect(editor.hasMarkedText())
+    let composingTab = try #require(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: controller.panel.windowNumber, context: nil,
+        characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48))
+    controller.panel.sendEvent(composingTab)
+    #expect(controller.panel.firstResponder === editor)
+    #expect(probe.payloads.isEmpty)
+  }
+
   @Test @MainActor func actualFormUsesOriginalFieldOrderAndScrollableBounds() throws {
     NSApplication.shared.setActivationPolicy(.prohibited)
     let parent = NSWindow(

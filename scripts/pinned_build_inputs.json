@@ -3250,6 +3250,8 @@
     ],
     "scripts/verify_release_authority_gate.py": [
       "class AuthorityGateContractError(",
+      "def require_current_host_authority_binding(",
+      "strip_comments_and_strings(",
       "def require_authority_before(",
       "def reject_insecure_or_fallback(",
       "def verify_repository(",
@@ -3591,7 +3593,7 @@
     "scripts/publication/sbom.py": "b14ac82f224ba4b2ff204238cbba72cb8fee6483422f760f188eeb596f84124e",
     "scripts/publication/legal_review.py": "b2d2941861c70cc89ebbe08888d5a0c31508133f1e8ea164e7435e653a3ee4f1",
     "scripts/publication/license_resolution.py": "9e00327e2c3cb8383c7d9303c61b13a53208d09c5b1b9c068f54e60e430efacf",
-    "scripts/verify_release_authority_gate.py": "7e37868a9c8f48af23c00f25c533d71ff6f6e3b99aa924a40009f68507dd0f01",
+    "scripts/verify_release_authority_gate.py": "846bbccbe4618c65bb749550ee48a5d5f665c3b063e4c46834d65edcb0635886",
     "scripts/verify_production_boundary_removal.py": "e32545944c88bdc1ac09ad5432ea18e5fb85460f38087b9b30341794c23f5159",
     "scripts/publication/__init__.py": "5fc6024921e18d7ea6ea3f9f02a00a102c4ab5e89166f881cd8d001b24919271",
     "scripts/release_executor_source.py": "904947d837abfc5df40c08544c0584ab564665203b32d34aec77f81dd1894528",

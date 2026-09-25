@@ -1911,6 +1911,43 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 finish_capture=complete,
             )
 
+    def test_host_readiness_never_retries_when_process_cleanup_is_unproven(self) -> None:
+        for code in ("baseline_mismatch", "baseline_unavailable", "tunnel_unavailable", "app_control_unavailable"):
+            with self.subTest(code=code):
+                failure = PacketHostError(code, "initial transaction was not admitted")
+                failure.attach_cleanup_context(PacketHostError("host_cleanup_unproven", "owned group remains"))
+                def complete(_stage: object) -> PacketCaptureDisposition:
+                    self.fail("a failed readiness transaction cannot reach capture callbacks")
+                with patch("scripts.ga_runtime_acceptance.run_fixed_host_transaction", side_effect=[failure, typed_host_receipt("tcp-ipv4")]) as transaction, \
+                     patch("scripts.ga_runtime_acceptance.time.monotonic", return_value=0.0), \
+                     patch("scripts.ga_runtime_acceptance.time.sleep") as sleep, \
+                     patch("scripts.ga_runtime_acceptance.sys.stderr", new_callable=io.StringIO) as diagnostic:
+                    with self.assertRaises(PacketHostError) as raised:
+                        ProductionCollectorRuntime._run_packet_host_transaction(
+                            case_id="tcp-ipv4", begin_capture=complete,
+                            exercise_test=complete, finish_capture=complete)
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(raised.exception.cleanup_code, "host_cleanup_unproven")
+                transaction.assert_called_once_with(case_id="tcp-ipv4", begin_capture=complete,
+                                                    exercise_test=complete, finish_capture=complete)
+                sleep.assert_not_called()
+                self.assertEqual(diagnostic.getvalue(), "")
+
+    def test_host_readiness_still_retries_clean_app_control_failure(self) -> None:
+        unavailable = PacketHostError("app_control_unavailable", "Host is starting")
+        expected = typed_host_receipt("tcp-ipv4")
+        def complete(_stage: object) -> PacketCaptureDisposition:
+            return PacketCaptureDisposition.COMPLETE
+        with patch("scripts.ga_runtime_acceptance.run_fixed_host_transaction", side_effect=[unavailable, expected]) as transaction, \
+             patch("scripts.ga_runtime_acceptance.time.monotonic", return_value=0.0), \
+             patch("scripts.ga_runtime_acceptance.time.sleep") as sleep:
+            receipt = ProductionCollectorRuntime._run_packet_host_transaction(
+                case_id="tcp-ipv4", begin_capture=complete,
+                exercise_test=complete, finish_capture=complete)
+        self.assertIs(receipt, expected)
+        self.assertEqual(transaction.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
     def test_collect_observes_extension_after_first_operator_approval(self) -> None:
         runtime = FakeCollectorRuntime(self.fixture)
         capture_runtime = self._capture_runtime()

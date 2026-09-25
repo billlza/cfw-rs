@@ -2354,6 +2354,8 @@ class ProductionCollectorRuntime:
                     finish_capture=finish_capture,
                 )
             except PacketHostError as error:
+                if error.cleanup_code is not None:
+                    raise
                 waiting_for_operator = error.code in {
                     "baseline_mismatch",
                     "baseline_unavailable",

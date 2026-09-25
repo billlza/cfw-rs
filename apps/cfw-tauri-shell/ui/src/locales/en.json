@@ -717,5 +717,12 @@
   "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} log entries{value3}",
   "Native Overview": "Native Overview",
   "The native settings window could not deliver this action. Close it and try again.": "The native settings window could not deliver this action. Close it and try again.",
-  "{label} must contain at most {maximum} characters": "{label} must contain at most {maximum} characters"
+  "{label} must contain at most {maximum} characters": "{label} must contain at most {maximum} characters",
+  "Ascending order": "Ascending order",
+  "Clear connection search": "Clear connection search",
+  "Descending order": "Descending order",
+  "Sort connections by downloaded data": "Sort connections by downloaded data",
+  "Sort connections by host": "Sort connections by host",
+  "Sort connections by start time": "Sort connections by start time",
+  "Sort connections by uploaded data": "Sort connections by uploaded data"
 }

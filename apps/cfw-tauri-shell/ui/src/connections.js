@@ -94,21 +94,21 @@ function renderConnections() {
         <div class="cfw-conn-search">
           <span>●</span>
           <input value="${escapeHtml(state.connectionSearch)}" data-connection-search aria-label="${escapeHtml(t("Search connections"))}" placeholder="${escapeHtml(t("Search connections"))}" />
-          ${state.connectionSearch ? '<button data-action="clear-connection-search">×</button>' : ""}
+          ${state.connectionSearch ? `<button data-action="clear-connection-search" aria-label="${escapeHtml(t("Clear connection search"))}">×</button>` : ""}
         </div>
         <strong data-conn-totals>${escapeHtml(t("Total: ↑ {upload} ↓ {download}", { upload: totalUp, download: totalDown }))}</strong>
       </section>
 
       <section class="cfw-conn-controls">
         ${[
-          ["upload", "↥ ◒"],
-          ["download", "↧ ◒"],
-          ["upload", "↥ ▥"],
-          ["download", "↧ ▥"],
-          ["age", "◷"],
-          ["host", "▭"],
-        ].map(([sort, label]) => `
-          <button class="${state.connectionSort === sort ? "selected" : ""}" data-connection-sort="${sort}">${label}</button>
+          ["upload", "↥ ◒", t("Sort connections by uploaded data")],
+          ["download", "↧ ◒", t("Sort connections by downloaded data")],
+          ["upload", "↥ ▥", t("Sort connections by uploaded data")],
+          ["download", "↧ ▥", t("Sort connections by downloaded data")],
+          ["age", "◷", t("Sort connections by start time")],
+          ["host", "▭", t("Sort connections by host")],
+        ].map(([sort, label, purpose]) => `
+          <button class="${state.connectionSort === sort ? "selected" : ""}" data-connection-sort="${sort}" aria-label="${escapeHtml(purpose)}" aria-pressed="${state.connectionSort === sort}"${state.connectionSort === sort ? ` aria-description="${escapeHtml(t(state.connectionSortDesc ? "Descending order" : "Ascending order"))}"` : ""}>${label}</button>
         `).join("")}
         <span></span>
         <button class="danger" data-action="toggle-connection-stream">${state.connectionPaused ? t("Resume") : t("Pause")}</button>

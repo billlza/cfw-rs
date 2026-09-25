@@ -717,5 +717,12 @@
   "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 条日志{value3}",
   "Native Overview": "原生总览",
   "The native settings window could not deliver this action. Close it and try again.": "原生设置窗口未能提交此操作。请关闭后重试。",
-  "{label} must contain at most {maximum} characters": "{label}最多可输入 {maximum} 个字符"
+  "{label} must contain at most {maximum} characters": "{label}最多可输入 {maximum} 个字符",
+  "Ascending order": "升序",
+  "Clear connection search": "清除连接搜索",
+  "Descending order": "降序",
+  "Sort connections by downloaded data": "按下载数据量排序连接",
+  "Sort connections by host": "按主机排序连接",
+  "Sort connections by start time": "按开始时间排序连接",
+  "Sort connections by uploaded data": "按上传数据量排序连接"
 }

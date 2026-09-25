@@ -1,6 +1,6 @@
 {
-  "checked_at": "2026-09-20",
-  "scope": "direct workspace dependencies only",
+  "checked_at": "2026-09-25T08:41:48.875167+00:00",
+  "scope": "external registry dependencies declared by root, crates and apps manifests, including dev/build/target tables; not every transitive crate",
   "packages": [
     {
       "name": "anyhow",
@@ -8,7 +8,11 @@
         "1.0.104"
       ],
       "latest_stable": "1.0.104",
-      "source": "https://crates.io/crates/anyhow"
+      "source": "https://crates.io/api/v1/crates/anyhow",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "base64",
@@ -18,7 +22,50 @@
         "0.23.1"
       ],
       "latest_stable": "0.23.1",
-      "source": "https://crates.io/crates/base64"
+      "source": "https://crates.io/api/v1/crates/base64",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-release-verifier/Cargo.toml",
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "cc",
+      "locked": [
+        "1.4.7"
+      ],
+      "latest_stable": "1.4.7",
+      "source": "https://crates.io/api/v1/crates/cc",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "core-foundation",
+      "locked": [
+        "0.10.1"
+      ],
+      "latest_stable": "0.10.1",
+      "source": "https://crates.io/api/v1/crates/core-foundation",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "dispatch2",
+      "locked": [
+        "0.3.1"
+      ],
+      "latest_stable": "0.3.1",
+      "source": "https://crates.io/api/v1/crates/dispatch2",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "futures-util",
@@ -26,7 +73,12 @@
         "0.3.34"
       ],
       "latest_stable": "0.3.34",
-      "source": "https://crates.io/crates/futures-util"
+      "source": "https://crates.io/api/v1/crates/futures-util",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "libc",
@@ -34,31 +86,123 @@
         "0.2.189"
       ],
       "latest_stable": "0.2.189",
-      "source": "https://crates.io/crates/libc"
+      "source": "https://crates.io/api/v1/crates/libc",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-core/Cargo.toml",
+        "crates/cfw-platform/Cargo.toml",
+        "crates/cfw-profiles/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "minisign-verify",
       "locked": [
-        "0.2.5"
+        "0.3.0"
       ],
-      "latest_stable": "0.2.5",
-      "source": "https://crates.io/crates/minisign-verify"
+      "latest_stable": "0.3.0",
+      "source": "https://crates.io/api/v1/crates/minisign-verify",
+      "manifests": [
+        "crates/cfw-release-verifier/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
-      "name": "reqwest",
+      "name": "objc2",
       "locked": [
-        "0.13.5"
+        "0.6.4"
       ],
-      "latest_stable": "0.13.5",
-      "source": "https://crates.io/crates/reqwest"
+      "latest_stable": "0.6.4",
+      "source": "https://crates.io/api/v1/crates/objc2",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
-      "name": "rustls",
+      "name": "objc2-app-kit",
       "locked": [
-        "0.23.45"
+        "0.3.2"
       ],
-      "latest_stable": "0.23.45",
-      "source": "https://crates.io/crates/rustls"
+      "latest_stable": "0.3.2",
+      "source": "https://crates.io/api/v1/crates/objc2-app-kit",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "objc2-core-foundation",
+      "locked": [
+        "0.3.2"
+      ],
+      "latest_stable": "0.3.2",
+      "source": "https://crates.io/api/v1/crates/objc2-core-foundation",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "objc2-core-location",
+      "locked": [
+        "0.3.2"
+      ],
+      "latest_stable": "0.3.2",
+      "source": "https://crates.io/api/v1/crates/objc2-core-location",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "objc2-core-wlan",
+      "locked": [
+        "0.3.2"
+      ],
+      "latest_stable": "0.3.2",
+      "source": "https://crates.io/api/v1/crates/objc2-core-wlan",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "objc2-foundation",
+      "locked": [
+        "0.3.2"
+      ],
+      "latest_stable": "0.3.2",
+      "source": "https://crates.io/api/v1/crates/objc2-foundation",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "objc2-service-management",
+      "locked": [
+        "0.3.2"
+      ],
+      "latest_stable": "0.3.2",
+      "source": "https://crates.io/api/v1/crates/objc2-service-management",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "objc2-system-configuration",
+      "locked": [
+        "0.3.2"
+      ],
+      "latest_stable": "0.3.2",
+      "source": "https://crates.io/api/v1/crates/objc2-system-configuration",
+      "manifests": [
+        "crates/cfw-platform/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "plist",
@@ -66,7 +210,11 @@
         "1.10.1"
       ],
       "latest_stable": "1.10.1",
-      "source": "https://crates.io/crates/plist"
+      "source": "https://crates.io/api/v1/crates/plist",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "qrcode",
@@ -74,15 +222,86 @@
         "0.14.1"
       ],
       "latest_stable": "0.14.1",
-      "source": "https://crates.io/crates/qrcode"
+      "source": "https://crates.io/api/v1/crates/qrcode",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "regex",
+      "locked": [
+        "1.13.1"
+      ],
+      "latest_stable": "1.13.1",
+      "source": "https://crates.io/api/v1/crates/regex",
+      "manifests": [
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "reqwest",
+      "locked": [
+        "0.13.5"
+      ],
+      "latest_stable": "0.13.5",
+      "source": "https://crates.io/api/v1/crates/reqwest",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "rustls",
+      "locked": [
+        "0.23.45"
+      ],
+      "latest_stable": "0.23.45",
+      "source": "https://crates.io/api/v1/crates/rustls",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "saphyr-parser",
       "locked": [
-        "0.0.12"
+        "0.1.0"
       ],
       "latest_stable": "0.1.0",
-      "source": "https://crates.io/crates/saphyr-parser"
+      "source": "https://crates.io/api/v1/crates/saphyr-parser",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "security-framework",
+      "locked": [
+        "3.7.0"
+      ],
+      "latest_stable": "3.7.0",
+      "source": "https://crates.io/api/v1/crates/security-framework",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "security-framework-sys",
+      "locked": [
+        "2.17.0"
+      ],
+      "latest_stable": "2.17.0",
+      "source": "https://crates.io/api/v1/crates/security-framework-sys",
+      "manifests": [
+        "crates/cfw-apple-network/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "semver",
@@ -90,7 +309,11 @@
         "1.0.28"
       ],
       "latest_stable": "1.0.28",
-      "source": "https://crates.io/crates/semver"
+      "source": "https://crates.io/api/v1/crates/semver",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "serde",
@@ -98,7 +321,18 @@
         "1.0.229"
       ],
       "latest_stable": "1.0.229",
-      "source": "https://crates.io/crates/serde"
+      "source": "https://crates.io/api/v1/crates/serde",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml",
+        "crates/cfw-core/Cargo.toml",
+        "crates/cfw-engine-api/Cargo.toml",
+        "crates/cfw-platform/Cargo.toml",
+        "crates/cfw-profiles/Cargo.toml",
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "serde_json",
@@ -106,7 +340,19 @@
         "1.0.151"
       ],
       "latest_stable": "1.0.151",
-      "source": "https://crates.io/crates/serde_json"
+      "source": "https://crates.io/api/v1/crates/serde_json",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml",
+        "crates/cfw-core/Cargo.toml",
+        "crates/cfw-engine-api/Cargo.toml",
+        "crates/cfw-platform/Cargo.toml",
+        "crates/cfw-profiles/Cargo.toml",
+        "crates/cfw-release-verifier/Cargo.toml",
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "sha2",
@@ -115,16 +361,63 @@
         "0.11.0"
       ],
       "latest_stable": "0.11.0",
-      "source": "https://crates.io/crates/sha2"
+      "source": "https://crates.io/api/v1/crates/sha2",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-core/Cargo.toml",
+        "crates/cfw-release-verifier/Cargo.toml",
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
-      "name": "thiserror",
+      "name": "tauri",
       "locked": [
-        "1.0.69",
-        "2.0.20"
+        "2.11.6"
       ],
-      "latest_stable": "2.0.20",
-      "source": "https://crates.io/crates/thiserror"
+      "latest_stable": "2.11.6",
+      "source": "https://crates.io/api/v1/crates/tauri",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "tauri-build",
+      "locked": [
+        "2.6.3"
+      ],
+      "latest_stable": "2.6.3",
+      "source": "https://crates.io/api/v1/crates/tauri-build",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "tauri-plugin-global-shortcut",
+      "locked": [
+        "2.3.2"
+      ],
+      "latest_stable": "2.3.2",
+      "source": "https://crates.io/api/v1/crates/tauri-plugin-global-shortcut",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "tauri-plugin-single-instance",
+      "locked": [
+        "2.4.5"
+      ],
+      "latest_stable": "2.4.5",
+      "source": "https://crates.io/api/v1/crates/tauri-plugin-single-instance",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "tempfile",
@@ -132,7 +425,31 @@
         "3.27.0"
       ],
       "latest_stable": "3.27.0",
-      "source": "https://crates.io/crates/tempfile"
+      "source": "https://crates.io/api/v1/crates/tempfile",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "thiserror",
+      "locked": [
+        "1.0.69",
+        "2.0.21"
+      ],
+      "latest_stable": "2.0.21",
+      "source": "https://crates.io/api/v1/crates/thiserror",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-application/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml",
+        "crates/cfw-core/Cargo.toml",
+        "crates/cfw-engine-api/Cargo.toml",
+        "crates/cfw-profiles/Cargo.toml",
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "tokio",
@@ -140,7 +457,14 @@
         "1.53.1"
       ],
       "latest_stable": "1.53.1",
-      "source": "https://crates.io/crates/tokio"
+      "source": "https://crates.io/api/v1/crates/tokio",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-application/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "tokio-tungstenite",
@@ -148,15 +472,11 @@
         "0.30.0"
       ],
       "latest_stable": "0.30.0",
-      "source": "https://crates.io/crates/tokio-tungstenite"
-    },
-    {
-      "name": "urlencoding",
-      "locked": [
-        "2.1.3"
+      "source": "https://crates.io/api/v1/crates/tokio-tungstenite",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml"
       ],
-      "latest_stable": "2.1.3",
-      "source": "https://crates.io/crates/urlencoding"
+      "latest_stable_present": true
     },
     {
       "name": "url",
@@ -164,7 +484,37 @@
         "2.5.8"
       ],
       "latest_stable": "2.5.8",
-      "source": "https://crates.io/crates/url"
+      "source": "https://crates.io/api/v1/crates/url",
+      "manifests": [
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "urlencoding",
+      "locked": [
+        "2.1.3"
+      ],
+      "latest_stable": "2.1.3",
+      "source": "https://crates.io/api/v1/crates/urlencoding",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-controller/Cargo.toml"
+      ],
+      "latest_stable_present": true
+    },
+    {
+      "name": "urlpattern",
+      "locked": [
+        "0.3.0",
+        "0.6.0"
+      ],
+      "latest_stable": "0.6.0",
+      "source": "https://crates.io/api/v1/crates/urlpattern",
+      "manifests": [
+        "crates/urlpattern-maintained-adapter/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "uuid",
@@ -172,7 +522,16 @@
         "1.26.1"
       ],
       "latest_stable": "1.26.1",
-      "source": "https://crates.io/crates/uuid"
+      "source": "https://crates.io/api/v1/crates/uuid",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-application/Cargo.toml",
+        "crates/cfw-engine-api/Cargo.toml",
+        "crates/cfw-profiles/Cargo.toml",
+        "crates/cfw-singbox-config/Cargo.toml"
+      ],
+      "latest_stable_present": true
     },
     {
       "name": "zeroize",
@@ -180,13 +539,32 @@
         "1.9.0"
       ],
       "latest_stable": "1.9.0",
-      "source": "https://crates.io/crates/zeroize"
+      "source": "https://crates.io/api/v1/crates/zeroize",
+      "manifests": [
+        "apps/cfw-tauri-shell/Cargo.toml",
+        "crates/cfw-apple-network/Cargo.toml",
+        "crates/cfw-core/Cargo.toml"
+      ],
+      "latest_stable_present": true
     }
   ],
   "rust_stable": "1.98.1",
-  "sing_box_stable": "1.14.1",
-  "application_build": "40073",
+  "sing_box_stable": "1.14.2",
+  "application_build": "50008",
+  "installed_preview_build": "50007",
+  "installed_sing_box": "1.14.1",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
-  "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.1",
-  "implementation_status": "Planning only; no dependency updates applied"
+  "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
+  "implementation_status": "Dependencies updated and source/compatibility validation in progress; new candidate not yet built or installed",
+  "compatible_update_exceptions": [
+    {
+      "package": "generic-array 0.14.7",
+      "reason": "crypto-common 0.1.7 requires exactly =0.14.7; reachable via Tauri codegen sha2 0.10.9"
+    },
+    {
+      "package": "toml 0.8.2 / toml_datetime 0.6.3 / toml_edit 0.20.2",
+      "reason": "retained by upstream constraints in all-platform lock; absent from macOS target inverse graph; proc-macro-crate 2.0.2 fixes toml_datetime and toml_edit exactly"
+    }
+  ],
+  "evidence_directory": "target/050-completion/direct-rust-recheck-20260925"
 }

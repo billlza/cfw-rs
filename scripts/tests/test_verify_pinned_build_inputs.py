@@ -199,7 +199,7 @@ TAURI_CACHE_CONTRACT_SHA = _sha(TAURI_CACHE_CONTRACT_BODY)
 LIBBOX_MODULE_CACHE_CONTRACT_SHA = _sha(LIBBOX_MODULE_CACHE_CONTRACT_BODY)
 XCODEGEN_PATCH_SHA = _sha(XCODEGEN_PATCH_BODY)
 XCODEGEN_PATCHED_SETTINGS_SHA = _sha(b"synthetic patched SettingsBuilder.swift")
-COMMIT = "1ac1a339cb1223e9c70eae14c44411c75033c02d"
+COMMIT = "af6e64c3b69e6132ebaee0e1a3d24e93903f6709"
 ANDROID_REFERENCE_COMMIT = "124a7c13038fcc389e3efbe61504fe6ab14724d9"
 APPLE_REFERENCE_COMMIT = "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"
 GOMOBILE_COMMIT = "9f03b8f25789099c5c8abef4a02085da783ba923"
@@ -210,7 +210,7 @@ XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
     "socks": "native/macos/patches/socks-lifecycle.patch",
-    "probe": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
+    "probe": "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
     "security": "native/macos/patches/security.patch",
     "raw": "native/macos/patches/raw-packet.patch",
     "dns": "native/macos/patches/dns-failover.patch",
@@ -597,7 +597,7 @@ class Fixture:
             "GOMOBILE_MODULE_SUM": "h1:foTOGKJetah9VwaJl1XJx5TswIAVg8NfYmHOhrOc95I=",
             "GOVULNCHECK_VERSION": "v1.6.0",
             "GOVULNCHECK_MODULE_SUM": "h1:FeMO9Rm/HwyduOztbvKcOw+zvDEPr4I4aQNSfevFcKY=",
-            "SING_BOX_VERSION": "v1.14.1",
+            "SING_BOX_VERSION": "v1.14.2",
             "SING_BOX_COMMIT": COMMIT,
             "SING_BOX_ANDROID_REFERENCE_COMMIT": ANDROID_REFERENCE_COMMIT,
             "SING_BOX_APPLE_REFERENCE_COMMIT": APPLE_REFERENCE_COMMIT,
@@ -684,7 +684,7 @@ class Fixture:
                 "GOMOBILE_VERSION": "v0.1.13",
                 "GOVULNCHECK_VERSION": "v1.6.0",
                 "TAURI_CLI_VERSION": "2.11.4",
-                "SING_BOX_VERSION": "v1.14.1",
+                "SING_BOX_VERSION": "v1.14.2",
             },
             "runtimeTools": {
                 "adb": {
@@ -1063,7 +1063,7 @@ class Fixture:
             "gomobile": "v0.1.13",
             "singBox": {
                 "commit": COMMIT,
-                "tag": "v1.14.1",
+                "tag": "v1.14.2",
                 "androidReferenceCommit": ANDROID_REFERENCE_COMMIT,
                 "securityPatch": {
                     "path": PATCH_PATHS["security"],

@@ -7,7 +7,7 @@ export function createConnectionsView({
 }) {
 function visibleConnections() {
   const regex = safeRegex(state.connectionSearch);
-  const rows = state.connections.filter((connection) => {
+  const rows = state.connectionSearch ? state.connections.filter((connection) => {
     const metadata = connection.metadata ?? {};
     const haystack = [
       connection.host,
@@ -22,8 +22,8 @@ function visibleConnections() {
       metadata.network,
       metadata.type,
     ].filter(Boolean).join(" ");
-    return !state.connectionSearch || (regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.connectionSearch.toLowerCase()));
-  });
+    return regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.connectionSearch.toLowerCase());
+  }) : state.connections;
 
   const sorters = {
     host: (row) => row.host,
@@ -33,14 +33,16 @@ function visibleConnections() {
     age: (row) => Date.parse(row.start || "") || 0,
   };
   const sorter = sorters[state.connectionSort] ?? sorters.age;
-  return [...rows].sort((left, right) => {
-    const leftValue = sorter(left);
-    const rightValue = sorter(right);
+  // Compute each sort key once per snapshot instead of parsing timestamps
+  // in every comparison. Keep stable tie order and never mutate source rows.
+  return rows.map((connection) => ({ connection, value: sorter(connection) })).sort((left, right) => {
+    const leftValue = left.value;
+    const rightValue = right.value;
     const result = typeof leftValue === "string"
       ? leftValue.localeCompare(String(rightValue))
       : leftValue - rightValue;
     return state.connectionSortDesc ? -result : result;
-  }).slice(0, MAX_CONNECTION_ROWS);
+  }).slice(0, MAX_CONNECTION_ROWS).map(({ connection }) => connection);
 }
 
 function connectionProcessLabel(connection) {

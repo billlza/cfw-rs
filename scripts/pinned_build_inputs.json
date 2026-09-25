@@ -18,7 +18,7 @@
     "GOMOBILE_VERSION": "v0.1.13",
     "GOVULNCHECK_VERSION": "v1.6.0",
     "TAURI_CLI_VERSION": "2.11.4",
-    "SING_BOX_VERSION": "v1.14.1",
+    "SING_BOX_VERSION": "v1.14.2",
     "NPM_VERSION": "12.0.2",
     "NPM_ARCHIVE_SHA256": "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1",
     "GO_RELEASE_TOOLS_GO_MOD_SHA256": "d3b33745ba03310f6064ef401a937ab29a1e34ec4829953cf8a454857e71da40",
@@ -399,54 +399,54 @@
     ]
   },
   "singBoxCommitKey": "SING_BOX_COMMIT",
-  "singBoxCommit": "1ac1a339cb1223e9c70eae14c44411c75033c02d",
+  "singBoxCommit": "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
   "patches": [
     {
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "7279aef88a394ee8caf00505ef797e8c6f798047d99615c62da9dca03d987645"
+      "sha256": "6dc9d6c3abcd5935b34b4fbc4d3a58a0d4f2b04b3d10a91547d32c3350b1d73c"
     },
     {
       "name": "sing-box raw packet tun patch",
       "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
       "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
-      "sha256": "a550daa7b955f838b5b9b8983b41b789ccb9aedcc97b9a53f96f6affbe3f06e9"
+      "sha256": "d3aa03dcf3e3e0421bd1b5062dcf8ca60f62252afabd8d15013ed3e4bda25950"
     },
     {
       "name": "sing-box DNS failover patch",
       "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
       "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-      "sha256": "b702db8c212448d09fd968ca50efec8205291be5c99be354b0fb59aeac1a6823"
+      "sha256": "bf731db9feb7541c453cea0ea6ed4cd30278e3ca67d06f749ff1f87268f6d5ce"
     },
     {
       "name": "sing-box endpoint conflict patch",
       "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
       "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-      "sha256": "9e15e2d1dfd1c46deead734d40e6c6f021cfc400cdc9effaeb13420485b03565"
+      "sha256": "d3815c6cc2af12565422c96c1cc0ad41be1792edf796d11efdf98598c8344d49"
     },
     {
       "name": "sing-box profile probe patch",
       "pathKey": "SING_BOX_PROFILE_PROBE_PATCH_PATH",
       "sha256Key": "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
-      "sha256": "2450102e3133f61b124ef2032a9dc96d12a04e32ebab56f5a5ab5eb053d26b34"
+      "sha256": "fc9d376b27c9cb506ddba1969d1ee51c49b01e7b877fdc201d54c80b73f2e80a"
     },
     {
       "name": "sing-box SOCKS lifecycle patch",
       "pathKey": "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
       "sha256Key": "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-      "sha256": "3c14ecdcb33c5fdc941a3b7ea3470174ae491c4c8d5444c21e67e3f9ce805ed2"
+      "sha256": "6522a046fade01547102e6ff43fa12ae5a25250139c803011a606b7fd8fd9821"
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "d7f06761d17ff6c7d78e0a7048d8d3d25901ab00d73a6f1cbd97b94d9e3895d1",
+  "combinedDiffSha256": "3e3724b36f49365637584dc82a5222cbf79df981e854b59a20a94651a5d90aed",
   "sourceContract": {
     "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
-    "patchedDiffSha256": "5ce0d47a8cce32ae6b3cf487fe34a9f3da61496e2559130c56a5b689bf456033",
+    "patchedDiffSha256": "009b75e74077b754d5e9bcfae44df2d71ad463d9b48f055e21d4e8cddc97dec5",
     "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
-    "patchedGoModSha256": "1cdccddd3b0170e0a6eb89c94abde9563a4209a98a931d6201d7df0d406bc617",
+    "patchedGoModSha256": "3e606978fd1ec0f5f43cab7aa977fe6a58e39116061c294002a26197db71ca46",
     "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
-    "patchedGoSumSha256": "2ff58229b24d2a8a7bc465efc0cc0567619ce969bc08f695445580bfdf3edacd"
+    "patchedGoSumSha256": "f5d1781f8ac66ad56e948ba7be11606327cf59e5d583b5fd62415fabb9d5f1a9"
   },
   "libboxModuleCacheContract": {
     "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
@@ -584,7 +584,7 @@
       "GA native inputs refuse unsigned-validation toolchain selection",
       "unsigned-validation Apple identity is incomplete",
       "PreviewPreSign",
-      "const PREVIEW_BUILD_NUMBER: &str = \"50007\";",
+      "const PREVIEW_BUILD_NUMBER: &str = \"50008\";",
       "pub fn native_ui_verifier_command(",
       "command.env_clear().envs(",
       "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION"
@@ -2120,7 +2120,7 @@
       "--features physical-release-evidence --config",
       "--native-ui-preview",
       "--features physical-release-evidence,native-ui --config",
-      "native UI Host requires exact preview version/build 0.5.0/50007"
+      "native UI Host requires exact preview version/build 0.5.0/50008"
     ],
     "scripts/verify_candidate_bundle.py": [
       "CandidateBundleContext",
@@ -3429,7 +3429,7 @@
   },
   "artifactSourceSha256": {
     "apps/cfw-tauri-shell/build.rs": "9d00211ddc75de1028dc87cbe37a1e060c6dcc007319bc8bc0b57181fece6157",
-    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "d241c60b2d0a450722f70d688d21774f60fd0bb940afdfb0ece663ce3ea65da0",
+    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "938de6040a39984c33c53f28b83191951d0a7eccd40db2e005f46e35a4cc2b83",
     "scripts/libbox_source_contract.sh": "f8c208e43a4589a563147e23437b6dac0d819a52665d5f965ea922eb74c4db5d",
     "scripts/build_libbox.sh": "f37bc8e6e03eebcf7fdb1e0d56b798c97ed89a5102796a744e3ee13f53752421",
     "scripts/build_native_products.sh": "37d375ff2ed3a7ee394b9de48f8e29a6ef51dbf2cc7443b4866998d95413f16c",
@@ -3463,17 +3463,17 @@
     "scripts/notarization_executor.py": "15a2065c0f7792d3b0609082471d557136b26575d3d7244b15434cc461e50005",
     "scripts/run_notarization_transaction.sh": "8ee5288ff7e441cf34c0295b0f8debe78c057c9cde1b1393c9f7ef77b401de0e",
     "scripts/dmg_notarization_transaction.py": "9f472927720d153df58fb4b3c9df41c064565ab1b63c689fd463accdfd5fd6e6",
-    "scripts/release_artifact_set.py": "e2419beb95953c8418e04b0a0c7d19c5cc4adbee81635e3ecb2fc11391039f37",
+    "scripts/release_artifact_set.py": "55590e8bb716a844bc711c68152bbe0c38d4ad145dfcdbe03cb5625c35ecb3bd",
     "scripts/release_apple_toolchain.py": "b4ff7cc330566f7d60efd75f3aa7f1e33647f913c0a9a4ad70a71babd422bf7f",
     "scripts/repository_source_identity.py": "3a9ae0e221efe9cca5a6657ca8653934229cad152561a1532a9073c5bb4f40dd",
     "scripts/release_git.py": "1cfdf6620923863f20f46f20830e0ded8240401117ef4d1464007be8ffee656e",
     "scripts/hash_artifact.py": "fd524dc2d44bbb00cfeadfe3052ed3c8c7871c632d8b8ad704c728a0d3b17f66",
     "scripts/hash_native_build_inputs.py": "7e7d327c3a1c3edd6a7c33cdf544d22d349ce40646e4c5ed26651e060f5bb0fa",
-    "scripts/release_cargo_inputs.py": "46cc74cd18e2c92a9300da62dadf765e647419cb03213f1188ab19e0c37de0f8",
+    "scripts/release_cargo_inputs.py": "c2c6f59b75e053024069ee4db95b5157566c10d79149618b9f5f65acb0e21daf",
     "scripts/release_cargo_inputs.sh": "548f5279e951c90492aba0e6cf8162705d8bad140d899a4eb963aabbea58f7aa",
     "scripts/release_python_launcher.sh": "80c2be4bc813785a9be4e3abed1f360a5c09a72a95ff96629a9fd568bd1600e2",
     "scripts/release_python_runtime.py": "f73d2b9e2fec9925931588ba33961004282623697421007e3b6b45377b3cab32",
-    "scripts/release_build_identity.py": "256d535e043777b9f9e3e7720071954de7452f675786ddca64e475c7b12b2c2f",
+    "scripts/release_build_identity.py": "6bb24ed4f1808660f580f0d0a4f2a111127c00d059b582b5d447dd808fde1417",
     "scripts/release_regular_file.py": "9b623ad7d818abb35400e33a92bd408d200451aa20b8bbaf06319f73571190f0",
     "scripts/release_bundle_codesign.sh": "98b4c8e66b76dc4fe5d638ab79e36473304850feca36c035fe41a5169d4d4555",
     "scripts/release_policy_tool_directory.sh": "7f8e7653b7cfc0f61d73cac3b881a4b74c1e44a7313ef0141e2da8db5bc9851c",
@@ -3505,7 +3505,7 @@
     "CHANGELOG.md": "8be87402efabcde91e7bec25c75e24f43766d2d9b6a5c1b54fce2f4ca1d9d8fe",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
     "scripts/validate_notary_archive.py": "099ff41742da304d34ec8b92dd3b3c4f96d064f21bde697b21f5c99c2393f283",
-    "scripts/tauri_host_skeleton.sh": "8385c6bee2b0e2679903599d2a7008a7280e3c5780dd36d11cf30909bb4ba1fe",
+    "scripts/tauri_host_skeleton.sh": "f3ccd369984a598932549e623dcf3e0806119ec983e3a05fd0f55429067eae9c",
     "scripts/verify_candidate_bundle.py": "4ff243b9c5ee212e48eeae711d2a776df5c0491365ab1f5f9f39be19754ebe05",
     "scripts/verify_candidate_bundle.sh": "67323fbd170c6131a0a2aac37655d38c210c48a3ace3b62d98197b5528d4eb8c",
     "scripts/verify_artifact_manifest.py": "084eae16e377a84ff766d8379804709685b2ee9bf16fe38ffc2ae0f9124abe59",
@@ -3548,7 +3548,7 @@
     "scripts/validated_candidate_evidence.py": "c2161502ddae3b874449b30553ffe291e47ea8f7295fe6649d7776b108d85e90",
     "scripts/sealed_evidence_manifest.py": "f024d80654bf27fc534fa17215d1fd00e134314182d9a28bdef77827873ec363",
     "scripts/physical_capture/packet.py": "2cf1c0ccd2a61d8ff5fe6b15a026d0a3bcfd1ec8c8fc049906381b82c951bbca",
-    "scripts/verify_release_app.sh": "07a213b52ca05ca2e3b80abb5bcb7feffcd32253b7a8ff65c7346fe249b30de8",
+    "scripts/verify_release_app.sh": "76c1671cf4ca3fc24b4781cbcd3a94afe87e4f0e8d0b980ce31dbd4e55668af0",
     "scripts/candidate_freeze.py": "9de77fc6d62a7f9045459b0399c8ed0ad5aef974a7dd8ad6517e4b5ca320dcf2",
     "scripts/release_signing_plan.py": "8a32ce3302081bd17090828bdb2f629898089bd4f39955cd5d6f28e6a2c21d27",
     "scripts/release_signing_preflight.py": "3913448110a6149a7af609299adbc0657efdef452463e1c769ce49a2b77b012d",
@@ -3610,6 +3610,6 @@
     "scripts/apple_validation_policy.sh": "7858530b4243c2edbb64fdc4db77d1d8fa13cbd2509af5cceeb780b1636bb56a",
     "scripts/build_native_ui.sh": "3c2033522b0fc787bd1f79681f5ed5b2dcd3a0404a835b111e65d2dca263d6d6",
     "scripts/native_ui_artifact.py": "acecd5b5765dec5dffd9121a839a61736c19ae0795d986b5647f03e991b4c50f",
-    "scripts/prepare_preview_candidate.sh": "bf9343416ebf5860a8ab207ebc66069b4f06f64137ed63f0ffcc87d17bc34e1f"
+    "scripts/prepare_preview_candidate.sh": "ce3ad76f17f77602054c646b171cf907386d06bb2fe925e57013e6789cab99cc"
   }
 }

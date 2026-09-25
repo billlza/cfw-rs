@@ -52,8 +52,8 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tauri = { version = "=2.11.5", features = ["tray-icon"] }
-tauri-plugin-single-instance = "=2.4.4"
+tauri = { version = "=2.11.6", features = ["tray-icon"] }
+tauri-plugin-single-instance = "=2.4.5"
 tauri-plugin-global-shortcut = "=2.3.2"
 thiserror.workspace = true
 tempfile.workspace = true
@@ -64,7 +64,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
-cc = "=1.4.6"
+cc = "=1.4.7"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true

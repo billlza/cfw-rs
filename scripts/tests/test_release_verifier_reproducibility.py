@@ -108,7 +108,105 @@ class ReleaseVerifierReproducibilityTests(unittest.TestCase):
                 f"{error.reason}"
             )
 
-    def _build_and_inspect(self, parent: Path) -> dict[str, object]:
+    def _assert_rejected_fixtures(self, executable: Path) -> None:
+        public_key_lines = PUBLIC_KEY_ENVELOPE.splitlines()
+        signature_lines = SIGNATURE_ENVELOPE.splitlines()
+        public_key = base64.b64decode(public_key_lines[1], validate=True)
+        signature = base64.b64decode(signature_lines[1], validate=True)
+        global_signature = base64.b64decode(signature_lines[3], validate=True)
+        self.assertEqual(len(public_key), 42)
+        self.assertEqual(len(signature), 74)
+        self.assertEqual(len(global_signature), 64)
+
+        def replace_encoded_line(lines: list[str], index: int, value: bytes) -> str:
+            changed = list(lines)
+            changed[index] = base64.b64encode(value).decode("ascii")
+            return "\n".join(changed)
+
+        # Keep the algorithm and key ID unchanged so rejection reaches the
+        # cryptographic verifier instead of failing on an ID mismatch.
+        changed_key = public_key[:10] + bytes([public_key[10] ^ 1]) + public_key[11:]
+        changed_key_id = signature[:2] + bytes([signature[2] ^ 1]) + signature[3:]
+        changed_global = bytes([global_signature[0] ^ 1]) + global_signature[1:]
+        changed_comment = list(signature_lines)
+        changed_comment[2] = "trusted comment: timestamp:1556193336\tfile:test"
+        invalid_signature = (
+            "updater signature does not match the embedded public key: "
+            "The signature verification failed"
+        )
+        cases = (
+            (
+                "archive-content", b"Test", PUBLIC_KEY_ENVELOPE,
+                SIGNATURE_ENVELOPE, "test", invalid_signature,
+            ),
+            (
+                "public-key-material", b"test",
+                replace_encoded_line(public_key_lines, 1, changed_key),
+                SIGNATURE_ENVELOPE, "test", invalid_signature,
+            ),
+            (
+                "signature-key-id", b"test", PUBLIC_KEY_ENVELOPE,
+                replace_encoded_line(signature_lines, 1, changed_key_id), "test",
+                "cannot initialize updater signature verification: "
+                "The signature was created with a different key than the one provided",
+            ),
+            (
+                "unsupported-algorithm", b"test", PUBLIC_KEY_ENVELOPE,
+                replace_encoded_line(signature_lines, 1, b"XX" + signature[2:]),
+                "test", "updater signature is invalid: "
+                "This signature algorithm is not supported by this implementation",
+            ),
+            (
+                "trusted-timestamp", b"test", PUBLIC_KEY_ENVELOPE,
+                "\n".join(changed_comment), "test", invalid_signature,
+            ),
+            (
+                "global-signature", b"test", PUBLIC_KEY_ENVELOPE,
+                replace_encoded_line(signature_lines, 3, changed_global),
+                "test", invalid_signature,
+            ),
+            (
+                "staged-basename", b"test", PUBLIC_KEY_ENVELOPE,
+                SIGNATURE_ENVELOPE, "different",
+                "updater signature names a different archive",
+            ),
+        )
+        for name, data, key, signature_text, archive_name, error in cases:
+            with self.subTest(rejection=name):
+                # Independent regular files preserve the valid fixture for the
+                # second reproducibility build and isolate each rejection cause.
+                root = self.root / f"rejection-{name}"
+                root.mkdir(mode=0o700)
+                config_path = root / "tauri.conf.json"
+                archive_path = root / archive_name
+                signature_path = root / "test.sig"
+                config = json.loads(self.configuration.read_bytes())
+                config["plugins"]["updater"]["pubkey"] = base64.b64encode(
+                    key.encode("utf-8")
+                ).decode("ascii")
+                config_path.write_text(
+                    json.dumps(config, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                archive_path.write_bytes(data)
+                signature_path.write_bytes(
+                    base64.b64encode(signature_text.encode("utf-8")) + b"\n"
+                )
+                for path in (config_path, archive_path, signature_path):
+                    path.chmod(0o600)
+                rejected = self._run(
+                    [
+                        str(executable), str(config_path), str(archive_path),
+                        str(signature_path), "--json",
+                    ]
+                )
+                self.assertEqual(rejected.returncode, 1, rejected.stderr.decode())
+                self.assertEqual(rejected.stdout, b"")
+                self.assertEqual(rejected.stderr.decode("utf-8"), f"error: {error}\n")
+
+    def _build_and_inspect(
+        self, parent: Path, *, check_rejections: bool = False
+    ) -> dict[str, object]:
         with _compiled_release_verifier(
             REPOSITORY, temporary_parent=parent
         ) as build:
@@ -167,6 +265,9 @@ class ReleaseVerifierReproducibilityTests(unittest.TestCase):
             self.assertEqual(verification.stderr, b"")
             receipt = json.loads(verification.stdout.decode("utf-8"))
 
+            if check_rejections:
+                self._assert_rejected_fixtures(executable)
+
             return {
                 "apple_toolchain": build.apple_toolchain,
                 "bytes": executable_bytes,
@@ -210,7 +311,7 @@ class ReleaseVerifierReproducibilityTests(unittest.TestCase):
             "_run_bounded_process",
             side_effect=record_build,
         ):
-            first = self._build_and_inspect(self.short_parent)
+            first = self._build_and_inspect(self.short_parent, check_rejections=True)
             self.assertEqual(list(self.short_parent.iterdir()), [])
             second = self._build_and_inspect(self.long_parent)
             self.assertEqual(list(self.long_parent.iterdir()), [])

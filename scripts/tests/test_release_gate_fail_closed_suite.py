@@ -250,18 +250,18 @@ _PINNED_INPUTS = (
     "scripts/xcodegen-2.46.0-installed-resources.patch",
     "crates/cfw-release-verifier/src/main.rs",
     ".github/workflows/ci.yml",
-    "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch",
-    "native/macos/patches/sing-box-v1.14.1-raw-packet-tun.patch",
-    "native/macos/patches/sing-box-v1.14.1-dns-failover.patch",
-    "native/macos/patches/sing-box-v1.14.1-endpoint-conflict.patch",
-    "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
-    "native/macos/patches/sing-box-v1.14.1-socks-lifecycle.patch",
+    "native/macos/patches/sing-box-v1.14.2-security-dependencies.patch",
+    "native/macos/patches/sing-box-v1.14.2-raw-packet-tun.patch",
+    "native/macos/patches/sing-box-v1.14.2-dns-failover.patch",
+    "native/macos/patches/sing-box-v1.14.2-endpoint-conflict.patch",
+    "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
+    "native/macos/patches/sing-box-v1.14.2-socks-lifecycle.patch",
     # Sources the pinned libbox build tags are bound to: the controller block and
     # the projection that injects it require `with_clash_api` in the artifact.
     "crates/cfw-singbox-config/src/controller.rs",
     "crates/cfw-singbox-config/src/projection.rs",
 )
-_SECURITY_PATCH = "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch"
+_SECURITY_PATCH = "native/macos/patches/sing-box-v1.14.2-security-dependencies.patch"
 _PINS_ENV = "scripts/dependency_pins.env"
 
 

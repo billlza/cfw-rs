@@ -1,0 +1,1384 @@
+diff --git a/cmd/cfm-build-workspace/main.go b/cmd/cfm-build-workspace/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee6216ecc718dd7e900e1ae64e8fe829f5943aa6
+--- /dev/null
++++ b/cmd/cfm-build-workspace/main.go
+@@ -0,0 +1,188 @@
++// Build an isolated workspace with the source-bound sing v0.9.6-0.20260922013354-87c33f17688f packet-address
++// correction. The original source and checksum-verified module cache stay intact.
++package main
++
++import (
++	"crypto/sha256"
++	"errors"
++	"flag"
++	"fmt"
++	"go/format"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++type sourceEdit struct{ before, after string }
++type sourcePatch struct {
++	path, digest string
++	edits        []sourceEdit
++}
++
++var patches = []sourcePatch{
++	{
++		path: "common/bufio/bind.go", digest: "581bcc7042231a0d4e76da58372bde94ad59d59e460b6f84200b193976d4bc9e",
++		edits: []sourceEdit{
++			{"\"net\"", "\"net\"\n\t\"sync\""},
++			{"remoteAddr M.Socksaddr", "remoteAddr M.Socksaddr\n\tremoteAddrAccess sync.RWMutex"},
++			{"c.remoteAddr = M.SocksaddrFromNet(addr)", "c.setRemoteAddr(M.SocksaddrFromNet(addr))"},
++			{"c.remoteAddr = destination", "c.setRemoteAddr(destination)"},
++			{"c.remoteAddr.UDPAddr()", "c.remoteAddress().UDPAddr()"},
++			{"WritePacket(buffer, c.remoteAddr)", "WritePacket(buffer, c.remoteAddress())"},
++			{"return c.remoteAddr", "return c.remoteAddress()"},
++			{"func (c *serverPacketConn) Read(p []byte)", `// Copy the address under a short lock; never hold it across blocking I/O.
++func (c *serverPacketConn) setRemoteAddr(addr M.Socksaddr) {
++	c.remoteAddrAccess.Lock()
++	c.remoteAddr = addr
++	c.remoteAddrAccess.Unlock()
++}
++
++func (c *serverPacketConn) remoteAddress() M.Socksaddr {
++	c.remoteAddrAccess.RLock()
++	defer c.remoteAddrAccess.RUnlock()
++	return c.remoteAddr
++}
++
++func (c *serverPacketConn) Read(p []byte)`},
++		},
++	},
++	{
++		path: "common/bufio/bind_wait.go", digest: "ee1581ff0a07d1858f5edafc5c767e9cc884a2462cf350e55ffacfa65dd59203",
++		edits: []sourceEdit{{"w.remoteAddr = destination", "w.setRemoteAddr(destination)"}},
++	},
++}
++
++func rewrite(patch sourcePatch, input []byte) ([]byte, error) {
++	if fmt.Sprintf("%x", sha256.Sum256(input)) != patch.digest {
++		return nil, fmt.Errorf("%s: sing v0.9.6-0.20260922013354-87c33f17688f source checksum mismatch", patch.path)
++	}
++	source := string(input)
++	for _, edit := range patch.edits {
++		if strings.Count(source, edit.before) != 1 {
++			return nil, fmt.Errorf("%s: source edit is not unique", patch.path)
++		}
++		source = strings.Replace(source, edit.before, edit.after, 1)
++	}
++	return format.Source([]byte(source))
++}
++
++func copySources(source, destination string) error {
++	var copied int64
++	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
++		if walkErr != nil {
++			return walkErr
++		}
++		relative, err := filepath.Rel(source, path)
++		if err != nil {
++			return err
++		}
++		if relative == ".git" {
++			return filepath.SkipDir
++		}
++		target := filepath.Join(destination, relative)
++		if entry.IsDir() {
++			return os.MkdirAll(target, 0o700)
++		}
++		metadata, err := entry.Info()
++		if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 16<<20 {
++			return fmt.Errorf("refuse nonregular or oversized build input: %s", relative)
++		}
++		copied += metadata.Size()
++		if copied > 256<<20 {
++			return errors.New("build source copy exceeds 256 MiB")
++		}
++		content, err := os.ReadFile(path)
++		if err != nil {
++			return err
++		}
++		return os.WriteFile(target, content, 0o600|metadata.Mode().Perm()&0o111)
++	})
++}
++
++func prepare(sourceRoot, moduleRoot, output string) (workspace string, resultErr error) {
++	if !filepath.IsAbs(sourceRoot) || !filepath.IsAbs(moduleRoot) || !filepath.IsAbs(output) {
++		return "", errors.New("source, module and output paths must be absolute")
++	}
++	realSource, err := filepath.EvalSymlinks(sourceRoot)
++	if err != nil || realSource != filepath.Clean(sourceRoot) || strings.HasPrefix(filepath.Clean(output)+string(os.PathSeparator), realSource+string(os.PathSeparator)) {
++		return "", errors.New("build workspace must be outside the real source directory")
++	}
++	realRoot, err := filepath.EvalSymlinks(moduleRoot)
++	if err != nil || realRoot != filepath.Clean(moduleRoot) || filepath.Base(realRoot) != "sing@v0.9.6-0.20260922013354-87c33f17688f" {
++		return "", errors.New("module source must be the real sing v0.9.6-0.20260922013354-87c33f17688f directory")
++	}
++	if strings.HasPrefix(filepath.Clean(output)+string(os.PathSeparator), realRoot+string(os.PathSeparator)) {
++		return "", errors.New("build workspace must be outside the verified module directory")
++	}
++	goMod, err := os.ReadFile(filepath.Join(realSource, "go.mod"))
++	if err != nil || !strings.Contains(string(goMod), "\tgithub.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f\n") || strings.Contains(string(goMod), "replace ") {
++		return "", errors.New("unexpected sing-box module declaration")
++	}
++	// Validate and rewrite both files before creating the isolated workspace.
++	contents := make(map[string][]byte, len(patches))
++	for _, patch := range patches {
++		path := filepath.Join(realRoot, patch.path)
++		metadata, err := os.Lstat(path)
++		if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 65536 {
++			return "", fmt.Errorf("%s: expected a bounded regular source file", patch.path)
++		}
++		input, err := os.ReadFile(path)
++		if err != nil {
++			return "", err
++		}
++		contents[patch.path], err = rewrite(patch, input)
++		if err != nil {
++			return "", err
++		}
++	}
++	if err := os.Mkdir(output, 0o700); err != nil {
++		return "", err
++	}
++	defer func() {
++		if resultErr != nil {
++			resultErr = errors.Join(resultErr, os.RemoveAll(output))
++		}
++	}()
++	if err := copySources(realSource, output); err != nil {
++		return "", err
++	}
++	moduleCopy := filepath.Join(output, "cfw-dependencies", "sing")
++	if err := copySources(realRoot, moduleCopy); err != nil {
++		return "", err
++	}
++	for relative, content := range contents {
++		path := filepath.Join(moduleCopy, relative)
++		if err := os.WriteFile(path, content, 0o600); err != nil {
++			return "", err
++		}
++	}
++	// A fixed relative replacement keeps ephemeral absolute paths out of module
++	// build identities. Both trees, including the dependency license, are copied.
++	goMod = append(goMod, []byte("\nreplace github.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f => ./cfw-dependencies/sing\n")...)
++	if err := os.WriteFile(filepath.Join(output, "go.mod"), goMod, 0o600); err != nil {
++		return "", err
++	}
++	return output, nil
++}
++
++func main() {
++	moduleRoot := flag.String("module-source", "", "verified sing v0.9.6-0.20260922013354-87c33f17688f module directory")
++	output := flag.String("output", "", "new private build workspace")
++	flag.Parse()
++	if flag.NArg() != 0 {
++		fmt.Fprintln(os.Stderr, "unexpected build-workspace arguments")
++		os.Exit(1)
++	}
++	sourceRoot, err := os.Getwd()
++	if err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++	path, err := prepare(sourceRoot, *moduleRoot, *output)
++	if err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++	fmt.Println(path)
++}
+diff --git a/cmd/cfm-build-workspace/main_test.go b/cmd/cfm-build-workspace/main_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c202f5846b73a2086a83e1098d53f284bb11f49
+--- /dev/null
++++ b/cmd/cfm-build-workspace/main_test.go
+@@ -0,0 +1,102 @@
++package main
++
++import (
++	"bytes"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestWorkspacePreservesSourcesAndRejectsDrift(t *testing.T) {
++	cache := os.Getenv("GOMODCACHE")
++	if !filepath.IsAbs(cache) {
++		t.Fatal("test requires the verified absolute module cache")
++	}
++	parent, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	module := filepath.Join(parent, "sing@v0.9.6-0.20260922013354-87c33f17688f")
++	source := filepath.Join(parent, "source")
++	if err = os.Mkdir(source, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	goMod := []byte("module github.com/sagernet/sing-box\n\nrequire (\n\tgithub.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f\n)\n")
++	if err = os.WriteFile(filepath.Join(source, "go.mod"), goMod, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	original := make(map[string][]byte)
++	for _, patch := range patches {
++		input, err := os.ReadFile(filepath.Join(cache, "github.com/sagernet/sing@v0.9.6-0.20260922013354-87c33f17688f", patch.path))
++		if err != nil {
++			t.Fatal(err)
++		}
++		path := filepath.Join(module, patch.path)
++		if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++			t.Fatal(err)
++		}
++		if err = os.WriteFile(path, input, 0o600); err != nil {
++			t.Fatal(err)
++		}
++		original[path] = input
++	}
++	output := filepath.Join(t.TempDir(), "workspace")
++	workspace, err := prepare(source, module, output)
++	if err != nil {
++		t.Fatal(err)
++	}
++	data, err := os.ReadFile(filepath.Join(workspace, "go.mod"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.HasSuffix(string(data), "\nreplace github.com/sagernet/sing v0.9.6-0.20260922013354-87c33f17688f => ./cfw-dependencies/sing\n") {
++		t.Fatalf("missing exact relative module replacement: %s", data)
++	}
++	unchanged, err := os.ReadFile(filepath.Join(source, "go.mod"))
++	if err != nil || !bytes.Equal(unchanged, goMod) {
++		t.Fatal("source go.mod was modified", err)
++	}
++	for path, before := range original {
++		after, err := os.ReadFile(path)
++		if err != nil || !bytes.Equal(before, after) {
++			t.Fatal("module cache source was modified", err)
++		}
++		relative, err := filepath.Rel(module, path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		patched, err := os.ReadFile(filepath.Join(output, "cfw-dependencies", "sing", relative))
++		if err != nil || bytes.Equal(before, patched) {
++			t.Fatal("workspace did not contain corrected source", err)
++		}
++	}
++	if _, err = prepare(source, module, output); err == nil {
++		t.Fatal("overwrote existing output")
++	}
++	for _, protected := range []string{source, module} {
++		inside := filepath.Join(protected, "workspace")
++		if _, err = prepare(source, module, inside); err == nil {
++			t.Fatal("accepted a workspace inside verified inputs")
++		}
++		if _, err = os.Stat(inside); !os.IsNotExist(err) {
++			t.Fatal("workspace rejection modified verified inputs", err)
++		}
++	}
++	for _, patch := range patches {
++		path := filepath.Join(module, patch.path)
++		if err = os.WriteFile(path, append(bytes.Clone(original[path]), '\n'), 0o600); err != nil {
++			t.Fatal(err)
++		}
++		rejected := filepath.Join(t.TempDir(), "rejected")
++		if _, err = prepare(source, module, rejected); err == nil {
++			t.Fatal("accepted changed module source", patch.path)
++		}
++		if _, err = os.Stat(rejected); !os.IsNotExist(err) {
++			t.Fatal("source rejection left output", err)
++		}
++		if err = os.WriteFile(path, original[path], 0o600); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
+diff --git a/dns/socks_setup_budget_test.go b/dns/socks_setup_budget_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d52c84a783d0235cb00d6ff489b00804a0f032f
+--- /dev/null
++++ b/dns/socks_setup_budget_test.go
+@@ -0,0 +1,111 @@
++package dns_test
++
++import (
++	"bufio"
++	"context"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	mdns "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/adapter"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++)
++
++func setupBudgetDNS(t *testing.T, answer bool) (int, *atomic.Int32) {
++	t.Helper()
++	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	seen := new(atomic.Int32)
++	ready, done := make(chan struct{}), make(chan error, 1)
++	server := &mdns.Server{PacketConn: conn, Net: "udp", NotifyStartedFunc: func() { close(ready) }, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, query *mdns.Msg) {
++		seen.Add(1)
++		if !answer {
++			return // A real UDP black hole: receive the query and send no reply.
++		}
++		response := new(mdns.Msg)
++		response.SetReply(query)
++		response.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: query.Question[0].Name, Rrtype: mdns.TypeA, Class: mdns.ClassINET}, A: net.ParseIP("127.0.0.1")}}
++		if err := w.WriteMsg(response); err != nil {
++			t.Error(err)
++		}
++	})}
++	go func() { done <- server.ActivateAndServe() }()
++	select {
++	case <-ready:
++	case err := <-done:
++		t.Fatalf("DNS fixture did not start: %v", err)
++	}
++	t.Cleanup(func() {
++		if err := server.Shutdown(); err != nil {
++			t.Error(err)
++		}
++		if err := <-done; err != nil {
++			t.Error(err)
++		}
++	})
++	return conn.LocalAddr().(*net.UDPAddr).Port, seen
++}
++
++func TestSOCKSBootstrapFallbackSurvivesPrimaryTimeout(t *testing.T) {
++	proxyPort := unusedDNSProbePort(t)
++	startPolicyBoxContext(t, map[string]any{
++		"log":       map[string]any{"disabled": true},
++		"inbounds":  []any{map[string]any{"type": "socks", "listen": "127.0.0.1", "listen_port": proxyPort}},
++		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
++	})
++	primaryPort, primaryQueries := setupBudgetDNS(t, false)
++	fallbackPort, fallbackQueries := setupBudgetDNS(t, true)
++	ctx := startPolicyBoxContext(t, map[string]any{
++		"log": map[string]any{"disabled": true},
++		"dns": map[string]any{"strategy": "ipv4_only", "servers": []any{
++			map[string]any{"type": "udp", "tag": "primary", "server": "127.0.0.1", "server_port": primaryPort},
++			map[string]any{"type": "udp", "tag": "fallback", "server": "127.0.0.1", "server_port": fallbackPort},
++		}},
++		"outbounds": []any{map[string]any{"type": "socks", "tag": "node", "version": "5", "server": "proxy.invalid", "server_port": proxyPort,
++			"domain_resolver": map[string]any{"server": "primary", "fallback_server": "fallback", "strategy": "ipv4_only"}}},
++	})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "fallback-established") }))
++	defer server.Close()
++	outbound, exists := service.FromContext[adapter.OutboundManager](ctx).Outbound("node")
++	if !exists {
++		t.Fatal("fixture outbound missing")
++	}
++	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
++	defer cancel()
++	started := time.Now()
++	conn, err := outbound.DialContext(callCtx, "tcp", M.ParseSocksaddr(strings.TrimPrefix(server.URL, "http://")))
++	if err != nil {
++		t.Fatalf("bootstrap fallback never completed; elapsed=%v primary=%d fallback=%d: %v", time.Since(started), primaryQueries.Load(), fallbackQueries.Load(), err)
++	}
++	defer conn.Close()
++	if primaryQueries.Load() == 0 || fallbackQueries.Load() == 0 {
++		t.Fatal("both real DNS transports must be exercised")
++	}
++	t.Logf("real DNS fallback and SOCKS negotiation completed in %v", time.Since(started))
++	cancel()
++	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n"); err != nil {
++		t.Fatal(err)
++	}
++	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer response.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(response.Body, 1024))
++	if err != nil || response.StatusCode != 200 || string(body) != "fallback-established" {
++		t.Fatalf("established payload not retained: status=%d body=%q err=%v", response.StatusCode, body, err)
++	}
++}
+diff --git a/protocol/socks/client.go b/protocol/socks/client.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ddcb15ed6cb6bbe103147f0037d74b5bae2a9fd0
+--- /dev/null
++++ b/protocol/socks/client.go
+@@ -0,0 +1,186 @@
++package socks
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net"
++	"sync"
++	"time"
++
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing/common/bufio"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/protocol/socks"
++)
++
++// boundedClient keeps the upstream protocol implementation while giving each
++// setup attempt its own cancellation scope. A dial context owns the handshake,
++// not the lifetime of a successfully established connection.
++type boundedClient struct {
++	dialer   N.Dialer
++	server   M.Socksaddr
++	version  socks.Version
++	username string
++	password string
++	timeout  time.Duration
++	direct   bool
++}
++
++var _ N.Dialer = (*boundedClient)(nil)
++
++func (c *boundedClient) begin(ctx context.Context) (context.Context, *socks.Client, func(error) error) {
++	timeout := c.timeout
++	if timeout == 0 {
++		// Setup includes name resolution and several SOCKS round trips after
++		// TCP connects. Use the protocol-handshake budget, as TLS does, rather
++		// than applying the socket-connect budget to the whole negotiation.
++		// The underlying dialer still enforces TCPConnectTimeout per socket.
++		timeout = C.TCPTimeout
++	}
++	ctx, cancel := context.WithTimeout(ctx, timeout)
++	scope := &handshakeDialer{Dialer: c.dialer, server: c.server, direct: c.direct}
++	done := make(chan struct{})
++	stop := context.AfterFunc(ctx, func() {
++		scope.closeOwned()
++		close(done)
++	})
++	finish := func(err error) error {
++		// If cancellation won, wait for its close operation before releasing any
++		// connection to the caller. No callback may outlive this setup attempt.
++		if !stop() {
++			<-done
++		}
++		if cause := ctx.Err(); cause != nil {
++			err = errors.Join(cause, err)
++		}
++		cancel()
++		if err != nil {
++			return errors.Join(err, scope.closeOwned())
++		}
++		scope.release()
++		return nil
++	}
++	return ctx, socks.NewClient(scope, c.server, c.version, c.username, c.password), finish
++}
++
++func (c *boundedClient) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	ctx, client, finish := c.begin(ctx)
++	conn, err := client.DialContext(ctx, network, destination)
++	if err = finish(err); err != nil {
++		return nil, err
++	}
++	if N.NetworkName(network) == N.NetworkUDP {
++		// The upstream association changes its default remote address on Read.
++		// A connected UDP dial must keep the requested destination immutable,
++		// including while QUIC reads and writes concurrently. Reuse the packet
++		// adapter so Write always calls WriteTo with the original destination.
++		packet, ok := conn.(net.PacketConn)
++		if !ok {
++			return nil, errors.Join(errors.New("socks5: UDP dial did not return a packet association"), conn.Close())
++		}
++		return bufio.NewBindPacketConn(packet, destination), nil
++	}
++	return conn, nil
++}
++
++func (c *boundedClient) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	ctx, client, finish := c.begin(ctx)
++	conn, err := client.ListenPacket(ctx, destination)
++	if err = finish(err); err != nil {
++		return nil, err
++	}
++	return conn, nil
++}
++
++type handshakeDialer struct {
++	N.Dialer
++	server M.Socksaddr
++	direct bool
++	peer   M.Socksaddr
++
++	access   sync.Mutex
++	owned    []io.Closer
++	closed   bool
++	closeErr error
++}
++
++func (d *handshakeDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	if N.NetworkName(network) == N.NetworkUDP {
++		if destination.Port == 0 {
++			return nil, errors.New("socks5: UDP relay returned port zero")
++		}
++		if destination.Addr.IsUnspecified() {
++			// Some servers return a wildcard BND.ADDR. Keep the relay's port,
++			// and reach it through the same configured dialer/detour. A detour's
++			// RemoteAddr can be an earlier hop, so only direct sockets use it.
++			server := d.server
++			if d.direct && d.peer.IsIP() && !d.peer.Addr.IsUnspecified() {
++				server = d.peer
++			}
++			server.Port = destination.Port
++			destination = server
++		}
++	}
++	conn, err := d.Dialer.DialContext(ctx, network, destination)
++	if err != nil {
++		return nil, err
++	}
++	if err = d.own(ctx, conn); err != nil {
++		return nil, err
++	}
++	if N.NetworkName(network) == N.NetworkTCP {
++		d.peer = M.SocksaddrFromNet(conn.RemoteAddr())
++	}
++	return conn, nil
++}
++
++func (d *handshakeDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	conn, err := d.Dialer.ListenPacket(ctx, destination)
++	if err != nil {
++		return nil, err
++	}
++	if err = d.own(ctx, conn); err != nil {
++		return nil, err
++	}
++	return conn, nil
++}
++
++func (d *handshakeDialer) own(ctx context.Context, conn io.Closer) error {
++	d.access.Lock()
++	defer d.access.Unlock()
++	if err := ctx.Err(); err != nil {
++		return errors.Join(err, closeHandshakeConn(conn))
++	}
++	d.owned = append(d.owned, conn)
++	return nil
++}
++
++func closeHandshakeConn(conn io.Closer) error {
++	err := conn.Close()
++	// The upstream SOCKS client also closes its control socket on failure.
++	if errors.Is(err, net.ErrClosed) {
++		return nil
++	}
++	return err
++}
++
++func (d *handshakeDialer) closeOwned() error {
++	d.access.Lock()
++	defer d.access.Unlock()
++	if !d.closed {
++		d.closed = true
++		for _, conn := range d.owned {
++			d.closeErr = errors.Join(d.closeErr, closeHandshakeConn(conn))
++		}
++		d.owned = nil
++	}
++	return d.closeErr
++}
++
++func (d *handshakeDialer) release() {
++	d.access.Lock()
++	d.owned = nil
++	d.access.Unlock()
++}
+diff --git a/protocol/socks/outbound.go b/protocol/socks/outbound.go
+index 344c798881eacbac2394e05a4d85f8e4c85e7d42..a0ff3b84092cc9b54310d573458ac4ada923cda0 100644
+--- a/protocol/socks/outbound.go
++++ b/protocol/socks/outbound.go
+@@ -5,0 +6 @@ import (
++	"time"
+@@ -33 +34 @@ type Outbound struct {
+-	client    *socks.Client
++	client    *boundedClient
+@@ -57,2 +58,6 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+-		client:    socks.NewClient(outboundDialer, options.ServerOptions.Build(), version, options.Username, options.Password),
+-		resolve:   version == socks.Version4,
++		client: &boundedClient{
++			dialer: outboundDialer, server: options.ServerOptions.Build(), version: version,
++			username: options.Username, password: options.Password,
++			timeout: time.Duration(options.ConnectTimeout), direct: options.Detour == "",
++		},
++		resolve: version == socks.Version4,
+diff --git a/protocol/socks/outbound_lifecycle_test.go b/protocol/socks/outbound_lifecycle_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e3ffc7ebde119ee02ea0963ad03a87818290e9d
+--- /dev/null
++++ b/protocol/socks/outbound_lifecycle_test.go
+@@ -0,0 +1,749 @@
++package socks
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/netip"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/dns"
++	D "github.com/sagernet/sing-box/dns/transport"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/json/badoption"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/sagernet/sing/service"
++
++	mdns "github.com/miekg/dns"
++)
++
++// Real local SOCKS control/data sockets; no external endpoints or OS settings.
++type socksFixture struct {
++	tcp         net.Listener
++	udp         net.PacketConn
++	stall       string
++	phaseDelay  time.Duration
++	stallFirst  bool
++	bind        string
++	zeroPort    bool
++	dnsReply    bool
++	replyFrom   string
++	observedUDP chan string
++	rejectAuth  bool
++	reached     chan int
++	closed      chan int
++	count       atomic.Int32
++	access      sync.Mutex
++	conns       []net.Conn
++	workers     sync.WaitGroup
++	stopOnce    sync.Once
++	closing     bool
++}
++
++func newSocksFixture(t *testing.T, stall string) *socksFixture {
++	t.Helper()
++	tcp, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		tcp.Close()
++		t.Fatal(err)
++	}
++	f := &socksFixture{tcp: tcp, udp: udp, stall: stall, bind: "127.0.0.1", reached: make(chan int, 16), closed: make(chan int, 16)}
++	t.Cleanup(f.close)
++	return f
++}
++
++func (f *socksFixture) start() {
++	f.workers.Add(2)
++	go func() {
++		defer f.workers.Done()
++		for {
++			conn, err := f.tcp.Accept()
++			if err != nil {
++				return
++			}
++			f.access.Lock()
++			if f.closing {
++				f.access.Unlock()
++				conn.Close()
++				return
++			}
++			f.conns = append(f.conns, conn)
++			f.access.Unlock()
++			id := int(f.count.Add(1))
++			f.workers.Add(1)
++			go func() {
++				defer f.workers.Done()
++				defer conn.Close()
++				defer func() { f.closed <- id }()
++				f.serve(conn, id)
++			}()
++		}
++	}()
++	go func() {
++		defer f.workers.Done()
++		buffer := make([]byte, 4096)
++		for {
++			count, peer, err := f.udp.ReadFrom(buffer)
++			if err != nil {
++				return
++			}
++			packet := append([]byte(nil), buffer[:count]...)
++			if f.replyFrom != "" {
++				reader := bytes.NewReader(packet[3:])
++				target, parseErr := M.SocksaddrSerializer.ReadAddrPort(reader)
++				if parseErr != nil {
++					return
++				}
++				f.observedUDP <- target.String()
++				response := bytes.NewBuffer([]byte{0, 0, 0})
++				if M.SocksaddrSerializer.WriteAddrPort(response, M.ParseSocksaddr(f.replyFrom)) != nil {
++					return
++				}
++				response.Write(packet[len(packet)-reader.Len():])
++				packet = response.Bytes()
++			}
++			if f.dnsReply {
++				offset, err := socksAddressLength(packet[3:])
++				if err != nil {
++					continue
++				}
++				offset += 3
++				var query mdns.Msg
++				if query.Unpack(packet[offset:]) != nil {
++					continue
++				}
++				response := new(mdns.Msg)
++				response.SetReply(&query)
++				response.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: query.Question[0].Name, Rrtype: mdns.TypeA, Class: mdns.ClassINET, Ttl: 30}, A: net.ParseIP("203.0.113.9")}}
++				raw, err := response.Pack()
++				if err != nil {
++					continue
++				}
++				packet = append(packet[:offset], raw...)
++			}
++			if _, err = f.udp.WriteTo(packet, peer); err != nil {
++				return
++			}
++		}
++	}()
++}
++
++func (f *socksFixture) close() {
++	f.stopOnce.Do(func() {
++		f.tcp.Close()
++		f.udp.Close()
++		f.access.Lock()
++		f.closing = true
++		for _, c := range f.conns {
++			c.Close()
++		}
++		f.access.Unlock()
++		f.workers.Wait()
++	})
++}
++func readN(conn net.Conn, size int) ([]byte, error) {
++	data := make([]byte, size)
++	_, err := io.ReadFull(conn, data)
++	return data, err
++}
++func (f *socksFixture) waitAt(conn net.Conn, id int, phase string) bool {
++	if f.phaseDelay > 0 {
++		time.Sleep(f.phaseDelay)
++	}
++	if f.stall != phase || f.stallFirst && id != 1 {
++		return false
++	}
++	f.reached <- id
++	var buffer [1]byte
++	conn.Read(buffer[:])
++	return true
++}
++func (f *socksFixture) serve(conn net.Conn, id int) {
++	header, err := readN(conn, 2)
++	if err != nil || header[0] != 5 {
++		return
++	}
++	if _, err = readN(conn, int(header[1])); err != nil {
++		return
++	}
++	if f.waitAt(conn, id, "method") {
++		return
++	}
++	if _, err = conn.Write([]byte{5, 2}); err != nil {
++		return
++	}
++	header, err = readN(conn, 2)
++	if err != nil || header[0] != 1 {
++		return
++	}
++	if _, err = readN(conn, int(header[1])); err != nil {
++		return
++	}
++	size, err := readN(conn, 1)
++	if err != nil {
++		return
++	}
++	if _, err = readN(conn, int(size[0])); err != nil {
++		return
++	}
++	if f.waitAt(conn, id, "authentication") {
++		return
++	}
++	authStatus := byte(0)
++	if f.rejectAuth {
++		authStatus = 1
++	}
++	if _, err = conn.Write([]byte{1, authStatus}); err != nil {
++		return
++	}
++	if f.rejectAuth {
++		var buffer [1]byte
++		conn.Read(buffer[:])
++		return
++	}
++	header, err = readN(conn, 4)
++	if err != nil || header[0] != 5 {
++		return
++	}
++	switch header[3] {
++	case 1:
++		_, err = readN(conn, 6)
++	case 4:
++		_, err = readN(conn, 18)
++	case 3:
++		size, err = readN(conn, 1)
++		if err == nil {
++			_, err = readN(conn, int(size[0])+2)
++		}
++	default:
++		return
++	}
++	if err != nil {
++		return
++	}
++	if f.waitAt(conn, id, "request") {
++		return
++	}
++	port := uint16(f.udp.LocalAddr().(*net.UDPAddr).Port)
++	if f.zeroPort {
++		port = 0
++	}
++	response := []byte{5, 0, 0}
++	if ip, err := netip.ParseAddr(f.bind); err == nil {
++		if ip.Is4() {
++			response = append(response, 1)
++		} else {
++			response = append(response, 4)
++		}
++		response = append(response, ip.AsSlice()...)
++	} else {
++		response = append(response, 3, byte(len(f.bind)))
++		response = append(response, []byte(f.bind)...)
++	}
++	response = binary.BigEndian.AppendUint16(response, port)
++	if _, err = conn.Write(response); err != nil {
++		return
++	}
++	if header[1] == 1 {
++		io.Copy(conn, conn)
++	} else {
++		var buffer [1]byte
++		conn.Read(buffer[:])
++	}
++}
++
++func socksAddressLength(data []byte) (int, error) {
++	if len(data) < 1 {
++		return 0, io.ErrUnexpectedEOF
++	}
++	switch data[0] {
++	case 1:
++		if len(data) >= 7 {
++			return 7, nil
++		}
++	case 4:
++		if len(data) >= 19 {
++			return 19, nil
++		}
++	case 3:
++		if len(data) >= 2 && len(data) >= int(data[1])+4 {
++			return int(data[1]) + 4, nil
++		}
++	}
++	return 0, io.ErrUnexpectedEOF
++}
++
++func fixtureOutbound(t *testing.T, f *socksFixture, timeout time.Duration, ctx context.Context, detour string, server string) adapter.Outbound {
++	t.Helper()
++	if server == "" {
++		server = "127.0.0.1"
++	}
++	options := option.SOCKSOutboundOptions{ServerOptions: option.ServerOptions{Server: server, ServerPort: uint16(f.tcp.Addr().(*net.TCPAddr).Port)},
++		DialerOptions: option.DialerOptions{ConnectTimeout: badoption.Duration(timeout), Detour: detour}, Username: "fixture-user", Password: "fixture-password"}
++	result, err := NewOutbound(ctx, nil, log.NewNOPFactory().NewLogger("fixture"), "node", options)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return result
++}
++
++func TestSOCKSHandshakeCancellation(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		for _, phase := range []string{"method", "authentication", "request"} {
++			t.Run(network+"/"+phase, func(t *testing.T) {
++				f := newSocksFixture(t, phase)
++				f.start()
++				outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++				ctx, cancel := context.WithCancel(context.Background())
++				defer cancel()
++				done := make(chan error, 1)
++				go func() {
++					conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr("203.0.113.1:443"))
++					if conn != nil {
++						conn.Close()
++					}
++					done <- err
++				}()
++				select {
++				case <-f.reached:
++				case <-time.After(time.Second):
++					t.Fatal("server did not reach scripted handshake stage")
++				}
++				cancel()
++				select {
++				case err := <-done:
++					if !errors.Is(err, context.Canceled) {
++						t.Errorf("expected cancellation, got %v", err)
++					}
++				case <-time.After(500 * time.Millisecond):
++					t.Error("SOCKS handshake ignored cancellation")
++					f.close()
++					<-done
++					return
++				}
++				select {
++				case <-f.closed:
++				case <-time.After(500 * time.Millisecond):
++					t.Error("cancelled handshake did not close its control connection")
++				}
++			})
++		}
++	}
++}
++
++func TestSOCKSConnectTimeoutIncludesHandshake(t *testing.T) {
++	f := newSocksFixture(t, "request")
++	f.start()
++	outbound := fixtureOutbound(t, f, 100*time.Millisecond, context.Background(), "", "")
++	done := make(chan error, 1)
++	start := time.Now()
++	go func() {
++		conn, err := outbound.DialContext(context.Background(), "udp", M.ParseSocksaddr("203.0.113.1:53"))
++		if conn != nil {
++			conn.Close()
++		}
++		done <- err
++	}()
++	select {
++	case err := <-done:
++		if !errors.Is(err, context.DeadlineExceeded) {
++			t.Errorf("expected configured handshake deadline, got %v", err)
++		}
++		if time.Since(start) > 500*time.Millisecond {
++			t.Error("handshake exceeded its configured bound")
++		}
++	case <-time.After(600 * time.Millisecond):
++		t.Error("connect_timeout did not bound the SOCKS handshake")
++		f.close()
++		<-done
++	}
++}
++
++func TestSOCKSDefaultBudgetAllowsCompleteNegotiation(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		t.Run(network, func(t *testing.T) {
++			t.Parallel()
++			f := newSocksFixture(t, "")
++			// Model three successful round trips over a congested upstream.
++			// TCP connects immediately; protocol negotiation takes six seconds.
++			f.phaseDelay = 2 * time.Second
++			f.start()
++			outbound := fixtureOutbound(t, f, 0, context.Background(), "", "")
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			started := time.Now()
++			conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr("203.0.113.1:443"))
++			if err != nil {
++				t.Fatalf("working SOCKS negotiation cut short after %v: %v", time.Since(started), err)
++			}
++			defer conn.Close()
++			t.Logf("real %s negotiation completed in %v", network, time.Since(started))
++			cancel()
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			payload := []byte("retained-after-slow-negotiation")
++			if _, err = conn.Write(payload); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 4096)
++			var n int
++			if network == "tcp" {
++				n, err = io.ReadFull(conn, got[:len(payload)])
++			} else {
++				n, err = conn.Read(got)
++			}
++			if err != nil || !bytes.Equal(got[:n], payload) {
++				t.Fatalf("established connection did not retain payload: %q %v", got[:n], err)
++			}
++		})
++	}
++}
++
++func TestSOCKSSuccessfulConnectionsOutliveDialContext(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		t.Run(network, func(t *testing.T) {
++			f := newSocksFixture(t, "")
++			f.start()
++			outbound := fixtureOutbound(t, f, 100*time.Millisecond, context.Background(), "", "")
++			ctx, cancel := context.WithCancel(context.Background())
++			conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr("203.0.113.1:443"))
++			cancel()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			time.Sleep(120 * time.Millisecond)
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			for i := 0; i < 3; i++ {
++				payload := []byte("retained-session")
++				if _, err = conn.Write(payload); err != nil {
++					t.Fatal(err)
++				}
++				got := make([]byte, 4096)
++				var count int
++				var readErr error
++				if network == "tcp" {
++					count, readErr = io.ReadFull(conn, got[:len(payload)])
++				} else {
++					count, readErr = conn.Read(got)
++				}
++				if readErr != nil {
++					t.Fatal(readErr)
++				}
++				if string(got[:count]) != string(payload) {
++					t.Fatal("session payload changed")
++				}
++			}
++		})
++	}
++}
++
++func TestSOCKSUDPResolverRecoversAfterCancelledHandshake(t *testing.T) {
++	f := newSocksFixture(t, "request")
++	f.stallFirst = true
++	f.dnsReply = true
++	f.start()
++	outbound := fixtureOutbound(t, f, 150*time.Millisecond, context.Background(), "", "")
++	transport := D.NewUDPRaw(log.NewNOPFactory().NewLogger("dns"), dns.NewTransportAdapter("udp", "dns", nil), outbound, M.ParseSocksaddr("9.9.9.9:53"))
++	defer transport.Close()
++	query := new(mdns.Msg)
++	query.SetQuestion("fixture.invalid.", mdns.TypeA)
++	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
++	_, err := transport.Exchange(ctx, query)
++	cancel()
++	if err == nil {
++		t.Fatal("stalled handshake unexpectedly returned a DNS answer")
++	}
++	select {
++	case <-f.closed:
++	case <-time.After(400 * time.Millisecond):
++		t.Error("expired DNS dial retained its TCP control connection")
++	}
++	next, cancelNext := context.WithTimeout(context.Background(), 600*time.Millisecond)
++	response, err := transport.Exchange(next, query)
++	cancelNext()
++	if err != nil {
++		t.Errorf("same DNS transport could not recover after timeout: %v", err)
++		return
++	}
++	if len(response.Answer) != 1 {
++		t.Fatal("recovered DNS answer missing")
++	}
++	third, cancelThird := context.WithTimeout(context.Background(), 500*time.Millisecond)
++	defer cancelThird()
++	if response, err = transport.Exchange(third, query); err != nil || len(response.Answer) != 1 {
++		t.Fatalf("successful UDP session did not survive query cancellation: %v", err)
++	}
++	if f.count.Load() != 2 {
++		t.Fatalf("expected one failed and one reusable dial; got %d", f.count.Load())
++	}
++}
++
++func TestSOCKSUDPConnectedDestinationDoesNotChangeAfterReceivingAnotherSource(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.replyFrom = "198.51.100.9:53"
++	f.observedUDP = make(chan string, 8)
++	f.start()
++	outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++	destination := M.ParseSocksaddr("203.0.113.1:443")
++	conn, err := outbound.DialContext(context.Background(), "udp", destination)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	for i := 0; i < 2; i++ {
++		if _, err = conn.Write([]byte("fixed-destination")); err != nil {
++			t.Fatal(err)
++		}
++		body := make([]byte, 128)
++		n, readErr := conn.Read(body)
++		if readErr != nil || string(body[:n]) != "fixed-destination" {
++			t.Fatalf("read %q: %v", body[:n], readErr)
++		}
++		if got := <-f.observedUDP; got != destination.String() {
++			t.Fatalf("sent to %s after receiving another source", got)
++		}
++	}
++	if conn.RemoteAddr().String() != destination.String() {
++		t.Fatal("connected remote address changed")
++	}
++}
++
++type relayFixtureOutbound struct {
++	f        *socksFixture
++	expected string
++	calls    chan M.Socksaddr
++}
++
++func (*relayFixtureOutbound) Type() string           { return "fixture" }
++func (*relayFixtureOutbound) Tag() string            { return "fixture" }
++func (*relayFixtureOutbound) Network() []string      { return []string{"tcp", "udp"} }
++func (*relayFixtureOutbound) Dependencies() []string { return nil }
++func (d *relayFixtureOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	if network == "tcp" {
++		return (&net.Dialer{}).DialContext(ctx, "tcp", d.f.tcp.Addr().String())
++	}
++	d.calls <- destination
++	if destination.String() != d.expected {
++		return nil, fmt.Errorf("wrong relay destination: %s", destination)
++	}
++	return (&net.Dialer{}).DialContext(ctx, "udp", d.f.udp.LocalAddr().String())
++}
++func (*relayFixtureOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, errors.New("unexpected fixture packet listener")
++}
++
++type relayFixtureManager struct{ outbound *relayFixtureOutbound }
++
++func (*relayFixtureManager) Start(adapter.StartStage) error  { return nil }
++func (*relayFixtureManager) Close() error                    { return nil }
++func (m *relayFixtureManager) Outbounds() []adapter.Outbound { return []adapter.Outbound{m.outbound} }
++func (m *relayFixtureManager) Outbound(tag string) (adapter.Outbound, bool) {
++	return m.outbound, tag == "fixture"
++}
++func (m *relayFixtureManager) Default() adapter.Outbound { return m.outbound }
++func (*relayFixtureManager) Remove(string) error         { return errors.New("unexpected fixture remove") }
++func (*relayFixtureManager) Create(context.Context, adapter.Router, log.ContextLogger, string, string, any) error {
++	return errors.New("unexpected fixture create")
++}
++
++func TestSOCKSUDPUnspecifiedRelayUsesLogicalServer(t *testing.T) {
++	for _, bind := range []string{"0.0.0.0", "::", "203.0.113.25", "relay.example"} {
++		t.Run(bind, func(t *testing.T) {
++			f := newSocksFixture(t, "")
++			f.bind = bind
++			f.start()
++			expected := bind
++			if bind == "0.0.0.0" || bind == "::" {
++				expected = "198.51.100.10"
++			}
++			recording := &relayFixtureOutbound{f: f, expected: net.JoinHostPort(expected, fmt.Sprint(f.udp.LocalAddr().(*net.UDPAddr).Port)), calls: make(chan M.Socksaddr, 2)}
++			ctx := service.ContextWith[adapter.OutboundManager](context.Background(), &relayFixtureManager{recording})
++			outbound := fixtureOutbound(t, f, time.Second, ctx, "fixture", "198.51.100.10")
++			conn, err := outbound.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.1:53"))
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			payload := []byte("relay-payload")
++			if _, err = conn.Write(payload); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 4096)
++			count, readErr := conn.Read(got)
++			if readErr != nil {
++				t.Fatal(readErr)
++			}
++			if string(got[:count]) != string(payload) {
++				t.Fatal("UDP payload changed")
++			}
++			if called := <-recording.calls; called.String() != recording.expected {
++				t.Fatal("detour or relay port was not preserved")
++			}
++		})
++	}
++}
++
++func TestSOCKSUDPUnspecifiedRelayRejectsZeroPort(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.bind = "0.0.0.0"
++	f.zeroPort = true
++	f.start()
++	recording := &relayFixtureOutbound{f: f, calls: make(chan M.Socksaddr, 2)}
++	ctx := service.ContextWith[adapter.OutboundManager](context.Background(), &relayFixtureManager{recording})
++	outbound := fixtureOutbound(t, f, time.Second, ctx, "fixture", "198.51.100.10")
++	conn, err := outbound.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.1:53"))
++	if conn != nil {
++		conn.Close()
++	}
++	if err == nil {
++		t.Fatal("invalid relay port was accepted")
++	}
++	select {
++	case destination := <-recording.calls:
++		t.Errorf("invalid relay was dialed: %v", destination)
++	default:
++	}
++	select {
++	case <-f.closed:
++	case <-time.After(time.Second):
++		t.Error("invalid relay retained its control connection")
++	}
++}
++
++func TestSOCKSCancelledAttemptDoesNotCloseConcurrentSession(t *testing.T) {
++	for _, network := range []string{"tcp", "udp"} {
++		t.Run(network, func(t *testing.T) {
++			f := newSocksFixture(t, "request")
++			f.stallFirst = true
++			f.start()
++			outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++			first, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			done := make(chan error, 1)
++			go func() {
++				conn, err := outbound.DialContext(first, network, M.ParseSocksaddr("203.0.113.1:443"))
++				if conn != nil {
++					conn.Close()
++				}
++				done <- err
++			}()
++			select {
++			case <-f.reached:
++			case <-time.After(time.Second):
++				t.Fatal("first handshake did not reach request")
++			}
++			conn, err := outbound.DialContext(context.Background(), network, M.ParseSocksaddr("203.0.113.1:443"))
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			cancel()
++			select {
++			case err = <-done:
++				if !errors.Is(err, context.Canceled) {
++					t.Fatalf("expected cancellation, got %v", err)
++				}
++			case <-time.After(500 * time.Millisecond):
++				t.Fatal("first handshake did not stop")
++			}
++			if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			payload := []byte("independent-session")
++			if _, err = conn.Write(payload); err != nil {
++				t.Fatal(err)
++			}
++			got := make([]byte, 4096)
++			var count int
++			if network == "tcp" {
++				count, err = io.ReadFull(conn, got[:len(payload)])
++			} else {
++				count, err = conn.Read(got)
++			}
++			if err != nil {
++				t.Fatalf("cancellation closed an unrelated session: %v", err)
++			}
++			if !bytes.Equal(got[:count], payload) {
++				t.Fatal("concurrent session payload changed")
++			}
++		})
++	}
++}
++
++func TestSOCKSListenPacketPreservesDatagramsAfterSetup(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.bind = "::"
++	f.start()
++	outbound := fixtureOutbound(t, f, 100*time.Millisecond, context.Background(), "", "")
++	ctx, cancel := context.WithCancel(context.Background())
++	destination := M.ParseSocksaddr("203.0.113.1:443")
++	conn, err := outbound.ListenPacket(ctx, destination)
++	cancel()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	time.Sleep(120 * time.Millisecond)
++	if err = conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	for _, size := range []int{1, 512, 1232, 2048} {
++		payload := bytes.Repeat([]byte{byte(size % 251)}, size)
++		if _, err = conn.WriteTo(payload, destination.UDPAddr()); err != nil {
++			t.Fatal(err)
++		}
++		received := make([]byte, 4096)
++		count, peer, err := conn.ReadFrom(received)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(payload, received[:count]) || peer.String() != destination.String() {
++			t.Fatalf("datagram size %d or its destination changed", size)
++		}
++	}
++}
++
++func TestSOCKSAuthenticationFailureClosesControl(t *testing.T) {
++	f := newSocksFixture(t, "")
++	f.rejectAuth = true
++	f.start()
++	outbound := fixtureOutbound(t, f, time.Second, context.Background(), "", "")
++	conn, err := outbound.DialContext(context.Background(), "udp", M.ParseSocksaddr("203.0.113.1:53"))
++	if conn != nil {
++		conn.Close()
++	}
++	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("authentication failure was lost: %v", err)
++	}
++	select {
++	case <-f.closed:
++	case <-time.After(500 * time.Millisecond):
++		t.Fatal("failed authentication retained its control socket")
++	}
++	if f.count.Load() != 1 {
++		t.Fatal("failed authentication was retried")
++	}
++}

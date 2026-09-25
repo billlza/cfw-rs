@@ -236,6 +236,7 @@ enum Installed40019ProxySnapshotCodec {
 
 private enum ProxyAgentConnectionProfile: Equatable, Sendable {
   case current
+  case serviceObservation
   case installed40019Migration
 }
 
@@ -388,6 +389,8 @@ public actor AuthenticatedProxyAgentTransport:
 {
   private let machServiceName: String
   private let identity: CodeIdentityRequirement
+  private let currentCodeHash: ServiceCodeHash
+  private var buildConstraint = ServiceConnectionBuildConstraint()
   private let serviceController: any ProxyAgentServiceControlling
   private let replyDeadline: CallbackDeadlineScheduler
   private let installed40019Dependencies: Installed40019ProxyTransportDependencies
@@ -398,6 +401,7 @@ public actor AuthenticatedProxyAgentTransport:
     machServiceName: String,
     teamIdentifier: String,
     proxyAgentBundleIdentifier: String,
+    currentCodeHash: ServiceCodeHash,
     serviceController: any ProxyAgentServiceControlling = SMProxyAgentServiceController(),
     replyTimeout: Duration = .seconds(5)
   ) throws {
@@ -405,6 +409,7 @@ public actor AuthenticatedProxyAgentTransport:
       throw ProxyAgentHostError.transportUnavailable("invalid transport configuration")
     }
     self.machServiceName = machServiceName
+    self.currentCodeHash = currentCodeHash
     identity = try CodeIdentityRequirement(
       expectedTeamIdentifier: teamIdentifier,
       expectedBundleIdentifier: proxyAgentBundleIdentifier
@@ -418,6 +423,7 @@ public actor AuthenticatedProxyAgentTransport:
     machServiceName: String,
     teamIdentifier: String,
     proxyAgentBundleIdentifier: String,
+    currentCodeHash: ServiceCodeHash,
     serviceController: any ProxyAgentServiceControlling,
     replyTimeout: Duration = .seconds(5),
     installed40019Dependencies: Installed40019ProxyTransportDependencies
@@ -426,6 +432,7 @@ public actor AuthenticatedProxyAgentTransport:
       throw ProxyAgentHostError.transportUnavailable("invalid transport configuration")
     }
     self.machServiceName = machServiceName
+    self.currentCodeHash = currentCodeHash
     identity = try CodeIdentityRequirement(
       expectedTeamIdentifier: teamIdentifier,
       expectedBundleIdentifier: proxyAgentBundleIdentifier
@@ -443,7 +450,7 @@ public actor AuthenticatedProxyAgentTransport:
     try serviceController.ensureRegistered()
     let token = try outstandingRequests.reserve()
     defer { outstandingRequests.release(token) }
-    let reference = try connectedSession()
+    let reference = try connectedSession(requireCurrentBuild: !restorationOnly)
     defer { reference.lifecycle.release(token: token) }
     do {
       let _: Void = try await awaitBoundedCallback(
@@ -772,7 +779,8 @@ public actor AuthenticatedProxyAgentTransport:
     let requestData = try ProtocolCodec.encode(request)
     return try await awaitProxyAgentResult(
       requestID: request.requestID,
-      expectedKind: expectedKind
+      expectedKind: expectedKind,
+      requireCurrentBuild: command.kind != .snapshot && command.kind != .stop
     ) {
       connection, finish in
       guard
@@ -800,6 +808,7 @@ public actor AuthenticatedProxyAgentTransport:
   private func awaitProxyAgentResult(
     requestID: RequestID,
     expectedKind: CommandResultKind,
+    requireCurrentBuild: Bool = true,
     _ operation:
       @escaping @Sendable (
         NSXPCConnection,
@@ -809,7 +818,7 @@ public actor AuthenticatedProxyAgentTransport:
     try await awaitProxyAgentResult(
       requestID: requestID,
       expectedKind: expectedKind,
-      connect: { try connectedSession() },
+      connect: { try connectedSession(requireCurrentBuild: requireCurrentBuild) },
       decode: { data in
         let response = try ProtocolCodec.decodeResponse(data)
         return ProxyAgentDecodedResponse(
@@ -921,15 +930,25 @@ public actor AuthenticatedProxyAgentTransport:
     reference.lifecycle.retire()
   }
 
-  private func connectedSession() throws -> ProxyAgentConnectionReference {
-    if let connectionReference, connectionReference.profile == .current {
+  private func connectedSession(requireCurrentBuild: Bool = true) throws
+    -> ProxyAgentConnectionReference
+  {
+    let requirement = buildConstraint.requirement(
+      base: identity.requirementText, currentCodeHash: currentCodeHash,
+      requestingCurrentBuild: requireCurrentBuild)
+    let requireCurrentBuild = buildConstraint.requiresCurrentBuild
+    if let connectionReference,
+      connectionReference.profile == .current
+        || (!requireCurrentBuild && connectionReference.profile == .serviceObservation)
+    {
       return connectionReference
     }
     if let connectionReference { retireConnection(connectionReference) }
     let connection = NSXPCConnection(machServiceName: machServiceName)
-    try identity.configure(connection)
+    connection.setCodeSigningRequirement(requirement)
     connection.remoteObjectInterface = NSXPCInterface(with: CFWProxyAgentXPCProtocol.self)
-    let reference = ProxyAgentConnectionReference(connection, profile: .current)
+    let reference = ProxyAgentConnectionReference(
+      connection, profile: requireCurrentBuild ? .current : .serviceObservation)
     installConnectionLifecycle(reference)
     connection.activate()
     connectionReference = reference

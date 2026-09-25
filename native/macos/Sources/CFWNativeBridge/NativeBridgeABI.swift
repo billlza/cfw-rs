@@ -59,6 +59,7 @@ private enum ProductionNativeBridge {
   static let coordinator: Result<NativeBridgeCoordinator, NativeBridgeExecutionError> = Result {
     let signing = try HostSigningIdentity.current()
     let teamIdentifier = signing.teamIdentifier
+    let serviceBuildObserver = try CurrentAppServiceBuildObserver()
     let installer = OSSystemExtensionInstaller(
       extensionIdentifier: "com.bill.clashformac.packet-tunnel",
       approvalHandler: {}
@@ -68,7 +69,8 @@ private enum ProductionNativeBridge {
     // (bounded timeouts, invalidation/interruption) fails closed.
     let authorityClient = RegistrationGatedAuthorityClient(
       authority: BoundedAuthorityXPCClient(
-        remote: NSXPCGlobalAuthorityRemote(role: .host)))
+        remote: NSXPCGlobalAuthorityRemote(
+          currentHostCodeHash: try serviceBuildObserver.currentCodeHash(for: .globalAuthority))))
     let enrollment = AuthorityInstallationEnrollment()
     let tunnel = try NetworkExtensionHostBridge(
       providerBundleIdentifier: "com.bill.clashformac.packet-tunnel",
@@ -82,7 +84,8 @@ private enum ProductionNativeBridge {
     let proxy = try AuthenticatedProxyAgentTransport(
       machServiceName: "com.bill.clashformac.proxy-agent",
       teamIdentifier: teamIdentifier,
-      proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent"
+      proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
+      currentCodeHash: try serviceBuildObserver.currentCodeHash(for: .proxyAgent)
     )
     let credentialVault = try CredentialVault(
       accessGroup: "\(teamIdentifier).com.bill.clashformac.credentials"
@@ -97,7 +100,8 @@ private enum ProductionNativeBridge {
       engineLease: GlobalAuthorityEngineLeaseInspector(authority: authorityClient),
       installed40019Authority: Installed40019AuthorityOffProver(),
       credentialVault: credentialVault,
-      hostOperationLease: KernelNativeHostOperationLeaseAcquirer()
+      hostOperationLease: KernelNativeHostOperationLeaseAcquirer(),
+      serviceBuildObserver: serviceBuildObserver
     )
   }.mapError { error in
     if let error = error as? NativeBridgeExecutionError {

@@ -207,6 +207,7 @@ private func realInstalled40019ProxyTransport(
     machServiceName: "com.bill.clashformac.proxy-agent",
     teamIdentifier: "YKUPL7Z869",
     proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
+    currentCodeHash: try ServiceCodeHash(Data(repeating: 0x42, count: 20)),
     serviceController: FixedInstalled40019ProxyServiceController(),
     installed40019Dependencies: dependencies
   )
@@ -524,8 +525,8 @@ private func coordinator(
     hostOperationLease: hostOperationLease,
     serviceMaintainer: serviceMaintainer,
     serviceRuntimeObserver: serviceRuntimeObserver,
-    systemProxySwitchObserver: systemProxySwitchObserver
-  )
+    systemProxySwitchObserver: systemProxySwitchObserver,
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
 }
 
 private func statusErrorCode(
@@ -552,7 +553,8 @@ private func statusErrorCode(
     engineLease: StubLease(
       observation: AuthorityOwnershipObservation(state: .recovering, lease: nil)),
     credentialVault: StubCredentialVault(),
-    hostOperationLease: BusyNativeHostOperationLease())
+    hostOperationLease: BusyNativeHostOperationLease(),
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
   #expect(try await subject.execute(.authorizeSystemProxy) == .acknowledged)
   #expect(try await subject.execute(.authorizeSystemProxyRestoration) == .acknowledged)
   #expect(await proxy.authorizationCount == 2)
@@ -772,7 +774,8 @@ private actor RegistrationRecoveryLease: NativeEngineLeaseInspecting {
     proxy: StubProxyAgent(.off), systemProxyPreparer: UnusedSystemProxyStartPreparer(),
     tunnel: StubTunnelHost(.off, recoveryStatus: .invalid), engineLease: lease,
     credentialVault: StubCredentialVault(), hostOperationLease: AvailableNativeHostOperationLease(),
-    serviceMaintainer: maintainer, serviceRuntimeObserver: StubServiceRuntimeObserver())
+    serviceMaintainer: maintainer, serviceRuntimeObserver: StubServiceRuntimeObserver(),
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
   guard
     case .serviceMaintenance(let registration) = try await subject.execute(
       .maintainCurrentServices(.registerGlobalAuthority))

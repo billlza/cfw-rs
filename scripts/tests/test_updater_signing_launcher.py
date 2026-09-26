@@ -1401,21 +1401,27 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
             output_lines = completed.stdout.decode(
                 "utf-8", errors="strict"
             ).splitlines()
-            self.assertEqual(len(output_lines), 8)
-            self.assertEqual(output_lines[0], "")
+            self.assertEqual(len(output_lines), 9)
             self.assertEqual(
-                output_lines[1],
+                output_lines[0],
+                "Signing without an app version. Pass --app-version to bind this "
+                "signature to a version; updaters configured with "
+                "`requireSignedVersion` will reject this signature.",
+            )
+            self.assertEqual(output_lines[1], "")
+            self.assertEqual(
+                output_lines[2],
                 "Your file was signed successfully, You can find the signature here:",
             )
-            self.assertEqual(output_lines[2], str(signature.resolve(strict=True)))
-            self.assertEqual(output_lines[3:5], ["", "Public signature:"])
+            self.assertEqual(output_lines[3], str(signature.resolve(strict=True)))
+            self.assertEqual(output_lines[4:6], ["", "Public signature:"])
             decoded_signature = base64.b64decode(
-                output_lines[5].encode("ascii"), validate=True
+                output_lines[6].encode("ascii"), validate=True
             )
             self.assertGreater(len(decoded_signature), 0)
-            self.assertEqual(output_lines[6], "")
+            self.assertEqual(output_lines[7], "")
             self.assertEqual(
-                output_lines[7],
+                output_lines[8],
                 "Make sure to include this into the signature field of your update server.",
             )
             self.assertEqual(hashlib.sha256(fixture.key.read_bytes()).hexdigest(), before)

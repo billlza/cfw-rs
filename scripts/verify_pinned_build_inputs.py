@@ -70,7 +70,7 @@ TAURI_CLI_INSTALLER_RELATIVE_PATH = "scripts/install_pinned_tauri_cli.sh"
 # Level 1 source identity: detect accidental or unreviewed installer drift.
 # Exact Git/hosted-CI identity remains the trust root; this is not authentication.
 REQUIRED_TAURI_CLI_INSTALLER_SHA256 = (
-    "7d2e63375f873c476a842ed9252a727e378525dedfef6c9d20db113c36360e45"
+    "f99045e8f7fdd95078d27bcd6c4479e511f594ca69d4a4b7de5ea554394fce7f"
 )
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
@@ -165,7 +165,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "ee069c04734c0e7ee88cd3402c358d6b76043b2da1fb7bfaf5e90e0e6479bda9"
+    "f381cf425d919424df21fb0b7900094593d304025d6a1c45cccf34fd368548bd"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -3495,7 +3495,7 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         ).encode("utf-8")
     ).hexdigest()
     if cargo_control_file_reference_identity != (
-        "d6aafbcad40a22a2089efd2a2260671e09f63598fc78dbe23fc86f2d43718279"
+        "42fab0b199f7b0bda2599a314edc45745e629207748b78d2b43972f084f79640"
     ):
         raise PinnedInputError(
             "Tauri CLI installer contains an unexpected Cargo control-file reference"

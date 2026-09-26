@@ -302,7 +302,7 @@ normalize_cargo_offline_cache() {
     normalize-offline "$root"
 }
 verify_tauri_payload_source() {
-  for required in Cargo.toml Cargo.lock LICENSE_APACHE-2.0 LICENSE_MIT; do
+  for required in Cargo.toml Cargo.lock LICENSE-APACHE-2.0 LICENSE-MIT; do
     test -f "$payload/source/$required"
   done
   printf '%s  %s\\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$source/Cargo.lock" |

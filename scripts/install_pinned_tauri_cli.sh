@@ -67,7 +67,7 @@ verify_tauri_payload_layout() {
     die "Tauri CLI executable must be thin arm64"
   [[ -d "$source" && ! -L "$source" ]] ||
     die "Tauri CLI payload has no clean source tree"
-  for required in Cargo.toml Cargo.lock LICENSE_APACHE-2.0 LICENSE_MIT; do
+  for required in Cargo.toml Cargo.lock LICENSE-APACHE-2.0 LICENSE-MIT; do
     [[ -f "$source/$required" && ! -L "$source/$required" ]] ||
       die "Tauri CLI payload source is missing $required"
     [[ "$(stat -f '%l' "$source/$required")" == "1" ]] ||

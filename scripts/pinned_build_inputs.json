@@ -314,7 +314,7 @@
     "ciWorkflowPath": ".github/workflows/ci.yml",
     "requiredCiFragment": "install-tauri-cli",
     "installerPath": "scripts/install_pinned_tauri_cli.sh",
-    "installerSha256": "7d2e63375f873c476a842ed9252a727e378525dedfef6c9d20db113c36360e45",
+    "installerSha256": "f99045e8f7fdd95078d27bcd6c4479e511f594ca69d4a4b7de5ea554394fce7f",
     "requiredInstallerFragments": [
       "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
       "$TAURI_CLI_CRATE_SHA256",

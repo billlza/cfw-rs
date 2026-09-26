@@ -1668,6 +1668,44 @@ LIBBOX_VET_PACKAGES=(".")
                     self.assertFalse(staging.exists())
                     self.assertEqual(result.stderr, b"")
 
+    def test_tauri_payload_requires_official_regular_single_link_licenses(self) -> None:
+        installer = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
+        start = installer.index("  for required in ", installer.index("verify_tauri_payload_layout() {"))
+        end = installer.index("\n  done", start) + len("\n  done")
+        required_files = installer[start:end]
+        for license_name in ("LICENSE-APACHE-2.0", "LICENSE-MIT"):
+            for mutation in ("valid", "missing", "symlink", "hardlink", "directory"):
+                with self.subTest(license=license_name, mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                    source = Path(temporary) / "source"
+                    source.mkdir()
+                    for name in ("Cargo.toml", "Cargo.lock", "LICENSE-APACHE-2.0", "LICENSE-MIT"):
+                        (source / name).write_text("fixture\n", encoding="utf-8")
+                    license_file = source / license_name
+                    if mutation == "missing":
+                        license_file.unlink()
+                    elif mutation == "symlink":
+                        license_file.unlink()
+                        license_file.symlink_to("Cargo.toml")
+                    elif mutation == "hardlink":
+                        os.link(license_file, source / "extra-link")
+                    elif mutation == "directory":
+                        license_file.unlink()
+                        license_file.mkdir()
+                    script = ('set -euo pipefail\nsource="$1"\n'
+                              + 'die() { printf "%s\\n" "$*" >&2; exit 1; }\n'
+                              + required_files + "\n")
+                    completed = subprocess.run(
+                        ["/bin/bash", "-p", "-c", script, "license-test", str(source)],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, check=False, timeout=10,
+                    )
+                    if mutation == "valid":
+                        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                        self.assertEqual(completed.stderr, b"")
+                    else:
+                        self.assertEqual(completed.returncode, 1)
+                        self.assertIn(license_name.encode(), completed.stderr)
+
     def test_tauri_installer_uses_isolated_clean_payload(self) -> None:
         installer = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
         workspace_manifest_creation = (

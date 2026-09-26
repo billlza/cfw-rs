@@ -19,6 +19,32 @@ pub(crate) enum EngineControl {
     Tunnel,
 }
 
+/// Explicitly rechecks a failed startup through the existing native service
+/// reconciliation path. It never carries a requested start or a profile.
+pub(crate) async fn reconcile_startup_services(
+    engine: &ManagedEngine,
+    retirement: &LegacyRetirementGate,
+) -> Result<EngineStatusPayload, String> {
+    // Capture the actor's current recovery offer before waiting in the Host
+    // queue; a queued click cannot adopt a newer offer after another attempt.
+    let recovery = engine.coordinator.reconcile_startup();
+    let mode_lease = engine
+        .begin_mode_change(EngineMode::Off)
+        .await
+        .map_err(|error| error.to_string())?;
+    // Recovery may register the current services, so retain the same exclusion
+    // against a live legacy runtime or an unfinished maintenance transaction.
+    crate::legacy::require_network_start_allowed(retirement)?;
+    let completion = mode_lease
+        .run_to_completion(async move { recovery.await.map_err(|error| error.to_string()) });
+    let (result, mode_lease) = completion
+        .await
+        .map_err(|_| "background service recovery task ended without a response".to_owned())?;
+    drop(mode_lease);
+    result?;
+    engine.status_payload(retirement)
+}
+
 /// Enables or removes System Proxy while preserving the core and Packet Tunnel.
 pub(crate) async fn set_system_proxy_enabled(
     engine: &ManagedEngine,

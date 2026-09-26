@@ -430,6 +430,7 @@ const pendingEngine = {
 };
 const failedReconciliation = {
   ...pendingEngine,
+  startup_recovery_available: true,
   snapshot: { ...pendingEngine.snapshot,
     state: { ...pendingEngine.snapshot.state, error: "native service status unavailable" } },
 };
@@ -931,7 +932,7 @@ test("startup engine snapshot handshake retains authoritative state", () => {
   } else {
     assert.equal(startupObservedEngine.availabilityReason, null);
   }
-  for (const command of ["apply_active_profile", "set_core_enabled", "set_system_proxy_enabled", "set_tun_enabled", "set_proxy_mode", "select_profile", "select_proxy", "write_runtime_settings_snapshot", "write_automation_settings"]) {
+  for (const command of ["apply_active_profile", "reconcile_startup_services", "set_core_enabled", "set_system_proxy_enabled", "set_tun_enabled", "set_proxy_mode", "select_profile", "select_proxy", "write_runtime_settings_snapshot", "write_automation_settings"]) {
     assert.equal(startupInvocationCommands.includes(command), false, `startup observation must not invoke ${command}`);
   }
 });
@@ -1404,7 +1405,7 @@ test("normal mode switches call the existing backend without preparing or cleani
       ]);
       for (const forbidden of [
         "begin_migration_handoff", "prepare_legacy_cutover", "disable_service_mode",
-        "recover_legacy_cutover", "write_settings_snapshot", "reset_settings_snapshot",
+        "recover_legacy_cutover", "reconcile_startup_services", "write_settings_snapshot", "reset_settings_snapshot",
       ]) {
         assert.equal(invocationDetails.some((entry) => entry.command === forbidden), false, forbidden);
       }
@@ -3026,6 +3027,67 @@ test("engine status events do not discard a pending switch failure", async () =>
     if (originalResponse === undefined) delete responses.set_system_proxy_enabled;
     else responses.set_system_proxy_enabled = originalResponse;
     state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("startup service recovery is explicit, bounded to one request and stays Off", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalError = state.engineMutationError;
+  const originalHandoff = state.migrationHandoff;
+  const failure = {
+    ...OFF_ENGINE,
+    snapshot: { desired_mode: "off", generation: 0, config_digest: null,
+      state: { state: "failed", target: "off", generation: 0, error: "Background service update failed" } },
+    startup_recovery_available: true,
+  };
+  try {
+    await setEngine(failure);
+    const before = invocationDetails.length;
+    const html = await renderPage("general");
+    assert.match(html, /data-action="reconcile-startup-services"/u);
+    assert.doesNotMatch(html, /data-action="toggle-core"/u);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => command === "reconcile_startup_services"), false);
+    const pending = deferred();
+    responses.reconcile_startup_services = () => pending.promise;
+    const operation = appModule.handleAction("reconcile-startup-services");
+    await waitForInvocation("reconcile_startup_services");
+    assert.equal(state.engineMutationBusy, true);
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /in progress/u);
+    assert.equal(invocationDetails.slice(before).filter(({ command }) => command === "reconcile_startup_services").length, 1);
+    pending.resolve(OFF_ENGINE);
+    await operation;
+    assert.equal(state.engine.state, "Off");
+    assert.equal(state.engineMutationBusy, false);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => /^(set_core_enabled|set_system_proxy_enabled|set_tun_enabled)$/u.test(command)), false);
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+
+    await setEngine(failure);
+    responses.reconcile_startup_services = () => { throw new Error("Service recovery remains unproven"); };
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /remains unproven/u);
+    assert.equal(state.engine.state, "Failed");
+    assert.equal(state.engineMutationBusy, false);
+    assert.match(await renderPage("general"), /Service recovery remains unproven/u);
+    assert.match(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    responses.reconcile_startup_services = () => RUNNING_ENGINE;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /did not prove/u);
+    assert.equal(state.engine.state, "Failed");
+    assert.equal(state.engine.active, false);
+    await setEngine({ ...failure, startup_recovery_available: false });
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    const calls = invocationDetails.length;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /not available/u);
+    assert.equal(invocationDetails.length, calls);
+    await setEngine(failure);
+    state.migrationHandoff = true;
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    const handoffCalls = invocationDetails.length;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /not available/u);
+    assert.equal(invocationDetails.length, handoffCalls);
+  } finally {
+    delete responses.reconcile_startup_services;
+    state.engineMutationError = originalError;
+    state.migrationHandoff = originalHandoff;
     await setEngine(originalEngine);
   }
 });

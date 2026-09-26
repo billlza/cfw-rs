@@ -1041,6 +1041,13 @@ function engineToggleCapability(key) {
       reason: t("This window owns legacy CFM maintenance. Use its explicit maintenance or recovery controls."),
     };
   }
+  if ((key === "coreRunning" || key === "systemProxy" || key === "tunMode") && state.engine.startupRecoveryAvailable) {
+    return {
+      available: false,
+      label: key === "coreRunning" ? t("Core") : key === "systemProxy" ? t("System Proxy") : t("TUN Mode"),
+      reason: t("Recover background services before starting a connection."),
+    };
+  }
   if (key === "coreRunning") {
     return {
       available: state.engine.localProxyAvailable === true,
@@ -3000,7 +3007,41 @@ async function applyToggle(key, checked, source) {
   }
 }
 
+async function reconcileStartupServices() {
+  if (state.engineMutationBusy) throw new Error("A network mode change is already in progress");
+  if (state.migrationHandoff || !state.engine.startupRecoveryAvailable) {
+    throw new Error(t("Background service recovery is not available in the current state."));
+  }
+  const requestId = runtime.engineStatusRequestId + 1;
+  runtime.engineStatusRequestId = requestId;
+  state.engineMutationBusy = true;
+  state.engineMutationError = null;
+  renderPage();
+  try {
+    const payload = await invoke("reconcile_startup_services");
+    const recovered = normalizeEngineStatus(payload);
+    if (recovered.state !== "Off" || recovered.desiredMode !== "off" || recovered.active) {
+      throw new Error(t("Background service recovery did not prove the engine is Off."));
+    }
+    if (requestId === runtime.engineStatusRequestId) applyEngineStatus(payload);
+    else await loadEngineStatus();
+    appendLog("info", "engine", t("Background service recovery completed."));
+  } catch (error) {
+    try {
+      await loadEngineStatus();
+    } catch (refreshError) {
+      appendLog("error", "engine", t("Could not refresh mode state after refusal: {error}", { error: errorText(refreshError) }));
+    }
+    state.engineMutationError = errorText(error).slice(0, 512);
+    throw error;
+  } finally {
+    state.engineMutationBusy = false;
+    renderPage();
+  }
+}
+
 export async function handleAction(action) {
+  if (action === "reconcile-startup-services") return reconcileStartupServices();
   if (action === "open-automation-settings") { await automationSettingsUI.open(); return; }
   if (action === "open-runtime-settings") { await runtimeSettingsUI.open(); return; }
   if (action === "open-legacy-maintenance") {

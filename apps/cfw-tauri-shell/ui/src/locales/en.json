@@ -724,5 +724,12 @@
   "Sort connections by downloaded data": "Sort connections by downloaded data",
   "Sort connections by host": "Sort connections by host",
   "Sort connections by start time": "Sort connections by start time",
-  "Sort connections by uploaded data": "Sort connections by uploaded data"
+  "Sort connections by uploaded data": "Sort connections by uploaded data",
+  "Background service recovery completed.": "Background service recovery completed.",
+  "Background service recovery did not prove the engine is Off.": "Background service recovery did not prove the engine is Off.",
+  "Background service recovery is not available in the current state.": "Background service recovery is not available in the current state.",
+  "Check and restore background services while keeping the engine stopped.": "Check and restore background services while keeping the engine stopped.",
+  "Recover background services": "Recover background services",
+  "Recover background services before starting a connection.": "Recover background services before starting a connection.",
+  "Recovering…": "Recovering…"
 }

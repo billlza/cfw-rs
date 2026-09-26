@@ -724,5 +724,12 @@
   "Sort connections by downloaded data": "按下载数据量排序连接",
   "Sort connections by host": "按主机排序连接",
   "Sort connections by start time": "按开始时间排序连接",
-  "Sort connections by uploaded data": "按上传数据量排序连接"
+  "Sort connections by uploaded data": "按上传数据量排序连接",
+  "Background service recovery completed.": "后台服务恢复完成。",
+  "Background service recovery did not prove the engine is Off.": "后台服务恢复未能确认内核已停止。",
+  "Background service recovery is not available in the current state.": "当前状态无法执行后台服务恢复。",
+  "Check and restore background services while keeping the engine stopped.": "检查并恢复后台服务，保持内核停止。",
+  "Recover background services": "恢复后台服务",
+  "Recover background services before starting a connection.": "请先恢复后台服务，再启动连接。",
+  "Recovering…": "正在恢复…"
 }

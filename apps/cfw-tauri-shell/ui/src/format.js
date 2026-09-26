@@ -68,6 +68,7 @@ export const UI_COMMANDS = Object.freeze([
   "read_automation_settings",
   "request_wifi_name_access",
   "recover_legacy_cutover",
+  "reconcile_startup_services",
   "refresh_tray_menu",
   "reset_settings_snapshot",
   "reveal_home_directory",
@@ -300,6 +301,8 @@ export function normalizeEngineStatus(value) {
     tunnelAvailable: capabilities.tunnel === true,
     providerManagementAvailable: capabilities.provider_management === true,
     availabilityReason: reason,
+    startupRecoveryAvailable: value.startup_recovery_available === true
+      && stateTag === "failed" && desiredMode === "off" && snapshot.state.target === "off",
     cutoverReady: value.cutover_ready === true,
     cutoverReason,
     generation: snapshot.generation,

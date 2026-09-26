@@ -133,6 +133,7 @@ pub(crate) struct EngineCapabilities {
 pub(crate) struct EngineStatusPayload {
     pub(crate) snapshot: EngineSnapshot,
     capabilities: EngineCapabilities,
+    startup_recovery_available: bool,
     cutover_ready: bool,
     cutover_unavailable_reason: Option<String>,
     unavailable_reason: Option<String>,
@@ -362,6 +363,9 @@ impl ManagedEngine {
         Ok(EngineStatusPayload {
             snapshot: self.coordinator.snapshot(),
             capabilities,
+            startup_recovery_available: self.unavailable_reason.is_none()
+                && retirement_reason.is_none()
+                && self.coordinator.can_reconcile_startup(),
             cutover_ready: cutover_ready
                 && (self.capabilities.system_proxy || self.capabilities.tunnel),
             cutover_unavailable_reason: (!cutover_ready).then_some(cutover_reason).flatten(),

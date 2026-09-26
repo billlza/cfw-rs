@@ -160,6 +160,15 @@ pub(crate) async fn set_core_enabled(
     crate::engine_controls::set_core_enabled(&engine, &retirement, &profiles, enabled).await
 }
 
+/// User-requested recovery of the current background services after startup failed.
+#[tauri::command]
+pub(crate) async fn reconcile_startup_services(
+    engine: State<'_, ManagedEngine>,
+    retirement: State<'_, LegacyRetirementGate>,
+) -> Result<EngineStatusPayload, String> {
+    crate::engine_controls::reconcile_startup_services(&engine, &retirement).await
+}
+
 /// Live proxy mode of the running engine.
 ///
 /// This is the one runtime switch the clash-compatible controller of a sing-box

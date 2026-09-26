@@ -724,5 +724,12 @@
   "Sort connections by downloaded data": "ダウンロード量で接続を並べ替え",
   "Sort connections by host": "ホストで接続を並べ替え",
   "Sort connections by start time": "開始時刻で接続を並べ替え",
-  "Sort connections by uploaded data": "アップロード量で接続を並べ替え"
+  "Sort connections by uploaded data": "アップロード量で接続を並べ替え",
+  "Background service recovery completed.": "バックグラウンドサービスの復旧が完了しました。",
+  "Background service recovery did not prove the engine is Off.": "バックグラウンドサービスの復旧後、エンジンの停止を確認できませんでした。",
+  "Background service recovery is not available in the current state.": "現在の状態ではバックグラウンドサービスを復旧できません。",
+  "Check and restore background services while keeping the engine stopped.": "エンジンを停止したままバックグラウンドサービスを確認して復旧します。",
+  "Recover background services": "バックグラウンドサービスを復旧",
+  "Recover background services before starting a connection.": "接続を開始する前にバックグラウンドサービスを復旧してください。",
+  "Recovering…": "復旧中…"
 }

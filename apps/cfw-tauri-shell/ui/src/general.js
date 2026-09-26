@@ -120,7 +120,9 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
               <i class="${statusDot}"></i>
               <span>${escapeHtml(engineLabel)}</span>
             </span>
-            <button class="cfw-text-button" data-action="toggle-core" ${state.engineMutationBusy || state.migrationHandoff ? "disabled" : ""}>${engine.desiredMode === "off" ? t("Start core") : t("Stop core")}</button>
+            ${engine.startupRecoveryAvailable && !state.migrationHandoff
+              ? `<button class="cfw-text-button" data-action="reconcile-startup-services" title="${escapeHtml(t("Check and restore background services while keeping the engine stopped."))}"${state.engineMutationBusy ? " disabled" : ""}>${escapeHtml(t(state.engineMutationBusy ? "Recovering…" : "Recover background services"))}</button>`
+              : `<button class="cfw-text-button" data-action="toggle-core" ${state.engineMutationBusy || state.migrationHandoff ? "disabled" : ""}>${engine.desiredMode === "off" ? t("Start core") : t("Stop core")}</button>`}
           </div>
         </div>
 

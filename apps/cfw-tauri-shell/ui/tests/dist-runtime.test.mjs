@@ -192,6 +192,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
     "prepare_legacy_cutover",
     "disable_service_mode",
     "recover_legacy_cutover",
+    "reconcile_startup_services",
     "controller_snapshot",
     "controller_version",
     "providers_snapshot",

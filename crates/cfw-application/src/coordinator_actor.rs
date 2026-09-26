@@ -12,7 +12,10 @@ use tokio::{
 
 use crate::{
     CoordinatorOptions, EngineCoordinatorError, EngineOperation, EngineRestartSpec,
-    coordinator_startup::reconcile_initial_state,
+    coordinator_startup::{
+        ReconciliationFailure, ReconciliationOutcome, publish_reconciliation,
+        reconcile_initial_state,
+    },
     cutover::prepare_cutover_request,
     runtime::{CoordinatorState, reconcile_active_runtime, set_failed, set_off},
     transition::{transition, transition_to_off},
@@ -56,6 +59,10 @@ pub(crate) struct ChangeProfileCommand {
 }
 
 pub(crate) enum Command {
+    ReconcileStartup {
+        expected_failure: Option<Arc<ReconciliationFailure>>,
+        response: oneshot::Sender<Result<EngineSnapshot, EngineCoordinatorError>>,
+    },
     SetMode(Box<SetModeCommand>),
     ChangeProfile(Box<ChangeProfileCommand>),
     PrepareCutover(Box<PrepareCutoverCommand>),
@@ -74,7 +81,7 @@ pub(crate) async fn run_coordinator(
     mut commands: mpsc::Receiver<Command>,
     snapshots: watch::Sender<EngineSnapshot>,
     initial_snapshot: EngineSnapshot,
-    reconciliation: watch::Sender<Option<Result<EngineSnapshot, EngineCoordinatorError>>>,
+    reconciliation: watch::Sender<Option<ReconciliationOutcome>>,
     runtime: CoordinatorRuntime,
 ) {
     let CoordinatorRuntime {
@@ -101,15 +108,15 @@ pub(crate) async fn run_coordinator(
     )
     .await
     {
-        Ok(()) => {
-            reconciliation.send_replace(Some(Ok(state.snapshot.clone())));
-            None
-        }
-        Err(failure) => {
-            reconciliation.send_replace(Some(Err(failure.error.clone())));
-            Some(failure)
-        }
+        Ok(()) => None,
+        Err(failure) => Some(Arc::new(failure)),
     };
+    publish_reconciliation(
+        &reconciliation,
+        &state,
+        startup_failure.as_ref(),
+        startup_reconciliation,
+    );
 
     let interval_start = Instant::now() + options.status_reconciliation_interval;
     let mut status_reconciliation =
@@ -121,6 +128,41 @@ pub(crate) async fn run_coordinator(
             command = commands.recv() => {
                 let Some(command) = command else {
                     break;
+                };
+                let command = match command {
+                    Command::ReconcileStartup { expected_failure, response } => {
+                        let eligible = startup_failure.as_ref().is_some_and(|failure| {
+                            expected_failure.as_ref().is_some_and(|expected| Arc::ptr_eq(expected, failure))
+                                && failure.allows_service_reconciliation(&state, startup_reconciliation)
+                        });
+                        if !eligible {
+                            let error = startup_failure.as_ref().map_or(
+                                EngineCoordinatorError::SnapshotPreconditionChanged,
+                                |failure| failure.error.clone(),
+                            );
+                            let _response_dropped = response.send(Err(error));
+                            continue;
+                        }
+                        // Withdraw this offer before awaiting native I/O. A
+                        // new failed attempt receives a different Arc identity.
+                        reconciliation.send_modify(|outcome| {
+                            if let Some(outcome) = outcome { outcome.recovery = None; }
+                        });
+                        startup_failure = match reconcile_initial_state(
+                            backend.as_ref(), &mut state, &snapshots, &session,
+                            options.operation_timeout, startup_reconciliation,
+                        ).await {
+                            Ok(()) => None,
+                            Err(failure) => Some(Arc::new(failure)),
+                        };
+                        publish_reconciliation(&reconciliation, &state, startup_failure.as_ref(), startup_reconciliation);
+                        let result = startup_failure.as_ref().map_or_else(
+                            || Ok(state.snapshot.clone()), |failure| Err(failure.error.clone()),
+                        );
+                        let _response_dropped = response.send(result);
+                        continue;
+                    }
+                    command => command,
                 };
                 // RestartSpec is also read by the snapshot forwarder. Retrying
                 // startup here would publish another failure snapshot and feed
@@ -142,18 +184,17 @@ pub(crate) async fn run_coordinator(
                     )
                     .await
                     {
-                        Ok(()) => {
-                            reconciliation.send_replace(Some(Ok(state.snapshot.clone())));
-                            None
-                        }
-                        Err(failure) => {
-                            reconciliation.send_replace(Some(Err(failure.error.clone())));
-                            Some(failure)
-                        }
+                        Ok(()) => None,
+                        Err(failure) => Some(Arc::new(failure)),
                     };
+                    publish_reconciliation(&reconciliation, &state, startup_failure.as_ref(), startup_reconciliation);
                 }
+
                 if let Some(failure) = &startup_failure {
                     match command {
+                        Command::ReconcileStartup { response, .. } => {
+                            let _response_dropped = response.send(Err(failure.error.clone()));
+                        }
                         Command::SetMode(command)
                             if command.target == EngineMode::Off && failure.safely_off => {
                             state.snapshot.desired_mode = EngineMode::Off;
@@ -206,6 +247,9 @@ pub(crate) async fn run_coordinator(
                     continue;
                 }
                 match command {
+                    Command::ReconcileStartup { response, .. } => {
+                        let _response_dropped = response.send(Err(EngineCoordinatorError::SnapshotPreconditionChanged));
+                    }
                     Command::SetMode(command) => {
                         let SetModeCommand {
                             target,

@@ -724,5 +724,12 @@
   "Sort connections by downloaded data": "依下載資料量排序連線",
   "Sort connections by host": "依主機排序連線",
   "Sort connections by start time": "依開始時間排序連線",
-  "Sort connections by uploaded data": "依上傳資料量排序連線"
+  "Sort connections by uploaded data": "依上傳資料量排序連線",
+  "Background service recovery completed.": "背景服務恢復完成。",
+  "Background service recovery did not prove the engine is Off.": "背景服務恢復未能確認核心已停止。",
+  "Background service recovery is not available in the current state.": "目前狀態無法執行背景服務恢復。",
+  "Check and restore background services while keeping the engine stopped.": "檢查並恢復背景服務，保持核心停止。",
+  "Recover background services": "恢復背景服務",
+  "Recover background services before starting a connection.": "請先恢復背景服務，再啟動連線。",
+  "Recovering…": "正在恢復…"
 }

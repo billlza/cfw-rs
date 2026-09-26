@@ -50,12 +50,17 @@ class CandidateFixture:
         self.repository = repository
         repository.mkdir()
         self.context = context
-        self.preview = context in bundle.PREVIEW_CONTEXTS
+        self.unsigned_preview = context is ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST
+        self.preview = context in bundle.PREVIEW_CONTEXTS or self.unsigned_preview
         self.version = "0.5.0" if self.preview else "0.4.0"
-        self.build = "50011" if self.preview else "40000"
+        self.build = "50000" if self.unsigned_preview else "50011" if self.preview else "40000"
         self.signing = "pre-sign"
         private = []
-        if context is ids.CandidateBundleContext.PREVIEW_PRE_SIGN:
+        if self.unsigned_preview:
+            self.signing = "unsigned-validation"
+            self.app = ids.unsigned_preview_root(repository) / "cargo/release/bundle/macos" / ids.SIGNED_APP_NAME
+            self.native = ids.unsigned_preview_native_products_root(repository)
+        elif context is ids.CandidateBundleContext.PREVIEW_PRE_SIGN:
             self.app = ids.preview_preflight_root(repository) / "pre-sign" / ids.SIGNED_APP_NAME
             self.native = ids.preview_native_products_root(repository)
         elif context is ids.CandidateBundleContext.UNSIGNED_HOST:
@@ -120,6 +125,8 @@ class CandidateFixture:
         write_plist(extension_root / "Contents/Info.plist", extension)
         write(extension_root / "Contents/MacOS/CFWPacketTunnel", b"mach-o:extension", executable=True)
         metadata = {"buildNumber": self.build, **self.native_metadata}
+        if self.unsigned_preview:
+            metadata["signingMode"] = "unsigned-validation"
         for embedded, name in ((bridge, bridge_name), (agent_root, agent_name), (extension_root, extension_name)):
             shutil.copytree(embedded, self.native / name)
             self.manifest(self.native / name, metadata)
@@ -227,7 +234,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             stack.enter_context(patch.object(bundle, "current_native_build_metadata", return_value=fixture.native_metadata))
             stack.enter_context(patch.object(
                 ui, "expected_metadata",
-                side_effect=lambda _repository, _build, *, signing, clean: {
+                side_effect=lambda _repository, _build, *, signing, clean, context=ui.NativeUiContext.SIGNED_PREVIEW: {
                     **fixture.ui_metadata, "signingMode": signing,
                 },
             ))
@@ -246,6 +253,32 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             with self.subTest(context=context):
                 fixture = self.fixture(context)
                 self.assertEqual(self.verify(fixture), int(context is ids.CandidateBundleContext.PREVIEW_PRE_SIGN))
+
+    def test_unsigned_preview_requires_real_component_composition_and_unsigned_host_state(self) -> None:
+        fixture = self.fixture(ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
+        self.assertEqual(self.verify(fixture), 1)
+        with self.assertRaisesRegex(bundle.CandidateError, "unsigned Host rejected"):
+            self.verify(fixture, unsigned_failure=True)
+        fixture.ui_exports = set()
+        with self.assertRaisesRegex(bundle.CandidateError, "C exports differ"):
+            self.verify(fixture)
+        fixture.ui_exports = set(ui.COMPONENT_EXPORTS)
+        fixture.host_rpaths.append("/tmp/build-library")
+        with self.assertRaises(bundle.CandidateError):
+            self.verify(fixture)
+
+    def test_unsigned_preview_rejects_production_manifest_modes_for_every_component(self) -> None:
+        for index, name in enumerate(("CFWGlobalAuthority", "CFWNativeBridge.framework", "CFWProxyAgent.app",
+                                      bundle.EXPECTED_EXTENSION_WRAPPER, "CFWLegacyTombstone", ui.LIBRARY, ui.RESOURCES)):
+            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
+            path = fixture.native / (name + ".manifest.json")
+            original = json.loads(path.read_text())
+            for mode in ("pre-sign", "developer-id"):
+                changed = json.loads(json.dumps(original))
+                changed["metadata"]["signingMode"] = mode
+                path.write_text(json.dumps(changed))
+                with self.subTest(component=name, mode=mode), self.assertRaises(bundle.CandidateError):
+                    self.verify(fixture)
 
     def test_original_unsigned_release_still_passes_without_ui(self) -> None:
         fixture = self.fixture(ids.CandidateBundleContext.UNSIGNED_HOST)

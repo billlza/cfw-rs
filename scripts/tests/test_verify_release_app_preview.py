@@ -50,7 +50,7 @@ class SignedPreviewShellTests(unittest.TestCase):
 
     def test_unsigned_unknown_and_post_notary_private_contexts_are_rejected(self) -> None:
         for context, pre_notary in (
-            ("unsigned-host", "1"), ("preview-pre-sign", "1"), ("preview", "1"),
+            ("unsigned-host", "1"), ("unsigned-preview-host", "1"), ("preview-pre-sign", "1"), ("preview", "1"),
             ("signing-attempt-work", "0"), ("signing-attempt-publish-ready", "0"),
             ("preview-signing-attempt-work", "0"), ("preview-signing-attempt-publish-ready", "0"),
         ):

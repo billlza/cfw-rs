@@ -64,6 +64,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         readonly_caller_tauri: Path | None = None,
         runtime_verifier_failure_call: int | None = None,
         preview: bool = False,
+        unsigned_preview: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         environment = dict(os.environ)
         for variable in SIGNING_VARIABLES:
@@ -111,7 +112,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
                 'readonly config_override="$4"; '
                 'readonly variable="caller-variable"; '
             )
-        shell += 'cfw_build_tauri_host_skeleton "$2" "$3" "$4"' + (' "$9"; ' if preview else '; ')
+        shell += 'cfw_build_tauri_host_skeleton "$2" "$3" "$4"' + (' "$9"; ' if preview or unsigned_preview else '; ')
         shell += (
             "contract_test_status=$?; "
             'if [[ "$contract_test_status" -eq 0 && '
@@ -135,7 +136,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             str(self.cargo_home),
             str(readonly_caller_tauri) if readonly_caller_tauri else "",
             str(runtime_verifier_failure_call or 0),
-            *( ["--native-ui-preview"] if preview else [] ),
+            *( ["--native-ui-unsigned-preview"] if unsigned_preview else ["--native-ui-preview"] if preview else [] ),
         ]
         return subprocess.run(
             command,
@@ -144,6 +145,23 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+
+    def test_unsigned_preview_mode_enables_real_components_and_refuses_wrong_build_before_tauri(self) -> None:
+        self.write_config({"version": "0.5.0", "bundle": {"macOS": {}}})
+        override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50000"}}})
+        good = self.run_contract(unsigned_preview=True, override=override,
+                                 environment_updates={"CFW_BUILD_NUMBER": "50000"})
+        self.assertEqual(good.returncode, 0, good.stderr.decode())
+        self.assertIn(b"[physical-release-evidence,native-ui]", good.stdout)
+        for build in ("40000", "40073", "50011", "050000", "+50000"):
+            failed = self.run_contract(unsigned_preview=True, override=override,
+                                       environment_updates={"CFW_BUILD_NUMBER": build})
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertNotIn(b"[cargo-home=", failed.stdout)
+        production = self.run_contract(preview=True, override=override,
+                                       environment_updates={"CFW_BUILD_NUMBER": "50000"})
+        self.assertNotEqual(production.returncode, 0)
+        self.assertNotIn(b"[cargo-home=", production.stdout)
 
     def test_candidate_verifier_rejects_non_distribution_macho_mode(self) -> None:
         binary = self.root / "host-binary"

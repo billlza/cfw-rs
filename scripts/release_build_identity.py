@@ -109,6 +109,7 @@ FROZEN_GA_REPOSITORY_RELATIVE = Path(
     f"target/release-worktrees/{ACTIVE_RELEASE_IDENTITY.ga_build}"
 )
 UNSIGNED_VALIDATION_BUILD = "40000"
+UNSIGNED_PREVIEW_VALIDATION_BUILD: Final = "50000"
 SIGNING_OUTPUT_RELATIVE = Path("signing-output")
 SIGNING_INPUT_NAME = "signing-input"
 SIGNED_APP_NAME = "Clash for Mac.app"
@@ -121,6 +122,7 @@ class CandidateBundleContext(str, Enum):
     """One explicit path provenance accepted by the bundle verifiers."""
 
     UNSIGNED_HOST = "unsigned-host"
+    UNSIGNED_PREVIEW_HOST = "unsigned-preview-host"
     SIGNING_ATTEMPT_WORK = "signing-attempt-work"
     SIGNING_ATTEMPT_PUBLISH_READY = "signing-attempt-publish-ready"
     CANONICAL_NATIVE_CONTENT = "canonical-native-content"
@@ -225,6 +227,24 @@ def bundle_build_identity(
     if len(unique) != 1:
         raise BuildIdentityError(f"Host/Agent/System Extension build versions differ: {identities}")
     return BundleBuildIdentity(expected_product_version, unique.pop())
+
+
+def unsigned_preview_root(repository: Path) -> Path:
+    return repository / f"target/candidates/{PREVIEW_PRODUCT_VERSION}/unsigned/{UNSIGNED_PREVIEW_VALIDATION_BUILD}"
+
+
+def unsigned_preview_native_products_root(repository: Path) -> Path:
+    return unsigned_preview_root(repository) / "native-products"
+
+
+def require_native_product_build_mode(build_version: str, mode: str) -> None:
+    """Keep CI-only native products outside every pre-sign production lane."""
+    if mode not in {"unsigned-validation", "pre-sign"}:
+        raise BuildIdentityError("native product build mode is invalid")
+    if build_version == UNSIGNED_PREVIEW_VALIDATION_BUILD and mode != "unsigned-validation":
+        raise BuildIdentityError("unsigned preview validation cannot be built as pre-sign input")
+    if build_version == SIGNED_PREVIEW_BUILD and mode != "pre-sign":
+        raise BuildIdentityError("signed preview products cannot be built in an unsigned validation lane")
 
 
 def preview_preflight_root(repository: Path) -> Path:
@@ -485,6 +505,14 @@ def candidate_bundle_verification_paths(
     )
     if app_path.name != SIGNED_APP_NAME:
         raise BuildIdentityError("candidate application name is invalid")
+    if context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST:
+        identity = bundle_build_identity(app_path, expected_product_version=PREVIEW_PRODUCT_VERSION)
+        expected_app = unsigned_preview_root(canonical_repository) / "cargo/release/bundle/macos" / SIGNED_APP_NAME
+        if (identity != BundleBuildIdentity(PREVIEW_PRODUCT_VERSION, UNSIGNED_PREVIEW_VALIDATION_BUILD)
+            or app_path != expected_app
+            or native_path != unsigned_preview_native_products_root(canonical_repository)):
+            raise BuildIdentityError("unsigned preview app/native pair is not the fixed 0.5.0/50000 validation output")
+        return CandidateBundleVerificationPaths(app_path, native_path, identity, context)
     if context in _PREVIEW_CONTEXTS:
         return _preview_bundle_verification_paths(
             canonical_repository, app_path, native_path, context
@@ -739,6 +767,8 @@ def candidate_native_products_output(
         allowed = {ga_pre_sign_native_products_root(repository)}
     elif canonical_build == SIGNED_PREVIEW_BUILD:
         allowed = {preview_native_products_root(repository)}
+    elif canonical_build == UNSIGNED_PREVIEW_VALIDATION_BUILD:
+        allowed = {unsigned_preview_native_products_root(repository)}
     else:
         raise BuildIdentityError(
             "candidate build is neither the unsigned validation build nor the active GA build"

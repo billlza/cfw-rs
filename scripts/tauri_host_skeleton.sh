@@ -9,8 +9,8 @@ source "$tauri_host_contract_directory/release_cargo_inputs.sh"
 unset tauri_host_contract_directory
 
 cfw_build_tauri_host_skeleton() {
-  if [[ $# -ne 3 && ! ( $# -eq 4 && "$4" == "--native-ui-preview" ) ]]; then
-    echo "error: cfw_build_tauri_host_skeleton requires APP_DIR TAURI_BIN CONFIG_OVERRIDE [--native-ui-preview]" >&2
+  if [[ $# -ne 3 && ! ( $# -eq 4 && ( "$4" == "--native-ui-preview" || "$4" == "--native-ui-unsigned-preview" ) ) ]]; then
+    echo "error: cfw_build_tauri_host_skeleton requires APP_DIR TAURI_BIN CONFIG_OVERRIDE [--native-ui-preview|--native-ui-unsigned-preview]" >&2
     return 1
   fi
 
@@ -131,6 +131,11 @@ if sys.argv[3] == "--native-ui-preview":
         raise SystemExit("error: native UI Host requires exact preview version/build 0.5.0/50011")
     if override["bundle"]["macOS"].get("bundleVersion") != "50011":
         raise SystemExit("error: native UI Host override must retain preview build 50011")
+elif sys.argv[3] == "--native-ui-unsigned-preview":
+    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50000":
+        raise SystemExit("error: unsigned native UI Host requires exact validation version/build 0.5.0/50000")
+    if override["bundle"]["macOS"].get("bundleVersion") != "50000":
+        raise SystemExit("error: unsigned native UI Host override must retain validation build 50000")
 PY
 
   (
@@ -138,7 +143,7 @@ PY
       echo "error: cannot enter Tauri application root" >&2
       return 1
     }
-    if [[ "$contract_tauri_host_preview" == "--native-ui-preview" ]]; then
+    if [[ "$contract_tauri_host_preview" == "--native-ui-preview" || "$contract_tauri_host_preview" == "--native-ui-unsigned-preview" ]]; then
       /usr/bin/env \
         -u APPLE_CERTIFICATE \
         -u APPLE_CERTIFICATE_PASSWORD \

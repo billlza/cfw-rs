@@ -148,7 +148,7 @@ class NativeUiArtifactTests(unittest.TestCase):
                     value = promote_manifest(pre_sign / name, pre_sign / (name + ".manifest.json"), signed / name)
                     (signed / (name + ".manifest.json")).write_text(json.dumps(value))
             manifests()
-            def expected(_repository, _build, *, signing, clean):
+            def expected(_repository, _build, *, signing, clean, context=ui.NativeUiContext.SIGNED_PREVIEW):
                 return {**metadata, "signingMode": signing}
             with patch.object(ui, "expected_metadata", side_effect=expected), patch.object(ui, "verify_library"), patch(
                 "scripts.release_build_identity.preview_native_products_root", return_value=pre_sign

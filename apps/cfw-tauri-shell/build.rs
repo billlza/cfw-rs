@@ -5,6 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[path = "build_support/development_native_ui.rs"]
+mod development_native_ui;
+
 #[path = "build_support/native_product_input.rs"]
 mod native_product_input;
 
@@ -173,7 +176,9 @@ fn main() {
                 panic!("native UI release artifact validation failed: {error}")
             });
         } else {
-            build_development_native_ui(repository_root);
+            verify_development_native_ui(repository_root).unwrap_or_else(|error| {
+                panic!("native UI development inputs failed: {error}; run scripts/prepare_development_native_ui.py before Cargo")
+            });
         }
     }
     println!(
@@ -231,81 +236,45 @@ fn main() {
     tauri_build::build()
 }
 
-fn build_development_native_ui(repository_root: &Path) {
-    let package = repository_root.join("native/dashboard");
+fn verify_development_native_ui(repository_root: &Path) -> Result<(), String> {
     println!(
-        "cargo:rerun-if-changed={}",
-        package.join("Package.swift").display()
+        "cargo:rerun-if-env-changed={}",
+        development_native_ui::OUTPUT_ENV
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        package.join("Sources").display()
-    );
-    let build = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo build output"))
-        .join("swift-dashboard");
-    let status = std::process::Command::new("/usr/bin/xcrun")
-        .args([
-            "swift",
-            "build",
-            "--configuration",
-            "debug",
-            "--product",
-            "CFMNativeDashboard",
-            "--package-path",
-        ])
-        .arg(&package)
-        .arg("--scratch-path")
-        .arg(&build)
-        .args(["-Xswiftc", "-warnings-as-errors"])
-        .status()
-        .expect("run selected Xcode Swift compiler");
-    assert!(status.success(), "native SwiftUI library build failed");
-    let output = std::process::Command::new("/usr/bin/xcrun")
-        .args([
-            "swift",
-            "build",
-            "--configuration",
-            "debug",
-            "--show-bin-path",
-            "--package-path",
-        ])
-        .arg(&package)
-        .arg("--scratch-path")
-        .arg(&build)
-        .output()
-        .expect("resolve Swift build product directory");
-    assert!(
-        output.status.success(),
-        "Swift build product directory is unavailable"
-    );
-    let library = PathBuf::from(
-        String::from_utf8(output.stdout)
-            .expect("Swift output path is UTF-8")
-            .trim(),
-    );
-    assert!(
-        library.join("libCFMNativeDashboard.dylib").is_file(),
-        "Swift dashboard library is missing"
-    );
-    // SwiftPM's resource accessor resolves from the executable bundle for
-    // a dylib host. Keep development resources alongside both Cargo bins
-    // and test executables; never write into the installed application.
-    let target_directory = build.ancestors().nth(4).expect("Cargo target directory");
-    let bundle = "CFMNativeDashboard_CFMNativeDashboard.bundle";
-    for destination in [
-        target_directory.to_path_buf(),
-        target_directory.join("deps"),
-    ] {
-        let status = std::process::Command::new("/usr/bin/ditto")
-            .arg(library.join(bundle))
-            .arg(destination.join(bundle))
-            .status()
-            .expect("copy native dashboard development resources");
-        assert!(status.success(), "native dashboard resource copy failed");
+    for relative in development_native_ui::SOURCE_PATHS {
+        println!(
+            "cargo:rerun-if-changed={}",
+            repository_root.join(relative).display()
+        );
     }
-    println!("cargo:rustc-link-search=native={}", library.display());
+    let products = PathBuf::from(
+        std::env::var_os(development_native_ui::OUTPUT_ENV)
+            .ok_or("CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS is unset")?,
+    );
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo output is missing")?);
+    let profile = out_dir
+        .ancestors()
+        .nth(3)
+        .ok_or("Cargo profile output is missing")?;
+    let verified =
+        development_native_ui::verify(repository_root, &products, profile, |path, value| {
+            let manifest: ArtifactManifest = serde_json::from_value(value.clone())
+                .map_err(|error| format!("parse development artifact manifest: {error}"))?;
+            verify_manifest(path, &manifest)
+        })?;
+    for path in verified.watched_paths {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!(
+        "cargo:rustc-link-search=native={}",
+        verified.library_root.display()
+    );
     println!("cargo:rustc-link-lib=dylib=CFMNativeDashboard");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", library.display());
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        verified.library_root.display()
+    );
+    Ok(())
 }
 
 fn verify_release_native_ui(repository_root: &Path) -> Result<(), String> {
@@ -315,8 +284,14 @@ fn verify_release_native_ui(repository_root: &Path) -> Result<(), String> {
         return Err("native-dashboard cannot be included in a release candidate".into());
     }
     let products = candidate_native_products_root(repository_root)?;
-    if products.context != native_product_input::NativeProductContext::PreviewPreSign {
-        return Err("native-ui release inputs require the signed preview context".into());
+    if !matches!(
+        products.context,
+        native_product_input::NativeProductContext::PreviewPreSign
+            | native_product_input::NativeProductContext::UnsignedPreviewValidation
+    ) {
+        return Err(
+            "native-ui release inputs require a closed signed or unsigned preview context".into(),
+        );
     }
     let script = repository_root.join("scripts/build_native_ui.sh");
     for relative in [
@@ -343,12 +318,16 @@ fn verify_release_native_ui(repository_root: &Path) -> Result<(), String> {
         let manifest: ArtifactManifest = read_json(&manifest_path)?;
         verify_manifest(&path, &manifest)?;
     }
-    // Reuse the artifact verifier with the sealed production interpreter and
-    // compiler selection. It checks source, toolchain, Mach-O load paths and
+    // Reuse the artifact verifier with the selected context's sealed interpreter
+    // and compiler selection. It checks source, toolchain, Mach-O load paths and
     // localization resources, rather than accepting a caller's digest string.
-    let result = native_product_input::native_ui_verifier_command(&script, std::env::vars_os())
-        .output()
-        .map_err(|error| format!("run native UI artifact verifier: {error}"))?;
+    let result = native_product_input::native_ui_verifier_command(
+        &script,
+        std::env::vars_os(),
+        products.context,
+    )
+    .output()
+    .map_err(|error| format!("run native UI artifact verifier: {error}"))?;
     if !result.status.success() {
         return Err(format!(
             "native UI artifact verifier failed: {}{}",

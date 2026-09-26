@@ -11,6 +11,7 @@ use std::process::Command;
 pub fn native_ui_verifier_command(
     script: &Path,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
+    context: NativeProductContext,
 ) -> Command {
     const INPUTS: &[&str] = &[
         "CFW_BUILD_NUMBER",
@@ -27,6 +28,9 @@ pub fn native_ui_verifier_command(
     ];
     let mut command = Command::new("/bin/bash");
     command.arg("-p").arg(script).arg("--verify");
+    if context == NativeProductContext::UnsignedPreviewValidation {
+        command.arg("--unsigned-preview-validation");
+    }
     command.env_clear().envs(
         environment
             .into_iter()
@@ -44,10 +48,13 @@ const GA_PRE_SIGNING_MODE: &str = "pre-sign";
 const PREVIEW_CANDIDATE_ROOT: &str = "target/candidates/0.5.0";
 const PREVIEW_PRE_SIGN_RELATIVE_ROOT: &str = "preview-preflight/50011/native-products";
 const PREVIEW_BUILD_NUMBER: &str = "50011";
+const UNSIGNED_PREVIEW_RELATIVE_ROOT: &str = "unsigned/50000/native-products";
+const UNSIGNED_PREVIEW_BUILD_NUMBER: &str = "50000";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeProductContext {
     UnsignedValidation,
+    UnsignedPreviewValidation,
     GaPreSign,
     PreviewPreSign,
 }
@@ -105,6 +112,7 @@ impl NativeProductContext {
     pub const fn expected_build_number(self) -> &'static str {
         match self {
             Self::UnsignedValidation => UNSIGNED_BUILD_NUMBER,
+            Self::UnsignedPreviewValidation => UNSIGNED_PREVIEW_BUILD_NUMBER,
             Self::GaPreSign => GA_BUILD_NUMBER,
             Self::PreviewPreSign => PREVIEW_BUILD_NUMBER,
         }
@@ -112,7 +120,7 @@ impl NativeProductContext {
 
     pub const fn expected_signing_mode(self) -> &'static str {
         match self {
-            Self::UnsignedValidation => UNSIGNED_SIGNING_MODE,
+            Self::UnsignedValidation | Self::UnsignedPreviewValidation => UNSIGNED_SIGNING_MODE,
             Self::GaPreSign | Self::PreviewPreSign => GA_PRE_SIGNING_MODE,
         }
     }
@@ -168,13 +176,17 @@ impl CandidateNativeProducts {
         let unsigned = format!("{candidate_root_text}/{UNSIGNED_RELATIVE_ROOT}");
         let ga_pre_sign = format!("{candidate_root_text}/{GA_PRE_SIGN_RELATIVE_ROOT}");
         let preview_pre_sign = format!("{candidate_root_text}/{PREVIEW_PRE_SIGN_RELATIVE_ROOT}");
+        let unsigned_preview = format!("{candidate_root_text}/{UNSIGNED_PREVIEW_RELATIVE_ROOT}");
         let context = if candidate_root.ends_with(PREVIEW_CANDIDATE_ROOT) {
-            if declared_output != preview_pre_sign {
+            if declared_output == preview_pre_sign {
+                NativeProductContext::PreviewPreSign
+            } else if declared_output == unsigned_preview {
+                NativeProductContext::UnsignedPreviewValidation
+            } else {
                 return Err(format!(
-                    "preview native-products output must be exactly {preview_pre_sign}, found {declared_output}"
+                    "preview native-products output must be exactly {preview_pre_sign} or {unsigned_preview}, found {declared_output}"
                 ));
             }
-            NativeProductContext::PreviewPreSign
         } else if declared_output == unsigned {
             NativeProductContext::UnsignedValidation
         } else if declared_output == ga_pre_sign {
@@ -349,6 +361,7 @@ mod preview_tests {
         let command = native_ui_verifier_command(
             Path::new("/repo/scripts/build_native_ui.sh"),
             environment.map(|(key, value)| (key.into(), value.into())),
+            NativeProductContext::PreviewPreSign,
         );
         let passed = command
             .get_envs()
@@ -479,6 +492,89 @@ mod preview_tests {
             assert!(CandidateNativeProducts::resolve(&root, &old, build).is_err());
             assert!(CandidateNativeProducts::resolve(&old_root, &old, "50011").is_err());
         }
+    }
+
+    #[test]
+    fn unsigned_preview_context_is_disjoint_from_every_production_root_and_mode() {
+        let fixture = Fixture::new();
+        let root = fixture.root("0.5.0");
+        let output = fixture.output("0.5.0", UNSIGNED_PREVIEW_RELATIVE_ROOT);
+        let admitted = CandidateNativeProducts::resolve(&root, &output, "50000").unwrap();
+        assert_eq!(
+            admitted.context,
+            NativeProductContext::UnsignedPreviewValidation
+        );
+        assert_eq!(
+            admitted.context.expected_signing_mode(),
+            "unsigned-validation"
+        );
+        let good = BTreeMap::from([
+            ("buildNumber".into(), "50000".into()),
+            ("signingMode".into(), "unsigned-validation".into()),
+        ]);
+        admitted
+            .context
+            .require_manifest_identity(&good, "UI")
+            .unwrap();
+        for signing in ["pre-sign", "developer-id"] {
+            let mut changed = good.clone();
+            changed.insert("signingMode".into(), signing.into());
+            assert!(
+                admitted
+                    .context
+                    .require_manifest_identity(&changed, "UI")
+                    .is_err()
+            );
+        }
+        for (version, relative, build) in [
+            ("0.4.0", UNSIGNED_RELATIVE_ROOT, "40000"),
+            ("0.4.0", GA_PRE_SIGN_RELATIVE_ROOT, "40073"),
+            ("0.5.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT, "50011"),
+        ] {
+            let other = fixture.output(version, relative);
+            assert!(CandidateNativeProducts::resolve(&root, &output, build).is_err());
+            assert!(
+                CandidateNativeProducts::resolve(&fixture.root(version), &other, "50000").is_err()
+            );
+        }
+        let pinned = ("27.0", "27A266a");
+        assert_eq!(
+            admitted
+                .context
+                .expected_apple_identity(
+                    pinned,
+                    (Some("27.0"), Some("27A5252f")),
+                    Some("/runtime/python3")
+                )
+                .unwrap(),
+            ("27.0", "27A5252f")
+        );
+        assert!(
+            admitted
+                .context
+                .expected_apple_identity(pinned, (Some("27.0"), Some("27A5252f")), None)
+                .is_err()
+        );
+        assert!(
+            admitted
+                .context
+                .expected_apple_identity(pinned, (Some("27.0"), None), Some("/runtime/python3"))
+                .is_err()
+        );
+        let command = native_ui_verifier_command(
+            Path::new("/repo/scripts/build_native_ui.sh"),
+            [],
+            admitted.context,
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "-p",
+                "/repo/scripts/build_native_ui.sh",
+                "--verify",
+                "--unsigned-preview-validation"
+            ]
+        );
     }
 
     #[test]

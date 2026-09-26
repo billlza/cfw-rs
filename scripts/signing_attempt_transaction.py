@@ -1310,7 +1310,7 @@ def production_verification_runner(
     *,
     repository: Path | None = None,
 ) -> None:
-    if context is CandidateBundleContext.UNSIGNED_HOST:
+    if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.UNSIGNED_PREVIEW_HOST}:
         raise SigningAttemptError(
             "signing_verification_context_invalid",
             "signed GA verification cannot use unsigned-host context",

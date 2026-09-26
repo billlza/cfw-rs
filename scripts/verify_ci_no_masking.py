@@ -56,6 +56,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DEFAULT_PINS = REPO_ROOT / "scripts" / "dependency_pins.env"
 RELEASE_CI_GATE = REPO_ROOT / "scripts" / "run_release_ci_gate.sh"
+NATIVE_UI_DEVELOPMENT_CHECKS = REPO_ROOT / "scripts" / "native_ui_development_checks.sh"
+REQUIRED_NATIVE_UI_DEVELOPMENT_CHECKS_SHA256 = "c193d7c8d262a0703686c637e9fc87ec568c256269f22415bd21ef012e4d0d83"
 REQUIRED_RUN_SHELL = "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
 REQUIRED_CHECKOUT_ACTION = (
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -105,10 +107,10 @@ REQUIRED_SWIFT_TARGET_INFO_PROBE = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "4ebb87cf406067ed44ac7850b0281265c3566f8546698e1fc7d57f1886e10137"
+    "1114fccda4ec9ac39c6e3acd690cb723fbfa8cc7de6d60c837c8b44cbe472d09"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "132898156c66f2d3bf022cb3801de41a80f23a17a0d83f6506af3027bda6825d"
+    "306f74ead0054801a3dc8e147b4569666cec0ebb2d0d6c9491f8a43e20066cac"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -882,7 +884,8 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         'source "$repo_root/scripts/release_policy_tool_directory.sh"',
         "cfw_run_warning_free_policy_install",
         "cfw_run_with_release_cargo_runtime",
-        "cfw_run_with_fresh_release_cargo_target",
+        "cfw_run_native_ui_development_check",
+        'source "$repo_root/scripts/native_ui_development_checks.sh"',
         "prepare-cargo-workspace-inputs",
         "cfw_run_release_python_script",
         '"$repo_root/scripts/run_release_python_tests.py"',
@@ -936,29 +939,8 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
             "metadata",
             "--locked",
         ),
-        (
-            "cfw_run_with_fresh_release_cargo_target",
-            "$repo_root",
-            "$CFW_RELEASE_CARGO_EXECUTABLE",
-            "clippy",
-            "--locked",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ),
-        (
-            "cfw_run_with_fresh_release_cargo_target",
-            "$repo_root",
-            "$CFW_RELEASE_CARGO_EXECUTABLE",
-            "test",
-            "--locked",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-        ),
+        ("cfw_run_native_ui_development_check", "$repo_root", "clippy"),
+        ("cfw_run_native_ui_development_check", "$repo_root", "test"),
         (
             "cfw_run_with_release_cargo_runtime",
             "$repo_root",
@@ -973,6 +955,33 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
                 "closed release CI gate omits required Cargo command "
                 + repr(" ".join(expected))
             )
+    if NATIVE_UI_DEVELOPMENT_CHECKS.is_symlink() or not NATIVE_UI_DEVELOPMENT_CHECKS.is_file():
+        findings.append("native UI development helper is missing or is a symlink")
+    else:
+        helper_bytes = NATIVE_UI_DEVELOPMENT_CHECKS.read_bytes()
+        if hashlib.sha256(helper_bytes).hexdigest() != REQUIRED_NATIVE_UI_DEVELOPMENT_CHECKS_SHA256:
+            findings.append("native UI development helper differs from the reviewed policy")
+        try:
+            helper_source = _without_full_line_comments(helper_bytes.decode("utf-8"))
+        except UnicodeDecodeError:
+            findings.append("native UI development helper is not UTF-8 source")
+        else:
+            findings += _check_masking(helper_source)
+            for fragment in (
+                'target="$(/usr/bin/mktemp -d "$repository/target/development/ci-${operation}_XXXXXXXX")"',
+                '"$repository/scripts/prepare_development_native_ui.py" --cargo-target-dir "$target"',
+                'export CARGO_TARGET_DIR="$target"',
+                'export CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS="$products"',
+            ):
+                if fragment not in helper_source:
+                    findings.append(f"native UI helper omits fresh preparation binding {fragment!r}")
+            for operation in ("clippy", "test"):
+                required = ("cfw_run_with_release_cargo_runtime", "$repository", "$CFW_RELEASE_CARGO_EXECUTABLE", operation,
+                            "--locked", "--workspace", "--all-targets", "--all-features")
+                if operation == "clippy":
+                    required += ("--", "-D", "warnings")
+                if not _source_contains_token_sequence(helper_source, required):
+                    findings.append("native UI helper omits required Cargo command " + repr(" ".join(required)))
     expected_packet_command = (
         "/bin/bash",
         "-p",

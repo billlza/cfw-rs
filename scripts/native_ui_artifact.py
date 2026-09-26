@@ -7,6 +7,7 @@ services, or change networking. Candidate identity and signing remain separate.
 from __future__ import annotations
 
 import argparse
+from enum import Enum
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 
 if __package__:
     from .hash_artifact import build_manifest
@@ -115,24 +117,43 @@ def swift_compiler_version() -> str:
     return result.stdout.strip() + ("\n" + driver if driver else "")
 
 
-def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool) -> dict[str, str]:
+class NativeUiContext(str, Enum):
+    SIGNED_PREVIEW = "signed-preview"
+    UNSIGNED_PREVIEW_VALIDATION = "unsigned-preview-validation"
+
+
+def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool,
+                      context: NativeUiContext = NativeUiContext.SIGNED_PREVIEW) -> dict[str, str]:
     if __package__:
-        from .release_build_identity import SIGNED_PREVIEW_IDENTITY
+        from .release_build_identity import SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD
+        from .apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
     else:
-        from release_build_identity import SIGNED_PREVIEW_IDENTITY
-    if build != SIGNED_PREVIEW_IDENTITY.build_number or signing not in {"pre-sign", "developer-id"}:
+        from release_build_identity import SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD
+        from apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
+    if not isinstance(context, NativeUiContext):
+        raise NativeUiArtifactError("UI artifact context is invalid")
+    if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
+        if build != UNSIGNED_PREVIEW_VALIDATION_BUILD or signing != "unsigned-validation":
+            raise NativeUiArtifactError("unsigned preview UI requires exact 50000 unsigned-validation identity")
+    elif build != SIGNED_PREVIEW_IDENTITY.build_number or signing not in {"pre-sign", "developer-id"}:
         raise NativeUiArtifactError("UI products require the exact signed-preview identity")
     pins = dict(re.findall(r"^(XCODE_VERSION|XCODE_BUILD_VERSION)=([^\n]+)$",
                            (repository / "scripts/dependency_pins.env").read_text(), re.M))
-    expected_xcode = f"Xcode {pins['XCODE_VERSION']}\nBuild version {pins['XCODE_BUILD_VERSION']}\n"
+    if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
+        xcode_version, xcode_build = unsigned_runtime_apple_identity(pins, Path(sys.executable).resolve(strict=True))
+    else:
+        if any(key in os.environ for key in ("CFW_UNSIGNED_VALIDATION_PYTHON", "CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION")):
+            raise NativeUiArtifactError("signed preview UI refuses unsigned-validation toolchain selectors")
+        xcode_version, xcode_build = selected_apple_identity(pins, os.environ, role="production")
+    expected_xcode = f"Xcode {xcode_version}\nBuild version {xcode_build}\n"
     if command(["/usr/bin/xcodebuild", "-version"]) != expected_xcode:
-        raise NativeUiArtifactError("native UI products require the pinned production Xcode")
+        raise NativeUiArtifactError("native UI products require the exact selected Xcode identity")
     return {
         "productVersion": SIGNED_PREVIEW_IDENTITY.product_version, "buildNumber": build,
         "configuration": "release", "target": TRIPLE, "signingMode": signing, "buildSystem": "swiftbuild",
         "uiSourceSha256": source_digest(repository),
         **current_identity(repository, require_clean=clean),
-        "xcodeVersion": pins["XCODE_VERSION"], "xcodeBuildVersion": pins["XCODE_BUILD_VERSION"],
+        "xcodeVersion": xcode_version, "xcodeBuildVersion": xcode_build,
         "swiftVersion": swift_compiler_version(),
     }
 
@@ -230,8 +251,16 @@ def verify_resources(resources: Path) -> None:
             raise NativeUiArtifactError(f"UI localization is empty: {locale}")
 
 
-def verify_products(repository: Path, products: Path, *, build: str, signing: str = "pre-sign") -> None:
-    expected = expected_metadata(repository, build, signing=signing, clean=False)
+def verify_products(repository: Path, products: Path, *, build: str, signing: str = "pre-sign",
+                    context: NativeUiContext = NativeUiContext.SIGNED_PREVIEW) -> None:
+    if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
+        if __package__:
+            from .release_build_identity import unsigned_preview_native_products_root
+        else:
+            from release_build_identity import unsigned_preview_native_products_root
+        if products != unsigned_preview_native_products_root(repository) or products.resolve(strict=True) != products:
+            raise NativeUiArtifactError("unsigned preview UI products require the exact validation root")
+    expected = expected_metadata(repository, build, signing=signing, clean=False, context=context)
     pre_sign_products = None
     if signing == "developer-id":
         if __package__:
@@ -268,20 +297,24 @@ def verify_products(repository: Path, products: Path, *, build: str, signing: st
             raise NativeUiArtifactError(f"UI artifact bytes differ from the recorded manifest: {name}")
 
 
-def build_products(repository: Path, products: Path, *, build: str) -> None:
+def build_products(repository: Path, products: Path, *, build: str,
+                   context: NativeUiContext = NativeUiContext.SIGNED_PREVIEW) -> None:
     if __package__:
-        from .release_build_identity import preview_native_products_root, preview_preflight_root
+        from .release_build_identity import preview_native_products_root, preview_preflight_root, unsigned_preview_native_products_root, unsigned_preview_root
     else:
-        from release_build_identity import preview_native_products_root, preview_preflight_root
-    expected_root = preview_native_products_root(repository)
+        from release_build_identity import preview_native_products_root, preview_preflight_root, unsigned_preview_native_products_root, unsigned_preview_root
+    unsigned = context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
+    expected_root = unsigned_preview_native_products_root(repository) if unsigned else preview_native_products_root(repository)
+    scratch_root = unsigned_preview_root(repository) if unsigned else preview_preflight_root(repository)
+    signing = "unsigned-validation" if unsigned else "pre-sign"
     if products != expected_root or not products.is_dir() or products.resolve(strict=True) != products:
         raise NativeUiArtifactError("UI products must be built inside the exact preview preflight")
-    metadata = expected_metadata(repository, build, signing="pre-sign", clean=True)
+    metadata = expected_metadata(repository, build, signing=signing, clean=True, context=context)
     for name in (LIBRARY, RESOURCES, LIBRARY + ".manifest.json", RESOURCES + ".manifest.json"):
         path = products / name
         if path.exists() or path.is_symlink():
             raise NativeUiArtifactError(f"refusing to replace an existing UI product: {path}")
-    scratch = preview_preflight_root(repository) / "swift-ui-build"
+    scratch = scratch_root / "swift-ui-build"
     scratch.mkdir(mode=0o700)
     arguments = ["/usr/bin/xcrun", "swift", "build", "--package-path", str(repository / "native/dashboard"),
                  "--scratch-path", str(scratch), "--configuration", "release", "--triple", TRIPLE,
@@ -297,14 +330,14 @@ def build_products(repository: Path, products: Path, *, build: str) -> None:
     shutil.copytree(output / RESOURCES, products / RESOURCES)
     remove_build_rpaths(products / LIBRARY)
     verify_resources(products / RESOURCES)
-    if expected_metadata(repository, build, signing="pre-sign", clean=True) != metadata:
+    if expected_metadata(repository, build, signing=signing, clean=True, context=context) != metadata:
         raise NativeUiArtifactError("SwiftUI source or compiler changed during the build")
     for name in (LIBRARY, RESOURCES):
         with (products / (name + ".manifest.json")).open("x") as handle:
             json.dump(build_manifest(products / name, metadata=metadata), handle, sort_keys=True, indent=2)
             handle.write("\n")
         os.chmod(products / (name + ".manifest.json"), 0o644)
-    verify_products(repository, products, build=build)
+    verify_products(repository, products, build=build, signing=signing, context=context)
 
 
 def main() -> None:
@@ -313,13 +346,16 @@ def main() -> None:
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--products", type=Path, required=True)
     parser.add_argument("--build-number", required=True)
+    parser.add_argument("--unsigned-preview-validation", action="store_true")
     arguments = parser.parse_args()
     try:
         repository = arguments.repository.resolve(strict=True)
+        context = NativeUiContext.UNSIGNED_PREVIEW_VALIDATION if arguments.unsigned_preview_validation else NativeUiContext.SIGNED_PREVIEW
+        signing = "unsigned-validation" if arguments.unsigned_preview_validation else "pre-sign"
         if arguments.operation == "build":
-            build_products(repository, arguments.products, build=arguments.build_number)
+            build_products(repository, arguments.products, build=arguments.build_number, context=context)
         else:
-            verify_products(repository, arguments.products, build=arguments.build_number)
+            verify_products(repository, arguments.products, build=arguments.build_number, signing=signing, context=context)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, f"error: native UI artifact: {error}\n")
     print("native UI Release code/resources verified against source, compiler and candidate identity")

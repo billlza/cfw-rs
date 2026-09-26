@@ -78,7 +78,35 @@ lease; the projection is not an authorization credential or a cached permission.
 
 ## Verification
 
-Use the repository's pinned/private Rust environment and verified Cargo wrapper:
+Use the repository's pinned/private Rust environment and verified Cargo wrapper.
+Prepare the development library explicitly before invoking Cargo with either
+native feature. From the repository root, using the admitted Python launcher:
+
+```sh
+export CARGO_TARGET_DIR="$PWD/target"
+CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS="$(
+  cfw_run_release_python_script "$PWD" "$PWD/scripts/prepare_development_native_ui.py" \
+    --cargo-target-dir "$CARGO_TARGET_DIR"
+)"
+export CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS
+```
+
+If Cargo uses `--target aarch64-apple-darwin`, pass the same `--target` to preparation.
+The script builds Swift debug code into a fresh attempt under
+`target/native-ui-development/`, and places localization resources beside both
+Cargo binaries and test executables. It keeps compiler logs and publishes a
+completion receipt only after source and copied resources are checked. Existing
+resources with different bytes are preserved: select a fresh absolute
+`$PWD/target/development/<name>` for both commands in that case.
+
+Cargo's build script only verifies and links these already prepared products;
+it never runs Swift or copies files. It revalidates content manifests for the
+package, headers, resources and preparation/validation sources. After changing
+those inputs, run preparation again; missing or stale inputs fail explicitly.
+Candidate products and installed applications are not accepted as development
+inputs. This procedure does not sign, install or exercise networking.
+
+Then run the checks:
 
 ```sh
 cargo test --locked --offline -p cfw-application
@@ -104,9 +132,10 @@ write PNG render fixtures and 10,000 raw decode/model timings. These debug compo
 timings exclude rendering, app launch, RSS, energy and network traffic. They do
 not establish any performance improvement over the full 40073 application.
 
-Remaining: migrate profiles, nodes, settings, connections, rules and diagnostics; native app lifecycle,
-menu bar and update/migration composition; screen-reader and oldest-OS tests;
-installed real-state validation and full comparative performance/network evidence.
+Component and FFI checks do not establish installed app lifecycle or service
+migration, screen-reader or oldest-OS behavior, or comparative performance and
+network results. Those require separate product acceptance while preserving the
+existing pages and interaction paths under the corrected UI contract.
 
 ## Inspecting the UI locally
 
@@ -119,23 +148,45 @@ never starts the production Rust host or its native networking services. See
 
 ## Corrected in-place components
 
-The `native-ui` feature enables the original Profiles menu and Network settings
-form as native components. It does not expose the rejected Overview menu entry.
+The `native-ui` feature enables the original Profiles menu, Network settings
+form and General switches as native components. It does not expose the rejected Overview menu entry.
 The existing nine pages and command handlers remain the product surface.
-`ProfileMenu.swift` and `RuntimeSettings.swift`, with matching C headers, receive
+`ProfileMenu.swift`, `RuntimeSettings.swift` and `GeneralSwitches.swift`, with matching C headers, receive
 bounded, versioned display frames and return intent to the original JS/Rust
-application handlers. Neither component invokes networking or changes permissions.
+application handlers. The components do not invoke networking or change permissions.
 
 The menu preserves action order, source/engine disabled reasons and content-window
 positioning. The form preserves field order, labels, checkboxes, draft/error state,
-revision-based submission and busy cancellation rules. Both follow the effective
+revision-based submission and busy cancellation rules. All three follow the effective
 page theme. Supported systems use native SwiftUI glass for appropriate controls;
 older systems and accessibility settings retain standard readable materials.
 
 The corresponding Rust adapter is `apps/cfw-tauri-shell/src/native_components/`.
 Frontend adapters live beside the original handlers, and retain all business
 validation there. Run host checks with `--features native-ui`; the normal Swift
-package suite includes both new components. See the implementation status for
+package suite includes all three components. See the implementation status for
 actual test counts and unresolved installed/visual/accessibility gates. The
 historical `Preview/build-preview.sh` is the rejected sample UI and must not be
 installed or handed over as the corrected 0.5 preview.
+
+
+## CI compilation of the 0.5 bundle
+
+The CI skeleton uses the separate unsigned validation identity **0.5.0/50000**:
+
+```sh
+scripts/build_unsigned_candidate.sh --preview-validation \
+  --validation-python-executable "$CFW_RELEASE_PYTHON_EXECUTABLE"
+```
+
+The Python executable must already satisfy the closed validation runtime contract.
+This lane builds Release native UI components, embeds their library and localization
+resources, and verifies their source, compiler, architecture, exports and portable
+load paths. Its exact output is `target/candidates/0.5.0/unsigned/50000`; retained
+attempts are never overwritten. It has no distribution signature and is not an
+input to the signed preview, installation or publication lanes. The signed preview
+keeps its independently allocated build and pinned production compiler.
+
+CI Rust tests and Clippy retain `--all-targets --all-features`. Each gets an explicit
+Swift development preparation and a fresh `target/development/ci-...` directory
+before Cargo starts. These checks remain separate from the Release bundle lane.

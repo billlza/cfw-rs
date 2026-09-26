@@ -286,6 +286,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
         self.configure_preview_fixture()
         for context in (
             provenance.CandidateBundleContext.UNSIGNED_HOST,
+            provenance.CandidateBundleContext.UNSIGNED_PREVIEW_HOST,
             provenance.CandidateBundleContext.PREVIEW_PRE_SIGN,
             provenance.CandidateBundleContext.SIGNING_ATTEMPT_WORK,
         ):

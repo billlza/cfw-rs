@@ -23,6 +23,7 @@ if __package__:
         CandidateBundleContext,
         PRODUCT_VERSION,
         SIGNED_PREVIEW_IDENTITY,
+        UNSIGNED_PREVIEW_VALIDATION_BUILD,
         candidate_bundle_verification_paths,
     )
     from .repository_source_identity import (
@@ -37,6 +38,7 @@ else:
         CandidateBundleContext,
         PRODUCT_VERSION,
         SIGNED_PREVIEW_IDENTITY,
+        UNSIGNED_PREVIEW_VALIDATION_BUILD,
         candidate_bundle_verification_paths,
     )
     from repository_source_identity import (
@@ -425,18 +427,25 @@ def verify_preview_ui(
     *,
     context: CandidateBundleContext,
 ) -> None:
-    if context not in PREVIEW_CONTEXTS:
+    unsigned = context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST
+    if context not in PREVIEW_CONTEXTS and not unsigned:
         raise CandidateError("native UI bundle verification requires a preview context")
-    signing = "pre-sign" if context is CandidateBundleContext.PREVIEW_PRE_SIGN else "developer-id"
-    build = SIGNED_PREVIEW_IDENTITY.build_number
+    if unsigned:
+        signing = "unsigned-validation"
+        build = UNSIGNED_PREVIEW_VALIDATION_BUILD
+        ui_context = native_ui_artifact.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
+    else:
+        signing = "pre-sign" if context is CandidateBundleContext.PREVIEW_PRE_SIGN else "developer-id"
+        build = SIGNED_PREVIEW_IDENTITY.build_number
+        ui_context = native_ui_artifact.NativeUiContext.SIGNED_PREVIEW
     try:
         # Validate the staged bytes and their exact source/toolchain metadata
         # before comparing the embedded copies against those same manifests.
         native_ui_artifact.verify_products(
-            repository, native_products, build=build, signing=signing
+            repository, native_products, build=build, signing=signing, context=ui_context
         )
         metadata = native_ui_artifact.expected_metadata(
-            repository, build, signing=signing, clean=False
+            repository, build, signing=signing, clean=False, context=ui_context
         )
         library = app / "Contents/Frameworks" / native_ui_artifact.LIBRARY
         resources = app / "Contents/Resources" / native_ui_artifact.RESOURCES
@@ -502,9 +511,12 @@ def verify_candidate(
     app = verification_paths.app
     native_products = verification_paths.native_products
     build_identity = verification_paths.build_identity
-    preview = context in PREVIEW_CONTEXTS
+    unsigned_preview = context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST
+    preview = context in PREVIEW_CONTEXTS or unsigned_preview
     expected_version = SIGNED_PREVIEW_IDENTITY.product_version if preview else EXPECTED_VERSION
     native_metadata = current_native_build_metadata(repository)
+    if unsigned_preview:
+        native_metadata = {**native_metadata, "signingMode": "unsigned-validation"}
 
     tauri = json.loads(
         (repository / "apps/cfw-tauri-shell/tauri.conf.json").read_text(encoding="utf-8")
@@ -539,7 +551,7 @@ def verify_candidate(
         extension_binary,
     ):
         require_regular_file(file_path)
-    if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.PREVIEW_PRE_SIGN}:
+    if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.UNSIGNED_PREVIEW_HOST, CandidateBundleContext.PREVIEW_PRE_SIGN}:
         verify_unsigned_host_skeleton(app)
 
     system_extensions_root = contents / "Library/SystemExtensions"
@@ -642,6 +654,7 @@ def verify_candidate(
         native_products / "CFWLegacyTombstone",
         tombstone_manifest,
         build_identity.build_version,
+        {"signingMode": "unsigned-validation"} if unsigned_preview else None,
     )
     reviewed_plist = (
         repository

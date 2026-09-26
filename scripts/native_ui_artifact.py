@@ -37,6 +37,7 @@ SOURCE_PATHS = (
 )
 LOCALES = frozenset({"en", "ja", "zh-Hans", "zh-Hant"})
 COMPONENT_EXPORTS = frozenset({
+    "cfm_webview_window_number_v1",
     "cfm_profile_menu_present_v1", "cfm_profile_menu_update_v1",
     "cfm_profile_menu_dismiss_v1", "cfm_profile_menu_anchor_v1",
     "cfm_runtime_settings_present_v1", "cfm_runtime_settings_update_v1",

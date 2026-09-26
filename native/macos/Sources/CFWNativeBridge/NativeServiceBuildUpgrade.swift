@@ -46,7 +46,12 @@ extension NativeBridgeCoordinator {
       serviceBuildPollCheckpoint = nil
       // A partial handoff must retain its failure. The ordinary query may
       // auto-register jobs, so it is not a safe fallback after mutation begins.
-      if error is ServiceBuildHandoffFailure || error is CancellationError || Task.isCancelled {
+      if error is ServiceBuildHandoffFailure || error is CancellationError || Task.isCancelled
+        || (checkpoint.proxy == .enabled && checkpoint.authority == .notRegistered)
+      {
+        // An orphaned Proxy cannot prove global Active without its Authority.
+        // A normal query here would implicitly register the missing Authority,
+        // bypassing the ordered recovery that just failed.
         throw Self.map(error)
       }
       // Preserve the actual active session and the existing stop path. An
@@ -141,6 +146,11 @@ extension NativeBridgeCoordinator {
         : [.unregisterGlobalAuthority, .registerGlobalAuthority, .registerProxyAgent]
     case (.notRegistered, .notRegistered):
       actions = [.registerGlobalAuthority, .registerProxyAgent]
+    case (.enabled, .notRegistered):
+      // Quit/recovery may have registered the Proxy while Authority registration
+      // was unavailable. Retire only a freshly proven, stable-Off orphan before
+      // restoring the existing Authority -> Proxy registration order.
+      actions = [.retireOrphanedServices, .registerGlobalAuthority, .registerProxyAgent]
     default:
       throw NativeBridgeExecutionError.failure(
         .cleanupUnproven, "Background service update ordering requires explicit recovery.")
@@ -150,7 +160,13 @@ extension NativeBridgeCoordinator {
         try Task.checkCancellation()
         Self.serviceUpgradeLog.info(
           "Background service update phase: \(String(describing: action), privacy: .public)")
-        do { _ = try await maintainCurrentServices(action) } catch {
+        do {
+          if action == .retireOrphanedServices {
+            _ = try await retireOrphanedServicesForUpgrade()
+          } else {
+            _ = try await maintainCurrentServices(action)
+          }
+        } catch {
           let failure = Self.map(error).responseFailure
           throw NativeBridgeExecutionError.failure(
             failure.code,

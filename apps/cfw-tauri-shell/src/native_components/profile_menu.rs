@@ -38,6 +38,7 @@ struct Frame {
     items: Vec<MenuItem>,
 }
 unsafe extern "C" {
+    fn cfm_webview_window_number_v1(view: *mut std::ffi::c_void, window: *mut i64) -> i32;
     fn cfm_profile_menu_anchor_v1(
         view: *mut std::ffi::c_void,
         x: f64,
@@ -71,13 +72,11 @@ pub(super) fn require_window(app: &AppHandle, window: &WebviewWindow) -> Result<
 }
 
 /// Resolve the decorated host from the same borrowed WKWebView used for menus.
-/// The shared anchor helper retains neither the view nor its parent.
+/// Window lookup retains neither the view nor its parent and needs no DOM geometry.
 pub(super) fn parent_of_webview(view: *mut std::ffi::c_void) -> Result<i64, String> {
-    let (mut number, mut x, mut y) = (0_i64, 0.0, 0.0);
+    let mut number = 0_i64;
     // SAFETY: caller is within Tauri's main-thread with_webview closure.
-    let status = unsafe {
-        cfm_profile_menu_anchor_v1(view, 0.0, 0.0, 1.0, 1.0, &mut number, &mut x, &mut y)
-    };
+    let status = unsafe { cfm_webview_window_number_v1(view, &mut number) };
     if status == 1 {
         Ok(number)
     } else {

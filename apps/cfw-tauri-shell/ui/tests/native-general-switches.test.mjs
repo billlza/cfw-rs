@@ -59,6 +59,28 @@ test("page rerender and leaving General reject old clicks while settling their n
   assert.deepEqual(h.errors, []);
 });
 
+test("a submission settling behind an occluding frame cannot resurrect controls or native focus", async () => {
+  const h = harness(); let finish;
+  h.setToggle(new Promise((resolve) => { finish = resolve; }));
+  h.ui.sync(frame()); await settle(); h.event(); await settle();
+  h.ui.invalidate();
+  const hidden = { ...frame(), clip: { x: 0, y: 0, width: 0, height: 0 }, items: [] };
+  h.ui.sync(hidden); await settle();
+  assert.equal(h.ui.canFocus(3), false);
+  assert.equal(await h.ui.focus(3), false);
+  h.event({ action: 2, submission: 0, value: false });
+  finish(); await settle(); await settle();
+  assert.deepEqual(h.calls.at(-1).args.request.items, []);
+  assert.equal(h.calls.at(-1).args.request.acknowledgedSubmission, 1);
+  assert.deepEqual(h.traversal, []);
+  assert.equal(h.calls.some(({ command }) => command === "focus_native_general_switch"), false);
+  const current = frame(); current.items[0].rect.y += 17;
+  h.ui.sync(current); await settle();
+  assert.equal(h.calls.at(-1).args.request.items[0].rect.y, current.items[0].rect.y);
+  assert.equal(h.toggles.length, 1, "Only the submission begun before occlusion ran");
+  assert.deepEqual(h.errors, []);
+});
+
 test("Tab focus does not consume or acknowledge a network submission", async () => {
   const h = harness(); h.ui.sync(frame()); await settle();
   h.event({ action: 2, submission: 0, value: false });

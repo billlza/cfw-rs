@@ -91,7 +91,7 @@ const nativeGeneralSwitches = createNativeGeneralSwitches({
   enabled: () => state.payload?.native_ui?.general_switches === true && !state.migrationHandoff,
   isGeneral: () => state.activePage === "general",
   visible: () => state.activePage === "general" && !state.glassDialog && !state.runtimeSettingsDialog
-    && !state.automationDialog && !state.profileInspector,
+    && !state.automationDialog && !state.profileInspector && !state.profileContextMenu,
   locale: getLocale, invoke, makeChannel: (handler) => new Channel(handler),
   onToggle: applyUiToggle,
   onError: (error) => {
@@ -1457,6 +1457,9 @@ function syncNativeProfileMenu() {
 
 
 function renderGlassOverlays() {
+  // Dialogs also render independently of renderPageContent (for example,
+  // network services). Invalidate native input before replacing any overlay.
+  nativeGeneralSwitches.beforeRender();
   if (nativeProfileMenuEnabled()) syncNativeProfileMenu();
   const root = document.getElementById("glass-menu-root");
   if (!root) return;
@@ -1701,6 +1704,7 @@ function renderGlassOverlays() {
   automationSettingsUI.bindDialog();
   positionGlassMenu();
   bindGlassOverlayEvents();
+  nativeGeneralSwitches.refresh();
 }
 
 function positionGlassMenu() {

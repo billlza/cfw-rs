@@ -131,10 +131,16 @@ export function createNativeGeneralSwitches({ enabled, visible, isGeneral, local
   function inputs() { return [...document.querySelectorAll(".cfw-general-view .inline-switch input[data-toggle]")]; }
   function inputFor(key) { return inputs().find((input) => GENERAL_SWITCH_KEYS.indexOf(input.dataset.toggle) + 1 === key); }
   function restore() {
+    const occluded = isGeneral() && !visible();
     for (const input of inputs()) {
       const label = input.closest(".inline-switch");
       label.classList.remove("native-switch-ready");
-      label.removeAttribute("aria-hidden");
+      // These DOM mirrors must not become a second accessible/control owner
+      // when the native layer is removed for a modal. Do not mutate the saved
+      // input's disabled or checked state to express presentation occlusion.
+      label.inert = occluded;
+      if (occluded) label.setAttribute("aria-hidden", "true");
+      else label.removeAttribute("aria-hidden");
       input.removeAttribute("data-native-general-key");
     }
   }
@@ -272,10 +278,22 @@ export function createNativeGeneralSwitches({ enabled, visible, isGeneral, local
     });
   }
   function beforeRender() {
-    if (!transport || failed) return;
+    if (!transport) return;
+    if (failed) { restore(); return; }
     if (!isGeneral()) returnFocusKey = null;
     // Invalidate old page actions immediately, before asynchronous native layout.
     transport.invalidate();
+    if (!visible()) {
+      focusedKey = null;
+      restore();
+      // Publish occlusion now, not at the next animation frame. In particular,
+      // an in-flight click acknowledgement must see this empty latest frame
+      // instead of republishing the underlying six controls over a dialog.
+      try {
+        const frame = projection();
+        if (frame) transport.sync(frame);
+      } catch (error) { transport.fail(error); }
+    }
   }
   return { refresh, beforeRender, focusedKey: () => focusedKey };
 }

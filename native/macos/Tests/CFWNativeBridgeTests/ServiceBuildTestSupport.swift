@@ -24,16 +24,26 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
   private var remainingInspectionFailures: Int
   private let failAfterProxyUnregister: Bool
   private let cancelAfterProxyUnregister: Bool
+  private let conflictingInspection: Int?
+  private let failedMutation: String?
   private var inspections = 0
   private var events: [String] = []
 
   init(
     inspectionFailures: Int = 0, failAfterProxyUnregister: Bool = false,
-    cancelAfterProxyUnregister: Bool = false
+    cancelAfterProxyUnregister: Bool = false,
+    proxyStatus: CurrentAppServiceStatus = .enabled,
+    authorityStatus: CurrentAppServiceStatus = .enabled,
+    conflictingInspection: Int? = nil,
+    failedMutation: String? = nil
   ) {
     remainingInspectionFailures = inspectionFailures
     self.failAfterProxyUnregister = failAfterProxyUnregister
     self.cancelAfterProxyUnregister = cancelAfterProxyUnregister
+    self.proxyStatus = proxyStatus
+    self.authorityStatus = authorityStatus
+    self.conflictingInspection = conflictingInspection
+    self.failedMutation = failedMutation
   }
 
   var inspectionCount: Int { lock.withLock { inspections } }
@@ -56,6 +66,12 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
     lock.withLock { service == .proxyAgent ? proxyStatus : authorityStatus }
   }
 
+  func setStatus(_ status: CurrentAppServiceStatus, of service: CurrentAppService) {
+    lock.withLock {
+      if service == .proxyAgent { proxyStatus = status } else { authorityStatus = status }
+    }
+  }
+
   func inspect() throws -> CurrentAppServiceBuildInspection {
     try lock.withLock {
       inspections += 1
@@ -67,10 +83,14 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
         build: 50010, cdHash: Data(repeating: 0x42, count: 20))
       let previous = try CurrentAppServiceCodeIdentity(
         build: 50009, cdHash: Data(repeating: 0x41, count: 20))
+      let proxyCode =
+        inspections == conflictingInspection
+        ? try CurrentAppServiceCodeIdentity(build: 50010, cdHash: Data(repeating: 0x43, count: 20))
+        : (currentProxy ? expected : previous)
       return .init(
         proxy: .init(
           registration: proxyStatus,
-          runningCode: proxyStatus == .notRegistered ? nil : (currentProxy ? expected : previous),
+          runningCode: proxyStatus == .notRegistered ? nil : proxyCode,
           expectedCode: expected),
         authority: .init(
           registration: authorityStatus,
@@ -86,6 +106,9 @@ final class ServiceUpgradeFixture: CurrentAppServiceMaintaining,
     try lock.withLock {
       if mutation == .observe { return service == .proxyAgent ? proxyStatus : authorityStatus }
       events.append("\(mutation):\(service)")
+      if failedMutation == "\(mutation):\(service)" {
+        throw CurrentAppServiceMaintenanceError.mutationFailed(service)
+      }
       let status: CurrentAppServiceStatus = mutation == .register ? .enabled : .notRegistered
       if service == .proxyAgent {
         proxyStatus = status
@@ -111,4 +134,16 @@ struct ServiceUpgradeAbsentRuntimeObserver: CurrentAppServiceRuntimeObserving {
 
 struct ServiceUpgradeDisabledProxyObserver: CurrentSystemProxySwitchObserving {
   func status() -> CurrentSystemProxySwitchStatus { .disabled }
+}
+
+struct ServiceUpgradeRuntimeState: CurrentAppServiceRuntimeObserving {
+  let authority: CurrentAppServiceRuntimeStatus
+  func status(of service: CurrentAppService) -> CurrentAppServiceRuntimeStatus {
+    service == .globalAuthority ? authority : .absent
+  }
+}
+
+struct ServiceUpgradeSystemProxyState: CurrentSystemProxySwitchObserving {
+  let observed: CurrentSystemProxySwitchStatus
+  func status() -> CurrentSystemProxySwitchStatus { observed }
 }

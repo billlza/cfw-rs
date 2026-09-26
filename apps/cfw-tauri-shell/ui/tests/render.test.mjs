@@ -499,6 +499,117 @@ function savedToolbarPolicy() {
   ] };
 }
 
+test("overlay-only General dialogs hide native switches and restore fresh geometry on close", async () => {
+  const keys = ["allowLan", "ipv6DNS", "tunMode", "mixin", "systemProxy", "startAtLogin"];
+  const prior = { resize: globalThis.ResizeObserver, style: globalThis.getComputedStyle,
+    frame: globalThis.requestAnimationFrame, events: window.addEventListener,
+    enabled: state.payload.native_ui.general_switches,
+    presentationError: state.nativeGeneralPresentationError,
+    automation: responses.read_automation_settings };
+  let top = 80;
+  const rows = keys.map((key, index) => {
+    const label = element("label"), input = element("input");
+    const classes = new Set(), attributes = new Map();
+    label.classList = { add: (name) => classes.add(name), remove: (name) => classes.delete(name) };
+    label.setAttribute = (name, value) => attributes.set(name, value);
+    label.removeAttribute = (name) => attributes.delete(name);
+    label.getAttribute = (name) => attributes.get(name) ?? null;
+    label.querySelector = () => ({ textContent: key });
+    label.getBoundingClientRect = () => ({ x: 790, y: top + index * 40, width: 34, height: 20 });
+    input.dataset.toggle = key;
+    input.disabled = index === 5;
+    input.checked = index === 1;
+    input.closest = () => label;
+    input.removeAttribute = (name) => { if (name === "data-native-general-key") delete input.dataset.nativeGeneralKey; };
+    return input;
+  });
+  const general = element();
+  general.parentElement = null;
+  querySelectorElements.set(".cfw-general-view", general);
+  querySelectorAllElements.set(".cfw-general-view .inline-switch input[data-toggle]", rows);
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  globalThis.getComputedStyle = () => ({ overflowX: "visible", overflowY: "visible" });
+  globalThis.requestAnimationFrame = (callback) => setImmediate(callback);
+  window.addEventListener = () => {};
+  responses.sync_native_general_switches = true;
+  responses.focus_native_general_switch = true;
+  responses.dismiss_native_general_switches = true;
+  responses.read_automation_settings = {
+    settings: { shortcuts: [], network_enabled: false, network_rules: [] },
+    revision: "modal-lifecycle", network: null,
+  };
+  const frames = () => invocationDetails.filter(({ command }) => command === "sync_native_general_switches").map(({ args }) => args.request);
+  let submission = 0;
+  const flush = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  const close = async () => {
+    for (const listener of documentListeners.get("keydown") ?? []) {
+      listener({ key: "Escape", preventDefault() {} });
+    }
+    await flush();
+  };
+  try {
+    state.payload.native_ui.general_switches = true;
+    state.glassDialog = null;
+    await renderPage("general"); await flush();
+    assert.equal(frames().at(-1)?.items.length, 6);
+    for (const action of ["show-network-interfaces", "allow-lan-info", "dns-query", "mixin-info",
+      "open-runtime-settings", "open-automation-settings", "show-network-interfaces"]) {
+      const before = frames().length;
+      const previous = frames().at(-1);
+      const businessState = rows.map(({ disabled, checked }) => ({ disabled, checked }));
+      await appModule.handleAction(action);
+      assert.ok(rows.every((input) => input.closest().inert === true), "DOM mirrors become inert during overlay-only rendering");
+      const completion = invocationDetails.find(({ command }) => command === "sync_native_general_switches").args.completion;
+      const callsBeforeInput = invoked.length;
+      // A native input may already be in IPC when its DOM modal opens.
+      completion.onmessage({ kind: "input", requestId: previous.requestId, sequence: previous.sequence,
+        submission: ++submission, key: 3, action: 1, value: true });
+      completion.onmessage({ kind: "input", requestId: previous.requestId, sequence: previous.sequence,
+        submission: 0, key: 3, action: 2, value: false });
+      await flush();
+      assert.match(glassRoot.innerHTML, /glass-dialog-backdrop/u);
+      assert.ok(frames().length > before, "Overlay-only rendering must publish native occlusion");
+      assert.deepEqual(frames().at(-1).items, []);
+      assert.ok(rows.every((input) => input.closest().inert === true && input.closest().getAttribute("aria-hidden") === "true"));
+      assert.deepEqual(rows.map(({ disabled, checked }) => ({ disabled, checked })), businessState);
+      assert.equal(frames().at(-1).acknowledgedSubmission, submission);
+      assert.deepEqual(invoked.slice(callsBeforeInput).filter((command) => !command.startsWith("sync_native_general_switches")), [],
+        "Occluded native input cannot traverse, regain focus, or invoke a business command");
+      top += 7;
+      await close();
+      assert.equal(glassRoot.innerHTML, "");
+      assert.equal(frames().at(-1).items.length, 6);
+      assert.equal(frames().at(-1).items[0].rect.y, top, "Reopening measures current DOM geometry");
+      assert.ok(rows.every((input) => input.closest().inert === false));
+      assert.deepEqual(rows.map(({ disabled, checked }) => ({ disabled, checked })), businessState,
+        "Closing a modal restores presentation without changing original disabled/checked state");
+    }
+    responses.sync_native_general_switches = () => { throw new Error("modal layout rejected"); };
+    await appModule.handleAction("show-network-interfaces"); await flush();
+    assert.match(state.nativeGeneralPresentationError, /modal layout rejected/u);
+    assert.ok(invoked.includes("dismiss_native_general_switches"));
+    assert.ok(rows.every((input) => input.closest().inert === true), "A reported native failure must not expose occluded DOM mirrors");
+    await close();
+    assert.ok(rows.every((input) => input.closest().inert === false), "The original DOM control remains available after a reported presentation failure");
+  } finally {
+    state.glassDialog = null;
+    await renderPage("feedback"); await flush();
+    state.payload.native_ui.general_switches = prior.enabled;
+    state.nativeGeneralPresentationError = prior.presentationError;
+    if (prior.automation === undefined) delete responses.read_automation_settings;
+    else responses.read_automation_settings = prior.automation;
+    querySelectorElements.delete(".cfw-general-view");
+    querySelectorAllElements.delete(".cfw-general-view .inline-switch input[data-toggle]");
+    globalThis.ResizeObserver = prior.resize;
+    globalThis.getComputedStyle = prior.style;
+    globalThis.requestAnimationFrame = prior.frame;
+    window.addEventListener = prior.events;
+    responses.sync_native_general_switches = true;
+    // The page adapter is a lifetime singleton; its empty presentation remains
+    // available for later disabled-feature page renders in this shared harness.
+  }
+});
+
 test("General exposes IPv6 as a direct switch rather than a settings-dialog button", async () => {
   const html = await renderPage("general");
   const row = html.match(/<div class="cfw-row-left">IPv6 DNS<\/div>([\s\S]*?)<div class="cfw-row">/u)?.[1];

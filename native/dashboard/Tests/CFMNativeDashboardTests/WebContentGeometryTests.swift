@@ -68,6 +68,12 @@ import WebKit
       var x = -1.0
       var y = -1.0
       let pointer = Unmanaged.passUnretained(webview).toOpaque()
+      // The former settings parent lookup fabricated a 1x1 DOM viewport.
+      // Keep that invalid anchor rejected while resolving the window directly.
+      #expect(profileMenuAnchor(pointer, 0, 0, 1, 1, &number, &x, &y) == 2)
+      #expect(number == -1)
+      try #require(webviewWindowNumber(pointer, &number) == 1)
+      #expect(number == window.windowNumber)
       try #require(
         profileMenuAnchor(
           pointer, 100, 50, dimensions[0], dimensions[1], &number, &x, &y) == 1)
@@ -87,5 +93,41 @@ import WebKit
           pointer, 100, 50, dimensions[0], dimensions[1] + 10, &number, &x, &y) == 2)
       #expect(x == -1)
     }
+  }
+
+  @Test @MainActor func windowLookupRejectsDetachedHiddenAndWrongViewWithoutOutput() {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    let window = NSWindow(
+      contentRect: NSRect(x: 100, y: 100, width: 400, height: 300),
+      styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    defer { window.close() }
+    let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+    let pointer = Unmanaged.passUnretained(view).toOpaque()
+    var number: Int64 = -1
+    #expect(webviewWindowNumber(nil, &number) == 0)
+    #expect(webviewWindowNumber(pointer, nil) == 0)
+    #expect(webviewWindowNumber(pointer, &number) == 2)
+    #expect(number == -1)
+    window.contentView?.addSubview(view)
+    #expect(webviewWindowNumber(pointer, &number) == 2)
+    #expect(number == -1)
+    window.orderFront(nil)
+    #expect(webviewWindowNumber(pointer, &number) == 1)
+    #expect(number == window.windowNumber)
+    window.orderOut(nil)
+    number = -1
+    #expect(webviewWindowNumber(pointer, &number) == 2)
+    #expect(number == -1)
+    let ordinary = NSView()
+    window.contentView?.addSubview(ordinary)
+    window.orderFront(nil)
+    #expect(webviewWindowNumber(Unmanaged.passUnretained(ordinary).toOpaque(), &number) == 0)
+    #expect(number == -1)
+  }
+
+  @Test func windowLookupRejectsWrongThreadBeforeDereferencing() async {
+    let result = await Task.detached { webviewWindowNumber(nil, nil) }.value
+    #expect(result == 3)
   }
 }

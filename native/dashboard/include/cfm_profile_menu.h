@@ -34,10 +34,16 @@ int32_t cfm_profile_menu_present_v1(const uint8_t *bytes, intptr_t count,
 int32_t cfm_profile_menu_update_v1(const uint8_t *bytes, intptr_t count);
 int32_t cfm_profile_menu_dismiss_v1(uint64_t session);
 
+/* Resolve only the visible parent window of the borrowed live WKWebView.
+ * This does not validate or synthesize a DOM anchor. No output on failure.
+ * 0 invalid input/type; 1 accepted; 2 detached/hidden parent; 3 wrong thread.
+ */
+int32_t cfm_webview_window_number_v1(void *borrowed_ns_view, int64_t *window_number);
+
 /* borrowed_ns_view must be the live WKWebView/NSView supplied by Tauri's
  * PlatformWebview.inner() in with_webview on the main thread. CSS viewport
- * coordinates are converted using that view's actual bounds and flip state.
- * No output is written on failure. Status 2 means no visible parent window.
+ * coordinates use the view's content safe area, page zoom and flip state.
+ * No output on failure. Status 2 means a hidden parent or stale viewport.
  */
 int32_t cfm_profile_menu_anchor_v1(void *borrowed_ns_view, double client_x, double client_y,
                                  double viewport_width, double viewport_height,

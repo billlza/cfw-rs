@@ -92,7 +92,7 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository, preview=True)
             source = repository / "apps/cfw-tauri-shell/src/legacy/admission.rs"
-            source.write_text(source.read_text().replace("50012", "50013"))
+            source.write_text(source.read_text().replace("50013", "50014"))
             with self.assertRaisesRegex(ValueError, "runtime migration admission RELEASE_BUILD"):
                 verify(repository, preview=True)
 
@@ -160,17 +160,17 @@ class VersionContractTests(unittest.TestCase):
                 verify(repository, preview=True)
 
     def test_preview_build_is_exact_and_canonical(self) -> None:
-        for build in ("40073", "50001", "50002", "50003", "50004", "50005", "50006", "50007", "50008", "50009", "50011", "50013", "050012", "５００１１"):
+        for build in ("40073", "50001", "50002", "50003", "50004", "50005", "50006", "50007", "50008", "50009", "50012", "50014", "050013", "５００１１"):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository, preview=True)
                 project = repository / "native/macos/project.yml"
-                project.write_text(project.read_text().replace("50012", build))
+                project.write_text(project.read_text().replace("50013", build))
                 with self.assertRaisesRegex(ValueError, "preview build|canonical positive"):
                     verify(repository, preview=True)
 
     def test_preview_observation_identity_is_checked(self) -> None:
-        for original, replacement in (("50012", "40073"), ("0.5.0", "0.4.0")):
+        for original, replacement in (("50013", "40073"), ("0.5.0", "0.4.0")):
             with self.subTest(original=original), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository, preview=True)

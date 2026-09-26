@@ -519,6 +519,27 @@ public func profileMenuDismiss(_ session: UInt64) -> Int32 {
 
 /// The host supplies the actual WKWebView obtained from Tauri's with_webview
 /// callback. The pointer is borrowed for this call; it is never retained.
+/// Resolving its window does not depend on a DOM anchor or viewport dimensions.
+@_cdecl("cfm_webview_window_number_v1")
+public func webviewWindowNumber(
+  _ borrowedView: UnsafeMutableRawPointer?, _ windowNumber: UnsafeMutablePointer<Int64>?
+) -> Int32 {
+  guard Thread.isMainThread else { return 3 }
+  guard let borrowedView, let windowNumber else { return 0 }
+  let view = Unmanaged<NSView>.fromOpaque(borrowedView).takeUnretainedValue()
+  let result: (Int32, Int64) = MainActor.assumeIsolated {
+    guard let view = view as? WKWebView else { return (0, 0) }
+    guard let window = view.window, window.isVisible,
+      NSApp?.windows.contains(where: { $0 === window }) == true
+    else { return (2, 0) }
+    return (1, Int64(window.windowNumber))
+  }
+  guard result.0 == 1 else { return result.0 }
+  windowNumber.pointee = result.1
+  return 1
+}
+
+/// Convert a current DOM anchor; stale viewport geometry remains rejected.
 @_cdecl("cfm_profile_menu_anchor_v1")
 public func profileMenuAnchor(
   _ borrowedView: UnsafeMutableRawPointer?, _ clientX: Double, _ clientY: Double,

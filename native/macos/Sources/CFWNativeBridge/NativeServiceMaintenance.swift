@@ -163,36 +163,100 @@ extension NativeBridgeCoordinator {
     return result
   }
 
-  private func retireOrphanedServices() async throws -> NativeServiceMaintenanceResult {
+  func retireOrphanedServicesForUpgrade() async throws -> NativeServiceMaintenanceResult {
+    try Task.checkCancellation()
+    try requirePair(
+      servicePair(), proxy: [.enabled], authority: [.notRegistered],
+      operation: "Automatic orphaned service retirement")
+    return try await retireOrphanedServices(requireStableProxyOff: true)
+  }
+
+  private func retireOrphanedServices(
+    requireStableProxyOff: Bool = false
+  ) async throws -> NativeServiceMaintenanceResult {
     try requirePair(
       servicePair(), proxy: [.enabled, .notRegistered], authority: [.enabled, .notRegistered],
       operation: "Orphaned service retirement")
     try await requireOrphanedServiceRetirementBoundary()
-    if servicePair().proxy == .enabled {
-      let snapshot = try Self.requireObservation(
-        await Self.observe { try await self.proxy.snapshot() }, component: "ProxyAgent")
+    if requireStableProxyOff {
+      try Task.checkCancellation()
+      try requirePair(
+        servicePair(), proxy: [.enabled], authority: [.notRegistered],
+        operation: "Automatic orphaned Proxy observation")
+    }
+    if requireStableProxyOff || servicePair().proxy == .enabled {
+      let observation = await Self.observe { try await self.proxy.snapshot() }
+      if requireStableProxyOff { try Task.checkCancellation() }
+      let snapshot = try Self.requireObservation(observation, component: "ProxyAgent")
       guard
         Self.isStableOff(snapshot)
-          || ((snapshot.mode == .localProxy || snapshot.mode == .systemProxy)
+          || (!requireStableProxyOff
+            && (snapshot.mode == .localProxy || snapshot.mode == .systemProxy)
             && snapshot.state.kind == .failed)
       else {
         throw NativeBridgeExecutionError.failure(.busy, "An active ProxyAgent cannot be retired.")
       }
       try await requireOrphanedServiceRetirementBoundary()
+      if requireStableProxyOff {
+        // The boundary above awaits the Tunnel. Re-observe the Proxy afterwards;
+        // an Off -> failed/active transition must not inherit manual recovery's
+        // permission to retire a failed owner. Recheck trusted identities and
+        // the exact mixed pair immediately before the unregister mutation.
+        try Task.checkCancellation()
+        let fresh = try Self.requireObservation(
+          await Self.observe { try await self.proxy.snapshot() }, component: "ProxyAgent")
+        try Task.checkCancellation()
+        guard Self.isStableOff(fresh) else {
+          throw NativeBridgeExecutionError.failure(
+            .busy, "Automatic service retirement requires a stable Off ProxyAgent.")
+        }
+        try requireOrphanedUpgradeIdentities()
+      }
       try await perform(.unregister, on: .proxyAgent)
     }
     try await waitForServiceProcessAbsence(.proxyAgent)
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
     try await requireOrphanedServiceRetirementBoundary()
-    if servicePair().authority == .enabled {
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
+    // Automatic recovery only owned the orphaned Proxy mutation. A newly
+    // registered Authority is a state change, never permission to retire it.
+    if !requireStableProxyOff && servicePair().authority == .enabled {
       try await perform(.unregister, on: .globalAuthority)
     }
     try await waitForServiceProcessAbsence(.globalAuthority)
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
     try requireServiceProcessAbsent(.proxyAgent)
     try await requireOrphanedServiceRetirementBoundary()
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
     // No Off attestation: the journals remain for the replacement's recovery.
     let result = maintenanceResult(action: .retireOrphanedServices, engineStatus: nil)
     try requireMaintenancePostcondition(result)
     return result
+  }
+
+  private func requireAutomaticallyRetiredPair() throws {
+    try Task.checkCancellation()
+    try requirePair(
+      servicePair(), proxy: [.notRegistered], authority: [.notRegistered],
+      operation: "Automatic orphaned service retirement completion")
+  }
+
+  private func requireOrphanedUpgradeIdentities() throws {
+    let inspection: CurrentAppServiceBuildInspection
+    do {
+      inspection = try serviceBuildObserver.inspect()
+      try inspection.proxy.requireNonConflictingVersion()
+      try inspection.authority.requireNonConflictingVersion()
+    } catch {
+      throw NativeBridgeExecutionError.failure(
+        .identityRejected, "Orphaned service identities changed before retirement.")
+    }
+    guard inspection.proxy.registration == .enabled, inspection.proxy.runningCode != nil,
+      inspection.authority.registration == .notRegistered, inspection.authority.runningCode == nil
+    else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven, "Orphaned service registrations changed before retirement.")
+    }
   }
 
   private func requireOrphanedServiceRetirementBoundary() async throws {

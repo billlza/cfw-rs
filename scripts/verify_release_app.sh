@@ -374,10 +374,10 @@ configure_release_verification_context() {
       ;;
     preview-signing-attempt-work|preview-signing-attempt-publish-ready|preview-canonical-native-content)
       expected_version="0.5.0"
-      expected_build_number="50012"
+      expected_build_number="50013"
       preview_ui=1
-      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/preview-preflight/50012/profiles/signing-preflight.json"
-      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/preview-preflight/50012/native-products"
+      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/preview-preflight/50013/profiles/signing-preflight.json"
+      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/preview-preflight/50013/native-products"
       ;;
     unsigned-host|preview-pre-sign)
       die "release application verification rejects unsigned or pre-sign context"

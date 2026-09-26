@@ -44,7 +44,7 @@ prepare_libbox_build_workspace() {
   local source_root="$1" go_bin="$2" output="$3" workspace replacement
   workspace="$(
     cd "$source_root" && "$go_bin" run ./cmd/cfm-build-workspace \
-      -module-source "$GOMODCACHE/github.com/sagernet/sing@v0.9.4" \
+      -module-source "$GOMODCACHE/github.com/sagernet/sing@v0.9.6-0.20260922013354-87c33f17688f" \
       -output "$output"
   )" || return 1
   [[ "$workspace" == "$output" && -d "$workspace" && ! -L "$workspace" ]] || {
@@ -53,7 +53,7 @@ prepare_libbox_build_workspace() {
   }
   replacement="$(cd "$workspace" && "$go_bin" list -m \
     -f '{{.Version}} {{if .Replace}}{{.Replace.Path}}{{end}}' github.com/sagernet/sing)" || return 1
-  [[ "$replacement" == 'v0.9.4 ./cfw-dependencies/sing' ]] || {
+  [[ "$replacement" == 'v0.9.6-0.20260922013354-87c33f17688f ./cfw-dependencies/sing' ]] || {
     echo "error: build workspace resolved an unexpected sing replacement" >&2
     return 1
   }

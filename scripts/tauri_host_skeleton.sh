@@ -9,14 +9,15 @@ source "$tauri_host_contract_directory/release_cargo_inputs.sh"
 unset tauri_host_contract_directory
 
 cfw_build_tauri_host_skeleton() {
-  if [[ $# -ne 3 ]]; then
-    echo "error: cfw_build_tauri_host_skeleton requires APP_DIR TAURI_BIN CONFIG_OVERRIDE" >&2
+  if [[ $# -ne 3 && ! ( $# -eq 4 && ( "$4" == "--native-ui-preview" || "$4" == "--native-ui-unsigned-preview" ) ) ]]; then
+    echo "error: cfw_build_tauri_host_skeleton requires APP_DIR TAURI_BIN CONFIG_OVERRIDE [--native-ui-preview|--native-ui-unsigned-preview]" >&2
     return 1
   fi
 
   local contract_tauri_host_app_dir="$1"
   local contract_tauri_host_bin="$2"
   local contract_tauri_host_config_override="$3"
+  local contract_tauri_host_preview="${4:-}"
   local contract_tauri_host_signing_variable
   local contract_tauri_host_repository
   contract_tauri_host_repository="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)" ||
@@ -52,7 +53,8 @@ cfw_build_tauri_host_skeleton() {
   PYTHONDONTWRITEBYTECODE=1 \
     "${CFW_RELEASE_PYTHON_EXECUTABLE:-python3}" -I -S -B -W error - \
     "$contract_tauri_host_app_dir" \
-    "$contract_tauri_host_config_override" <<'PY' || return 1
+    "$contract_tauri_host_config_override" "$contract_tauri_host_preview" \
+    "${CFW_BUILD_NUMBER:-}" <<'PY' || return 1
 import json
 import os
 import stat
@@ -124,6 +126,16 @@ for platform_name in (
 
 override = parse_json(sys.argv[2], "inline override")
 require_no_signing_identity(override, "inline override")
+if sys.argv[3] == "--native-ui-preview":
+    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50016":
+        raise SystemExit("error: native UI Host requires exact preview version/build 0.5.0/50016")
+    if override["bundle"]["macOS"].get("bundleVersion") != "50016":
+        raise SystemExit("error: native UI Host override must retain preview build 50016")
+elif sys.argv[3] == "--native-ui-unsigned-preview":
+    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50000":
+        raise SystemExit("error: unsigned native UI Host requires exact validation version/build 0.5.0/50000")
+    if override["bundle"]["macOS"].get("bundleVersion") != "50000":
+        raise SystemExit("error: unsigned native UI Host override must retain validation build 50000")
 PY
 
   (
@@ -131,15 +143,27 @@ PY
       echo "error: cannot enter Tauri application root" >&2
       return 1
     }
-    /usr/bin/env \
-      -u APPLE_CERTIFICATE \
-      -u APPLE_CERTIFICATE_PASSWORD \
-      -u APPLE_SIGNING_IDENTITY \
-      CARGO_HOME="$CARGO_HOME" \
-      CARGO_NET_OFFLINE=true \
-      "$contract_tauri_host_bin" build --bundles app --ci \
-      --features physical-release-evidence --config \
-      "$contract_tauri_host_config_override"
+    if [[ "$contract_tauri_host_preview" == "--native-ui-preview" || "$contract_tauri_host_preview" == "--native-ui-unsigned-preview" ]]; then
+      /usr/bin/env \
+        -u APPLE_CERTIFICATE \
+        -u APPLE_CERTIFICATE_PASSWORD \
+        -u APPLE_SIGNING_IDENTITY \
+        CARGO_HOME="$CARGO_HOME" \
+        CARGO_NET_OFFLINE=true \
+        "$contract_tauri_host_bin" build --bundles app --ci \
+        --features physical-release-evidence,native-ui --config \
+        "$contract_tauri_host_config_override"
+    else
+      /usr/bin/env \
+        -u APPLE_CERTIFICATE \
+        -u APPLE_CERTIFICATE_PASSWORD \
+        -u APPLE_SIGNING_IDENTITY \
+        CARGO_HOME="$CARGO_HOME" \
+        CARGO_NET_OFFLINE=true \
+        "$contract_tauri_host_bin" build --bundles app --ci \
+        --features physical-release-evidence --config \
+        "$contract_tauri_host_config_override"
+    fi
   ) || return 1
   cfw_verify_release_cargo_runtime \
     "$contract_tauri_host_repository" "$CARGO_HOME"

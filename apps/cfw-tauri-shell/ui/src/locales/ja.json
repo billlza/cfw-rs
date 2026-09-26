@@ -714,5 +714,22 @@
   "{state} · desired {desiredMode}": "{state} · 要求モード {desiredMode}",
   "{title} - {mode} Mode": "{title} - {mode}モード",
   "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.": "どのプロファイルからも参照されていないキーチェーン項目が {value1} 件あります。ストアのスナップショットと認証情報のリビジョンを再検証してから、一度のアトミックな削除を行います。{value2}",
-  "{visibleCount}{total} log entries{value3}": "ログ {visibleCount}{total} 件{value3}"
+  "{visibleCount}{total} log entries{value3}": "ログ {visibleCount}{total} 件{value3}",
+  "Native Overview": "ネイティブ概要",
+  "The native settings window could not deliver this action. Close it and try again.": "ネイティブ設定ウインドウから操作を送信できませんでした。閉じて再試行してください。",
+  "{label} must contain at most {maximum} characters": "{label}は {maximum} 文字以内で入力してください",
+  "Ascending order": "昇順",
+  "Clear connection search": "接続の検索をクリア",
+  "Descending order": "降順",
+  "Sort connections by downloaded data": "ダウンロード量で接続を並べ替え",
+  "Sort connections by host": "ホストで接続を並べ替え",
+  "Sort connections by start time": "開始時刻で接続を並べ替え",
+  "Sort connections by uploaded data": "アップロード量で接続を並べ替え",
+  "Background service recovery completed.": "バックグラウンドサービスの復旧が完了しました。",
+  "Background service recovery did not prove the engine is Off.": "バックグラウンドサービスの復旧後、エンジンの停止を確認できませんでした。",
+  "Background service recovery is not available in the current state.": "現在の状態ではバックグラウンドサービスを復旧できません。",
+  "Check and restore background services while keeping the engine stopped.": "エンジンを停止したままバックグラウンドサービスを確認して復旧します。",
+  "Recover background services": "バックグラウンドサービスを復旧",
+  "Recover background services before starting a connection.": "接続を開始する前にバックグラウンドサービスを復旧してください。",
+  "Recovering…": "復旧中…"
 }

@@ -2,36 +2,36 @@
   "go": "1.27.1",
   "gomobile": "v0.1.13",
   "singBox": {
-    "commit": "1ac1a339cb1223e9c70eae14c44411c75033c02d",
-    "tag": "v1.14.1",
+    "commit": "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
+    "tag": "v1.14.2",
     "androidReferenceCommit": "a3668ae6e4bbcb3ceff8461d0cac55d79edf504f",
     "securityPatch": {
-      "path": "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch",
-      "sha256": "7279aef88a394ee8caf00505ef797e8c6f798047d99615c62da9dca03d987645",
-      "patchedDiffSha256": "5ce0d47a8cce32ae6b3cf487fe34a9f3da61496e2559130c56a5b689bf456033",
-      "patchedGoModSha256": "1cdccddd3b0170e0a6eb89c94abde9563a4209a98a931d6201d7df0d406bc617",
-      "patchedGoSumSha256": "2ff58229b24d2a8a7bc465efc0cc0567619ce969bc08f695445580bfdf3edacd"
+      "path": "native/macos/patches/sing-box-v1.14.2-security-dependencies.patch",
+      "sha256": "6dc9d6c3abcd5935b34b4fbc4d3a58a0d4f2b04b3d10a91547d32c3350b1d73c",
+      "patchedDiffSha256": "009b75e74077b754d5e9bcfae44df2d71ad463d9b48f055e21d4e8cddc97dec5",
+      "patchedGoModSha256": "3e606978fd1ec0f5f43cab7aa977fe6a58e39116061c294002a26197db71ca46",
+      "patchedGoSumSha256": "f5d1781f8ac66ad56e948ba7be11606327cf59e5d583b5fd62415fabb9d5f1a9"
     },
     "rawPacketPatch": {
-      "path": "native/macos/patches/sing-box-v1.14.1-raw-packet-tun.patch",
-      "sha256": "a550daa7b955f838b5b9b8983b41b789ccb9aedcc97b9a53f96f6affbe3f06e9"
+      "path": "native/macos/patches/sing-box-v1.14.2-raw-packet-tun.patch",
+      "sha256": "d3aa03dcf3e3e0421bd1b5062dcf8ca60f62252afabd8d15013ed3e4bda25950"
     },
     "dnsFailoverPatch": {
-      "path": "native/macos/patches/sing-box-v1.14.1-dns-failover.patch",
-      "sha256": "b702db8c212448d09fd968ca50efec8205291be5c99be354b0fb59aeac1a6823"
+      "path": "native/macos/patches/sing-box-v1.14.2-dns-failover.patch",
+      "sha256": "ca2e713682cf7636d3341fca467b61498375a15492894247077f98bbcb7c2c71"
     },
     "endpointConflictPatch": {
-      "path": "native/macos/patches/sing-box-v1.14.1-endpoint-conflict.patch",
-      "sha256": "9e15e2d1dfd1c46deead734d40e6c6f021cfc400cdc9effaeb13420485b03565"
+      "path": "native/macos/patches/sing-box-v1.14.2-endpoint-conflict.patch",
+      "sha256": "d3815c6cc2af12565422c96c1cc0ad41be1792edf796d11efdf98598c8344d49"
     },
-    "combinedDiffSha256": "d7f06761d17ff6c7d78e0a7048d8d3d25901ab00d73a6f1cbd97b94d9e3895d1",
+    "combinedDiffSha256": "9133eee3b979be1efdcae74c9c5ffe17d29614e0f06c0c51dffce59b0e8d566d",
     "profileProbePatch": {
-      "path": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
-      "sha256": "2450102e3133f61b124ef2032a9dc96d12a04e32ebab56f5a5ab5eb053d26b34"
+      "path": "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
+      "sha256": "fc9d376b27c9cb506ddba1969d1ee51c49b01e7b877fdc201d54c80b73f2e80a"
     },
     "socksLifecyclePatch": {
-      "path": "native/macos/patches/sing-box-v1.14.1-socks-lifecycle.patch",
-      "sha256": "3c14ecdcb33c5fdc941a3b7ea3470174ae491c4c8d5444c21e67e3f9ce805ed2"
+      "path": "native/macos/patches/sing-box-v1.14.2-socks-lifecycle.patch",
+      "sha256": "6522a046fade01547102e6ff43fa12ae5a25250139c803011a606b7fd8fd9821"
     }
   },
   "singBoxForAppleReference": {

@@ -14,6 +14,7 @@ const callbacks = new Map();
 const querySelectorElements = new Map();
 const querySelectorAllElements = new Map();
 const documentListeners = new Map();
+const intervalCallbacks = [];
 let nextCallbackId = 1;
 let updateListenerWasReady = false;
 
@@ -67,6 +68,8 @@ const reloadButton = element("button", "reload-button");
 const reloadButtonListeners = new Map();
 reloadButton.addEventListener = (type, listener) => reloadButtonListeners.set(type, listener);
 reloadButton.click = async () => reloadButtonListeners.get("click")?.();
+const statusBarNodes = new Map(["upload-rate", "download-rate", "runtime-value", "traffic-progress"]
+  .map((id) => [id, element("div", id)]));
 const documentStub = {
   documentElement: element("html"),
   body: element("body"),
@@ -76,6 +79,7 @@ const documentStub = {
     if (id === "page") return page;
     if (id === "glass-menu-root") return glassRoot;
     if (id === "reload-button") return reloadButton;
+    if (statusBarNodes.has(id)) return statusBarNodes.get(id);
     return element("div", id);
   },
   querySelector: (selector) => querySelectorElements.get(selector) ?? null,
@@ -99,7 +103,10 @@ globalThis.window = {
     return 1;
   },
   setTimeout: (callback, delay) => setTimeout(callback, delay),
-  setInterval: () => 1,
+  setInterval: (callback, delay) => {
+    intervalCallbacks.push({ callback, delay });
+    return intervalCallbacks.length;
+  },
   matchMedia: () => ({ matches: false }),
 };
 globalThis.requestAnimationFrame = globalThis.window.requestAnimationFrame;
@@ -220,6 +227,7 @@ const DIAGNOSTICS = {
 
 const responses = {
   boot_payload: {
+    native_ui: { profile_menu: false, runtime_settings: false, general_switches: false },
     product: {
       name: "Clash for Mac",
       version: "0.4.0",
@@ -350,7 +358,12 @@ const initialLiveSettings = responses.read_settings_snapshot;
 const slowLoginItemQuery = deferred();
 let initialLiveQueryPending = true;
 let bootstrapReady = false;
-globalThis.window.__CFM_STARTUP__ = { ready() { bootstrapReady = true; } };
+let bootstrapFailed = false;
+const bootstrapOutcome = deferred();
+globalThis.window.__CFM_STARTUP__ = {
+  ready() { bootstrapReady = true; bootstrapOutcome.resolve(); },
+  fail() { bootstrapFailed = true; bootstrapOutcome.resolve(); },
+};
 responses.read_settings_snapshot = (args) => {
   if (args?.includeLoginItemStatus === false) {
     return {
@@ -380,7 +393,13 @@ globalThis.window.__TAURI_INTERNALS__ = {
   },
   async invoke(command, args) {
     if (command === "plugin:event|listen") {
+      if (args.event === "cfw://engine-event" && startupRaceCase === "listen-refused") {
+        throw new Error("engine listener registration refused");
+      }
       listeners.set(args.event, callbacks.get(args.handler));
+      if (args.event === "cfw://engine-event" && startupRaceCase === "after-subscribe") {
+        await completeInitialNativeReconciliation();
+      }
       return nextCallbackId;
     }
     if (command === "plugin:event|unlisten") return null;
@@ -396,9 +415,65 @@ globalThis.window.__TAURI_INTERNALS__ = {
   },
 };
 
+// Execute the real bootstrap under deterministic native/event timing. The
+// matrix test runs this harness in fresh Node processes for the other cases.
+const startupRaceCase = process.env.CFM_TEST_STARTUP_RACE ?? "running";
+assert.ok(["running", "off", "failed", "listen-refused", "after-subscribe", "stale-read"].includes(startupRaceCase));
+const initialProfilesSnapshot = responses.profiles_snapshot;
+let nativeCompletionBeforeListener = false;
+let initialCompletionDelivered = false;
+const pendingEngine = {
+  ...OFF_ENGINE,
+  snapshot: { desired_mode: "off", generation: 1, config_digest: null,
+    state: { state: "failed", generation: 1, target: "off",
+      error: "native startup reconciliation is pending" } },
+};
+const failedReconciliation = {
+  ...pendingEngine,
+  startup_recovery_available: true,
+  snapshot: { ...pendingEngine.snapshot,
+    state: { ...pendingEngine.snapshot.state, error: "native service status unavailable" } },
+};
+responses.engine_snapshot = pendingEngine;
+async function completeInitialNativeReconciliation() {
+  if (initialCompletionDelivered) return;
+  initialCompletionDelivered = true;
+  responses.profiles_snapshot = initialProfilesSnapshot;
+  responses.engine_snapshot = startupRaceCase === "off" ? OFF_ENGINE
+    : startupRaceCase === "failed" ? failedReconciliation : RUNNING_ENGINE;
+  const listener = listeners.get("cfw://engine-event");
+  nativeCompletionBeforeListener = !listener;
+  if (startupRaceCase === "stale-read") {
+    responses.engine_snapshot = () => {
+      const delayed = deferred();
+      responses.engine_snapshot = RUNNING_ENGINE;
+      queueMicrotask(async () => {
+        try {
+          await listeners.get("cfw://engine-event")({ event: "cfw://engine-event", payload: { type: "snapshot_changed" } });
+          delayed.resolve(OFF_ENGINE);
+        } catch (error) { delayed.reject(error); }
+      });
+      return delayed.promise;
+    };
+  }
+  if (listener) await listener({ event: "cfw://engine-event", payload: { type: "snapshot_changed" } });
+}
+responses.profiles_snapshot = async () => {
+  if (startupRaceCase !== "after-subscribe") await completeInitialNativeReconciliation();
+  return initialProfilesSnapshot;
+};
+
 const appModule = await import("../src/app.js");
 const { PAGES, state, runtime } = await import("../src/state.js");
-await new Promise((resolve) => setTimeout(resolve, 150));
+let bootstrapDeadline;
+try {
+  await Promise.race([
+    bootstrapOutcome.promise,
+    new Promise((_, reject) => { bootstrapDeadline = setTimeout(() => reject(new Error("bootstrap did not settle")), 2000); }),
+  ]);
+} finally { clearTimeout(bootstrapDeadline); }
+const startupObservedEngine = structuredClone(state.engine);
+const startupInvocationCommands = invoked.slice();
 const responsiveBeforeLoginItemReply = bootstrapReady && listeners.has("cfw://page");
 const loginItemWasPending = state.launchAtLogin.liveStatus === "checking";
 // The remainder of this file exercises app.js's standalone fatal boundary;
@@ -423,6 +498,105 @@ const setEngine = async (envelope) => {
   await emit("cfw://settings-changed", responses.read_settings_snapshot);
 };
 
+test("status bar clock preserves changing values without rewriting unchanged DOM", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalNodes = new Map(statusBarNodes);
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  function countedNode(id) {
+    const node = element("div", id);
+    let text = "", width = "";
+    node.writes = { text: 0, width: 0 };
+    Object.defineProperty(node, "textContent", {
+      get: () => text,
+      set: (value) => { text = value; node.writes.text += 1; },
+    });
+    Object.defineProperty(node.style, "width", {
+      get: () => width,
+      set: (value) => { width = value; node.writes.width += 1; },
+    });
+    return node;
+  }
+  const writes = () => [...statusBarNodes.values()].map((node) => ({ ...node.writes }));
+  const resetWrites = () => {
+    for (const node of statusBarNodes.values()) node.writes = { text: 0, width: 0 };
+  };
+  const noWrites = Array.from({ length: 4 }, () => ({ text: 0, width: 0 }));
+  try {
+    Date.now = () => now;
+    for (const id of statusBarNodes.keys()) statusBarNodes.set(id, countedNode(id));
+    const clocks = intervalCallbacks.filter(({ delay }) => delay === 1000);
+    assert.equal(clocks.length, 1, "real bootstrap retains exactly one one-second clock");
+    const tick = clocks[0].callback;
+    await setEngine(OFF_ENGINE);
+    await renderPage("general");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 00");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "0%");
+    resetWrites();
+    let ipcBefore = invoked.length;
+    for (let second = 0; second < 60; second++) { now += 1000; tick(); }
+    assert.equal(invoked.length, ipcBefore, "Off clock ticks issue no IPC");
+    assert.deepEqual(writes(), noWrites, "60 stable Off ticks must preserve existing DOM values");
+
+    await setEngine(RUNNING_ENGINE);
+    resetWrites(); ipcBefore = invoked.length;
+    now += 1000; tick();
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 01");
+    now += 1000; tick();
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 02");
+    assert.deepEqual(writes(), [{ text: 0, width: 0 }, { text: 0, width: 0 },
+      { text: 2, width: 0 }, { text: 0, width: 0 }]);
+    assert.equal(invoked.length, ipcBefore, "running clock ticks issue no IPC");
+
+    // The same registered callback must publish changes in the displayed rates.
+    resetWrites();
+    state.traffic.upload = 0.5; state.traffic.download = 2;
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "2.0 MB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "10%");
+    assert.deepEqual(writes(), [{ text: 1, width: 0 }, { text: 1, width: 0 },
+      { text: 0, width: 0 }, { text: 0, width: 1 }]);
+    state.traffic.upload = 1; state.traffic.download = 0.5;
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "6%");
+    resetWrites(); tick();
+    assert.deepEqual(writes(), noWrites);
+    assert.equal(invoked.length, ipcBefore, "rate display changes issue no IPC");
+
+    // A replacement node must receive current values even when state is unchanged.
+    const detachedNodes = [...statusBarNodes.values()];
+    for (const id of statusBarNodes.keys()) statusBarNodes.set(id, countedNode(id));
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 02");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "6%");
+    assert.deepEqual(writes(), [{ text: 1, width: 0 }, { text: 1, width: 0 },
+      { text: 1, width: 0 }, { text: 0, width: 1 }]);
+    assert.deepEqual(detachedNodes.map((node) => node.writes), noWrites);
+    assert.equal(invoked.length, ipcBefore, "replacing DOM nodes introduces no IPC");
+
+    await setEngine(OFF_ENGINE);
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 00");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "0%");
+    resetWrites(); ipcBefore = invoked.length;
+    now += 1000; tick();
+    assert.deepEqual(writes(), noWrites, "returning Off clears old values once");
+    assert.equal(invoked.length, ipcBefore);
+  } finally {
+    Date.now = originalNow;
+    for (const [id, node] of originalNodes) statusBarNodes.set(id, node);
+    await setEngine(originalEngine);
+  }
+});
+
 function savedToolbarPolicy() {
   return { profileId: "toolbar-profile", name: "Saved", groups: [
     { name: "GLOBAL", type: "Selector", now: "DIRECT", options: [{ name: "DIRECT", delay: null }] },
@@ -431,6 +605,117 @@ function savedToolbarPolicy() {
     ] },
   ] };
 }
+
+test("overlay-only General dialogs hide native switches and restore fresh geometry on close", async () => {
+  const keys = ["allowLan", "ipv6DNS", "tunMode", "mixin", "systemProxy", "startAtLogin"];
+  const prior = { resize: globalThis.ResizeObserver, style: globalThis.getComputedStyle,
+    frame: globalThis.requestAnimationFrame, events: window.addEventListener,
+    enabled: state.payload.native_ui.general_switches,
+    presentationError: state.nativeGeneralPresentationError,
+    automation: responses.read_automation_settings };
+  let top = 80;
+  const rows = keys.map((key, index) => {
+    const label = element("label"), input = element("input");
+    const classes = new Set(), attributes = new Map();
+    label.classList = { add: (name) => classes.add(name), remove: (name) => classes.delete(name) };
+    label.setAttribute = (name, value) => attributes.set(name, value);
+    label.removeAttribute = (name) => attributes.delete(name);
+    label.getAttribute = (name) => attributes.get(name) ?? null;
+    label.querySelector = () => ({ textContent: key });
+    label.getBoundingClientRect = () => ({ x: 790, y: top + index * 40, width: 34, height: 20 });
+    input.dataset.toggle = key;
+    input.disabled = index === 5;
+    input.checked = index === 1;
+    input.closest = () => label;
+    input.removeAttribute = (name) => { if (name === "data-native-general-key") delete input.dataset.nativeGeneralKey; };
+    return input;
+  });
+  const general = element();
+  general.parentElement = null;
+  querySelectorElements.set(".cfw-general-view", general);
+  querySelectorAllElements.set(".cfw-general-view .inline-switch input[data-toggle]", rows);
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  globalThis.getComputedStyle = () => ({ overflowX: "visible", overflowY: "visible" });
+  globalThis.requestAnimationFrame = (callback) => setImmediate(callback);
+  window.addEventListener = () => {};
+  responses.sync_native_general_switches = true;
+  responses.focus_native_general_switch = true;
+  responses.dismiss_native_general_switches = true;
+  responses.read_automation_settings = {
+    settings: { shortcuts: [], network_enabled: false, network_rules: [] },
+    revision: "modal-lifecycle", network: null,
+  };
+  const frames = () => invocationDetails.filter(({ command }) => command === "sync_native_general_switches").map(({ args }) => args.request);
+  let submission = 0;
+  const flush = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  const close = async () => {
+    for (const listener of documentListeners.get("keydown") ?? []) {
+      listener({ key: "Escape", preventDefault() {} });
+    }
+    await flush();
+  };
+  try {
+    state.payload.native_ui.general_switches = true;
+    state.glassDialog = null;
+    await renderPage("general"); await flush();
+    assert.equal(frames().at(-1)?.items.length, 6);
+    for (const action of ["show-network-interfaces", "allow-lan-info", "dns-query", "mixin-info",
+      "open-runtime-settings", "open-automation-settings", "show-network-interfaces"]) {
+      const before = frames().length;
+      const previous = frames().at(-1);
+      const businessState = rows.map(({ disabled, checked }) => ({ disabled, checked }));
+      await appModule.handleAction(action);
+      assert.ok(rows.every((input) => input.closest().inert === true), "DOM mirrors become inert during overlay-only rendering");
+      const completion = invocationDetails.find(({ command }) => command === "sync_native_general_switches").args.completion;
+      const callsBeforeInput = invoked.length;
+      // A native input may already be in IPC when its DOM modal opens.
+      completion.onmessage({ kind: "input", requestId: previous.requestId, sequence: previous.sequence,
+        submission: ++submission, key: 3, action: 1, value: true });
+      completion.onmessage({ kind: "input", requestId: previous.requestId, sequence: previous.sequence,
+        submission: 0, key: 3, action: 2, value: false });
+      await flush();
+      assert.match(glassRoot.innerHTML, /glass-dialog-backdrop/u);
+      assert.ok(frames().length > before, "Overlay-only rendering must publish native occlusion");
+      assert.deepEqual(frames().at(-1).items, []);
+      assert.ok(rows.every((input) => input.closest().inert === true && input.closest().getAttribute("aria-hidden") === "true"));
+      assert.deepEqual(rows.map(({ disabled, checked }) => ({ disabled, checked })), businessState);
+      assert.equal(frames().at(-1).acknowledgedSubmission, submission);
+      assert.deepEqual(invoked.slice(callsBeforeInput).filter((command) => !command.startsWith("sync_native_general_switches")), [],
+        "Occluded native input cannot traverse, regain focus, or invoke a business command");
+      top += 7;
+      await close();
+      assert.equal(glassRoot.innerHTML, "");
+      assert.equal(frames().at(-1).items.length, 6);
+      assert.equal(frames().at(-1).items[0].rect.y, top, "Reopening measures current DOM geometry");
+      assert.ok(rows.every((input) => input.closest().inert === false));
+      assert.deepEqual(rows.map(({ disabled, checked }) => ({ disabled, checked })), businessState,
+        "Closing a modal restores presentation without changing original disabled/checked state");
+    }
+    responses.sync_native_general_switches = () => { throw new Error("modal layout rejected"); };
+    await appModule.handleAction("show-network-interfaces"); await flush();
+    assert.match(state.nativeGeneralPresentationError, /modal layout rejected/u);
+    assert.ok(invoked.includes("dismiss_native_general_switches"));
+    assert.ok(rows.every((input) => input.closest().inert === true), "A reported native failure must not expose occluded DOM mirrors");
+    await close();
+    assert.ok(rows.every((input) => input.closest().inert === false), "The original DOM control remains available after a reported presentation failure");
+  } finally {
+    state.glassDialog = null;
+    await renderPage("feedback"); await flush();
+    state.payload.native_ui.general_switches = prior.enabled;
+    state.nativeGeneralPresentationError = prior.presentationError;
+    if (prior.automation === undefined) delete responses.read_automation_settings;
+    else responses.read_automation_settings = prior.automation;
+    querySelectorElements.delete(".cfw-general-view");
+    querySelectorAllElements.delete(".cfw-general-view .inline-switch input[data-toggle]");
+    globalThis.ResizeObserver = prior.resize;
+    globalThis.getComputedStyle = prior.style;
+    globalThis.requestAnimationFrame = prior.frame;
+    window.addEventListener = prior.events;
+    responses.sync_native_general_switches = true;
+    // The page adapter is a lifetime singleton; its empty presentation remains
+    // available for later disabled-feature page renders in this shared harness.
+  }
+});
 
 test("General exposes IPv6 as a direct switch rather than a settings-dialog button", async () => {
   const html = await renderPage("general");
@@ -633,6 +918,24 @@ function interactiveElement(tag = "button") {
   });
   return node;
 }
+
+test("startup engine snapshot handshake retains authoritative state", () => {
+  assert.equal(nativeCompletionBeforeListener, startupRaceCase !== "after-subscribe");
+  assert.equal(bootstrapReady, startupRaceCase !== "listen-refused");
+  assert.equal(bootstrapFailed, startupRaceCase === "listen-refused");
+  const expectedActive = ["running", "after-subscribe", "stale-read"].includes(startupRaceCase);
+  assert.equal(startupObservedEngine.active, expectedActive);
+  if (startupRaceCase === "failed") {
+    assert.equal(startupObservedEngine.availabilityReason, "native service status unavailable");
+  } else if (startupRaceCase === "listen-refused") {
+    assert.equal(startupObservedEngine.availabilityReason, "native startup reconciliation is pending");
+  } else {
+    assert.equal(startupObservedEngine.availabilityReason, null);
+  }
+  for (const command of ["apply_active_profile", "reconcile_startup_services", "set_core_enabled", "set_system_proxy_enabled", "set_tun_enabled", "set_proxy_mode", "select_profile", "select_proxy", "write_runtime_settings_snapshot", "write_automation_settings"]) {
+    assert.equal(startupInvocationCommands.includes(command), false, `startup observation must not invoke ${command}`);
+  }
+});
 
 test("bootstrap reaches the dashboard instead of the fatal handler", () => {
   assert.equal(documentStub.body.innerHTML.includes("fatal"), false);
@@ -1102,7 +1405,7 @@ test("normal mode switches call the existing backend without preparing or cleani
       ]);
       for (const forbidden of [
         "begin_migration_handoff", "prepare_legacy_cutover", "disable_service_mode",
-        "recover_legacy_cutover", "write_settings_snapshot", "reset_settings_snapshot",
+        "recover_legacy_cutover", "reconcile_startup_services", "write_settings_snapshot", "reset_settings_snapshot",
       ]) {
         assert.equal(invocationDetails.some((entry) => entry.command === forbidden), false, forbidden);
       }
@@ -2724,6 +3027,67 @@ test("engine status events do not discard a pending switch failure", async () =>
     if (originalResponse === undefined) delete responses.set_system_proxy_enabled;
     else responses.set_system_proxy_enabled = originalResponse;
     state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("startup service recovery is explicit, bounded to one request and stays Off", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalError = state.engineMutationError;
+  const originalHandoff = state.migrationHandoff;
+  const failure = {
+    ...OFF_ENGINE,
+    snapshot: { desired_mode: "off", generation: 0, config_digest: null,
+      state: { state: "failed", target: "off", generation: 0, error: "Background service update failed" } },
+    startup_recovery_available: true,
+  };
+  try {
+    await setEngine(failure);
+    const before = invocationDetails.length;
+    const html = await renderPage("general");
+    assert.match(html, /data-action="reconcile-startup-services"/u);
+    assert.doesNotMatch(html, /data-action="toggle-core"/u);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => command === "reconcile_startup_services"), false);
+    const pending = deferred();
+    responses.reconcile_startup_services = () => pending.promise;
+    const operation = appModule.handleAction("reconcile-startup-services");
+    await waitForInvocation("reconcile_startup_services");
+    assert.equal(state.engineMutationBusy, true);
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /in progress/u);
+    assert.equal(invocationDetails.slice(before).filter(({ command }) => command === "reconcile_startup_services").length, 1);
+    pending.resolve(OFF_ENGINE);
+    await operation;
+    assert.equal(state.engine.state, "Off");
+    assert.equal(state.engineMutationBusy, false);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => /^(set_core_enabled|set_system_proxy_enabled|set_tun_enabled)$/u.test(command)), false);
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+
+    await setEngine(failure);
+    responses.reconcile_startup_services = () => { throw new Error("Service recovery remains unproven"); };
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /remains unproven/u);
+    assert.equal(state.engine.state, "Failed");
+    assert.equal(state.engineMutationBusy, false);
+    assert.match(await renderPage("general"), /Service recovery remains unproven/u);
+    assert.match(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    responses.reconcile_startup_services = () => RUNNING_ENGINE;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /did not prove/u);
+    assert.equal(state.engine.state, "Failed");
+    assert.equal(state.engine.active, false);
+    await setEngine({ ...failure, startup_recovery_available: false });
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    const calls = invocationDetails.length;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /not available/u);
+    assert.equal(invocationDetails.length, calls);
+    await setEngine(failure);
+    state.migrationHandoff = true;
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    const handoffCalls = invocationDetails.length;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /not available/u);
+    assert.equal(invocationDetails.length, handoffCalls);
+  } finally {
+    delete responses.reconcile_startup_services;
+    state.engineMutationError = originalError;
+    state.migrationHandoff = originalHandoff;
     await setEngine(originalEngine);
   }
 });

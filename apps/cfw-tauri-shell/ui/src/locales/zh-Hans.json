@@ -714,5 +714,22 @@
   "{state} · desired {desiredMode}": "{state} · 请求模式 {desiredMode}",
   "{title} - {mode} Mode": "{title} - {mode}模式",
   "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.": "有 {value1} 项钥匙串记录未被任何配置文件引用。清理会重新验证配置库快照和凭据库版本后，执行一次原子删除。{value2}",
-  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 条日志{value3}"
+  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 条日志{value3}",
+  "Native Overview": "原生总览",
+  "The native settings window could not deliver this action. Close it and try again.": "原生设置窗口未能提交此操作。请关闭后重试。",
+  "{label} must contain at most {maximum} characters": "{label}最多可输入 {maximum} 个字符",
+  "Ascending order": "升序",
+  "Clear connection search": "清除连接搜索",
+  "Descending order": "降序",
+  "Sort connections by downloaded data": "按下载数据量排序连接",
+  "Sort connections by host": "按主机排序连接",
+  "Sort connections by start time": "按开始时间排序连接",
+  "Sort connections by uploaded data": "按上传数据量排序连接",
+  "Background service recovery completed.": "后台服务恢复完成。",
+  "Background service recovery did not prove the engine is Off.": "后台服务恢复未能确认内核已停止。",
+  "Background service recovery is not available in the current state.": "当前状态无法执行后台服务恢复。",
+  "Check and restore background services while keeping the engine stopped.": "检查并恢复后台服务，保持内核停止。",
+  "Recover background services": "恢复后台服务",
+  "Recover background services before starting a connection.": "请先恢复后台服务，再启动连接。",
+  "Recovering…": "正在恢复…"
 }

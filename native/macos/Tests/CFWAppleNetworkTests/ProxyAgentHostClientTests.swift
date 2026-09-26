@@ -30,6 +30,8 @@ private final class FakeProxyAgentService: ProxyAgentServicing, @unchecked Senda
     statuses.count > 1 ? statuses.removeFirst() : statuses[0]
   }
 
+  func requireRegistrationReady() throws {}
+
   func register() throws {
     registerCalls += 1
     if let registerError { throw registerError }
@@ -83,6 +85,7 @@ private func transport(
     machServiceName: "com.bill.clashformac.proxy-agent",
     teamIdentifier: "YKUPL7Z869",
     proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
+    currentCodeHash: try ServiceCodeHash(Data(repeating: 0x42, count: 20)),
     serviceController: FixedProxyAgentServiceController(status: status))
 }
 
@@ -289,6 +292,7 @@ private func installed40019Transport(
     machServiceName: "com.bill.clashformac.proxy-agent",
     teamIdentifier: "YKUPL7Z869",
     proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
+    currentCodeHash: try ServiceCodeHash(Data(repeating: 0x42, count: 20)),
     serviceController: SequencedProxyAgentServiceController(statuses),
     installed40019Dependencies: Installed40019ProxyTransportDependencies(
       observeProcess: { try harness.observe() },

@@ -15,6 +15,7 @@ from unittest.mock import patch
 from scripts.hash_artifact import build_manifest
 from scripts.promote_signed_native_manifest import promote_manifest
 from scripts import verify_legacy_tombstone_provenance as provenance
+from scripts import release_build_identity as identities
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
@@ -100,9 +101,9 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
     def digest(self, relative: str) -> str:
         return hashlib.sha256((self.repository / relative).read_bytes()).hexdigest()
 
-    def write_bundle_identity(self, build_number: str) -> None:
+    def write_bundle_identity(self, build_number: str, version: str = "0.4.0") -> None:
         value = {
-            "CFBundleShortVersionString": "0.4.0",
+            "CFBundleShortVersionString": version,
             "CFBundleVersion": build_number,
         }
         for path in self.bundle_plists:
@@ -226,6 +227,91 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
             | {"preSignArtifactSha256", "preSignManifestSha256"},
         )
         self.assertEqual(metadata["signingMode"], "developer-id")
+
+    def configure_preview_fixture(self) -> None:
+        old_pre_sign = self.pre_sign_root
+        old_output = self.attempt_output
+        new_pre_sign = identities.preview_native_products_root(self.repository)
+        new_output = identities.preview_signing_attempt_output_root(
+            self.repository, "00000001", provenance.CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
+        )
+        shutil.copytree(old_pre_sign, new_pre_sign)
+        shutil.copytree(old_output, new_output)
+        attempts = identities.preview_signing_attempts_root(self.repository)
+        for path in (attempts.parent, attempts, new_output.parent):
+            path.chmod(0o700)
+        for name in (
+            "pre_sign_root", "unsigned", "unsigned_binary", "unsigned_manifest",
+            "attempt_output", "signed_root", "signed", "signed_binary", "signed_manifest",
+            "embedded_app", "embedded_binary",
+        ):
+            old_path = getattr(self, name)
+            if old_path.is_relative_to(old_pre_sign):
+                setattr(self, name, new_pre_sign / old_path.relative_to(old_pre_sign))
+            else:
+                setattr(self, name, new_output / old_path.relative_to(old_output))
+        self.bundle_plists = tuple(new_output / path.relative_to(old_output) for path in self.bundle_plists)
+        self.BUILD_NUMBER = "50016"
+        manifest = self.repository / "crates/cfw-legacy-tombstone/Cargo.toml"
+        manifest.write_text(manifest.read_text().replace("0.4.0", "0.5.0"))
+        self.write_bundle_identity(self.BUILD_NUMBER, "0.5.0")
+        self.write_pre_sign_manifest()
+        self.write_signed_manifest()
+
+    def test_all_signed_preview_contexts_accept_exact_promoted_copies(self) -> None:
+        self.configure_preview_fixture()
+        ready = self.attempt_output.with_name("publish-ready")
+        shutil.copytree(self.attempt_output, ready)
+        canonical_output = identities.preview_signing_output_root(self.repository)
+        canonical_output.mkdir(mode=0o700)
+        canonical_native = canonical_output / "signed-native-products"
+        shutil.copytree(self.signed_root, canonical_native)
+        canonical_app = identities.preview_root(self.repository) / "signed/Clash for Mac.app"
+        shutil.copytree(self.embedded_app, canonical_app)
+        for context, app, native in (
+            (provenance.CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK, self.embedded_app, self.signed_root),
+            (provenance.CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY,
+             ready / "signing-input/Clash for Mac.app", ready / "signed-native-products"),
+            (provenance.CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT, canonical_app, canonical_native),
+        ):
+            with self.subTest(context=context):
+                value = self.verify(
+                    context=context, embedded_app=app,
+                    signed_artifact=native / provenance.ARTIFACT_NAME,
+                    signed_manifest=native / provenance.MANIFEST_NAME,
+                )
+                self.assertEqual(value["metadata"]["buildNumber"], "50016")
+
+    def test_preview_rejects_unsigned_and_cross_release_contexts(self) -> None:
+        self.configure_preview_fixture()
+        for context in (
+            provenance.CandidateBundleContext.UNSIGNED_HOST,
+            provenance.CandidateBundleContext.UNSIGNED_PREVIEW_HOST,
+            provenance.CandidateBundleContext.PREVIEW_PRE_SIGN,
+            provenance.CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+        ):
+            with self.subTest(context=context), self.assertRaises(provenance.LegacyTombstoneProvenanceError):
+                self.verify(context=context)
+        context = provenance.CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
+        old_root = self.repository / "target/candidates/0.4.0/ga/40073/native-products"
+        with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "preview preflight root"):
+            self.verify(context=context, unsigned_artifact=old_root / provenance.ARTIFACT_NAME,
+                        unsigned_manifest=old_root / provenance.MANIFEST_NAME)
+        with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "build number differs"):
+            self.verify(context=context, build_number="40073")
+
+    def test_preview_still_checks_promotion_source_and_embedded_bytes(self) -> None:
+        self.configure_preview_fixture()
+        context = provenance.CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
+        value = json.loads(self.signed_manifest.read_bytes())
+        value["metadata"]["preSignManifestSha256"] = "f" * 64
+        self.signed_manifest.write_text(json.dumps(value))
+        with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "promotion lineage"):
+            self.verify(context=context)
+        self.write_signed_manifest()
+        self.embedded_binary.write_bytes(b"unrelated embedded binary")
+        with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "exact promoted signed binary"):
+            self.verify(context=context)
 
     def test_all_signed_candidate_contexts_accept_exact_bound_copies(self) -> None:
         publish_ready = self.attempt_output.with_name("publish-ready")

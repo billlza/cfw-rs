@@ -8,7 +8,8 @@ use cfw_platform::{
     observe_gatekeeper_status, verify_release_signature,
 };
 
-const RELEASE_VERSION: &str = "0.4.0";
+const RELEASE_VERSION: &str = "0.5.0";
+const RELEASE_BUILD: &str = "50016";
 const RELEASE_TEAM_ID: &str = "YKUPL7Z869";
 const MAX_BUNDLE_ENTRIES: usize = 4096;
 const GLOBAL_AUTHORITY_IDENTIFIER: &str = "com.bill.clashformac.global-authority";
@@ -78,20 +79,21 @@ pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
     let dictionary = info
         .as_dictionary()
         .ok_or_else(|| "installed Info.plist is not a dictionary".to_owned())?;
-    if dictionary
-        .get("CFBundleShortVersionString")
-        .and_then(plist::Value::as_string)
-        != Some(RELEASE_VERSION)
-        || dictionary
-            .get("CFBundleIdentifier")
-            .and_then(plist::Value::as_string)
-            != Some("com.bill.clashformac")
-        || !dictionary
+    if !installed_product_identity_is_current(
+        dictionary
+            .get("CFBundleShortVersionString")
+            .and_then(plist::Value::as_string),
+        dictionary
             .get("CFBundleVersion")
-            .and_then(plist::Value::as_string)
-            .is_some_and(positive_build_number)
+            .and_then(plist::Value::as_string),
+    ) || dictionary
+        .get("CFBundleIdentifier")
+        .and_then(plist::Value::as_string)
+        != Some("com.bill.clashformac")
     {
-        return Err("installed bundle version, identifier, or build number is not the 0.4.0 release contract".into());
+        return Err(format!(
+            "installed bundle identity is not the {RELEASE_VERSION}/{RELEASE_BUILD} preview contract"
+        ));
     }
 
     validate_installed_bundle_tree(canonical_bundle)?;
@@ -109,8 +111,13 @@ pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
     Ok(())
 }
 
-fn positive_build_number(value: &str) -> bool {
-    matches!(value.as_bytes(), [b'1'..=b'9', rest @ ..] if rest.iter().all(u8::is_ascii_digit))
+fn installed_product_identity_is_current(version: Option<&str>, build: Option<&str>) -> bool {
+    // A preview has the same canonical install, signature, notarization and
+    // permission requirements. Accept only the reviewed preview identity;
+    // changing the marketing version cannot admit an arbitrary local build.
+    cfw_core::PRODUCT_VERSION == RELEASE_VERSION
+        && version == Some(RELEASE_VERSION)
+        && build == Some(RELEASE_BUILD)
 }
 
 fn require_secure_regular(path: &Path, label: &str) -> Result<(), String> {
@@ -337,9 +344,7 @@ fn validate_installed_bundle_tree(root: &Path) -> Result<(), String> {
                 name,
                 "mihomo" | "clash-rs" | "clash-darwin" | "cfw-helper" | "cores"
             ) {
-                return Err(format!(
-                    "installed 0.4.0 bundle contains retired payload {name}"
-                ));
+                return Err(format!("installed bundle contains retired payload {name}"));
             }
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)
@@ -521,7 +526,8 @@ mod tests {
 
     #[test]
     fn release_security_accepts_only_the_closed_component_enum() {
-        assert_eq!(ReleaseSignedComponent::NESTED.len(), 6);
+        assert_eq!(ReleaseSignedComponent::NESTED.len(), 7);
+        assert!(ReleaseSignedComponent::NESTED.contains(&ReleaseSignedComponent::NativeUi));
         assert_eq!(
             ReleaseSignedComponent::Application.path(),
             Path::new("/Applications/Clash for Mac.app")
@@ -598,10 +604,36 @@ mod tests {
     }
 
     #[test]
-    fn build_number_is_canonical_positive_decimal() {
-        assert!(positive_build_number("2026072201"));
-        for invalid in ["", "0", "00", "01", "0001", "-1", "+1", "1.0", " 1"] {
-            assert!(!positive_build_number(invalid), "{invalid:?}");
+    fn handoff_identity_requires_exact_current_preview_not_just_a_positive_build() {
+        assert!(installed_product_identity_is_current(
+            Some("0.5.0"),
+            Some("50016")
+        ));
+        for (version, build) in [
+            (Some("0.4.0"), Some("40073")),
+            (Some("0.4.0"), Some("50016")),
+            (Some("0.5.0"), Some("40073")),
+            (Some("0.5.0"), Some("50001")),
+            (Some("0.5.0"), Some("50002")),
+            (Some("0.5.0"), Some("50003")),
+            (Some("0.5.0"), Some("50007")),
+            (Some("0.5.0"), Some("50008")),
+            (Some("0.5.0"), Some("50009")),
+            (Some("0.5.0"), Some("50012")),
+            (Some("0.5.0"), Some("50013")),
+            (Some("0.5.0"), Some("50014")),
+            (Some("0.5.0"), Some("50015")),
+            (Some("0.5.0"), Some("50017")),
+            (Some("0.5.0"), Some("050016")),
+            (Some("0.5.0"), Some("0")),
+            (Some("0.5.0-preview"), Some("50016")),
+            (None, Some("50016")),
+            (Some("0.5.0"), None),
+        ] {
+            assert!(
+                !installed_product_identity_is_current(version, build),
+                "{version:?}/{build:?}"
+            );
         }
     }
 }

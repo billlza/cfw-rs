@@ -1,6 +1,6 @@
 [package]
 name = "cfw-tauri-shell"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license.workspace = true
 build = "build.rs"
@@ -8,6 +8,8 @@ autobins = false
 
 [features]
 physical-release-evidence = []
+native-ui = []
+native-dashboard = ["native-ui"]
 
 [[bin]]
 name = "clash-for-mac"
@@ -22,6 +24,12 @@ harness = false
 name = "startup_main_run_loop"
 path = "tests/startup_main_run_loop.rs"
 harness = false
+
+[[test]]
+name = "native_dashboard_ffi"
+path = "tests/native_dashboard_ffi.rs"
+harness = false
+required-features = ["native-dashboard"]
 
 [dependencies]
 cfw-application = { path = "../../crates/cfw-application" }
@@ -44,8 +52,8 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tauri = { version = "=2.11.5", features = ["tray-icon"] }
-tauri-plugin-single-instance = "=2.4.4"
+tauri = { version = "=2.12.0", features = ["tray-icon"] }
+tauri-plugin-single-instance = "=2.4.5"
 tauri-plugin-global-shortcut = "=2.3.2"
 thiserror.workspace = true
 tempfile.workspace = true
@@ -56,11 +64,11 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
-cc = "=1.4.6"
+cc = "=1.5.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
-tauri-build = { version = "=2.6.3", features = [] }
+tauri-build = { version = "=2.7.0", features = [] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "=0.10.1"

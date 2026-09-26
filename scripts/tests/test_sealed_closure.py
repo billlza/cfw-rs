@@ -22,18 +22,18 @@ REPOSITORY = Path(__file__).resolve().parent.parent.parent
 # files itself, so the derived patch closure is bound to the patch bytes in the
 # repository rather than to the pin table the production code already reads.
 PATCH_PATHS = {
-    "socks_lifecycle": "native/macos/patches/sing-box-v1.14.1-socks-lifecycle.patch",
-    "security": "native/macos/patches/sing-box-v1.14.1-security-dependencies.patch",
-    "raw_packet": "native/macos/patches/sing-box-v1.14.1-raw-packet-tun.patch",
-    "dns_failover": "native/macos/patches/sing-box-v1.14.1-dns-failover.patch",
-    "endpoint_conflict": "native/macos/patches/sing-box-v1.14.1-endpoint-conflict.patch",
-    "profile_probe": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
+    "socks_lifecycle": "native/macos/patches/sing-box-v1.14.2-socks-lifecycle.patch",
+    "security": "native/macos/patches/sing-box-v1.14.2-security-dependencies.patch",
+    "raw_packet": "native/macos/patches/sing-box-v1.14.2-raw-packet-tun.patch",
+    "dns_failover": "native/macos/patches/sing-box-v1.14.2-dns-failover.patch",
+    "endpoint_conflict": "native/macos/patches/sing-box-v1.14.2-endpoint-conflict.patch",
+    "profile_probe": "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
 }
 # Authoritative digest of the raw-packet TUN patch with cleanup ownership retained
 # until Close succeeds. Kept as a literal because hashing the file alone would
 # still pass if the patch regressed and the pins were recomputed to match.
 EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "a550daa7b955f838b5b9b8983b41b789ccb9aedcc97b9a53f96f6affbe3f06e9"
+    "d3aa03dcf3e3e0421bd1b5062dcf8ca60f62252afabd8d15013ed3e4bda25950"
 )
 # The combined diff is the full-object-ID digest of the whole working-tree diff
 # of the patched sing-box checkout
@@ -41,9 +41,10 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
 # This revision includes all six patches, the utun resolver, synchronized SOCKS
-# packet addresses and Go 1.27 debug-crash compatibility.
+# packet addresses, Go 1.27 debug-crash compatibility, and bounded DNS probe
+# shutdown lifecycle. Independently SHA-256 checked against promotion-final-canonical.diff.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "d7f06761d17ff6c7d78e0a7048d8d3d25901ab00d73a6f1cbd97b94d9e3895d1"
+    "9133eee3b979be1efdcae74c9c5ffe17d29614e0f06c0c51dffce59b0e8d566d"
 )
 
 
@@ -151,7 +152,7 @@ class DeriveSupplyChainTests(unittest.TestCase):
         self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.27.1")
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
-            "1ac1a339cb1223e9c70eae14c44411c75033c02d",
+            "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
         )
         patched_source = supply_chain["patched_source"]
 

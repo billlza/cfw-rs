@@ -2,6 +2,12 @@
 
 - Add Simplified Chinese, Traditional Chinese, English and Japanese with Settings → Appearance → Language, system-language matching, and localized native menus. Language changes preserve the active network session.
 
+## 0.5.0 - Unreleased
+
+- Prepare native SwiftUI components in the existing interface, preserving the
+  page layout, settings handlers and network controls. Preview validation uses
+  the separate 0.5.0/50001 identity; this entry does not mark a public release.
+
 ## 0.4.0 - Unreleased
 
 ### Everyday proxy use and compatibility

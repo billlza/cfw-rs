@@ -207,6 +207,7 @@ private func realInstalled40019ProxyTransport(
     machServiceName: "com.bill.clashformac.proxy-agent",
     teamIdentifier: "YKUPL7Z869",
     proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
+    currentCodeHash: try ServiceCodeHash(Data(repeating: 0x42, count: 20)),
     serviceController: FixedInstalled40019ProxyServiceController(),
     installed40019Dependencies: dependencies
   )
@@ -524,8 +525,8 @@ private func coordinator(
     hostOperationLease: hostOperationLease,
     serviceMaintainer: serviceMaintainer,
     serviceRuntimeObserver: serviceRuntimeObserver,
-    systemProxySwitchObserver: systemProxySwitchObserver
-  )
+    systemProxySwitchObserver: systemProxySwitchObserver,
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
 }
 
 private func statusErrorCode(
@@ -552,7 +553,8 @@ private func statusErrorCode(
     engineLease: StubLease(
       observation: AuthorityOwnershipObservation(state: .recovering, lease: nil)),
     credentialVault: StubCredentialVault(),
-    hostOperationLease: BusyNativeHostOperationLease())
+    hostOperationLease: BusyNativeHostOperationLease(),
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
   #expect(try await subject.execute(.authorizeSystemProxy) == .acknowledged)
   #expect(try await subject.execute(.authorizeSystemProxyRestoration) == .acknowledged)
   #expect(await proxy.authorizationCount == 2)
@@ -772,7 +774,8 @@ private actor RegistrationRecoveryLease: NativeEngineLeaseInspecting {
     proxy: StubProxyAgent(.off), systemProxyPreparer: UnusedSystemProxyStartPreparer(),
     tunnel: StubTunnelHost(.off, recoveryStatus: .invalid), engineLease: lease,
     credentialVault: StubCredentialVault(), hostOperationLease: AvailableNativeHostOperationLease(),
-    serviceMaintainer: maintainer, serviceRuntimeObserver: StubServiceRuntimeObserver())
+    serviceMaintainer: maintainer, serviceRuntimeObserver: StubServiceRuntimeObserver(),
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
   guard
     case .serviceMaintenance(let registration) = try await subject.execute(
       .maintainCurrentServices(.registerGlobalAuthority))
@@ -934,6 +937,60 @@ private actor RegistrationRecoveryLease: NativeEngineLeaseInspecting {
   #expect(result.globalAuthority == .unknown)
   #expect(maintainer.unregisterCalls == 0)
   #expect(maintainer.registerCalls == 0)
+}
+
+@Test func maintenanceRegistrationStatusRemainsReadableWhileAnotherHostOwnsTheLease() async throws {
+  let maintainer = StubServiceMaintainer(proxy: .requiresApproval, authority: .notRegistered)
+  let runtimeObserver = StubServiceRuntimeObserver(onObservation: { _ in
+    Issue.record("registration status must not inspect native runtime ownership")
+  })
+  let subject = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .active, lease: nil),
+    onAuthorityObservation: { Issue.record("registration status must not call Authority") },
+    serviceMaintainer: maintainer,
+    serviceRuntimeObserver: runtimeObserver,
+    hostOperationLease: BusyNativeHostOperationLease()
+  )
+  guard
+    case .serviceMaintenance(let result) = try await subject.execute(
+      .maintainCurrentServices(.status))
+  else {
+    Issue.record("registration status returned the wrong result")
+    return
+  }
+  #expect(result.proxyAgent == .requiresApproval)
+  #expect(result.globalAuthority == .notRegistered)
+  #expect(result.engineStatus == nil)
+  #expect(result.offProofProfile == nil)
+  #expect(maintainer.registerCalls == 0)
+  #expect(maintainer.unregisterCalls == 0)
+  #expect(runtimeObserver.observations.isEmpty)
+}
+
+@Test func maintenanceStatusExemptionNeverAdmitsProofMutationOrEngineQuery() async {
+  let maintainer = StubServiceMaintainer()
+  let subject = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    onAuthorityObservation: { Issue.record("contended operation must stop before Authority") },
+    serviceMaintainer: maintainer,
+    hostOperationLease: BusyNativeHostOperationLease()
+  )
+  let actions: [NativeServiceMaintenanceAction] = [
+    .retireOrphanedServices, .proveOff, .proveInstalled40019Off,
+    .unregisterProxyAgent, .unregisterInstalled40019ProxyAgent,
+    .unregisterGlobalAuthority, .unregisterInstalled40019GlobalAuthority,
+    .recoverInstalled40019GlobalAuthority, .registerGlobalAuthority, .registerProxyAgent,
+  ]
+  for action in actions {
+    #expect(await maintenanceErrorCode(subject, action: action) == .busy)
+  }
+  #expect(await statusErrorCode(subject) == .busy)
+  #expect(maintainer.registerCalls == 0)
+  #expect(maintainer.unregisterCalls == 0)
 }
 
 @Test func everyUnprovenAuthorityStateBlocksBeforeServiceMutation() async {

@@ -89,15 +89,13 @@ cfw_verify_tauri_toolchain_tree() {
     "$contract_repository" \
     "$contract_toolchain_root/tauri-cli-$TAURI_CLI_VERSION" \
     "$contract_toolchain_root/tauri-cli-$TAURI_CLI_VERSION.manifest.json" \
-    "artifactKind=pinned-tauri-cli-v2" \
+    "artifactKind=pinned-tauri-cli-v3" \
     "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
     "cacheNormalization=cargo-runtime-metadata-v1" \
     "crateSha256=$TAURI_CLI_CRATE_SHA256" \
     "dependencyMode=isolated-fetch-offline-locked-v1" \
-    "lockPatchSha256=$TAURI_CLI_LOCK_PATCH_SHA256" \
     "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
-    "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
-    "payloadLayout=bin-and-patched-source-v1" \
+    "payloadLayout=bin-and-source-v1" \
     "platform=darwin-arm64" \
     "rustToolchain=$RUST_VERSION-aarch64-apple-darwin" \
     "spinCrateSha256=$TAURI_CLI_SPIN_CRATE_SHA256" \

@@ -28,6 +28,7 @@
 		11F76D79F69C374799833893 /* TunnelStartPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60B3C108BAE14F4FAD80B612 /* TunnelStartPayload.swift */; };
 		12203711F9A93F0ED7B15311 /* ProfileProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0ADE357B98AE70D95F88166 /* ProfileProbeTests.swift */; };
 		126C760C0E500850FE6FD654 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		1507635078CDB537385B76DA /* Libbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20A40424BBF5C27623237F4E /* Libbox.framework */; };
 		165FA2450722590862E4454B /* NativeCredentialProvisioning.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9D32E275B38C221430B4CE0 /* NativeCredentialProvisioning.swift */; };
 		1682CE7F97A6CC6120A6E76C /* SourceBuiltLibboxServiceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D320F573306DC97645B252C1 /* SourceBuiltLibboxServiceRuntime.swift */; };
 		1861B1E4F77F744A97B6F939 /* ProxyAgentExecutable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66C5581D4DCE8B78FB58CFF6 /* ProxyAgentExecutable.swift */; };
@@ -46,15 +47,14 @@
 		281F6E3A928E9C48C94C2461 /* DescriptorRelativeAuthorityJournalStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 465A3C62623695EE6E126275 /* DescriptorRelativeAuthorityJournalStore.swift */; };
 		290F5647E4CA6DAE86780DF3 /* SystemExtensions.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D3BB877A7812177051275480 /* SystemExtensions.framework */; };
 		2A89401485BC97A4B891807A /* ConfigurationAcceptanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C23E8D5D284F70D5D716D59 /* ConfigurationAcceptanceStore.swift */; };
-		2B29088075A3B1599490065D /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
 		2BF9FA6651D39E9CF41BB152 /* libCFWPacketTunnel.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */; };
-		2C5101DC2BAE5B7D2008D1D6 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
 		2D326E131B9136B45351E0F7 /* ActiveAgreementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA95986F311AAC515D6E91A9 /* ActiveAgreementTests.swift */; };
 		2D8F05E47B8260818C7767B2 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
 		2EA04AE28BCEA321B02396EB /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
 		2FD38E04FFB446291E3D43C0 /* LANConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1213D975F966E8D1AE1A8C2 /* LANConfigurationTests.swift */; };
 		2FD87C0054E1B0612C53D829 /* ProxySystemProxyOwnerCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8C51159D7679093887C868 /* ProxySystemProxyOwnerCoordinatorTests.swift */; };
 		2FF1FD83F995C36DA4B9F958 /* SecureAppGroupFileSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 128D75EF9EC431457D0C0BEF /* SecureAppGroupFileSystem.swift */; };
+		312DE70F1452BD5BE5AAD7C2 /* NativeServiceBuildUpgrade.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACCA752D82ED695DFF524483 /* NativeServiceBuildUpgrade.swift */; };
 		31304B4A591A7AD8A04B0628 /* TunnelStartupFailureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8781957532D08A5AB5AE5D /* TunnelStartupFailureTests.swift */; };
 		31892327BE3A489CF3944978 /* HostBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */; };
 		319889940229F25DF0E96648 /* ProxyAgentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5641D870A50F668D27BBD945 /* ProxyAgentService.swift */; };
@@ -98,15 +98,18 @@
 		4E62E118E3CD0A571B5AE8C3 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
 		4E8E86078AA5C36AC5295445 /* HostOperationLeaseTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A9E96FE6465933256FE3F0 /* HostOperationLeaseTestSupport.swift */; };
 		50126BEDAEECE79D002EB2DD /* NativeServiceMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F5C955BE3888C734719F8C /* NativeServiceMaintenance.swift */; };
+		50FB27BF9560CD697B23FCB5 /* CurrentAppServiceBuildIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D75E34CDE0982B08258C6B8F /* CurrentAppServiceBuildIdentityTests.swift */; };
 		51617AF3C09BB388D3E907E9 /* Installed40019ServiceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D52F90CAACC8058CD237E904 /* Installed40019ServiceIdentity.swift */; };
 		51A66433541E7BFA56D8349F /* AuthorityOwnerLiveness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B6B108B86A1999F6F49DC65 /* AuthorityOwnerLiveness.swift */; };
 		527D00F15E863BCF363DE5B9 /* CredentialVaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F4C3519285AD3E4A9D9EF7 /* CredentialVaultTests.swift */; };
 		5283C405277D91501B4B1EF6 /* AuthorityClients.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F8D726F2FF199DD6FE4F89A /* AuthorityClients.swift */; };
 		5310A3BE70CA7D5FF085F3FB /* NativeBridgeResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2D915EA460231BB72C07BED /* NativeBridgeResponse.swift */; };
+		536186983C6456412B1FF0C9 /* Libbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20A40424BBF5C27623237F4E /* Libbox.framework */; };
 		551F2FFD16E74E3614B52761 /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
 		5650162AC8548C4E6631FF3C /* ProxyAgentHostClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAD05F579DE857E47E3E3CB7 /* ProxyAgentHostClientTests.swift */; };
 		591D1BD5E9F10FEF4CB973AF /* ReleaseObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E44B3DE1EB0AD41B7D6ECE1 /* ReleaseObservationTests.swift */; };
 		5921F3E3EE9CEE9BC138A048 /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		595BFA1EC93A534445100CA7 /* Libbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20A40424BBF5C27623237F4E /* Libbox.framework */; };
 		5A98DB54F5C858E278A6526E /* AuthorityServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1C10EF960C6845CB10AABCF /* AuthorityServiceTests.swift */; };
 		5BB2BA84D0F48D19EC31F26B /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
 		5DC7BD432FEC00E9C1FAF90A /* ProxySessionLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E89F74FCF4C2F074B0C73F2 /* ProxySessionLifecycleTests.swift */; };
@@ -134,6 +137,7 @@
 		72CD7982ED549C6165DFA57A /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		7372C976420D0AAAA52D361F /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
 		73A9DC122B9AB99B0C6C61F6 /* GlobalAuthorityReleaseGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0455B5ED6D560B8A31EA57D6 /* GlobalAuthorityReleaseGateTests.swift */; };
+		73E9A417FE28811E8040497C /* Libbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20A40424BBF5C27623237F4E /* Libbox.framework */; };
 		76D8A0ACC47B4F6F444A3B96 /* CutoverPreflightProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2F4658B4AD92ECE5D6CC765 /* CutoverPreflightProtocol.swift */; };
 		76EC298BA1C9D20A3E8BC51F /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
 		780FCAA8E5686E46112B0C76 /* ProxySessionLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D6C8F26D378EB06A88158DE /* ProxySessionLifecycle.swift */; };
@@ -142,6 +146,7 @@
 		7A8E99C04688601AD40713F7 /* EngineCapacity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE46B0F6439FE7FFBD73E1CF /* EngineCapacity.swift */; };
 		7BC50CE790768817735373B2 /* AuthorityPeerEventChannelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19545CBBAF9DB86AC7DE4948 /* AuthorityPeerEventChannelTests.swift */; };
 		7C372DB30E51C336FC46B33F /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		7CF97406634C292E992518A7 /* CurrentAppServiceBuildIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88D3F2055732A13F15DDFB62 /* CurrentAppServiceBuildIdentity.swift */; };
 		7D2FFA00D27C51C9B77525AC /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC1C346771288A99F87CD85 /* main.swift */; };
 		806D9DCC408819CF8DD2C3E2 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
 		81FC73EDEA5785B2D0FF674A /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A0E3A08746263766406F990 /* SystemConfiguration.framework */; };
@@ -179,13 +184,11 @@
 		A8A42C9D43D868105D17B6E9 /* LargeCredentialInjectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F298F5DE9516CF2CBDAC1168 /* LargeCredentialInjectionTests.swift */; };
 		A8C414AA189F87A5579F29E9 /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
 		A9BA08A4674699FE9096AFF6 /* NativeCredentialOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A237C7BA5EE6EC8197286026 /* NativeCredentialOperations.swift */; };
-		AA969CD59D11611B68B3296D /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
 		AAA25515FE23A8F894479C36 /* FailClosedJournalRecoveryPropertyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA8DDB3621A4BA277A3F436 /* FailClosedJournalRecoveryPropertyTests.swift */; };
 		AC092B960EA5E1929DC2446D /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
 		ACECCA1F0B2C56B6F2297859 /* CFWNativeBridge.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 2B8A11FF762CF83D34CECA5D /* CFWNativeBridge.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		AD676E4399DE2A0D410DBE94 /* ConfigurationCredentialSlots.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4ED128AC51841A4C0D2E48B /* ConfigurationCredentialSlots.swift */; };
 		AE66718ECB24BFB1C3CDC6C4 /* CodeIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27AE266237E0D2CBF3F958CC /* CodeIdentityTests.swift */; };
-		B037CF6F74D0F19136364ACD /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
 		B2BE5BBF11693DCAF8122319 /* AuthorityMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7FC4B36F66C1A8276647F80 /* AuthorityMigrationTests.swift */; };
 		B30009BCC72DD9FE380298D6 /* GlobalAuthorityReleaseGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF5E602BD7F6C68A8AF548D /* GlobalAuthorityReleaseGate.swift */; };
 		B46F8298D75E6A4CDBB4C26A /* NativeBridgeABIRequestRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 116FB108DAEC7A1D5A893E63 /* NativeBridgeABIRequestRegistryTests.swift */; };
@@ -212,7 +215,9 @@
 		CCA1612F83B16CEBB6A61BE7 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
 		CCECC01DD34E2AAE4FB94428 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
 		CD0610E632D83D1B3AC34385 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
+		CE4FE90915834A4488982EEB /* ServiceCodeHashTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D3F30C708341085CA5DB41E /* ServiceCodeHashTests.swift */; };
 		CF8D7B40E6DB1DFC301191F2 /* libCFWProxyAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */; };
+		CF9DAC141D2DA93FE1E3736A /* ServiceBuildTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91AC920C955485007E259A90 /* ServiceBuildTestSupport.swift */; };
 		CFF39E6E6F5CB84DD781084C /* TunnelStartupFailure.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7406103DE615890A8601FC61 /* TunnelStartupFailure.swift */; };
 		D00E9C42E457BEC0114F41E1 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
 		D06BA5B8CDED7A536F16A41E /* ProxyEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB752DDC87AB652A7909F45 /* ProxyEngine.swift */; };
@@ -225,6 +230,7 @@
 		D6EB900D516790C71871D3B6 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 795C8BFA79F454B8B2481E02 /* ServiceManagement.framework */; };
 		D84ECF85B6C66520E54685E2 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = C995B5D3DAB440A295071ED4 /* main.swift */; };
 		D85022AC17A6A99C5D66E5F3 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		D88D8A4A9D78DF98810EC844 /* ServiceCodeHash.swift in Sources */ = {isa = PBXBuildFile; fileRef = 811D2A50690D3024E318A4DE /* ServiceCodeHash.swift */; };
 		D8F9FEF2F102E74E39B225C2 /* CurrentAppServiceMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4146744E5941DE00451B081 /* CurrentAppServiceMaintenance.swift */; };
 		D93B91A180CD2E89E6309AA5 /* libCFWAppleNetwork.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */; };
 		DA5E5259BF2BA27D1B65CB64 /* CodeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A965BF014FA4185DA6B7F5D2 /* CodeIdentity.swift */; };
@@ -269,12 +275,12 @@
 		F97D0D94B77C0D3C98CF0ADF /* GlobalAuthorityServiceControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 142BEACC628DDBF81D3767B7 /* GlobalAuthorityServiceControllerTests.swift */; };
 		F9F9255B305DE38462682FAB /* Installed40019AuthorityOffProof.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D9514DF7F517CDCE49C0E21 /* Installed40019AuthorityOffProof.swift */; };
 		FA01AAC837E291166601C01F /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		FAC163B40D2B0CB2309045AE /* Libbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20A40424BBF5C27623237F4E /* Libbox.framework */; };
 		FBE529D59774224B2089F234 /* AuthorityV1Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7AAC3C84790FF6D3B9BCE2B /* AuthorityV1Models.swift */; };
 		FBFD168627E6B687B0CF32D1 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C72C5ECB90D52B622ED1FD9E /* PacketTunnelProvider.swift */; };
 		FE0030F07C4F8304C6BD1506 /* ConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1115B6C06001CB30128567C /* ConfigurationStore.swift */; };
 		FE20D5CDDDA46493E3D8190F /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 		FF6F979E948203F4769E73C4 /* CFWConnectionOwnerResolver.m in Sources */ = {isa = PBXBuildFile; fileRef = ED0BD0E330AB9AACB2641D5D /* CFWConnectionOwnerResolver.m */; };
-		FFC4CBAC60356C178708B897 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
 		FFD4858DD6062F98A7D66C7A /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
 /* End PBXBuildFile section */
 
@@ -814,6 +820,7 @@
 		1EDEB2ECF88C7087A26CB76C /* TunnelSecretLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelSecretLifecycle.swift; sourceTree = "<group>"; };
 		201B88220F2DF38B9D357E2C /* AuthoritySystemProxyStartPreparer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoritySystemProxyStartPreparer.swift; sourceTree = "<group>"; };
 		2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWPacketTunnel.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		20A40424BBF5C27623237F4E /* Libbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Libbox.framework; path = "../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework"; sourceTree = "<group>"; };
 		23A8434D510A63CC0DD8F4E3 /* SystemProxyStartPreparerTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyStartPreparerTestSupport.swift; sourceTree = "<group>"; };
 		23AB3114001202652F8107CF /* AuthorityTunnelStartPreparer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityTunnelStartPreparer.swift; sourceTree = "<group>"; };
 		24B2949D961A95CDC43CD78D /* NativeBridgeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCoordinator.swift; sourceTree = "<group>"; };
@@ -822,9 +829,9 @@
 		298B080814FE88D1912CE2F0 /* CFWLibboxObjC.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CFWLibboxObjC.h; sourceTree = "<group>"; };
 		2A0E3A08746263766406F990 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		2B8A11FF762CF83D34CECA5D /* CFWNativeBridge.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = CFWNativeBridge.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		2D3F30C708341085CA5DB41E /* ServiceCodeHashTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceCodeHashTests.swift; sourceTree = "<group>"; };
 		2F1B8C9A5CD0697EF290FDC8 /* AuthorityV1Codec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityV1Codec.swift; sourceTree = "<group>"; };
 		2FBA3DF467FC9550C79C4CB2 /* LibboxRuntimeDirectoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxRuntimeDirectoryTests.swift; sourceTree = "<group>"; };
-		31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libbox.xcframework; path = "../../target/native-dependencies/Libbox.xcframework"; sourceTree = "<group>"; };
 		328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWCredentialTransport.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		34CF9D4C6428C4F7637376BC /* IPPacket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPPacket.swift; sourceTree = "<group>"; };
 		363A7D4E545593B4AF3C4280 /* AuthorityProtocolServiceExampleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityProtocolServiceExampleTests.swift; sourceTree = "<group>"; };
@@ -893,14 +900,17 @@
 		7C19605072174559F5EF08AE /* NativeBridgeCoordinatorSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCoordinatorSupport.swift; sourceTree = "<group>"; };
 		7E78C153A23537769A7F8D59 /* NativeBridgeStartCommandIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeStartCommandIntegrationTests.swift; sourceTree = "<group>"; };
 		809342A1B071C7EC9BC2CBA7 /* CurrentAppServiceMaintenanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentAppServiceMaintenanceTests.swift; sourceTree = "<group>"; };
+		811D2A50690D3024E318A4DE /* ServiceCodeHash.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceCodeHash.swift; sourceTree = "<group>"; };
 		82685BB8910588272D53CC8C /* EngineProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProtocol.swift; sourceTree = "<group>"; };
 		8417065D3B67D2B50263CD01 /* TunnelStartPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelStartPayloadTests.swift; sourceTree = "<group>"; };
 		8569B9D226EF86F2B91C544E /* ReleaseGateAndErrorMappingExampleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseGateAndErrorMappingExampleTests.swift; sourceTree = "<group>"; };
 		886B86DF5657CF8262E91220 /* CredentialProvisioningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialProvisioningTests.swift; sourceTree = "<group>"; };
+		88D3F2055732A13F15DDFB62 /* CurrentAppServiceBuildIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentAppServiceBuildIdentity.swift; sourceTree = "<group>"; };
 		8A8781957532D08A5AB5AE5D /* TunnelStartupFailureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelStartupFailureTests.swift; sourceTree = "<group>"; };
 		8C26C4C175B8052338A2C6E8 /* AuthorityLifecycleContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityLifecycleContractTests.swift; sourceTree = "<group>"; };
 		8DF1E90C407C1EE1B28FD463 /* SensitiveDataBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveDataBufferTests.swift; sourceTree = "<group>"; };
 		90CCAF59793DBC94CF708C90 /* ProxyAuthorityOwnership.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyAuthorityOwnership.swift; sourceTree = "<group>"; };
+		91AC920C955485007E259A90 /* ServiceBuildTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceBuildTestSupport.swift; sourceTree = "<group>"; };
 		9596FFAAFEEE04BFFAD05FA1 /* VersionedJournalQueryContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionedJournalQueryContractTests.swift; sourceTree = "<group>"; };
 		979C7849A2B06E17A7103C64 /* NativeEngineRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEngineRequest.swift; sourceTree = "<group>"; };
 		9C9FB4A929A9CCB2ACF903FF /* libCFWGlobalAuthority.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWGlobalAuthority.a; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -922,6 +932,7 @@
 		AA95986F311AAC515D6E91A9 /* ActiveAgreementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveAgreementTests.swift; sourceTree = "<group>"; };
 		AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostBridge.swift; sourceTree = "<group>"; };
 		AAD05F579DE857E47E3E3CB7 /* ProxyAgentHostClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyAgentHostClientTests.swift; sourceTree = "<group>"; };
+		ACCA752D82ED695DFF524483 /* NativeServiceBuildUpgrade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeServiceBuildUpgrade.swift; sourceTree = "<group>"; };
 		AD0016F58D12E75C03B59A78 /* LibboxRuntimeStartReceiptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxRuntimeStartReceiptTests.swift; sourceTree = "<group>"; };
 		AD7351E924E1C09B0D05B4BF /* CFWConnectionOwnerResolver.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CFWConnectionOwnerResolver.h; sourceTree = "<group>"; };
 		ADC1BF63F00F4DEE6497D7B5 /* PeerAuthorizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerAuthorizationTests.swift; sourceTree = "<group>"; };
@@ -962,6 +973,7 @@
 		D3BB877A7812177051275480 /* SystemExtensions.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemExtensions.framework; path = System/Library/Frameworks/SystemExtensions.framework; sourceTree = SDKROOT; };
 		D52F90CAACC8058CD237E904 /* Installed40019ServiceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Installed40019ServiceIdentity.swift; sourceTree = "<group>"; };
 		D5625795A2E9D9E5CB7179D5 /* TunnelPreferenceCompensationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelPreferenceCompensationTests.swift; sourceTree = "<group>"; };
+		D75E34CDE0982B08258C6B8F /* CurrentAppServiceBuildIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentAppServiceBuildIdentityTests.swift; sourceTree = "<group>"; };
 		D9A5BD97825FF29B51767DC6 /* TunnelStartupFailureMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelStartupFailureMappingTests.swift; sourceTree = "<group>"; };
 		DA94A600EF7112AD91C6D809 /* SensitiveDataBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveDataBuffer.swift; sourceTree = "<group>"; };
 		DADB303F05659F2AF32743C0 /* AuthorityXPCWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityXPCWire.swift; sourceTree = "<group>"; };
@@ -1018,7 +1030,7 @@
 				3461914FFEFE386E960FBD31 /* libCFWPacketTransport.a in Frameworks */,
 				AC092B960EA5E1929DC2446D /* libCFWLibboxRuntime.a in Frameworks */,
 				2EA04AE28BCEA321B02396EB /* libCFWLibboxObjC.a in Frameworks */,
-				B037CF6F74D0F19136364ACD /* Libbox.xcframework in Frameworks */,
+				1507635078CDB537385B76DA /* Libbox.framework in Frameworks */,
 				DC09FC72F033FE9559CB7252 /* CryptoKit.framework in Frameworks */,
 				5E69E4D4F0024D3C03A5E7AA /* Network.framework in Frameworks */,
 				6B7672458B4FB9FEE56A5892 /* Security.framework in Frameworks */,
@@ -1045,7 +1057,7 @@
 				0273EE7E521A21E917BC4402 /* libCFWPacketTransport.a in Frameworks */,
 				806D9DCC408819CF8DD2C3E2 /* libCFWLibboxRuntime.a in Frameworks */,
 				1B40606EA3B7A0D0F84EA7B9 /* libCFWLibboxObjC.a in Frameworks */,
-				2C5101DC2BAE5B7D2008D1D6 /* Libbox.xcframework in Frameworks */,
+				536186983C6456412B1FF0C9 /* Libbox.framework in Frameworks */,
 				6579548B9BDF9390A864DCA4 /* libresolv.tbd in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1112,7 +1124,7 @@
 				551F2FFD16E74E3614B52761 /* libCFWCredentialVault.a in Frameworks */,
 				1095FFA840D61812DF74CAB3 /* libCFWLibboxRuntime.a in Frameworks */,
 				63D8F608CA339E93E46E8737 /* libCFWLibboxObjC.a in Frameworks */,
-				FFC4CBAC60356C178708B897 /* Libbox.xcframework in Frameworks */,
+				FAC163B40D2B0CB2309045AE /* Libbox.framework in Frameworks */,
 				6668EED592BA0A9E4DF59237 /* libresolv.tbd in Frameworks */,
 				7372C976420D0AAAA52D361F /* CryptoKit.framework in Frameworks */,
 				FE20D5CDDDA46493E3D8190F /* Security.framework in Frameworks */,
@@ -1139,7 +1151,7 @@
 				C879D04BB3E96898FED1A675 /* libCFWCredentialVault.a in Frameworks */,
 				CCA1612F83B16CEBB6A61BE7 /* libCFWLibboxRuntime.a in Frameworks */,
 				76EC298BA1C9D20A3E8BC51F /* libCFWLibboxObjC.a in Frameworks */,
-				AA969CD59D11611B68B3296D /* Libbox.xcframework in Frameworks */,
+				595BFA1EC93A534445100CA7 /* Libbox.framework in Frameworks */,
 				0C0217CE41F6C8FEC81AD19C /* CryptoKit.framework in Frameworks */,
 				0BE2A57906A6F8B63BF96C43 /* Network.framework in Frameworks */,
 				3299E762ADC5BCC4471B86EA /* Security.framework in Frameworks */,
@@ -1222,7 +1234,7 @@
 				CD0610E632D83D1B3AC34385 /* libCFWLibboxRuntime.a in Frameworks */,
 				3DA4D7FD9ABC519FC7F404CC /* libCFWSharedProtocol.a in Frameworks */,
 				B7A66DBFE129AE59041EBAB8 /* libCFWLibboxObjC.a in Frameworks */,
-				2B29088075A3B1599490065D /* Libbox.xcframework in Frameworks */,
+				73E9A417FE28811E8040497C /* Libbox.framework in Frameworks */,
 				1E6E7AC1FB1DB90874772E7D /* Network.framework in Frameworks */,
 				7C372DB30E51C336FC46B33F /* libresolv.tbd in Frameworks */,
 			);
@@ -1262,6 +1274,7 @@
 				8569B9D226EF86F2B91C544E /* ReleaseGateAndErrorMappingExampleTests.swift */,
 				5E44B3DE1EB0AD41B7D6ECE1 /* ReleaseObservationTests.swift */,
 				648FFFF2B9583C604BA9C27D /* SandboxAcceptanceStoreTests.swift */,
+				2D3F30C708341085CA5DB41E /* ServiceCodeHashTests.swift */,
 				8417065D3B67D2B50263CD01 /* TunnelStartPayloadTests.swift */,
 				8A8781957532D08A5AB5AE5D /* TunnelStartupFailureTests.swift */,
 				9596FFAAFEEE04BFFAD05FA1 /* VersionedJournalQueryContractTests.swift */,
@@ -1348,7 +1361,7 @@
 			isa = PBXGroup;
 			children = (
 				6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */,
-				31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */,
+				20A40424BBF5C27623237F4E /* Libbox.framework */,
 				18B43654E000715C99413186 /* libresolv.tbd */,
 				374828D0449C73C8F8420F62 /* Network.framework */,
 				A8823AD70E7698BBEC5D4EFC /* NetworkExtension.framework */,
@@ -1435,6 +1448,7 @@
 				6D8F71383B6E3BBF87994954 /* ReleaseObservation.swift */,
 				03314AEFA2B438B786B82D20 /* SandboxConfigurationAcceptanceStore.swift */,
 				128D75EF9EC431457D0C0BEF /* SecureAppGroupFileSystem.swift */,
+				811D2A50690D3024E318A4DE /* ServiceCodeHash.swift */,
 				60B3C108BAE14F4FAD80B612 /* TunnelStartPayload.swift */,
 				7406103DE615890A8601FC61 /* TunnelStartupFailure.swift */,
 				CD25E1DB9E3CE6218710F318 /* XPCProtocol.swift */,
@@ -1553,6 +1567,7 @@
 				A237C7BA5EE6EC8197286026 /* NativeCredentialOperations.swift */,
 				452632C2C9A18D7B70323830 /* NativeEngineOperations.swift */,
 				54874CC86565F799055BFC6E /* NativeProfileProbe.swift */,
+				ACCA752D82ED695DFF524483 /* NativeServiceBuildUpgrade.swift */,
 				17437FC5747522533423CDCD /* NativeServiceMaintenance.swift */,
 			);
 			path = CFWNativeBridge;
@@ -1573,6 +1588,7 @@
 				7896F72383220A9DC2DA2EAB /* AuthorityMigrationRecovery.swift */,
 				201B88220F2DF38B9D357E2C /* AuthoritySystemProxyStartPreparer.swift */,
 				23AB3114001202652F8107CF /* AuthorityTunnelStartPreparer.swift */,
+				88D3F2055732A13F15DDFB62 /* CurrentAppServiceBuildIdentity.swift */,
 				C4146744E5941DE00451B081 /* CurrentAppServiceMaintenance.swift */,
 				C0968AA95D99B0ADFCE2E644 /* GlobalAuthorityServiceController.swift */,
 				AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */,
@@ -1654,6 +1670,7 @@
 				B33DBA13DAFD5B12CBB88549 /* AuthorityMigrationRecoveryTests.swift */,
 				E7FC4B36F66C1A8276647F80 /* AuthorityMigrationTests.swift */,
 				0EA2D1DF586BD9D4FC56269F /* ContinuationGateTests.swift */,
+				D75E34CDE0982B08258C6B8F /* CurrentAppServiceBuildIdentityTests.swift */,
 				809342A1B071C7EC9BC2CBA7 /* CurrentAppServiceMaintenanceTests.swift */,
 				142BEACC628DDBF81D3767B7 /* GlobalAuthorityServiceControllerTests.swift */,
 				1620B333C955FB29FAE0D7AC /* HostTicketOnlyStartCancellationTests.swift */,
@@ -1680,6 +1697,7 @@
 				116FB108DAEC7A1D5A893E63 /* NativeBridgeABIRequestRegistryTests.swift */,
 				537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */,
 				7E78C153A23537769A7F8D59 /* NativeBridgeStartCommandIntegrationTests.swift */,
+				91AC920C955485007E259A90 /* ServiceBuildTestSupport.swift */,
 				23A8434D510A63CC0DD8F4E3 /* SystemProxyStartPreparerTestSupport.swift */,
 				D9A5BD97825FF29B51767DC6 /* TunnelStartupFailureMappingTests.swift */,
 			);
@@ -2360,6 +2378,7 @@
 				E82CF41C9875348866CA7D4F /* AuthorityMigrationRecovery.swift in Sources */,
 				F000BC8C71C55FA7E58BA019 /* AuthoritySystemProxyStartPreparer.swift in Sources */,
 				95BC27876DFD33B32D080B81 /* AuthorityTunnelStartPreparer.swift in Sources */,
+				7CF97406634C292E992518A7 /* CurrentAppServiceBuildIdentity.swift in Sources */,
 				D8F9FEF2F102E74E39B225C2 /* CurrentAppServiceMaintenance.swift in Sources */,
 				703A033D0A61E301C5E42F54 /* GlobalAuthorityServiceController.swift in Sources */,
 				31892327BE3A489CF3944978 /* HostBridge.swift in Sources */,
@@ -2395,6 +2414,7 @@
 				A9BA08A4674699FE9096AFF6 /* NativeCredentialOperations.swift in Sources */,
 				F0E9A05FCDAE5987205212C3 /* NativeEngineOperations.swift in Sources */,
 				636D9FC118E27E3AFF497050 /* NativeProfileProbe.swift in Sources */,
+				312DE70F1452BD5BE5AAD7C2 /* NativeServiceBuildUpgrade.swift in Sources */,
 				692231AC32BB1DDA9998CFB2 /* NativeServiceMaintenance.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -2415,6 +2435,7 @@
 				894759E742FD405750382EB9 /* AuthorityMigrationRecoveryTests.swift in Sources */,
 				B2BE5BBF11693DCAF8122319 /* AuthorityMigrationTests.swift in Sources */,
 				82D7622ADD91331C5583251A /* ContinuationGateTests.swift in Sources */,
+				50FB27BF9560CD697B23FCB5 /* CurrentAppServiceBuildIdentityTests.swift in Sources */,
 				9F556A3B9DE753175DDBEEE2 /* CurrentAppServiceMaintenanceTests.swift in Sources */,
 				F97D0D94B77C0D3C98CF0ADF /* GlobalAuthorityServiceControllerTests.swift in Sources */,
 				CC0052CFF063DB8B5351728A /* HostTicketOnlyStartCancellationTests.swift in Sources */,
@@ -2451,6 +2472,7 @@
 				B46F8298D75E6A4CDBB4C26A /* NativeBridgeABIRequestRegistryTests.swift in Sources */,
 				930613C9BEEDDD2FFC874965 /* NativeBridgeProtocolTests.swift in Sources */,
 				8402C24BB67D937A1496B15D /* NativeBridgeStartCommandIntegrationTests.swift in Sources */,
+				CF9DAC141D2DA93FE1E3736A /* ServiceBuildTestSupport.swift in Sources */,
 				BB7DAEEE558037767B17F502 /* SystemProxyStartPreparerTestSupport.swift in Sources */,
 				DE432DFC1E07AD57350C4448 /* TunnelStartupFailureMappingTests.swift in Sources */,
 			);
@@ -2538,6 +2560,7 @@
 				09D10C4C4BACC53129D462D9 /* ReleaseGateAndErrorMappingExampleTests.swift in Sources */,
 				591D1BD5E9F10FEF4CB973AF /* ReleaseObservationTests.swift in Sources */,
 				6BCC3006DF57517C283F6432 /* SandboxAcceptanceStoreTests.swift in Sources */,
+				CE4FE90915834A4488982EEB /* ServiceCodeHashTests.swift in Sources */,
 				0F7A8914DA83F0FF23B82662 /* TunnelStartPayloadTests.swift in Sources */,
 				31304B4A591A7AD8A04B0628 /* TunnelStartupFailureTests.swift in Sources */,
 				8BEB6EC7DD58B8D0E4B0610D /* VersionedJournalQueryContractTests.swift in Sources */,
@@ -2596,6 +2619,7 @@
 				9F1575F89D2C687E2604830D /* ReleaseObservation.swift in Sources */,
 				E1FEB1EB30DCC6826ABA4CA4 /* SandboxConfigurationAcceptanceStore.swift in Sources */,
 				2FF1FD83F995C36DA4B9F958 /* SecureAppGroupFileSystem.swift in Sources */,
+				D88D8A4A9D78DF98810EC844 /* ServiceCodeHash.swift in Sources */,
 				11F76D79F69C374799833893 /* TunnelStartPayload.swift in Sources */,
 				CFF39E6E6F5CB84DD781084C /* TunnelStartupFailure.swift in Sources */,
 				8A7D89A4C08C1C3B342754BE /* XPCProtocol.swift in Sources */,
@@ -3027,8 +3051,7 @@
 				DEFINES_MODULE = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"../../target/native-dependencies/Libbox.xcframework/macos-arm64",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3051,7 +3074,7 @@
 				EXECUTABLE_NAME = CFWPacketTunnel;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				INFOPLIST_FILE = "Config/PacketTunnel-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -3079,7 +3102,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3129,6 +3152,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -3161,8 +3188,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"../../target/native-dependencies/Libbox.xcframework/macos-arm64",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3185,7 +3211,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
-				CFW_BUILD_NUMBER = 40000;
+				CFW_BUILD_NUMBER = 50016;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
@@ -3241,7 +3267,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LM_FORCE_LINK_GENERATION = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.4.0;
+				MARKETING_VERSION = 0.5.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = NO;
@@ -3337,7 +3363,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
-				CFW_BUILD_NUMBER = 40000;
+				CFW_BUILD_NUMBER = 50016;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
@@ -3387,7 +3413,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LM_FORCE_LINK_GENERATION = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.4.0;
+				MARKETING_VERSION = 0.5.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = NO;
@@ -3433,8 +3459,7 @@
 				DEFINES_MODULE = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"../../target/native-dependencies/Libbox.xcframework/macos-arm64",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3496,7 +3521,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3520,7 +3545,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3702,6 +3727,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -3761,7 +3790,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3785,7 +3814,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3810,7 +3839,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				INFOPLIST_FILE = "Config/ProxyAgent-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -3839,7 +3868,7 @@
 				EXECUTABLE_NAME = CFWPacketTunnel;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				INFOPLIST_FILE = "Config/PacketTunnel-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -3915,6 +3944,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -3930,6 +3963,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
+				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -3967,8 +4004,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"../../target/native-dependencies/Libbox.xcframework/macos-arm64",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -3994,7 +4030,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -4034,7 +4070,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"../../target/native-dependencies\"",
+					"\"../../target/native-dependencies/Libbox.xcframework/macos-arm64\"",
 				);
 				INFOPLIST_FILE = "Config/ProxyAgent-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (

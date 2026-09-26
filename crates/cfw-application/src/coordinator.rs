@@ -12,6 +12,7 @@ use crate::{
     coordinator_actor::{
         Command, CoordinatorRuntime, SetModeCommand, StartupReconciliation, run_coordinator,
     },
+    coordinator_startup::ReconciliationOutcome,
     runtime::validate_lineage,
 };
 
@@ -48,7 +49,7 @@ impl Default for CoordinatorOptions {
 pub struct EngineModeCoordinator {
     commands: mpsc::Sender<Command>,
     snapshots: watch::Receiver<EngineSnapshot>,
-    reconciliation: watch::Receiver<Option<Result<EngineSnapshot, EngineCoordinatorError>>>,
+    reconciliation: watch::Receiver<Option<ReconciliationOutcome>>,
 }
 
 impl EngineModeCoordinator {
@@ -297,6 +298,57 @@ impl EngineModeCoordinator {
         self.snapshots.borrow().clone()
     }
 
+    /// The typed failure of the latest startup reconciliation, if any.
+    /// Reading this value does not query or mutate native services. A successful
+    /// explicit retry clears it through the existing reconciliation channel.
+    pub fn startup_failure(&self) -> Option<EngineCoordinatorError> {
+        self.reconciliation
+            .borrow()
+            .as_ref()
+            .and_then(|outcome| outcome.result.as_ref().err().cloned())
+    }
+
+    /// Presentation-only eligibility for one explicit startup service recovery.
+    /// The actor rechecks the failure identity and native ownership boundaries.
+    pub fn can_reconcile_startup(&self) -> bool {
+        !self.commands.is_closed()
+            && self
+                .reconciliation
+                .borrow()
+                .as_ref()
+                .is_some_and(|outcome| outcome.recovery.is_some())
+    }
+
+    /// Reobserves the one recoverable startup service failure and settles only
+    /// at Off. It never follows recovery with a start. Accepted work survives
+    /// cancellation of its caller, like other ownership-bearing actor commands.
+    /// Stale/repeated offers are rejected without native I/O.
+    pub fn reconcile_startup(
+        &self,
+    ) -> impl Future<Output = Result<EngineSnapshot, EngineCoordinatorError>> + Send + 'static + use<>
+    {
+        // Capture at the user-action boundary, before a Host operation queue
+        // may await its own permit. Polling later must not adopt a newer offer.
+        let expected_failure = self
+            .reconciliation
+            .borrow()
+            .as_ref()
+            .and_then(|outcome| outcome.recovery.clone());
+        let commands = self.commands.clone();
+        async move {
+            let (response_tx, response_rx) = oneshot::channel();
+            commands
+                .try_send(Command::ReconcileStartup {
+                    expected_failure,
+                    response: response_tx,
+                })
+                .map_err(map_send_error)?;
+            response_rx
+                .await
+                .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
+        }
+    }
+
     /// Serializes native preparation, candidate validation, runtime replacement
     /// and the storage commit with status polling and mode changes. Fetch remote
     /// input before calling this method. The actor reads the current mode when
@@ -385,8 +437,8 @@ impl EngineModeCoordinator {
     pub async fn wait_for_reconciliation(&self) -> Result<EngineSnapshot, EngineCoordinatorError> {
         let mut reconciliation = self.reconciliation.clone();
         loop {
-            if let Some(result) = reconciliation.borrow().clone() {
-                return result;
+            if let Some(outcome) = reconciliation.borrow().clone() {
+                return outcome.result;
             }
             reconciliation
                 .changed()

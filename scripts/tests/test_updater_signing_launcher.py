@@ -581,6 +581,82 @@ class PinnedSignerVerificationTests(unittest.TestCase):
             )
         return held, captured_arguments, captured_kwargs
 
+    def test_obsolete_or_extra_patch_metadata_rejected_before_credentials(self) -> None:
+        from scripts.hash_artifact import build_manifest
+
+        for mutation in ("old-kind", "extra-patch"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repository, signer, manifest = self._repository(root, b"fixture signer")
+                fixture = SigningHome(root)
+                metadata = dict(
+                    item.split("=", 1) for item in launcher.PINNED_TAURI_METADATA
+                )
+                payload = build_manifest(
+                    signer.parent.parent, algorithm="sha256-tree-v2"
+                )
+                payload["metadata"] = metadata
+                manifest.write_text(json.dumps(payload), encoding="utf-8")
+                calls: list[subprocess.CompletedProcess[bytes]] = []
+
+                def runner(arguments: list[str], **kwargs: object):
+                    command = [
+                        str(REPO_ROOT / "scripts/verify_artifact_manifest.py")
+                        if value == str(repository / "scripts/verify_artifact_manifest.py")
+                        else value
+                        for value in arguments
+                    ]
+                    result = subprocess.run(command, **kwargs)
+                    calls.append(result)
+                    return result
+
+                def verifier(_repository: Path):
+                    # Exercise exact metadata with this test lane's runtime;
+                    # production runtime admission has its own policy tests.
+                    return launcher._verify_pinned_tauri_signer_with_runtime(
+                        repository, Path(sys.executable).resolve(strict=True),
+                        runner=runner,
+                    )
+
+                held = verifier(repository)
+                os.close(held.descriptor)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0].returncode, 0)
+                self.assertEqual(calls[0].stderr, b"")
+                self.assertEqual(calls[0].stdout, _verified_signer_entry(signer))
+                calls.clear()
+                if mutation == "old-kind":
+                    metadata["artifactKind"] = "pinned-tauri-cli-v2"
+                else:
+                    metadata["lockPatchSha256"] = "a" * 64
+                manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+                password_reader = mock.Mock(
+                    side_effect=AssertionError("credential access")
+                )
+                execve = mock.Mock(side_effect=AssertionError("signer execution"))
+                with self.assertRaisesRegex(
+                    launcher.UpdaterSigningLaunchError,
+                    "source-bound Tauri toolchain tree or exact metadata did not verify",
+                ):
+                    launcher._launch_updater_signer(
+                        fixture.archive,
+                        signer_verifier=verifier,
+                        home=fixture.home,
+                        password_reader=password_reader,
+                        acl_checker=lambda _path: None,
+                        execve=execve,
+                    )
+                self.assertEqual(len(calls), 1)
+                self.assertNotEqual(calls[0].returncode, 0)
+                expected = (
+                    b"artifactKind mismatch" if mutation == "old-kind"
+                    else b"metadata field set mismatch"
+                )
+                self.assertIn(expected, calls[0].stderr)
+                password_reader.assert_not_called()
+                execve.assert_not_called()
+
     def test_distinct_source_bound_signer_outputs_are_accepted(self) -> None:
         for signer_bytes in (b"first-host-signer", b"second-host-signer-output"):
             with self.subTest(signer_bytes=signer_bytes):
@@ -1338,21 +1414,27 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
             output_lines = completed.stdout.decode(
                 "utf-8", errors="strict"
             ).splitlines()
-            self.assertEqual(len(output_lines), 8)
-            self.assertEqual(output_lines[0], "")
+            self.assertEqual(len(output_lines), 9)
             self.assertEqual(
-                output_lines[1],
+                output_lines[0],
+                "Signing without an app version. Pass --app-version to bind this "
+                "signature to a version; updaters configured with "
+                "`requireSignedVersion` will reject this signature.",
+            )
+            self.assertEqual(output_lines[1], "")
+            self.assertEqual(
+                output_lines[2],
                 "Your file was signed successfully, You can find the signature here:",
             )
-            self.assertEqual(output_lines[2], str(signature.resolve(strict=True)))
-            self.assertEqual(output_lines[3:5], ["", "Public signature:"])
+            self.assertEqual(output_lines[3], str(signature.resolve(strict=True)))
+            self.assertEqual(output_lines[4:6], ["", "Public signature:"])
             decoded_signature = base64.b64decode(
-                output_lines[5].encode("ascii"), validate=True
+                output_lines[6].encode("ascii"), validate=True
             )
             self.assertGreater(len(decoded_signature), 0)
-            self.assertEqual(output_lines[6], "")
+            self.assertEqual(output_lines[7], "")
             self.assertEqual(
-                output_lines[7],
+                output_lines[8],
                 "Make sure to include this into the signature field of your update server.",
             )
             self.assertEqual(hashlib.sha256(fixture.key.read_bytes()).hexdigest(), before)

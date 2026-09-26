@@ -37,6 +37,10 @@ class PublicationSourcePlanPinTests(unittest.TestCase):
         for component, reference in expected.items():
             with self.subTest(component=component):
                 self.assertEqual(_SOURCE_CLOSURE_PLANS[component]["reference"], reference)
+        self.assertEqual(
+            _SOURCE_CLOSURE_PLANS["tauri-cli"]["upstream"],
+            f"https://crates.io/crates/tauri-cli/{pins['TAURI_CLI_VERSION']}",
+        )
         self.assertIn(pins["XCODE_VERSION"], _SOURCE_CLOSURE_PLANS["xcode"]["reference"])
 
 

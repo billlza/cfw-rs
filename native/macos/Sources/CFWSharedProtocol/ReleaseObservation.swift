@@ -158,11 +158,18 @@ public struct ReleaseObservationJournalDecision: Codable, Equatable, Sendable {
 }
 
 public struct ReleaseObservationCandidate: Codable, Equatable, Sendable {
+  static let previewProductVersion = "0.5.0"
+  static let previewBuildNumber = "50016"
+
   public let version: String
   public let buildNumber: String
 
   public init(version: String, buildNumber: String) throws {
-    guard version == "0.4.0",
+    // Preserve historical release observations while admitting only the fixed
+    // preview identity. Observation acceptance does not grant GA eligibility.
+    guard
+      version == "0.4.0"
+        || (version == Self.previewProductVersion && buildNumber == Self.previewBuildNumber),
       !buildNumber.isEmpty, buildNumber.count <= 18,
       buildNumber.first != "0",
       buildNumber.utf8.allSatisfy({

@@ -116,7 +116,9 @@ test("renderer pages are exactly the shared page contract", () => {
 
 test("every command the dashboard invokes exists in generate_handler!", () => {
   const handlers = handlerCommands();
-  assert.equal(handlers.size, 90, "the release command surface includes bounded startup diagnostics and admitted reload");
+  const baseline = JSON.parse(readFileSync(path.join(shellRoot, "../../docs/planning/0.5.0-command-baseline.json"), "utf8"));
+  assert.deepEqual([...handlers].sort(), [...baseline.commands, "present_native_profile_menu", "update_native_profile_menu", "dismiss_native_profile_menu", "present_native_runtime_settings", "update_native_runtime_settings", "dismiss_native_runtime_settings", "sync_native_general_switches", "focus_native_general_switch", "dismiss_native_general_switches", "reconcile_startup_services"].sort(),
+    "retain every frozen command and add only the admitted presentation and explicit startup recovery commands");
   const missing = [...invoked.keys()].filter((command) => !handlers.has(command));
   assert.deepEqual(missing, [], `dashboard invokes commands that do not exist: ${missing.join(", ")}`);
 });

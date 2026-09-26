@@ -14,6 +14,8 @@ source "$repo_root/scripts/dependency_pins.env"
 source "$repo_root/scripts/release_tool_environment.sh"
 # shellcheck source=scripts/release_policy_tool_directory.sh
 source "$repo_root/scripts/release_policy_tool_directory.sh"
+# shellcheck source=scripts/native_ui_development_checks.sh
+source "$repo_root/scripts/native_ui_development_checks.sh"
 
 die() {
   echo "error: $*" >&2
@@ -198,7 +200,7 @@ case "$gate" in
   version-contract)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
     cfw_run_release_python_script \
-      "$repo_root" "$repo_root/scripts/verify_version_contract.py"
+      "$repo_root" "$repo_root/scripts/verify_version_contract.py" --preview
     ;;
   rust-fmt)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
@@ -213,15 +215,11 @@ case "$gate" in
     ;;
   rust-clippy)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
-    cfw_run_with_fresh_release_cargo_target \
-      "$repo_root" "$CFW_RELEASE_CARGO_EXECUTABLE" clippy \
-      --locked --workspace --all-targets --all-features -- -D warnings
+    cfw_run_native_ui_development_check "$repo_root" clippy
     ;;
   rust-test)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
-    cfw_run_with_fresh_release_cargo_target \
-      "$repo_root" "$CFW_RELEASE_CARGO_EXECUTABLE" test \
-      --locked --workspace --all-targets --all-features
+    cfw_run_native_ui_development_check "$repo_root" test
     ;;
   rust-target-audit)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"

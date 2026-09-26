@@ -176,7 +176,8 @@ private final class RebindTestStore: CredentialVaultBlobStoring, @unchecked Send
   let coordinator = NativeBridgeCoordinator(
     proxy: proxy, systemProxyPreparer: UnusedSystemProxyStartPreparer(), tunnel: tunnel,
     engineLease: AvailableEngineLease(), credentialVault: EmptyCredentialVault(),
-    hostOperationLease: ForbiddenProfileProbeOperationLease())
+    hostOperationLease: ForbiddenProfileProbeOperationLease(),
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
   let request = try ProfileDelayTestRequest(
     audience: preflightRequest().systemProxyRequest.credentialAudience,
     configJSON: #"{"outbounds":[{"type":"direct","tag":"node"}]}"#,
@@ -386,8 +387,8 @@ private func makeCoordinator(
     tunnel: tunnel,
     engineLease: AvailableEngineLease(),
     credentialVault: credentialVault,
-    hostOperationLease: AvailableNativeHostOperationLease()
-  )
+    hostOperationLease: AvailableNativeHostOperationLease(),
+    serviceBuildObserver: FixedCurrentServiceBuildObserver())
 }
 
 private struct PreflightIdentityDocument: Encodable {

@@ -714,5 +714,22 @@
   "{state} · desired {desiredMode}": "{state} · 要求模式 {desiredMode}",
   "{title} - {mode} Mode": "{title} - {mode}模式",
   "{value1} Keychain entr{value2} not referenced by any stored profile. Cleanup revalidates the repository snapshot and the vault revision before one atomic deletion.": "有 {value1} 項鑰匙圈記錄未被任何設定檔參照。清理會重新驗證設定檔庫快照與憑證庫版本後，執行一次不可分割的刪除。{value2}",
-  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 行日誌{value3}"
+  "{visibleCount}{total} log entries{value3}": "{visibleCount}{total} 行日誌{value3}",
+  "Native Overview": "原生總覽",
+  "The native settings window could not deliver this action. Close it and try again.": "原生設定視窗未能提交此操作。請關閉後重試。",
+  "{label} must contain at most {maximum} characters": "{label}最多可輸入 {maximum} 個字元",
+  "Ascending order": "升冪",
+  "Clear connection search": "清除連線搜尋",
+  "Descending order": "降冪",
+  "Sort connections by downloaded data": "依下載資料量排序連線",
+  "Sort connections by host": "依主機排序連線",
+  "Sort connections by start time": "依開始時間排序連線",
+  "Sort connections by uploaded data": "依上傳資料量排序連線",
+  "Background service recovery completed.": "背景服務恢復完成。",
+  "Background service recovery did not prove the engine is Off.": "背景服務恢復未能確認核心已停止。",
+  "Background service recovery is not available in the current state.": "目前狀態無法執行背景服務恢復。",
+  "Check and restore background services while keeping the engine stopped.": "檢查並恢復背景服務，保持核心停止。",
+  "Recover background services": "恢復背景服務",
+  "Recover background services before starting a connection.": "請先恢復背景服務，再啟動連線。",
+  "Recovering…": "正在恢復…"
 }

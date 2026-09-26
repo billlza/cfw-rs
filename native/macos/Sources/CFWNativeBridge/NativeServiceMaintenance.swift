@@ -1,8 +1,11 @@
 import CFWAppleNetwork
 import CFWSharedProtocol
 import Foundation
+import OSLog
 
 extension NativeBridgeCoordinator {
+  private static let maintenanceLog = Logger(
+    subsystem: "com.bill.clashformac", category: "service-maintenance")
   func maintainCurrentServices(
     _ action: NativeServiceMaintenanceAction
   ) async throws -> NativeServiceMaintenanceResult {
@@ -40,7 +43,7 @@ extension NativeBridgeCoordinator {
       try await requireCurrentMaintenanceOwnersOff(
         for: before, requireAuthorityProof: true)
       if before.proxy == .enabled {
-        try perform(.unregister, on: .proxyAgent)
+        try await perform(.unregister, on: .proxyAgent)
       }
       try await waitForServiceProcessAbsence(.proxyAgent)
       try await requireCurrentMaintenanceOwnersOff(
@@ -55,7 +58,7 @@ extension NativeBridgeCoordinator {
       try await requireInstalled40019MaintenanceOwnersOff(
         for: before, requireAuthorityProof: true)
       if before.proxy == .enabled {
-        try perform(.unregister, on: .proxyAgent)
+        try await perform(.unregister, on: .proxyAgent)
       }
       try await waitForServiceProcessAbsence(.proxyAgent)
       try await requireInstalled40019MaintenanceOwnersOff(
@@ -75,11 +78,11 @@ extension NativeBridgeCoordinator {
         // Authority client while preserving a self-contained retry proof.
         try await requireCurrentMaintenanceOwnersOff(
           for: before, requireAuthorityProof: false)
-        try perform(.register, on: .globalAuthority)
+        try await perform(.register, on: .globalAuthority)
       }
       try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: true)
-      try perform(.unregister, on: .globalAuthority)
+      try await perform(.unregister, on: .globalAuthority)
       try await waitForServiceProcessAbsence(.globalAuthority)
       try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: false)
@@ -92,7 +95,7 @@ extension NativeBridgeCoordinator {
       )
       try await requireInstalled40019MaintenanceOwnersOff(
         for: before, requireAuthorityProof: true)
-      try perform(.unregister, on: .globalAuthority)
+      try await perform(.unregister, on: .globalAuthority)
       try await waitForServiceProcessAbsence(.globalAuthority)
       try await requireInstalled40019MaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: false)
@@ -106,11 +109,11 @@ extension NativeBridgeCoordinator {
       if before.authority == .notRegistered {
         try await requireCurrentMaintenanceOwnersOff(
           for: before, requireAuthorityProof: false)
-        try perform(.register, on: .globalAuthority)
+        try await perform(.register, on: .globalAuthority)
       }
       try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: true)
-      try perform(.unregister, on: .globalAuthority)
+      try await perform(.unregister, on: .globalAuthority)
       try await waitForServiceProcessAbsence(.globalAuthority)
       try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: false)
@@ -124,7 +127,7 @@ extension NativeBridgeCoordinator {
       if before.authority == .notRegistered {
         try await requireCurrentMaintenanceOwnersOff(
           for: before, requireAuthorityProof: false)
-        try perform(.register, on: .globalAuthority)
+        try await perform(.register, on: .globalAuthority)
       }
       try await requireMaintenanceTunnelOff()
       try requireServiceProcessAbsent(.proxyAgent)
@@ -143,7 +146,7 @@ extension NativeBridgeCoordinator {
       try await requireAuthorityReadyForServiceRegistration()
       if before.proxy == .notRegistered {
         try requireServiceProcessAbsent(.proxyAgent)
-        try perform(.register, on: .proxyAgent)
+        try await perform(.register, on: .proxyAgent)
       }
       // A restarted Authority cannot prove Off until the Agent has recovered
       // its ownership journal. Registering the observer starts no data plane;
@@ -160,36 +163,100 @@ extension NativeBridgeCoordinator {
     return result
   }
 
-  private func retireOrphanedServices() async throws -> NativeServiceMaintenanceResult {
+  func retireOrphanedServicesForUpgrade() async throws -> NativeServiceMaintenanceResult {
+    try Task.checkCancellation()
+    try requirePair(
+      servicePair(), proxy: [.enabled], authority: [.notRegistered],
+      operation: "Automatic orphaned service retirement")
+    return try await retireOrphanedServices(requireStableProxyOff: true)
+  }
+
+  private func retireOrphanedServices(
+    requireStableProxyOff: Bool = false
+  ) async throws -> NativeServiceMaintenanceResult {
     try requirePair(
       servicePair(), proxy: [.enabled, .notRegistered], authority: [.enabled, .notRegistered],
       operation: "Orphaned service retirement")
     try await requireOrphanedServiceRetirementBoundary()
-    if servicePair().proxy == .enabled {
-      let snapshot = try Self.requireObservation(
-        await Self.observe { try await self.proxy.snapshot() }, component: "ProxyAgent")
+    if requireStableProxyOff {
+      try Task.checkCancellation()
+      try requirePair(
+        servicePair(), proxy: [.enabled], authority: [.notRegistered],
+        operation: "Automatic orphaned Proxy observation")
+    }
+    if requireStableProxyOff || servicePair().proxy == .enabled {
+      let observation = await Self.observe { try await self.proxy.snapshot() }
+      if requireStableProxyOff { try Task.checkCancellation() }
+      let snapshot = try Self.requireObservation(observation, component: "ProxyAgent")
       guard
         Self.isStableOff(snapshot)
-          || ((snapshot.mode == .localProxy || snapshot.mode == .systemProxy)
+          || (!requireStableProxyOff
+            && (snapshot.mode == .localProxy || snapshot.mode == .systemProxy)
             && snapshot.state.kind == .failed)
       else {
         throw NativeBridgeExecutionError.failure(.busy, "An active ProxyAgent cannot be retired.")
       }
       try await requireOrphanedServiceRetirementBoundary()
-      try perform(.unregister, on: .proxyAgent)
+      if requireStableProxyOff {
+        // The boundary above awaits the Tunnel. Re-observe the Proxy afterwards;
+        // an Off -> failed/active transition must not inherit manual recovery's
+        // permission to retire a failed owner. Recheck trusted identities and
+        // the exact mixed pair immediately before the unregister mutation.
+        try Task.checkCancellation()
+        let fresh = try Self.requireObservation(
+          await Self.observe { try await self.proxy.snapshot() }, component: "ProxyAgent")
+        try Task.checkCancellation()
+        guard Self.isStableOff(fresh) else {
+          throw NativeBridgeExecutionError.failure(
+            .busy, "Automatic service retirement requires a stable Off ProxyAgent.")
+        }
+        try requireOrphanedUpgradeIdentities()
+      }
+      try await perform(.unregister, on: .proxyAgent)
     }
     try await waitForServiceProcessAbsence(.proxyAgent)
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
     try await requireOrphanedServiceRetirementBoundary()
-    if servicePair().authority == .enabled {
-      try perform(.unregister, on: .globalAuthority)
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
+    // Automatic recovery only owned the orphaned Proxy mutation. A newly
+    // registered Authority is a state change, never permission to retire it.
+    if !requireStableProxyOff && servicePair().authority == .enabled {
+      try await perform(.unregister, on: .globalAuthority)
     }
     try await waitForServiceProcessAbsence(.globalAuthority)
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
     try requireServiceProcessAbsent(.proxyAgent)
     try await requireOrphanedServiceRetirementBoundary()
+    if requireStableProxyOff { try requireAutomaticallyRetiredPair() }
     // No Off attestation: the journals remain for the replacement's recovery.
     let result = maintenanceResult(action: .retireOrphanedServices, engineStatus: nil)
     try requireMaintenancePostcondition(result)
     return result
+  }
+
+  private func requireAutomaticallyRetiredPair() throws {
+    try Task.checkCancellation()
+    try requirePair(
+      servicePair(), proxy: [.notRegistered], authority: [.notRegistered],
+      operation: "Automatic orphaned service retirement completion")
+  }
+
+  private func requireOrphanedUpgradeIdentities() throws {
+    let inspection: CurrentAppServiceBuildInspection
+    do {
+      inspection = try serviceBuildObserver.inspect()
+      try inspection.proxy.requireNonConflictingVersion()
+      try inspection.authority.requireNonConflictingVersion()
+    } catch {
+      throw NativeBridgeExecutionError.failure(
+        .identityRejected, "Orphaned service identities changed before retirement.")
+    }
+    guard inspection.proxy.registration == .enabled, inspection.proxy.runningCode != nil,
+      inspection.authority.registration == .notRegistered, inspection.authority.runningCode == nil
+    else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven, "Orphaned service registrations changed before retirement.")
+    }
   }
 
   private func requireOrphanedServiceRetirementBoundary() async throws {
@@ -439,10 +506,14 @@ extension NativeBridgeCoordinator {
   private func perform(
     _ mutation: CurrentAppServiceMutation,
     on service: CurrentAppService
-  ) throws {
+  ) async throws {
     do {
-      _ = try serviceMaintainer.perform(mutation, on: service)
+      _ = try await serviceMaintainer.perform(mutation, on: service)
+      try Task.checkCancellation()
     } catch let error as CurrentAppServiceMaintenanceError {
+      Self.maintenanceLog.error(
+        "Service maintenance failed: service=\(service.rawValue) mutation=\(mutation.rawValue) cause=\(String(describing: error), privacy: .public)"
+      )
       switch error {
       case .approvalRequired:
         throw NativeBridgeExecutionError.failure(
@@ -456,7 +527,18 @@ extension NativeBridgeCoordinator {
       case .mutationFailed, .postconditionFailed:
         throw NativeBridgeExecutionError.failure(
           .cleanupUnproven, "A fixed service mutation did not prove its postcondition.")
+      case .unregistrationPending:
+        throw NativeBridgeExecutionError.failure(
+          .busy, "The previous service unregistration has not completed.")
+      case .unregistrationTimedOut:
+        throw NativeBridgeExecutionError.failure(
+          .timeout, "Service unregistration did not complete before its bounded deadline.")
       }
+    } catch is CancellationError {
+      Self.maintenanceLog.notice(
+        "Service maintenance wait cancelled: service=\(service.rawValue) mutation=\(mutation.rawValue)"
+      )
+      throw CancellationError()
     } catch {
       throw NativeBridgeExecutionError.failure(
         .internal, "A fixed service mutation failed at its native boundary.")

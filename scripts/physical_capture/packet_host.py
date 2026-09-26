@@ -17,6 +17,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import secrets
 import signal
@@ -147,6 +148,7 @@ class PacketHostError(RuntimeError):
         self.code = code
         self.cleanup_code: str | None = None
         self.cleanup_context: str | None = None
+        self.protocol_context: dict[str, Any] | None = None
 
     def attach_cleanup_context(self, cleanup_error: BaseException) -> None:
         """Retain this primary failure while exposing a secondary cleanup failure."""
@@ -373,7 +375,7 @@ def _signal_process_group(
             return True, child_reaped
         except ProcessLookupError:
             return False, child_reaped
-        except PermissionError as error:
+        except PermissionError:
             if child_reaped:
                 # Darwin can retain an already-signalled descendant as a
                 # transient zombie and report EPERM for the whole group. This
@@ -383,10 +385,10 @@ def _signal_process_group(
             if not child_reaped and _reap_child_nonblocking(pid):
                 child_reaped = True
                 continue
-            raise PacketHostError(
-                "host_cleanup_unproven",
-                "Packet Host process-group cleanup is unproven",
-            ) from error
+            # A leader may still be exiting when Darwin first reports EPERM.
+            # Keep both obligations outstanding and use the caller's existing
+            # bounded TERM/KILL grace periods to await reap and group removal.
+            return True, False
     raise PacketHostError(
         "host_cleanup_unproven", "Packet Host process-group cleanup is unproven"
     )
@@ -450,6 +452,28 @@ def _terminate_process_group(pid: int) -> None:
     )
 
 
+def _fixed_host_environment() -> dict[str, str]:
+    uid = os.getuid()
+    if uid == 0 or os.geteuid() != uid:
+        raise PacketHostError(
+            "host_environment_invalid", "Packet evidence requires the ordinary real user"
+        )
+    try:
+        account = pwd.getpwuid(uid)
+        home = account.pw_dir
+        if account.pw_uid != uid or not home or not Path(home).is_absolute():
+            raise ValueError("account home is not absolute")
+        canonical = Path(home).resolve(strict=True)
+        encoded = os.fsencode(str(canonical))
+        if b"\0" in encoded or os.fsdecode(encoded) != str(canonical) or not canonical.is_dir():
+            raise ValueError("account home is not an encodable directory")
+    except (KeyError, OSError, ValueError) as error:
+        raise PacketHostError(
+            "host_environment_invalid", "the real user's account home is unavailable or invalid"
+        ) from error
+    return {**FIXED_ENVIRONMENT, "HOME": str(canonical)}
+
+
 def _spawn_fixed_host(child_fd: int, parent_fd: int) -> int:
     actions = [
         (os.POSIX_SPAWN_CLOSE, parent_fd),
@@ -461,7 +485,7 @@ def _spawn_fixed_host(child_fd: int, parent_fd: int) -> int:
         return os.posix_spawn(
             str(HOST_EXECUTABLE),
             HOST_ARGV,
-            dict(FIXED_ENVIRONMENT),
+            _fixed_host_environment(),
             file_actions=actions,
             setsid=True,
             setsigmask=(),
@@ -1135,10 +1159,16 @@ def run_fixed_host_transaction(
                 finish_disposition=finish_disposition,
             )
             if failure["code"] != expected_failure:
-                raise PacketHostError(
+                mismatch = PacketHostError(
                     "host_result_inconsistent",
                     "Packet Host failure differs from begin or terminal cleanup",
                 )
+                mismatch.protocol_context = {
+                    "expected_failure_code": expected_failure,
+                    "terminal": progress,
+                    "final": final,
+                }
+                raise mismatch from (callback_errors[0] if callback_errors else None)
             if callback_errors and failure["code"] == "capture_cancelled":
                 raise PacketHostError(
                     "capture_callback_failed",
@@ -1236,10 +1266,16 @@ def run_fixed_host_transaction(
                 finish_disposition=finish_disposition,
             )
             if expected_failure is not None and failure["code"] != expected_failure:
-                raise PacketHostError(
+                mismatch = PacketHostError(
                     "host_result_inconsistent",
                     "Packet Host terminal failure differs from its cleanup disposition",
                 )
+                mismatch.protocol_context = {
+                    "expected_failure_code": expected_failure,
+                    "terminal": restore_frame if test is not None else progress,
+                    "final": final,
+                }
+                raise mismatch from (callback_errors[0] if callback_errors else None)
             if callback_errors and failure["code"] == "capture_cancelled":
                 raise PacketHostError(
                     "capture_callback_failed",

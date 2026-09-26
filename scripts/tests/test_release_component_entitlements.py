@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import hashlib
 import os
 from pathlib import Path
@@ -240,30 +241,47 @@ class ReleaseComponentEntitlementTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = main(
-                [
-                    "--role",
-                    "proxy-agent",
-                    "--decoded-profile",
-                    str(profile_path),
-                    "--reviewed-entitlements",
-                    str(reviewed_path),
-                    "--signing-identities",
-                    str(identities_path),
-                    "--signing-identity",
-                    SIGNING_IDENTITY,
-                    "--expected-profile-uuid",
-                    PROFILE_UUIDS["proxy-agent"],
-                    "--output",
-                    str(output_path),
-                ]
-            )
+            arguments = [
+                "--role",
+                "proxy-agent",
+                "--decoded-profile",
+                str(profile_path),
+                "--reviewed-entitlements",
+                str(reviewed_path),
+                "--signing-identities",
+                str(identities_path),
+                "--signing-identity",
+                SIGNING_IDENTITY,
+                "--expected-profile-uuid",
+                PROFILE_UUIDS["proxy-agent"],
+                "--output",
+                str(output_path),
+            ]
+            # Keep CLI parsing, plist reads, identity/profile validation, and
+            # xcent writes real; bind only the validator's existing clock input.
+            with mock.patch(
+                "scripts.release_component_entitlements.build_release_component_entitlements",
+                wraps=partial(build_release_component_entitlements, now=NOW),
+            ):
+                result = main(arguments)
 
             self.assertEqual(result, 0)
             self.assertEqual(
                 plistlib.loads(output_path.read_bytes()), build("proxy-agent")
             )
             self.assertEqual(stat.S_IMODE(output_path.stat().st_mode), 0o600)
+
+            expired_profile = valid_profile("proxy-agent")
+            expired_profile["ExpirationDate"] = NOW
+            profile_path.write_bytes(plistlib.dumps(expired_profile))
+            expired_output = root / "expired.release.xcent"
+            arguments[-1] = str(expired_output)
+            with mock.patch(
+                "scripts.release_component_entitlements.build_release_component_entitlements",
+                wraps=partial(build_release_component_entitlements, now=NOW),
+            ), self.assertRaisesRegex(SystemExit, "profile has expired"):
+                main(arguments)
+            self.assertFalse(expired_output.exists())
 
 
 class ReleaseXcentFilesystemTests(unittest.TestCase):

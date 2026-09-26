@@ -1132,10 +1132,34 @@ def verify_runtime_cargo_home(
         raise ReleaseCargoInputsError("runtime Cargo home contains a forbidden source or configuration")
 
 
+def release_verifier_package_identity(repository: Path) -> tuple[str, str]:
+    # Bind the root to the source-owned crate we will actually compile. A fixed
+    # historical product version both rejects a newer release and fails to
+    # detect a manifest/lock disagreement in the older release.
+    try:
+        manifest = tomllib.loads(
+            read_regular(
+                repository / "crates/cfw-release-verifier/Cargo.toml", 64 * 1024
+            ).decode("utf-8")
+        )
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, PublicationError) as error:
+        raise ReleaseCargoInputsError("release verifier manifest is unavailable or invalid") from error
+    package = manifest.get("package")
+    if (
+        not isinstance(package, dict)
+        or package.get("name") != "cfw-release-verifier"
+        or not isinstance(package.get("version"), str)
+        or not CRATE_VERSION_RE.fullmatch(package["version"])
+    ):
+        raise ReleaseCargoInputsError("release verifier manifest lacks an exact package identity")
+    return "cfw-release-verifier", package["version"]
+
+
 def release_verifier_dependency_records(
     repository: Path,
     inputs: WorkspaceCargoInputs,
 ) -> dict[str, object]:
+    _, verifier_version = release_verifier_package_identity(repository)
     _lock_sha, packages, _locked = _read_workspace_lock(repository)
     indexed: dict[str, list[dict[str, Any]]] = {}
     by_identity: dict[tuple[str, str, str | None], dict[str, Any]] = {}
@@ -1146,7 +1170,7 @@ def release_verifier_dependency_records(
     roots = [
         value
         for value in indexed.get("cfw-release-verifier", [])
-        if value.get("source") is None and value.get("version") == "0.4.0"
+        if value.get("source") is None and value.get("version") == verifier_version
     ]
     if len(roots) != 1:
         raise ReleaseCargoInputsError("Cargo.lock lacks the exact release verifier root")
@@ -1285,6 +1309,7 @@ __all__ = [
     "prepare_workspace_cargo_inputs",
     "reject_ambient_cargo_configuration",
     "release_verifier_dependency_records",
+    "release_verifier_package_identity",
     "verify_runtime_cargo_home",
     "verify_workspace_cargo_inputs",
     "workspace_input_root",

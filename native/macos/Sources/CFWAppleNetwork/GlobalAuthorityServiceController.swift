@@ -23,12 +23,14 @@ public protocol GlobalAuthorityServiceControlling: Sendable {
 
 public protocol GlobalAuthorityDaemonServicing: Sendable {
   var registrationStatus: GlobalAuthorityRegistrationStatus { get }
+  func requireRegistrationReady() throws
   func register() throws
-  func unregister() throws
+  func unregister() async throws
 }
 
 public struct SMGlobalAuthorityDaemonService: GlobalAuthorityDaemonServicing {
   public static let plistName = "com.bill.clashformac.global-authority.plist"
+  private let unregistration = ServiceUnregistrationBarrier()
 
   public init() {}
 
@@ -42,12 +44,22 @@ public struct SMGlobalAuthorityDaemonService: GlobalAuthorityDaemonServicing {
     }
   }
 
-  public func register() throws {
-    try SMAppService.daemon(plistName: Self.plistName).register()
+  public func requireRegistrationReady() throws {
+    try unregistration.requireRegistrationReady()
   }
 
-  public func unregister() throws {
-    try SMAppService.daemon(plistName: Self.plistName).unregister()
+  public func register() throws {
+    try unregistration.register {
+      try SMAppService.daemon(plistName: Self.plistName).register()
+    }
+  }
+
+  public func unregister() async throws {
+    try await unregistration.unregister { finish in
+      SMAppService.daemon(plistName: Self.plistName).unregister { error in
+        finish(error.map { .failure($0) } ?? .success(()))
+      }
+    }
   }
 }
 
@@ -63,6 +75,9 @@ public struct SMGlobalAuthorityServiceController: GlobalAuthorityServiceControll
   }
 
   public func ensureRegistered() throws {
+    do { try service.requireRegistrationReady() } catch {
+      throw GlobalAuthorityRegistrationError.registrationFailed
+    }
     switch service.registrationStatus {
     case .enabled:
       return

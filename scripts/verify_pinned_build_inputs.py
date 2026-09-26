@@ -13,9 +13,8 @@ entrypoint additionally requires the generated packet LAN peer artifact, while
   ``--locked`` and the release gate checks the exact Apple Silicon target graph;
 * the XcodeGen installed-resource patch and patched source digest are bound to
     the isolated bootstrap and its installed-resource probe;
-* the official Tauri CLI crate, its published lock, the compatible dependency lock
-  update, the resulting lock, and the exact Cargo cache-normalization contract
-  are checksum-bound to one installer entrypoint;
+* the official Tauri CLI crate, its unchanged published lock, and the exact Cargo
+  cache-normalization contract are checksum-bound to one installer entrypoint;
 * the six design-pinned patch files exist as regular files and their computed
   SHA-256 digests match both the manifest and dependency_pins.env;
 * the combined diff SHA-256 is pinned and is distinct from any single patch digest;
@@ -70,7 +69,7 @@ TAURI_CLI_INSTALLER_RELATIVE_PATH = "scripts/install_pinned_tauri_cli.sh"
 # Level 1 source identity: detect accidental or unreviewed installer drift.
 # Exact Git/hosted-CI identity remains the trust root; this is not authentication.
 REQUIRED_TAURI_CLI_INSTALLER_SHA256 = (
-    "b649c88ae4fe0af5a815bc2bcdf93c6a122b18c5ff237e91c540ca8a8c893a8f"
+    "f99045e8f7fdd95078d27bcd6c4479e511f594ca69d4a4b7de5ea554394fce7f"
 )
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
@@ -110,7 +109,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "8042bf5042e7d2abe6e8846bd94349ffe1113498e3286ff9152bea4e44544a4d"
+    "8ac4ff9eb949d159b0103b3a0499bc55f16d52f6434ad09732f2ebfb69187acf"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,7 +117,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "00baa621d76b77bff7be4d15809324e59353bc00f6fb992df00bef40eadfeb44"
+    "b3f5f1f993bd20af6b19512e7c8df099102e5455efed152a035551150fc93672"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -165,7 +164,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "6f6a35f5c2593757621facc057d5aaac1bbe8cfab5d0ad05c2af003e29e9a9b0"
+    "217e5d20cdc13ae6caadf7c17605cb02f0fc4e5108ce380b0cf649a8d8833355"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -3206,12 +3205,6 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
             "upstreamCargoLockSha256",
             "Tauri CLI upstream Cargo.lock",
         ),
-        ("lockPatchSha256Key", "lockPatchSha256", "Tauri CLI lock patch"),
-        (
-            "patchedCargoLockSha256Key",
-            "patchedCargoLockSha256",
-            "Tauri CLI patched Cargo.lock",
-        ),
         ("spinCrateSha256Key", "spinCrateSha256", "Tauri CLI spin crate"),
     )
     for key_field, value_field, description in digest_pairs:
@@ -3267,24 +3260,11 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
     spin_version_key = spec.get("spinVersionKey")
     spin_version = spec.get("spinVersion")
     if not isinstance(spin_version_key, str) or not isinstance(spin_version, str):
-        raise PinnedInputError("Tauri CLI spin replacement has no version binding")
+        raise PinnedInputError("Tauri CLI spin input has no version binding")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", spin_version):
-        raise PinnedInputError("Tauri CLI spin replacement version is malformed")
+        raise PinnedInputError("Tauri CLI spin input version is malformed")
     if _require_env(env, spin_version_key) != spin_version:
-        raise PinnedInputError("Tauri CLI spin replacement version differs from the manifest")
-
-    patch_path_key = spec.get("lockPatchPathKey")
-    if not isinstance(patch_path_key, str):
-        raise PinnedInputError("Tauri CLI lock patch has no path binding")
-    patch_relative = _require_env(env, patch_path_key)
-    computed_patch_sha = hashlib.sha256(
-        _read_bytes(repository, patch_relative, "Tauri CLI lock patch")
-    ).hexdigest()
-    if computed_patch_sha != spec["lockPatchSha256"]:
-        raise PinnedInputError(
-            f"Tauri CLI lock patch digest {computed_patch_sha} differs from the pinned "
-            f"{spec['lockPatchSha256']}"
-        )
+        raise PinnedInputError("Tauri CLI spin input version differs from the manifest")
 
     installer_relative = spec.get("installerPath")
     installer_expected_sha256 = spec.get("installerSha256")
@@ -3314,21 +3294,6 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         installer = installer_body.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise PinnedInputError("Tauri CLI installer is not strict UTF-8") from error
-    lock_patch_command_prefix = (
-        'GIT_CEILING_DIRECTORIES="$staging" ' + "\\" + "\n  "
-    )
-    lock_patch_check_command = (
-        lock_patch_command_prefix
-        + '/usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"'
-    )
-    lock_patch_apply_command = (
-        lock_patch_command_prefix
-        + '/usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"'
-    )
-    lock_patch_reverse_check_command = (
-        lock_patch_command_prefix
-        + '/usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"'
-    )
     colon_path_rejection_command = '[[ "$temporary_parent" != *:* ]]'
     staging_creation_command = (
         'staging="$(/usr/bin/mktemp -d '
@@ -3358,6 +3323,8 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
                 f"Tauri CLI installer does not contain required pinned fragment {fragment!r}"
             )
     exact_counts = {
+        'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$source/Cargo.lock" |\n'
+        '    shasum -a 256 --check >/dev/null': 1,
         'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"': 1,
         '"$repo_root" "$cargo_cache_contract"': 2,
         'validate-preparation "$root"': 1,
@@ -3369,9 +3336,6 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest': 1,
         'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest': 1,
         '[[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]]': 1,
-        lock_patch_check_command: 1,
-        lock_patch_apply_command: 1,
-        lock_patch_reverse_check_command: 1,
         colon_path_rejection_command: 1,
         staging_creation_command: 1,
         workspace_manifest_renderer: 1,
@@ -3440,7 +3404,7 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
     require_exact_block(
         "verify_tauri_workspace_boundary() {",
         "\n}",
-        "79ff796bee6ec01ab2530da6112847aad1a2bf9df786103dbb6e3d2c780fd992",
+        "468af618535337139cfcbaf00616f00ad13eb4017d546d68d7f105c9009d6a75",
         "workspace boundary verifier",
     )
     require_exact_block(
@@ -3453,23 +3417,13 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
     def normalized_shell_operation(operation: str) -> str:
         return " ".join(operation.replace("\\\n", " ").split())
 
-    expected_lock_patch_operations = {
-        normalized_shell_operation(lock_patch_check_command),
-        normalized_shell_operation(lock_patch_apply_command),
-        normalized_shell_operation(lock_patch_reverse_check_command),
-    }
-    observed_lock_patch_operations = [
-        normalized_shell_operation(line)
+    # Official-source mode admits no patch application. Each source/workspace
+    # lock remains independently bound to the exact upstream archive bytes.
+    if any(
+        not line.lstrip().startswith("#") and re.search(r"\bapply\b", line)
         for line in installer.replace("\\\n", " ").splitlines()
-        if not line.lstrip().startswith("#") and re.search(r"\bapply\b", line)
-    ]
-    if (
-        len(observed_lock_patch_operations) != len(expected_lock_patch_operations)
-        or set(observed_lock_patch_operations) != expected_lock_patch_operations
     ):
-        raise PinnedInputError(
-            "Tauri CLI installer contains an unexpected lock patch apply operation"
-        )
+        raise PinnedInputError("Tauri CLI official source contains a patch apply operation")
 
     expected_workspace_references = {
         normalized_shell_operation(value)
@@ -3480,7 +3434,7 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
             '"$(stat -f \'%Lp\' "$staging_workspace_lock")" == "600" ]] ||',
             'printf \'%s  %s\\n\' "$staging_workspace_manifest_sha256" '
             '"$staging_workspace_manifest" |',
-            'printf \'%s  %s\\n\' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" '
+            'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" '
             '"$staging_workspace_lock" |',
             '/usr/bin/cmp -s "$cargo_lock" "$staging_workspace_lock" ||',
             'readonly staging_workspace_manifest="$staging/Cargo.toml"',
@@ -3540,7 +3494,7 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         ).encode("utf-8")
     ).hexdigest()
     if cargo_control_file_reference_identity != (
-        "c2004832a51b0ea20561ee649c58fa5d2be3c5594e47d58bfd02ee8a48bd6e2b"
+        "42fab0b199f7b0bda2599a314edc45745e629207748b78d2b43972f084f79640"
     ):
         raise PinnedInputError(
             "Tauri CLI installer contains an unexpected Cargo control-file reference"
@@ -3561,21 +3515,12 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         staging_creation,
     )
     upstream_lock_digest = locate(
-        'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock"',
+        'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |\n'
+        '  shasum -a 256 --check\n',
         preparation_before,
     )
-    lock_patch_check = locate(lock_patch_check_command, upstream_lock_digest)
-    lock_patch_apply = locate(lock_patch_apply_command, lock_patch_check)
-    patched_lock_digest = locate(
-        'printf \'%s  %s\\n\' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock"',
-        lock_patch_apply,
-    )
-    lock_patch_reverse_check = locate(
-        lock_patch_reverse_check_command, patched_lock_digest
-    )
     spin_semantic_check = locate(
-        "patched Tauri CLI lock has unexpected spin records",
-        lock_patch_reverse_check,
+        "official Tauri CLI lock has unexpected spin records", upstream_lock_digest
     )
     workspace_manifest_creation = locate(
         workspace_manifest_creation_command,

@@ -210,6 +210,7 @@ extension NativeBridgeCoordinator {
   }
 
   static func map(_ error: Error) -> NativeBridgeExecutionError {
+    if let error = error as? ServiceBuildHandoffFailure { return error.failure }
     if let error = error as? NativeBridgeExecutionError {
       return error
     }

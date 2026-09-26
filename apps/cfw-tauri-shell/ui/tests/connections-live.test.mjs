@@ -1,6 +1,39 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createConnectionsView } from "../src/connections.js";
+import { safeRegex } from "../src/format.js";
+
+test("connection ordering remains stable, bounded and responsive to changed snapshots", () => {
+  const connections = [
+    { id: "new", host: "c.example", start: "2026-09-25T02:00:00Z" },
+    { id: "invalid", host: "a[example", start: "not-a-date" },
+    { id: "tie-a", host: "b.example", start: "2026-09-25T01:00:00Z", metadata: { process_path: "/Applications/Test.app" } },
+    { id: "tie-b", host: "b.example", start: "2026-09-25T01:00:00Z" },
+  ];
+  const state = {
+    connections, connectionSearch: "", connectionSort: "age", connectionSortDesc: false,
+    connectionStream: {}, toggles: {}, closingConnectionIds: new Set(),
+  };
+  const view = createConnectionsView({
+    state, runtime: {}, MAX_CONNECTION_ROWS: 3, safeRegex,
+    escapeHtml: (value) => String(value ?? ""), formatBytes: String,
+  });
+  const visibleIds = () => [...view.renderConnections().matchAll(/data-connection-id="([^"]+)"/gu)].map((match) => match[1]);
+  assert.deepEqual(visibleIds(), ["invalid", "tie-a", "tie-b"]);
+  state.connectionSortDesc = true;
+  assert.deepEqual(visibleIds(), ["new", "tie-a", "tie-b"]);
+  assert.deepEqual(connections.map(({ id }) => id), ["new", "invalid", "tie-a", "tie-b"]);
+  connections[3] = { ...connections[3], start: "2026-09-25T03:00:00Z" };
+  assert.deepEqual(visibleIds(), ["tie-b", "new", "tie-a"]);
+  state.connectionSearch = "[";
+  assert.deepEqual(visibleIds(), ["invalid"]);
+  state.connectionSearch = "test\\.app|c\\.example";
+  assert.deepEqual(visibleIds(), ["new", "tie-a"]);
+  state.connectionSearch = "";
+  state.connectionSort = "host";
+  state.connectionSortDesc = false;
+  assert.deepEqual(visibleIds(), ["invalid", "tie-a", "tie-b"]);
+});
 
 test("streamed rows keep their sort position and receive working actions once", () => {
   const row = (id) => {

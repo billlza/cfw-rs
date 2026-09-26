@@ -169,7 +169,6 @@ PATCH_BODIES = {
     "dns": b"synthetic dns failover patch body\n",
     "endpoint": b"synthetic endpoint conflict patch body\n",
 }
-TAURI_LOCK_PATCH_BODY = b"synthetic tauri-cli spin lock patch body\n"
 TAURI_CACHE_CONTRACT_BODY = b"synthetic Tauri Cargo cache contract\n"
 LIBBOX_MODULE_CACHE_CONTRACT_BODY = b"""\
 LIBBOX_MODULE_BUILD_PACKAGES=("./experimental/libbox")
@@ -192,25 +191,22 @@ COMBINED_SHA = _sha(b"synthetic combined diff body\n")
 REJECTED_PATCH_DIGESTS = sorted(REQUIRED_REJECTED_PATCH_DIGESTS)
 TAURI_CRATE_SHA = _sha(b"synthetic official tauri-cli crate archive")
 TAURI_UPSTREAM_LOCK_SHA = _sha(b"synthetic upstream tauri-cli Cargo.lock")
-TAURI_LOCK_PATCH_SHA = _sha(TAURI_LOCK_PATCH_BODY)
-TAURI_PATCHED_LOCK_SHA = _sha(b"synthetic patched tauri-cli Cargo.lock")
 TAURI_SPIN_SHA = _sha(b"synthetic spin crate")
 TAURI_CACHE_CONTRACT_SHA = _sha(TAURI_CACHE_CONTRACT_BODY)
 LIBBOX_MODULE_CACHE_CONTRACT_SHA = _sha(LIBBOX_MODULE_CACHE_CONTRACT_BODY)
 XCODEGEN_PATCH_SHA = _sha(XCODEGEN_PATCH_BODY)
 XCODEGEN_PATCHED_SETTINGS_SHA = _sha(b"synthetic patched SettingsBuilder.swift")
-COMMIT = "1ac1a339cb1223e9c70eae14c44411c75033c02d"
+COMMIT = "af6e64c3b69e6132ebaee0e1a3d24e93903f6709"
 ANDROID_REFERENCE_COMMIT = "124a7c13038fcc389e3efbe61504fe6ab14724d9"
 APPLE_REFERENCE_COMMIT = "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"
 GOMOBILE_COMMIT = "9f03b8f25789099c5c8abef4a02085da783ba923"
-TAURI_PATCH_PATH = "scripts/tauri-cli-spin.patch"
 TAURI_CACHE_CONTRACT_PATH = "scripts/tauri_cargo_cache_contract.py"
 LIBBOX_MODULE_CACHE_CONTRACT_PATH = "scripts/libbox_module_cache_contract.sh"
 XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
     "socks": "native/macos/patches/socks-lifecycle.patch",
-    "probe": "native/macos/patches/sing-box-v1.14.1-profile-probe.patch",
+    "probe": "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
     "security": "native/macos/patches/security.patch",
     "raw": "native/macos/patches/raw-packet.patch",
     "dns": "native/macos/patches/dns-failover.patch",
@@ -291,8 +287,6 @@ TAURI_INSTALLER = """\
 echo "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate"
 echo "$TAURI_CLI_CRATE_SHA256"
 echo "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256"
-echo "$TAURI_CLI_LOCK_PATCH_SHA256"
-echo "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256"
 echo "$TAURI_CLI_SPIN_VERSION"
 echo "$TAURI_CLI_SPIN_CRATE_SHA256"
 echo "$TAURI_CARGO_CACHE_CONTRACT_SHA256"
@@ -308,10 +302,10 @@ normalize_cargo_offline_cache() {
     normalize-offline "$root"
 }
 verify_tauri_payload_source() {
-  for required in Cargo.toml Cargo.lock LICENSE_APACHE-2.0 LICENSE_MIT; do
+  for required in Cargo.toml Cargo.lock LICENSE-APACHE-2.0 LICENSE-MIT; do
     test -f "$payload/source/$required"
   done
-  printf '%s  %s\\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$source/Cargo.lock" |
+  printf '%s  %s\\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$source/Cargo.lock" |
     shasum -a 256 --check >/dev/null
   "$python_bin" - <<'PY'
 root = None
@@ -349,10 +343,10 @@ verify_tauri_workspace_boundary() {
     "$staging_workspace_manifest_sha256" "$staging_workspace_manifest" |
     shasum -a 256 --check >/dev/null
   printf '%s  %s\\n' \
-    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock" |
+    "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
     shasum -a 256 --check >/dev/null
   printf '%s  %s\\n' \
-    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$staging_workspace_lock" |
+    "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$staging_workspace_lock" |
     shasum -a 256 --check >/dev/null
   /usr/bin/cmp -s "$cargo_lock" "$staging_workspace_lock" ||
     die "Tauri source and workspace locks differ"
@@ -376,14 +370,6 @@ readonly cargo_lock="$source_root/Cargo.lock"
 verify_cargo_preparation_cache "$prepared_cargo_home"
 printf '%s  %s\\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
   shasum -a 256 --check
-GIT_CEILING_DIRECTORIES="$staging" \\
-  /usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"
-GIT_CEILING_DIRECTORIES="$staging" \\
-  /usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"
-printf '%s  %s\\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock" |
-  shasum -a 256 --check
-GIT_CEILING_DIRECTORIES="$staging" \\
-  /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"
 PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \\
   "$cargo_manifest" \\
   "$cargo_lock" \\
@@ -391,7 +377,7 @@ PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \\
   "$TAURI_CLI_SPIN_VERSION" \\
   "$TAURI_CLI_SPIN_CRATE_SHA256" <<'PY'
 PY
-echo "patched Tauri CLI lock has unexpected spin records"
+echo "official Tauri CLI lock has unexpected spin records"
 [[ ! -e "$staging_workspace_manifest" && ! -L "$staging_workspace_manifest" && \
   ! -e "$staging_workspace_lock" && ! -L "$staging_workspace_lock" ]] ||
   die "temporary Tauri workspace inputs already exist"
@@ -458,12 +444,12 @@ readonly payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"
 verify_tauri_payload_source
 /usr/bin/lipo -archs "$payload/bin/cargo-tauri"
 echo "--algorithm sha256-tree-v2"
-echo "artifactKind=pinned-tauri-cli-v2"
+echo "artifactKind=pinned-tauri-cli-v3"
 echo "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256"
 echo "cacheNormalization=cargo-runtime-metadata-v1"
 echo "dependencyMode=isolated-fetch-offline-locked-v1"
 echo "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET"
-echo "payloadLayout=bin-and-patched-source-v1"
+echo "payloadLayout=bin-and-source-v1"
 echo "xcodeBuild=$XCODE_BUILD_VERSION"
 echo "xcodeVersion=$XCODE_VERSION"
 echo "cfw_verify_tauri_toolchain_tree"
@@ -505,21 +491,6 @@ for _start_marker, _end_marker in (
         _end_marker,
     )
 
-TAURI_LOCK_PATCH_COMMAND_PREFIX = (
-    'GIT_CEILING_DIRECTORIES="$staging" ' + "\\" + "\n  "
-)
-TAURI_LOCK_PATCH_CHECK_COMMAND = (
-    TAURI_LOCK_PATCH_COMMAND_PREFIX
-    + '/usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"'
-)
-TAURI_LOCK_PATCH_APPLY_COMMAND = (
-    TAURI_LOCK_PATCH_COMMAND_PREFIX
-    + '/usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"'
-)
-TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND = (
-    TAURI_LOCK_PATCH_COMMAND_PREFIX
-    + '/usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"'
-)
 TAURI_INSTALLER_SHA = _sha(TAURI_INSTALLER.encode("utf-8"))
 CI_WORKFLOW = """\
 jobs:
@@ -583,12 +554,9 @@ class Fixture:
             "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": XCODEGEN_PATCHED_SETTINGS_SHA,
             "NODE_VERSION": "26.8.2",
             "GO_VERSION": "1.27.1",
-            "TAURI_CLI_VERSION": "2.11.4",
+            "TAURI_CLI_VERSION": "2.12.0",
             "TAURI_CLI_CRATE_SHA256": TAURI_CRATE_SHA,
             "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": TAURI_UPSTREAM_LOCK_SHA,
-            "TAURI_CLI_LOCK_PATCH_PATH": TAURI_PATCH_PATH,
-            "TAURI_CLI_LOCK_PATCH_SHA256": TAURI_LOCK_PATCH_SHA,
-            "TAURI_CLI_PATCHED_CARGO_LOCK_SHA256": TAURI_PATCHED_LOCK_SHA,
             "TAURI_CLI_SPIN_VERSION": "0.9.9",
             "TAURI_CLI_SPIN_CRATE_SHA256": TAURI_SPIN_SHA,
             "TAURI_CARGO_CACHE_CONTRACT_SHA256": TAURI_CACHE_CONTRACT_SHA,
@@ -597,7 +565,7 @@ class Fixture:
             "GOMOBILE_MODULE_SUM": "h1:foTOGKJetah9VwaJl1XJx5TswIAVg8NfYmHOhrOc95I=",
             "GOVULNCHECK_VERSION": "v1.6.0",
             "GOVULNCHECK_MODULE_SUM": "h1:FeMO9Rm/HwyduOztbvKcOw+zvDEPr4I4aQNSfevFcKY=",
-            "SING_BOX_VERSION": "v1.14.1",
+            "SING_BOX_VERSION": "v1.14.2",
             "SING_BOX_COMMIT": COMMIT,
             "SING_BOX_ANDROID_REFERENCE_COMMIT": ANDROID_REFERENCE_COMMIT,
             "SING_BOX_APPLE_REFERENCE_COMMIT": APPLE_REFERENCE_COMMIT,
@@ -683,8 +651,8 @@ class Fixture:
                 "GO_VERSION": "1.27.1",
                 "GOMOBILE_VERSION": "v0.1.13",
                 "GOVULNCHECK_VERSION": "v1.6.0",
-                "TAURI_CLI_VERSION": "2.11.4",
-                "SING_BOX_VERSION": "v1.14.1",
+                "TAURI_CLI_VERSION": "2.12.0",
+                "SING_BOX_VERSION": "v1.14.2",
             },
             "runtimeTools": {
                 "adb": {
@@ -844,11 +812,6 @@ class Fixture:
                 "crateSha256": TAURI_CRATE_SHA,
                 "upstreamCargoLockSha256Key": "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
                 "upstreamCargoLockSha256": TAURI_UPSTREAM_LOCK_SHA,
-                "lockPatchPathKey": "TAURI_CLI_LOCK_PATCH_PATH",
-                "lockPatchSha256Key": "TAURI_CLI_LOCK_PATCH_SHA256",
-                "lockPatchSha256": TAURI_LOCK_PATCH_SHA,
-                "patchedCargoLockSha256Key": "TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
-                "patchedCargoLockSha256": TAURI_PATCHED_LOCK_SHA,
                 "spinVersionKey": "TAURI_CLI_SPIN_VERSION",
                 "spinVersion": "0.9.9",
                 "spinCrateSha256Key": "TAURI_CLI_SPIN_CRATE_SHA256",
@@ -864,8 +827,6 @@ class Fixture:
                     "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
                     "$TAURI_CLI_CRATE_SHA256",
                     "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
-                    "$TAURI_CLI_LOCK_PATCH_SHA256",
-                    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
                     "$TAURI_CLI_SPIN_VERSION",
                     "$TAURI_CLI_SPIN_CRATE_SHA256",
                     "$TAURI_CARGO_CACHE_CONTRACT_SHA256",
@@ -889,9 +850,6 @@ class Fixture:
                     "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse",
                     "CARGO_TERM_COLOR=never",
                     'RUSTC="$rustc_bin"',
-                    TAURI_LOCK_PATCH_CHECK_COMMAND,
-                    TAURI_LOCK_PATCH_APPLY_COMMAND,
-                    TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND,
                     '[[ "$temporary_parent" != *:* ]]',
                     'staging="$(/usr/bin/mktemp -d '
                     '"$temporary_parent/cfw-tauri-cli.XXXXXX")"',
@@ -921,12 +879,12 @@ class Fixture:
                     '/bin/mv "$source_root" "$payload/source"',
                     "/usr/bin/lipo -archs",
                     "--algorithm sha256-tree-v2",
-                    "artifactKind=pinned-tauri-cli-v2",
+                    "artifactKind=pinned-tauri-cli-v3",
                     "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256",
                     "cacheNormalization=cargo-runtime-metadata-v1",
                     "dependencyMode=isolated-fetch-offline-locked-v1",
                     "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET",
-                    "payloadLayout=bin-and-patched-source-v1",
+                    "payloadLayout=bin-and-source-v1",
                     "xcodeBuild=$XCODE_BUILD_VERSION",
                     "xcodeVersion=$XCODE_VERSION",
                     "cfw_verify_release_toolchain_manifest",
@@ -1063,7 +1021,7 @@ class Fixture:
             "gomobile": "v0.1.13",
             "singBox": {
                 "commit": COMMIT,
-                "tag": "v1.14.1",
+                "tag": "v1.14.2",
                 "androidReferenceCommit": ANDROID_REFERENCE_COMMIT,
                 "securityPatch": {
                     "path": PATCH_PATHS["security"],
@@ -1096,7 +1054,6 @@ class Fixture:
         self.build_unsigned = (
             REPO_ROOT / "scripts/build_unsigned_candidate.sh"
         ).read_text(encoding="utf-8")
-        self.tauri_lock_patch = TAURI_LOCK_PATCH_BODY
         self.libbox_module_cache_contract = LIBBOX_MODULE_CACHE_CONTRACT_BODY
         self.xcodegen_patch = XCODEGEN_PATCH_BODY
         self.xcodegen_bootstrap = XCODEGEN_BOOTSTRAP
@@ -1189,7 +1146,6 @@ class Fixture:
         (root / "scripts/build_unsigned_candidate.sh").write_text(
             self.build_unsigned, encoding="utf-8"
         )
-        (root / TAURI_PATCH_PATH).write_bytes(self.tauri_lock_patch)
         (root / TAURI_CACHE_CONTRACT_PATH).write_bytes(TAURI_CACHE_CONTRACT_BODY)
         (root / LIBBOX_MODULE_CACHE_CONTRACT_PATH).write_bytes(
             self.libbox_module_cache_contract
@@ -1861,10 +1817,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.env["TAURI_CLI_CRATE_SHA256"] = "a" * 64
         self._assert_fails(fixture, "Tauri CLI crate digest")
 
-    def test_tauri_cli_lock_patch_content_drift_fails(self) -> None:
+    def test_tauri_cli_upstream_lock_digest_drift_fails(self) -> None:
         fixture = Fixture()
-        fixture.tauri_lock_patch = b"tampered tauri-cli lock patch\n"
-        self._assert_fails(fixture, "lock patch digest")
+        fixture.env["TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256"] = "a" * 64
+        self._assert_fails(fixture, "Tauri CLI upstream Cargo.lock digest")
 
     def test_tauri_cli_installer_content_drift_fails(self) -> None:
         fixture = Fixture()
@@ -1876,22 +1832,35 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.manifest["tauriCli"]["installerSha256"] = "a" * 64
         self._assert_fails(fixture, "installer digest differs")
 
-    def test_tauri_cli_installer_must_isolate_lock_patch_from_parent_git(self) -> None:
+    def test_tauri_cli_installer_requires_official_source_digest(self) -> None:
         fixture = Fixture()
-        fixture.tauri_installer = fixture.tauri_installer.replace(
-            'GIT_CEILING_DIRECTORIES="$staging"',
-            'GIT_CEILING_DIRECTORIES="$source_root"',
-        )
-        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
-
-    def test_tauri_cli_installer_must_bind_ceiling_to_each_git_command(self) -> None:
-        fixture = Fixture()
-        fixture.tauri_installer = fixture.tauri_installer.replace(
-            TAURI_LOCK_PATCH_COMMAND_PREFIX,
-            'GIT_CEILING_DIRECTORIES="$staging" /usr/bin/true\n',
+        original = fixture.tauri_installer
+        fixture.tauri_installer = original.replace(
+            '"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |',
+            '"unbound" "$cargo_lock" |',
             1,
         )
-        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
+        self.assertNotEqual(fixture.tauri_installer, original)
+        self._assert_tauri_semantic_fails(
+            fixture,
+            "differs from release policy|Cargo control-file reference|"
+            "lacks ordered operation|required pinned fragment|exact occurrences",
+        )
+
+    def test_tauri_cli_installer_requires_official_payload_digest(self) -> None:
+        fixture = Fixture()
+        original = fixture.tauri_installer
+        fixture.tauri_installer = original.replace(
+            '"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$source/Cargo.lock" |',
+            '"unbound" "$source/Cargo.lock" |',
+            1,
+        )
+        self.assertNotEqual(fixture.tauri_installer, original)
+        self._assert_tauri_semantic_fails(
+            fixture,
+            "differs from release policy|Cargo control-file reference|"
+            "lacks ordered operation|required pinned fragment|exact occurrences",
+        )
 
     def test_tauri_cli_installer_rejects_extra_unbound_lock_patch_apply(self) -> None:
         upstream_lock_check = (
@@ -1917,7 +1886,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 self.assertNotEqual(fixture.tauri_installer, original)
                 self._assert_tauri_semantic_fails(
                     fixture,
-                    "unexpected lock patch apply operation",
+                    "official source contains a patch apply operation",
                 )
 
     def test_tauri_cli_installer_must_reject_colon_in_temporary_parent(self) -> None:
@@ -1938,8 +1907,8 @@ class PinnedBuildInputsTests(unittest.TestCase):
             1,
         )
         fixture.tauri_installer = fixture.tauri_installer.replace(
-            TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND,
-            TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND + "\n" + colon_check.rstrip(),
+            'echo "official Tauri CLI lock has unexpected spin records"',
+            'echo "official Tauri CLI lock has unexpected spin records"' + "\n" + colon_check.rstrip(),
             1,
         )
         self._assert_fails(
@@ -1994,16 +1963,16 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_tauri_cli_installer_rejects_early_workspace_lock_copy(self) -> None:
         fixture = Fixture()
         copy = '/usr/bin/install -m 0600 "$cargo_lock" "$staging_workspace_lock"\n'
-        patched_lock_check = (
-            "printf '%s  %s\\n' \"$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256\" "
+        official_lock_check = (
+            "printf '%s  %s\\n' \"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256\" "
             '"$cargo_lock" |\n'
             "  shasum -a 256 --check\n"
         )
         original = fixture.tauri_installer
         fixture.tauri_installer = fixture.tauri_installer.replace(copy, "", 1)
         fixture.tauri_installer = fixture.tauri_installer.replace(
-            patched_lock_check,
-            copy + patched_lock_check,
+            official_lock_check,
+            copy + official_lock_check,
             1,
         )
         self.assertNotEqual(fixture.tauri_installer, original)
@@ -2096,7 +2065,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 fixture.tauri_installer = original.replace(source, replacement, 1)
                 self.assertNotEqual(fixture.tauri_installer, original)
                 self.assertEqual(fixture.tauri_installer.count("$cargo_manifest"), 5)
-                self.assertEqual(fixture.tauri_installer.count("$cargo_lock"), 9)
+                self.assertEqual(fixture.tauri_installer.count("$cargo_lock"), 8)
                 self._assert_tauri_semantic_fails(
                     fixture,
                     "unexpected Cargo control-file reference",
@@ -2119,7 +2088,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             (
                 '"$staging_workspace_manifest_sha256" '
                 '"$staging_workspace_manifest" |',
-                '"$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" '
+                '"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" '
                 '"$staging_workspace_manifest" |',
             ),
         )
@@ -2165,10 +2134,28 @@ class PinnedBuildInputsTests(unittest.TestCase):
         for source, replacement in mutations:
             with self.subTest(source=source):
                 fixture = Fixture()
-                fixture.tauri_installer = fixture.tauri_installer.replace(
-                    source,
-                    replacement,
-                )
+                if source in (
+                    "shasum -a 256 --check >/dev/null",
+                    "printf '%s  %s\\n'",
+                ):
+                    # Exercise the workspace verifier itself; the independent
+                    # payload checksum gate must not mask a broken workspace.
+                    start = fixture.tauri_installer.index(
+                        "verify_tauri_workspace_boundary() {"
+                    )
+                    end = fixture.tauri_installer.index("\n}", start) + 2
+                    boundary = fixture.tauri_installer[start:end]
+                    self.assertIn(source, boundary)
+                    fixture.tauri_installer = (
+                        fixture.tauri_installer[:start]
+                        + boundary.replace(source, replacement)
+                        + fixture.tauri_installer[end:]
+                    )
+                else:
+                    fixture.tauri_installer = fixture.tauri_installer.replace(
+                        source,
+                        replacement,
+                    )
                 self._assert_tauri_semantic_fails(
                     fixture,
                     "differs from release policy",
@@ -2183,48 +2170,63 @@ class PinnedBuildInputsTests(unittest.TestCase):
         )
         self._assert_fails(fixture, "required pinned fragment|exact occurrences")
 
-    def test_tauri_cli_installer_must_use_absolute_git_for_lock_patch(self) -> None:
+    def test_tauri_cli_installer_requires_source_checksum_verifier(self) -> None:
         fixture = Fixture()
-        fixture.tauri_installer = fixture.tauri_installer.replace(
-            '/usr/bin/git -C "$source_root"',
-            'git -C "$source_root"',
+        original = fixture.tauri_installer
+        fixture.tauri_installer = original.replace(
+            'shasum -a 256 --check\n',
+            '/usr/bin/true\n',
             1,
         )
-        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
+        self.assertNotEqual(fixture.tauri_installer, original)
+        self._assert_tauri_semantic_fails(
+            fixture,
+            "differs from release policy|Cargo control-file reference|"
+            "lacks ordered operation|required pinned fragment|exact occurrences",
+        )
 
-    def test_tauri_cli_installer_must_reverse_check_applied_lock_patch(self) -> None:
+    def test_tauri_cli_installer_requires_payload_checksum_verifier(self) -> None:
         fixture = Fixture()
-        fixture.tauri_installer = fixture.tauri_installer.replace(
-            '/usr/bin/git -C "$source_root" apply --unidiff-zero '
-            '--reverse --check "$lock_patch"',
-            "true",
+        original = fixture.tauri_installer
+        fixture.tauri_installer = original.replace(
+            '    shasum -a 256 --check >/dev/null',
+            '    /usr/bin/true',
             1,
         )
-        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
+        self.assertNotEqual(fixture.tauri_installer, original)
+        self._assert_tauri_semantic_fails(fixture, "exact occurrences")
 
-    def test_tauri_cli_installer_rejects_lock_patch_order_drift(self) -> None:
+    def test_tauri_cli_installer_requires_workspace_checksum_verifier(self) -> None:
         fixture = Fixture()
-        patched_digest = (
-            "printf '%s  %s\\n' \"$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256\" "
+        original = fixture.tauri_installer
+        fixture.tauri_installer = original.replace(
+            '"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$staging_workspace_lock" |',
+            '"unbound" "$staging_workspace_lock" |',
+            1,
+        )
+        self.assertNotEqual(fixture.tauri_installer, original)
+        self._assert_tauri_semantic_fails(
+            fixture,
+            "differs from release policy|Cargo control-file reference|"
+            "lacks ordered operation|required pinned fragment|exact occurrences",
+        )
+
+    def test_tauri_cli_installer_rejects_official_source_check_after_copy(self) -> None:
+        fixture = Fixture()
+        source_check = (
+            "printf '%s  %s\\n' \"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256\" "
             '"$cargo_lock" |\n'
             "  shasum -a 256 --check\n"
         )
-        reverse_command = TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND
-        self.assertGreater(
-            fixture.tauri_installer.index(reverse_command),
-            fixture.tauri_installer.index(patched_digest),
+        copy = '/usr/bin/install -m 0600 "$cargo_lock" "$staging_workspace_lock"\n'
+        self.assertLess(
+            fixture.tauri_installer.index(source_check),
+            fixture.tauri_installer.index(copy),
         )
         fixture.tauri_installer = fixture.tauri_installer.replace(
-            reverse_command,
-            "",
-            1,
-        )
-        fixture.tauri_installer = fixture.tauri_installer.replace(
-            patched_digest,
-            reverse_command + "\n" + patched_digest,
-            1,
-        )
-        self._assert_tauri_semantic_fails(fixture, "lacks ordered operation")
+            source_check, "", 1
+        ).replace(copy, copy + source_check, 1)
+        self._assert_tauri_semantic_fails(fixture, "Cargo control-file reference|lacks ordered operation")
 
     def test_tauri_cache_contract_content_drift_fails(self) -> None:
         fixture = Fixture()

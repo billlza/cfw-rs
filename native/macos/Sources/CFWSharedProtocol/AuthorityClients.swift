@@ -386,6 +386,21 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
   private let onDisconnect: @Sendable () -> Void
   private var connection: NSXPCConnection?
   private var heartbeatTask: Task<Void, Never>?
+  private enum BuildPolicy {
+    case protocolPeer
+    case currentHost(ServiceCodeHash)
+  }
+  private var buildPolicy: BuildPolicy = .protocolPeer
+  private var connectionRequiresCurrentBuild = false
+  private var buildConstraint = ServiceConnectionBuildConstraint()
+
+  /// The production Host supplies the verified embedded Authority requirement.
+  /// Owner and physical protocol-fixture clients retain their existing role
+  /// identity contract; this initializer makes no build claim for those peers.
+  public convenience init(currentHostCodeHash: ServiceCodeHash) {
+    self.init(role: .host)
+    buildPolicy = .currentHost(currentHostCodeHash)
+  }
 
   public init(
     role: AuthorityRole,
@@ -406,7 +421,12 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
     method: AuthorityXPCMethod, request: Data,
     configuration: Data?, secretPayload: Data?
   ) async throws -> AuthorityXPCReply {
-    let connection = connected()
+    let requiresCurrentBuild: Bool
+    switch buildPolicy {
+    case .currentHost: requiresCurrentBuild = method == .prepareStart
+    case .protocolPeer: requiresCurrentBuild = false
+    }
+    let connection = connected(requiresCurrentBuild: requiresCurrentBuild)
     let result: AuthorityXPCReply = try await withCheckedThrowingContinuation { continuation in
       let gate = AuthorityReplyGate(continuation)
       guard
@@ -460,13 +480,26 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
     value?.invalidate()
   }
 
-  private func connected() -> NSXPCConnection {
-    lock.withLock {
-      if let connection { return connection }
+  private func connected(requiresCurrentBuild: Bool) -> NSXPCConnection {
+    var retired: NSXPCConnection?
+    let selected = lock.withLock {
+      let requirement: String
+      switch buildPolicy {
+      case .currentHost(let hash):
+        requirement = buildConstraint.requirement(
+          base: GlobalAuthorityConnectionContract.authorityDesignatedRequirement,
+          currentCodeHash: hash, requestingCurrentBuild: requiresCurrentBuild)
+      case .protocolPeer:
+        requirement = GlobalAuthorityConnectionContract.authorityDesignatedRequirement
+      }
+      let requiresCurrentBuild = buildConstraint.requiresCurrentBuild
+      if let connection, !requiresCurrentBuild || connectionRequiresCurrentBuild {
+        return connection
+      }
+      retired = connection
       let value = NSXPCConnection(
         machServiceName: machServiceName, options: .privileged)
-      value.setCodeSigningRequirement(
-        GlobalAuthorityConnectionContract.authorityDesignatedRequirement)
+      value.setCodeSigningRequirement(requirement)
       value.remoteObjectInterface = NSXPCInterface(
         with: CFWGlobalAuthorityXPCProtocol.self)
       let box = WeakXPCConnectionBox(value)
@@ -490,8 +523,11 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
       }
       value.activate()
       connection = value
+      connectionRequiresCurrentBuild = requiresCurrentBuild
       return value
     }
+    retired?.invalidate()
+    return selected
   }
 
   private func clear(_ expected: NSXPCConnection?) {

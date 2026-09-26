@@ -47,7 +47,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const migrationBanner = renderMigrationBanner();
   const engineReason = state.engineMutationError ?? engine.availabilityReason;
   return `
-    <div class="cfw-general-view">
+    <div class="cfw-general-view${state.payload?.native_ui?.general_switches === true && !state.migrationHandoff ? " native-general-switches" : ""}">
       <section class="cfw-header">
         <div class="cfw-app-mark">${renderCatLogo()}</div>
         <div class="cfw-title">
@@ -59,6 +59,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
       <section class="cfw-content${migrationBanner ? " cfw-content-migration" : ""}">
         ${migrationBanner}
         ${engineReason ? renderRowReason(engineReason) : ""}
+        ${state.nativeGeneralPresentationError ? renderRowReason(state.nativeGeneralPresentationError) : ""}
         <div class="cfw-row">
           <div class="cfw-row-left">
             <span>${escapeHtml(t("Port"))}</span>
@@ -119,7 +120,9 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
               <i class="${statusDot}"></i>
               <span>${escapeHtml(engineLabel)}</span>
             </span>
-            <button class="cfw-text-button" data-action="toggle-core" ${state.engineMutationBusy || state.migrationHandoff ? "disabled" : ""}>${engine.desiredMode === "off" ? t("Start core") : t("Stop core")}</button>
+            ${engine.startupRecoveryAvailable && !state.migrationHandoff
+              ? `<button class="cfw-text-button" data-action="reconcile-startup-services" title="${escapeHtml(t("Check and restore background services while keeping the engine stopped."))}"${state.engineMutationBusy ? " disabled" : ""}>${escapeHtml(t(state.engineMutationBusy ? "Recovering…" : "Recover background services"))}</button>`
+              : `<button class="cfw-text-button" data-action="toggle-core" ${state.engineMutationBusy || state.migrationHandoff ? "disabled" : ""}>${engine.desiredMode === "off" ? t("Start core") : t("Stop core")}</button>`}
           </div>
         </div>
 

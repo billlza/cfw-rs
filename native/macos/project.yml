@@ -9,7 +9,7 @@ options:
 settings:
   base:
     ARCHS: arm64
-    CFW_BUILD_NUMBER: 40000
+    CFW_BUILD_NUMBER: 50016
     # Release products provide a reviewed entitlement file (or none). Never let
     # Xcode inject development-only grants such as get-task-allow into a
     # Developer ID build driven by the `build` action.
@@ -26,7 +26,7 @@ settings:
     LM_FORCE_LINK_GENERATION: true
     GCC_TREAT_WARNINGS_AS_ERRORS: true
     MACOSX_DEPLOYMENT_TARGET: "15.0"
-    MARKETING_VERSION: 0.4.0
+    MARKETING_VERSION: 0.5.0
     ONLY_ACTIVE_ARCH: false
     SUPPORTS_MACCATALYST: false
     SWIFT_STRICT_CONCURRENCY: complete
@@ -185,6 +185,10 @@ targets:
       base:
         PRODUCT_MODULE_NAME: CFWCredentialVault
 
+  # Every Libbox consumer names the same verified macOS arm64 framework slice.
+  # Mixing the XCFramework's processed Products copy with this source slice
+  # gives Clang two module-map identities across test and analyze actions.
+  # The release pipeline still verifies the complete source-bound XCFramework.
   CFWLibboxRuntime:
     type: library.static
     platform: macOS
@@ -193,19 +197,12 @@ targets:
     dependencies:
       - target: CFWSharedProtocol
       - target: CFWLibboxObjC
-      - framework: ../../target/native-dependencies/Libbox.xcframework
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
         embed: false
       - sdk: libresolv.tbd
       - sdk: Network.framework
     settings:
       base:
-        # The pinned single-slice libbox XCFramework is also named directly: the
-        # `analyze` action does not materialize an XCFramework slice into
-        # BUILT_PRODUCTS_DIR, so `import Libbox` must resolve from the source
-        # tree as well.
-        FRAMEWORK_SEARCH_PATHS:
-          - $(inherited)
-          - ../../target/native-dependencies/Libbox.xcframework/macos-arm64
         PRODUCT_MODULE_NAME: CFWLibboxRuntime
         SWIFT_INCLUDE_PATHS:
           - $(inherited)
@@ -222,18 +219,13 @@ targets:
       - path: Sources/CFWLibboxObjC/include
         headerVisibility: public
     dependencies:
-      - framework: ../../target/native-dependencies/Libbox.xcframework
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
         embed: false
     settings:
       base:
         CLANG_ENABLE_MODULES: true
         CLANG_WARN_DOCUMENTATION_COMMENTS: true
         DEFINES_MODULE: true
-        # See CFWLibboxRuntime: `#import <Libbox/Libbox.h>` must resolve during
-        # the `analyze` action too, which never processes the XCFramework.
-        FRAMEWORK_SEARCH_PATHS:
-          - $(inherited)
-          - ../../target/native-dependencies/Libbox.xcframework/macos-arm64
         PRODUCT_MODULE_NAME: CFWLibboxObjC
         MODULEMAP_FILE: $(SRCROOT)/Sources/CFWLibboxObjC/include/module.modulemap
 
@@ -248,6 +240,8 @@ targets:
       - target: CFWPacketTransport
       - target: CFWLibboxRuntime
       - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
+        embed: false
       - sdk: CryptoKit.framework
       - sdk: Security.framework
     settings:
@@ -267,7 +261,7 @@ targets:
       - target: CFWPacketTransport
       - target: CFWLibboxRuntime
       - target: CFWLibboxObjC
-      - framework: ../../target/native-dependencies/Libbox.xcframework
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
         embed: false
       - sdk: libresolv.tbd
     entitlements:
@@ -316,6 +310,8 @@ targets:
       - target: CFWCredentialVault
       - target: CFWLibboxRuntime
       - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
+        embed: false
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
     settings:
@@ -334,7 +330,7 @@ targets:
       - target: CFWCredentialVault
       - target: CFWLibboxRuntime
       - target: CFWLibboxObjC
-      - framework: ../../target/native-dependencies/Libbox.xcframework
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
         embed: false
       - sdk: libresolv.tbd
       - sdk: CryptoKit.framework
@@ -427,7 +423,7 @@ targets:
       - target: CFWPacketTransport
       - target: CFWLibboxRuntime
       - target: CFWLibboxObjC
-      - framework: ../../target/native-dependencies/Libbox.xcframework
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
         embed: false
       - sdk: CryptoKit.framework
       - sdk: Network.framework
@@ -446,7 +442,7 @@ targets:
       - target: CFWLibboxRuntime
       - target: CFWSharedProtocol
       - target: CFWLibboxObjC
-      - framework: ../../target/native-dependencies/Libbox.xcframework
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
         embed: false
       - sdk: Network.framework
       - sdk: libresolv.tbd
@@ -531,7 +527,7 @@ targets:
       - target: CFWCredentialVault
       - target: CFWLibboxRuntime
       - target: CFWLibboxObjC
-      - framework: ../../target/native-dependencies/Libbox.xcframework
+      - framework: ../../target/native-dependencies/Libbox.xcframework/macos-arm64/Libbox.framework
         embed: false
       - sdk: CryptoKit.framework
       - sdk: Network.framework

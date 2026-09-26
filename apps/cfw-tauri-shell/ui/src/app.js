@@ -1,3 +1,7 @@
+import { Channel } from "@tauri-apps/api/core";
+import { profileMenuItems, nativeMenuItems, createNativeProfileMenu } from "./native-profile-menu.js";
+import { createNativeRuntimeSettings } from "./native-runtime-settings.js";
+import { createNativeGeneralSwitches } from "./native-general-switches.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
@@ -77,6 +81,33 @@ import {
 
 let migrationHandoffRendererReady = null;
 let criticalMigrationListenersBound = false;
+const nativeProfileMenu = createNativeProfileMenu({ invoke, makeChannel: (handler) => new Channel(handler), onError: reportProfileMenuFailure });
+const nativeRuntimeSettings = createNativeRuntimeSettings({
+  enabled: () => state.payload?.native_ui?.runtime_settings === true,
+  invoke, makeChannel: (handler) => new Channel(handler),
+  onError: (error) => appendLog("error", "settings", t("{action} failed: {error}", { action: t("Network settings"), error: errorText(error) })),
+});
+const nativeGeneralSwitches = createNativeGeneralSwitches({
+  enabled: () => state.payload?.native_ui?.general_switches === true && !state.migrationHandoff,
+  isGeneral: () => state.activePage === "general",
+  visible: () => state.activePage === "general" && !state.glassDialog && !state.runtimeSettingsDialog
+    && !state.automationDialog && !state.profileInspector && !state.profileContextMenu,
+  locale: getLocale, invoke, makeChannel: (handler) => new Channel(handler),
+  onToggle: applyUiToggle,
+  onError: (error) => {
+    state.nativeGeneralPresentationError = t("{action} failed: {error}", { action: t("General"), error: errorText(error) });
+    appendLog("error", "ui", state.nativeGeneralPresentationError);
+    scheduleRender();
+  },
+});
+
+function nativeProfileMenuEnabled() { return state.payload?.native_ui?.profile_menu === true; }
+function reportProfileMenuFailure(error) {
+  appendLog("error", "profile", t("{action} failed: {error}", { action: t("Profiles"), error: errorText(error) }));
+}
+function dismissNativeProfileMenu() {
+  if (nativeProfileMenuEnabled()) void nativeProfileMenu.dismiss().catch(reportProfileMenuFailure);
+}
 
 const LOGIN_ITEM_LIVE_STATUSES = new Set([
   "checking",
@@ -136,7 +167,7 @@ const { renderSettings, renderNetworkDiagnostics } = createSettingsView({ state,
 
 import { createAutomationSettingsUI } from "./automation-settings.js";
 const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderPage, appendLog,
-  dismissOtherDialogs: () => { runtimeSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; } });
+  dismissOtherDialogs: () => { dismissNativeProfileMenu(); runtimeSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; } });
 
 import { createProxyDelayTest } from "./proxy-delay-test.js";
 const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView, invoke, activeProfile, engineIsOff,
@@ -144,7 +175,8 @@ const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView
 const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
 
 const runtimeSettingsUI = createRuntimeSettingsUI({ state, invoke, appendLog, renderPage,
-  dismissOtherDialogs: () => { automationSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; },
+  nativeDialog: nativeRuntimeSettings,
+  dismissOtherDialogs: () => { dismissNativeProfileMenu(); automationSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; },
   refreshRuntime: async () => {
     await loadEngineStatus();
     await loadRuntimeProjection();
@@ -988,6 +1020,7 @@ function profileMenuIcon(kind) {
 }
 
 function closeGlassOverlays() {
+  dismissNativeProfileMenu();
   runtimeSettingsUI.close();
   automationSettingsUI.close();
   state.profileContextMenu = null;
@@ -1006,6 +1039,13 @@ function engineToggleCapability(key) {
       available: false,
       label: key === "coreRunning" ? t("Core") : key === "systemProxy" ? t("System Proxy") : t("TUN Mode"),
       reason: t("This window owns legacy CFM maintenance. Use its explicit maintenance or recovery controls."),
+    };
+  }
+  if ((key === "coreRunning" || key === "systemProxy" || key === "tunMode") && state.engine.startupRecoveryAvailable) {
+    return {
+      available: false,
+      label: key === "coreRunning" ? t("Core") : key === "systemProxy" ? t("System Proxy") : t("TUN Mode"),
+      reason: t("Recover background services before starting a connection."),
     };
   }
   if (key === "coreRunning") {
@@ -1342,40 +1382,100 @@ async function resolveProfileSource(id) {
   return profile.sourceUrl;
 }
 
+function currentProfileMenuItems(profile) {
+  return profileMenuItems(PROFILE_MENU_ACTIONS, profile, { engineOff: engineIsOff(), engineNotOffReason: REASONS.engineNotOff, t });
+}
+
+function nativeProfileMenuRequest(context, profile) {
+  return { requestId: context.requestId, revision: context.revision, locale: getLocale(),
+    appearance: document.documentElement.dataset.theme,
+    moreLabel: t("scroll to view more"), point: context.point, items: nativeMenuItems(currentProfileMenuItems(profile)) };
+}
+
+async function acceptNativeProfileMenu(context, result) {
+  if (state.profileContextMenu !== context) return;
+  state.profileContextMenu = null;
+  if (result.error) { reportProfileMenuFailure(result.error); renderPage(); return; }
+  if (result.action === null) return;
+  const profile = state.profiles.find((item) => item.id === context.id);
+  const action = profile && currentProfileMenuItems(profile).find((item) => item.id === result.action);
+  if (!action || action.reason) {
+    reportProfileMenuFailure(action?.reason ?? "The profile action is no longer available");
+    renderPage(); return;
+  }
+  try { await runProfileMenuAction(result.action, context.id); }
+  catch (error) { reportProfileMenuFailure(error); }
+  renderPage();
+}
+
 async function openProfileContextMenu(id, clientX, clientY) {
   state.glassDialog = null;
-  state.profileContextMenu = { id, x: clientX, y: clientY };
+  const context = { id, x: clientX, y: clientY };
+  state.profileContextMenu = context;
+  if (nativeProfileMenuEnabled()) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile) { state.profileContextMenu = null; return; }
+    Object.assign(context, { requestId: crypto.randomUUID(), revision: 1, ready: false,
+      point: { x: clientX, y: clientY, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight } });
+    try {
+      const request = nativeProfileMenuRequest(context, profile);
+      context.projection = JSON.stringify({ locale: request.locale, appearance: request.appearance, items: request.items });
+      context.ready = await nativeProfileMenu.present(request, (result) => {
+        void acceptNativeProfileMenu(context, result).catch(reportProfileMenuFailure);
+      });
+      if (state.profileContextMenu !== context) return;
+      await resolveProfileSource(id);
+      if (state.profileContextMenu === context) renderGlassOverlays();
+    } catch (error) {
+      if (state.profileContextMenu === context) {
+        state.profileContextMenu = null;
+        dismissNativeProfileMenu();
+      }
+      reportProfileMenuFailure(error);
+    }
+    return;
+  }
   renderGlassOverlays();
   await resolveProfileSource(id);
-  if (state.profileContextMenu?.id === id) renderGlassOverlays();
+  if (state.profileContextMenu === context) renderGlassOverlays();
+}
+
+function syncNativeProfileMenu() {
+  const context = state.profileContextMenu;
+  if (!context?.ready || !context.requestId) return;
+  const profile = state.profiles.find((item) => item.id === context.id);
+  if (!profile || state.activePage !== "profiles" || state.glassDialog || state.runtimeSettingsDialog || state.automationDialog) {
+    dismissNativeProfileMenu();
+    state.profileContextMenu = null;
+    return;
+  }
+  const request = nativeProfileMenuRequest(context, profile);
+  const projection = JSON.stringify({ locale: request.locale, appearance: request.appearance, items: request.items });
+  if (projection === context.projection) return;
+  context.projection = projection;
+  request.revision = ++context.revision;
+  void nativeProfileMenu.update(request).catch((error) => {
+    if (state.profileContextMenu !== context) return;
+    state.profileContextMenu = null;
+    dismissNativeProfileMenu();
+    reportProfileMenuFailure(error);
+  });
 }
 
 
 function renderGlassOverlays() {
+  // Dialogs also render independently of renderPageContent (for example,
+  // network services). Invalidate native input before replacing any overlay.
+  nativeGeneralSwitches.beforeRender();
+  if (nativeProfileMenuEnabled()) syncNativeProfileMenu();
   const root = document.getElementById("glass-menu-root");
   if (!root) return;
 
   const parts = [];
-  if (state.profileContextMenu) {
+  if (state.profileContextMenu && !nativeProfileMenuEnabled()) {
     const profile = state.profiles.find((item) => item.id === state.profileContextMenu.id);
     if (profile) {
-      const engineOff = engineIsOff();
-      const items = PROFILE_MENU_ACTIONS
-        .filter((action) => !(action.needsInactive && profile.active))
-        .map((action) => {
-          let reason = null;
-          if (action.remoteOnly) {
-            if (profile.sourceUrl === undefined) {
-              reason = profile.sourceError
-                ? t("Subscription URL could not be read: {sourceError}", { sourceError: profile.sourceError })
-                : t("Reading this profile…");
-            } else if (profile.sourceUrl === null) {
-              reason = t("This profile was imported locally and has no subscription URL.");
-            }
-          }
-          if (!reason && action.needsEngineOff && !engineOff) reason = REASONS.engineNotOff;
-          return { ...action, reason };
-        });
+      const items = currentProfileMenuItems(profile);
       const menuHtml = items.map((action) => `
         <button type="button" class="glass-menu-item ${action.danger ? "danger" : ""}" data-profile-menu="${action.id}" data-profile-id="${escapeHtml(profile.id)}" ${action.reason ? `disabled title="${escapeHtml(action.reason)}"` : ""}>
           <span class="glass-menu-icon">${profileMenuIcon(action.icon)}</span>
@@ -1611,6 +1711,7 @@ function renderGlassOverlays() {
   automationSettingsUI.bindDialog();
   positionGlassMenu();
   bindGlassOverlayEvents();
+  nativeGeneralSwitches.refresh();
 }
 
 function positionGlassMenu() {
@@ -2282,6 +2383,7 @@ function renderPage() {
 }
 
 function renderPageContent() {
+  nativeGeneralSwitches.beforeRender();
   const page = pageById(state.activePage);
   const renderer = pageRenderers[page.id];
   if (typeof renderer !== "function") {
@@ -2305,6 +2407,7 @@ function renderPageContent() {
   document.getElementById("page").innerHTML = renderer();
   bindPageEvents();
   renderGlassOverlays();
+  nativeGeneralSwitches.refresh();
   if (state.profileInspector?.mode === "edit" && state.profileInspector.focusKey) {
     requestAnimationFrame(() => focusProfileEditorSection(state.profileInspector.focusKey));
   }
@@ -2315,12 +2418,22 @@ function updateStatusBar() {
   const down = document.getElementById("download-rate");
   const runtime = document.getElementById("runtime-value");
   const progress = document.getElementById("traffic-progress");
-  if (up) up.textContent = formatRate(state.traffic.upload);
-  if (down) down.textContent = formatRate(state.traffic.download);
-  if (runtime) runtime.textContent = formatRuntime(state.traffic.runtimeSeconds);
+  if (up) {
+    const value = formatRate(state.traffic.upload);
+    if (up.textContent !== value) up.textContent = value;
+  }
+  if (down) {
+    const value = formatRate(state.traffic.download);
+    if (down.textContent !== value) down.textContent = value;
+  }
+  if (runtime) {
+    const value = formatRuntime(state.traffic.runtimeSeconds);
+    if (runtime.textContent !== value) runtime.textContent = value;
+  }
   if (progress) {
     const total = Math.min(100, Math.max(0, (state.traffic.upload + state.traffic.download) * 4));
-    progress.style.width = `${total}%`;
+    const width = `${total}%`;
+    if (progress.style.width !== width) progress.style.width = width;
   }
 }
 
@@ -2468,12 +2581,7 @@ function bindPageEvents() {
     input.addEventListener("change", async (event) => {
       const key = event.currentTarget.dataset.toggle;
       const checked = event.currentTarget.checked;
-      try {
-        await applyToggle(key, checked, "ui");
-      } catch (error) {
-        appendLog("error", "ui", t("{key} refused: {error}", { key: key, error: errorText(error) }));
-      }
-      renderPage();
+      await applyUiToggle(key, checked);
     });
   });
 
@@ -2807,6 +2915,15 @@ const PERSISTED_TOGGLES = new Set([
   "retainWindowBounds",
 ]);
 
+async function applyUiToggle(key, checked) {
+  try {
+    await applyToggle(key, checked, "ui");
+  } catch (error) {
+    appendLog("error", "ui", t("{key} refused: {error}", { key, error: errorText(error) }));
+  }
+  renderPage();
+}
+
 async function applyToggle(key, checked, source) {
   if (key === "allowLan") return runtimeSettingsUI.toggleLAN(checked);
   if (key === "ipv6DNS") return runtimeSettingsUI.toggleIPv6DNS(checked);
@@ -2890,7 +3007,41 @@ async function applyToggle(key, checked, source) {
   }
 }
 
+async function reconcileStartupServices() {
+  if (state.engineMutationBusy) throw new Error("A network mode change is already in progress");
+  if (state.migrationHandoff || !state.engine.startupRecoveryAvailable) {
+    throw new Error(t("Background service recovery is not available in the current state."));
+  }
+  const requestId = runtime.engineStatusRequestId + 1;
+  runtime.engineStatusRequestId = requestId;
+  state.engineMutationBusy = true;
+  state.engineMutationError = null;
+  renderPage();
+  try {
+    const payload = await invoke("reconcile_startup_services");
+    const recovered = normalizeEngineStatus(payload);
+    if (recovered.state !== "Off" || recovered.desiredMode !== "off" || recovered.active) {
+      throw new Error(t("Background service recovery did not prove the engine is Off."));
+    }
+    if (requestId === runtime.engineStatusRequestId) applyEngineStatus(payload);
+    else await loadEngineStatus();
+    appendLog("info", "engine", t("Background service recovery completed."));
+  } catch (error) {
+    try {
+      await loadEngineStatus();
+    } catch (refreshError) {
+      appendLog("error", "engine", t("Could not refresh mode state after refusal: {error}", { error: errorText(refreshError) }));
+    }
+    state.engineMutationError = errorText(error).slice(0, 512);
+    throw error;
+  } finally {
+    state.engineMutationBusy = false;
+    renderPage();
+  }
+}
+
 export async function handleAction(action) {
+  if (action === "reconcile-startup-services") return reconcileStartupServices();
   if (action === "open-automation-settings") { await automationSettingsUI.open(); return; }
   if (action === "open-runtime-settings") { await runtimeSettingsUI.open(); return; }
   if (action === "open-legacy-maintenance") {
@@ -3603,7 +3754,7 @@ async function reloadPayload() {
 
 function applyBootPayload(payload) {
   const normalized = normalizeBootPayload(payload);
-  state.payload = { product: normalized.product };
+  state.payload = { product: normalized.product, native_ui: normalized.native_ui };
   state.migrationHandoff = normalized.migration_handoff;
   state.migrationHandoffStatus = normalized.migration_handoff_status;
   if (state.migrationHandoff || state.migrationHandoffStatus.state === "in_progress") {
@@ -4052,11 +4203,6 @@ async function bootstrap() {
   void networkDiagnostics.finally(() => {
     if (state.activePage === "settings") renderPage();
   });
-  void (async () => {
-    if (await loadControllerSnapshotWithRetry()) {
-      if (state.activePage === "rules") await loadRulesSnapshot();
-    }
-  })().finally(renderPage);
 
   document.getElementById("reload-button").addEventListener("click", reloadPayload);
 
@@ -4195,6 +4341,18 @@ async function bootstrap() {
   });
 
   criticalMigrationListenersBound = true;
+  // Native reconciliation can finish after the first snapshot but before the
+  // event subscriptions above. Events have no replay, so close that interval
+  // with one current read after both engine listeners are installed. Future
+  // transitions use the listeners; reads never retry native reconciliation.
+  await loadEngineStatus();
+  await loadRuntimeProjection();
+  renderPage();
+  void (async () => {
+    if (await loadControllerSnapshotWithRetry()) {
+      if (state.activePage === "rules") await loadRulesSnapshot();
+    }
+  })().finally(renderPage);
   if (state.migrationHandoff) {
     // Close the snapshot/listener gap without requesting another boot challenge
     // in this renderer lifetime. A real WebView reload receives the next

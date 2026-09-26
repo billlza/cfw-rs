@@ -13,7 +13,7 @@ source "$repo_root/scripts/release_toolchain_contract.sh"
 readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 
 readonly expected_team_id="YKUPL7Z869"
-readonly expected_version="0.4.0"
+expected_version="0.4.0"
 readonly expected_app_id="com.bill.clashformac"
 readonly expected_extension_id="com.bill.clashformac.packet-tunnel"
 readonly expected_extension_wrapper="$expected_extension_id.systemextension"
@@ -361,6 +361,62 @@ verify_macho() {
   assert_developer_id_signature "$binary"
 }
 
+configure_release_verification_context() {
+  local context="$1"
+  local before_notarization="$2"
+  case "$context" in
+    signing-attempt-work|signing-attempt-publish-ready|canonical-native-content)
+      expected_version="0.4.0"
+      expected_build_number="40073"
+      preview_ui=0
+      signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40073/profiles/signing-preflight.json"
+      pre_sign_native_products_root="$repo_root/target/candidates/0.4.0/ga/40073/native-products"
+      ;;
+    preview-signing-attempt-work|preview-signing-attempt-publish-ready|preview-canonical-native-content)
+      expected_version="0.5.0"
+      expected_build_number="50016"
+      preview_ui=1
+      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/preview-preflight/50016/profiles/signing-preflight.json"
+      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/preview-preflight/50016/native-products"
+      ;;
+    unsigned-host|preview-pre-sign)
+      die "release application verification rejects unsigned or pre-sign context"
+      ;;
+    *)
+      die "release application verification context is invalid"
+      ;;
+  esac
+  case "$context" in
+    signing-attempt-work|signing-attempt-publish-ready|preview-signing-attempt-work|preview-signing-attempt-publish-ready)
+      [[ "$before_notarization" == "1" ]] ||
+        die "private signing-attempt verification is allowed only before notarization"
+      ;;
+  esac
+}
+
+verify_native_ui_security() {
+  local library="$1"
+  local entitlements="$temporary_root/native-ui-entitlements.plist"
+  require_regular_file "$library"
+  assert_developer_id_signature "$library"
+  codesign -d --entitlements - --xml "$library" >"$entitlements" 2>/dev/null ||
+    die "cannot extract SwiftUI library entitlements"
+  "$python_bin" -I -S -B -W error - "$entitlements" <<'PY'
+from pathlib import Path
+import plistlib
+import sys
+
+data = Path(sys.argv[1]).read_bytes()
+if data:
+    try:
+        entitlements = plistlib.loads(data)
+    except plistlib.InvalidFileException as error:
+        raise SystemExit("error: SwiftUI library entitlements are malformed") from error
+    if entitlements != {}:
+        raise SystemExit("error: SwiftUI library must not contain signed entitlements")
+PY
+}
+
 verify_tombstone_provenance() {
   local embedded_app="$1"
   local pre_sign_native_products="$2"
@@ -409,6 +465,9 @@ native_products_root="${2:-}"
 [[ $# == 4 && "$3" == "--context" ]] ||
   die "usage: scripts/verify_release_app.sh [--pre-notary] APP NATIVE_PRODUCTS --context CONTEXT"
 verification_context="$4"
+configure_release_verification_context "$verification_context" "$pre_notary"
+readonly expected_version expected_build_number preview_ui
+readonly signing_preflight_manifest pre_sign_native_products_root
 [[ "$app_path" == /* ]] || die "application path must be absolute"
 [[ "$native_products_root" == /* ]] || die "native products root must be absolute"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "application must be a non-symlink directory: $app_path"
@@ -433,25 +492,13 @@ except ValueError:
 paths = candidate_bundle_verification_paths(
     Path(sys.argv[1]), sys.argv[2], sys.argv[3], context
 )
-if context is CandidateBundleContext.UNSIGNED_HOST:
-    raise SystemExit("error: release application verification rejects unsigned-host context")
+if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.PREVIEW_PRE_SIGN}:
+    raise SystemExit("error: release application verification rejects unsigned or pre-sign context")
 print(paths.build_identity.build_version)
 PY
 )" || die "bundle build identity is invalid"
-[[ "$build_number" == "40073" ]] ||
-  die "release application is not the fixed GA build 40073"
-case "$verification_context" in
-  signing-attempt-work|signing-attempt-publish-ready)
-    ((pre_notary == 1)) ||
-      die "private signing-attempt verification is allowed only before notarization"
-    ;;
-  canonical-native-content)
-    ;;
-  *)
-    die "release application verification context is invalid"
-    ;;
-esac
-signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40073/profiles/signing-preflight.json"
+[[ "$build_number" == "$expected_build_number" ]] ||
+  die "release application is not the fixed $expected_version build $expected_build_number"
 require_regular_file "$signing_preflight_manifest"
 expected_signing_certificate_sha256="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \
@@ -672,7 +719,7 @@ cmp -s "$proxy_agent_plist" "$repo_root/native/macos/Config/com.bill.clashformac
   die "ProxyAgent launchd MachServices contract mismatch"
 verify_tombstone_provenance \
   "$app_path" \
-  "$repo_root/target/candidates/0.4.0/ga/$build_number/native-products" \
+  "$pre_sign_native_products_root" \
   "$verification_context"
 assert_developer_id_signature "$authority_path" "$expected_authority_id"
 
@@ -727,6 +774,9 @@ app_version="$(plist_value "$app_path/Contents/Info.plist" CFBundleShortVersionS
 verify_bundle_security "$app_path" host "$expected_app_id"
 verify_bundle_security "$extension_path" packet-tunnel "$expected_extension_id"
 verify_bundle_security "$agent_path" proxy-agent "$expected_agent_id"
+if [[ "$preview_ui" == "1" ]]; then
+  verify_native_ui_security "$app_path/Contents/Frameworks/libCFMNativeDashboard.dylib"
+fi
 
 macho_count=0
 macho_candidates="$temporary_root/macho-candidates"

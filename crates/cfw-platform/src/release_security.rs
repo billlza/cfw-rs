@@ -16,6 +16,7 @@ pub enum ReleaseSignedComponent {
     Application,
     MainExecutable,
     NativeBridge,
+    NativeUi,
     GlobalAuthority,
     ProxyAgent,
     PacketTunnel,
@@ -23,9 +24,10 @@ pub enum ReleaseSignedComponent {
 }
 
 impl ReleaseSignedComponent {
-    pub const NESTED: [Self; 6] = [
+    pub const NESTED: [Self; 7] = [
         Self::MainExecutable,
         Self::NativeBridge,
+        Self::NativeUi,
         Self::GlobalAuthority,
         Self::ProxyAgent,
         Self::PacketTunnel,
@@ -38,6 +40,9 @@ impl ReleaseSignedComponent {
             Self::MainExecutable => "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac",
             Self::NativeBridge => {
                 "/Applications/Clash for Mac.app/Contents/Frameworks/CFWNativeBridge.framework"
+            }
+            Self::NativeUi => {
+                "/Applications/Clash for Mac.app/Contents/Frameworks/libCFMNativeDashboard.dylib"
             }
             Self::GlobalAuthority => {
                 "/Applications/Clash for Mac.app/Contents/Library/HelperTools/CFWGlobalAuthority"
@@ -59,6 +64,7 @@ impl ReleaseSignedComponent {
             Self::Application => "application bundle",
             Self::MainExecutable => "Contents/MacOS/clash-for-mac",
             Self::NativeBridge => "Contents/Frameworks/CFWNativeBridge.framework",
+            Self::NativeUi => "Contents/Frameworks/libCFMNativeDashboard.dylib",
             Self::GlobalAuthority => "Contents/Library/HelperTools/CFWGlobalAuthority",
             Self::ProxyAgent => "Contents/Library/LoginItems/CFWProxyAgent.app",
             Self::PacketTunnel => {

@@ -148,6 +148,8 @@ _AUTHORITY_GATE_INPUTS = (
     "native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift",
     "native/macos/Sources/CFWPacketTunnel/TunnelTicketStartCoordinator.swift",
     "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityReleaseGate.swift",
+    "native/macos/Sources/CFWSharedProtocol/AuthorityClients.swift",
+    "native/macos/Sources/CFWSharedProtocol/ServiceCodeHash.swift",
     "apps/cfw-tauri-shell/build.rs",
 )
 
@@ -165,6 +167,23 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
     def test_copied_shipped_tree_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             verify_authority(_copy_authority_gate_tree(Path(tmp)))
+
+    def test_copied_host_binding_sources_cannot_weaken_current_build_requirement(self) -> None:
+        mutations = (
+            ("AuthorityClients.swift", "buildPolicy = .currentHost(currentHostCodeHash)",
+             "buildPolicy = .protocolPeer", "Host Authority role and build policy"),
+            ("ServiceCodeHash.swift", "requiresCurrentBuild = requiresCurrentBuild || requestingCurrentBuild",
+             "requiresCurrentBuild = requestingCurrentBuild", "Host Authority reconnect code constraint"),
+        )
+        for filename, original, replacement, message in mutations:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                root = _copy_authority_gate_tree(Path(tmp))
+                source = root / "native/macos/Sources/CFWSharedProtocol" / filename
+                text = source.read_text(encoding="utf-8")
+                self.assertEqual(text.count(original), 1)
+                source.write_text(text.replace(original, replacement), encoding="utf-8")
+                with self.assertRaisesRegex(AuthorityGateContractError, message):
+                    verify_authority(root)
 
     def test_injected_data_plane_fallback_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -200,6 +200,12 @@ class PreviewShellOptionalArgumentsTests(unittest.TestCase):
                 candidate = native.parent
                 app = candidate / "cargo/release/bundle/macos/Clash for Mac.app"
                 manifest = candidate / "Clash for Mac.app.manifest.json"
+                bundle_calls = [event["argv"] for event in events
+                                if event["kind"] == "external"
+                                and Path(event["argv"][0]).name == "verify_candidate_bundle.sh"]
+                expected_context = "unsigned-preview-host" if preview else "unsigned-host"
+                self.assertEqual(bundle_calls, [[str(root / "scripts/verify_candidate_bundle.sh"),
+                                                str(app), str(native), "--context", expected_context]] * 2)
                 expected_hash_metadata = [identity_metadata[0], "architecture=arm64", shared_metadata[0],
                                           "deploymentTarget=15.0", *shared_metadata[1:], *identity_metadata[1:]]
                 self.assertEqual(calls("hash_artifact.py"), [[str(root), str(root / "scripts/hash_artifact.py"), str(app),

@@ -780,15 +780,27 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                     ),
                     cleanup_runtime_removal,
                 )
+                host_invocation = (
+                    '"${tauri_host_command[@]}"'
+                    if relative == "build_unsigned_candidate.sh"
+                    else "cfw_build_tauri_host_skeleton"
+                )
+                if relative == "build_unsigned_candidate.sh":
+                    command_definition = source.index(
+                        'tauri_host_command=(\n'
+                        '  cfw_build_tauri_host_skeleton "$repo_root/apps/cfw-tauri-shell" '
+                        '"$tauri_bin" "$tauri_override"\n)'
+                    )
+                    self.assertLess(runtime_create, command_definition)
                 scoped_host_environment = (
                     'CARGO_HOME="$candidate_cargo_home" \\\n'
                     '  CARGO_NET_OFFLINE=true \\\n'
                     '  CARGO_TARGET_DIR="$cargo_target" \\\n'
                     '  MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \\\n'
-                    "  cfw_build_tauri_host_skeleton"
+                    "  " + host_invocation
                 )
                 cargo_use = source.index(scoped_host_environment, runtime_create)
-                build = source.index("cfw_build_tauri_host_skeleton", cargo_use)
+                build = source.index(host_invocation, cargo_use)
                 runtime_verification = source.index(
                     'cfw_verify_release_cargo_runtime "$repo_root" '
                     '"$candidate_cargo_home"',
@@ -817,7 +829,10 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 self.assertLess(build, verification)
                 self.assertLess(verification, manifest)
                 self.assertIn(
-                    "--context unsigned-host", source[verification:manifest]
+                    '--context "$bundle_context"'
+                    if relative == "build_unsigned_candidate.sh"
+                    else "--context unsigned-host",
+                    source[verification:manifest],
                 )
                 self.assertNotIn("export CARGO_NET_OFFLINE", source)
                 self.assertNotIn("export CARGO_TARGET_DIR", source)
@@ -979,8 +994,23 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         manifest_reverification = unsigned.rindex("verify_artifact_manifest.py")
         self.assertLess(manifest, final_verification)
         self.assertLess(final_verification, manifest_reverification)
+        # The argv regression executes both modes and checks both verifier
+        # calls. This source guard also keeps the selector closed/read-only.
+        self.assertIn('bundle_context="unsigned-host"', unsigned)
         self.assertIn(
-            "--context unsigned-host",
+            'if [[ $preview_validation -eq 1 ]]; then\n'
+            '  product_version="0.5.0"\n'
+            '  build_version="50000"\n'
+            '  candidate_relative="target/candidates/0.5.0/unsigned/50000"\n'
+            '  bundle_context="unsigned-preview-host"',
+            unsigned,
+        )
+        self.assertIn(
+            'readonly product_version build_version candidate_relative bundle_context app_artifact_kind',
+            unsigned,
+        )
+        self.assertIn(
+            '--context "$bundle_context"',
             unsigned[final_verification:manifest_reverification],
         )
 

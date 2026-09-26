@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 import pwd
+import shlex
 import signal
 import socket
-import stat
 import sys
 import tempfile
 import threading
@@ -203,8 +203,16 @@ else:
 """,
                     encoding="utf-8",
                 )
-                executable = Path(sys.executable).resolve(strict=True)
-                self.assertTrue(stat.S_ISREG(executable.stat().st_mode))
+                # Exercise the real Host admission guard against a private
+                # executable fixture, not the CI runner's Python file policy.
+                executable = root / "packet host launcher"
+                executable.write_text(
+                    "#!/bin/sh\nexec "
+                    + shlex.quote(str(Path(sys.executable).resolve(strict=True)))
+                    + ' "$@"\n',
+                    encoding="utf-8",
+                )
+                executable.chmod(0o700)
                 with patch.object(packet_host, "HOST_EXECUTABLE", executable), patch.object(
                     packet_host,
                     "HOST_ARGV",
@@ -251,6 +259,39 @@ else:
             finally:
                 os.close(read_fd)
                 os.close(write_fd)
+
+    def test_unsafe_host_files_are_rejected_before_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = root / "host"
+            host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for mode in (0o770, 0o702, 0o600):
+                with self.subTest(mode=oct(mode)):
+                    host.chmod(mode)
+                    with patch.object(packet_host, "HOST_EXECUTABLE", host), patch.object(
+                        packet_host, "_spawn_fixed_host"
+                    ) as spawn:
+                        with self.assertRaises(PacketHostError) as raised:
+                            run_fixed_host_transaction(
+                                case_id="dns-a-primary",
+                                begin_capture=lambda _ready: PacketCaptureDisposition.COMPLETE,
+                                exercise_test=lambda _ready: PacketCaptureDisposition.COMPLETE,
+                                finish_capture=lambda _ready: PacketCaptureDisposition.COMPLETE,
+                            )
+                        self.assertEqual(raised.exception.code, "host_executable_unsafe")
+                        spawn.assert_not_called()
+            host.chmod(0o700)
+            alias = root / "alias"
+            alias.symlink_to(host)
+            with patch.object(packet_host, "HOST_EXECUTABLE", alias):
+                with self.assertRaises(PacketHostError) as raised:
+                    packet_host._validate_host_executable()
+                self.assertEqual(raised.exception.code, "host_executable_unsafe")
+            os.link(host, root / "second-link")
+            with patch.object(packet_host, "HOST_EXECUTABLE", host):
+                with self.assertRaises(PacketHostError) as raised:
+                    packet_host._validate_host_executable()
+                self.assertEqual(raised.exception.code, "host_executable_unsafe")
 
     def test_unknown_case_is_rejected_before_host_launch(self) -> None:
         with patch.object(packet_host, "_validate_host_executable") as validate:

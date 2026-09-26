@@ -87,6 +87,9 @@ class CiLaneTableTests(unittest.TestCase):
                 wrapper = scripts / "run_release_ci_gate.sh"
                 wrapper.write_bytes(wrapper_source)
                 wrapper.chmod(0o755)
+                (scripts / "native_ui_development_checks.sh").write_bytes(
+                    (Path(__file__).resolve().parents[1] / "native_ui_development_checks.sh").read_bytes()
+                )
                 (scripts / "dependency_pins.env").write_text(
                     "MACOS_DEPLOYMENT_TARGET=15.0\n", encoding="utf-8"
                 )

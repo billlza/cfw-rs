@@ -41,9 +41,10 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
 # This revision includes all six patches, the utun resolver, synchronized SOCKS
-# packet addresses and Go 1.27 debug-crash compatibility.
+# packet addresses, Go 1.27 debug-crash compatibility, and bounded DNS probe
+# shutdown lifecycle. Independently SHA-256 checked against promotion-final-canonical.diff.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "3e3724b36f49365637584dc82a5222cbf79df981e854b59a20a94651a5d90aed"
+    "9133eee3b979be1efdcae74c9c5ffe17d29614e0f06c0c51dffce59b0e8d566d"
 )
 
 

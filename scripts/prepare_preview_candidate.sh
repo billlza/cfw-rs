@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
 from release_build_identity import SIGNED_PREVIEW_IDENTITY, preview_preflight_root, preview_root
 repository = Path(sys.argv[1])
 if sys.argv[2] != SIGNED_PREVIEW_IDENTITY.build_number:
-    raise SystemExit("preview build must equal the reviewed 50015 identity")
+    raise SystemExit("preview build must equal the reviewed 50016 identity")
 root = preview_preflight_root(repository)
 if os.path.lexists(root) or os.path.lexists(preview_root(repository)):
     raise SystemExit("preview identity already has retained work; do not replace or reuse it")
@@ -103,7 +103,7 @@ override="$("$CFW_RELEASE_PYTHON_EXECUTABLE" -I -S -B -W error - "$native_produc
 import json
 import sys
 native = sys.argv[1]
-print(json.dumps({"bundle": {"macOS": {"bundleVersion": "50015", "files": {
+print(json.dumps({"bundle": {"macOS": {"bundleVersion": "50016", "files": {
     "Frameworks/CFWNativeBridge.framework": f"{native}/CFWNativeBridge.framework",
     "Frameworks/libCFMNativeDashboard.dylib": f"{native}/libCFMNativeDashboard.dylib",
     "Resources/CFMNativeDashboard_CFMNativeDashboard.bundle": f"{native}/CFMNativeDashboard_CFMNativeDashboard.bundle",
@@ -133,5 +133,5 @@ run_python "$repo_root/scripts/hash_artifact.py" "$pre_sign_app" --algorithm sha
   --metadata "version=0.5.0" --metadata "buildNumber=$CFW_BUILD_NUMBER" --metadata "signingMode=pre-sign" \
   --metadata "repositoryCommit=$repository_commit" --metadata "releaseSourceSha256=$release_source_sha256" \
   --metadata "toolchainSha256=$toolchain_sha256"
-echo "Real 0.5.0/50015 Host prepared and byte-verified: $pre_sign_app"
+echo "Real 0.5.0/50016 Host prepared and byte-verified: $pre_sign_app"
 echo "This is an unsigned pre-sign input. Signing, notarization and installed acceptance remain required."

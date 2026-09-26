@@ -1,11 +1,9 @@
 #!/bin/bash -p
 # Install the pinned Tauri CLI from its checksum-bound crates.io source archive.
 #
-# Refresh the published lock to compatible patched dependencies, including the
-# rustls security fix and the replacement for yanked spin 0.9.8. This bootstrap
-# applies the repository's digest-pinned lock update, then installs from the
-# resulting local source with --locked. Product builds
-# remain offline and never invoke this script implicitly.
+# Preserve the published Cargo.lock byte-for-byte. The official lock already
+# includes the required spin and rustls versions; no dependency patch is applied.
+# Preparation remains isolated and final compilation is offline and locked.
 set -euo pipefail
 unset CDPATH
 
@@ -75,7 +73,7 @@ verify_tauri_payload_layout() {
     [[ "$(stat -f '%l' "$source/$required")" == "1" ]] ||
       die "Tauri CLI payload source file must not have hard links: $required"
   done
-  printf '%s  %s\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$source/Cargo.lock" |
+  printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$source/Cargo.lock" |
     shasum -a 256 --check >/dev/null
 
   PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
@@ -166,10 +164,10 @@ verify_tauri_workspace_boundary() {
     "$staging_workspace_manifest_sha256" "$staging_workspace_manifest" |
     shasum -a 256 --check >/dev/null
   printf '%s  %s\n' \
-    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock" |
+    "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
     shasum -a 256 --check >/dev/null
   printf '%s  %s\n' \
-    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$staging_workspace_lock" |
+    "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$staging_workspace_lock" |
     shasum -a 256 --check >/dev/null
   /usr/bin/cmp -s "$cargo_lock" "$staging_workspace_lock" ||
     die "Tauri source and workspace locks differ"
@@ -225,12 +223,6 @@ readonly developer_dir
 sdk_root="$(DEVELOPER_DIR="$developer_dir" /usr/bin/xcrun --sdk macosx --show-sdk-path)"
 readonly sdk_root
 
-readonly lock_patch="$repo_root/$TAURI_CLI_LOCK_PATCH_PATH"
-[[ -f "$lock_patch" && ! -L "$lock_patch" ]] ||
-  die "the pinned Tauri CLI lock patch is missing or not a regular file"
-printf '%s  %s\n' "$TAURI_CLI_LOCK_PATCH_SHA256" "$lock_patch" |
-  shasum -a 256 --check
-
 readonly temporary_parent_input="${TMPDIR:-}"
 [[ "$temporary_parent_input" == /* && -d "$temporary_parent_input" && \
   ! -L "$temporary_parent_input" ]] ||
@@ -252,7 +244,22 @@ readonly temporary_mode
   die "the temporary directory must not be group- or other-writable"
 staging="$(/usr/bin/mktemp -d "$temporary_parent/cfw-tauri-cli.XXXXXX")"
 cleanup() {
-  /bin/rm -rf -- "$staging"
+  local original_status=$?
+  trap - EXIT
+  if (( original_status != 0 )); then
+    printf 'error: Tauri CLI installation failed; retained staging: %s\n' "$staging" >&2
+    exit "$original_status"
+  fi
+  if [[ "$staging" != "$temporary_parent/cfw-tauri-cli."* || \
+    ! -d "$staging" || -L "$staging" ]]; then
+    printf 'error: refusing to clean unexpected Tauri CLI staging: %s\n' "$staging" >&2
+    exit 1
+  fi
+  if ! /bin/rm -rf -- "$staging"; then
+    printf 'error: cannot clean successful Tauri CLI staging: %s\n' "$staging" >&2
+    exit 1
+  fi
+  exit 0
 }
 trap cleanup EXIT
 
@@ -321,21 +328,8 @@ readonly cargo_lock="$source_root/Cargo.lock"
 printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
   shasum -a 256 --check
 
-# The exact upstream lock digest was verified above, so this dependency
-# update cannot be redirected onto a different published lock.
-# Bound Git discovery to this staging root: TMPDIR may itself be inside a
-# release worktree, where an unbounded `git apply` silently skips Cargo.lock.
-GIT_CEILING_DIRECTORIES="$staging" \
-  /usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"
-GIT_CEILING_DIRECTORIES="$staging" \
-  /usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"
-printf '%s  %s\n' "$TAURI_CLI_LOCK_PATCH_SHA256" "$lock_patch" |
-  shasum -a 256 --check >/dev/null
-printf '%s  %s\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock" |
-  shasum -a 256 --check
-GIT_CEILING_DIRECTORIES="$staging" \
-  /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"
-
+# The extracted source uses the archive's exact official lock. The isolated
+# workspace receives a byte-identical copy; both locks are verified around Cargo.
 PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
   "$cargo_manifest" \
   "$cargo_lock" \
@@ -360,7 +354,7 @@ for block in Path(lock_path).read_text(encoding="utf-8").split("[[package]]")[1:
         records.append(fields)
 expected = {"name": "spin", "version": spin_version, "checksum": spin_checksum}
 if records != [expected]:
-    raise SystemExit(f"error: patched Tauri CLI lock has unexpected spin records: {records!r}")
+    raise SystemExit(f"error: official Tauri CLI lock has unexpected spin records: {records!r}")
 PY
 
 [[ ! -e "$staging_workspace_manifest" && ! -L "$staging_workspace_manifest" && \
@@ -425,19 +419,19 @@ cfw_run_release_python_script \
   "$offline_cargo_home" \
   --output "$offline_cache_manifest" \
   --algorithm sha256-tree-v2 \
-  --metadata "artifactKind=pinned-tauri-offline-cache-v2" \
+  --metadata "artifactKind=pinned-tauri-offline-cache-v3" \
   --metadata "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
   --metadata "cacheNormalization=cargo-runtime-metadata-v1" \
-  --metadata "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
+  --metadata "cargoLockSha256=$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" \
   --metadata "rustToolchain=$rust_toolchain"
 offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest \
   "$repo_root" \
   "$offline_cargo_home" \
   "$offline_cache_manifest" \
-  "artifactKind=pinned-tauri-offline-cache-v2" \
+  "artifactKind=pinned-tauri-offline-cache-v3" \
   "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
   "cacheNormalization=cargo-runtime-metadata-v1" \
-  "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
+  "cargoLockSha256=$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" \
   "rustToolchain=$rust_toolchain")"
 readonly offline_cache_sha256_before
 
@@ -489,10 +483,10 @@ offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest \
   "$repo_root" \
   "$offline_cargo_home" \
   "$offline_cache_manifest" \
-  "artifactKind=pinned-tauri-offline-cache-v2" \
+  "artifactKind=pinned-tauri-offline-cache-v3" \
   "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
   "cacheNormalization=cargo-runtime-metadata-v1" \
-  "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
+  "cargoLockSha256=$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" \
   "rustToolchain=$rust_toolchain")"
 readonly offline_cache_sha256_after
 [[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]] ||
@@ -516,15 +510,13 @@ cfw_run_release_python_script \
   "$payload" \
   --output "$staging/tauri-cli-$TAURI_CLI_VERSION.manifest.json" \
   --algorithm sha256-tree-v2 \
-  --metadata "artifactKind=pinned-tauri-cli-v2" \
+  --metadata "artifactKind=pinned-tauri-cli-v3" \
   --metadata "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
   --metadata "cacheNormalization=cargo-runtime-metadata-v1" \
   --metadata "crateSha256=$TAURI_CLI_CRATE_SHA256" \
   --metadata "dependencyMode=isolated-fetch-offline-locked-v1" \
-  --metadata "lockPatchSha256=$TAURI_CLI_LOCK_PATCH_SHA256" \
   --metadata "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
-  --metadata "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
-  --metadata "payloadLayout=bin-and-patched-source-v1" \
+  --metadata "payloadLayout=bin-and-source-v1" \
   --metadata "platform=darwin-arm64" \
   --metadata "rustToolchain=$rust_toolchain" \
   --metadata "spinCrateSha256=$TAURI_CLI_SPIN_CRATE_SHA256" \
@@ -536,4 +528,4 @@ cfw_run_release_python_script \
 /bin/mv "$payload" "$install_root"
 /bin/mv "$staging/tauri-cli-$TAURI_CLI_VERSION.manifest.json" "$install_manifest"
 cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
-echo "tauri-cli $TAURI_CLI_VERSION installed from checksum-bound patched source"
+echo "tauri-cli $TAURI_CLI_VERSION installed from checksum-bound official source"

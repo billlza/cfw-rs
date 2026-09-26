@@ -392,15 +392,13 @@ class ExecutionBeforeVersionTests(unittest.TestCase):
             root = self.toolchain_root / f"tauri-cli-{self.pins['TAURI_CLI_VERSION']}"
             binary = root / "bin/cargo-tauri"
             metadata = [
-                "artifactKind=pinned-tauri-cli-v2",
+                "artifactKind=pinned-tauri-cli-v3",
                 f"cacheContractSha256={self.pins['TAURI_CARGO_CACHE_CONTRACT_SHA256']}",
                 "cacheNormalization=cargo-runtime-metadata-v1",
                 f"crateSha256={self.pins['TAURI_CLI_CRATE_SHA256']}",
                 "dependencyMode=isolated-fetch-offline-locked-v1",
-                f"lockPatchSha256={self.pins['TAURI_CLI_LOCK_PATCH_SHA256']}",
                 f"macosDeploymentTarget={self.pins['MACOS_DEPLOYMENT_TARGET']}",
-                f"patchedCargoLockSha256={self.pins['TAURI_CLI_PATCHED_CARGO_LOCK_SHA256']}",
-                "payloadLayout=bin-and-patched-source-v1",
+                "payloadLayout=bin-and-source-v1",
                 "platform=darwin-arm64",
                 f"rustToolchain={self.pins['RUST_VERSION']}-aarch64-apple-darwin",
                 f"spinCrateSha256={self.pins['TAURI_CLI_SPIN_CRATE_SHA256']}",
@@ -1629,23 +1627,49 @@ LIBBOX_VET_PACKAGES=(".")
             readme,
         )
 
+    def test_tauri_installer_cleanup_preserves_failure_and_only_removes_own_success(
+        self,
+    ) -> None:
+        source = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
+        start = source.index("cleanup() {")
+        end = source.index("\n}", start) + 2
+        cleanup = source[start:end]
+        for status in (7, 0):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary)
+                staging = parent / "cfw-tauri-cli.current"
+                historical = parent / "cfw-tauri-cli.history"
+                staging.mkdir()
+                historical.mkdir()
+                (staging / "evidence").write_text("current", encoding="utf-8")
+                (historical / "evidence").write_text("history", encoding="utf-8")
+                script = (
+                    'set -euo pipefail\ntemporary_parent="$1"\nstaging="$2"\n'
+                    + cleanup
+                    + '\ntrap cleanup EXIT\nexit "$3"\n'
+                )
+                result = subprocess.run(
+                    [
+                        "/bin/bash", "-p", "-c", script, "cleanup-test",
+                        str(parent), str(staging), str(status),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, status, result.stderr.decode())
+                self.assertEqual((historical / "evidence").read_text(), "history")
+                if status:
+                    self.assertEqual((staging / "evidence").read_text(), "current")
+                    self.assertIn(str(staging).encode(), result.stderr)
+                else:
+                    self.assertFalse(staging.exists())
+                    self.assertEqual(result.stderr, b"")
+
     def test_tauri_installer_uses_isolated_clean_payload(self) -> None:
         installer = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
-        lock_patch_command_prefix = (
-            'GIT_CEILING_DIRECTORIES="$staging" ' + "\\" + "\n  "
-        )
-        lock_patch_check_command = (
-            lock_patch_command_prefix
-            + '/usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"'
-        )
-        lock_patch_apply_command = (
-            lock_patch_command_prefix
-            + '/usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"'
-        )
-        lock_patch_reverse_check_command = (
-            lock_patch_command_prefix
-            + '/usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"'
-        )
         workspace_manifest_creation = (
             'render_tauri_workspace_manifest >"$staging_workspace_manifest"'
         )
@@ -1673,9 +1697,6 @@ LIBBOX_VET_PACKAGES=(".")
             'cfw_verify_release_toolchain_manifest',
             'RUSTC="$rustc_bin"',
             "--target aarch64-apple-darwin",
-            lock_patch_check_command,
-            lock_patch_apply_command,
-            lock_patch_reverse_check_command,
             'members = ["tauri-cli-%s"]',
             'resolver = "2"',
             workspace_manifest_creation,
@@ -1683,8 +1704,8 @@ LIBBOX_VET_PACKAGES=(".")
             '--additional-working-directory "$source_root"',
             'readonly payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"',
             '/bin/mv "$source_root" "$payload/source"',
-            "artifactKind=pinned-tauri-cli-v2",
-            "payloadLayout=bin-and-patched-source-v1",
+            "artifactKind=pinned-tauri-cli-v3",
+            "payloadLayout=bin-and-source-v1",
             'PATH="$cargo_install_root/bin:$(dirname "$cargo_bin"):',
             'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"',
             'cfw_run_release_python_script',
@@ -1708,9 +1729,6 @@ LIBBOX_VET_PACKAGES=(".")
         self.assertEqual(installer.count(normalization_call), 2)
         self.assertEqual(installer.count(fetch_warning_call), 1)
         self.assertEqual(installer.count(install_warning_call), 1)
-        self.assertEqual(installer.count(lock_patch_check_command), 1)
-        self.assertEqual(installer.count(lock_patch_apply_command), 1)
-        self.assertEqual(installer.count(lock_patch_reverse_check_command), 1)
         self.assertEqual(installer.count(workspace_manifest_creation), 1)
         self.assertEqual(installer.count(workspace_lock_creation), 1)
         self.assertEqual(installer.count(workspace_boundary_call), 4)
@@ -1732,20 +1750,13 @@ LIBBOX_VET_PACKAGES=(".")
         self.assertEqual(installer.count(equality), 1)
         self.assertNotIn("cargo_path_warning", installer)
         upstream_lock_digest = installer.index(
-            'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock"'
+            'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock"',
+            installer.index(preparation_call),
         )
-        lock_patch_check = installer.index(lock_patch_check_command, upstream_lock_digest)
-        lock_patch_apply = installer.index(lock_patch_apply_command, lock_patch_check)
-        patched_lock_digest = installer.index(
-            'printf \'%s  %s\\n\' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock"',
-            lock_patch_apply,
-        )
-        reverse_check = installer.index(
-            lock_patch_reverse_check_command, patched_lock_digest
-        )
+        self.assertNotIn("$lock_patch", installer)
+        self.assertNotRegex(installer, r"(?m)^[^#\n]*\bgit\b[^\n]*\bapply\b")
         spin_semantic_check = installer.index(
-            "patched Tauri CLI lock has unexpected spin records",
-            reverse_check,
+            "official Tauri CLI lock has unexpected spin records", upstream_lock_digest
         )
         workspace_manifest = installer.index(
             workspace_manifest_creation, spin_semantic_check
@@ -2087,15 +2098,13 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                 f"tauri-cli-{self.pins['TAURI_CLI_VERSION']}",
                 f"tauri-cli-{self.pins['TAURI_CLI_VERSION']}.manifest.json",
                 [
-                    "artifactKind=pinned-tauri-cli-v2",
+                    "artifactKind=pinned-tauri-cli-v3",
                     f"cacheContractSha256={self.pins['TAURI_CARGO_CACHE_CONTRACT_SHA256']}",
                     "cacheNormalization=cargo-runtime-metadata-v1",
                     f"crateSha256={self.pins['TAURI_CLI_CRATE_SHA256']}",
                     "dependencyMode=isolated-fetch-offline-locked-v1",
-                    f"lockPatchSha256={self.pins['TAURI_CLI_LOCK_PATCH_SHA256']}",
                     f"macosDeploymentTarget={self.pins['MACOS_DEPLOYMENT_TARGET']}",
-                    f"patchedCargoLockSha256={self.pins['TAURI_CLI_PATCHED_CARGO_LOCK_SHA256']}",
-                    "payloadLayout=bin-and-patched-source-v1",
+                    "payloadLayout=bin-and-source-v1",
                     "platform=darwin-arm64",
                     f"rustToolchain={self.pins['RUST_VERSION']}-aarch64-apple-darwin",
                     f"spinCrateSha256={self.pins['TAURI_CLI_SPIN_CRATE_SHA256']}",

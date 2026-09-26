@@ -46,7 +46,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                     classifier(repository, native)
 
     def test_new_context_refuses_wrong_or_mixed_component_identity(self):
-        for build, version in (("40000", "0.5.0"), ("40073", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50000", "0.4.0")):
+        for build, version in (("40000", "0.5.0"), ("40073", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50016", "0.5.0"), ("50000", "0.4.0")):
             with self.subTest(build=build, version=version), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary).resolve()
                 app, native = self.pair(repository, build=build, version=version)
@@ -56,7 +56,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             repository = Path(temporary).resolve()
             app, native = self.pair(repository)
             info = app / "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/Info.plist"
-            info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "0.5.0", "CFBundleVersion": "50015"}))
+            info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "0.5.0", "CFBundleVersion": "50016"}))
             with self.assertRaisesRegex(identity.BuildIdentityError, "build versions differ"):
                 identity.candidate_bundle_verification_paths(repository, app, native, identity.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
 
@@ -67,7 +67,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                 "40000": repository / "target/candidates/0.4.0/unsigned/native-products",
                 "40073": identity.ga_pre_sign_native_products_root(repository),
                 "50000": identity.unsigned_preview_native_products_root(repository),
-                "50015": identity.preview_native_products_root(repository),
+                "50016": identity.preview_native_products_root(repository),
             }
             for build, expected in roots.items():
                 for declared, root in roots.items():
@@ -85,10 +85,12 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             ("50000", "pre-sign", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50013", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
             ("50014", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
-            ("50016", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
+            ("50015", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
+            ("50017", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
             ("50013", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50014", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50015", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
+            ("50016", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("40000", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
         ):
             with self.subTest(build=build, signing=signing, context=context), patch.object(ui, "command") as tool:
@@ -96,8 +98,8 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                     ui.expected_metadata(Path("/never-read"), build, signing=signing, clean=False, context=context)
                 tool.assert_not_called()
         identity.require_native_product_build_mode("50000", "unsigned-validation")
-        identity.require_native_product_build_mode("50015", "pre-sign")
-        for build, mode in (("50000", "pre-sign"), ("50015", "unsigned-validation")):
+        identity.require_native_product_build_mode("50016", "pre-sign")
+        for build, mode in (("50000", "pre-sign"), ("50016", "unsigned-validation")):
             with self.assertRaises(identity.BuildIdentityError):
                 identity.require_native_product_build_mode(build, mode)
 
@@ -121,7 +123,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                              {"CFW_UNSIGNED_VALIDATION_XCODE_VERSION": "27.0", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION": "27A266a"}):
                 with self.subTest(selector=selector), patch.dict(os.environ, selector, clear=True), patch.object(ui, "command") as tool:
                     with self.assertRaisesRegex(ui.NativeUiArtifactError, "refuses unsigned-validation"):
-                        ui.expected_metadata(repository, "50015", signing="pre-sign", clean=False)
+                        ui.expected_metadata(repository, "50016", signing="pre-sign", clean=False)
                     tool.assert_not_called()
 
     def test_unsigned_intermediate_directory_symlink_is_rejected_before_creation(self):

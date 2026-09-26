@@ -14,10 +14,8 @@ for argument in "$@"; do
     *) echo "usage: scripts/build_native_ui.sh [--verify] [--unsigned-preview-validation]" >&2; exit 2 ;;
   esac
 done
-context_arguments=()
 if [[ $unsigned_preview -eq 1 ]]; then
   cfw_seal_release_tool_environment unsigned-validation
-  context_arguments+=(--unsigned-preview-validation)
 else
   cfw_seal_release_tool_environment production
 fi
@@ -25,5 +23,13 @@ source "$repo_root/scripts/release_toolchain_contract.sh"
 cfw_select_release_apple_toolchain
 : "${CFW_NATIVE_PRODUCTS_OUTPUT:?set the exact preview native-products path}"
 : "${CFW_BUILD_NUMBER:?set the exact preview build number}"
-cfw_run_release_python_script "$repo_root" "$repo_root/scripts/native_ui_artifact.py" "$operation" \
-  --repository "$repo_root" --products "$CFW_NATIVE_PRODUCTS_OUTPUT" --build-number "$CFW_BUILD_NUMBER" "${context_arguments[@]}"
+# Bash 3.2 with nounset rejects expansion of an empty optional array. Build
+# the complete command first so both production and CI always expand real argv.
+artifact_command=(
+  cfw_run_release_python_script "$repo_root" "$repo_root/scripts/native_ui_artifact.py" "$operation"
+  --repository "$repo_root" --products "$CFW_NATIVE_PRODUCTS_OUTPUT" --build-number "$CFW_BUILD_NUMBER"
+)
+if [[ $unsigned_preview -eq 1 ]]; then
+  artifact_command+=(--unsigned-preview-validation)
+fi
+"${artifact_command[@]}"

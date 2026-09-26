@@ -127,10 +127,10 @@ for platform_name in (
 override = parse_json(sys.argv[2], "inline override")
 require_no_signing_identity(override, "inline override")
 if sys.argv[3] == "--native-ui-preview":
-    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50011":
-        raise SystemExit("error: native UI Host requires exact preview version/build 0.5.0/50011")
-    if override["bundle"]["macOS"].get("bundleVersion") != "50011":
-        raise SystemExit("error: native UI Host override must retain preview build 50011")
+    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50012":
+        raise SystemExit("error: native UI Host requires exact preview version/build 0.5.0/50012")
+    if override["bundle"]["macOS"].get("bundleVersion") != "50012":
+        raise SystemExit("error: native UI Host override must retain preview build 50012")
 elif sys.argv[3] == "--native-ui-unsigned-preview":
     if base_config.get("version") != "0.5.0" or sys.argv[4] != "50000":
         raise SystemExit("error: unsigned native UI Host requires exact validation version/build 0.5.0/50000")

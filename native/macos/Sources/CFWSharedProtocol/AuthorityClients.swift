@@ -386,7 +386,10 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
   private let onDisconnect: @Sendable () -> Void
   private var connection: NSXPCConnection?
   private var heartbeatTask: Task<Void, Never>?
-  private enum BuildPolicy { case protocolPeer, currentHost(ServiceCodeHash) }
+  private enum BuildPolicy {
+    case protocolPeer
+    case currentHost(ServiceCodeHash)
+  }
   private var buildPolicy: BuildPolicy = .protocolPeer
   private var connectionRequiresCurrentBuild = false
   private var buildConstraint = ServiceConnectionBuildConstraint()

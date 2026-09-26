@@ -59,20 +59,24 @@ build_version="40000"
 candidate_relative="target/candidates/0.4.0/unsigned"
 bundle_context="unsigned-host"
 app_artifact_kind="unsigned-application-validation-v1"
-version_contract_arguments=()
-tauri_ui_arguments=()
-validation_app_metadata=()
+# Keep real required arguments in every command/metadata array: Bash 3.2
+# treats an empty array expansion as unbound under the required nounset mode.
+version_contract_command=(
+  cfw_run_release_python_script "$repo_root" "$repo_root/scripts/verify_version_contract.py"
+)
 if [[ $preview_validation -eq 1 ]]; then
   product_version="0.5.0"
   build_version="50000"
   candidate_relative="target/candidates/0.5.0/unsigned/50000"
   bundle_context="unsigned-preview-host"
   app_artifact_kind="unsigned-preview-application-validation-v1"
-  version_contract_arguments+=(--preview)
-  tauri_ui_arguments+=(--native-ui-unsigned-preview)
-  validation_app_metadata+=(--metadata "signingMode=unsigned-validation")
+  version_contract_command+=(--preview)
 fi
 readonly product_version build_version candidate_relative bundle_context app_artifact_kind
+validation_app_metadata=(--metadata "version=$product_version")
+if [[ $preview_validation -eq 1 ]]; then
+  validation_app_metadata+=(--metadata "signingMode=unsigned-validation")
+fi
 candidate_root="$repo_root/$candidate_relative"
 cargo_target="$candidate_root/cargo"
 native_products="$candidate_root/native-products"
@@ -100,8 +104,7 @@ cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
   die "tauri-cli $TAURI_CLI_VERSION is required"
 [[ "$("$node_bin" --version)" == "v$NODE_VERSION" ]] ||
   die "pinned Node.js $NODE_VERSION is unavailable"
-cfw_run_release_python_script \
-  "$repo_root" "$repo_root/scripts/verify_version_contract.py" "${version_contract_arguments[@]}"
+"${version_contract_command[@]}"
 [[ -d "$repo_root/apps/cfw-tauri-shell/node_modules" ]] ||
   die "UI dependencies are not prepared; run pinned npm ci explicitly"
 /bin/bash -p "$repo_root/scripts/build_ui_with_pinned_node.sh" \
@@ -216,14 +219,17 @@ if preview == "1":
 print(json.dumps(override, separators=(",", ":")))
 PY
 )"
+tauri_host_command=(
+  cfw_build_tauri_host_skeleton "$repo_root/apps/cfw-tauri-shell" "$tauri_bin" "$tauri_override"
+)
+if [[ $preview_validation -eq 1 ]]; then
+  tauri_host_command+=(--native-ui-unsigned-preview)
+fi
 CARGO_HOME="$candidate_cargo_home" \
   CARGO_NET_OFFLINE=true \
   CARGO_TARGET_DIR="$cargo_target" \
   MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
-  cfw_build_tauri_host_skeleton \
-  "$repo_root/apps/cfw-tauri-shell" \
-  "$tauri_bin" \
-  "$tauri_override" "${tauri_ui_arguments[@]}"
+  "${tauri_host_command[@]}"
 cfw_verify_release_cargo_runtime "$repo_root" "$candidate_cargo_home"
 cfw_remove_release_cargo_runtime "$candidate_cargo_home"
 candidate_cargo_home=""
@@ -269,7 +275,7 @@ cfw_run_release_python_script \
   --metadata "toolchainSha256=$toolchain_sha256" \
   --metadata "uiDependenciesTreeSha256=$ui_dependencies_tree_sha256" \
   --metadata "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256" \
-  --metadata "version=$product_version" "${validation_app_metadata[@]}"
+  "${validation_app_metadata[@]}"
 app_manifest_sha256="$(
   /usr/bin/shasum -a 256 "$app_manifest" | /usr/bin/awk '{print $1}'
 )"
@@ -281,7 +287,7 @@ cfw_run_release_python_script \
   "$app_path" \
   "$app_manifest" \
   --metadata "artifactKind=$app_artifact_kind" \
-  --metadata "version=$product_version" "${validation_app_metadata[@]}" \
+  "${validation_app_metadata[@]}" \
   --metadata "buildNumber=$build_version" \
   --metadata "cargoWorkspaceSourcesTreeSha256=$cargo_workspace_sources_tree_sha256" \
   --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
@@ -306,7 +312,7 @@ cfw_run_release_python_script \
   "$app_path" \
   "$app_manifest" \
   --metadata "artifactKind=$app_artifact_kind" \
-  --metadata "version=$product_version" "${validation_app_metadata[@]}" \
+  "${validation_app_metadata[@]}" \
   --metadata "buildNumber=$build_version" \
   --metadata "releaseSourceSha256=$release_source_sha256" \
   --metadata "repositoryCommit=$repository_commit"

@@ -550,12 +550,12 @@
   ],
   "rust_stable": "1.98.1",
   "sing_box_stable": "1.14.2",
-  "application_build": "50011",
+  "application_build": "50012",
   "installed_preview_build": "50010",
   "installed_sing_box": "not observed at runtime for 50010",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "All 41 directly declared registry dependencies include their latest observed stable release; cc refresh passed default Host compilation/strict Clippy and target supply-chain policies. Native UI/Release integration and installed 50011/VPN/performance acceptance remain pending.",
+  "implementation_status": "All 41 directly declared registry dependencies include their latest observed stable release; cc refresh passed default Host compilation/strict Clippy and target supply-chain policies. Native UI/Release integration and installed 50012/VPN/performance acceptance remain pending.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",

@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-09-25T08:41:48.875167+00:00",
+  "checked_at": "2026-09-26T09:21:33.966896+00:00",
   "scope": "external registry dependencies declared by root, crates and apps manifests, including dev/build/target tables; not every transitive crate",
   "packages": [
     {
@@ -33,9 +33,9 @@
     {
       "name": "cc",
       "locked": [
-        "1.4.7"
+        "1.5.1"
       ],
-      "latest_stable": "1.4.7",
+      "latest_stable": "1.5.1",
       "source": "https://crates.io/api/v1/crates/cc",
       "manifests": [
         "apps/cfw-tauri-shell/Cargo.toml"
@@ -550,12 +550,12 @@
   ],
   "rust_stable": "1.98.1",
   "sing_box_stable": "1.14.2",
-  "application_build": "50008",
-  "installed_preview_build": "50007",
-  "installed_sing_box": "1.14.1",
+  "application_build": "50011",
+  "installed_preview_build": "50010",
+  "installed_sing_box": "not observed at runtime for 50010",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "Dependencies updated and source/compatibility validation in progress; new candidate not yet built or installed",
+  "implementation_status": "All 41 directly declared registry dependencies include their latest observed stable release; cc refresh passed default Host compilation/strict Clippy and target supply-chain policies. Native UI/Release integration and installed 50011/VPN/performance acceptance remain pending.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",
@@ -566,5 +566,8 @@
       "reason": "retained by upstream constraints in all-platform lock; absent from macOS target inverse graph; proc-macro-crate 2.0.2 fixes toml_datetime and toml_edit exactly"
     }
   ],
-  "evidence_directory": "target/050-completion/direct-rust-recheck-20260925"
+  "evidence_directory": "target/050-completion/preview-50011-operator/registry-recheck-20260926",
+  "packaged_sing_box": "1.14.2",
+  "dependency_refresh_evidence": "target/cc-dependency-refresh-20260926/completed.json",
+  "toolchain_recheck_note": "Rust 1.98.1 official releases page and sing-box v1.14.2 GitHub latest release rechecked on 2026-09-26; registry observation time is recorded separately."
 }

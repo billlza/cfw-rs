@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Testing
+import WebKit
 
 @testable import CFMNativeDashboard
 
@@ -447,7 +448,7 @@ struct ProfileMenuTests {
     }
   }
 
-  @Test @MainActor func anchorsUseActualViewBoundsAndFlipState() throws {
+  @Test @MainActor func anchorsUseWKViewportZoomAndFlipState() throws {
     NSApplication.shared.setActivationPolicy(.prohibited)
     let parent = NSWindow(
       contentRect: NSRect(x: 100, y: 100, width: 850, height: 603),
@@ -455,12 +456,13 @@ struct ProfileMenuTests {
     parent.isReleasedWhenClosed = false
     parent.orderFront(nil)
     defer { parent.close() }
-    final class FlippedView: NSView { override var isFlipped: Bool { true } }
+    final class UnflippedView: WKWebView { override var isFlipped: Bool { false } }
     for view in [
-      NSView(frame: NSRect(x: 20, y: 30, width: 400, height: 300)),
-      FlippedView(frame: NSRect(x: 20, y: 30, width: 400, height: 300)),
+      WKWebView(frame: NSRect(x: 20, y: 30, width: 400, height: 300)),
+      UnflippedView(frame: NSRect(x: 20, y: 30, width: 400, height: 300)),
     ] {
       parent.contentView?.addSubview(view)
+      view.pageZoom = 0.5
       defer { view.removeFromSuperview() }
       let pointer = Unmanaged.passUnretained(view).toOpaque()
       var window: Int64 = -1

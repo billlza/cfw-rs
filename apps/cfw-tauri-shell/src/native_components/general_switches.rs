@@ -86,6 +86,7 @@ impl Request {
     }
 }
 
+#[cfg(feature = "native-ui")]
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Event {

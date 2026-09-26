@@ -213,17 +213,8 @@ final class GeneralSwitchesController {
   /// Admit only the public pageZoom conversion, allowing less than one CSS
   /// pixel for viewport quantization, never arbitrary proportional stretching.
   static func viewportIsCurrent(_ frame: GeneralSwitchesFrame, in webview: WKWebView) -> Bool {
-    let bounds = webview.bounds
-    let zoom = webview.pageZoom
-    guard bounds.width.isFinite, bounds.height.isFinite, bounds.minX.isFinite,
-      bounds.minY.isFinite, bounds.width > 0, bounds.height > 0,
-      zoom.isFinite, zoom > 0
-    else { return false }
-    let width = bounds.width / zoom
-    let height = bounds.height / zoom
-    return width.isFinite && height.isFinite
-      && abs(frame.viewport.width - width) < 1
-      && abs(frame.viewport.height - height) < 1
+    WebContentGeometry(
+      webview: webview, width: frame.viewport.width, height: frame.viewport.height) != nil
   }
 
   /// Validate all geometry and system-control sizes before taking ownership of
@@ -285,24 +276,19 @@ final class GeneralSwitchesController {
       webview.window === parent, let parent,
       NSApp?.windows.contains(where: { $0 === parent }) == true
     else { return false }
-    let bounds = webview.bounds
-    let scale = webview.pageZoom
+    guard
+      let geometry = WebContentGeometry(
+        webview: webview, width: next.viewport.width, height: next.viewport.height)
+    else { return false }
     func rectangle(_ input: GeneralSwitchesFrame.Rectangle) -> NSRect {
-      let x = bounds.minX + input.x * scale
-      let width = input.width * scale
-      let height = input.height * scale
-      let top = input.y * scale
-      return NSRect(
-        x: x, y: webview.isFlipped ? bounds.minY + top : bounds.maxY - top - height,
-        width: width, height: height)
+      geometry.rectangle(x: input.x, y: input.y, width: input.width, height: input.height)
     }
-    guard bounds.width > 0, bounds.height > 0 else { return false }
     let clipRectangle = rectangle(next.clip)
     guard
       [clipRectangle.minX, clipRectangle.minY, clipRectangle.width, clipRectangle.height]
         .allSatisfy(\.isFinite)
     else { return false }
-    let intersection = clipRectangle.intersection(bounds)
+    let intersection = clipRectangle.intersection(geometry.viewport)
     let clip = intersection.isNull || intersection.isEmpty ? NSRect.zero : intersection
     guard [clip.origin.x, clip.origin.y, clip.width, clip.height].allSatisfy(\.isFinite) else {
       return false

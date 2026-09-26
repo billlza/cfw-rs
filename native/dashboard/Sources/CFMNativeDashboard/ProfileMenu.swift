@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import SwiftUI
+import WebKit
 
 public typealias ProfileMenuCallback = @convention(c) (UInt, UInt64, UInt32) -> Void
 
@@ -533,18 +534,15 @@ public func profileMenuAnchor(
   else { return 0 }
   let view = Unmanaged<NSView>.fromOpaque(borrowedView).takeUnretainedValue()
   let result: (Int32, Int64, Double, Double) = MainActor.assumeIsolated {
+    guard let view = view as? WKWebView else { return (0, 0, 0, 0) }
     guard let window = view.window, window.isVisible,
       NSApp?.windows.contains(where: { $0 === window }) == true
     else { return (2, 0, 0, 0) }
-    let bounds = view.bounds
-    guard bounds.width.isFinite, bounds.height.isFinite, bounds.minX.isFinite, bounds.minY.isFinite,
-      bounds.width > 0, bounds.height > 0
-    else { return (0, 0, 0, 0) }
-    let point = NSPoint(
-      x: bounds.minX + clientX / viewportWidth * bounds.width,
-      y: view.isFlipped
-        ? bounds.minY + clientY / viewportHeight * bounds.height
-        : bounds.maxY - clientY / viewportHeight * bounds.height)
+    guard
+      let geometry = WebContentGeometry(
+        webview: view, width: viewportWidth, height: viewportHeight)
+    else { return (2, 0, 0, 0) }
+    let point = geometry.rectangle(x: clientX, y: clientY, width: 0, height: 0).origin
     let screenPoint = window.convertPoint(toScreen: view.convert(point, to: nil))
     guard screenPoint.x.isFinite, screenPoint.y.isFinite,
       containsInclusive(window.frame, screenPoint)

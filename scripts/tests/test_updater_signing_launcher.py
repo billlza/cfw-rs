@@ -592,10 +592,6 @@ class PinnedSignerVerificationTests(unittest.TestCase):
                 metadata = dict(
                     item.split("=", 1) for item in launcher.PINNED_TAURI_METADATA
                 )
-                if mutation == "old-kind":
-                    metadata["artifactKind"] = "pinned-tauri-cli-v2"
-                else:
-                    metadata["lockPatchSha256"] = "a" * 64
                 payload = build_manifest(
                     signer.parent.parent, algorithm="sha256-tree-v2"
                 )
@@ -615,25 +611,42 @@ class PinnedSignerVerificationTests(unittest.TestCase):
                     return result
 
                 def verifier(_repository: Path):
-                    return launcher.verify_pinned_tauri_signer(repository, runner=runner)
+                    # Exercise exact metadata with this test lane's runtime;
+                    # production runtime admission has its own policy tests.
+                    return launcher._verify_pinned_tauri_signer_with_runtime(
+                        repository, Path(sys.executable).resolve(strict=True),
+                        runner=runner,
+                    )
+
+                held = verifier(repository)
+                os.close(held.descriptor)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0].returncode, 0)
+                self.assertEqual(calls[0].stderr, b"")
+                self.assertEqual(calls[0].stdout, _verified_signer_entry(signer))
+                calls.clear()
+                if mutation == "old-kind":
+                    metadata["artifactKind"] = "pinned-tauri-cli-v2"
+                else:
+                    metadata["lockPatchSha256"] = "a" * 64
+                manifest.write_text(json.dumps(payload), encoding="utf-8")
 
                 password_reader = mock.Mock(
                     side_effect=AssertionError("credential access")
                 )
                 execve = mock.Mock(side_effect=AssertionError("signer execution"))
-                with mock.patch.object(
-                    launcher, "_signer_toolchain_metadata",
-                    return_value=launcher.PINNED_TAURI_METADATA,
+                with self.assertRaisesRegex(
+                    launcher.UpdaterSigningLaunchError,
+                    "source-bound Tauri toolchain tree or exact metadata did not verify",
                 ):
-                    with self.assertRaises(launcher.UpdaterSigningLaunchError):
-                        launcher._launch_updater_signer(
-                            fixture.archive,
-                            signer_verifier=verifier,
-                            home=fixture.home,
-                            password_reader=password_reader,
-                            acl_checker=lambda _path: None,
-                            execve=execve,
-                        )
+                    launcher._launch_updater_signer(
+                        fixture.archive,
+                        signer_verifier=verifier,
+                        home=fixture.home,
+                        password_reader=password_reader,
+                        acl_checker=lambda _path: None,
+                        execve=execve,
+                    )
                 self.assertEqual(len(calls), 1)
                 self.assertNotEqual(calls[0].returncode, 0)
                 expected = (

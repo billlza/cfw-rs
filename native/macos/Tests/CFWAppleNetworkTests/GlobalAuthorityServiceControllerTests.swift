@@ -19,6 +19,8 @@ private final class FakeAuthorityDaemonService: GlobalAuthorityDaemonServicing,
     statuses.count > 1 ? statuses.removeFirst() : statuses[0]
   }
 
+  func requireRegistrationReady() throws {}
+
   func register() throws {
     registerCalls += 1
     if let registerError { throw registerError }

@@ -64,12 +64,14 @@ public protocol ProxyAgentServiceControlling: Sendable {
 
 public protocol ProxyAgentServicing: Sendable {
   var registrationStatus: ProxyAgentRegistrationStatus { get }
+  func requireRegistrationReady() throws
   func register() throws
-  func unregister() throws
+  func unregister() async throws
 }
 
 public struct SMProxyAgentService: ProxyAgentServicing {
   public static let launchAgentPlistName = "com.bill.clashformac.proxy-agent.plist"
+  private let unregistration = ServiceUnregistrationBarrier()
 
   public init() {}
 
@@ -83,12 +85,22 @@ public struct SMProxyAgentService: ProxyAgentServicing {
     }
   }
 
-  public func register() throws {
-    try SMAppService.agent(plistName: Self.launchAgentPlistName).register()
+  public func requireRegistrationReady() throws {
+    try unregistration.requireRegistrationReady()
   }
 
-  public func unregister() throws {
-    try SMAppService.agent(plistName: Self.launchAgentPlistName).unregister()
+  public func register() throws {
+    try unregistration.register {
+      try SMAppService.agent(plistName: Self.launchAgentPlistName).register()
+    }
+  }
+
+  public func unregister() async throws {
+    try await unregistration.unregister { finish in
+      SMAppService.agent(plistName: Self.launchAgentPlistName).unregister { error in
+        finish(error.map { .failure($0) } ?? .success(()))
+      }
+    }
   }
 }
 
@@ -104,6 +116,9 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
   }
 
   public func ensureRegistered() throws {
+    do { try service.requireRegistrationReady() } catch {
+      throw ProxyAgentHostError.registrationFailed("service unregistration remains pending")
+    }
     switch service.registrationStatus {
     case .enabled:
       return

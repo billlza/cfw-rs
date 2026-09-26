@@ -120,13 +120,13 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
         registration: before.1, runningCode: authority, expectedCode: expectedAuthority))
   }
 
-  private struct Process: Equatable {
+  private struct ProcessRecord: Equatable {
     let pid: pid_t
     let path: String
     let kernel: Installed40019KernelProcessIdentity
   }
 
-  private static func processInventory() throws -> [Process] {
+  private static func processInventory() throws -> [ProcessRecord] {
     let requested = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
     let capacity = Int(requested) + 4096
     guard requested > 0, capacity <= 1 << 20 else {
@@ -140,7 +140,7 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
       CurrentAppServiceRuntimeObserver.isCompleteProcessInventory(
         returnedBytes: returned, capacityBytes: pids.count * MemoryLayout<pid_t>.stride)
     else { throw CurrentAppServiceBuildError.identityUnavailable }
-    var results: [Process] = []
+    var results: [ProcessRecord] = []
     for pid in pids.prefix(Int(returned) / MemoryLayout<pid_t>.stride) where pid > 0 {
       var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
       let count = buffer.withUnsafeMutableBytes {
@@ -177,7 +177,7 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
       if try belongsToServiceScope(
         name: URL(fileURLWithPath: path).lastPathComponent, kernel: kernel, invokingUID: geteuid())
       {
-        results.append(Process(pid: pid, path: path, kernel: kernel))
+        results.append(ProcessRecord(pid: pid, path: path, kernel: kernel))
       }
     }
     return results.sorted { $0.pid < $1.pid }
@@ -196,7 +196,7 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
     return true
   }
 
-  private static func observe(_ service: CurrentAppService, candidates: [Process]) throws
+  private static func observe(_ service: CurrentAppService, candidates: [ProcessRecord]) throws
     -> CurrentAppServiceCodeIdentity?
   {
     let name = service == .proxyAgent ? "CFWProxyAgent" : "CFWGlobalAuthority"

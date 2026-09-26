@@ -59,7 +59,11 @@ private enum ProductionNativeBridge {
   static let coordinator: Result<NativeBridgeCoordinator, NativeBridgeExecutionError> = Result {
     let signing = try HostSigningIdentity.current()
     let teamIdentifier = signing.teamIdentifier
-    let serviceBuildObserver = try CurrentAppServiceBuildObserver()
+    let proxyAgentService = SMProxyAgentService()
+    let authorityDaemonService = SMGlobalAuthorityDaemonService()
+    let serviceMaintainer = CurrentAppServiceMaintainer(
+      proxyAgent: proxyAgentService, globalAuthority: authorityDaemonService)
+    let serviceBuildObserver = try CurrentAppServiceBuildObserver(services: serviceMaintainer)
     let installer = OSSystemExtensionInstaller(
       extensionIdentifier: "com.bill.clashformac.packet-tunnel",
       approvalHandler: {}
@@ -68,6 +72,7 @@ private enum ProductionNativeBridge {
     // lease inspector and the Tunnel-start preparer. Its connection lifecycle
     // (bounded timeouts, invalidation/interruption) fails closed.
     let authorityClient = RegistrationGatedAuthorityClient(
+      serviceController: SMGlobalAuthorityServiceController(service: authorityDaemonService),
       authority: BoundedAuthorityXPCClient(
         remote: NSXPCGlobalAuthorityRemote(
           currentHostCodeHash: try serviceBuildObserver.currentCodeHash(for: .globalAuthority))))
@@ -85,7 +90,8 @@ private enum ProductionNativeBridge {
       machServiceName: "com.bill.clashformac.proxy-agent",
       teamIdentifier: teamIdentifier,
       proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
-      currentCodeHash: try serviceBuildObserver.currentCodeHash(for: .proxyAgent)
+      currentCodeHash: try serviceBuildObserver.currentCodeHash(for: .proxyAgent),
+      serviceController: SMProxyAgentServiceController(service: proxyAgentService)
     )
     let credentialVault = try CredentialVault(
       accessGroup: "\(teamIdentifier).com.bill.clashformac.credentials"
@@ -101,6 +107,7 @@ private enum ProductionNativeBridge {
       installed40019Authority: Installed40019AuthorityOffProver(),
       credentialVault: credentialVault,
       hostOperationLease: KernelNativeHostOperationLeaseAcquirer(),
+      serviceMaintainer: serviceMaintainer,
       serviceBuildObserver: serviceBuildObserver
     )
   }.mapError { error in

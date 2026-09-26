@@ -36,6 +36,250 @@ private enum MaintenanceFixtureError: Error { case injected }
     ]) == .unobservable)
 }
 
+private final class ControlledAuthorityUnregistration: GlobalAuthorityDaemonServicing,
+  @unchecked Sendable
+{
+  private let lock = NSLock()
+  private let barrier = ServiceUnregistrationBarrier()
+  private var state: GlobalAuthorityRegistrationStatus = .enabled
+  private var callbacks: [@Sendable (Result<Void, Error>) -> Void] = []
+  private var requested: (count: Int, finish: @Sendable (Result<Void, Error>) -> Void)?
+  private var deadlineAction: (@Sendable () -> Void)?
+  private var osCompletionDelivered = true
+  private var registrations = 0
+  let legacyReturnsBeforeCompletion: Bool
+  let registerResult: GlobalAuthorityRegistrationStatus
+  let pendingProjection: GlobalAuthorityRegistrationStatus
+  let registerThrows: Bool
+
+  init(
+    legacyReturnsBeforeCompletion: Bool = false,
+    initial: GlobalAuthorityRegistrationStatus = .enabled,
+    registerResult: GlobalAuthorityRegistrationStatus = .enabled,
+    pendingProjection: GlobalAuthorityRegistrationStatus = .notRegistered,
+    registerThrows: Bool = false
+  ) {
+    self.legacyReturnsBeforeCompletion = legacyReturnsBeforeCompletion
+    self.state = initial
+    self.registerResult = registerResult
+    self.pendingProjection = pendingProjection
+    self.registerThrows = registerThrows
+  }
+
+  var registrationStatus: GlobalAuthorityRegistrationStatus { lock.withLock { state } }
+  var registerCalls: Int { lock.withLock { registrations } }
+  var unregisterCalls: Int { lock.withLock { callbacks.count } }
+
+  func requireRegistrationReady() throws { try barrier.requireRegistrationReady() }
+
+  func register() throws {
+    try barrier.register {
+      try lock.withLock {
+        registrations += 1
+        guard osCompletionDelivered else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: 1)
+        }
+        state = registerResult
+        if registerThrows { throw NSError(domain: NSPOSIXErrorDomain, code: 1) }
+      }
+    }
+  }
+
+  func unregister() async throws {
+    if legacyReturnsBeforeCompletion {
+      submit { _ in }
+      return
+    }
+    try await barrier.unregister(
+      deadline: CallbackDeadlineScheduler { action in
+        self.lock.withLock { self.deadlineAction = action }
+      }, operation: { finish in self.submit(finish) })
+  }
+
+  private func submit(_ finish: @escaping @Sendable (Result<Void, Error>) -> Void) {
+    let waiting: (@Sendable (Result<Void, Error>) -> Void)? = lock.withLock {
+      state = pendingProjection
+      osCompletionDelivered = false
+      callbacks.append(finish)
+      guard let waiting = requested, callbacks.count >= waiting.count else { return nil }
+      requested = nil
+      return waiting.finish
+    }
+    waiting?(.success(()))
+  }
+
+  func waitUntilSubmitted(count: Int = 1) async throws {
+    let _: Void = try await awaitBoundedCallback(
+      deadline: CallbackDeadlineScheduler(timeout: .seconds(5)),
+      timeoutError: MaintenanceFixtureError.injected
+    ) { finish in
+      let ready = self.lock.withLock {
+        if self.callbacks.count >= count { return true }
+        self.requested = (count, finish)
+        return false
+      }
+      if ready { finish(.success(())) }
+    }
+  }
+
+  func complete(_ result: Result<Void, Error>, at index: Int = 0) {
+    let callback = lock.withLock {
+      if index == callbacks.count - 1 {
+        osCompletionDelivered = true
+        if case .success = result { state = .notRegistered }
+      }
+      return callbacks[index]
+    }
+    callback(result)
+  }
+
+  func expire() throws {
+    let action = try #require(lock.withLock { deadlineAction })
+    action()
+  }
+}
+
+private struct ControlledProxyUnregistration: ProxyAgentServicing {
+  let shared: ControlledAuthorityUnregistration
+  var registrationStatus: ProxyAgentRegistrationStatus {
+    switch shared.registrationStatus {
+    case .enabled: .enabled
+    case .requiresApproval: .requiresApproval
+    case .notRegistered: .notRegistered
+    case .notFound: .notFound
+    case .unknown: .unknown
+    }
+  }
+  func requireRegistrationReady() throws { try shared.requireRegistrationReady() }
+  func register() throws { try shared.register() }
+  func unregister() async throws { try await shared.unregister() }
+}
+
+@Suite(.timeLimit(.minutes(1))) struct ServiceUnregistrationCompletionTests {
+  private func maintainer(_ authority: ControlledAuthorityUnregistration)
+    -> CurrentAppServiceMaintainer
+  {
+    CurrentAppServiceMaintainer(
+      proxyAgent: MaintenanceProxyService([.notRegistered]), globalAuthority: authority)
+  }
+
+  @Test func oldImmediateReturnAllowsTheKnownUnsafeReregistrationSequence() async throws {
+    let service = ControlledAuthorityUnregistration(legacyReturnsBeforeCompletion: true)
+    let subject = maintainer(service)
+    #expect(try await subject.perform(.unregister, on: .globalAuthority) == .notRegistered)
+    await #expect(throws: CurrentAppServiceMaintenanceError.mutationFailed(.globalAuthority)) {
+      try await subject.perform(.register, on: .globalAuthority)
+    }
+    #expect(service.registerCalls == 1)
+    service.complete(.success(()))
+  }
+
+  @Test func currentMaintainerWaitsForCompletionBeforeReregistering() async throws {
+    let service = ControlledAuthorityUnregistration()
+    let subject = maintainer(service)
+    let pending = Task { try await subject.perform(.unregister, on: .globalAuthority) }
+    try await service.waitUntilSubmitted()
+    #expect(service.registrationStatus == .notRegistered)
+    await #expect(throws: CurrentAppServiceMaintenanceError.unregistrationPending(.globalAuthority))
+    {
+      try await subject.perform(.register, on: .globalAuthority)
+    }
+    await #expect(throws: CurrentAppServiceMaintenanceError.unregistrationPending(.globalAuthority))
+    {
+      try await subject.perform(.unregister, on: .globalAuthority)
+    }
+    #expect(throws: GlobalAuthorityRegistrationError.registrationFailed) {
+      try SMGlobalAuthorityServiceController(service: service).ensureRegistered()
+    }
+    #expect(service.registerCalls == 0)
+    #expect(service.unregisterCalls == 1)
+    service.complete(.success(()))
+    #expect(try await pending.value == .notRegistered)
+    #expect(try await subject.perform(.register, on: .globalAuthority) == .enabled)
+    #expect(service.registerCalls == 1)
+  }
+
+  @Test func callbackFailureDoesNotAdvanceRegistration() async throws {
+    let service = ControlledAuthorityUnregistration()
+    let subject = maintainer(service)
+    let pending = Task { try await subject.perform(.unregister, on: .globalAuthority) }
+    try await service.waitUntilSubmitted()
+    service.complete(.failure(MaintenanceFixtureError.injected))
+    await #expect(throws: CurrentAppServiceMaintenanceError.mutationFailed(.globalAuthority)) {
+      try await pending.value
+    }
+    #expect(service.registerCalls == 0)
+    #expect(service.registrationStatus == .notRegistered)
+  }
+
+  @Test(arguments: [false, true])
+  func expiredOrCancelledWaitKeepsOrdinaryRegistrationBlocked(cancel: Bool) async throws {
+    let service = ControlledAuthorityUnregistration(
+      pendingProjection: cancel ? .enabled : .notRegistered)
+    let subject = maintainer(service)
+    let pending = Task { try await subject.perform(.unregister, on: .globalAuthority) }
+    try await service.waitUntilSubmitted()
+    if cancel {
+      pending.cancel()
+      await #expect(throws: CancellationError.self) { try await pending.value }
+    } else {
+      try service.expire()
+      await #expect(
+        throws: CurrentAppServiceMaintenanceError.unregistrationTimedOut(.globalAuthority)
+      ) {
+        try await pending.value
+      }
+    }
+    #expect(throws: GlobalAuthorityRegistrationError.registrationFailed) {
+      try SMGlobalAuthorityServiceController(service: service).ensureRegistered()
+    }
+    #expect(throws: (any Error).self) {
+      try SMProxyAgentServiceController(
+        service: ControlledProxyUnregistration(shared: service)
+      ).ensureRegistered()
+    }
+    await #expect(throws: CurrentAppServiceMaintenanceError.unregistrationPending(.globalAuthority))
+    {
+      try await subject.perform(.register, on: .globalAuthority)
+    }
+    service.complete(.success(()))
+    #expect(service.registerCalls == 0)
+    try SMGlobalAuthorityServiceController(service: service).ensureRegistered()
+    #expect(service.registerCalls == 1)
+    // A duplicate old callback cannot release a later unregister epoch.
+    let next = Task { try await subject.perform(.unregister, on: .globalAuthority) }
+    try await service.waitUntilSubmitted(count: 2)
+    service.complete(.success(()), at: 0)
+    #expect(throws: ServiceUnregistrationError.self) { try service.requireRegistrationReady() }
+    service.complete(.success(()), at: 1)
+    #expect(try await next.value == .notRegistered)
+    #expect(service.registerCalls == 1)
+  }
+
+  @Test(arguments: [false, true])
+  func registrationThatRequiresApprovalRetainsItsType(registerThrows: Bool) async {
+    let service = ControlledAuthorityUnregistration(
+      initial: .notRegistered, registerResult: .requiresApproval, registerThrows: registerThrows)
+    await #expect(throws: CurrentAppServiceMaintenanceError.approvalRequired(.globalAuthority)) {
+      try await maintainer(service).perform(.register, on: .globalAuthority)
+    }
+    #expect(service.registrationStatus == .requiresApproval)
+    #expect(service.registerCalls == 1)
+  }
+
+  @Test func alreadyCancelledCallerDoesNotSubmitUnregistration() async {
+    let service = ControlledAuthorityUnregistration()
+    let subject = maintainer(service)
+    let pending = Task {
+      withUnsafeCurrentTask { $0?.cancel() }
+      return try await subject.perform(.unregister, on: .globalAuthority)
+    }
+    await #expect(throws: CancellationError.self) { try await pending.value }
+    #expect(service.unregisterCalls == 0)
+    #expect(service.registrationStatus == .enabled)
+  }
+}
+
 private final class MaintenanceProxyService: ProxyAgentServicing, @unchecked Sendable {
   var statuses: [ProxyAgentRegistrationStatus]
   var registerError: (any Error)?
@@ -56,6 +300,8 @@ private final class MaintenanceProxyService: ProxyAgentServicing, @unchecked Sen
   var registrationStatus: ProxyAgentRegistrationStatus {
     statuses.count > 1 ? statuses.removeFirst() : statuses[0]
   }
+
+  func requireRegistrationReady() throws {}
 
   func register() throws {
     registerCalls += 1
@@ -90,6 +336,8 @@ private final class MaintenanceAuthorityService: GlobalAuthorityDaemonServicing,
   var registrationStatus: GlobalAuthorityRegistrationStatus {
     statuses.count > 1 ? statuses.removeFirst() : statuses[0]
   }
+
+  func requireRegistrationReady() throws {}
 
   func register() throws {
     registerCalls += 1
@@ -153,7 +401,7 @@ struct CurrentAppServiceMaintenanceTests {
       ))
   }
 
-  @Test func exactServicesRegisterAndUnregisterWithPostconditions() throws {
+  @Test func exactServicesRegisterAndUnregisterWithPostconditions() async throws {
     let proxy = MaintenanceProxyService([.enabled, .notRegistered])
     let authority = MaintenanceAuthorityService([.notRegistered, .enabled])
     let maintainer = CurrentAppServiceMaintainer(
@@ -162,15 +410,15 @@ struct CurrentAppServiceMaintenanceTests {
     )
 
     #expect(
-      try maintainer.perform(.unregister, on: .proxyAgent) == .notRegistered)
-    #expect(try maintainer.perform(.register, on: .globalAuthority) == .enabled)
+      try await maintainer.perform(.unregister, on: .proxyAgent) == .notRegistered)
+    #expect(try await maintainer.perform(.register, on: .globalAuthority) == .enabled)
     #expect(proxy.unregisterCalls == 1)
     #expect(proxy.registerCalls == 0)
     #expect(authority.registerCalls == 1)
     #expect(authority.unregisterCalls == 0)
   }
 
-  @Test func idempotentTerminalStatesDoNotRepeatMutation() throws {
+  @Test func idempotentTerminalStatesDoNotRepeatMutation() async throws {
     let proxy = MaintenanceProxyService([.notRegistered])
     let authority = MaintenanceAuthorityService([.enabled])
     let maintainer = CurrentAppServiceMaintainer(
@@ -179,13 +427,13 @@ struct CurrentAppServiceMaintenanceTests {
     )
 
     #expect(
-      try maintainer.perform(.unregister, on: .proxyAgent) == .notRegistered)
-    #expect(try maintainer.perform(.register, on: .globalAuthority) == .enabled)
+      try await maintainer.perform(.unregister, on: .proxyAgent) == .notRegistered)
+    #expect(try await maintainer.perform(.register, on: .globalAuthority) == .enabled)
     #expect(proxy.unregisterCalls == 0)
     #expect(authority.registerCalls == 0)
   }
 
-  @Test func approvalUnknownMutationAndPostconditionFailuresStayDistinct() {
+  @Test func approvalUnknownMutationAndPostconditionFailuresStayDistinct() async {
     let cases:
       [(
         MaintenanceProxyService,
@@ -224,14 +472,14 @@ struct CurrentAppServiceMaintenanceTests {
         proxyAgent: proxy,
         globalAuthority: MaintenanceAuthorityService([.enabled])
       )
-      #expect(throws: expected) {
-        try maintainer.perform(mutation, on: .proxyAgent)
+      await #expect(throws: expected) {
+        try await maintainer.perform(mutation, on: .proxyAgent)
       }
       switch expected {
       case .approvalRequired, .serviceNotFound, .statusUnknown:
         #expect(proxy.registerCalls == 0)
         #expect(proxy.unregisterCalls == 0)
-      case .mutationFailed, .postconditionFailed:
+      case .mutationFailed, .postconditionFailed, .unregistrationPending, .unregistrationTimedOut:
         #expect(proxy.unregisterCalls == 1)
       }
     }

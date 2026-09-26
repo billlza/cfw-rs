@@ -1250,11 +1250,13 @@ fn startup_service_reconciliation_admission_rejects_leases_and_quarantine() {
         },
         safely_off: false,
     };
-    let mut snapshot = cfw_engine_api::EngineSnapshot::default();
-    snapshot.state = EngineState::Failed {
-        generation: 0,
-        target: EngineMode::Off,
-        error: "typed".into(),
+    let snapshot = cfw_engine_api::EngineSnapshot {
+        state: EngineState::Failed {
+            generation: 0,
+            target: EngineMode::Off,
+            error: "typed".into(),
+        },
+        ..Default::default()
     };
     let mut state = CoordinatorState {
         snapshot,

@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-09-26T09:21:33.966896+00:00",
+  "checked_at": "2026-09-26T17:41:27.764284+00:00",
   "scope": "external registry dependencies declared by root, crates and apps manifests, including dev/build/target tables; not every transitive crate",
   "packages": [
     {
@@ -376,24 +376,24 @@
       "locked": [
         "2.11.6"
       ],
-      "latest_stable": "2.11.6",
+      "latest_stable": "2.12.0",
       "source": "https://crates.io/api/v1/crates/tauri",
       "manifests": [
         "apps/cfw-tauri-shell/Cargo.toml"
       ],
-      "latest_stable_present": true
+      "latest_stable_present": false
     },
     {
       "name": "tauri-build",
       "locked": [
         "2.6.3"
       ],
-      "latest_stable": "2.6.3",
+      "latest_stable": "2.7.0",
       "source": "https://crates.io/api/v1/crates/tauri-build",
       "manifests": [
         "apps/cfw-tauri-shell/Cargo.toml"
       ],
-      "latest_stable_present": true
+      "latest_stable_present": false
     },
     {
       "name": "tauri-plugin-global-shortcut",
@@ -550,12 +550,12 @@
   ],
   "rust_stable": "1.98.1",
   "sing_box_stable": "1.14.2",
-  "application_build": "50013",
-  "installed_preview_build": "50010",
-  "installed_sing_box": "not observed at runtime for 50010",
+  "application_build": "50014",
+  "installed_preview_build": "50013",
+  "installed_sing_box": "1.14.2 packaged in verified 50013; active data-plane acceptance remains pending",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "The September 26 registry check and locked Rust/Libbox inputs remain unchanged. Installed 50012 exposed service handoff, modal occlusion and settings-parent failures; source repairs are under integration for 50013. Physical VPN and whole-product performance acceptance remain open.",
+  "implementation_status": "The fresh September 26 registry check found Tauri 2.12.0 and tauri-build 2.7.0; integration and compatibility validation are pending. Other 39 direct dependencies, Rust 1.98.1 and sing-box 1.14.2 match this observation. Candidate 50014 identity rotation and status-bar DOM write avoidance are implemented; no new candidate has been built. Installed 50013 remains immutable; its first service registration refusal is unresolved despite later guarded recovery. Physical VPN, complete UI/accessibility, comparative performance and soak acceptance remain open.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",
@@ -566,7 +566,7 @@
       "reason": "retained by upstream constraints in all-platform lock; absent from macOS target inverse graph; proc-macro-crate 2.0.2 fixes toml_datetime and toml_edit exactly"
     }
   ],
-  "evidence_directory": "target/050-completion/preview-50011-operator/registry-recheck-20260926",
+  "evidence_directory": "target/050-completion/dependency-recheck-50014",
   "packaged_sing_box": "1.14.2",
   "dependency_refresh_evidence": "target/cc-dependency-refresh-20260926/completed.json",
   "toolchain_recheck_note": "Rust 1.98.1 official releases page and sing-box v1.14.2 GitHub latest release rechecked on 2026-09-26; registry observation time is recorded separately."

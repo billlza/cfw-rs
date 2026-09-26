@@ -13,9 +13,8 @@ entrypoint additionally requires the generated packet LAN peer artifact, while
   ``--locked`` and the release gate checks the exact Apple Silicon target graph;
 * the XcodeGen installed-resource patch and patched source digest are bound to
     the isolated bootstrap and its installed-resource probe;
-* the official Tauri CLI crate, its published lock, the compatible dependency lock
-  update, the resulting lock, and the exact Cargo cache-normalization contract
-  are checksum-bound to one installer entrypoint;
+* the official Tauri CLI crate, its unchanged published lock, and the exact Cargo
+  cache-normalization contract are checksum-bound to one installer entrypoint;
 * the six design-pinned patch files exist as regular files and their computed
   SHA-256 digests match both the manifest and dependency_pins.env;
 * the combined diff SHA-256 is pinned and is distinct from any single patch digest;
@@ -118,7 +117,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "8a0a9f2faa4c78f091515576cc1085c7fd4769097d53bed3cf4a0ab9e6242f5f"
+    "b3f5f1f993bd20af6b19512e7c8df099102e5455efed152a035551150fc93672"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -165,7 +164,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "f381cf425d919424df21fb0b7900094593d304025d6a1c45cccf34fd368548bd"
+    "217e5d20cdc13ae6caadf7c17605cb02f0fc4e5108ce380b0cf649a8d8833355"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}

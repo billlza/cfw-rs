@@ -133,7 +133,7 @@ class NativeUiArtifactTests(unittest.TestCase):
             (pre_sign / ui.LIBRARY).chmod(0o755)
             resources(pre_sign / ui.RESOURCES)
             metadata = {key: "bound" for key in ui.METADATA_KEYS}
-            metadata.update(configuration="release", buildNumber="50010", productVersion="0.5.0", signingMode="pre-sign")
+            metadata.update(configuration="release", buildNumber="50011", productVersion="0.5.0", signingMode="pre-sign")
             for name in (ui.LIBRARY, ui.RESOURCES):
                 (pre_sign / (name + ".manifest.json")).write_text(json.dumps(build_manifest(pre_sign / name, metadata)))
                 if (pre_sign / name).is_dir():
@@ -153,18 +153,18 @@ class NativeUiArtifactTests(unittest.TestCase):
             with patch.object(ui, "expected_metadata", side_effect=expected), patch.object(ui, "verify_library"), patch(
                 "scripts.release_build_identity.preview_native_products_root", return_value=pre_sign
             ):
-                ui.verify_products(repository, signed, build="50010", signing="developer-id")
+                ui.verify_products(repository, signed, build="50011", signing="developer-id")
                 manifest = signed / (ui.LIBRARY + ".manifest.json")
                 bad = json.loads(manifest.read_text())
                 bad["metadata"]["preSignArtifactSha256"] = "0" * 64
                 manifest.write_text(json.dumps(bad))
                 with self.assertRaisesRegex(SignedNativeManifestError, "exact pre-sign promotion"):
-                    ui.verify_products(repository, signed, build="50010", signing="developer-id")
+                    ui.verify_products(repository, signed, build="50011", signing="developer-id")
                 manifests()
                 (signed / ui.RESOURCES / "Contents/Resources/en.lproj/Localizable.strings").write_text('"key" = "modified";')
                 manifests()
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "must not modify"):
-                    ui.verify_products(repository, signed, build="50010", signing="developer-id")
+                    ui.verify_products(repository, signed, build="50011", signing="developer-id")
 
     def test_source_digest_covers_real_abi_and_library_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -194,26 +194,26 @@ class NativeUiArtifactTests(unittest.TestCase):
             library.chmod(0o755)
             resources(root / ui.RESOURCES)
             metadata = {key: "bound" for key in ui.METADATA_KEYS}
-            metadata.update(configuration="release", buildNumber="50010", productVersion="0.5.0")
+            metadata.update(configuration="release", buildNumber="50011", productVersion="0.5.0")
             for name in (ui.LIBRARY, ui.RESOURCES):
                 (root / (name + ".manifest.json")).write_text(json.dumps(build_manifest(root / name, metadata)))
             with patch.object(ui, "expected_metadata", return_value=metadata), patch.object(ui, "verify_library"):
-                ui.verify_products(root, root, build="50010")
+                ui.verify_products(root, root, build="50011")
                 manifest = root / (ui.LIBRARY + ".manifest.json")
                 good = manifest.read_text()
                 bad = json.loads(good)
                 bad["metadata"]["configuration"] = "debug"
                 manifest.write_text(json.dumps(bad))
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "Release inputs"):
-                    ui.verify_products(root, root, build="50010")
+                    ui.verify_products(root, root, build="50011")
                 manifest.write_text(good)
                 library.write_bytes(b"different library")
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "bytes differ"):
-                    ui.verify_products(root, root, build="50010")
+                    ui.verify_products(root, root, build="50011")
                 library.write_bytes(b"unsigned test fixture")
                 (root / ui.RESOURCES / "Contents/Resources/en.lproj/Localizable.strings").write_text('"key" = "changed";')
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "bytes differ"):
-                    ui.verify_products(root, root, build="50010")
+                    ui.verify_products(root, root, build="50011")
 
 
 if __name__ == "__main__":

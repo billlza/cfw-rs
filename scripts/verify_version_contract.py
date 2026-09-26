@@ -169,7 +169,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--preview", action="store_true",
-        help="explicitly verify the fixed 0.5.0/50010 signed preview; default remains 0.4.0",
+        help="explicitly verify the fixed 0.5.0/50011 signed preview; default remains 0.4.0",
     )
     arguments = parser.parse_args()
     repository = Path(__file__).resolve().parent.parent

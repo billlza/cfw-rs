@@ -251,7 +251,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
             else:
                 setattr(self, name, new_output / old_path.relative_to(old_output))
         self.bundle_plists = tuple(new_output / path.relative_to(old_output) for path in self.bundle_plists)
-        self.BUILD_NUMBER = "50010"
+        self.BUILD_NUMBER = "50011"
         manifest = self.repository / "crates/cfw-legacy-tombstone/Cargo.toml"
         manifest.write_text(manifest.read_text().replace("0.4.0", "0.5.0"))
         self.write_bundle_identity(self.BUILD_NUMBER, "0.5.0")
@@ -280,7 +280,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
                     signed_artifact=native / provenance.ARTIFACT_NAME,
                     signed_manifest=native / provenance.MANIFEST_NAME,
                 )
-                self.assertEqual(value["metadata"]["buildNumber"], "50010")
+                self.assertEqual(value["metadata"]["buildNumber"], "50011")
 
     def test_preview_rejects_unsigned_and_cross_release_contexts(self) -> None:
         self.configure_preview_fixture()

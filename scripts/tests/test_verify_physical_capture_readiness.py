@@ -353,6 +353,47 @@ cfw_build_tauri_host_skeleton() {
 }
 """
 
+    def test_every_real_host_build_branch_requires_a_literal_evidence_feature(self) -> None:
+        source = (Path(__file__).resolve().parents[2] / "scripts/tauri_host_skeleton.sh").read_text()
+        self.assertTrue(readiness._host_build_has_feature(source))
+        for old, new in (
+            ("--features physical-release-evidence,native-ui", "--features native-ui"),
+            ("--features physical-release-evidence --config", "--features native-ui --config"),
+        ):
+            self.assertEqual(source.count(old), 1)
+            self.assertFalse(readiness._host_build_has_feature(source.replace(old, new)))
+        command = '"$contract_tauri_host_bin" build --features '
+        for features in ("physical-release-evidence", "physical-release-evidence,native-ui",
+                         "native-ui,physical-release-evidence"):
+            self.assertTrue(readiness._host_build_has_feature(command + features))
+        for features in ("native-ui", "$features", "physical-release-evidence,",
+                         "physical-release-evidence,physical-release-evidence",
+                         "physical-release-evidence-invalid", "", "physical-release-evidence --features native-ui"):
+            self.assertFalse(readiness._host_build_has_feature(command + features))
+        for decoy in ("# " + command + readiness.HOST_FEATURE,
+                      "echo '" + command + readiness.HOST_FEATURE + "'"):
+            self.assertFalse(readiness._host_build_has_feature(decoy))
+
+    def test_host_build_flags_cannot_come_from_decoys_or_a_different_command(self) -> None:
+        valid = '\n"$contract_tauri_host_bin" build --features physical-release-evidence\n'
+        for bad in (
+            '"$contract_tauri_host_bin"  build --features native-ui',
+            '$contract_tauri_host_bin build --features native-ui',
+            '"${contract_tauri_host_bin}" build --features native-ui',
+            '"$contract_tauri_host_bin" build ; echo --features physical-release-evidence',
+            '"$contract_tauri_host_bin" build -- --features physical-release-evidence',
+            '"$contract_tauri_host_bin" build --features $(echo physical-release-evidence)',
+            '"$contract_tauri_host_bin" "$build_command" --features native-ui',
+        ):
+            with self.subTest(command=bad):
+                self.assertFalse(readiness._host_build_has_feature(valid + bad))
+        for decoy in ("cat <<'EOF'\n" + valid + "EOF\n",
+                      "cat <<EOF\n" + valid + "EOF\n",
+                      "cat <<-EOF\n" + valid + "\tEOF\n",
+                      "cat <<'EOF'\n" + valid):
+            self.assertFalse(readiness._host_build_has_feature(decoy))
+        self.assertTrue(readiness._host_build_has_feature("cat <<'EOF'\nnot a command\nEOF\n" + valid))
+
     def test_async_startup_module_must_be_declared_called_and_reach_the_transport(self) -> None:
         rust = {
             readiness.HOST_MAIN_PATH: "mod startup; fn main() { startup::start(); }",

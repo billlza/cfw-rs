@@ -56,7 +56,11 @@ class ReleaseAuthorityGateTests(unittest.TestCase):
         mutations = (
             (0, current_constructor, old_constructor, "current Authority composition"),
             (0, "currentCodeHash(for: .globalAuthority)", "currentCodeHash(for: .proxyAgent)", "current Authority composition"),
-            (0, "let serviceBuildObserver = try CurrentAppServiceBuildObserver()", "let serviceBuildObserver = otherObserver", "embedded service identity"),
+            (0, "let serviceBuildObserver = try CurrentAppServiceBuildObserver(services: serviceMaintainer)", "let serviceBuildObserver = otherObserver", "embedded service identity"),
+            (0, "proxyAgent: proxyAgentService, globalAuthority: authorityDaemonService", "proxyAgent: otherProxy, globalAuthority: authorityDaemonService", "embedded service identity"),
+            (0, "SMGlobalAuthorityServiceController(service: authorityDaemonService)", "SMGlobalAuthorityServiceController()", "current Authority composition"),
+            (0, "SMProxyAgentServiceController(service: proxyAgentService)", "SMProxyAgentServiceController()", "shared Proxy service lifecycle"),
+            (0, "serviceMaintainer: serviceMaintainer,", "serviceMaintainer: CurrentAppServiceMaintainer(),", "shared maintenance lifecycle"),
             (1, "self.init(role: .host)", "self.init(role: .provider)", "role and build policy"),
             (1, "buildPolicy = .currentHost(currentHostCodeHash)", "buildPolicy = .protocolPeer", "role and build policy"),
             (1, "requiresCurrentBuild = method == .prepareStart", "requiresCurrentBuild = false", "start code requirement"),
@@ -80,7 +84,7 @@ class ReleaseAuthorityGateTests(unittest.TestCase):
 
     def test_current_host_binding_cannot_be_supplied_only_by_comments_or_strings(self) -> None:
         for source_index, fragment in (
-            (0, "let serviceBuildObserver = try CurrentAppServiceBuildObserver()"),
+            (0, "let serviceBuildObserver = try CurrentAppServiceBuildObserver(services: serviceMaintainer)"),
             (1, "value.setCodeSigningRequirement(requirement)"),
         ):
             for decoy in ("/* " + fragment + " */", 'let decoy = "' + fragment + '"'):

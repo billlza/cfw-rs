@@ -48,15 +48,31 @@ def require_current_host_authority_binding(
     client_code = compact(clients)
     require_text(
         bridge_code,
-        compact("let serviceBuildObserver = try CurrentAppServiceBuildObserver()"),
+        compact("""let proxyAgentService = SMProxyAgentService()
+          let authorityDaemonService = SMGlobalAuthorityDaemonService()
+          let serviceMaintainer = CurrentAppServiceMaintainer(
+            proxyAgent: proxyAgentService, globalAuthority: authorityDaemonService)
+          let serviceBuildObserver = try CurrentAppServiceBuildObserver(services: serviceMaintainer)"""),
         "Host embedded service identity",
     )
     require_text(
         bridge_code,
         compact("""let authorityClient = RegistrationGatedAuthorityClient(
+          serviceController: SMGlobalAuthorityServiceController(service: authorityDaemonService),
           authority: BoundedAuthorityXPCClient(remote: NSXPCGlobalAuthorityRemote(
             currentHostCodeHash: try serviceBuildObserver.currentCodeHash(for: .globalAuthority))))"""),
         "Host current Authority composition",
+    )
+    require_text(
+        bridge_code,
+        compact("""currentCodeHash: try serviceBuildObserver.currentCodeHash(for: .proxyAgent),
+          serviceController: SMProxyAgentServiceController(service: proxyAgentService)"""),
+        "Host shared Proxy service lifecycle",
+    )
+    require_text(
+        bridge_code,
+        compact("""serviceMaintainer: serviceMaintainer, serviceBuildObserver: serviceBuildObserver"""),
+        "Host shared maintenance lifecycle",
     )
     require_text(
         client_code,

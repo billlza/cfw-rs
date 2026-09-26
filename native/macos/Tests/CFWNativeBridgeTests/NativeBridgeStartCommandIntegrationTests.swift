@@ -20,20 +20,96 @@ import Testing
 //     (lease / context / digest / owner-ready / OS state); any lease disagreement
 //     fails closed and never activates or falls back;
 //   - a stop that cannot prove the effective OS descriptor is ambiguous, never Active.
-// Every ProxyAgent / Packet Tunnel / Authority side effect lives behind an injected
-// in-memory seam, so no real launchd, XPC, SystemConfiguration, or Network Extension
-// is exercised. The public command request/response contract is unchanged.
+// ProxyAgent / Packet Tunnel / Authority mutations live behind injected in-memory
+// seams. Some fixtures retain the default maintainer's read-only SM metadata
+// queries; the concurrency handshakes below inject their maintainer as well.
+// The public command request/response contract is unchanged.
 //
 // This complements (and does not duplicate) `ActiveAgreementTests`, which drives the
 // read-only `queryStatus` agreement matrix, and `CutoverPreflightTests`, which drives
 // the preflight (never-start) path.
 
-private func waitUntil(_ condition: @escaping @Sendable () async -> Bool) async -> Bool {
-  for _ in 0..<1_000 {
-    if await condition() { return true }
-    await Task.yield()
+private enum NativeFixtureWaitError: Error, Equatable { case deadlineExceeded, injectedFailure }
+private enum NativeFixtureBlockPoint: CaseIterable { case snapshot, authorization, installation }
+private enum NativeFixtureReadinessFailure: CaseIterable { case deadline, cancellation }
+
+/// A bounded single-wait promise using the production callback gate's existing
+/// first-terminal-result, early-completion and cancellation semantics.
+private final class NativeFixturePromise<Value: Sendable>: Sendable {
+  private let gate = CallbackContinuationGate<Value>()
+
+  func finish(_ result: Result<Value, Error>) { gate.finish(result) }
+
+  func wait(
+    deadline: CallbackDeadlineScheduler = .init(timeout: .seconds(5))
+  ) async throws -> Value {
+    try Task.checkCancellation()
+    let value = try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        gate.install(continuation)
+        guard !Task.isCancelled else {
+          gate.finish(.failure(CancellationError()))
+          return
+        }
+        guard gate.beginOperation() else { return }
+        deadline.schedule { [weak gate] in
+          gate?.finish(.failure(NativeFixtureWaitError.deadlineExceeded))
+        }
+      }
+    } onCancel: {
+      gate.finish(.failure(CancellationError()))
+    }
+    try Task.checkCancellation()
+    return value
   }
-  return false
+}
+
+/// Each fixture pauses once. Entry is observable, release is remembered even
+/// before entry, and cancellation/deadlines use the same single-resume gate.
+private final class NativeFixtureHandshake: Sendable {
+  private let entered = NativeFixturePromise<Void>()
+  private let released = NativeFixturePromise<Void>()
+
+  func enter() async throws {
+    try Task.checkCancellation()
+    entered.finish(.success(()))
+    try await released.wait()
+  }
+
+  func waitUntilEntered(
+    deadline: CallbackDeadlineScheduler = .init(timeout: .seconds(5))
+  ) async throws {
+    try await entered.wait(deadline: deadline)
+  }
+
+  func release() { released.finish(.success(())) }
+
+  func cancel() {
+    entered.finish(.failure(CancellationError()))
+    released.finish(.failure(CancellationError()))
+  }
+}
+
+/// Readiness is a prerequisite, not an expectation after which execution may
+/// continue. Any prerequisite/body failure cancels and drains the exact task.
+private func whileNativeFixtureBlocked<Value: Sendable>(
+  at handshake: NativeFixtureHandshake,
+  readinessDeadline: CallbackDeadlineScheduler = .init(timeout: .seconds(5)),
+  operation: @escaping @Sendable () async throws -> Value,
+  body: () async throws -> Void
+) async throws -> Value {
+  let task = Task { try await operation() }
+  do {
+    try await handshake.waitUntilEntered(deadline: readinessDeadline)
+    try await body()
+    handshake.release()
+    return try await task.value
+  } catch {
+    task.cancel()
+    handshake.cancel()
+    _ = await task.result
+    throw error
+  }
 }
 
 private final class NativeCleanupEventLog: @unchecked Sendable {
@@ -107,10 +183,11 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
   private let descriptor: ConfigurationDescriptor
   private let registrationError: ProxyAgentHostError?
   private let blocksSnapshot: Bool
+  private let snapshotAdmission: NativeFixtureHandshake?
+  nonisolated let snapshotHandshake = NativeFixtureHandshake()
   private var snapshotSequence: [EngineSnapshot]
   private let snapshotErrorAt: Int?
   private var registered: Bool
-  private var snapshotWait: CheckedContinuation<Void, Never>?
   private var runtimeFailed = false
   private var failureOmitsDescriptor = false
   private(set) var ensureCalls = 0
@@ -125,6 +202,7 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
     registrationError: ProxyAgentHostError? = nil,
     initiallyRegistered: Bool = true,
     blocksSnapshot: Bool = false,
+    snapshotAdmission: NativeFixtureHandshake? = nil,
     snapshotSequence: [EngineSnapshot] = [],
     snapshotErrorAt: Int? = nil
   ) {
@@ -132,6 +210,7 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
     self.registrationError = registrationError
     registered = initiallyRegistered
     self.blocksSnapshot = blocksSnapshot
+    self.snapshotAdmission = snapshotAdmission
     self.snapshotSequence = snapshotSequence
     self.snapshotErrorAt = snapshotErrorAt
   }
@@ -181,10 +260,9 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
 
   func snapshot() async throws -> EngineSnapshot {
     snapshotCalls += 1
+    if let snapshotAdmission { try await snapshotAdmission.enter() }
     if blocksSnapshot {
-      await withCheckedContinuation { continuation in
-        snapshotWait = continuation
-      }
+      try await snapshotHandshake.enter()
     }
     guard registered else { throw ProxyAgentHostError.registrationUnavailable }
     if snapshotCalls == snapshotErrorAt {
@@ -218,12 +296,7 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
   func counters() -> (ensure: Int, snapshot: Int, start: Int, stop: Int) {
     (ensureCalls, snapshotCalls, startCalls, stopCalls)
   }
-  func hasPendingSnapshot() -> Bool { snapshotWait != nil }
-  func releaseSnapshot() {
-    let continuation = snapshotWait
-    snapshotWait = nil
-    continuation?.resume()
-  }
+  func releaseSnapshot() { snapshotHandshake.release() }
   func authorizedContexts() -> [ProxyOwnerContext] { startContexts }
   func transferredConfigurationDigests() -> [String] { startConfigurationDigests }
 }
@@ -309,22 +382,16 @@ private actor FailedStartProxyAgent: ProxyAgentTransporting {
 
 private actor StartableTunnelHost: TunnelHostBridging {
   private(set) var authorizationCalls = 0
-  private var authorizationWait: CheckedContinuation<Void, Never>?
+  nonisolated let authorizationHandshake = NativeFixtureHandshake()
   private let blocksAuthorization: Bool
   private let authorizationError: AppleNetworkError?
   func authorizeTunnelConfiguration(_ descriptor: ConfigurationDescriptor) async throws {
     #expect(descriptor == self.descriptor)
     authorizationCalls += 1
     if blocksAuthorization {
-      await withCheckedContinuation { authorizationWait = $0 }
+      try await authorizationHandshake.enter()
     }
     if let authorizationError { throw authorizationError }
-  }
-  func hasPendingAuthorization() -> Bool { authorizationWait != nil }
-  func releaseAuthorization() {
-    let wait = authorizationWait
-    authorizationWait = nil
-    wait?.resume()
   }
   private let expectedInjectedConfiguration: Data?
   private let descriptor: ConfigurationDescriptor
@@ -512,7 +579,7 @@ private actor BlockingRetryableInstallationTunnelHost: TunnelHostBridging {
     throw AppleNetworkError.providerDidNotRespond
   }
   private let descriptor: ConfigurationDescriptor
-  private var firstWait: CheckedContinuation<Void, Never>?
+  nonisolated let installationHandshake = NativeFixtureHandshake()
   private(set) var installCalls = 0
 
   init(descriptor: ConfigurationDescriptor) {
@@ -522,20 +589,10 @@ private actor BlockingRetryableInstallationTunnelHost: TunnelHostBridging {
   func installTunnel() async throws -> SystemExtensionInstallResult {
     installCalls += 1
     if installCalls == 1 {
-      await withCheckedContinuation { continuation in
-        firstWait = continuation
-      }
+      try await installationHandshake.enter()
       throw AppleNetworkError.systemExtensionInstallationTimedOut
     }
     return .completed
-  }
-
-  func hasPendingFirstWait() -> Bool { firstWait != nil }
-
-  func releaseFirstWait() {
-    let continuation = firstWait
-    firstWait = nil
-    continuation?.resume()
   }
 
   func cancelTunnelInstallationWait() {}
@@ -1185,19 +1242,22 @@ struct NativeBridgeStartCommandIntegrationTests {
     let tunnel = StartableTunnelHost(descriptor: descriptor, blocksAuthorization: true)
     let coordinator = makeCoordinator(
       proxy: proxy, tunnel: tunnel,
-      observation: AuthorityOwnershipObservation(state: .off, lease: nil), credentialVault: vault)
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil), credentialVault: vault,
+      serviceMaintainer: ServiceUpgradeFixture())
     let command = NativeBridgeCommand.authorizeTunnelConfiguration(request)
     let wire = try JSONEncoder().encode(NativeRequestEnvelope(command: command))
     let decoded = try NativeBridgeProtocolCodec.decodeRequest(wire)
     #expect(decoded.command == command)
-    let waiting = Task { try await coordinator.execute(decoded.command) }
-    #expect(await waitUntil { await tunnel.hasPendingAuthorization() })
-    #expect(vault.resolutionCount == 0)
-    #expect(await tunnel.counters().start == 0)
-    #expect(await failureCode(coordinator, .startTunnel(request)) == .busy)
-    #expect(vault.resolutionCount == 0)
-    await tunnel.releaseAuthorization()
-    guard case .acknowledged = try await waiting.value else {
+    let result = try await whileNativeFixtureBlocked(
+      at: tunnel.authorizationHandshake,
+      operation: { try await coordinator.execute(decoded.command) },
+      body: {
+        #expect(vault.resolutionCount == 0)
+        #expect(await tunnel.counters().start == 0)
+        #expect(await failureCode(coordinator, .startTunnel(request)) == .busy)
+        #expect(vault.resolutionCount == 0)
+      })
+    guard case .acknowledged = result else {
       Issue.record("VPN consent did not complete")
       return
     }
@@ -1583,20 +1643,20 @@ struct NativeBridgeStartCommandIntegrationTests {
     let coordinator = makeCoordinator(
       proxy: proxy,
       tunnel: tunnel,
-      observation: AuthorityOwnershipObservation(state: .off, lease: nil))
-
-    let first = Task<NativeBridgeErrorCode?, Never> {
-      await failureCode(coordinator, .installTunnel(request.context))
-    }
-    #expect(await waitUntil { await tunnel.hasPendingFirstWait() })
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      serviceMaintainer: ServiceUpgradeFixture())
 
     // While the exact OS callback wait is unresolved, a reentrant mutation fails
     // Busy instead of starting a parallel System Extension request or projecting
     // a status through an incomplete mutation boundary.
-    #expect(await failureCode(coordinator, .queryStatus) == .busy)
-    #expect(await failureCode(coordinator, .installTunnel(request.context)) == .busy)
-    await tunnel.releaseFirstWait()
-    #expect(await first.value == .timeout)
+    let first = try await whileNativeFixtureBlocked(
+      at: tunnel.installationHandshake,
+      operation: { await failureCode(coordinator, .installTunnel(request.context)) },
+      body: {
+        #expect(await failureCode(coordinator, .queryStatus) == .busy)
+        #expect(await failureCode(coordinator, .installTunnel(request.context)) == .busy)
+      })
+    #expect(first == .timeout)
 
     let differentContext = try EngineCommandContext(
       installationID: request.context.installationID,
@@ -1627,22 +1687,169 @@ struct NativeBridgeStartCommandIntegrationTests {
     let coordinator = makeCoordinator(
       proxy: proxy,
       tunnel: tunnel,
-      observation: AuthorityOwnershipObservation(state: .off, lease: nil))
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      serviceMaintainer: ServiceUpgradeFixture())
 
-    let status = Task<Bool, Never> {
+    let result = try await whileNativeFixtureBlocked(
+      at: proxy.snapshotHandshake,
+      operation: { try await coordinator.execute(.queryStatus) },
+      body: {
+        #expect(await failureCode(coordinator, .installTunnel(request.context)) == .busy)
+      })
+    guard case .status(.off) = result else {
+      Issue.record("external status did not return Off after its snapshot was released")
+      return
+    }
+  }
+
+  @Test func earlySnapshotReleaseDoesNotStrandExternalStatus() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor, blocksSnapshot: true)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor),
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      serviceMaintainer: ServiceUpgradeFixture())
+    // Force the ordering that polling cannot exclude: release precedes entry.
+    await proxy.releaseSnapshot()
+    let completion = NativeFixturePromise<NativeBridgeResult>()
+    let status = Task {
       do {
-        guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
-          return false
-        }
-        return true
+        completion.finish(.success(try await coordinator.execute(.queryStatus)))
       } catch {
-        return false
+        completion.finish(.failure(error))
       }
     }
-    #expect(await waitUntil { await proxy.hasPendingSnapshot() })
-    #expect(await failureCode(coordinator, .installTunnel(request.context)) == .busy)
-    await proxy.releaseSnapshot()
-    #expect(await status.value)
+    do {
+      let result = try await completion.wait(deadline: .init(timeout: .seconds(2)))
+      guard case .status(.off) = result else {
+        Issue.record("early snapshot release did not preserve global Off")
+        await status.value
+        return
+      }
+    } catch {
+      status.cancel()
+      await proxy.releaseSnapshot()
+      await status.value
+      throw error
+    }
+    await status.value
+    #expect(await coordinator.activeOperation == nil)
+  }
+
+  @Test(arguments: NativeFixtureReadinessFailure.allCases)
+  fileprivate func preSnapshotReadinessFailureCancelsAndDrainsOwnedQuery(
+    failure: NativeFixtureReadinessFailure
+  ) async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let admission = NativeFixtureHandshake()
+    let proxy = StartableProxyAgent(
+      descriptor: descriptor, blocksSnapshot: true, snapshotAdmission: admission)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      serviceMaintainer: ServiceUpgradeFixture())
+    let scheduledDeadline = NativeFixturePromise<@Sendable () -> Void>()
+    let deadline = CallbackDeadlineScheduler { expire in
+      scheduledDeadline.finish(.success(expire))
+    }
+    let waiting = Task {
+      try await whileNativeFixtureBlocked(
+        at: proxy.snapshotHandshake, readinessDeadline: deadline,
+        operation: { try await coordinator.execute(.queryStatus) },
+        body: {
+          Issue.record("failed readiness must not execute the reentrant command path")
+        })
+    }
+    do {
+      // Force the query to own the operation but not yet install its snapshot
+      // continuation. Unlike a scheduler delay this ordering is deterministic.
+      try await admission.waitUntilEntered()
+      #expect(await coordinator.activeOperation != nil)
+      let expire = try await scheduledDeadline.wait()
+      switch failure {
+      case .deadline:
+        expire()
+        expire()  // A duplicate terminal callback must not resume twice.
+      case .cancellation:
+        waiting.cancel()
+      }
+      switch await waiting.result {
+      case .success:
+        Issue.record("failed readiness incorrectly completed the external query")
+      case .failure(let error):
+        if failure == .deadline {
+          #expect(error as? NativeFixtureWaitError == .deadlineExceeded)
+        } else {
+          #expect(error is CancellationError)
+        }
+      }
+      // These deliberately late signals cannot revive the canceled operation.
+      admission.release()
+      proxy.snapshotHandshake.release()
+      expire()
+    } catch {
+      waiting.cancel()
+      admission.cancel()
+      proxy.snapshotHandshake.cancel()
+      _ = await waiting.result
+      throw error
+    }
+    #expect(await coordinator.activeOperation == nil)
+    #expect(await proxy.counters().snapshot == 1)
+    #expect(await tunnel.counters().install == 0)
+    let retry = try await coordinator.beginMutation()
+    await coordinator.endMutation(retry)
+  }
+
+  @Test(arguments: NativeFixtureBlockPoint.allCases)
+  fileprivate func failedBlockedAssertionDrainsTheExactCoordinatorOperation(
+    point: NativeFixtureBlockPoint
+  ) async throws {
+    let request = try startRequest(
+      tunnelOptions: point == .snapshot ? nil : TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: point == .snapshot ? .systemProxy : .tunnel)
+    let proxy = StartableProxyAgent(descriptor: descriptor, blocksSnapshot: point == .snapshot)
+    let tunnel: any TunnelHostBridging
+    let handshake: NativeFixtureHandshake
+    let command: NativeBridgeCommand
+    switch point {
+    case .snapshot:
+      tunnel = StartableTunnelHost(descriptor: descriptor)
+      handshake = proxy.snapshotHandshake
+      command = .queryStatus
+    case .authorization:
+      let host = StartableTunnelHost(descriptor: descriptor, blocksAuthorization: true)
+      tunnel = host
+      handshake = host.authorizationHandshake
+      command = .authorizeTunnelConfiguration(request)
+    case .installation:
+      let host = BlockingRetryableInstallationTunnelHost(descriptor: descriptor)
+      tunnel = host
+      handshake = host.installationHandshake
+      command = .installTunnel(request.context)
+    }
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      serviceMaintainer: ServiceUpgradeFixture())
+    await #expect(throws: NativeFixtureWaitError.injectedFailure) {
+      _ = try await whileNativeFixtureBlocked(
+        at: handshake, operation: { try await coordinator.execute(command) },
+        body: {
+          #expect(await coordinator.activeOperation != nil)
+          #expect(await failureCode(coordinator, .installTunnel(request.context)) == .busy)
+          // Model a throwing readiness/body assertion, then require real cleanup.
+          throw NativeFixtureWaitError.injectedFailure
+        })
+    }
+    #expect(await coordinator.activeOperation == nil)
+    handshake.release()
+    handshake.cancel()
+    let retry = try await coordinator.beginMutation()
+    await coordinator.endMutation(retry)
   }
 
   @Test func terminalTunnelInstallationFailureRetainsAnExactCancelableReceipt()

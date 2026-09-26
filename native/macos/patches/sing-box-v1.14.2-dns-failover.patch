@@ -876,17 +876,20 @@ index 0000000000000000000000000000000000000000..4d537dddafcf10761daf507af2b46ee9
 +}
 diff --git a/dns/policy_test.go b/dns/policy_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..0a5248fc068d7e5658b43e64ba0db42104d41638
+index 0000000000000000000000000000000000000000..48048ac590035858909b9ae64f81a9e19fcd276f
 --- /dev/null
 +++ b/dns/policy_test.go
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,192 @@
 +package dns_test
 +
 +import (
 +	"context"
++	"errors"
 +	"fmt"
++	"io"
 +	"net"
 +	"net/netip"
++	"sync"
 +	"testing"
 +	"time"
 +
@@ -955,7 +958,18 @@ index 0000000000000000000000000000000000000000..0a5248fc068d7e5658b43e64ba0db421
 +			if err != nil {
 +				t.Fatal(err)
 +			}
-+			server := &mdns.Server{Listener: listener, Net: "tcp", Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) {
++			probe := &policyTCPProbeDrain{done: make(chan error, 1)}
++			server := &mdns.Server{Listener: listener, Net: "tcp", DecorateReader: func(reader mdns.Reader) mdns.Reader {
++				return &policyTCPProbeReader{Reader: reader, probe: probe}
++			}, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) {
++				// Both business requests are A; the AAAA request identifies the
++				// separate pipelined reuse probe whose peer must finish before
++				// this policy test deliberately shuts down the Box.
++				if q.Question[0].Qtype == mdns.TypeAAAA {
++					if err := probe.observe(w.RemoteAddr().String()); err != nil {
++						t.Error(err)
++					}
++				}
 +				r := new(mdns.Msg)
 +				r.SetReply(q)
 +				for _, address := range answer {
@@ -989,6 +1003,19 @@ index 0000000000000000000000000000000000000000..0a5248fc068d7e5658b43e64ba0db421
 +					map[string]any{"type": "tcp", "tag": "fallback", "server": "127.0.0.1", "server_port": fallbackPort},
 +				}, "rules": []any{map[string]any{"action": "evaluate", "server": "main", "response_filter": map[string]any{"rule_set": []string{"country"}}, "response_ip_accept_all": true}, map[string]any{"match_response": true, "action": "respond"}}},
 +			})
++			// Register after the Box cleanup, so this runs before Box.Close even
++			// when a policy assertion fails. All WriteMsg errors remain fatal to
++			// the test; cancellation/Close itself is covered by transport tests.
++			t.Cleanup(func() {
++				select {
++				case err := <-probe.done:
++					if !errors.Is(err, io.EOF) {
++						t.Errorf("reuse probe peer did not finish cleanly: %v", err)
++					}
++				case <-time.After(6 * time.Second):
++					t.Error("reuse probe peer did not finish before policy fixture cleanup")
++				}
++			})
 +			query := new(mdns.Msg)
 +			query.SetQuestion("mixed.example.", mdns.TypeA)
 +			main, _ := transports.Transport("main")
@@ -1006,6 +1033,44 @@ index 0000000000000000000000000000000000000000..0a5248fc068d7e5658b43e64ba0db421
 +			}
 +		})
 +	}
++}
++
++// This reader observes the real probe connection's final EOF, not merely an
++// empty handler count (the probe may not have been scheduled yet). It does not
++// change requests, responses, socket deadlines, or server errors.
++type policyTCPProbeDrain struct {
++	access sync.Mutex
++	remote string
++	done   chan error
++	finish sync.Once
++}
++
++func (p *policyTCPProbeDrain) observe(remote string) error {
++	p.access.Lock()
++	defer p.access.Unlock()
++	if p.remote != "" && p.remote != remote {
++		return fmt.Errorf("unexpected second reuse probe connection: %s", remote)
++	}
++	p.remote = remote
++	return nil
++}
++
++type policyTCPProbeReader struct {
++	mdns.Reader
++	probe *policyTCPProbeDrain
++}
++
++func (r *policyTCPProbeReader) ReadTCP(conn net.Conn, timeout time.Duration) ([]byte, error) {
++	message, err := r.Reader.ReadTCP(conn, timeout)
++	if err != nil {
++		r.probe.access.Lock()
++		matches := r.probe.remote != "" && r.probe.remote == conn.RemoteAddr().String()
++		r.probe.access.Unlock()
++		if matches {
++			r.probe.finish.Do(func() { r.probe.done <- err })
++		}
++	}
++	return message, err
 +}
 diff --git a/dns/response_filter_test.go b/dns/response_filter_test.go
 new file mode 100644
@@ -4035,4 +4100,687 @@ index 0000000000000000000000000000000000000000..30f89e5e1a9f0f4f1765fcab4828ee4b
 +
 +func (r *responseFilteredDNSRule) Close() error {
 +	return E.Errors(r.DNSRule.Close(), r.filter.Close())
++}
+diff --git a/dns/transport/multiplexer.go b/dns/transport/multiplexer.go
+index 6b275ae9d6db2593fc8df1752b5f4be16fd1406b..733e6c8db41756adfcde1c6d9e756424cf919aa0 100644
+--- a/dns/transport/multiplexer.go
++++ b/dns/transport/multiplexer.go
+@@ -31,0 +32,11 @@ const (
++var errQueryMultiplexerClosed = errors.New("DNS multiplexer lifecycle closed")
++
++// Preserve the caller's historical context.Err result. Only our private
++// instance-cancellation cause maps to net.ErrClosed.
++func queryMultiplexerContextError(ctx context.Context) error {
++	if context.Cause(ctx) == errQueryMultiplexerClosed {
++		return net.ErrClosed
++	}
++	return ctx.Err()
++}
++
+@@ -53,0 +65,31 @@ type queryMultiplexer struct {
++
++	lifecycleAccess  sync.Mutex
++	closed           atomic.Bool
++	lifecycleContext context.Context
++	cancelLifecycle  context.CancelCauseFunc
++	workers          sync.WaitGroup
++	closeDone        chan struct{}
++	closeErr         error
++	cleanupDone      chan struct{}
++	cleanupPhase     atomic.Uint32
++	cleanupErr       error
++}
++
++// Retain the single cleanup attempt through the returned failure, even when
++// the transport has been removed from its manager. Observing later cleanup
++// completion never changes the original Close result or reopens admission.
++type queryMultiplexerCloseTimeoutError struct {
++	cause error
++	owner *queryMultiplexer
++}
++
++func (e *queryMultiplexerCloseTimeoutError) Error() string                { return e.cause.Error() }
++func (e *queryMultiplexerCloseTimeoutError) Unwrap() error                { return e.cause }
++func (e *queryMultiplexerCloseTimeoutError) CleanupDone() <-chan struct{} { return e.owner.cleanupDone }
++func (e *queryMultiplexerCloseTimeoutError) CleanupResult() (complete bool, err error) {
++	select {
++	case <-e.owner.cleanupDone:
++		return true, e.owner.cleanupErr
++	default:
++		return false, e
++	}
+@@ -83,0 +126 @@ func newQueryMultiplexer(options queryMultiplexerOptions) *queryMultiplexer {
++	lifecycleContext, cancelLifecycle := context.WithCancelCause(context.Background())
+@@ -85,2 +128,6 @@ func newQueryMultiplexer(options queryMultiplexerOptions) *queryMultiplexer {
+-		options: options,
+-		queries: make(map[uint16]*pendingQuery),
++		options:          options,
++		lifecycleContext: lifecycleContext,
++		cancelLifecycle:  cancelLifecycle,
++		closeDone:        make(chan struct{}),
++		cleanupDone:      make(chan struct{}),
++		queries:          make(map[uint16]*pendingQuery),
+@@ -100 +147,89 @@ func (m *queryMultiplexer) Close() error {
+-	return m.connection.Close()
++	deadline := time.Now().Add(reuseProbeTimeout)
++	m.lifecycleAccess.Lock()
++	if m.closed.Load() {
++		m.lifecycleAccess.Unlock()
++		<-m.closeDone
++		return m.closeErr
++	}
++	m.closed.Store(true)
++	m.cancelLifecycle(errQueryMultiplexerClosed)
++	m.lifecycleAccess.Unlock()
++	m.probeAccess.Lock()
++	m.probeEpoch++
++	m.probeAccess.Unlock()
++
++	// One instance-owned cleanup attempt covers both pool Close (which may
++	// itself block in TLS close_notify) and already-admitted network workers.
++	// A timeout reports failure without pretending this attempt has finished.
++	timer := time.NewTimer(time.Until(deadline))
++	defer timer.Stop()
++	go func() {
++		m.cleanupPhase.Store(1) // closing pool sockets
++		m.cleanupErr = m.connection.Close()
++		m.cleanupPhase.Store(2) // draining admitted network work
++		m.workers.Wait()
++		m.cleanupPhase.Store(3)
++		close(m.cleanupDone)
++	}()
++	var closeErr error
++	select {
++	case <-m.cleanupDone:
++		closeErr = m.cleanupErr
++	case <-timer.C:
++		phase := "pool close"
++		switch m.cleanupPhase.Load() {
++		case 2:
++			phase = "network worker drain"
++		case 3:
++			phase = "completion observation"
++		}
++		closeErr = &queryMultiplexerCloseTimeoutError{owner: m, cause: E.New("DNS transport close exceeded ", reuseProbeTimeout, " during ", phase, "; completion was not observed within the deadline")}
++	}
++	m.closeErr = closeErr
++	close(m.closeDone)
++	return closeErr
++}
++
++// Admission is serialized with Close. Workers cover probe/single-query network
++// work and admitted dials; pool.Close separately closes pooled connections.
++// recvLoop goroutines and user callbacks are not part of the worker drain.
++// Callbacks execute after worker release, without locks, and may call Close.
++func (m *queryMultiplexer) beginWorker(ctx context.Context) (context.Context, func(), error) {
++	m.lifecycleAccess.Lock()
++	defer m.lifecycleAccess.Unlock()
++	if m.closed.Load() {
++		return nil, nil, net.ErrClosed
++	}
++	workerCtx, cancel := context.WithCancelCause(ctx)
++	stopLifecycle := context.AfterFunc(m.lifecycleContext, func() { cancel(errQueryMultiplexerClosed) })
++	m.workers.Add(1)
++	return workerCtx, func() {
++		stopLifecycle()
++		cancel(nil)
++		m.workers.Done()
++	}, nil
++}
++
++func (m *queryMultiplexer) dial(ctx context.Context) (net.Conn, error) {
++	dialCtx, finish, err := m.beginWorker(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finish()
++	if err := queryMultiplexerContextError(dialCtx); err != nil {
++		return nil, err
++	}
++	conn, err := m.options.dial(dialCtx)
++	if cause := queryMultiplexerContextError(dialCtx); cause != nil {
++		if conn != nil {
++			conn.Close()
++		}
++		return nil, cause
++	}
++	if m.closed.Load() {
++		if conn != nil {
++			conn.Close()
++		}
++		return nil, net.ErrClosed
++	}
++	return conn, err
+@@ -105,0 +241,4 @@ func (m *queryMultiplexer) Reset() {
++		if m.closed.Load() {
++			m.probeAccess.Unlock()
++			return
++		}
+@@ -134,0 +274,4 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
++	if m.closed.Load() {
++		callback(nil, net.ErrClosed)
++		return
++	}
+@@ -137 +280,10 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
+-		go m.exchangeSingle(ctx, message, callback)
++		workerCtx, finish, err := m.beginWorker(ctx)
++		if err != nil {
++			callback(nil, err)
++			return
++		}
++		go func() {
++			response, err := m.exchangeSingle(workerCtx, message)
++			finish()
++			callback(response, err)
++		}()
+@@ -143,2 +295,2 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
+-func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
+-	conn, err := m.options.dial(ctx)
++func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
++	conn, err := m.dial(ctx)
+@@ -146,2 +298 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		callback(nil, err)
+-		return
++		return nil, err
+@@ -156 +307 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		ctxErr := ctx.Err()
++		ctxErr := queryMultiplexerContextError(ctx)
+@@ -158,2 +309 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-			callback(nil, ctxErr)
+-			return
++			return nil, ctxErr
+@@ -161,2 +311 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		callback(nil, E.Cause(err, "write request"))
+-		return
++		return nil, E.Cause(err, "write request")
+@@ -168 +317 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-			ctxErr := ctx.Err()
++			ctxErr := queryMultiplexerContextError(ctx)
+@@ -170,2 +319 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-				callback(nil, ctxErr)
+-				return
++				return nil, ctxErr
+@@ -173,2 +321 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-			callback(nil, E.Cause(err, "read response"))
+-			return
++			return nil, E.Cause(err, "read response")
+@@ -180,2 +327 @@ func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg
+-		callback(response, nil)
+-		return
++		return response, nil
+@@ -189,0 +336,4 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
++	if m.closed.Load() {
++		m.probeAccess.Unlock()
++		return
++	}
+@@ -197,0 +348,5 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
++	probeCtx, finish, err := m.beginWorker(context.WithoutCancel(ctx))
++	if err != nil {
++		m.probeAccess.Unlock()
++		return
++	}
+@@ -202 +357 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
+-	go m.runReuseProbe(context.WithoutCancel(ctx), message.Question[0].Name, epoch)
++	go func() { defer finish(); m.runReuseProbe(probeCtx, message.Question[0].Name, epoch) }()
+@@ -209 +364 @@ func (m *queryMultiplexer) runReuseProbe(ctx context.Context, questionName strin
+-	if m.probeEpoch != epoch {
++	if m.closed.Load() || m.probeEpoch != epoch {
+@@ -226 +381 @@ func (m *queryMultiplexer) executeReuseProbe(ctx context.Context, questionName s
+-	conn, err := m.options.dial(probeCtx)
++	conn, err := m.dial(probeCtx)
+@@ -267 +422 @@ func (m *queryMultiplexer) recordConnDeath(conn *multiplexConn) {
+-	if !m.options.probeReuse || m.reuseState.Load() != reuseStateSupported {
++	if m.closed.Load() || !m.options.probeReuse || m.reuseState.Load() != reuseStateSupported {
+@@ -288,0 +444,4 @@ func (m *queryMultiplexer) recordConnDeath(conn *multiplexConn) {
++	if m.closed.Load() {
++		m.probeAccess.Unlock()
++		return
++	}
+@@ -331 +490 @@ func (m *queryMultiplexer) dialConn(ctx context.Context) (*multiplexConn, error)
+-	conn, err := m.options.dial(ctx)
++	conn, err := m.dial(ctx)
+diff --git a/dns/transport/multiplexer_lifecycle_test.go b/dns/transport/multiplexer_lifecycle_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e68ae4d0f89170c422fbc0564286c9200129ed69
+--- /dev/null
++++ b/dns/transport/multiplexer_lifecycle_test.go
+@@ -0,0 +1,439 @@
++package transport
++
++import (
++	"context"
++	"errors"
++	"net"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	mDNS "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/route"
++)
++
++func lifecycleAwait(t *testing.T, done <-chan struct{}, what string) {
++	t.Helper()
++	select {
++	case <-done:
++	case <-time.After(7 * time.Second):
++		t.Fatal("bounded wait expired: ", what)
++	}
++}
++
++func lifecycleQuery() *mDNS.Msg {
++	m := new(mDNS.Msg)
++	m.SetQuestion("lifecycle.test.", mDNS.TypeA)
++	return m
++}
++
++func TestMultiplexerLifecycleCloseRejectsNewDial(t *testing.T) {
++	var dials atomic.Int32
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(context.Context) (net.Conn, error) {
++			dials.Add(1)
++			return nil, errors.New("unexpected dial")
++		},
++	})
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++	_, err := m.Exchange(context.Background(), lifecycleQuery())
++	if !errors.Is(err, net.ErrClosed) {
++		t.Errorf("closed Exchange returned %v, want net.ErrClosed", err)
++	}
++	// This is the already-queued probe entry, not a new public API.
++	m.runReuseProbe(context.Background(), "lifecycle.test.", 0)
++	if got := dials.Load(); got != 0 {
++		t.Errorf("closed instance admitted %d dials", got)
++	}
++}
++
++func TestMultiplexerLifecycleCloseOwnsBlockedProbe(t *testing.T) {
++	for _, managerFirst := range []bool{false, true} {
++		t.Run(map[bool]string{false: "transport-first", true: "connection-manager-first"}[managerFirst], func(t *testing.T) {
++			client, server := net.Pipe()
++			defer client.Close()
++			defer server.Close()
++			manager := route.NewConnectionManager(nil)
++			entered, readDone := make(chan struct{}), make(chan struct{})
++			m := newQueryMultiplexer(queryMultiplexerOptions{
++				probeReuse: true,
++				dial:       func(context.Context) (net.Conn, error) { return manager.TrackConn(client), nil },
++				write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++				readNext: func(c net.Conn) (*mDNS.Msg, error) {
++					close(entered)
++					var data [1]byte
++					_, err := c.Read(data[:])
++					close(readDone)
++					return nil, err
++				},
++			})
++			m.maybeStartProbe(context.Background(), lifecycleQuery())
++			lifecycleAwait(t, entered, "probe entered Read")
++			if managerFirst {
++				if err := manager.Close(); err != nil {
++					t.Fatal(err)
++				}
++			}
++			if err := m.Close(); err != nil {
++				t.Error(err)
++			}
++			select {
++			case <-readDone:
++			default:
++				t.Error("Close returned success before owned probe Read ended")
++			}
++			client.Close()
++			lifecycleAwait(t, readDone, "test cleanup ended Read")
++		})
++	}
++}
++
++func TestMultiplexerLifecycleLateProbeCannotPublishOrReset(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	var reads int
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial:       func(context.Context) (net.Conn, error) { return client, nil },
++		write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++		readNext: func(net.Conn) (*mDNS.Msg, error) {
++			reads++
++			if reads == 1 {
++				close(entered)
++				<-release
++			}
++			return &mDNS.Msg{MsgHdr: mDNS.MsgHdr{Id: uint16(reads)}}, nil
++		},
++	})
++	m.reuseState.Store(reuseStateProbing)
++	// Gate the actual completion method so even a peer completion racing Close
++	// cannot publish success after the closed epoch.
++	go func() { m.runReuseProbe(context.Background(), "lifecycle.test.", 0); close(finished) }()
++	lifecycleAwait(t, entered, "late result entered")
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++	before := m.reuseState.Load()
++	close(release)
++	lifecycleAwait(t, finished, "late result finished")
++	if got := m.reuseState.Load(); got != before {
++		t.Errorf("late probe published state %d after Close, before=%d", got, before)
++	}
++	m.Reset()
++	if got := m.reuseState.Load(); got != before {
++		t.Errorf("Reset changed closed state %d to %d", before, got)
++	}
++}
++
++func TestMultiplexerLifecycleCloseCancelsDialAndKeepsValues(t *testing.T) {
++	type key struct{}
++	entered, cancelled, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	var valueOK atomic.Bool
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(ctx context.Context) (net.Conn, error) {
++			valueOK.Store(ctx.Value(key{}) == "request-value")
++			close(entered)
++			<-ctx.Done()
++			close(cancelled)
++			<-release
++			return client, nil
++		},
++		write: func(net.Conn, *mDNS.Msg, uint16) error { return errors.New("must not write late connection") },
++	})
++	m.maybeStartProbe(context.WithValue(context.Background(), key{}, "request-value"), lifecycleQuery())
++	lifecycleAwait(t, entered, "probe dial entered")
++	var closeErr error
++	go func() { closeErr = m.Close(); close(finished) }()
++	select {
++	case <-finished:
++		t.Error("Close returned before admitted dial was cancelled and drained")
++	case <-cancelled:
++	case <-time.After(6 * time.Second):
++		t.Error("probe dial was not cancelled")
++	}
++	close(release)
++	lifecycleAwait(t, cancelled, "dial cancellation, including old 5s timeout")
++	lifecycleAwait(t, finished, "Close after releasing dial")
++	if closeErr != nil {
++		t.Error(closeErr)
++	}
++	if !valueOK.Load() {
++		t.Error("request context value was lost")
++	}
++	server.SetWriteDeadline(time.Now().Add(time.Second))
++	if _, err := server.Write([]byte{1}); err == nil {
++		t.Error("late dial connection survived Close")
++	}
++}
++
++func TestMultiplexerLifecycleSingleCallbackCanClose(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	completed := make(chan struct{})
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial:       func(context.Context) (net.Conn, error) { return client, nil },
++		write:      func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++		readNext:   func(net.Conn) (*mDNS.Msg, error) { return new(mDNS.Msg), nil },
++	})
++	// No question suppresses the optional probe, but exercises exchangeSingle.
++	m.ExchangeAsync(context.Background(), new(mDNS.Msg), func(_ *mDNS.Msg, err error) {
++		if err != nil {
++			t.Error(err)
++		}
++		if err := m.Close(); err != nil {
++			t.Error(err)
++		}
++		close(completed)
++	})
++	lifecycleAwait(t, completed, "callback re-entered Close")
++}
++
++func TestMultiplexerLifecycleConcurrentCloseWaitsSameResult(t *testing.T) {
++	entered, release := make(chan struct{}), make(chan struct{})
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(context.Context) (net.Conn, error) {
++			close(entered)
++			<-release
++			return nil, errors.New("dial released")
++		},
++	})
++	m.maybeStartProbe(context.Background(), lifecycleQuery())
++	lifecycleAwait(t, entered, "uncooperative dial entered")
++	results := make(chan error, 2)
++	var start sync.WaitGroup
++	start.Add(2)
++	for range 2 {
++		go func() { start.Done(); start.Wait(); results <- m.Close() }()
++	}
++	first, second := <-results, <-results
++	if first == nil || second == nil {
++		t.Error("Close reported success with a still-running dial")
++	}
++	if first != second {
++		t.Errorf("concurrent Close results differ: %v / %v", first, second)
++	}
++	close(release)
++	lifecycleAwait(t, m.cleanupDone, "late dial cleanup completion after retained timeout")
++	if later := m.Close(); later != first {
++		t.Errorf("idempotent Close result changed: %v / %v", first, later)
++	}
++}
++
++func TestMultiplexerLifecycleRealTCPNormalClose(t *testing.T) {
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	ready, serverDone := make(chan struct{}), make(chan struct{})
++	go func() {
++		defer close(serverDone)
++		conn, err := listener.Accept()
++		if err != nil {
++			t.Error(err)
++			return
++		}
++		defer conn.Close()
++		conn.SetDeadline(time.Now().Add(7 * time.Second))
++		for range 2 {
++			if _, err := ReadMessage(conn); err != nil {
++				t.Error(err)
++				return
++			}
++		}
++		close(ready)
++		if _, err := ReadMessage(conn); err == nil {
++			t.Error("unexpected third probe query")
++		}
++	}()
++	transport := newTestTCPTransport(t, listener)
++	transport.multiplexer.maybeStartProbe(context.Background(), lifecycleQuery())
++	lifecycleAwait(t, ready, "real TCP probe sent both questions")
++	started := time.Now()
++	if err := transport.Close(); err != nil {
++		t.Error(err)
++	}
++	t.Logf("real_tcp_close_elapsed=%s", time.Since(started))
++	lifecycleAwait(t, serverDone, "real TCP peer saw close")
++}
++
++func TestMultiplexerLifecycleSingleRetainsCallerDeadline(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	type valueKey struct{}
++	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), valueKey{}, "retained"), 50*time.Millisecond)
++	defer cancel()
++	deadline, _ := ctx.Deadline()
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial: func(actual context.Context) (net.Conn, error) {
++			got, ok := actual.Deadline()
++			if !ok || !got.Equal(deadline) || actual.Value(valueKey{}) != "retained" {
++				t.Error("caller deadline/values changed")
++			}
++			return client, nil
++		},
++		write:    func(net.Conn, *mDNS.Msg, uint16) error { return nil },
++		readNext: func(c net.Conn) (*mDNS.Msg, error) { var b [1]byte; _, err := c.Read(b[:]); return nil, err },
++	})
++	_, err := m.Exchange(ctx, new(mDNS.Msg))
++	if !errors.Is(err, context.DeadlineExceeded) {
++		t.Errorf("caller timeout became %v", err)
++	}
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestMultiplexerLifecycleLateConnDeathCannotDemote(t *testing.T) {
++	m := newQueryMultiplexer(queryMultiplexerOptions{probeReuse: true})
++	conn := new(multiplexConn)
++	conn.readEpoch.Store(1)
++	m.reuseState.Store(reuseStateSupported)
++	m.demoteFailures.Store(reuseDemoteFailureLimit - 1)
++	m.queries[1] = &pendingQuery{conn: conn}
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++	m.recordConnDeath(conn)
++	if got := m.reuseState.Load(); got != reuseStateSupported {
++		t.Errorf("closed state demoted to %d", got)
++	}
++	if got := m.demoteFailures.Load(); got != reuseDemoteFailureLimit-1 {
++		t.Errorf("closed failure count changed to %d", got)
++	}
++}
++
++func TestMultiplexerLifecycleRetainsCallerCancellation(t *testing.T) {
++	ctx, cancel := context.WithCancelCause(context.Background())
++	cancel(errors.New("caller-specific cancellation reason"))
++	m := newQueryMultiplexer(queryMultiplexerOptions{
++		probeReuse: true,
++		dial:       func(actual context.Context) (net.Conn, error) { return nil, actual.Err() },
++	})
++	_, err := m.Exchange(ctx, new(mDNS.Msg))
++	if !errors.Is(err, context.Canceled) {
++		t.Errorf("normal caller cancellation changed to %v", err)
++	}
++	if err := m.Close(); err != nil {
++		t.Fatal(err)
++	}
++}
++
++type lifecyclePoolCloseGate struct {
++	net.Conn
++	entered chan struct{}
++	release chan struct{}
++	once    sync.Once
++}
++
++func (c *lifecyclePoolCloseGate) Close() error {
++	c.once.Do(func() { close(c.entered) })
++	<-c.release
++	return c.Conn.Close()
++}
++
++func TestMultiplexerLifecyclePoolCloseBudget(t *testing.T) {
++	client, server := net.Pipe()
++	defer client.Close()
++	defer server.Close()
++	gate := &lifecyclePoolCloseGate{Conn: client, entered: make(chan struct{}), release: make(chan struct{})}
++	m := newQueryMultiplexer(queryMultiplexerOptions{})
++	if _, _, _, err := m.connection.AcquireShared(context.Background(), func(context.Context) (*multiplexConn, error) {
++		return &multiplexConn{Conn: gate}, nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	results := make(chan error, 2)
++	started := time.Now()
++	go func() { results <- m.Close() }()
++	lifecycleAwait(t, gate.entered, "pool Close entered blocking net.Conn.Close")
++	go func() { results <- m.Close() }()
++	observed := make([]error, 0, 2)
++	deadline := time.NewTimer(6 * time.Second)
++	defer deadline.Stop()
++	for len(observed) < 2 {
++		select {
++		case err := <-results:
++			observed = append(observed, err)
++			if err == nil {
++				t.Error("Close reported success while pool socket Close remained blocked")
++			}
++		case <-deadline.C:
++			t.Error("pool Close escaped the shared five-second result budget")
++			goto release
++		}
++	}
++	if observed[0] != observed[1] {
++		t.Error("concurrent Close returned different timeout results")
++	}
++	t.Logf("pool_close_timeout_elapsed=%s", time.Since(started))
++release:
++	var timeoutEvidence interface {
++		CleanupDone() <-chan struct{}
++		CleanupResult() (bool, error)
++	}
++	if len(observed) == 2 {
++		var ok bool
++		timeoutEvidence, ok = observed[0].(interface {
++			CleanupDone() <-chan struct{}
++			CleanupResult() (bool, error)
++		})
++		if !ok {
++			t.Error("timeout result lost the pending cleanup evidence")
++		} else {
++			if complete, err := timeoutEvidence.CleanupResult(); complete || err != observed[0] {
++				t.Error("pending cleanup result appeared successful")
++			}
++			if timeoutEvidence.CleanupDone() != m.cleanupDone {
++				t.Error("timeout evidence refers to a different cleanup")
++			}
++		}
++		select {
++		case <-m.cleanupDone:
++			t.Error("blocked cleanup was marked complete")
++		default:
++		}
++		if phase := m.cleanupPhase.Load(); phase != 1 {
++			t.Errorf("expected pending pool-close phase, got %d", phase)
++		}
++	}
++	close(gate.release)
++	for len(observed) < 2 {
++		select {
++		case err := <-results:
++			observed = append(observed, err)
++		case <-time.After(time.Second):
++			t.Fatal("Close did not finish after releasing the pool socket")
++		}
++	}
++	lifecycleAwait(t, m.cleanupDone, "released pool cleanup completion")
++	if phase := m.cleanupPhase.Load(); phase != 3 {
++		t.Errorf("late cleanup did not record completion: %d", phase)
++	}
++	if m.cleanupErr != nil {
++		t.Errorf("late pool cleanup error: %v", m.cleanupErr)
++	}
++	if timeoutEvidence != nil {
++		if complete, err := timeoutEvidence.CleanupResult(); !complete || err != nil {
++			t.Errorf("late cleanup result not retained: complete=%v err=%v", complete, err)
++		}
++	}
++	if later := m.Close(); later != observed[0] {
++		t.Error("late cleanup changed the first Close result")
++	}
 +}

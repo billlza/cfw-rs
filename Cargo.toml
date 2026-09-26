@@ -11,15 +11,8 @@ members = [
   "crates/cfw-platform",
   "crates/cfw-legacy-tombstone",
   "crates/cfw-release-verifier",
-  "crates/urlpattern-maintained-adapter",
 ]
 resolver = "2"
-
-[patch.crates-io]
-# tauri-utils 2.9.3 still requires urlpattern 0.3. This narrow adapter keeps
-# that API requirement while delegating to the maintained 0.6 implementation.
-# Remove it when the pinned Tauri line consumes urlpattern >=0.6 directly.
-urlpattern = { path = "crates/urlpattern-maintained-adapter" }
 
 [workspace.package]
 edition = "2024"

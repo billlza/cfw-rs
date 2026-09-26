@@ -15,7 +15,7 @@
     "test": "node ../../scripts/build_ui.mjs && node --test ui/tests/*.test.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.1"
+    "@tauri-apps/api": "2.12.0"
   },
   "devDependencies": {
     "esbuild": "0.28.2"

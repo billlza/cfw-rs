@@ -350,8 +350,8 @@ fn main() {
             } else if !startup::command_available_before_ready(invoke.message.command())
                 && let Err(error) = invoke
                     .message
-                    .state_ref()
-                    .get::<startup_state::NativeStartup>()
+                    .webview_ref()
+                    .state::<startup_state::NativeStartup>()
                     .require_ready()
             {
                 invoke.resolver.reject(error);

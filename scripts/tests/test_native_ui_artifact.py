@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -72,6 +73,7 @@ class NativeUiArtifactTests(unittest.TestCase):
         ui.verify_load_paths(good, dependencies)
         for invalid in (
             load_commands("/Applications/Xcode.app/toolchain/lib"),
+            load_commands("/var/run/asset/Metal.xctoolchain/usr/lib/swift-6.2/macosx"),
             load_commands("/tmp/debug"), load_commands("@executable_path/../../outside"),
             load_commands("@loader_path", "@loader_path"),
             load_commands(name="/tmp/libCFMNativeDashboard.dylib"),
@@ -107,6 +109,68 @@ class NativeUiArtifactTests(unittest.TestCase):
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "unexpected Swift compiler"):
                     ui.remove_build_rpaths(library)
 
+    def test_metal_build_path_requires_selected_read_only_apple_compiler(self) -> None:
+        root = "/var/run/system-asset/Metal.xctoolchain"
+        compiler = root + "/usr/bin/metal"
+        rpath = root + "/usr/lib/swift-6.2/macosx"
+        calls = []
+
+        def tool(arguments):
+            calls.append(arguments)
+            return compiler + "\n" if "--find" in arguments else ""
+
+        with patch.object(ui, "command", side_effect=tool), \
+                patch.object(ui, "regular") as checked_file, \
+                patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=0)), \
+                patch.object(ui.os, "statvfs", return_value=SimpleNamespace(f_flag=ui.os.ST_RDONLY)):
+            ui.verify_metal_span_build_rpath(rpath)
+            checked_file.assert_called_once_with(Path(compiler))
+            self.assertIn(["/usr/bin/codesign", "--verify", "--strict", "-R=anchor apple", compiler], calls)
+            for invalid in ("/tmp/injected", rpath.replace("swift-6.2", "swift-6.3"),
+                            rpath.replace("system-asset", "unselected-asset")):
+                with self.subTest(path=invalid), self.assertRaises(ui.NativeUiArtifactError):
+                    ui.verify_metal_span_build_rpath(invalid)
+
+        for uid, flags in ((501, ui.os.ST_RDONLY), (0, 0)):
+            with self.subTest(uid=uid, flags=flags), patch.object(ui, "command", side_effect=tool), \
+                    patch.object(ui, "regular"), \
+                    patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=uid)), \
+                    patch.object(ui.os, "statvfs", return_value=SimpleNamespace(f_flag=flags)):
+                with self.assertRaisesRegex(ui.NativeUiArtifactError, "read-only system asset"):
+                    ui.verify_metal_span_build_rpath(rpath)
+
+        def unsigned_tool(arguments):
+            if "--find" in arguments:
+                return compiler + "\n"
+            raise ui.NativeUiArtifactError("Apple requirement failed")
+
+        with patch.object(ui, "command", side_effect=unsigned_tool), patch.object(ui, "regular"), \
+                patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=0)), \
+                patch.object(ui.os, "statvfs", return_value=SimpleNamespace(f_flag=ui.os.ST_RDONLY)):
+            with self.assertRaisesRegex(ui.NativeUiArtifactError, "Apple requirement failed"):
+                ui.verify_metal_span_build_rpath(rpath)
+
+    def test_unexpected_path_after_metal_refuses_before_library_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            library = Path(temporary) / ui.LIBRARY
+            library.write_bytes(b"unchanged fixture")
+            library.chmod(0o755)
+            metal_path = "/var/run/system-asset/Metal.xctoolchain/usr/lib/swift-6.2/macosx"
+            calls = []
+
+            def tool(arguments):
+                calls.append(arguments)
+                if "--find" in arguments:
+                    return "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift\n"
+                return load_commands(metal_path, "/tmp/injected")
+
+            with patch.object(ui, "command", side_effect=tool), \
+                    patch.object(ui, "verify_metal_span_build_rpath", side_effect=[None, ui.NativeUiArtifactError("unexpected path")]):
+                with self.assertRaises(ui.NativeUiArtifactError):
+                    ui.remove_build_rpaths(library)
+            self.assertFalse(any("--remove-signature" in arguments or "-delete_rpath" in arguments for arguments in calls))
+            self.assertEqual(library.read_bytes(), b"unchanged fixture")
+
     def test_resource_bundle_requires_all_languages_and_no_external_links(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / ui.RESOURCES
@@ -133,7 +197,7 @@ class NativeUiArtifactTests(unittest.TestCase):
             (pre_sign / ui.LIBRARY).chmod(0o755)
             resources(pre_sign / ui.RESOURCES)
             metadata = {key: "bound" for key in ui.METADATA_KEYS}
-            metadata.update(configuration="release", buildNumber="50014", productVersion="0.5.0", signingMode="pre-sign")
+            metadata.update(configuration="release", buildNumber="50015", productVersion="0.5.0", signingMode="pre-sign")
             for name in (ui.LIBRARY, ui.RESOURCES):
                 (pre_sign / (name + ".manifest.json")).write_text(json.dumps(build_manifest(pre_sign / name, metadata)))
                 if (pre_sign / name).is_dir():
@@ -153,18 +217,18 @@ class NativeUiArtifactTests(unittest.TestCase):
             with patch.object(ui, "expected_metadata", side_effect=expected), patch.object(ui, "verify_library"), patch(
                 "scripts.release_build_identity.preview_native_products_root", return_value=pre_sign
             ):
-                ui.verify_products(repository, signed, build="50014", signing="developer-id")
+                ui.verify_products(repository, signed, build="50015", signing="developer-id")
                 manifest = signed / (ui.LIBRARY + ".manifest.json")
                 bad = json.loads(manifest.read_text())
                 bad["metadata"]["preSignArtifactSha256"] = "0" * 64
                 manifest.write_text(json.dumps(bad))
                 with self.assertRaisesRegex(SignedNativeManifestError, "exact pre-sign promotion"):
-                    ui.verify_products(repository, signed, build="50014", signing="developer-id")
+                    ui.verify_products(repository, signed, build="50015", signing="developer-id")
                 manifests()
                 (signed / ui.RESOURCES / "Contents/Resources/en.lproj/Localizable.strings").write_text('"key" = "modified";')
                 manifests()
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "must not modify"):
-                    ui.verify_products(repository, signed, build="50014", signing="developer-id")
+                    ui.verify_products(repository, signed, build="50015", signing="developer-id")
 
     def test_source_digest_covers_real_abi_and_library_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -194,26 +258,26 @@ class NativeUiArtifactTests(unittest.TestCase):
             library.chmod(0o755)
             resources(root / ui.RESOURCES)
             metadata = {key: "bound" for key in ui.METADATA_KEYS}
-            metadata.update(configuration="release", buildNumber="50014", productVersion="0.5.0")
+            metadata.update(configuration="release", buildNumber="50015", productVersion="0.5.0")
             for name in (ui.LIBRARY, ui.RESOURCES):
                 (root / (name + ".manifest.json")).write_text(json.dumps(build_manifest(root / name, metadata)))
             with patch.object(ui, "expected_metadata", return_value=metadata), patch.object(ui, "verify_library"):
-                ui.verify_products(root, root, build="50014")
+                ui.verify_products(root, root, build="50015")
                 manifest = root / (ui.LIBRARY + ".manifest.json")
                 good = manifest.read_text()
                 bad = json.loads(good)
                 bad["metadata"]["configuration"] = "debug"
                 manifest.write_text(json.dumps(bad))
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "Release inputs"):
-                    ui.verify_products(root, root, build="50014")
+                    ui.verify_products(root, root, build="50015")
                 manifest.write_text(good)
                 library.write_bytes(b"different library")
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "bytes differ"):
-                    ui.verify_products(root, root, build="50014")
+                    ui.verify_products(root, root, build="50015")
                 library.write_bytes(b"unsigned test fixture")
                 (root / ui.RESOURCES / "Contents/Resources/en.lproj/Localizable.strings").write_text('"key" = "changed";')
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "bytes differ"):
-                    ui.verify_products(root, root, build="50014")
+                    ui.verify_products(root, root, build="50015")
 
 
 if __name__ == "__main__":

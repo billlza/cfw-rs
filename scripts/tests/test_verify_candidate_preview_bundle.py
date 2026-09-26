@@ -53,7 +53,7 @@ class CandidateFixture:
         self.unsigned_preview = context is ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST
         self.preview = context in bundle.PREVIEW_CONTEXTS or self.unsigned_preview
         self.version = "0.5.0" if self.preview else "0.4.0"
-        self.build = "50000" if self.unsigned_preview else "50014" if self.preview else "40000"
+        self.build = "50000" if self.unsigned_preview else "50015" if self.preview else "40000"
         self.signing = "pre-sign"
         private = []
         if self.unsigned_preview:

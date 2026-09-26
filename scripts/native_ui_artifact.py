@@ -203,9 +203,37 @@ def verify_library(library: Path) -> None:
     verify_component_exports(command(["/usr/bin/nm", "-gU", str(library)]))
 
 
+def verify_metal_span_build_rpath(path: str) -> None:
+    """Authenticate the optional Metal toolchain path injected by Swift Build.
+
+    SwiftPM adds xcrun's Metal toolchain to its toolchain stack even for a
+    Swift-only library. Swift Build then emits every toolchain's Swift 6.2
+    back-deployment path. This is a build path to remove, never a path admitted
+    into the distributed library.
+    """
+    suffix = "/Metal.xctoolchain/usr/lib/swift-6.2/macosx"
+    if not path.endswith(suffix):
+        raise NativeUiArtifactError(f"unexpected Swift compiler search path: {path}")
+    selected = command(["/usr/bin/xcrun", "--find", "metal"]).strip()
+    metal = Path(selected)
+    if not metal.is_absolute() or "\n" in selected or "\r" in selected:
+        raise NativeUiArtifactError("selected Metal compiler path is invalid")
+    root = metal.parent.parent.parent
+    if metal != root / "usr/bin/metal" or root.name != "Metal.xctoolchain":
+        raise NativeUiArtifactError("selected Metal compiler is outside its toolchain")
+    if path != str(root / "usr/lib/swift-6.2/macosx"):
+        raise NativeUiArtifactError("UI rpath does not belong to the selected Metal toolchain")
+    regular(metal)
+    if metal.stat().st_uid != 0 or not os.statvfs(metal).f_flag & os.ST_RDONLY:
+        raise NativeUiArtifactError("selected Metal compiler must be on the read-only system asset")
+    command(["/usr/bin/codesign", "--verify", "--strict", "-R=anchor apple", str(metal)])
+
+
 def remove_build_rpaths(library: Path) -> None:
-    """Normalize only the selected Swift compiler's known compatibility rpath,
-    before hashing or signing; never silently accept other injected search paths.
+    """Remove authenticated build-only paths before hashing or signing.
+
+    The final distribution check still admits only system Swift and loader paths.
+    Validate the complete path set before mutating the compiler's output.
     """
     regular(library, mode=0o755)
     _, paths = macho_load_paths(command(["/usr/bin/otool", "-l", str(library)]))
@@ -215,7 +243,7 @@ def remove_build_rpaths(library: Path) -> None:
     compiler_paths = [path for path in paths if path not in {"/usr/lib/swift", "@loader_path"}]
     for path in compiler_paths:
         if not allowed_compiler_path.fullmatch(path):
-            raise NativeUiArtifactError(f"unexpected Swift compiler search path: {path}")
+            verify_metal_span_build_rpath(path)
     if compiler_paths:
         # install_name_tool may report the now-invalid compiler ad-hoc signature;
         # remove it first. Developer ID signing happens only in the signing lane.

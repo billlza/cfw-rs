@@ -537,12 +537,12 @@
   ],
   "rust_stable": "1.98.1",
   "sing_box_stable": "1.14.2",
-  "application_build": "50014",
+  "application_build": "50015",
   "installed_preview_build": "50013",
   "installed_sing_box": "1.14.2 packaged in verified 50013; active data-plane acceptance remains pending",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "Tauri 2.12.0, tauri-build 2.7.0 and the matching JavaScript API 2.12.0 are integrated. The unused local URLPattern adapter is removed because tauri-utils 2.10.0 directly consumes 0.6.0. All 40 remaining direct registry dependencies match the September 26 observation. Local validation passed 881 Rust tests, three custom native/main-run-loop harnesses, 194 UI tests, source/version contracts, and Rust/UI supply-chain checks; exact-source hosted CI and signed candidate acceptance remain pending. Rust 1.98.1 and sing-box 1.14.2 remain current in that observation. Candidate 50014 identity and status-bar DOM write avoidance are implemented; no candidate build/sign/install has completed. Installed 50013 remains immutable and its first-upgrade service refusal remains unresolved. Physical VPN, complete UI/accessibility, comparative performance and soak acceptance remain open.",
+  "implementation_status": "Tauri 2.12.0, tauri-build 2.7.0 and the matching JavaScript API 2.12.0 are integrated. The unused local URLPattern adapter is removed because tauri-utils 2.10.0 directly consumes 0.6.0. All 40 remaining direct registry dependencies match the September 26 observation. Local validation passed 881 Rust tests, three custom native/main-run-loop harnesses, 194 UI tests, source/version contracts, and Rust/UI supply-chain checks; exact-source hosted CI and signed candidate acceptance remain pending. Rust 1.98.1 and sing-box 1.14.2 remain current in that observation. Candidate 50014 preparation stopped after SwiftUI compilation because the selected Metal asset contributed an unexpected absolute back-deployment RPATH. Original partial artifacts remain preserved. Candidate 50015 identity preparation includes a narrowly authenticated pre-sign path normalization repair; actual candidate build/sign/install has not completed. Status-bar DOM write avoidance remains integrated. Installed 50013 remains immutable and its first-upgrade service refusal remains unresolved. Physical VPN, complete UI/accessibility, comparative performance and soak acceptance remain open.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",

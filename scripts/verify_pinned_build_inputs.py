@@ -109,7 +109,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "8ac4ff9eb949d159b0103b3a0499bc55f16d52f6434ad09732f2ebfb69187acf"
+    "bcbaf0356d42c849ed1d6d5caf8aae7a127751cfb61a8bc316d27e8d58d4f634"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -117,7 +117,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "b3f5f1f993bd20af6b19512e7c8df099102e5455efed152a035551150fc93672"
+    "728eced9d0e3775b99e28dbf8395e91756c87381ba169809752fb22f3651c9e7"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the

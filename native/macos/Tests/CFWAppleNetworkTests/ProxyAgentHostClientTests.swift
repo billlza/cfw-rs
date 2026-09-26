@@ -306,8 +306,119 @@ private func installed40019Transport(
   )
 }
 
+private final class ProxyConnectionHarness: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [NSXPCConnection] = []
+  private var requirements: [String] = []
+  private var callbacks: [@Sendable (Result<Data, Error>) -> Void] = []
+  private var responses: [Data] = []
+  let entered = ProxyAgentTestLatch()
+  let holdFirst: Bool
+
+  init(holdFirst: Bool = false) { self.holdFirst = holdFirst }
+  var connections: [NSXPCConnection] { lock.withLock { values } }
+  var requirementValues: [String] { lock.withLock { requirements } }
+  var requestCount: Int { lock.withLock { callbacks.count } }
+  func reply(_ index: Int) {
+    let pair = lock.withLock { (callbacks[index], responses[index]) }
+    pair.0(.success(pair.1))
+  }
+  var dependencies: ProxyAgentConnectionDependencies {
+    .init(
+      makeConnection: { _ in
+        let connection = NSXPCConnection(
+          machServiceName: "com.bill.clashformac.tests.never-activated")
+        self.lock.withLock { self.values.append(connection) }
+        return connection
+      },
+      prepareConnection: { _, requirement in
+        self.lock.withLock { self.requirements.append(requirement) }
+      },
+      activateConnection: { _ in },
+      execute: { _, data, reply in
+        do {
+          let request = try ProtocolCodec.decodeRequest(data)
+          let response = try JSONEncoder().encode(
+            Installed40019TestResponseEnvelope(
+              schemaVersion: NativeProtocolConstants.schemaVersion,
+              requestID: request.requestID,
+              result: try CommandResult(kind: .snapshot, snapshot: .off(sequence: 1))))
+          let index = self.lock.withLock {
+            self.callbacks.append(reply)
+            self.responses.append(response)
+            return self.callbacks.count - 1
+          }
+          self.entered.signal()
+          if !self.holdFirst || index != 0 { reply(.success(response)) }
+        } catch { reply(.failure(error)) }
+      })
+  }
+}
+
+private func connectionTestTransport(_ harness: ProxyConnectionHarness) throws
+  -> AuthenticatedProxyAgentTransport
+{
+  try AuthenticatedProxyAgentTransport(
+    machServiceName: "com.bill.clashformac.proxy-agent", teamIdentifier: "YKUPL7Z869",
+    proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
+    currentCodeHash: try ServiceCodeHash(Data(repeating: 0x42, count: 20)),
+    serviceController: FixedProxyAgentServiceController(status: .enabled),
+    replyTimeout: .milliseconds(200), connectionDependencies: harness.dependencies)
+}
+
 @Suite(.serialized)
 struct ProxyAgentHostClientTests {
+  @Test(arguments: [false, true])
+  func nativeConnectionEventRotatesOrdinarySnapshots(interrupted: Bool) async throws {
+    let harness = ProxyConnectionHarness()
+    let subject = try connectionTestTransport(harness)
+    _ = try await subject.snapshot()
+    let old = try #require(harness.connections.first)
+    let event = try #require(interrupted ? old.interruptionHandler : old.invalidationHandler)
+    let lateInvalidation = try #require(old.invalidationHandler)
+    event()
+    #expect(harness.requestCount == 1)
+    _ = try await subject.snapshot()
+    #expect(harness.connections.count == 2)
+    #expect(harness.requestCount == 2)
+    lateInvalidation()
+    event()
+    _ = try await subject.snapshot()
+    #expect(harness.connections.count == 2)
+    #expect(harness.requestCount == 3)
+    #expect(harness.requirementValues.first == harness.requirementValues.last)
+    #expect(harness.requirementValues.first?.contains("YKUPL7Z869") == true)
+    #expect(harness.requirementValues.first?.contains("com.bill.clashformac.proxy-agent") == true)
+  }
+
+  @Test(arguments: [false, true])
+  func nativeConnectionEventTerminatesInflightWithoutReplay(interrupted: Bool) async throws {
+    let harness = ProxyConnectionHarness(holdFirst: true)
+    let subject = try connectionTestTransport(harness)
+    let pending = Task { try await subject.snapshot() }
+    await harness.entered.wait()
+    let old = try #require(harness.connections.first)
+    // Optional invocation lets the old implementation reach its bounded timeout,
+    // proving the missing handler instead of leaving the test task unjoined.
+    let event = interrupted ? old.interruptionHandler : old.invalidationHandler
+    event?()
+    do {
+      _ = try await pending.value
+      Issue.record("A retired request unexpectedly succeeded")
+    } catch {
+      #expect(error as? ProxyAgentHostError == .transportUnavailable("connection-retired"))
+    }
+    #expect(event != nil)
+    #expect(harness.requestCount == 1)
+    _ = try await subject.snapshot()
+    #expect(harness.connections.count == 2)
+    harness.reply(0)
+    event?()
+    _ = try await subject.snapshot()
+    #expect(harness.connections.count == 2)
+    #expect(harness.requestCount == 3)
+  }
+
   @Test func registrationRepairsNotFoundServiceRecord() throws {
     let service = FakeProxyAgentService([.notFound, .enabled])
     let controller = SMProxyAgentServiceController(service: service)

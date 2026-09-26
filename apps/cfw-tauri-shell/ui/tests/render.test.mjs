@@ -14,6 +14,7 @@ const callbacks = new Map();
 const querySelectorElements = new Map();
 const querySelectorAllElements = new Map();
 const documentListeners = new Map();
+const intervalCallbacks = [];
 let nextCallbackId = 1;
 let updateListenerWasReady = false;
 
@@ -67,6 +68,8 @@ const reloadButton = element("button", "reload-button");
 const reloadButtonListeners = new Map();
 reloadButton.addEventListener = (type, listener) => reloadButtonListeners.set(type, listener);
 reloadButton.click = async () => reloadButtonListeners.get("click")?.();
+const statusBarNodes = new Map(["upload-rate", "download-rate", "runtime-value", "traffic-progress"]
+  .map((id) => [id, element("div", id)]));
 const documentStub = {
   documentElement: element("html"),
   body: element("body"),
@@ -76,6 +79,7 @@ const documentStub = {
     if (id === "page") return page;
     if (id === "glass-menu-root") return glassRoot;
     if (id === "reload-button") return reloadButton;
+    if (statusBarNodes.has(id)) return statusBarNodes.get(id);
     return element("div", id);
   },
   querySelector: (selector) => querySelectorElements.get(selector) ?? null,
@@ -99,7 +103,10 @@ globalThis.window = {
     return 1;
   },
   setTimeout: (callback, delay) => setTimeout(callback, delay),
-  setInterval: () => 1,
+  setInterval: (callback, delay) => {
+    intervalCallbacks.push({ callback, delay });
+    return intervalCallbacks.length;
+  },
   matchMedia: () => ({ matches: false }),
 };
 globalThis.requestAnimationFrame = globalThis.window.requestAnimationFrame;
@@ -489,6 +496,105 @@ const setEngine = async (envelope) => {
   responses.engine_snapshot = envelope;
   await emit("cfw://settings-changed", responses.read_settings_snapshot);
 };
+
+test("status bar clock preserves changing values without rewriting unchanged DOM", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalNodes = new Map(statusBarNodes);
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  function countedNode(id) {
+    const node = element("div", id);
+    let text = "", width = "";
+    node.writes = { text: 0, width: 0 };
+    Object.defineProperty(node, "textContent", {
+      get: () => text,
+      set: (value) => { text = value; node.writes.text += 1; },
+    });
+    Object.defineProperty(node.style, "width", {
+      get: () => width,
+      set: (value) => { width = value; node.writes.width += 1; },
+    });
+    return node;
+  }
+  const writes = () => [...statusBarNodes.values()].map((node) => ({ ...node.writes }));
+  const resetWrites = () => {
+    for (const node of statusBarNodes.values()) node.writes = { text: 0, width: 0 };
+  };
+  const noWrites = Array.from({ length: 4 }, () => ({ text: 0, width: 0 }));
+  try {
+    Date.now = () => now;
+    for (const id of statusBarNodes.keys()) statusBarNodes.set(id, countedNode(id));
+    const clocks = intervalCallbacks.filter(({ delay }) => delay === 1000);
+    assert.equal(clocks.length, 1, "real bootstrap retains exactly one one-second clock");
+    const tick = clocks[0].callback;
+    await setEngine(OFF_ENGINE);
+    await renderPage("general");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 00");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "0%");
+    resetWrites();
+    let ipcBefore = invoked.length;
+    for (let second = 0; second < 60; second++) { now += 1000; tick(); }
+    assert.equal(invoked.length, ipcBefore, "Off clock ticks issue no IPC");
+    assert.deepEqual(writes(), noWrites, "60 stable Off ticks must preserve existing DOM values");
+
+    await setEngine(RUNNING_ENGINE);
+    resetWrites(); ipcBefore = invoked.length;
+    now += 1000; tick();
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 01");
+    now += 1000; tick();
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 02");
+    assert.deepEqual(writes(), [{ text: 0, width: 0 }, { text: 0, width: 0 },
+      { text: 2, width: 0 }, { text: 0, width: 0 }]);
+    assert.equal(invoked.length, ipcBefore, "running clock ticks issue no IPC");
+
+    // The same registered callback must publish changes in the displayed rates.
+    resetWrites();
+    state.traffic.upload = 0.5; state.traffic.download = 2;
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "2.0 MB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "10%");
+    assert.deepEqual(writes(), [{ text: 1, width: 0 }, { text: 1, width: 0 },
+      { text: 0, width: 0 }, { text: 0, width: 1 }]);
+    state.traffic.upload = 1; state.traffic.download = 0.5;
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "6%");
+    resetWrites(); tick();
+    assert.deepEqual(writes(), noWrites);
+    assert.equal(invoked.length, ipcBefore, "rate display changes issue no IPC");
+
+    // A replacement node must receive current values even when state is unchanged.
+    const detachedNodes = [...statusBarNodes.values()];
+    for (const id of statusBarNodes.keys()) statusBarNodes.set(id, countedNode(id));
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 02");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "6%");
+    assert.deepEqual(writes(), [{ text: 1, width: 0 }, { text: 1, width: 0 },
+      { text: 1, width: 0 }, { text: 0, width: 1 }]);
+    assert.deepEqual(detachedNodes.map((node) => node.writes), noWrites);
+    assert.equal(invoked.length, ipcBefore, "replacing DOM nodes introduces no IPC");
+
+    await setEngine(OFF_ENGINE);
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 00");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "0%");
+    resetWrites(); ipcBefore = invoked.length;
+    now += 1000; tick();
+    assert.deepEqual(writes(), noWrites, "returning Off clears old values once");
+    assert.equal(invoked.length, ipcBefore);
+  } finally {
+    Date.now = originalNow;
+    for (const [id, node] of originalNodes) statusBarNodes.set(id, node);
+    await setEngine(originalEngine);
+  }
+});
 
 function savedToolbarPolicy() {
   return { profileId: "toolbar-profile", name: "Saved", groups: [

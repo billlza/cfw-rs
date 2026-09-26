@@ -2411,12 +2411,22 @@ function updateStatusBar() {
   const down = document.getElementById("download-rate");
   const runtime = document.getElementById("runtime-value");
   const progress = document.getElementById("traffic-progress");
-  if (up) up.textContent = formatRate(state.traffic.upload);
-  if (down) down.textContent = formatRate(state.traffic.download);
-  if (runtime) runtime.textContent = formatRuntime(state.traffic.runtimeSeconds);
+  if (up) {
+    const value = formatRate(state.traffic.upload);
+    if (up.textContent !== value) up.textContent = value;
+  }
+  if (down) {
+    const value = formatRate(state.traffic.download);
+    if (down.textContent !== value) down.textContent = value;
+  }
+  if (runtime) {
+    const value = formatRuntime(state.traffic.runtimeSeconds);
+    if (runtime.textContent !== value) runtime.textContent = value;
+  }
   if (progress) {
     const total = Math.min(100, Math.max(0, (state.traffic.upload + state.traffic.download) * 4));
-    progress.style.width = `${total}%`;
+    const width = `${total}%`;
+    if (progress.style.width !== width) progress.style.width = width;
   }
 }
 

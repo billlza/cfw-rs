@@ -4102,7 +4102,7 @@ index 0000000000000000000000000000000000000000..30f89e5e1a9f0f4f1765fcab4828ee4b
 +	return E.Errors(r.DNSRule.Close(), r.filter.Close())
 +}
 diff --git a/dns/transport/multiplexer.go b/dns/transport/multiplexer.go
-index 6b275ae9d6db2593fc8df1752b5f4be16fd1406b..733e6c8db41756adfcde1c6d9e756424cf919aa0 100644
+index 6b275ae9d6db2593fc8df1752b5f4be16fd1406b..1590db6be85ba864e8ab108ee005e43886cfba2f 100644
 --- a/dns/transport/multiplexer.go
 +++ b/dns/transport/multiplexer.go
 @@ -31,0 +32,11 @@ const (
@@ -4321,7 +4321,7 @@ index 6b275ae9d6db2593fc8df1752b5f4be16fd1406b..733e6c8db41756adfcde1c6d9e756424
 +	}
 @@ -202 +357 @@ func (m *queryMultiplexer) maybeStartProbe(ctx context.Context, message *mDNS.Ms
 -	go m.runReuseProbe(context.WithoutCancel(ctx), message.Question[0].Name, epoch)
-+	go func() { defer finish(); m.runReuseProbe(probeCtx, message.Question[0].Name, epoch) }()
++	go func(questionName string) { defer finish(); m.runReuseProbe(probeCtx, questionName, epoch) }(message.Question[0].Name)
 @@ -209 +364 @@ func (m *queryMultiplexer) runReuseProbe(ctx context.Context, questionName strin
 -	if m.probeEpoch != epoch {
 +	if m.closed.Load() || m.probeEpoch != epoch {

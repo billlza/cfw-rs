@@ -537,12 +537,12 @@
   ],
   "rust_stable": "1.98.1",
   "sing_box_stable": "1.14.2",
-  "application_build": "50018",
+  "application_build": "50019",
   "installed_preview_build": "50017",
   "installed_sing_box": "1.14.2 packaged in verified 50017; active data-plane acceptance remains pending",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "The September 26 dependency observations below are unchanged; this is not a fresh registry check. Tauri 2.12.0, tauri-build 2.7.0, JavaScript API 2.12.0, Rust 1.98.1 and sing-box 1.14.2 are integrated. All three CI jobs for 9fdbccc passed. Candidate 50017 was signed, notarized, stapled and installed; one first normal service upgrade reached Off after retiring the interrupted ProxyAgent connection. Original 50013/50016 failures remain retained. Source cc200a9 fixes current-page/log-filter accessibility metadata and the misleading unmatched-rule message; 198 local UI tests and source/version checks pass, its hosted CI was started, and these changes are not installed in 50017. Mouse navigation after native panel cancellation remains unexplained. Full physical VPN, complete UI/accessibility, comparable whole-product performance and soak acceptance remain open.",
+  "implementation_status": "September26 dependency observations are unchanged; this is not a fresh registry check. Rust1.98.1, sing-box1.14.2, Tauri/API2.12.0, tauri-build2.7.0 and CLI2.12.0 remain integrated. Installed50017 is signed/notarized/stapled; one first normal upgrade reached Off. Frozen50018/source7d79 completed pre-sign construction and all three CI jobs after one retained download-failure retry, but is held from signing/install because native-panel interaction failed. Repair8c95 fixes RuntimeSettings and ProfileMenu activation, with separate old-fail/new-pass component-host comparisons and 57 native component tests; its native CI job exposed a real DNS Msg ownership race while quality was still running. The probe now takes a string argument evaluated before goroutine launch; same-gate isolated old-fail/new-pass ownership evidence is retained, but full repaired DNS CI is pending. The 198 validated UI semantic tests belong to earlier source and are not installed in50017. Physical/product-host/lifecycle/VPN/whole-product performance/soak remain open; full SwiftUI-host versus in-place component scope clarification is pending.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",
@@ -569,5 +569,5 @@
   },
   "installed_preview_source": "9fdbccca6e99e148c3ef3e08df514d73d5f458f1",
   "installed_at": "2026-09-26T23:58:53.305292+00:00",
-  "next_preview_status": "50018 source identity allocated for the validated UI semantic fixes; 346 identity/input Python tests, six native input Rust tests, eight Swift release-observation tests, format/source/version/boundary checks and deterministic XcodeGen passed. No 50018 candidate build, signing, installation or exact-source CI completion yet; installed50017 remains unchanged."
+  "next_preview_status": "50019 source identity prepared separately from held50018; old50018/50017 and future50020 remain refused. 346 targeted Python and6 native-input Rust tests, shell syntax, Rust formatting, source/version/boundary checks and two identical pinned XcodeGen outputs pass. Strict Swift formatting and all8 native release-observation tests pass. DNS ownership repair and patch/combined-source pins are updated; canonical materialization matches all1,614 source files in an independent repaired copy, only multiplexer.go differs from old source, and202 targeted source-contract tests pass; every earlier engine/App remains unchanged and the repaired engine still needs a fresh build and full DNS CI. No50019App/sign/notary/install or exact-source CI completion; installed50017 unchanged and packaging headroom pending."
 }

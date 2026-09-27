@@ -537,12 +537,12 @@
   ],
   "rust_stable": "1.98.1",
   "sing_box_stable": "1.14.2",
-  "application_build": "50016",
-  "installed_preview_build": "50013",
-  "installed_sing_box": "1.14.2 packaged in verified 50013; active data-plane acceptance remains pending",
+  "application_build": "50018",
+  "installed_preview_build": "50017",
+  "installed_sing_box": "1.14.2 packaged in verified 50017; active data-plane acceptance remains pending",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "Tauri 2.12.0, tauri-build 2.7.0 and the matching JavaScript API 2.12.0 are integrated. The unused local URLPattern adapter is removed because tauri-utils 2.10.0 directly consumes 0.6.0. All 40 remaining direct registry dependencies match the September 26 observation. Local validation passed 881 Rust tests, three custom native/main-run-loop harnesses, 194 UI tests, source/version contracts, and Rust/UI supply-chain checks; exact-source hosted CI and signed candidate acceptance remain pending. Rust 1.98.1 and sing-box 1.14.2 remain current in that observation. Candidate 50014 preparation stopped after SwiftUI compilation because the selected Metal asset contributed an unexpected absolute back-deployment RPATH. Original partial artifacts remain preserved. Candidate 50015 completed the real pre-sign App and native path normalization checks, but signing was held because the retained CLI 2.11.4 exports deprecated STATIC_VCRUNTIME into tauri-build 2.7.0. Candidate 50016 prepares a CLI 2.12.0 migration. An isolated official-source CLI build and old-key/old-verifier signature compatibility probe passed; formal toolchain sealing and the new candidate remain pending. Status-bar DOM write avoidance remains integrated. Installed 50013 remains immutable and its first-upgrade service refusal remains unresolved. Physical VPN, complete UI/accessibility, comparative performance and soak acceptance remain open.",
+  "implementation_status": "The September 26 dependency observations below are unchanged; this is not a fresh registry check. Tauri 2.12.0, tauri-build 2.7.0, JavaScript API 2.12.0, Rust 1.98.1 and sing-box 1.14.2 are integrated. All three CI jobs for 9fdbccc passed. Candidate 50017 was signed, notarized, stapled and installed; one first normal service upgrade reached Off after retiring the interrupted ProxyAgent connection. Original 50013/50016 failures remain retained. Source cc200a9 fixes current-page/log-filter accessibility metadata and the misleading unmatched-rule message; 198 local UI tests and source/version checks pass, its hosted CI was started, and these changes are not installed in 50017. Mouse navigation after native panel cancellation remains unexplained. Full physical VPN, complete UI/accessibility, comparable whole-product performance and soak acceptance remain open.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",
@@ -560,11 +560,14 @@
   "dependency_inventory_note": "The registry observation checked 41 direct names before removing the now-unused local URLPattern adapter; the final workspace has 40 direct names. URLPattern 0.6.0 remains an external transitive dependency of tauri-utils 2.10.0.",
   "tauri_cli_migration": {
     "version": "2.12.0",
-    "status": "source integration and targeted tests passed; formal toolchain bootstrap pending",
+    "status": "Formal CLI 2.12.0 toolchain sealing completed and was used for 50016 and 50017. The actual signer lane passed 31 tests locally and in 50017 exact-source CI; App/DMG signing and notarization completed. This does not establish automatic updater App replacement or close the inherited tool-audit advisories.",
     "upstream_crate_sha256": "2e238d6e852e23a0c914ff8623544ed01b4c1cb67e3e48357a5e97fb966a0bcb",
     "upstream_lock_sha256": "792031ed27ead83bd06bbf564a3c814f33a8c7ee81a8729f8d7c17cd041b0515",
     "updater_signature_contract": "preserve timestamp/file two-field trusted comment; do not pass app-version",
     "verification_scope": "8 temporary-key positive and 8 tampered payload tests with frozen-source verifiers; 40073 binary hash reproduced; no App upgrade acceptance",
     "additional_tool_audit": "RustSec reported rsa and 5 maintenance advisories also present at identical versions in the previous CLI macOS graph. No ignores added; tool audit is not green. Source review places RSA private decryption in remote Apple signing negotiation, outside the admitted unsigned Host and minisign updater commands. Application audit is separate; no blanket exemption for other CLI commands."
-  }
+  },
+  "installed_preview_source": "9fdbccca6e99e148c3ef3e08df514d73d5f458f1",
+  "installed_at": "2026-09-26T23:58:53.305292+00:00",
+  "next_preview_status": "50018 source identity allocated for the validated UI semantic fixes; 346 identity/input Python tests, six native input Rust tests, eight Swift release-observation tests, format/source/version/boundary checks and deterministic XcodeGen passed. No 50018 candidate build, signing, installation or exact-source CI completion yet; installed50017 remains unchanged."
 }

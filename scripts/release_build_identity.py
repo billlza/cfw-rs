@@ -83,7 +83,7 @@ class ReleaseIdentity:
 
 ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40073")
 PREVIEW_PRODUCT_VERSION: Final = "0.5.0"
-SIGNED_PREVIEW_BUILD: Final = "50017"
+SIGNED_PREVIEW_BUILD: Final = "50018"
 
 
 @dataclass(frozen=True)

@@ -84,7 +84,13 @@ fn selected_dns_transports_keep_authentication_and_stay_on_the_selected_route() 
                 .as_json(),
         )
         .expect("runtime");
-        let projected = &runtime["dns"]["servers"][2];
+        let servers = runtime["dns"]["servers"].as_array().expect("servers");
+        let selected_servers = servers
+            .iter()
+            .filter(|server| server["tag"] == "cfw-profile-dns-0")
+            .collect::<Vec<_>>();
+        assert_eq!(selected_servers.len(), 1);
+        let projected = selected_servers[0];
         assert_eq!(projected["type"], kind);
         assert_eq!(projected["server"], "1.1.1.1");
         assert_eq!(projected["detour"], "wg");
@@ -94,8 +100,8 @@ fn selected_dns_transports_keep_authentication_and_stay_on_the_selected_route() 
             json!({"policy":"default"})
         );
         assert_eq!(
-            runtime["dns"]["servers"].as_array().expect("servers").len(),
-            3
+            servers.len(),
+            if matches!(kind, "udp" | "tcp") { 3 } else { 2 }
         );
         if !matches!(kind, "udp" | "tcp") {
             assert_eq!(projected["tls"]["server_name"], "cloudflare-dns.com");

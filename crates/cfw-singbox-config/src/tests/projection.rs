@@ -10,6 +10,198 @@ use crate::{
 };
 
 const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+fn inherited_bootstrap_profile() -> serde_json::Value {
+    serde_json::json!({
+        "dns": {"servers": [
+            {"type":"https","server":"1.1.1.1","server_port":443,
+             "path":"/dns-query","tls":{"enabled":true,"server_name":"cloudflare-dns.com"}},
+            {"type":"https","server":"223.5.5.5","server_port":443,
+             "path":"/dns-query","tls":{"enabled":true,"server_name":"dns.alidns.com"}}
+        ]},
+        "outbounds":[{"type":"shadowsocks","tag":"proxy","server":"node.example.com",
+            "server_port":443,"method":"aes-256-gcm",
+            "credential_ref":{"id":SS_ID,"kind":"shadowsocks_password"}}]
+    })
+}
+
+#[test]
+fn inherited_bootstrap_uses_the_profiles_numeric_encrypted_resolvers_in_all_modes() {
+    let profile = ValidatedSingBoxProfile::parse(&inherited_bootstrap_profile().to_string())
+        .expect("encrypted DNS profile");
+    for mode in [
+        ProjectionMode::LocalProxy,
+        ProjectionMode::SystemProxy,
+        ProjectionMode::Tunnel,
+    ] {
+        let projected = profile
+            .project(PROFILE_ID, mode, &EngineSettings::default())
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(projected.as_json()).unwrap();
+        for (index, (address, name)) in [
+            ("1.1.1.1", "cloudflare-dns.com"),
+            ("223.5.5.5", "dns.alidns.com"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let resolver = &config["dns"]["servers"][index];
+            assert_eq!(resolver["tag"], format!("cfw-bootstrap-dns-{index}"));
+            assert_eq!(resolver["type"], "https");
+            assert_eq!(resolver["server"], address);
+            assert_eq!(resolver["tls"]["server_name"], name);
+            assert_eq!(resolver["tls"]["min_version"], MINIMUM_REMOTE_TLS_VERSION);
+            assert!(resolver.get("detour").is_none());
+            assert!(resolver.get("domain_resolver").is_none());
+        }
+        assert_eq!(
+            config["outbounds"][0]["domain_resolver"],
+            serde_json::json!({
+                "server":"cfw-bootstrap-dns-0", "fallback_server":"cfw-bootstrap-dns-1"
+            })
+        );
+    }
+}
+
+#[test]
+fn inherited_bootstrap_keeps_explicit_bootstrap_and_selected_route_contracts() {
+    let mut input = inherited_bootstrap_profile();
+    input["dns"]["bootstrap_servers"] = serde_json::json!(["9.9.9.9"]);
+    let explicit = ValidatedSingBoxProfile::parse(&input.to_string())
+        .unwrap()
+        .project(
+            PROFILE_ID,
+            ProjectionMode::LocalProxy,
+            &EngineSettings::default(),
+        )
+        .unwrap();
+    let config: serde_json::Value = serde_json::from_str(explicit.as_json()).unwrap();
+    assert_eq!(config["dns"]["servers"][0]["type"], "udp");
+    assert_eq!(config["dns"]["servers"][0]["server"], "9.9.9.9");
+
+    input["dns"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bootstrap_servers");
+    for server in input["dns"]["servers"].as_array_mut().unwrap() {
+        server["route"] = serde_json::json!("selected");
+    }
+    let selected = ValidatedSingBoxProfile::parse(&input.to_string())
+        .unwrap()
+        .project(
+            PROFILE_ID,
+            ProjectionMode::LocalProxy,
+            &EngineSettings::default(),
+        )
+        .unwrap();
+    let config: serde_json::Value = serde_json::from_str(selected.as_json()).unwrap();
+    assert_eq!(config["dns"]["servers"][0]["type"], "udp");
+    assert_eq!(config["dns"]["servers"][0]["server"], "223.6.6.6");
+    assert_eq!(config["dns"]["servers"][1]["server"], "119.29.29.29");
+}
+
+#[test]
+fn inherited_bootstrap_deduplicates_equivalent_direct_transports() {
+    let mut input = inherited_bootstrap_profile();
+    let first = input["dns"]["servers"][0].clone();
+    let mut direct = first.clone();
+    direct["route"] = serde_json::json!("direct");
+    input["dns"]["servers"] = serde_json::json!([first, direct]);
+    let projected = ValidatedSingBoxProfile::parse(&input.to_string())
+        .unwrap()
+        .project(
+            PROFILE_ID,
+            ProjectionMode::LocalProxy,
+            &EngineSettings::default(),
+        )
+        .unwrap();
+    let config: serde_json::Value = serde_json::from_str(projected.as_json()).unwrap();
+    let bootstrap = config["dns"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["tag"].as_str().unwrap().starts_with("cfw-bootstrap-dns-"))
+        .collect::<Vec<_>>();
+    assert_eq!(bootstrap.len(), 1);
+    assert_eq!(bootstrap[0]["type"], "https");
+}
+
+#[test]
+fn inherited_bootstrap_preserves_encrypted_transport_and_tls_minimum() {
+    for kind in ["tls", "quic", "https", "h3"] {
+        let mut input = inherited_bootstrap_profile();
+        let mut resolver = serde_json::json!({
+            "type":kind, "server":"1.1.1.1", "server_port":443,
+            "tls":{"enabled":true,"server_name":"resolver.example.com","min_version":"1.3"}
+        });
+        if matches!(kind, "https" | "h3") {
+            resolver["path"] = serde_json::json!("/custom-query");
+        }
+        input["dns"]["servers"] = serde_json::json!([resolver]);
+        let projected = ValidatedSingBoxProfile::parse(&input.to_string())
+            .unwrap()
+            .project(
+                PROFILE_ID,
+                ProjectionMode::LocalProxy,
+                &EngineSettings::default(),
+            )
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(projected.as_json()).unwrap();
+        let bootstrap = &config["dns"]["servers"][0];
+        assert_eq!(bootstrap["type"], kind);
+        assert_eq!(bootstrap["tls"]["server_name"], "resolver.example.com");
+        assert_eq!(bootstrap["tls"]["min_version"], "1.3");
+        assert!(bootstrap.get("detour").is_none());
+        assert!(config["dns"]["servers"][1].get("detour").is_some());
+        if matches!(kind, "https" | "h3") {
+            assert_eq!(bootstrap["path"], "/custom-query");
+        }
+    }
+}
+
+#[test]
+fn inherited_bootstrap_does_not_reinterpret_plaintext_resolvers() {
+    let mut input = inherited_bootstrap_profile();
+    input["dns"]["servers"] = serde_json::json!([
+        {"type":"udp","server":"8.8.8.8","server_port":53}
+    ]);
+    let projected = ValidatedSingBoxProfile::parse(&input.to_string())
+        .unwrap()
+        .project(
+            PROFILE_ID,
+            ProjectionMode::LocalProxy,
+            &EngineSettings::default(),
+        )
+        .unwrap();
+    let config: serde_json::Value = serde_json::from_str(projected.as_json()).unwrap();
+    assert_eq!(config["dns"]["servers"][0]["type"], "udp");
+    assert_eq!(config["dns"]["servers"][0]["server"], "223.6.6.6");
+    assert_eq!(config["dns"]["servers"][1]["server"], "119.29.29.29");
+}
+
+#[test]
+fn inherited_bootstrap_preserves_disabled_ipv6_resolver_refusal() {
+    let mut input = inherited_bootstrap_profile();
+    input["dns"]["servers"] = serde_json::json!([
+        {"type":"https","server":"2001:4860:4860::8888","server_port":443,
+         "path":"/dns-query","tls":{"enabled":true,"server_name":"dns.google"}}
+    ]);
+    let settings = EngineSettings {
+        enable_ipv6: false,
+        ..EngineSettings::default()
+    };
+    let error = ValidatedSingBoxProfile::parse(&input.to_string())
+        .unwrap()
+        .project(PROFILE_ID, ProjectionMode::LocalProxy, &settings)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ConfigError::UnsupportedPolicyShape {
+            path: "$.dns".into(),
+            reason: "IPv6 resolver requires IPv6 to be enabled".into()
+        }
+    );
+}
 const SS_ID_2: &str = "77777777-7777-4777-8777-777777777777";
 const VMESS_ID: &str = "22222222-2222-4222-8222-222222222222";
 const VLESS_ID: &str = "33333333-3333-4333-8333-333333333333";

@@ -1,6 +1,6 @@
 //! Bootstrap transports terminate at numeric addresses and never depend on a
 //! proxy, another resolver name, or a silent plaintext fallback.
-use super::{DnsResolverRoute, ProfileDnsServer, invalid};
+use super::{DnsResolverRoute, ProfileDns, ProfileDnsServer, invalid};
 use crate::ConfigError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,6 +11,44 @@ use std::net::IpAddr;
 pub(crate) enum BootstrapDnsServer {
     Address(IpAddr),
     Transport(Box<ProfileDnsServer>),
+}
+
+impl ProfileDns {
+    /// Reuse explicitly configured encrypted resolver transports when the
+    /// profile leaves its bootstrap pool unspecified. Only numeric endpoints
+    /// can start independently; an explicit proxy/rules detour is never removed.
+    pub(crate) fn inherited_bootstrap_servers(&self, ipv6: bool) -> Vec<BootstrapDnsServer> {
+        let mut servers = Vec::new();
+        for configured in &self.servers {
+            let Some(address) = configured.address() else {
+                continue;
+            };
+            if crate::profile_validation::remote_endpoint_ip_is_unusable(address)
+                || (!ipv6 && address.is_ipv6())
+                || matches!(
+                    configured.route(),
+                    Some(DnsResolverRoute::Selected | DnsResolverRoute::Rules)
+                )
+            {
+                continue;
+            }
+            let mut transport = configured.clone();
+            match &mut transport {
+                ProfileDnsServer::Tls { route, .. }
+                | ProfileDnsServer::Quic { route, .. }
+                | ProfileDnsServer::Https { route, .. }
+                | ProfileDnsServer::Http3 { route, .. } => *route = None,
+                ProfileDnsServer::Udp { .. } | ProfileDnsServer::Tcp { .. } => continue,
+            }
+            let candidate = BootstrapDnsServer::Transport(Box::new(transport));
+            // An omitted route and explicit DIRECT are the same bootstrap
+            // transport. Preserve the configured order without duplicate tries.
+            if !servers.contains(&candidate) {
+                servers.push(candidate);
+            }
+        }
+        servers
+    }
 }
 
 impl BootstrapDnsServer {

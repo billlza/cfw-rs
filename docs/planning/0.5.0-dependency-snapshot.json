@@ -537,12 +537,12 @@
   ],
   "rust_stable": "1.98.1",
   "sing_box_stable": "1.14.2",
-  "application_build": "50019",
-  "installed_preview_build": "50017",
-  "installed_sing_box": "1.14.2 packaged in verified 50017; active data-plane acceptance remains pending",
+  "application_build": "50020",
+  "installed_preview_build": "50019",
+  "installed_sing_box": "1.14.2; installed50019 local HTTP and SOCKS5 passed with explicit authenticated bootstrap; default UDP bootstrap failed on current underlay",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "September26 broad direct-dependency observations remain unchanged. A separate September27 official stable metadata check confirms Rust1.98.1, sing-box1.14.2, Tauri/API/CLI2.12.0 and tauri-build2.7.0 match pins. Installed50017 remains signed/notarized/stapled and closed; held50018 is unchanged. Panel repair8c95 and DNS ownership repairfa5a are implemented. Exactfa5a native CI, DNS race lane, Xcode/unsigned App and supply-chain jobs passed; quality failed on one old combined-source digest literal in a sealed-closure test. Updating that literal preserves the assertion and passes all17 relevant tests after locally reproducing the old failure; next-source full CI pending. Diagnostic journal overwrite is repaired with old/new byte-preservation evidence; no-popup minimize control leaves the common input cause unresolved. Physical/product-host/lifecycle/VPN/whole-product performance/soak remain open; full-host versus component scope clarification is pending.",
+  "implementation_status": "Broad dependency observation dates remain unchanged; selected official stable selectors were checked September27. Installed50019 App/DMG signed/notarized/stapled, exactd592 three-job CI passed. Same-node runtime DNS discriminator found inherited UDP bootstrap failure and successful explicit encrypted bootstrap; original configuration restored with only normal save timestamp advanced. Next-source projection reuses eligible configured numeric encrypted DNS when no explicit bootstrap exists; 97 configuration tests, strict Clippy and 185 consumer tests pass. Full UI/physical input/TUN/comparative performance/soak and full-host scope remain open.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",
@@ -567,9 +567,9 @@
     "verification_scope": "8 temporary-key positive and 8 tampered payload tests with frozen-source verifiers; 40073 binary hash reproduced; no App upgrade acceptance",
     "additional_tool_audit": "RustSec reported rsa and 5 maintenance advisories also present at identical versions in the previous CLI macOS graph. No ignores added; tool audit is not green. Source review places RSA private decryption in remote Apple signing negotiation, outside the admitted unsigned Host and minisign updater commands. Application audit is separate; no blanket exemption for other CLI commands."
   },
-  "installed_preview_source": "9fdbccca6e99e148c3ef3e08df514d73d5f458f1",
-  "installed_at": "2026-09-26T23:58:53.305292+00:00",
-  "next_preview_status": "50019 identity is distinct from held50018; old50018/50017 and future50020 remain refused. Identity tests346Python+6Rust+8Swift and source bindings passed; counts overlap other policy validation. DNS patch and canonical combined-source pins are updated; full native fa5a CI passes, stale sealed-closure expected digest repaired locally, next exact-source CI still needed. Fresh repaired libbox and complete50019App/sign/notary/install remain required; installed50017 unchanged. Disk headroom must be checked before each build.",
+  "installed_preview_source": "d592d5762b0b15a0e992184d4abd49ef51df4c1c",
+  "installed_at": "2026-09-27T08:34:42.467996+00:00",
+  "next_preview_status": "50020 source identity is distinct from immutable50019; old50019 and future50021 refusals passed. Two pinned XcodeGen outputs match. Identity regression validation passed346Python+6Rust+8Swift; strict Swift/Rust formatting, source/version and build-boundary checks passed. No canonical50020 App/pre-sign/sign/notary/install allocated yet. Exact-source CI and installed automatic-bootstrap validation remain required.",
   "selected_stable_recheck": {
     "checked_at": "2026-09-27T07:44:22.873661+00:00",
     "scope": "Listed top-level selectors only; broader packages array checked_at is unchanged. Raw responses are in target/050-completion/dependency-freshness-20260927.",
@@ -582,5 +582,14 @@
       "@tauri-apps/api": "2.12.0"
     },
     "all_match_pins": true
+  },
+  "previous_implementation_checkpoint_before_50020": {
+    "application_build": "50019",
+    "installed_preview_build": "50017",
+    "installed_sing_box": "1.14.2 packaged in verified 50017; active data-plane acceptance remains pending",
+    "implementation_status": "September26 broad direct-dependency observations remain unchanged. A separate September27 official stable metadata check confirms Rust1.98.1, sing-box1.14.2, Tauri/API/CLI2.12.0 and tauri-build2.7.0 match pins. Installed50017 remains signed/notarized/stapled and closed; held50018 is unchanged. Panel repair8c95 and DNS ownership repairfa5a are implemented. Exactfa5a native CI, DNS race lane, Xcode/unsigned App and supply-chain jobs passed; quality failed on one old combined-source digest literal in a sealed-closure test. Updating that literal preserves the assertion and passes all17 relevant tests after locally reproducing the old failure; next-source full CI pending. Diagnostic journal overwrite is repaired with old/new byte-preservation evidence; no-popup minimize control leaves the common input cause unresolved. Physical/product-host/lifecycle/VPN/whole-product performance/soak remain open; full-host versus component scope clarification is pending.",
+    "installed_preview_source": "9fdbccca6e99e148c3ef3e08df514d73d5f458f1",
+    "installed_at": "2026-09-26T23:58:53.305292+00:00",
+    "next_preview_status": "50019 identity is distinct from held50018; old50018/50017 and future50020 remain refused. Identity tests346Python+6Rust+8Swift and source bindings passed; counts overlap other policy validation. DNS patch and canonical combined-source pins are updated; full native fa5a CI passes, stale sealed-closure expected digest repaired locally, next exact-source CI still needed. Fresh repaired libbox and complete50019App/sign/notary/install remain required; installed50017 unchanged. Disk headroom must be checked before each build."
   }
 }

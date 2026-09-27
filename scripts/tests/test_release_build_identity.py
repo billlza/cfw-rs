@@ -1068,7 +1068,7 @@ class SignedPreviewIdentityTests(unittest.TestCase):
         context: CandidateBundleContext,
         *,
         attempt_id: str = "00000001",
-        builds: tuple[str, str, str, str] = ("50019",) * 4,
+        builds: tuple[str, str, str, str] = ("50020",) * 4,
         version: str = "0.5.0",
     ) -> tuple[Path, Path, Path]:
         ids = release_build_identity
@@ -1100,13 +1100,13 @@ class SignedPreviewIdentityTests(unittest.TestCase):
         self.assertEqual(ids.PRODUCT_VERSION, "0.4.0")
         self.assertEqual(ids.ACTIVE_RELEASE_IDENTITY, ReleaseIdentity("0.4.0", "40073"))
         self.assertEqual(ids.SIGNED_PREVIEW_IDENTITY.product_version, "0.5.0")
-        self.assertEqual(ids.SIGNED_PREVIEW_IDENTITY.build_number, "50019")
-        for version, build in (("0.4.0", "50019"), ("0.5.0", "40073"), ("0.5.0", "50001"), ("0.5.0", "50002"), ("0.5.0", "50003"), ("0.5.0", "50004"), ("0.5.0", "50005"), ("0.5.0", "50006"), ("0.5.0", "50007"), ("0.5.0", "50008"), ("0.5.0", "50009"), ("0.5.0", "50012"), ("0.5.0", "50013"), ("0.5.0", "50014"), ("0.5.0", "50015"), ("0.5.0", "50017"), ("0.5.0", "50018"), ("0.5.0", "50020"), ("0.5.0", "050019")):
+        self.assertEqual(ids.SIGNED_PREVIEW_IDENTITY.build_number, "50020")
+        for version, build in (("0.4.0", "50020"), ("0.5.0", "40073"), ("0.5.0", "50001"), ("0.5.0", "50002"), ("0.5.0", "50003"), ("0.5.0", "50004"), ("0.5.0", "50005"), ("0.5.0", "50006"), ("0.5.0", "50007"), ("0.5.0", "50008"), ("0.5.0", "50009"), ("0.5.0", "50012"), ("0.5.0", "50013"), ("0.5.0", "50014"), ("0.5.0", "50015"), ("0.5.0", "50017"), ("0.5.0", "50018"), ("0.5.0", "50019"), ("0.5.0", "50021"), ("0.5.0", "050020")):
             with self.subTest(version=version, build=build), self.assertRaises(BuildIdentityError):
                 ids.SignedPreviewIdentity(version, build)
         repository = Path("/repository")
-        preflight = repository / "target/candidates/0.5.0/preview-preflight/50019"
-        root = repository / "target/candidates/0.5.0/preview/50019"
+        preflight = repository / "target/candidates/0.5.0/preview-preflight/50020"
+        root = repository / "target/candidates/0.5.0/preview/50020"
         self.assertEqual(ids.preview_preflight_root(repository), preflight)
         self.assertEqual(ids.preview_root(repository), root)
         self.assertEqual(ids.preview_native_products_root(repository), preflight / "native-products")
@@ -1117,10 +1117,10 @@ class SignedPreviewIdentityTests(unittest.TestCase):
 
     def test_preview_bundle_requires_explicit_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            app = self.make_app(Path(directory), ("50019",) * 4, version="0.5.0")
+            app = self.make_app(Path(directory), ("50020",) * 4, version="0.5.0")
             self.assertEqual(
                 bundle_build_identity(app, expected_product_version="0.5.0"),
-                BundleBuildIdentity("0.5.0", "50019"),
+                BundleBuildIdentity("0.5.0", "50020"),
             )
             with self.assertRaises(BuildIdentityError):
                 bundle_build_identity(app)
@@ -1133,7 +1133,7 @@ class SignedPreviewIdentityTests(unittest.TestCase):
                 repository = Path(directory).resolve()
                 app, native, output = self.make_pair(repository, context)
                 value = candidate_bundle_verification_paths(repository, app, native, context)
-                self.assertEqual(value.build_identity, BundleBuildIdentity("0.5.0", "50019"))
+                self.assertEqual(value.build_identity, BundleBuildIdentity("0.5.0", "50020"))
                 self.assertEqual(value.context, context)
                 if context is not CandidateBundleContext.PREVIEW_PRE_SIGN:
                     self.assertEqual(release_build_identity.preview_signing_output(repository, output).context, context)
@@ -1155,7 +1155,7 @@ class SignedPreviewIdentityTests(unittest.TestCase):
                             candidate_bundle_verification_paths(repository, app, native, context)
 
     def test_preview_rejects_uniform_wrong_or_noncanonical_builds(self) -> None:
-        for build in ("40073", "40000", "50001", "50002", "50003", "50004", "50005", "50006", "50007", "50008", "50009", "50012", "50013", "50014", "50015", "50017", "50018", "50020", "050019", "50019\n", "0", "+50019", "9223372036854775808"):
+        for build in ("40073", "40000", "50001", "50002", "50003", "50004", "50005", "50006", "50007", "50008", "50009", "50012", "50013", "50014", "50015", "50017", "50018", "50019", "50021", "050020", "50020\n", "0", "+50020", "9223372036854775808"):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as directory:
                 repository = Path(directory).resolve()
                 context = CandidateBundleContext.PREVIEW_PRE_SIGN
@@ -1164,7 +1164,7 @@ class SignedPreviewIdentityTests(unittest.TestCase):
                     candidate_bundle_verification_paths(repository, app, native, context)
 
     def test_old_and_future_preview_are_rejected_at_every_signing_stage(self) -> None:
-        for build in ("50013", "50014", "50015", "50016", "50017", "50018", "50020"):
+        for build in ("50013", "50014", "50015", "50016", "50017", "50018", "50019", "50021"):
             for context in self.contexts:
                 with self.subTest(build=build, context=context), tempfile.TemporaryDirectory() as directory:
                     repository = Path(directory).resolve()
@@ -1177,31 +1177,31 @@ class SignedPreviewIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
             native = ids.preview_native_products_root(repository)
-            self.assertEqual(candidate_native_products_output(repository, str(native), "50019"), native)
+            self.assertEqual(candidate_native_products_output(repository, str(native), "50020"), native)
             derived = native.parent / "xcode-derived-data"
-            self.assertEqual(candidate_native_derived_data_output(repository, str(native), str(derived), "50019"), derived)
+            self.assertEqual(candidate_native_derived_data_output(repository, str(native), str(derived), "50020"), derived)
             self.assertFalse((repository / "target").exists())
             for build, output in (
-                ("40073", native), ("40000", native), ("050019", native), ("50008", native), ("50009", native), ("50012", native), ("50013", native), ("50014", native), ("50015", native), ("50017", native), ("50018", native), ("50020", native),
-                ("50019", ga_pre_sign_native_products_root(repository)),
-                ("50019", repository / "target/candidates/0.5.0/unsigned/native-products"),
-                ("50019", repository / "target/candidates/0.5.0/ga-preflight/50019/native-products"),
-                ("50019", native.parent / "nested/native-products"),
+                ("40073", native), ("40000", native), ("050020", native), ("50008", native), ("50009", native), ("50012", native), ("50013", native), ("50014", native), ("50015", native), ("50017", native), ("50018", native), ("50019", native), ("50021", native),
+                ("50020", ga_pre_sign_native_products_root(repository)),
+                ("50020", repository / "target/candidates/0.5.0/unsigned/native-products"),
+                ("50020", repository / "target/candidates/0.5.0/ga-preflight/50020/native-products"),
+                ("50020", native.parent / "nested/native-products"),
             ):
                 with self.subTest(build=build, output=output), self.assertRaises(BuildIdentityError):
                     candidate_native_products_output(repository, str(output), build)
             with self.assertRaises(BuildIdentityError):
-                candidate_native_derived_data_output(repository, str(native), str(ga_preflight_root(repository) / "xcode-derived-data"), "50019")
+                candidate_native_derived_data_output(repository, str(native), str(ga_preflight_root(repository) / "xcode-derived-data"), "50020")
 
     def test_preview_pre_sign_only_accepts_two_exact_host_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
             context = CandidateBundleContext.PREVIEW_PRE_SIGN
             _, native, preflight = self.make_pair(repository, context)
-            built = self.make_app(preflight / "cargo/release/bundle/macos", ("50019",) * 4, version="0.5.0")
+            built = self.make_app(preflight / "cargo/release/bundle/macos", ("50020",) * 4, version="0.5.0")
             candidate_bundle_verification_paths(repository, built, native, context)
             for root in (preflight / "other", release_build_identity.preview_signed_root(repository), repository / "outside"):
-                app = self.make_app(root, ("50019",) * 4, version="0.5.0")
+                app = self.make_app(root, ("50020",) * 4, version="0.5.0")
                 with self.subTest(root=root), self.assertRaises(BuildIdentityError):
                     candidate_bundle_verification_paths(repository, app, native, context)
 
@@ -1213,7 +1213,7 @@ class SignedPreviewIdentityTests(unittest.TestCase):
                 for old in (CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.SIGNING_ATTEMPT_WORK, CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY, CandidateBundleContext.CANONICAL_NATIVE_CONTENT):
                     with self.subTest(old=old), self.assertRaises(BuildIdentityError):
                         candidate_bundle_verification_paths(repository, app, native, old)
-                ga_app = self.make_app(ga_signed_root(repository), ("50019",) * 4, version="0.5.0")
+                ga_app = self.make_app(ga_signed_root(repository), ("50020",) * 4, version="0.5.0")
                 with self.assertRaisesRegex(BuildIdentityError, "GA paths"):
                     candidate_bundle_verification_paths(repository, ga_app, native, context)
 
@@ -1298,19 +1298,19 @@ class SignedPreviewIdentityTests(unittest.TestCase):
             with self.assertRaises(BuildIdentityError):
                 candidate_bundle_verification_paths(repository, app, native, context)
             with self.assertRaises(BuildIdentityError):
-                candidate_native_products_output(repository, str(native), "50019")
+                candidate_native_products_output(repository, str(native), "50020")
 
     def test_preview_canonical_allows_verified_copies_not_preflight_or_ga_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
             context = CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT
             _, native, _ = self.make_pair(repository, context)
-            copy = self.make_app(repository / "target/notarization/preview-copy", ("50019",) * 4, version="0.5.0")
+            copy = self.make_app(repository / "target/notarization/preview-copy", ("50020",) * 4, version="0.5.0")
             candidate_bundle_verification_paths(repository, copy, native, context)
             pre_sign, _, _ = self.make_pair(repository, CandidateBundleContext.PREVIEW_PRE_SIGN)
             with self.assertRaises(BuildIdentityError):
                 candidate_bundle_verification_paths(repository, pre_sign, native, context)
-            false_ga = self.make_app(repository / "target/candidates/0.5.0/ga/50019/signed", ("50019",) * 4, version="0.5.0")
+            false_ga = self.make_app(repository / "target/candidates/0.5.0/ga/50020/signed", ("50020",) * 4, version="0.5.0")
             with self.assertRaisesRegex(BuildIdentityError, "another candidate namespace"):
                 candidate_bundle_verification_paths(repository, false_ga, native, context)
             ga_output = release_build_identity.ga_signing_output_root(repository)

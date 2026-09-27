@@ -39,10 +39,11 @@ pub struct EngineSettings {
     pub log_level: EngineLogLevel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lan_proxy: Option<LanProxySettings>,
-    /// Numeric resolvers dialled directly by libbox only while resolving a
-    /// domain-named proxy endpoint. Defaults retain two independent endpoints;
-    /// profile DNS can explicitly replace this with one to eight numeric servers.
-    /// Engine startup never depends on the host resolver.
+    /// Application fallback for resolving domain-named proxy endpoints.
+    /// Explicit profile bootstrap takes precedence, followed by independently
+    /// reachable numeric encrypted transports from the profile's DNS pool.
+    /// Otherwise these two numeric endpoints are dialled directly by libbox;
+    /// engine startup never depends on the host resolver.
     pub bootstrap_dns_servers: [IpAddr; 2],
     /// HTTPS resolvers used for all ordinary engine DNS in both modes,
     /// including every hijacked Tunnel query. Their connections are detoured

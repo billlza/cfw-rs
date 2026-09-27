@@ -542,7 +542,7 @@
   "installed_sing_box": "1.14.2 packaged in verified 50017; active data-plane acceptance remains pending",
   "rust_source": "https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/",
   "sing_box_source": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.2",
-  "implementation_status": "September26 dependency observations are unchanged; this is not a fresh registry check. Rust1.98.1, sing-box1.14.2, Tauri/API2.12.0, tauri-build2.7.0 and CLI2.12.0 remain integrated. Installed50017 is signed/notarized/stapled; one first normal upgrade reached Off. Frozen50018/source7d79 completed pre-sign construction and all three CI jobs after one retained download-failure retry, but is held from signing/install because native-panel interaction failed. Repair8c95 fixes RuntimeSettings and ProfileMenu activation, with separate old-fail/new-pass component-host comparisons and 57 native component tests; its native CI job exposed a real DNS Msg ownership race while quality was still running. The probe now takes a string argument evaluated before goroutine launch; same-gate isolated old-fail/new-pass ownership evidence is retained, but full repaired DNS CI is pending. The 198 validated UI semantic tests belong to earlier source and are not installed in50017. Physical/product-host/lifecycle/VPN/whole-product performance/soak remain open; full SwiftUI-host versus in-place component scope clarification is pending.",
+  "implementation_status": "September26 broad direct-dependency observations remain unchanged. A separate September27 official stable metadata check confirms Rust1.98.1, sing-box1.14.2, Tauri/API/CLI2.12.0 and tauri-build2.7.0 match pins. Installed50017 remains signed/notarized/stapled and closed; held50018 is unchanged. Panel repair8c95 and DNS ownership repairfa5a are implemented. Exactfa5a native CI, DNS race lane, Xcode/unsigned App and supply-chain jobs passed; quality failed on one old combined-source digest literal in a sealed-closure test. Updating that literal preserves the assertion and passes all17 relevant tests after locally reproducing the old failure; next-source full CI pending. Diagnostic journal overwrite is repaired with old/new byte-preservation evidence; no-popup minimize control leaves the common input cause unresolved. Physical/product-host/lifecycle/VPN/whole-product performance/soak remain open; full-host versus component scope clarification is pending.",
   "compatible_update_exceptions": [
     {
       "package": "generic-array 0.14.7",
@@ -569,5 +569,18 @@
   },
   "installed_preview_source": "9fdbccca6e99e148c3ef3e08df514d73d5f458f1",
   "installed_at": "2026-09-26T23:58:53.305292+00:00",
-  "next_preview_status": "50019 source identity prepared separately from held50018; old50018/50017 and future50020 remain refused. 346 targeted Python and6 native-input Rust tests, shell syntax, Rust formatting, source/version/boundary checks and two identical pinned XcodeGen outputs pass. Strict Swift formatting and all8 native release-observation tests pass. DNS ownership repair and patch/combined-source pins are updated; canonical materialization matches all1,614 source files in an independent repaired copy, only multiplexer.go differs from old source, and202 targeted source-contract tests pass; every earlier engine/App remains unchanged and the repaired engine still needs a fresh build and full DNS CI. No50019App/sign/notary/install or exact-source CI completion; installed50017 unchanged and packaging headroom pending."
+  "next_preview_status": "50019 identity is distinct from held50018; old50018/50017 and future50020 remain refused. Identity tests346Python+6Rust+8Swift and source bindings passed; counts overlap other policy validation. DNS patch and canonical combined-source pins are updated; full native fa5a CI passes, stale sealed-closure expected digest repaired locally, next exact-source CI still needed. Fresh repaired libbox and complete50019App/sign/notary/install remain required; installed50017 unchanged. Disk headroom must be checked before each build.",
+  "selected_stable_recheck": {
+    "checked_at": "2026-09-27T07:44:22.873661+00:00",
+    "scope": "Listed top-level selectors only; broader packages array checked_at is unchanged. Raw responses are in target/050-completion/dependency-freshness-20260927.",
+    "versions": {
+      "rust": "1.98.1",
+      "sing-box": "1.14.2",
+      "tauri": "2.12.0",
+      "tauri-build": "2.7.0",
+      "tauri-cli": "2.12.0",
+      "@tauri-apps/api": "2.12.0"
+    },
+    "all_match_pins": true
+  }
 }

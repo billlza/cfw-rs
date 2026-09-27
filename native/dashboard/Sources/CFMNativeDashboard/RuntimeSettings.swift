@@ -488,7 +488,7 @@ final class RuntimeSettingsWindow: NSObject, NSWindowDelegate {
     priorResponder = parent.firstResponder
     model = RuntimeSettingsModel(frame, event: event, closed: closed, context: context)
     panel = RuntimeSettingsPanel(
-      contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+      contentRect: .zero, styleMask: [.borderless],
       backing: .buffered, defer: false)
     super.init()
     panel.isReleasedWhenClosed = false

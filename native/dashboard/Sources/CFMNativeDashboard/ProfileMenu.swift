@@ -313,7 +313,7 @@ final class ProfileMenuWindow: NSObject, NSWindowDelegate {
     priorResponder = parent.firstResponder
     model = ProfileMenuModel(frame, callback: callback, context: context)
     panel = ProfileMenuPanel(
-      contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+      contentRect: .zero, styleMask: [.borderless], backing: .buffered,
       defer: false)
     super.init()
     panel.isReleasedWhenClosed = false

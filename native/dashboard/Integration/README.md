@@ -55,6 +55,22 @@ rendering is not evidence that AppKit controls render or behave correctly. Even 
 successful harness run does not establish the production Tauri/Rust lifecycle,
 network functionality, performance improvement, release eligibility, or 0.5 completion.
 
+Panel dismissal regressions require a working sidebar-click baseline. Open Network
+settings, Cancel (and separately Escape), then click Providers once. Also open a
+profile context menu, dismiss with Escape, and repeat the same sidebar click. The
+parent must receive the click and navigate without a page shortcut, forced
+activation, reload, or a second dismissal action. A completed close Channel alone
+does not prove that AppKit returned activation and keyboard focus to the parent.
+Keep the ordinary app-owned panel activation policy for both components; the
+nonactivating policy can leave the parent inactive after dismissal.
+
+With an unsaved form, also switch to another application and back, and hide or
+minimize the parent and restore it. Verify draft retention, no save intent, and
+normal dismissal/navigation. Observe actual activation/window notifications;
+calling an API on another application or posting a notification is not evidence
+of a real application switch. Closing the parent with its panel open must leave
+no orphan panel and deliver the closed callback exactly once.
+
 Diagnostic fixture support preserves the original frontend handlers. `open_page`
 accepts only the nine source-defined page IDs and records in-memory navigation;
 `report_dashboard_startup` accepts only the closed startup-code set. Runtime config

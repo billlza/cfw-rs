@@ -731,5 +731,8 @@
   "Check and restore background services while keeping the engine stopped.": "エンジンを停止したままバックグラウンドサービスを確認して復旧します。",
   "Recover background services": "バックグラウンドサービスを復旧",
   "Recover background services before starting a connection.": "接続を開始する前にバックグラウンドサービスを復旧してください。",
-  "Recovering…": "復旧中…"
+  "Recovering…": "復旧中…",
+  "Live rules from the running engine.": "実行中のコアから取得したルールです。",
+  "No rules loaded from the controller.": "コントローラーからルールが読み込まれていません。",
+  "No rules match this filter.": "この条件に一致するルールはありません。"
 }

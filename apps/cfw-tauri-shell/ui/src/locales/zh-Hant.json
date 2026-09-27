@@ -731,5 +731,8 @@
   "Check and restore background services while keeping the engine stopped.": "檢查並恢復背景服務，保持核心停止。",
   "Recover background services": "恢復背景服務",
   "Recover background services before starting a connection.": "請先恢復背景服務，再啟動連線。",
-  "Recovering…": "正在恢復…"
+  "Recovering…": "正在恢復…",
+  "Live rules from the running engine.": "目前執行中的核心所提供的即時規則。",
+  "No rules loaded from the controller.": "未從控制介面載入任何規則。",
+  "No rules match this filter.": "此篩選條件下沒有相符的規則。"
 }

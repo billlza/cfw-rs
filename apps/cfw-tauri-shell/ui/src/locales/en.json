@@ -731,5 +731,8 @@
   "Check and restore background services while keeping the engine stopped.": "Check and restore background services while keeping the engine stopped.",
   "Recover background services": "Recover background services",
   "Recover background services before starting a connection.": "Recover background services before starting a connection.",
-  "Recovering…": "Recovering…"
+  "Recovering…": "Recovering…",
+  "Live rules from the running engine.": "Live rules from the running engine.",
+  "No rules loaded from the controller.": "No rules loaded from the controller.",
+  "No rules match this filter.": "No rules match this filter."
 }

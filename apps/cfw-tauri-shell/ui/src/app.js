@@ -570,7 +570,7 @@ function renderNav() {
     .map((page, index) => {
       const active = page.id === state.activePage ? " active" : "";
       return `
-        <button class="nav-item${active}" data-page="${escapeHtml(page.id)}">
+        <button class="nav-item${active}" data-page="${escapeHtml(page.id)}"${active ? ' aria-current="page"' : ""}>
           <span>${index + 1}</span>
           <b>${escapeHtml(t(page.title))}</b>
         </button>
@@ -2283,7 +2283,7 @@ function renderLogs() {
         </div>
         <div class="segmented" data-log-filters>
           ${["all", "info", "debug", "warning", "error"].map((level) => `
-            <button type="button" class="${state.logFilter === level ? "selected" : ""}" data-log-filter="${level}">${level.toUpperCase()}</button>
+            <button type="button" class="${state.logFilter === level ? "selected" : ""}" data-log-filter="${level}" aria-pressed="${state.logFilter === level}">${level.toUpperCase()}</button>
           `).join("")}
         </div>
         <div class="toolbar-actions">
@@ -2845,7 +2845,9 @@ function bindGlobalEvents() {
       if (state.logFilter === next) return;
       state.logFilter = next;
       document.querySelectorAll("[data-log-filter]").forEach((button) => {
-        button.classList.toggle("selected", button.dataset.logFilter === state.logFilter);
+        const selected = button.dataset.logFilter === state.logFilter;
+        button.classList.toggle("selected", selected);
+        button.setAttribute("aria-pressed", String(selected));
       });
       patchLogStream();
       return;

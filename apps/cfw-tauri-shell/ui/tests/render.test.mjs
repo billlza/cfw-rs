@@ -58,6 +58,7 @@ function element(tag = "div", id = "") {
 }
 
 const page = element("section", "page");
+const nav = element("nav", "nav");
 page.querySelector = (selector) => (
   selector === ".cfw-migration-banner" && page.innerHTML.includes("cfw-migration-banner")
     ? element("div")
@@ -77,6 +78,7 @@ const documentStub = {
   hidden: false,
   getElementById: (id) => {
     if (id === "page") return page;
+    if (id === "nav") return nav;
     if (id === "glass-menu-root") return glassRoot;
     if (id === "reload-button") return reloadButton;
     if (statusBarNodes.has(id)) return statusBarNodes.get(id);
@@ -885,6 +887,81 @@ const dispatchDocumentEvent = async (type, event = {}) => {
   }
   await new Promise((resolve) => setTimeout(resolve, 20));
 };
+
+test("log filter accessibility state follows delegated clicks without replacing the page or issuing IPC", async () => {
+  const oldElement = globalThis.Element;
+  const saved = { activePage: state.activePage, logFilter: state.logFilter, logSearch: state.logSearch, logs: state.logs, logsPaused: state.logsPaused };
+  const selector = "[data-log-filter]";
+  const oldButtons = querySelectorAllElements.get(selector);
+  const oldStream = querySelectorElements.get(".log-stream");
+  const oldHeading = querySelectorElements.get(".logs-layout .toolbar-panel h3");
+  const stream = element("section");
+  const heading = element("h3");
+  class FilterElement {}
+  const levels = ["all", "info", "debug", "warning", "error"];
+  const buttons = levels.map((level) => {
+    const attributes = new Map();
+    const classes = new Set();
+    return Object.assign(new FilterElement(), element("button"), {
+      dataset: { logFilter: level },
+      closest: (query) => query === selector ? buttons.find((button) => button.dataset.logFilter === level) : null,
+      getAttribute: (name) => attributes.get(name) ?? null,
+      setAttribute: (name, value) => attributes.set(name, String(value)),
+      classList: {
+        toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
+        contains: (name) => classes.has(name),
+      },
+    });
+  });
+  function renderedFilters(html) {
+    return [...html.matchAll(/<button\b[^>]*data-log-filter="([^"]+)"[^>]*>/gu)]
+      .map(([tag, level]) => ({ level, pressed: tag.match(/aria-pressed="(true|false)"/u)?.[1] }));
+  }
+  try {
+    globalThis.Element = FilterElement;
+    Object.assign(state, { logFilter: "all", logSearch: "", logsPaused: false, logs: [
+      { time: "10:00", level: "info", source: "test", message: "info evidence" },
+      { time: "10:01", level: "error", source: "test", message: "error evidence" },
+    ] });
+    querySelectorAllElements.set(selector, buttons);
+    querySelectorElements.set(".log-stream", stream);
+    querySelectorElements.set(".logs-layout .toolbar-panel h3", heading);
+    const html = await renderPage("logs");
+    assert.deepEqual(renderedFilters(html), levels.map((level) => ({ level, pressed: String(level === "all") })));
+    for (const { level, pressed } of renderedFilters(html)) {
+      const button = buttons.find((value) => value.dataset.logFilter === level);
+      button.setAttribute("aria-pressed", pressed);
+      button.classList.toggle("selected", pressed === "true");
+    }
+    const ipcBefore = invoked.length;
+    for (const level of ["warning", "error", "info", "debug", "all", "all", "info"]) {
+      await dispatchDocumentEvent("click", { target: buttons.find((button) => button.dataset.logFilter === level) });
+      assert.equal(state.logFilter, level);
+      assert.deepEqual(buttons.map((button) => button.getAttribute("aria-pressed")), levels.map((value) => String(value === level)));
+      assert.deepEqual(buttons.map((button) => button.classList.contains("selected")), levels.map((value) => value === level));
+      assert.equal(page.innerHTML, html, "filtering must keep the existing page and its focusable controls");
+      const visible = level === "all" ? 2 : ["info", "error"].includes(level) ? 1 : 0;
+      assert.equal(heading.textContent, t("Log entries: {visible} / {total}", { visible, total: 2 }));
+      for (const entry of ["info", "error"]) assert.equal(stream.innerHTML.includes(`${entry} evidence`), level === "all" || level === entry);
+    }
+    assert.equal(invoked.length, ipcBefore, "filter changes are local view state");
+    await renderPage("general");
+    assert.deepEqual(renderedFilters(await renderPage("logs")), levels.map((level) => ({ level, pressed: String(level === "info") })));
+  } finally {
+    Object.assign(state, saved);
+    if (oldElement === undefined) delete globalThis.Element;
+    else globalThis.Element = oldElement;
+    for (const [map, key, value] of [
+      [querySelectorAllElements, selector, oldButtons],
+      [querySelectorElements, ".log-stream", oldStream],
+      [querySelectorElements, ".logs-layout .toolbar-panel h3", oldHeading],
+    ]) {
+      if (value === undefined) map.delete(key);
+      else map.set(key, value);
+    }
+    await renderPage(saved.activePage);
+  }
+});
 
 function deferred() {
   let resolve;
@@ -3365,6 +3442,13 @@ test("all dashboard pages render in each language without changing network ident
         const html = await renderPage(entry.id);
         assert.ok(html.trim(), `${language}: ${entry.id}`);
         assert.doesNotMatch(html, /\{(?:count|name|error|number|title|mode)\}/u);
+        const navButtons = [...nav.innerHTML.matchAll(/<button\b([^>]*)>/gu)].map((match) => match[1]);
+        assert.deepEqual(navButtons.map((attributes) => attributes.match(/data-page="([^"]+)"/u)?.[1]), PAGES.map(({ id }) => id));
+        const currentPages = navButtons.filter((attributes) => /aria-current="page"/u.test(attributes));
+        const activePages = navButtons.filter((attributes) => /class="[^"]*\bactive\b/u.test(attributes));
+        assert.equal(currentPages.length, 1, `${language}: exactly one current navigation page`);
+        assert.ok(currentPages[0].includes(`data-page="${entry.id}"`), `${language}: ${entry.id}`);
+        assert.deepEqual(currentPages, activePages, `${language}: visible and accessible page state must agree`);
       }
       const general = await renderPage("general");
       assert.ok(general.includes(t("System Proxy")), language);

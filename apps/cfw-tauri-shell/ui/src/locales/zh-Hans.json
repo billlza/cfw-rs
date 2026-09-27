@@ -731,5 +731,8 @@
   "Check and restore background services while keeping the engine stopped.": "检查并恢复后台服务，保持内核停止。",
   "Recover background services": "恢复后台服务",
   "Recover background services before starting a connection.": "请先恢复后台服务，再启动连接。",
-  "Recovering…": "正在恢复…"
+  "Recovering…": "正在恢复…",
+  "Live rules from the running engine.": "当前运行内核中的实时规则。",
+  "No rules loaded from the controller.": "未从控制接口加载到规则。",
+  "No rules match this filter.": "此筛选条件下没有匹配的规则。"
 }

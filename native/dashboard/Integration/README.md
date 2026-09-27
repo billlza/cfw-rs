@@ -22,6 +22,13 @@ and parent window number; `intents.jsonl` records fixture commands and native/ch
 lifecycle. `build-receipt.json` records the exact copied frontend hashes and source
 HEAD. Failed build directories are preserved.
 
+Each generated bundle permits one recorded session. Startup refuses an existing
+`intents.jsonl` with exit status 73 before opening a window, preserving earlier
+evidence if an observer attempts to relaunch a finished bundle. Build a fresh
+bundle for another session. After Quit, verify process/window inventory without
+reopening that bundle; an accessibility read of a new process is not evidence
+about the previous session's final state.
+
 The temporary app links only `libCFMNativeDashboard`, AppKit and WebKit. It does not
 load the production Rust host, CFWNativeBridge, Keychain, or network configuration.
 WebKit uses a nonpersistent store; a mandatory content rule blocks HTTP(S)/WS(S),

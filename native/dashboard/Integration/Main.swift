@@ -132,9 +132,13 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
     // The test app lives exclusively under target/050-completion/<run>/.
     output = Bundle.main.bundleURL.deletingLastPathComponent()
     let log = output.appendingPathComponent("intents.jsonl")
-    FileManager.default.createFile(atPath: log.path, contents: nil)
-    do { journal = try FileHandle(forWritingTo: log) } catch {
-      fatalError("Cannot open component test journal: \(error)")
+    do {
+      try Data().write(to: log, options: .withoutOverwriting)
+      journal = try FileHandle(forWritingTo: log)
+    } catch {
+      let message = "Cannot create a fresh component test journal: \(error)\n"
+      FileHandle.standardError.write(Data(message.utf8))
+      exit(73)
     }
     super.init()
   }

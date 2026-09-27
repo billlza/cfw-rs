@@ -1064,14 +1064,13 @@ class SigningAttemptTransactionTests(unittest.TestCase):
 
     def test_production_verifier_propagates_the_explicit_context(self) -> None:
         output = Path("/private/tmp/cfm-signing-output")
-        with self.assertRaisesRegex(
-            transaction.SigningAttemptError, "unsigned-host"
-        ):
-            transaction.production_verification_runner(
-                output, transaction.CandidateBundleContext.UNSIGNED_HOST
-            )
+        for unsigned in (transaction.CandidateBundleContext.UNSIGNED_HOST, transaction.CandidateBundleContext.UNSIGNED_PREVIEW_HOST):
+            with self.subTest(unsigned=unsigned), patch.object(transaction, "run_bounded_process") as runner:
+                with self.assertRaisesRegex(transaction.SigningAttemptError, "unsigned-host"):
+                    transaction.production_verification_runner(output, unsigned)
+                runner.assert_not_called()
         for context in transaction.CandidateBundleContext:
-            if context is transaction.CandidateBundleContext.UNSIGNED_HOST:
+            if context in {transaction.CandidateBundleContext.UNSIGNED_HOST, transaction.CandidateBundleContext.UNSIGNED_PREVIEW_HOST}:
                 continue
             with self.subTest(context=context), patch.object(
                 transaction,

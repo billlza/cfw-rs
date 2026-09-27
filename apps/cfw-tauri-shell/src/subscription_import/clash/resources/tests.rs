@@ -1,6 +1,20 @@
 use super::*;
 use crate::subscription_import::import_subscription_document;
 
+#[test]
+fn rule_payload_preserves_implicit_null_and_explicit_empty_text() {
+    let payload = load_single_document("-\n- ~\n- ''\n- !!str\n").expect("YAML sequence");
+    let rules = import_rule_payload(payload, ProviderRuleBehavior::IpCidr)
+        .expect("raw provider text before profile validation");
+    assert_eq!(
+        rules
+            .iter()
+            .map(|rule| rule.value.as_str())
+            .collect::<Vec<_>>(),
+        ["~", "~", "", ""]
+    );
+}
+
 const ROOT: &str = r#"
 proxies:
   - {name: local, type: socks5, server: local.example.com, port: 1080, username: local-user, password: local-secret}

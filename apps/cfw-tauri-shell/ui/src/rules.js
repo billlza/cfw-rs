@@ -20,13 +20,16 @@ function renderRules() {
   const pages = Math.max(1, Math.ceil(filtered.length / RULE_PAGE_SIZE));
   page = Math.max(0, Math.min(pages - 1, page));
   const rules = filtered.slice(page * RULE_PAGE_SIZE, (page + 1) * RULE_PAGE_SIZE);
+  const emptyMessage = state.savedProfilePolicyError ?? (source.length > 0
+    ? t("No rules match this filter.")
+    : live ? t("No rules loaded from the controller.") : t("The selected profile has no explicit rules."));
   return `
     <div class="rules-layout">
       <section class="panel toolbar-panel">
         <div>
           <p class="label">${escapeHtml(t("Router"))}</p>
           <h3>${escapeHtml(t(live ? "Active rules: {visible} / {total}" : "Saved rules: {visible} / {total}", { visible: filtered.length, total: source.length }))}</h3>
-          <p class="muted">${live ? "Live rules from the running engine." : t("Saved profile rules; hit counters become available when the engine reports them.")}</p>
+          <p class="muted">${escapeHtml(live ? t("Live rules from the running engine.") : t("Saved profile rules; hit counters become available when the engine reports them."))}</p>
         </div>
         <div class="search-box">
           <input value="${escapeHtml(state.ruleSearch)}" data-rule-search aria-label="${escapeHtml(t("Search rules"))}" placeholder="${escapeHtml(t("Search rules"))}" />
@@ -50,7 +53,7 @@ function renderRules() {
               <span>${escapeHtml(rule.proxy)}</span>
               <span>${escapeHtml(rule.hits)}</span>
             </div>
-          `).join("") || `<p class="empty">${escapeHtml(state.savedProfilePolicyError ?? (live ? "No rules loaded from the controller." : t("The selected profile has no explicit rules.")))}</p>`}
+          `).join("") || `<p class="empty">${escapeHtml(emptyMessage)}</p>`}
         </div>
       </section>
     </div>

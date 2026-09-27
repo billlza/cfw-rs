@@ -1,5 +1,6 @@
 import { t } from "./i18n.js";
 import { escapeHtml, errorText } from "./format.js";
+import { runtimeDialogFrame } from "./native-runtime-settings.js";
 
 export const RUNTIME_LOG_LEVELS = Object.freeze(["trace", "debug", "info", "warn", "error", "fatal", "silent"]);
 
@@ -52,7 +53,19 @@ export function preferencesFromRuntimeDraft(draft) {
   };
 }
 
-export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, refreshRuntime, dismissOtherDialogs }) {
+export function acceptNativeRuntimeDraft(prior, value) {
+  const limits = { port: 32, level: 16, mtu: 32, lanAddress: 255, lanPort: 32, lanSources: 8192 };
+  const keys = [...Object.keys(limits), "ipv6DNS", "allow", "ipv6DNSEdited"].sort();
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== keys.join(",")
+    || Object.entries(limits).some(([key, limit]) => typeof value[key] !== "string" || Array.from(value[key]).length > limit)
+    || ["ipv6DNS", "allow", "ipv6DNSEdited"].some((key) => typeof value[key] !== "boolean")
+    || !RUNTIME_LOG_LEVELS.includes(value.level)) throw new TypeError("Native runtime settings draft is invalid");
+  const { ipv6DNSEdited, ...fields } = value;
+  return { ...prior, ...fields, ipv6DNSInherited: prior.ipv6DNSInherited && !ipv6DNSEdited };
+}
+
+export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, refreshRuntime, dismissOtherDialogs, nativeDialog }) {
   let request = 0;
   function validateSnapshot(snapshot) {
     if (!snapshot || typeof snapshot.settings !== "object" || typeof snapshot.effective !== "object"
@@ -142,7 +155,22 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
   }
   function renderDialog() {
     const dialog = state.runtimeSettingsDialog;
-    if (!dialog) return "";
+    if (!dialog) { nativeDialog?.sync(null); return ""; }
+    if (nativeDialog?.enabled()) {
+      const failure = nativeDialog.sync(dialog, runtimeDialogFrame(dialog), {
+        onSubmit: (draft) => submitDialog(dialog, draft),
+        onClose: () => { if (state.runtimeSettingsDialog === dialog) { close(); renderPage(); } },
+        onChange: renderPage,
+      });
+      // Keep the original page backdrop and its cancellation handler. A native
+      // presentation failure is explicit and never represented as a saved form.
+      return `<div class="glass-dialog-backdrop" data-runtime-dismiss></div>${failure ? `
+        <section class="glass-dialog runtime-settings-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(t("Network settings"))}">
+          <h2>${escapeHtml(t("Network settings"))}</h2>
+          <p class="glass-dialog-copy warning" role="alert">${escapeHtml(failure)}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-runtime-dismiss${dialog.saving ? " disabled" : ""}>${escapeHtml(t("Cancel"))}</button></div>
+        </section>` : ""}`;
+    }
     const d = dialog.draft;
     const disabled = dialog.saving ? " disabled" : "";
     return `<div class="glass-dialog-backdrop" data-runtime-dismiss></div>
@@ -174,10 +202,15 @@ export function createRuntimeSettingsUI({ state, invoke, appendLog, renderPage, 
     document.querySelectorAll("[data-runtime-dismiss]").forEach((button) => button.addEventListener("click", () => { close(); renderPage(); }));
     document.querySelectorAll("[data-runtime-save]").forEach((button) => button.addEventListener("click", async () => {
       const dialog = state.runtimeSettingsDialog;
-      if (!dialog || dialog.saving) return;
-      try { await save(preferencesFromRuntimeDraft(dialog.draft), dialog.revision, dialog); }
-      catch (error) { dialog.error = errorText(error); renderPage(); }
+      await submitDialog(dialog);
     }));
+  }
+  async function submitDialog(dialog, nativeDraft) {
+    if (!dialog || state.runtimeSettingsDialog !== dialog || dialog.saving) return;
+    try {
+      if (nativeDraft !== undefined) dialog.draft = acceptNativeRuntimeDraft(dialog.draft, nativeDraft);
+      await save(preferencesFromRuntimeDraft(dialog.draft), dialog.revision, dialog);
+    } catch (error) { dialog.error = errorText(error); renderPage(); }
   }
   function bindPage() {
     document.querySelectorAll("[data-runtime-log-level]").forEach((input) => input.addEventListener("change", async () => {

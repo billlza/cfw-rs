@@ -76,6 +76,7 @@ if __package__:
         WorkspaceCargoInputs,
         create_runtime_cargo_home,
         release_verifier_dependency_records,
+        release_verifier_package_identity,
         verify_runtime_cargo_home,
         verify_workspace_cargo_inputs,
     )
@@ -139,6 +140,7 @@ else:
         WorkspaceCargoInputs,
         create_runtime_cargo_home,
         release_verifier_dependency_records,
+        release_verifier_package_identity,
         verify_runtime_cargo_home,
         verify_workspace_cargo_inputs,
     )
@@ -389,7 +391,7 @@ strip = true
 
 [workspace.dependencies]
 base64 = { version = "0.23.0", default-features = false, features = ["std"] }
-minisign-verify = "0.2.5"
+minisign-verify = "0.3.0"
 serde_json = "1.0.151"
 sha2 = "0.11"
 """
@@ -749,7 +751,7 @@ def _write_private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 
 def _validate_isolated_release_verifier_lock(
-    path: Path, dependency_sources: dict[str, object]
+    path: Path, dependency_sources: dict[str, object], expected_local_package: tuple[str, str]
 ) -> str:
     try:
         data = read_regular(path, MAX_PUBLICATION_DOCUMENT_BYTES)
@@ -775,7 +777,7 @@ def _validate_isolated_release_verifier_lock(
         if not all(isinstance(item, str) for item in (name, version, checksum)):
             raise ArtifactSetError("isolated release verifier lock identity is malformed")
         actual_registry.add((name, version, checksum))
-    if local != [("cfw-release-verifier", "0.4.0")]:
+    if local != [expected_local_package]:
         raise ArtifactSetError("isolated lock has an unexpected local package")
     crates = dependency_sources.get("crates")
     if not isinstance(crates, list):
@@ -1211,6 +1213,7 @@ def _compiled_release_verifier(
             dependency_sources = release_verifier_dependency_records(
                 repository, workspace_inputs
             )
+            expected_local_package = release_verifier_package_identity(repository)
             create_runtime_cargo_home(
                 repository,
                 workspace_inputs,
@@ -1274,7 +1277,7 @@ def _compiled_release_verifier(
             label="isolated release verifier lock generation",
         )
         isolated_lock_sha256 = _validate_isolated_release_verifier_lock(
-            workspace / "Cargo.lock", dependency_sources
+            workspace / "Cargo.lock", dependency_sources, expected_local_package
         )
         command = _release_verifier_build_argv(
             cargo=str(cargo),

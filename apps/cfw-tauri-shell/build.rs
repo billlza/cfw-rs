@@ -5,6 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[path = "build_support/development_native_ui.rs"]
+mod development_native_ui;
+
 #[path = "build_support/native_product_input.rs"]
 mod native_product_input;
 
@@ -167,6 +170,17 @@ fn main() {
         .ancestors()
         .nth(2)
         .expect("Tauri manifest must remain under apps/cfw-tauri-shell");
+    if std::env::var_os("CARGO_FEATURE_NATIVE_UI").is_some() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            verify_release_native_ui(repository_root).unwrap_or_else(|error| {
+                panic!("native UI release artifact validation failed: {error}")
+            });
+        } else {
+            verify_development_native_ui(repository_root).unwrap_or_else(|error| {
+                panic!("native UI development inputs failed: {error}; run scripts/prepare_development_native_ui.py before Cargo")
+            });
+        }
+    }
     println!(
         "cargo:rerun-if-changed={}",
         repository_root
@@ -220,6 +234,112 @@ fn main() {
             .unwrap_or_else(|error| panic!("native release artifact validation failed: {error}"));
     }
     tauri_build::build()
+}
+
+fn verify_development_native_ui(repository_root: &Path) -> Result<(), String> {
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        development_native_ui::OUTPUT_ENV
+    );
+    for relative in development_native_ui::SOURCE_PATHS {
+        println!(
+            "cargo:rerun-if-changed={}",
+            repository_root.join(relative).display()
+        );
+    }
+    let products = PathBuf::from(
+        std::env::var_os(development_native_ui::OUTPUT_ENV)
+            .ok_or("CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS is unset")?,
+    );
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo output is missing")?);
+    let profile = out_dir
+        .ancestors()
+        .nth(3)
+        .ok_or("Cargo profile output is missing")?;
+    let verified =
+        development_native_ui::verify(repository_root, &products, profile, |path, value| {
+            let manifest: ArtifactManifest = serde_json::from_value(value.clone())
+                .map_err(|error| format!("parse development artifact manifest: {error}"))?;
+            verify_manifest(path, &manifest)
+        })?;
+    for path in verified.watched_paths {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!(
+        "cargo:rustc-link-search=native={}",
+        verified.library_root.display()
+    );
+    println!("cargo:rustc-link-lib=dylib=CFMNativeDashboard");
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        verified.library_root.display()
+    );
+    Ok(())
+}
+
+fn verify_release_native_ui(repository_root: &Path) -> Result<(), String> {
+    // The rejected standalone Overview remains a development experiment. The
+    // installable preview adds only the in-place native component bridges.
+    if std::env::var_os("CARGO_FEATURE_NATIVE_DASHBOARD").is_some() {
+        return Err("native-dashboard cannot be included in a release candidate".into());
+    }
+    let products = candidate_native_products_root(repository_root)?;
+    if !matches!(
+        products.context,
+        native_product_input::NativeProductContext::PreviewPreSign
+            | native_product_input::NativeProductContext::UnsignedPreviewValidation
+    ) {
+        return Err(
+            "native-ui release inputs require a closed signed or unsigned preview context".into(),
+        );
+    }
+    let script = repository_root.join("scripts/build_native_ui.sh");
+    for relative in [
+        "scripts/build_native_ui.sh",
+        "scripts/native_ui_artifact.py",
+        "scripts/hash_artifact.py",
+        "scripts/repository_source_identity.py",
+        "native/dashboard/Package.swift",
+        "native/dashboard/Sources",
+        "native/dashboard/include",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            repository_root.join(relative).display()
+        );
+    }
+    require_single_link_regular_file(&script)?;
+    for name in [
+        "libCFMNativeDashboard.dylib",
+        "CFMNativeDashboard_CFMNativeDashboard.bundle",
+    ] {
+        let path = products.root.join(name);
+        let manifest_path = products.root.join(format!("{name}.manifest.json"));
+        let manifest: ArtifactManifest = read_json(&manifest_path)?;
+        verify_manifest(&path, &manifest)?;
+    }
+    // Reuse the artifact verifier with the selected context's sealed interpreter
+    // and compiler selection. It checks source, toolchain, Mach-O load paths and
+    // localization resources, rather than accepting a caller's digest string.
+    let result = native_product_input::native_ui_verifier_command(
+        &script,
+        std::env::vars_os(),
+        products.context,
+    )
+    .output()
+    .map_err(|error| format!("run native UI artifact verifier: {error}"))?;
+    if !result.status.success() {
+        return Err(format!(
+            "native UI artifact verifier failed: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    println!("cargo:rustc-link-search=native={}", products.root.display());
+    println!("cargo:rustc-link-lib=dylib=CFMNativeDashboard");
+    // verify_release_native_artifacts adds the shared package-relative rpath.
+    // No development build directory is embedded in the Host load commands.
+    Ok(())
 }
 
 fn macos_sdk_root() -> PathBuf {

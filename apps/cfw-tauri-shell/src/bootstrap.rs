@@ -425,6 +425,7 @@ struct ProductInfo {
 
 #[derive(Clone, Serialize)]
 pub(crate) struct BootPayload {
+    native_ui: crate::native_components::NativeUiCapabilities,
     product: ProductInfo,
     migration_handoff: bool,
     migration_handoff_status: MigrationHandoffStatus,
@@ -444,6 +445,7 @@ pub(crate) async fn boot_payload(
         .wait()
         .await?;
     Ok(BootPayload {
+        native_ui: crate::native_components::NativeUiCapabilities::current(),
         product: ProductInfo {
             name: "Clash for Mac",
             version: env!("CARGO_PKG_VERSION"),

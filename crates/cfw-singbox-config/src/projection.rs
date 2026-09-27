@@ -185,11 +185,22 @@ impl ValidatedSingBoxProfile {
             .copied()
             .map(crate::dns_policy::BootstrapDnsServer::Address)
             .collect::<Vec<_>>();
-        let bootstrap_servers = self
+        let explicit_bootstrap = self
             .document
             .dns
             .as_ref()
-            .and_then(|dns| dns.bootstrap_servers.as_deref())
+            .and_then(|dns| dns.bootstrap_servers.as_deref());
+        let inherited_bootstrap = if explicit_bootstrap.is_none() {
+            self.document
+                .dns
+                .as_ref()
+                .map(|dns| dns.inherited_bootstrap_servers(settings.enable_ipv6))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let bootstrap_servers = explicit_bootstrap
+            .or_else(|| (!inherited_bootstrap.is_empty()).then_some(inherited_bootstrap.as_slice()))
             .unwrap_or(&default_bootstrap);
         if self.dns_projection == DnsProjection::Ordinary {
             crate::dns_policy::validate_bootstrap_pool(bootstrap_servers)?;

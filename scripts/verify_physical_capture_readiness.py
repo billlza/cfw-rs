@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -1076,9 +1077,18 @@ def _collector_issues(source: str) -> tuple[int, list[str]]:
 
 
 def _logical_shell_lines(source: str) -> tuple[str, ...]:
+    # A deliberately limited reader for this pinned build script: continued
+    # simple commands and one literal heredoc at a time. Heredoc contents cannot
+    # supply an executable build. Unsupported/redirection syntax fails closed.
     lines: list[str] = []
     current = ""
+    delimiter: str | None = None
+    strip_tabs = False
     for raw in source.splitlines():
+        if delimiter is not None:
+            if (raw.lstrip("\t") if strip_tabs else raw) == delimiter:
+                delimiter = None
+            continue
         stripped = _SHELL_COMMENT_RE.sub("", raw).strip()
         if not stripped:
             continue
@@ -1086,30 +1096,75 @@ def _logical_shell_lines(source: str) -> tuple[str, ...]:
         if continued:
             stripped = stripped[:-1].rstrip()
         current = f"{current} {stripped}".strip()
-        if not continued:
-            lines.append(current)
-            current = ""
-    if current:
+        if continued:
+            continue
+        if "<<" in current:
+            heredocs = list(re.finditer(r"<<(-?)(?:'([A-Za-z_][A-Za-z0-9_]*)'|([A-Za-z_][A-Za-z0-9_]*))(?=\s|$)", current))
+            if len(heredocs) != 1 or current.count("<<") != 1:
+                raise ValueError("unsupported Host heredoc")
+            match = heredocs[0]
+            delimiter = match[2] or match[3]
+            strip_tabs = match[1] == "-"
         lines.append(current)
+        current = ""
+    if current or delimiter is not None:
+        raise ValueError("unterminated Host shell command or heredoc")
     return tuple(lines)
 
 
 def _host_build_has_feature(source: str) -> bool:
-    candidates = [
-        line
-        for line in _logical_shell_lines(source)
-        if '"$contract_tauri_host_bin" build' in line
-    ]
-    if len(candidates) != 1:
+    try:
+        lines = _logical_shell_lines(source)
+    except ValueError:
         return False
-    line = candidates[0]
-    return (
-        line.count("--features") == 1
-        and re.search(
-            rf"(?:^|\s)--features\s+{re.escape(HOST_FEATURE)}(?:\s|$)", line
-        )
-        is not None
-    )
+    candidates: list[list[str]] = []
+    for line in lines:
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            return False
+        executable = {"$contract_tauri_host_bin", "${contract_tauri_host_bin}"}
+        direct = bool(tokens) and tokens[0] in executable
+        if not direct and not any(tokens[index] in executable and tokens[index + 1] == "build"
+                                  for index in range(len(tokens) - 1)):
+            continue
+        # A compound command, substitution or forwarded argument separator is
+        # outside this source contract; another command's flags cannot count.
+        if any(token == "--" or (token and all(c in ";&|<>()" for c in token))
+               or "`" in token or "$(" in token for token in tokens):
+            return False
+        if tokens and tokens[0] == "/usr/bin/env":
+            index = 1
+            while index < len(tokens):
+                if tokens[index] == "-u" and index + 1 < len(tokens):
+                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tokens[index + 1]) is None:
+                        return False
+                    index += 2
+                elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
+                    index += 1
+                else:
+                    break
+            tokens = tokens[index:]
+        if len(tokens) < 2 or tokens[0] not in executable or tokens[1] != "build":
+            return False
+        candidates.append(tokens)
+    if not candidates:
+        return False
+    # Every final Host build branch must enable evidence, including preview.
+    for tokens in candidates:
+        if tokens.count("--features") != 1:
+            return False
+        index = tokens.index("--features") + 1
+        if index >= len(tokens):
+            return False
+        features = tokens[index].split(",")
+        if (HOST_FEATURE not in features or len(features) != len(set(features))
+                or any(re.fullmatch(r"[A-Za-z0-9_-]+", feature) is None for feature in features)):
+            return False
+    return True
 
 
 def _rust_sanitized(source: str) -> str:

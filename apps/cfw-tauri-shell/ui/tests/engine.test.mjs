@@ -25,6 +25,26 @@ function proxyEnvelope(overrides = {}) {
   };
 }
 
+test("startup recovery requires the typed capability and a failed Off snapshot", () => {
+  const failed = {
+    snapshot: { desired_mode: "off", generation: 0, config_digest: null,
+      state: { state: "failed", target: "off", generation: 0, error: "Service update failed" } },
+    startup_recovery_available: true,
+  };
+  assert.equal(normalizeEngineStatus(failed).startupRecoveryAvailable, true);
+  for (const flag of [undefined, false, "true", 1, null]) {
+    assert.equal(normalizeEngineStatus({ ...failed, startup_recovery_available: flag }).startupRecoveryAvailable, false);
+  }
+  for (const snapshot of [
+    { ...failed.snapshot, desired_mode: "system_proxy" },
+    { ...failed.snapshot, state: { ...failed.snapshot.state, target: "tunnel" } },
+    { ...failed.snapshot, state: { state: "off" } },
+  ]) {
+    assert.equal(normalizeEngineStatus({ ...failed, snapshot }).startupRecoveryAvailable, false);
+  }
+  assert.equal(normalizeEngineStatus({ ...proxyEnvelope(), startup_recovery_available: true }).startupRecoveryAvailable, false);
+});
+
 test("combined readiness checks both switches only after one ready tunnel attestation", () => {
   const envelope = proxyEnvelope();
   envelope.snapshot.desired_mode = "tunnel_system_proxy";

@@ -239,7 +239,10 @@ actor NativeBridgeCoordinator {
   let hostOperationLease: any NativeHostOperationLeaseAcquiring
   let serviceMaintainer: any CurrentAppServiceMaintaining
   let serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving
+  let serviceBuildObserver: any CurrentAppServiceBuildObserving
   let systemProxySwitchObserver: any CurrentSystemProxySwitchObserving
+  var serviceBuildPollCheckpoint: ServiceBuildRegistrationCheckpoint?
+  var serviceBuildUpgradePending = false
   var activeOperation: UUID?
   var startupPreferenceRecoveryComplete = false
   var pendingTunnelInstallation: NativePendingTunnelInstallation?
@@ -262,7 +265,8 @@ actor NativeBridgeCoordinator {
     serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving =
       CurrentAppServiceRuntimeObserver(),
     systemProxySwitchObserver: any CurrentSystemProxySwitchObserving =
-      CurrentSystemProxySwitchObserver()
+      CurrentSystemProxySwitchObserver(),
+    serviceBuildObserver: any CurrentAppServiceBuildObserving
   ) {
     self.proxy = proxy
     self.installed40019Proxy =
@@ -275,6 +279,7 @@ actor NativeBridgeCoordinator {
     self.hostOperationLease = hostOperationLease
     self.serviceMaintainer = serviceMaintainer
     self.serviceRuntimeObserver = serviceRuntimeObserver
+    self.serviceBuildObserver = serviceBuildObserver
     self.systemProxySwitchObserver = systemProxySwitchObserver
   }
 
@@ -282,14 +287,21 @@ actor NativeBridgeCoordinator {
     try Task.checkCancellation()
     // Profile probes neither own nor mutate the machine's network state.
     if case .testProfileDelays(let request) = command {
+      try await requireCurrentServiceBuilds(allowHandoff: false)
       return .profileDelays(try await testProfileDelays(request))
     }
     // Proxy authorization only obtains rights and needs no mutation lease.
+    // Registration status only reads SMAppService metadata. It must remain
+    // observable when another Host is busy; it cannot attest engine Off or
+    // authorize service mutation. All proof, repair and runtime queries below
+    // still acquire the existing cross-process operation lease.
     // Tunnel authorization writes a disabled manager, so it keeps the existing
     // cross-process preference-mutation lease through the bounded user wait.
     let operationLease: (any NativeHostOperationLeaseHolding)?
     do {
-      if command == .authorizeSystemProxy || command == .authorizeSystemProxyRestoration {
+      if command == .authorizeSystemProxy || command == .authorizeSystemProxyRestoration
+        || command == .maintainCurrentServices(.status)
+      {
         operationLease = nil
       } else {
         operationLease = try hostOperationLease.acquire()
@@ -306,6 +318,19 @@ actor NativeBridgeCoordinator {
       )
     }
     defer { operationLease?.release() }
+
+    if Self.requiresCurrentServices(command) {
+      let buildOperation = try beginOperation()
+      do {
+        try await requireCurrentServiceBuilds(allowHandoff: true)
+        endOperation(buildOperation)
+      } catch {
+        endOperation(buildOperation)
+        throw Self.map(error)
+      }
+    } else if command == .authorizeSystemProxy {
+      try await requireCurrentServiceBuilds(allowHandoff: false)
+    }
 
     switch command {
     case .testProfileDelays:
@@ -371,7 +396,7 @@ actor NativeBridgeCoordinator {
   private func queryExternalStatus() async throws -> NativeEngineStatus {
     let operationID = try beginOperation()
     defer { endOperation(operationID) }
-    return try await queryStatus(enforcePreferenceBarrier: true)
+    return try await queryStatusWithServiceBuildReconciliation()
   }
 
   func queryStatus(

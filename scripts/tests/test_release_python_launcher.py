@@ -63,7 +63,7 @@ class ReleasePythonLauncherTests(unittest.TestCase):
             ("scripts/gatekeeper_assessment.py", "--help"),
             ("scripts/hash_artifact.py", "--help"),
             ("scripts/harness/physical_machine_identity.py", "--help"),
-            ("scripts/verify_version_contract.py",),
+            ("scripts/verify_version_contract.py", "--preview"),
             ("scripts/verify_native_product_graph.py",),
             ("scripts/hash_native_build_inputs.py",),
         )

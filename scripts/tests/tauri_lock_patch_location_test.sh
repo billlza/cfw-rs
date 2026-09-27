@@ -1,6 +1,5 @@
 #!/bin/bash -p
-# Prove Tauri lock patching and Cargo workspace discovery are independent of an
-# enclosing release worktree.
+# Prove official lock integrity and Cargo workspace isolation in both staging locations.
 set -euo pipefail
 umask 077
 unset CDPATH
@@ -11,9 +10,8 @@ readonly repo_root
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_python_launcher.sh
 source "$repo_root/scripts/release_python_launcher.sh"
-readonly lock_patch="$repo_root/$TAURI_CLI_LOCK_PATCH_PATH"
 # Exact Cargo.lock from the checksum-pinned crates.io archive. Keep the fixture
-# offline and independent of both the patch and an installed Tauri CLI.
+# offline and independent of an installed Tauri CLI.
 readonly upstream_lock_fixture="$repo_root/scripts/tests/fixtures/tauri-cli-$TAURI_CLI_VERSION.Cargo.lock"
 readonly cargo_bin="${CFW_RELEASE_CARGO_EXECUTABLE:-}"
 readonly python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
@@ -56,22 +54,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-verify_patch_location() {
+verify_official_lock_location() {
   [[ $# -eq 2 ]] || return 2
   local fixture_root="$1"
   local expect_parent_repository="$2"
   local staging="$fixture_root/staging"
-  local source_root="$staging/tauri-cli-2.11.4"
+  local source_root="$staging/tauri-cli-$TAURI_CLI_VERSION"
   local cargo_lock="$source_root/Cargo.lock"
-  local actual_sha256 discovered_repository
-
+  local workspace_lock="$staging/Cargo.lock"
+  local checked_lock discovered_repository
   /bin/mkdir -m 0700 "$staging" "$source_root"
   /usr/bin/install -m 0600 "$upstream_lock_fixture" "$cargo_lock"
-  printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
-    /usr/bin/shasum -a 256 --check >/dev/null
-  printf '%s  %s\n' "$TAURI_CLI_LOCK_PATCH_SHA256" "$lock_patch" |
-    /usr/bin/shasum -a 256 --check >/dev/null
-
+  /usr/bin/install -m 0600 "$cargo_lock" "$workspace_lock"
+  for checked_lock in "$cargo_lock" "$workspace_lock"; do
+    printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$checked_lock" |
+      /usr/bin/shasum -a 256 --check >/dev/null
+    printf '\n# deliberate lock corruption\n' >>"$checked_lock"
+    if printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$checked_lock" |
+        /usr/bin/shasum -a 256 --check >"$fixture_root/tamper.stdout" 2>"$fixture_root/tamper.stderr"; then
+      echo "error: modified official lock was accepted: $checked_lock" >&2
+      return 1
+    fi
+    /usr/bin/install -m 0600 "$upstream_lock_fixture" "$checked_lock"
+    /usr/bin/cmp -s "$checked_lock" "$upstream_lock_fixture"
+  done
   if [[ "$expect_parent_repository" == "yes" ]]; then
     discovered_repository="$(/usr/bin/git -C "$source_root" rev-parse --show-toplevel)"
     [[ "$discovered_repository" == "$repo_root" ]] || {
@@ -79,29 +85,6 @@ verify_patch_location() {
       return 1
     }
   fi
-  if GIT_CEILING_DIRECTORIES="$staging" \
-    /usr/bin/git -C "$source_root" rev-parse --show-toplevel >/dev/null 2>&1; then
-    echo "error: Tauri patch fixture escaped its Git discovery ceiling" >&2
-    return 1
-  fi
-
-  GIT_CEILING_DIRECTORIES="$staging" \
-    /usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"
-  GIT_CEILING_DIRECTORIES="$staging" \
-    /usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"
-  actual_sha256="$(/usr/bin/shasum -a 256 "$cargo_lock" | /usr/bin/awk '{print $1}')"
-  [[ "$actual_sha256" == "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" ]] || {
-    echo "error: Tauri lock patch did not produce the exact pinned lock" >&2
-    return 1
-  }
-  GIT_CEILING_DIRECTORIES="$staging" \
-    /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"
-  GIT_CEILING_DIRECTORIES="$staging" \
-    /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse "$lock_patch"
-  /usr/bin/cmp -s "$cargo_lock" "$upstream_lock_fixture" || {
-    echo "error: Tauri lock patch did not restore the exact upstream lock" >&2
-    return 1
-  }
 }
 
 verify_cargo_workspace_location() {
@@ -109,7 +92,7 @@ verify_cargo_workspace_location() {
   local fixture_root="$1"
   local expect_parent_repository="$2"
   local staging="$fixture_root/cargo-staging"
-  local source_root="$staging/tauri-cli-2.11.4"
+  local source_root="$staging/tauri-cli-2.12.0"
   local cargo_manifest="$source_root/Cargo.toml"
   local source_lock="$source_root/Cargo.lock"
   local workspace_manifest="$staging/Cargo.toml"
@@ -130,7 +113,7 @@ verify_cargo_workspace_location() {
   {
     printf '[package]\n'
     printf 'name = "tauri-cli"\n'
-    printf 'version = "2.11.4"\n'
+    printf 'version = "2.12.0"\n'
     printf 'edition = "2021"\n'
   } >"$cargo_manifest"
   printf 'fn main() {}\n' >"$source_root/src/main.rs"
@@ -140,7 +123,7 @@ verify_cargo_workspace_location() {
     printf 'version = 4\n\n'
     printf '[[package]]\n'
     printf 'name = "tauri-cli"\n'
-    printf 'version = "2.11.4"\n'
+    printf 'version = "2.12.0"\n'
   } >"$source_lock"
 
   set +e
@@ -176,12 +159,12 @@ verify_cargo_workspace_location() {
 
   {
     printf '[workspace]\n'
-    printf 'members = ["tauri-cli-2.11.4"]\n'
+    printf 'members = ["tauri-cli-2.12.0"]\n'
     printf 'resolver = "2"\n'
   } >"$workspace_manifest"
   /bin/chmod 0600 "$workspace_manifest"
   workspace_manifest_sha256="$(
-    printf '[workspace]\nmembers = ["tauri-cli-2.11.4"]\nresolver = "2"\n' |
+    printf '[workspace]\nmembers = ["tauri-cli-2.12.0"]\nresolver = "2"\n' |
       /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
   )"
   printf '%s  %s\n' "$workspace_manifest_sha256" "$workspace_manifest" |
@@ -261,7 +244,7 @@ if not isinstance(members, list) or len(members) != 1:
 package = packages[0]
 if (
     package.get("name") != "tauri-cli"
-    or package.get("version") != "2.11.4"
+    or package.get("version") != "2.12.0"
     or package.get("manifest_path") != expected_manifest
     or package.get("id") != members[0]
 ):
@@ -317,8 +300,8 @@ readonly inside_root outside_root
 repository_manifest_before="$(/usr/bin/shasum -a 256 "$repo_root/Cargo.toml" | /usr/bin/awk '{print $1}')"
 repository_lock_before="$(/usr/bin/shasum -a 256 "$repo_root/Cargo.lock" | /usr/bin/awk '{print $1}')"
 repository_status_before="$(/usr/bin/git -C "$repo_root" status --porcelain=v1 --untracked-files=all)"
-verify_patch_location "$inside_root" yes
-verify_patch_location "$outside_root" no
+verify_official_lock_location "$inside_root" yes
+verify_official_lock_location "$outside_root" no
 verify_cargo_workspace_location "$inside_root" yes
 verify_cargo_workspace_location "$outside_root" no
 repository_manifest_after="$(/usr/bin/shasum -a 256 "$repo_root/Cargo.toml" | /usr/bin/awk '{print $1}')"
@@ -329,12 +312,12 @@ repository_status_after="$(/usr/bin/git -C "$repo_root" status --porcelain=v1 --
   exit 1
 }
 [[ "$repository_lock_after" == "$repository_lock_before" ]] || {
-  echo "error: Tauri lock patch location test changed the repository Cargo.lock" >&2
+  echo "error: Tauri official lock and workspace location test changed the repository Cargo.lock" >&2
   exit 1
 }
 [[ "$repository_status_after" == "$repository_status_before" ]] || {
-  echo "error: Tauri lock patch location test changed the parent repository" >&2
+  echo "error: Tauri official lock and workspace location test changed the parent repository" >&2
   exit 1
 }
 
-echo "Tauri lock patch location test passed"
+echo "Tauri official lock and workspace location test passed"

@@ -47,9 +47,10 @@ pub(crate) use subscriptions::{
     update_profile_info,
 };
 pub(crate) use toggles::{
-    apply_restore_dns_servers, current_platform_design, reset_settings_snapshot, set_allow_lan,
-    set_bind_address, set_core_enabled, set_log_level, set_mixin_enabled, set_proxy_mode,
-    set_system_proxy_enabled, set_tun_enabled, system_proxy_state, tun_runtime_state,
+    apply_restore_dns_servers, current_platform_design, reconcile_startup_services,
+    reset_settings_snapshot, set_allow_lan, set_bind_address, set_core_enabled, set_log_level,
+    set_mixin_enabled, set_proxy_mode, set_system_proxy_enabled, set_tun_enabled,
+    system_proxy_state, tun_runtime_state,
 };
 
 pub(crate) use providers::{

@@ -5,12 +5,16 @@ mod diagnostics;
 use automation::{read_automation_settings, request_wifi_name_access, write_automation_settings};
 use diagnostics::{Diagnostics, report_dashboard_startup};
 mod engine;
+mod engine_controls;
 mod i18n;
 mod launch;
 mod legacy;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod main_run_loop_driver;
+mod native_components;
+#[cfg(feature = "native-dashboard")]
+mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
 mod release_observation;
@@ -44,9 +48,9 @@ use commands::{
     preview_legacy_cfw_profile_migration, profile_credential_presence,
     profile_credential_requirements, profile_qrcode_svg, profiles_snapshot, providers_snapshot,
     provision_profile_credentials, read_profile_text, read_runtime_config_text,
-    read_runtime_settings_snapshot, read_settings_snapshot, refresh_tray_menu,
-    reset_settings_snapshot, reveal_home_directory, reveal_logs_directory, reveal_profile,
-    rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
+    read_runtime_settings_snapshot, read_settings_snapshot, reconcile_startup_services,
+    refresh_tray_menu, reset_settings_snapshot, reveal_home_directory, reveal_logs_directory,
+    reveal_profile, rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
     set_bind_address, set_core_enabled, set_launch_at_login_enabled, set_log_level,
     set_mixin_enabled, set_proxy_mode, set_system_proxy_enabled, set_tun_enabled,
     start_connections_stream, start_log_stream, stop_connections_stream, stop_log_stream,
@@ -62,6 +66,16 @@ use legacy::{
     disable_service_mode, legacy_retirement_status, recover_legacy_cutover,
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
+use native_components::general_switches::{
+    dismiss_native_general_switches, focus_native_general_switch, sync_native_general_switches,
+};
+use native_components::runtime_settings::{
+    dismiss_native_runtime_settings, present_native_runtime_settings,
+    update_native_runtime_settings,
+};
+use native_components::{
+    dismiss_native_profile_menu, present_native_profile_menu, update_native_profile_menu,
+};
 use shell::{TrayMenuState, build_app_menu, focus_main_window, handle_app_menu_event};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
@@ -222,6 +236,7 @@ fn main() {
     let invoke_handler: AppInvokeHandler = Box::new(tauri::generate_handler![
         acknowledge_migration_handoff_renderer_ready,
         engine_snapshot,
+        reconcile_startup_services,
         boot_payload,
         report_dashboard_startup,
         reload_dashboard,
@@ -310,7 +325,21 @@ fn main() {
         force_quit_app,
         parse_deep_links,
         network_diagnostics,
+        present_native_profile_menu,
+        update_native_profile_menu,
+        dismiss_native_profile_menu,
+        present_native_runtime_settings,
+        update_native_runtime_settings,
+        dismiss_native_runtime_settings,
+        sync_native_general_switches,
+        focus_native_general_switch,
+        dismiss_native_general_switches,
     ]);
+    #[cfg(feature = "native-ui")]
+    let builder = builder
+        .manage(native_components::NativeProfileMenuState::default())
+        .manage(native_components::runtime_settings::RuntimeSettingsState::default())
+        .manage(native_components::general_switches::GeneralSwitchesState::default());
     let application = builder
         .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
             if migration_handoff && !migration_handoff_command_allowed(invoke.message.command()) {
@@ -322,8 +351,8 @@ fn main() {
             } else if !startup::command_available_before_ready(invoke.message.command())
                 && let Err(error) = invoke
                     .message
-                    .state_ref()
-                    .get::<startup_state::NativeStartup>()
+                    .webview_ref()
+                    .state::<startup_state::NativeStartup>()
                     .require_ready()
             {
                 invoke.resolver.reject(error);
@@ -344,6 +373,18 @@ fn main() {
             Ok(())
         })
         .on_page_load(|webview, payload| {
+            #[cfg(feature = "native-ui")]
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                native_components::cancel_for_window(webview.app_handle(), webview.label());
+                native_components::runtime_settings::cancel_for_reload(
+                    webview.app_handle(),
+                    webview.label(),
+                );
+                native_components::general_switches::cancel_for_reload(
+                    webview.app_handle(),
+                    webview.label(),
+                );
+            }
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
@@ -367,6 +408,8 @@ fn main() {
                 emit_startup_error(window.app_handle(), "window_bounds_schedule_failed", error);
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
+                #[cfg(feature = "native-ui")]
+                native_components::cancel_for_window(window.app_handle(), window.label());
                 api.prevent_close();
                 window
                     .app_handle()
@@ -433,6 +476,7 @@ mod tests {
             "write_settings_snapshot",
             "select_profile",
             "set_core_enabled",
+            "reconcile_startup_services",
             "set_system_proxy_enabled",
             "set_tun_enabled",
             "check_for_updates",

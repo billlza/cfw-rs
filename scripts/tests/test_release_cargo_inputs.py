@@ -16,6 +16,7 @@ from scripts.release_cargo_inputs import (
     ReleaseCargoInputsError,
     create_runtime_cargo_home,
     prepare_workspace_cargo_inputs,
+    release_verifier_dependency_records,
     verify_runtime_cargo_home,
     verify_workspace_cargo_inputs,
     workspace_input_root,
@@ -93,6 +94,30 @@ class ReleaseCargoInputsTests(unittest.TestCase):
             self.source_cargo_home,
             workspace_root,
         )
+
+    def test_verifier_dependency_root_matches_its_source_manifest_version(self) -> None:
+        _archive, checksum = self._archive()
+        manifest = self.repository / "crates/cfw-release-verifier/Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        for version in ("0.4.0", "0.5.0"):
+            with self.subTest(version=version):
+                self._write_lock(checksum)
+                lock = self.repository / "Cargo.lock"
+                lock.write_text(lock.read_text().replace("fixture-app", "cfw-release-verifier").replace("0.4.0", version))
+                manifest.write_text(f'[package]\nname="cfw-release-verifier"\nversion="{version}"\n')
+                inputs = prepare_workspace_cargo_inputs(
+                    self.repository, self.source_cargo_home,
+                    workspace_input_root(self.repository, self.home),
+                )
+                records = release_verifier_dependency_records(self.repository, inputs)
+                self.assertEqual(records["crates"], list(inputs.crate_records))
+                other_version = "0.5.0" if version == "0.4.0" else "0.4.0"
+                manifest.write_text(f'[package]\nname="cfw-release-verifier"\nversion="{other_version}"\n')
+                with self.assertRaisesRegex(ReleaseCargoInputsError, "exact release verifier root"):
+                    release_verifier_dependency_records(self.repository, inputs)
+                manifest.write_text(f'[package]\nname="different-verifier"\nversion="{version}"\n')
+                with self.assertRaisesRegex(ReleaseCargoInputsError, "verifier manifest"):
+                    release_verifier_dependency_records(self.repository, inputs)
 
     def test_complete_lock_verified_vendor_is_prepared_and_reused(self) -> None:
         poisoned = self.source_cargo_home / "registry/src/poison/fixture-dependency-1.2.3"

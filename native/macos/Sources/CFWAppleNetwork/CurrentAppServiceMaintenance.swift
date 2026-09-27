@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 import SystemConfiguration
 
 public enum CurrentSystemProxySwitchStatus: Equatable, Sendable {
@@ -285,6 +286,60 @@ public enum CurrentAppServiceMaintenanceError: Error, Equatable, Sendable {
   case statusUnknown(CurrentAppService)
   case mutationFailed(CurrentAppService)
   case postconditionFailed(CurrentAppService)
+  case unregistrationPending(CurrentAppService)
+  case unregistrationTimedOut(CurrentAppService)
+}
+
+enum ServiceUnregistrationError: Error { case pending, timedOut }
+
+/// SMAppService's asynchronous completion is the re-registration barrier.
+/// Caller cancellation/deadline ends only that wait; the uncancellable OS
+/// operation keeps this instance blocked until its own completion arrives.
+final class ServiceUnregistrationBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private var pending: UUID?
+
+  func requireRegistrationReady() throws {
+    try lock.withLock {
+      guard pending == nil else { throw ServiceUnregistrationError.pending }
+    }
+  }
+
+  func register(_ operation: () throws -> Void) throws {
+    try lock.withLock {
+      guard pending == nil else { throw ServiceUnregistrationError.pending }
+      try operation()
+    }
+  }
+
+  func unregister(
+    deadline: CallbackDeadlineScheduler = CallbackDeadlineScheduler(timeout: .seconds(5)),
+    operation: @escaping (@escaping @Sendable (Result<Void, Error>) -> Void) -> Void
+  ) async throws {
+    let epoch = UUID()
+    let _: Void = try await awaitBoundedCallback(
+      deadline: deadline, timeoutError: ServiceUnregistrationError.timedOut
+    ) { finish in
+      let began = self.lock.withLock {
+        guard self.pending == nil else { return false }
+        self.pending = epoch
+        return true
+      }
+      guard began else {
+        finish(.failure(ServiceUnregistrationError.pending))
+        return
+      }
+      operation { result in
+        let current = self.lock.withLock {
+          guard self.pending == epoch else { return false }
+          self.pending = nil
+          return true
+        }
+        if current { finish(result) }
+      }
+    }
+    try Task.checkCancellation()
+  }
 }
 
 public protocol CurrentAppServiceMaintaining: Sendable {
@@ -292,7 +347,7 @@ public protocol CurrentAppServiceMaintaining: Sendable {
   func perform(
     _ mutation: CurrentAppServiceMutation,
     on service: CurrentAppService
-  ) throws -> CurrentAppServiceStatus
+  ) async throws -> CurrentAppServiceStatus
 }
 
 /// The narrow maintenance boundary for the two current SMAppService jobs.
@@ -302,6 +357,8 @@ public protocol CurrentAppServiceMaintaining: Sendable {
 /// a dormant bundle-swap state and later restore the exact current services.
 /// It deliberately has no surface for the legacy one-way tombstone.
 public struct CurrentAppServiceMaintainer: CurrentAppServiceMaintaining, Sendable {
+  private static let log = Logger(
+    subsystem: "com.bill.clashformac", category: "service-maintenance")
   private let proxyAgent: any ProxyAgentServicing
   private let globalAuthority: any GlobalAuthorityDaemonServicing
 
@@ -337,9 +394,24 @@ public struct CurrentAppServiceMaintainer: CurrentAppServiceMaintaining, Sendabl
   public func perform(
     _ mutation: CurrentAppServiceMutation,
     on service: CurrentAppService
-  ) throws -> CurrentAppServiceStatus {
+  ) async throws -> CurrentAppServiceStatus {
+    try Task.checkCancellation()
     if mutation == .observe {
       return status(of: service)
+    }
+    // NotRegistered does not itself prove that an earlier asynchronous
+    // unregister has completed. Reject even an otherwise idempotent retry.
+    if mutation != .observe {
+      do {
+        switch service {
+        case .proxyAgent: try proxyAgent.requireRegistrationReady()
+        case .globalAuthority: try globalAuthority.requireRegistrationReady()
+        }
+      } catch ServiceUnregistrationError.pending {
+        throw CurrentAppServiceMaintenanceError.unregistrationPending(service)
+      } catch {
+        throw CurrentAppServiceMaintenanceError.mutationFailed(service)
+      }
     }
     let initial = status(of: service)
     switch (mutation, initial) {
@@ -354,17 +426,35 @@ public struct CurrentAppServiceMaintainer: CurrentAppServiceMaintaining, Sendabl
     case (.register, .notRegistered):
       do {
         try register(service)
+      } catch ServiceUnregistrationError.pending {
+        throw CurrentAppServiceMaintenanceError.unregistrationPending(service)
       } catch {
+        Self.recordMutationFailure(error, mutation: .register, service: service)
+        if status(of: service) == .requiresApproval {
+          throw CurrentAppServiceMaintenanceError.approvalRequired(service)
+        }
         throw CurrentAppServiceMaintenanceError.mutationFailed(service)
       }
-      guard status(of: service) == .enabled else {
+      let final = status(of: service)
+      if final == .requiresApproval {
+        throw CurrentAppServiceMaintenanceError.approvalRequired(service)
+      }
+      guard final == .enabled else {
         throw CurrentAppServiceMaintenanceError.postconditionFailed(service)
       }
       return .enabled
     case (.unregister, .enabled):
       do {
-        try unregister(service)
+        try await unregister(service)
+        try Task.checkCancellation()
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch ServiceUnregistrationError.pending {
+        throw CurrentAppServiceMaintenanceError.unregistrationPending(service)
+      } catch ServiceUnregistrationError.timedOut {
+        throw CurrentAppServiceMaintenanceError.unregistrationTimedOut(service)
       } catch {
+        Self.recordMutationFailure(error, mutation: .unregister, service: service)
         throw CurrentAppServiceMaintenanceError.mutationFailed(service)
       }
       let final = status(of: service)
@@ -377,6 +467,20 @@ public struct CurrentAppServiceMaintainer: CurrentAppServiceMaintaining, Sendabl
     }
   }
 
+  private static func recordMutationFailure(
+    _ error: Error, mutation: CurrentAppServiceMutation, service: CurrentAppService
+  ) {
+    let failure = error as NSError
+    let knownDomains = [
+      NSPOSIXErrorDomain, NSCocoaErrorDomain, NSOSStatusErrorDomain, NSMachErrorDomain,
+      "SMAppServiceErrorDomain", "kSMErrorDomain",
+    ]
+    let domain = knownDomains.contains(failure.domain) ? failure.domain : "unclassified"
+    log.error(
+      "Service mutation failed: service=\(service.rawValue) mutation=\(mutation.rawValue) domain=\(domain, privacy: .public) code=\(failure.code)"
+    )
+  }
+
   private func register(_ service: CurrentAppService) throws {
     switch service {
     case .proxyAgent: try proxyAgent.register()
@@ -384,10 +488,10 @@ public struct CurrentAppServiceMaintainer: CurrentAppServiceMaintaining, Sendabl
     }
   }
 
-  private func unregister(_ service: CurrentAppService) throws {
+  private func unregister(_ service: CurrentAppService) async throws {
     switch service {
-    case .proxyAgent: try proxyAgent.unregister()
-    case .globalAuthority: try globalAuthority.unregister()
+    case .proxyAgent: try await proxyAgent.unregister()
+    case .globalAuthority: try await globalAuthority.unregister()
     }
   }
 }

@@ -12,23 +12,23 @@ The machine-readable values live in
 
 | Input | Pin | Verification |
 |---|---|---|
-| Rust | `1.98.1` | `rust-toolchain.toml`, exact five-component `rustup-component-file-tree-v2` surface, and compiler/version identity |
+| Rust | `1.98.1` | `rust-toolchain.toml`, exact six-component `rustup-component-file-tree-v2` surface, and compiler/version identity |
 | Node.js | `26.8.2` | official darwin-arm64 archive SHA-256 |
 | Go | `1.27.1` | official darwin-arm64 archive SHA-256 |
 | XcodeGen | `2.46.0` (`8445e778451c7e44237b90281bde622d764b0084`) | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
-| Tauri CLI | `2.11.4` | official crate SHA-256, published and patched lock digests, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
+| Tauri CLI | `2.12.0` | official crate SHA-256, unchanged published lock digest, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
 | gomobile/gobind | `v0.1.13` (`9f03b8f25789099c5c8abef4a02085da783ba923`) | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
 | govulncheck | `v1.6.0` | embedded Go module identity and module checksum |
 | cargo-deny | `0.20.2` | Rust `1.98.1` locked source install, version identity, and target-aware policy run |
-| sing-box/libbox | `v1.14.1`, `1ac1a339cb1223e9c70eae14c44411c75033c02d` | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, endpoint-conflict, profile-probe and SOCKS-lifecycle patches, with individual and combined SHA-256 values |
+| sing-box/libbox | `v1.14.2`, `af6e64c3b69e6132ebaee0e1a3d24e93903f6709` | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, endpoint-conflict, profile-probe and SOCKS-lifecycle patches, with individual and combined SHA-256 values |
 | iPhone Packet LAN peer (test-only) | signed thin-arm64 app tree `9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7` | source-tree identity, signed executable/profile/entitlements/certificate pins, dual-hash physical-device selection, CoreDevice receipt validation, and exact install/process/uninstall ownership |
 | Legacy Android packet peer (inactive) | Linux/arm64 artifact `268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c` | retained offline regression/build closure; it is not selected by the active Packet endpoint policy |
 | Apple provider reference | `afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa` | Git commit identity; reference only |
 | deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
-This table reflects the active 0.4.0 dependency pins after the September refresh;
-the candidate receipts retain the exact sources and toolchain used for the signed
-application. Earlier July and August reviews are historical records, not the
+This table reflects the active 0.5.0 development pins after the September refresh;
+frozen 0.4.0 source and candidate receipts retain their original sources and toolchain.
+Each signed application's own receipts remain authoritative. Earlier July and August reviews are historical records, not the
 current version inventory. The exact XcodeGen, sing-box, and gomobile tags resolve
 to their recorded commits. The Apple
 reference commit resolves to upstream `main`; it is not compiled or copied into
@@ -78,8 +78,8 @@ Network access is isolated to explicit preparation:
    execution.
 2. `scripts/install_pinned_tauri_cli.sh` builds the checksum-bound Tauri source
    with an isolated Cargo home and target directory. Its sealed payload retains
-   only the thin arm64 executable and clean patched crate source (including the
-   exact lock and licenses) under `target/toolchains/tauri-cli-2.11.4`; release
+   only the thin arm64 executable and clean official crate source (including the
+   unchanged published lock and licenses) under `target/toolchains/tauri-cli-2.12.0`; release
    scripts call that exact binary and never resolve `cargo tauri` from an
    ambient Cargo home. Cargo's three root-level runtime tracking/lock files are
    validated and removed only from the private offline cache snapshot before

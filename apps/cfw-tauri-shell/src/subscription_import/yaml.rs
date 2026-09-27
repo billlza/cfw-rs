@@ -208,10 +208,15 @@ pub(super) fn load_single_document(body: &str) -> Result<YamlValue, String> {
                 {
                     return Err("subscription YAML uses an unsupported tag".to_owned());
                 }
-                let scalar = YamlValue::Scalar(YamlScalar {
-                    text: value.into_owned(),
-                    resolvable,
-                });
+                // saphyr 0.1 emits empty text for implicit null nodes. Keep the
+                // existing importer text/key contract; explicit strings stay
+                // empty and must not become the legacy null placeholder.
+                let text = if resolvable && value.is_empty() {
+                    "~".to_owned()
+                } else {
+                    value.into_owned()
+                };
+                let scalar = YamlValue::Scalar(YamlScalar { text, resolvable });
                 attach(&mut stack, &mut root, scalar)?;
             }
             Event::SequenceStart(anchor_id, tag) => {
@@ -345,6 +350,130 @@ mod tests {
         match value {
             YamlValue::Scalar(scalar) => scalar,
             other => panic!("expected scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_scalar_text_and_resolution_preserve_existing_import_behavior() {
+        // Captured against saphyr-parser 0.0.12 before the dependency update.
+        // Implicit empties use its legacy null placeholder, while explicit
+        // string forms must retain their empty text and never become null.
+        for (name, body, text, resolvable, is_null) in [
+            ("implicit empty", "value:\n", "~", true, true),
+            ("explicit tilde", "value: ~\n", "~", true, true),
+            ("double quoted empty", "value: \"\"\n", "", false, false),
+            ("single quoted empty", "value: ''\n", "", false, false),
+            ("tagged empty", "value: !!str\n", "", false, false),
+            ("tagged tilde", "value: !!str ~\n", "~", false, false),
+            (
+                "tagged quoted empty",
+                "value: !!str \"\"\n",
+                "",
+                false,
+                false,
+            ),
+            ("empty literal", "value: |-\n", "", false, false),
+            ("plain null", "value: null\n", "null", true, true),
+            ("tagged null", "value: !!str null\n", "null", false, false),
+        ] {
+            let YamlValue::Mapping(mapping) = load_single_document(body).expect(name) else {
+                panic!("{name}: expected a mapping");
+            };
+            let value = scalar(mapping.get("value").expect("fixture value"));
+            assert_eq!(value.text(), text, "{name}: source text");
+            assert_eq!(value.resolvable, resolvable, "{name}: resolution flag");
+            assert_eq!(value.is_null(), is_null, "{name}: null meaning");
+            assert_eq!(value.as_bool(), None, "{name}: not a boolean");
+        }
+    }
+
+    #[test]
+    fn implicit_empty_and_explicit_tilde_keys_remain_duplicates() {
+        for body in [
+            "?\n: first\n~: second\n",
+            "~: first\n?\n: second\n",
+            "?\n: first\n?\n: second\n",
+            "?\n: first\n\"~\": second\n",
+            "?\n: first\n!!str ~: second\n",
+            "\"\": first\n'': second\n",
+            "? !!str\n: first\n\"\": second\n",
+        ] {
+            let error = load_single_document(body).expect_err("legacy duplicate key is rejected");
+            assert!(error.contains("duplicate key: <redacted>"), "{error}");
+            assert!(
+                !error.contains("first") && !error.contains("second"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_empty_keys_stay_distinct_from_empty_strings_and_null_spelling() {
+        for (body, expected_keys) in [
+            ("?\n: first\n\"\": second\n", ["~", ""]),
+            ("\"\": first\n?\n: second\n", ["", "~"]),
+            ("? !!str\n: first\n~: second\n", ["", "~"]),
+            ("?\n: first\n? !!str\n: second\n", ["~", ""]),
+            ("?\n: first\nnull: second\n", ["~", "null"]),
+        ] {
+            let YamlValue::Mapping(mapping) = load_single_document(body).expect("distinct keys")
+            else {
+                panic!("expected a mapping");
+            };
+            let entries = mapping.into_entries();
+            let keys = entries
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(keys, expected_keys);
+            assert_eq!(scalar(&entries[0].1).text(), "first");
+            assert_eq!(scalar(&entries[1].1).text(), "second");
+        }
+    }
+
+    #[test]
+    fn container_depth_accepts_sixteen_and_rejects_seventeen() {
+        assert_eq!(MAX_YAML_DEPTH, 16);
+        let at_limit = "[".repeat(16) + "value" + &"]".repeat(16);
+        assert!(load_single_document(&at_limit).is_ok());
+        let over_limit = "[".repeat(17) + "value" + &"]".repeat(17);
+        let error =
+            load_single_document(&over_limit).expect_err("seventeenth container is rejected");
+        assert!(error.contains("nesting depth limit of 16"), "{error}");
+    }
+
+    #[test]
+    fn actual_parser_events_enforce_exact_resource_boundary() {
+        assert_eq!(MAX_YAML_EVENTS, 200_000);
+        let event_count = |body: &str| {
+            Parser::new_from_str(body).fold(0, |count, step| {
+                step.expect("budget fixture must be valid YAML");
+                count + 1
+            })
+        };
+        let envelope_events = event_count("[]");
+        assert_eq!(event_count("[x]"), envelope_events + 1);
+        for target_events in [200_000, 200_001] {
+            let scalar_count = target_events - envelope_events;
+            let body = format!("[{}]", vec!["x"; scalar_count].join(","));
+            assert!(
+                body.len() <= 512 * 1024,
+                "fixture fits the source-body limit"
+            );
+            let observed_events = event_count(&body);
+            assert_eq!(observed_events, target_events);
+            println!(
+                "YAML_BUDGET requested={target_events} observed={observed_events} envelope={envelope_events} scalars={scalar_count}"
+            );
+            match load_single_document(&body) {
+                Ok(YamlValue::Sequence(values)) if target_events == MAX_YAML_EVENTS => {
+                    assert_eq!(values.len(), scalar_count);
+                }
+                Err(error) if target_events > MAX_YAML_EVENTS => {
+                    assert!(error.contains("200000-event budget"), "{error}");
+                }
+                other => panic!("unexpected result for {target_events} parser events: {other:?}"),
+            }
         }
     }
 

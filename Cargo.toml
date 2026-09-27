@@ -11,15 +11,8 @@ members = [
   "crates/cfw-platform",
   "crates/cfw-legacy-tombstone",
   "crates/cfw-release-verifier",
-  "crates/urlpattern-maintained-adapter",
 ]
 resolver = "2"
-
-[patch.crates-io]
-# tauri-utils 2.9.3 still requires urlpattern 0.3. This narrow adapter keeps
-# that API requirement while delegating to the maintained 0.6 implementation.
-# Remove it when the pinned Tauri line consumes urlpattern >=0.6 directly.
-urlpattern = { path = "crates/urlpattern-maintained-adapter" }
 
 [workspace.package]
 edition = "2024"
@@ -42,7 +35,7 @@ anyhow = "1.0.104"
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 futures-util = "0.3.34"
 libc = "0.2.189"
-minisign-verify = "0.2.5"
+minisign-verify = "0.3.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "socks"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 plist = "1.10.1"
@@ -52,12 +45,12 @@ qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 # Pure-Rust event-level YAML parser for Clash subscription conversion. The
 # event API is used deliberately: the importer owns its own alias, depth, and
 # event budgets instead of trusting a document-level loader.
-saphyr-parser = "0.0.12"
+saphyr-parser = "0.1.0"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "sync", "time"] }
 # Loopback-only websocket client for the clash-compatible controller streams.

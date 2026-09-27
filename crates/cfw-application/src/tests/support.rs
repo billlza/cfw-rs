@@ -42,6 +42,7 @@ pub(super) struct FakeBackend {
     pub(super) reject_stop_after_native_off: Mutex<bool>,
     pub(super) fail_query: Mutex<bool>,
     pub(super) query_error: Mutex<Option<BackendErrorKind>>,
+    pub(super) query_gate: Mutex<Option<Arc<Notify>>>,
     /// When true, a successful stop attests the owner stopped (returns `Ok`) but
     /// does not clear the native observation, so a subsequent independent
     /// OS-state query still reports the prior owner. Models a stop whose owner
@@ -226,6 +227,10 @@ impl EngineBackend for FakeBackend {
     fn query_status(&self) -> BackendFuture<'_, NativeEngineStatus> {
         Box::pin(async move {
             self.query_count.fetch_add(1, Ordering::AcqRel);
+            let gate = self.query_gate.lock().expect("query gate lock").clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             if *self.fail_query.lock().expect("query failure lock") {
                 return Err(BackendError::new(
                     BackendErrorKind::Unavailable,

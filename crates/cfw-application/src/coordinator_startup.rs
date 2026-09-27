@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use cfw_engine_api::{
-    EngineBackend, EngineMode, EngineOwner, EngineSessionIdentity, EngineSnapshot,
-    NativeEngineStatus, RetryDirective, RuntimeIdentity,
+    BackendErrorKind, EngineBackend, EngineMode, EngineOwner, EngineSessionIdentity,
+    EngineSnapshot, EngineState, NativeEngineStatus, RetryDirective, RuntimeIdentity,
 };
 use tokio::sync::watch;
 
@@ -23,7 +23,59 @@ pub(crate) struct ReconciliationFailure {
     pub(crate) safely_off: bool,
 }
 
+/// A failed observation is also the identity of one explicit recovery offer.
+/// Keeping that identity in the existing watch prevents queued clicks from
+/// retrying a newer failure after the first command has already completed.
+#[derive(Clone)]
+pub(crate) struct ReconciliationOutcome {
+    pub(crate) result: Result<EngineSnapshot, EngineCoordinatorError>,
+    pub(crate) recovery: Option<Arc<ReconciliationFailure>>,
+}
+
+pub(crate) fn publish_reconciliation(
+    channel: &watch::Sender<Option<ReconciliationOutcome>>,
+    state: &CoordinatorState,
+    failure: Option<&Arc<ReconciliationFailure>>,
+    policy: StartupReconciliation,
+) {
+    channel.send_replace(Some(ReconciliationOutcome {
+        result: failure.map_or_else(
+            || Ok(state.snapshot.clone()),
+            |failure| Err(failure.error.clone()),
+        ),
+        recovery: failure
+            .filter(|failure| failure.allows_service_reconciliation(state, policy))
+            .cloned(),
+    }));
+}
+
 impl ReconciliationFailure {
+    pub(crate) fn allows_service_reconciliation(
+        &self,
+        state: &CoordinatorState,
+        policy: StartupReconciliation,
+    ) -> bool {
+        matches!(policy, StartupReconciliation::CleanupKnownLineage)
+            && !self.safely_off
+            && state.snapshot.desired_mode == EngineMode::Off
+            && matches!(
+                state.snapshot.state,
+                EngineState::Failed {
+                    target: EngineMode::Off,
+                    ..
+                }
+            )
+            && state.native_lease.is_none()
+            && state.quarantine.is_none()
+            && matches!(
+                &self.error,
+                EngineCoordinatorError::Backend {
+                    operation: EngineOperation::QueryStatus,
+                    source,
+                } if source.kind == BackendErrorKind::CleanupUnproven
+            )
+    }
+
     /// A failed startup observation may be repeated only at a later explicit
     /// command boundary and only when the typed backend contract says that a
     /// fresh read or an external registration-state change can resolve it.

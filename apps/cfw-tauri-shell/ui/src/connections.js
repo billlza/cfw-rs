@@ -7,7 +7,7 @@ export function createConnectionsView({
 }) {
 function visibleConnections() {
   const regex = safeRegex(state.connectionSearch);
-  const rows = state.connections.filter((connection) => {
+  const rows = state.connectionSearch ? state.connections.filter((connection) => {
     const metadata = connection.metadata ?? {};
     const haystack = [
       connection.host,
@@ -22,8 +22,8 @@ function visibleConnections() {
       metadata.network,
       metadata.type,
     ].filter(Boolean).join(" ");
-    return !state.connectionSearch || (regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.connectionSearch.toLowerCase()));
-  });
+    return regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.connectionSearch.toLowerCase());
+  }) : state.connections;
 
   const sorters = {
     host: (row) => row.host,
@@ -33,14 +33,16 @@ function visibleConnections() {
     age: (row) => Date.parse(row.start || "") || 0,
   };
   const sorter = sorters[state.connectionSort] ?? sorters.age;
-  return [...rows].sort((left, right) => {
-    const leftValue = sorter(left);
-    const rightValue = sorter(right);
+  // Compute each sort key once per snapshot instead of parsing timestamps
+  // in every comparison. Keep stable tie order and never mutate source rows.
+  return rows.map((connection) => ({ connection, value: sorter(connection) })).sort((left, right) => {
+    const leftValue = left.value;
+    const rightValue = right.value;
     const result = typeof leftValue === "string"
       ? leftValue.localeCompare(String(rightValue))
       : leftValue - rightValue;
     return state.connectionSortDesc ? -result : result;
-  }).slice(0, MAX_CONNECTION_ROWS);
+  }).slice(0, MAX_CONNECTION_ROWS).map(({ connection }) => connection);
 }
 
 function connectionProcessLabel(connection) {
@@ -92,21 +94,21 @@ function renderConnections() {
         <div class="cfw-conn-search">
           <span>●</span>
           <input value="${escapeHtml(state.connectionSearch)}" data-connection-search aria-label="${escapeHtml(t("Search connections"))}" placeholder="${escapeHtml(t("Search connections"))}" />
-          ${state.connectionSearch ? '<button data-action="clear-connection-search">×</button>' : ""}
+          ${state.connectionSearch ? `<button data-action="clear-connection-search" aria-label="${escapeHtml(t("Clear connection search"))}">×</button>` : ""}
         </div>
         <strong data-conn-totals>${escapeHtml(t("Total: ↑ {upload} ↓ {download}", { upload: totalUp, download: totalDown }))}</strong>
       </section>
 
       <section class="cfw-conn-controls">
         ${[
-          ["upload", "↥ ◒"],
-          ["download", "↧ ◒"],
-          ["upload", "↥ ▥"],
-          ["download", "↧ ▥"],
-          ["age", "◷"],
-          ["host", "▭"],
-        ].map(([sort, label]) => `
-          <button class="${state.connectionSort === sort ? "selected" : ""}" data-connection-sort="${sort}">${label}</button>
+          ["upload", "↥ ◒", t("Sort connections by uploaded data")],
+          ["download", "↧ ◒", t("Sort connections by downloaded data")],
+          ["upload", "↥ ▥", t("Sort connections by uploaded data")],
+          ["download", "↧ ▥", t("Sort connections by downloaded data")],
+          ["age", "◷", t("Sort connections by start time")],
+          ["host", "▭", t("Sort connections by host")],
+        ].map(([sort, label, purpose]) => `
+          <button class="${state.connectionSort === sort ? "selected" : ""}" data-connection-sort="${sort}" aria-label="${escapeHtml(purpose)}" aria-pressed="${state.connectionSort === sort}"${state.connectionSort === sort ? ` aria-description="${escapeHtml(t(state.connectionSortDesc ? "Descending order" : "Ascending order"))}"` : ""}>${label}</button>
         `).join("")}
         <span></span>
         <button class="danger" data-action="toggle-connection-stream">${state.connectionPaused ? t("Resume") : t("Pause")}</button>

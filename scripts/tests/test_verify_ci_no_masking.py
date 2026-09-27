@@ -181,7 +181,7 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
                     audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
 
     def test_rust_test_gate_cannot_drop_all_features(self) -> None:
-        source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
+        source_gate = Path(__file__).resolve().parents[1] / "native_ui_development_checks.sh"
         source = source_gate.read_text(encoding="utf-8")
         required = (
             '"$CFW_RELEASE_CARGO_EXECUTABLE" test '
@@ -191,7 +191,7 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
         )
         self.assertIn(required, source)
         with tempfile.TemporaryDirectory() as temporary:
-            drifted_gate = Path(temporary) / "run_release_ci_gate.sh"
+            drifted_gate = Path(temporary) / "native_ui_development_checks.sh"
             drifted_gate.write_text(
                 source.replace(
                     required,
@@ -201,7 +201,7 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch(
-                "scripts.verify_ci_no_masking.RELEASE_CI_GATE", drifted_gate
+                "scripts.verify_ci_no_masking.NATIVE_UI_DEVELOPMENT_CHECKS", drifted_gate
             ), self.assertRaisesRegex(
                 CiPolicyError, "omits required Cargo command"
             ):

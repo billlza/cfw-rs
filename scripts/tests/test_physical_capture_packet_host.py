@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import array
+import json
 import os
 from pathlib import Path
+import pwd
+import shlex
 import signal
 import socket
-import stat
+import sys
 import tempfile
 import threading
 import unittest
@@ -88,6 +91,9 @@ class PacketHostTransportTests(unittest.TestCase):
                 helper.write_text(
                     """
 import json, os, socket, struct, sys
+
+with open(os.path.join(os.path.dirname(__file__), "child-environment.json"), "x", encoding="utf-8") as output:
+    json.dump(dict(os.environ), output, sort_keys=True)
 
 def send(sock, value):
     body = json.dumps(value, sort_keys=True, separators=(\",\", \":\")).encode()
@@ -197,14 +203,21 @@ else:
 """,
                     encoding="utf-8",
                 )
-                executable = Path("/usr/bin/env")
-                self.assertTrue(stat.S_ISREG(executable.stat().st_mode))
+                # Exercise the real Host admission guard against a private
+                # executable fixture, not the CI runner's Python file policy.
+                executable = root / "packet host launcher"
+                executable.write_text(
+                    "#!/bin/sh\nexec "
+                    + shlex.quote(str(Path(sys.executable).resolve(strict=True)))
+                    + ' "$@"\n',
+                    encoding="utf-8",
+                )
+                executable.chmod(0o700)
                 with patch.object(packet_host, "HOST_EXECUTABLE", executable), patch.object(
                     packet_host,
                     "HOST_ARGV",
                     (
                         str(executable),
-                        "/usr/bin/python3",
                         "-I",
                         "-S",
                         "-B",
@@ -214,7 +227,7 @@ else:
                         str(identity.st_ino),
                         str(marker),
                     ),
-                ):
+                ), patch.dict(os.environ, {"HOME": "/untrusted-home", "CFW_PACKET_HOST_SENTINEL": "must-not-inherit"}):
                     receipt = run_fixed_host_transaction(
                         case_id="dns-a-primary",
                         begin_capture=lambda ready: (
@@ -239,9 +252,46 @@ else:
                 self.assertEqual(receipt.candidate_observation_sequence, 11)
                 self.assertFalse(marker.exists())
                 self.assertTrue(os.get_inheritable(write_fd))
+                child_environment = json.loads((root / "child-environment.json").read_text())
+                self.assertEqual(child_environment.get("HOME"),
+                                 str(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)))
+                self.assertNotIn("CFW_PACKET_HOST_SENTINEL", child_environment)
             finally:
                 os.close(read_fd)
                 os.close(write_fd)
+
+    def test_unsafe_host_files_are_rejected_before_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = root / "host"
+            host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for mode in (0o770, 0o702, 0o600):
+                with self.subTest(mode=oct(mode)):
+                    host.chmod(mode)
+                    with patch.object(packet_host, "HOST_EXECUTABLE", host), patch.object(
+                        packet_host, "_spawn_fixed_host"
+                    ) as spawn:
+                        with self.assertRaises(PacketHostError) as raised:
+                            run_fixed_host_transaction(
+                                case_id="dns-a-primary",
+                                begin_capture=lambda _ready: PacketCaptureDisposition.COMPLETE,
+                                exercise_test=lambda _ready: PacketCaptureDisposition.COMPLETE,
+                                finish_capture=lambda _ready: PacketCaptureDisposition.COMPLETE,
+                            )
+                        self.assertEqual(raised.exception.code, "host_executable_unsafe")
+                        spawn.assert_not_called()
+            host.chmod(0o700)
+            alias = root / "alias"
+            alias.symlink_to(host)
+            with patch.object(packet_host, "HOST_EXECUTABLE", alias):
+                with self.assertRaises(PacketHostError) as raised:
+                    packet_host._validate_host_executable()
+                self.assertEqual(raised.exception.code, "host_executable_unsafe")
+            os.link(host, root / "second-link")
+            with patch.object(packet_host, "HOST_EXECUTABLE", host):
+                with self.assertRaises(PacketHostError) as raised:
+                    packet_host._validate_host_executable()
+                self.assertEqual(raised.exception.code, "host_executable_unsafe")
 
     def test_unknown_case_is_rejected_before_host_launch(self) -> None:
         with patch.object(packet_host, "_validate_host_executable") as validate:
@@ -254,6 +304,70 @@ else:
                 )
         self.assertEqual(raised.exception.code, "case_invalid")
         validate.assert_not_called()
+
+    def test_spawn_derives_only_home_from_real_account_and_preserves_launch_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "本地 home"
+            home.mkdir()
+            alias = Path(directory) / "account-alias"
+            alias.symlink_to(home, target_is_directory=True)
+            uid = os.getuid()
+            account = pwd.struct_passwd(("fixture", "*", uid, os.getgid(), "", str(alias), "/bin/sh"))
+            with patch.object(packet_host.pwd, "getpwuid", return_value=account) as lookup, \
+                 patch.object(packet_host.os, "posix_spawn", return_value=4244) as spawn, \
+                 patch.dict(os.environ, {"HOME": "/untrusted", "DYLD_INSERT_LIBRARIES": "/untrusted/inject", "CFW_TEST_ENV": "not-inherited"}):
+                self.assertEqual(packet_host._spawn_fixed_host(11, 12), 4244)
+            lookup.assert_called_once_with(uid)
+            self.assertEqual(spawn.call_args.args, (
+                str(packet_host.HOST_EXECUTABLE), packet_host.HOST_ARGV,
+                {**packet_host.FIXED_ENVIRONMENT, "HOME": str(home.resolve(strict=True))},
+            ))
+            self.assertEqual(spawn.call_args.kwargs, {
+                "file_actions": [(os.POSIX_SPAWN_CLOSE, 12),
+                                 (os.POSIX_SPAWN_DUP2, 11, packet_host.CONTROL_FD),
+                                 (os.POSIX_SPAWN_CLOSE, 11)],
+                "setsid": True, "setsigmask": (), "setsigdef": (signal.SIGPIPE,),
+            })
+            self.assertEqual(set(packet_host.FIXED_ENVIRONMENT), {"PATH", "LC_ALL", "LANG"})
+
+    def test_root_or_different_effective_uid_is_rejected_before_account_lookup_and_spawn(self) -> None:
+        for uid, effective in ((0, 0), (501, 0), (501, 502)):
+            with self.subTest(uid=uid, effective=effective), \
+                 patch.object(packet_host.os, "getuid", return_value=uid), \
+                 patch.object(packet_host.os, "geteuid", return_value=effective), \
+                 patch.object(packet_host.pwd, "getpwuid") as lookup, \
+                 patch.object(packet_host.os, "posix_spawn") as spawn:
+                with self.assertRaises(PacketHostError) as raised:
+                    packet_host._spawn_fixed_host(11, 12)
+                self.assertEqual(raised.exception.code, "host_environment_invalid")
+                lookup.assert_not_called()
+                spawn.assert_not_called()
+
+    def test_missing_relative_non_directory_or_unencodable_account_home_rejects_before_spawn(self) -> None:
+        uid = os.getuid()
+        with tempfile.TemporaryDirectory() as directory:
+            not_directory = Path(directory) / "file"
+            not_directory.write_text("not a directory")
+            homes = ("", "relative/home", str(Path(directory) / "absent"),
+                     str(not_directory), "/bad\0home", "/bad\ud800home")
+            for home in homes:
+                account = pwd.struct_passwd(("fixture", "*", uid, os.getgid(), "", home, "/bin/sh"))
+                with self.subTest(home=repr(home)), \
+                     patch.object(packet_host.pwd, "getpwuid", return_value=account), \
+                     patch.object(packet_host.os, "posix_spawn") as spawn:
+                    with self.assertRaises(PacketHostError) as raised:
+                        packet_host._spawn_fixed_host(11, 12)
+                    self.assertEqual(raised.exception.code, "host_environment_invalid")
+                    spawn.assert_not_called()
+            for error in (KeyError(uid), OSError("account lookup unavailable")):
+                with self.subTest(error=type(error).__name__), \
+                     patch.object(packet_host.pwd, "getpwuid", side_effect=error), \
+                     patch.object(packet_host.os, "posix_spawn") as spawn:
+                    with self.assertRaises(PacketHostError) as raised:
+                        packet_host._spawn_fixed_host(11, 12)
+                    self.assertEqual(raised.exception.code, "host_environment_invalid")
+                    self.assertIs(raised.exception.__cause__, error)
+                    spawn.assert_not_called()
 
     def test_cleanup_failure_is_attached_without_replacing_primary_error(self) -> None:
         invalid_hello = {
@@ -351,6 +465,28 @@ else:
                 packet_host._terminate_process_group(4244)
         self.assertEqual(raised.exception.code, "host_cleanup_unproven")
 
+    def test_permission_race_waits_for_natural_reap_and_group_disappearance_in_existing_grace(self) -> None:
+        with patch.object(packet_host.os, "waitpid", side_effect=[(0, 0), (0, 0), (4244, 0)]) as waitpid, \
+             patch.object(packet_host.os, "killpg", side_effect=[PermissionError(1, "operation not permitted"), ProcessLookupError()]) as killpg, \
+             patch.object(packet_host.time, "monotonic", side_effect=[0.0, 0.1]), \
+             patch.object(packet_host.time, "sleep") as sleep:
+            packet_host._terminate_process_group(4244)
+        self.assertEqual(waitpid.call_args_list, [call(4244, os.WNOHANG)] * 3)
+        self.assertEqual(killpg.call_args_list, [call(4244, signal.SIGTERM), call(4244, 0)])
+        sleep.assert_not_called()
+
+    def test_persistent_permission_failure_with_unreaped_child_uses_both_bounded_graces_and_fails(self) -> None:
+        with patch.object(packet_host.os, "waitpid", return_value=(0, 0)) as waitpid, \
+             patch.object(packet_host.os, "killpg", side_effect=PermissionError(1, "operation not permitted")) as killpg, \
+             patch.object(packet_host.time, "monotonic", side_effect=[0.0, 3.0, 4.0, 7.0]), \
+             patch.object(packet_host.time, "sleep") as sleep:
+            with self.assertRaises(PacketHostError) as raised:
+                packet_host._terminate_process_group(4244)
+        self.assertEqual(raised.exception.code, "host_cleanup_unproven")
+        self.assertEqual(killpg.call_args_list, [call(4244, signal.SIGTERM), call(4244, signal.SIGKILL)])
+        self.assertTrue(all(c.args == (4244, os.WNOHANG) for c in waitpid.call_args_list))
+        sleep.assert_not_called()
+
     def test_permission_probe_after_reap_means_group_still_exists(self) -> None:
         with patch.object(
             packet_host.os,
@@ -396,6 +532,12 @@ else:
         self.assertNotIn("unbounded internal cleanup detail", primary_error.__notes__[0])
 
     def test_aborted_host_state_still_invokes_exactly_one_terminal_cleanup(self) -> None:
+        self._check_aborted_host_cleanup()
+
+    def test_aborted_final_mismatch_retains_callback_and_validated_protocol_frames(self) -> None:
+        self._check_aborted_host_cleanup(finish_fails=True)
+
+    def _check_aborted_host_cleanup(self, *, finish_fails: bool = False) -> None:
         terminal_messages: list[dict[str, object]] = []
         worker: threading.Thread | None = None
 
@@ -473,11 +615,14 @@ else:
             return 4242
 
         cleanup_calls = 0
+        callback_error = RuntimeError("fixture terminal callback failed")
 
         def finish(terminal: object) -> PacketCaptureDisposition:
             nonlocal cleanup_calls
             self.assertIsInstance(terminal, packet_host.PacketHostAborted)
             cleanup_calls += 1
+            if finish_fails:
+                raise callback_error
             return PacketCaptureDisposition.COMPLETE
 
         with patch.object(packet_host, "_validate_host_executable"), patch.object(
@@ -493,17 +638,29 @@ else:
         if worker is not None:
             worker.join(timeout=2)
             self.assertFalse(worker.is_alive())
-        self.assertEqual(raised.exception.code, "observation_failed")
+        self.assertEqual(raised.exception.code, "host_result_inconsistent" if finish_fails else "observation_failed")
+        if finish_fails:
+            self.assertIs(raised.exception.__cause__, callback_error)
+            context = raised.exception.protocol_context
+            self.assertEqual(context["expected_failure_code"], "capture_cancelled")
+            self.assertEqual(context["terminal"]["document"], "cfw-packet-host-capture-aborted-v5")
+            self.assertEqual(context["final"]["code"], "observation_failed")
         self.assertEqual(cleanup_calls, 1)
         self.assertEqual(
             [message["document"] for message in terminal_messages],
             [
                 "cfw-packet-collector-capture-started-v5",
-                "cfw-packet-collector-capture-completed-v5",
+                "cfw-packet-collector-capture-complete-failed-v5" if finish_fails else "cfw-packet-collector-capture-completed-v5",
             ],
         )
 
     def test_failed_begin_still_invokes_exactly_one_terminal_cleanup(self) -> None:
+        self._check_failed_begin_cleanup()
+
+    def test_begin_final_mismatch_retains_callback_and_validated_protocol_frames(self) -> None:
+        self._check_failed_begin_cleanup(mismatch=True)
+
+    def _check_failed_begin_cleanup(self, *, mismatch: bool = False) -> None:
         stage_messages: list[dict[str, object]] = []
         worker: threading.Thread | None = None
 
@@ -569,7 +726,7 @@ else:
                         channel,
                         {
                             "case_id": request["case_id"],
-                            "code": "capture_cancelled",
+                            "code": "app_control_invalid" if mismatch else "capture_cancelled",
                             "document": "cfw-packet-host-failed-v5",
                             "schema_version": 5,
                             "sequence": 8,
@@ -584,6 +741,12 @@ else:
             return 4243
 
         cleanup_calls = 0
+        callback_error = RuntimeError("fixture start callback failed")
+
+        def begin(_baseline: object) -> PacketCaptureDisposition:
+            if mismatch:
+                raise callback_error
+            return PacketCaptureDisposition.CANCELLED
 
         def finish(terminal: object) -> PacketCaptureDisposition:
             nonlocal cleanup_calls
@@ -597,14 +760,20 @@ else:
             with self.assertRaises(PacketHostError) as raised:
                 run_fixed_host_transaction(
                     case_id="tcp-ipv4",
-                    begin_capture=lambda _ready: PacketCaptureDisposition.CANCELLED,
+                    begin_capture=begin,
                     exercise_test=lambda _ready: self.fail("test stage must not run"),
                     finish_capture=finish,
                 )
         if worker is not None:
             worker.join(timeout=2)
             self.assertFalse(worker.is_alive())
-        self.assertEqual(raised.exception.code, "capture_cancelled")
+        self.assertEqual(raised.exception.code, "host_result_inconsistent" if mismatch else "capture_cancelled")
+        if mismatch:
+            self.assertIs(raised.exception.__cause__, callback_error)
+            context = raised.exception.protocol_context
+            self.assertEqual(context["expected_failure_code"], "capture_cancelled")
+            self.assertEqual(context["terminal"]["document"], "cfw-packet-host-baseline-restored-v5")
+            self.assertEqual(context["final"]["code"], "app_control_invalid")
         self.assertEqual(cleanup_calls, 1)
         self.assertEqual(
             [message["document"] for message in stage_messages],

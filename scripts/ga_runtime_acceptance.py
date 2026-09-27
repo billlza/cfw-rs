@@ -35,7 +35,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Final, Iterable
+from typing import Any, BinaryIO, Callable, Final, Iterable
 import uuid
 
 if __package__:
@@ -171,8 +171,23 @@ else:
     )
 
 
+@dataclass(frozen=True)
+class FailedPacketCaptureEvidence:
+    """Bounded diagnostic bytes from a failed capture; never acceptance proof."""
+
+    check_id: str
+    command: dict[str, Any]
+    send_commands: tuple[dict[str, Any], ...]
+    packet_bytes: bytes
+    stderr_bytes: bytes
+    outputs_complete: bool
+    retention_errors: tuple[str, ...]
+
+
 class GARuntimeAcceptanceError(ValueError):
     """The fixed GA runtime evidence is incomplete, drifted, or unobservable."""
+
+    packet_capture_failure: FailedPacketCaptureEvidence | None = None
 
 
 PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
@@ -245,6 +260,13 @@ MAX_COMMAND_OUTPUT_BYTES: Final = 256 * 1024
 MAX_COMMAND_SECONDS: Final = 15 * 60
 DMG_BYTE_PROOF_TIMEOUT_SECONDS: Final = 30 * 60
 PACKET_HOST_READY_SECONDS: Final = 10 * 60
+# The signed Host allows 60 seconds for its test callback. Include interface
+# lookup, tcpdump readiness, every sender and capture completion in one budget,
+# leaving time for a sender's ten-second group cleanup, five-second tcpdump
+# cleanup, three-second failure retention and the protocol reply.
+PACKET_EXERCISE_SECONDS: Final = 35
+
+
 MAX_RUNTIME_FILES: Final = 32
 ADAPTER_PENDING_NAME: Final = ".runtime-acceptance.json.pending"
 TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,63}$")
@@ -2218,6 +2240,29 @@ def _utc_now() -> str:
     )
 
 
+def _failed_capture_pipe_snapshot(
+    stream: BinaryIO, prefix: bytes, maximum: int, deadline: float
+) -> tuple[bytes, bool]:
+    """Drain only currently available bytes, with size and time bounds."""
+    if len(prefix) > maximum:
+        return prefix[:maximum], False
+    output = bytearray(prefix)
+    descriptor = stream.fileno()
+    os.set_blocking(descriptor, False)
+    while time.monotonic() < deadline:
+        try:
+            chunk = os.read(descriptor, min(65536, maximum - len(output) + 1))
+        except BlockingIOError:
+            return bytes(output), False
+        if not chunk:
+            return bytes(output), True
+        room = maximum - len(output)
+        output.extend(chunk[:room])
+        if len(chunk) > room:
+            return bytes(output), False
+    return bytes(output), False
+
+
 def _capture_command_argv(
     interface: str, expected_records: int, filter_argv: Iterable[str]
 ) -> list[str]:
@@ -2354,6 +2399,8 @@ class ProductionCollectorRuntime:
                     finish_capture=finish_capture,
                 )
             except PacketHostError as error:
+                if error.cleanup_code is not None:
+                    raise
                 waiting_for_operator = error.code in {
                     "baseline_mismatch",
                     "baseline_unavailable",
@@ -2373,12 +2420,13 @@ class ProductionCollectorRuntime:
                 time.sleep(1.0 if waiting_for_operator else 0.25)
 
     def _tunnel_interface(self) -> str:
-        receipt = self.run(["/sbin/ifconfig"], timeout=60)
+        receipt = self.run(["/sbin/ifconfig"], timeout=15)
         _command(
             receipt,
             expected_argv=["/sbin/ifconfig"],
             expected_exit=0,
             label="GA tunnel interface observation",
+            maximum_seconds=15,
         )
         current: str | None = None
         matches: list[str] = []
@@ -2442,8 +2490,17 @@ class ProductionCollectorRuntime:
         check_id: str,
         tokens: dict[str, str],
     ) -> tuple[dict[str, Any], bytes]:
+        exercise_deadline = time.monotonic() + PACKET_EXERCISE_SECONDS
+
+        def remaining_seconds() -> int:
+            remaining = exercise_deadline - time.monotonic()
+            if remaining < 1:
+                raise _error("packet exercise exceeded its complete bounded deadline")
+            return int(remaining)
+
         policy = TRAFFIC_POLICY[check_id]
         interface = self._tunnel_interface()
+        remaining_seconds()
         filter_argv = packet_capture_filter_argv(
             case_id=policy["case_id"],
             tokens=(tokens["start"], tokens["target"], tokens["end"]),
@@ -2469,6 +2526,10 @@ class ProductionCollectorRuntime:
         primary: BaseException | None = None
         cleanup_failure: GARuntimeAcceptanceError | None = None
         result: tuple[dict[str, Any], bytes] | None = None
+        send_commands: list[dict[str, Any]] = []
+        capture_bytes = b""
+        remaining_stderr = b""
+        output_complete = False
         try:
             if process.stdout is None or process.stderr is None or process.stdin is None:
                 raise _error("fixed tcpdump capture pipes are unavailable")
@@ -2483,7 +2544,7 @@ class ProductionCollectorRuntime:
                 raise _error("tcpdump output selector is unavailable") from error
             os.set_blocking(process.stderr.fileno(), False)
             selector.register(process.stderr, selectors.EVENT_READ)
-            deadline = time.monotonic() + 10
+            deadline = min(exercise_deadline, time.monotonic() + 10)
             ready = False
             while time.monotonic() < deadline and not ready:
                 if process.poll() is not None:
@@ -2499,22 +2560,33 @@ class ProductionCollectorRuntime:
                     ready = b"listening on" in prefix
             if not ready:
                 raise _error("tcpdump did not reach its bounded listening state")
-            send_commands = []
             for index, stage in enumerate(PACKET_STAGES):
-                send_commands.append(self.run(
-                    _packet_sender_argv(
-                        check_id=check_id,
-                        stage=stage,
-                        token=tokens[stage],
-                        local_address=TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"],
-                    ),
-                    timeout=60,
-                ))
+                argv = _packet_sender_argv(
+                    check_id=check_id,
+                    stage=stage,
+                    token=tokens[stage],
+                    local_address=TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"],
+                )
+                timeout = remaining_seconds()
+                receipt = self.run(argv, timeout=timeout)
+                send_commands.append(receipt)
+                # A failed start marker cannot authorize target/end traffic.
+                # Check each actual sender before advancing the capture stage.
+                _command(receipt, expected_argv=argv, expected_exit=0,
+                         label=f"{check_id} {stage} collection sender",
+                         maximum_seconds=timeout)
+                remaining_seconds()
                 if index < len(PACKET_STAGES) - 1:
+                    if exercise_deadline - time.monotonic() <= 1.1:
+                        raise _error("packet exercise has no time for the next marker")
                     time.sleep(1.1)
             try:
-                capture_bytes, remaining_stderr = process.communicate(timeout=30)
+                capture_bytes, remaining_stderr = process.communicate(
+                    timeout=remaining_seconds())
+                output_complete = True
             except subprocess.TimeoutExpired as error:
+                capture_bytes = error.output or b""
+                remaining_stderr = error.stderr or b""
                 raise _error("tcpdump did not finish the exact packet count") from error
             finished_at = _utc_now()
             stderr_bytes = bytes(prefix) + remaining_stderr
@@ -2601,6 +2673,7 @@ class ProductionCollectorRuntime:
             )
             duration = (window_end - window_start) * 1000
             observation_ms = duration.numerator // duration.denominator
+            remaining_seconds()
             result = (
                 {
                     "capture_command": capture_command,
@@ -2621,6 +2694,44 @@ class ProductionCollectorRuntime:
                     self._terminate_capture(process)
                 except GARuntimeAcceptanceError as error:
                     cleanup_failure = error
+                if isinstance(primary, Exception):
+                    retained: list[bytes] = []
+                    complete: list[bool] = []
+                    retention_errors: list[str] = []
+                    retention_deadline = time.monotonic() + 3
+                    for label, stream, captured, maximum in (
+                        ("pcap", process.stdout, capture_bytes, MAX_PCAP_BYTES),
+                        ("stderr", process.stderr, bytes(prefix) + remaining_stderr,
+                         MAX_COMMAND_OUTPUT_BYTES),
+                    ):
+                        try:
+                            if output_complete:
+                                data, finished = captured[:maximum], len(captured) <= maximum
+                            elif stream is None:
+                                data, finished = captured[:maximum], False
+                                retention_errors.append(f"{label}: pipe unavailable")
+                            else:
+                                data, finished = _failed_capture_pipe_snapshot(
+                                    stream, captured, maximum, retention_deadline)
+                        except (OSError, ValueError) as error:
+                            data, finished = captured[:maximum], False
+                            retention_errors.append(f"{label}: {type(error).__name__}")
+                        retained.append(data)
+                        complete.append(finished)
+                    if not isinstance(primary, GARuntimeAcceptanceError):
+                        wrapped = _error(str(primary))
+                        wrapped.__cause__ = primary
+                        primary = wrapped
+                    primary.packet_capture_failure = FailedPacketCaptureEvidence(
+                        check_id=check_id,
+                        command={"argv": capture_argv, "exit_code": process.returncode,
+                                 "started_at": started_at, "finished_at": _utc_now(),
+                                 "acceptance_valid": False},
+                        send_commands=tuple(send_commands),
+                        packet_bytes=retained[0], stderr_bytes=retained[1],
+                        outputs_complete=all(complete),
+                        retention_errors=tuple(retention_errors),
+                    )
             if selector is not None:
                 try:
                     selector.close()

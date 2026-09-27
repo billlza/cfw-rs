@@ -26,12 +26,14 @@ fi
 
 validate_candidate_output() {
   PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
-    "$repo_root" "$CFW_BUILD_NUMBER" "$CFW_NATIVE_PRODUCTS_OUTPUT" <<'PY'
+    "$repo_root" "$CFW_BUILD_NUMBER" "$CFW_NATIVE_PRODUCTS_OUTPUT" "$signing_mode" <<'PY'
 import sys
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
-from release_build_identity import candidate_native_products_output
+from release_build_identity import candidate_native_products_output, require_native_product_build_mode
+
+require_native_product_build_mode(sys.argv[2], sys.argv[4])
 
 print(candidate_native_products_output(Path(sys.argv[1]), sys.argv[3], sys.argv[2]))
 PY

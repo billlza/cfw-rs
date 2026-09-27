@@ -28,6 +28,20 @@ def _arguments(**overrides: object) -> argparse.Namespace:
 
 
 class PacketSenderTests(unittest.TestCase):
+    def test_dns_failure_preserves_resolver_errno_and_cause(self) -> None:
+        for code in (socket.EAI_AGAIN, socket.EAI_NONAME):
+            cause = socket.gaierror(code, "resolver fixture")
+            with self.subTest(code=code), patch.object(
+                packet_sender.socket, "getaddrinfo", side_effect=cause
+            ):
+                with self.assertRaises(packet_sender.PacketSendError) as failure:
+                    packet_sender._resolve_dns(
+                        family="ipv4", resolver_role="primary",
+                        token=b"packet-target-0001", absence_window_ms=0,
+                    )
+            self.assertIn(f"getaddrinfo errno={code}", str(failure.exception))
+            self.assertIs(failure.exception.__cause__, cause)
+
     def test_udp_uses_kernel_ephemeral_port_and_sends_exact_stage(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
             receiver.bind(("127.0.0.1", 0))

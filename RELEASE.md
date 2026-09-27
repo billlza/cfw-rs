@@ -471,16 +471,15 @@ in an isolated attempt journal until the ending identity matches the starting
 identity; output beyond the fixed 64 MiB streaming limit terminates the
 complete lane process group.
 
-The Tauri installer verifies the official 2.11.4 crate and its published lock,
-applies the digest-pinned `spin` 0.9.9 lock update, verifies the resulting lock,
-and installs only from that local source with `--locked` using isolated Cargo
+The Tauri installer verifies the official 2.12.0 crate and its unchanged published
+lock, and installs only from that local source with `--locked` using isolated Cargo
 home and target directories. It normalizes only Cargo's three exact root-level
 runtime tracking/lock files in the private offline cache copy, then proves the
 complete remaining registry tree is byte-identical before and after compilation.
 The normalization helper digest and policy are bound into the final toolchain
 manifest, and any fetch or install warning blocks the bootstrap. The sealed
-payload contains only its thin arm64 binary and clean patched crate source, lock, and licenses under
-`target/toolchains/tauri-cli-2.11.4`. Release scripts invoke that absolute
+payload contains only its thin arm64 binary and clean official crate source, lock, and licenses under
+`target/toolchains/tauri-cli-2.12.0`. Release scripts invoke that absolute
 binary; an ambient Cargo home cannot substitute it. Go, Node.js, XcodeGen,
 Tauri, the Go release tools, and the prepared Go module cache must each have a verified
 `sha256-tree-v2` manifest before use. A directory without its matching manifest,
@@ -1438,7 +1437,7 @@ current or legacy caller-supplied Tauri secret variable. It resets `PATH`,
 resolves one fixed Homebrew Python probe to a canonical interpreter, disables
 Python site customization with `-S`, and calls the source-pinned launcher in an
 empty, explicit environment with only the archive path.
-The launcher verifies the complete fixed Tauri 2.11.4 toolchain tree and signer
+The launcher verifies the complete fixed Tauri 2.12.0 toolchain tree and signer
 digest before requesting the password. It then opens the fixed owner-only key
 at `~/Library/Application Support/Clash for Mac Release/Updater/cfw-rs-v2.key`
 with `O_NOFOLLOW`, validates the private `~/Library` anchor and every held

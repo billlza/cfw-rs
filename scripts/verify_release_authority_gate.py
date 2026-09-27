@@ -4,6 +4,11 @@ import re
 import sys
 from pathlib import Path
 
+if __package__:
+    from .verify_production_boundary_removal import strip_comments_and_strings
+else:
+    from verify_production_boundary_removal import strip_comments_and_strings
+
 
 class AuthorityGateContractError(RuntimeError):
     pass
@@ -22,6 +27,122 @@ MUTATION_RE = re.compile(MUTATION_PATTERN, re.IGNORECASE)
 def require_text(text: str, expected: str, label: str) -> None:
     if expected not in text:
         raise AuthorityGateContractError(f"{label} is missing {expected!r}")
+
+
+def require_current_host_authority_binding(
+    bridge: str, clients: str, code_hash: str
+) -> None:
+    """Guard the reviewed Host composition, not the retired role-only spelling.
+
+    These are source-contract checks, not a Swift semantic proof. Ignore comments
+    and strings for executable fragments so prose cannot replace the binding.
+    Keep the role, embedded Authority selection and connection enforcement linked.
+    """
+    def compact(source: str, *, strings: bool = False) -> str:
+        return re.sub(
+            r"\s+", "",
+            strip_comments_and_strings(source, "swift", strip_strings=not strings),
+        )
+
+    bridge_code = compact(bridge)
+    client_code = compact(clients)
+    require_text(
+        bridge_code,
+        compact("""let proxyAgentService = SMProxyAgentService()
+          let authorityDaemonService = SMGlobalAuthorityDaemonService()
+          let serviceMaintainer = CurrentAppServiceMaintainer(
+            proxyAgent: proxyAgentService, globalAuthority: authorityDaemonService)
+          let serviceBuildObserver = try CurrentAppServiceBuildObserver(services: serviceMaintainer)"""),
+        "Host embedded service identity",
+    )
+    require_text(
+        bridge_code,
+        compact("""let authorityClient = RegistrationGatedAuthorityClient(
+          serviceController: SMGlobalAuthorityServiceController(service: authorityDaemonService),
+          authority: BoundedAuthorityXPCClient(remote: NSXPCGlobalAuthorityRemote(
+            currentHostCodeHash: try serviceBuildObserver.currentCodeHash(for: .globalAuthority))))"""),
+        "Host current Authority composition",
+    )
+    require_text(
+        bridge_code,
+        compact("""currentCodeHash: try serviceBuildObserver.currentCodeHash(for: .proxyAgent),
+          serviceController: SMProxyAgentServiceController(service: proxyAgentService)"""),
+        "Host shared Proxy service lifecycle",
+    )
+    require_text(
+        bridge_code,
+        compact("""serviceMaintainer: serviceMaintainer, serviceBuildObserver: serviceBuildObserver"""),
+        "Host shared maintenance lifecycle",
+    )
+    require_text(
+        client_code,
+        compact("""public convenience init(currentHostCodeHash: ServiceCodeHash) {
+          self.init(role: .host)
+          buildPolicy = .currentHost(currentHostCodeHash)
+        }"""),
+        "Host Authority role and build policy",
+    )
+    require_text(
+        client_code,
+        compact("""switch buildPolicy {
+          case .currentHost: requiresCurrentBuild = method == .prepareStart
+          case .protocolPeer: requiresCurrentBuild = false
+        }"""),
+        "Host Authority start code requirement",
+    )
+    require_text(
+        client_code,
+        compact("""case .currentHost(let hash):
+          requirement = buildConstraint.requirement(
+            base: GlobalAuthorityConnectionContract.authorityDesignatedRequirement,
+            currentCodeHash: hash, requestingCurrentBuild: requiresCurrentBuild)
+          case .protocolPeer:"""),
+        "Host Authority designated requirement plus current code",
+    )
+    require_text(
+        client_code,
+        compact("""let value = NSXPCConnection(
+          machServiceName: machServiceName, options: .privileged)
+          value.setCodeSigningRequirement(requirement)
+          value.remoteObjectInterface = NSXPCInterface("""),
+        "Host Authority connection enforcement",
+    )
+    require_authority_before(
+        client_code, "privatefuncconnected(",
+        "value.setCodeSigningRequirement(requirement)", "value.activate()",
+        "Host Authority connection activation",
+    )
+    hash_code = compact(code_hash)
+    require_text(
+        hash_code,
+        compact("""package mutating func select(requestingCurrentBuild: Bool) -> Bool {
+          requiresCurrentBuild = requiresCurrentBuild || requestingCurrentBuild
+          return requiresCurrentBuild
+        }"""),
+        "Host Authority reconnect code constraint",
+    )
+    require_text(
+        hash_code,
+        compact("""select(requestingCurrentBuild: requestingCurrentBuild)
+          ? currentCodeHash.constraining(base) : base"""),
+        "Host Authority selected code constraint",
+    )
+    hash_surface = strip_comments_and_strings(code_hash, "swift")
+    builders = list(re.finditer(
+        r"package\s+func\s+constraining\s*\(\s*_\s+requirement\s*:\s*String\s*\)"
+        r"\s*->\s*String\s*\{", hash_surface,
+    ))
+    if len(builders) != 1:
+        raise AuthorityGateContractError("Host Authority additive CDHash builder is missing or ambiguous")
+    builder = builders[0]
+    builder_end = _matching_brace(hash_surface, builder.end() - 1)
+    require_text(
+        compact(code_hash[builder.start() : builder_end + 1], strings=True),
+        compact(r'''package func constraining(_ requirement: String) -> String {
+          requirement + " and cdhash H\"\(bytes.map { String(format: "%02x", $0) }.joined())\""
+        }''', strings=True),
+        "Host Authority additive CDHash requirement",
+    )
 
 
 def _matching_brace(text: str, opening: int) -> int:
@@ -153,7 +274,6 @@ def verify_repository(root: Path) -> None:
     compositions = {
         "native/macos/Sources/CFWNativeBridge/NativeBridgeABI.swift": (
             "RegistrationGatedAuthorityClient(",
-            "NSXPCGlobalAuthorityRemote(role: .host)",
             "AuthorityBackedTunnelStartPreparer(",
             "AuthorityBackedSystemProxyStartPreparer(",
         ),
@@ -172,6 +292,12 @@ def verify_repository(root: Path) -> None:
         text = (root / relative).read_text(encoding="utf-8")
         for expected in required:
             require_text(text, expected, relative)
+
+    require_current_host_authority_binding(
+        (root / "native/macos/Sources/CFWNativeBridge/NativeBridgeABI.swift").read_text(encoding="utf-8"),
+        (root / "native/macos/Sources/CFWSharedProtocol/AuthorityClients.swift").read_text(encoding="utf-8"),
+        (root / "native/macos/Sources/CFWSharedProtocol/ServiceCodeHash.swift").read_text(encoding="utf-8"),
+    )
 
     source_roots = [
         root / "native/macos/Sources",

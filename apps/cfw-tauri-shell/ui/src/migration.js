@@ -120,8 +120,14 @@ export function normalizeBootPayload(value) {
     "migration_handoff_renderer_ready",
     "migration_handoff_status",
     "product",
+    "native_ui",
   ])) {
     throw new TypeError("boot payload fields are invalid");
+  }
+  if (!exactKeys(value.native_ui, ["profile_menu", "runtime_settings", "general_switches"])
+    || typeof value.native_ui.profile_menu !== "boolean" || typeof value.native_ui.runtime_settings !== "boolean"
+    || typeof value.native_ui.general_switches !== "boolean") {
+    throw new TypeError("boot native UI capabilities are invalid");
   }
   if (!exactKeys(value.product, ["architecture", "license", "minimum_macos", "name", "version"])) {
     throw new TypeError("boot product fields are invalid");
@@ -156,6 +162,7 @@ export function normalizeBootPayload(value) {
   }
   return {
     product,
+    native_ui: { ...value.native_ui },
     migration_handoff: value.migration_handoff,
     migration_handoff_status: migrationHandoffStatus,
     migration_handoff_renderer_ready: rendererReady === null ? null : { ...rendererReady },

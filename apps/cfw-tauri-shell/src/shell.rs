@@ -255,10 +255,23 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::maximize(app, Some(&crate::i18n::text(app, "Zoom")))?,
         ],
     )?;
+    #[cfg(feature = "native-dashboard")]
+    window.append(&MenuItem::with_id(
+        app,
+        "native-overview",
+        crate::i18n::text(app, "Native Overview"),
+        true,
+        Some("CmdOrCtrl+Shift+O"),
+    )?)?;
     Menu::with_items(app, &[&app_menu, &edit, &window])
 }
 
 pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
+    #[cfg(feature = "native-dashboard")]
+    if id == "native-overview" {
+        crate::native_dashboard::open(app.clone());
+        return;
+    }
     match app_menu_action(id) {
         Some(AppMenuAction::OpenPage(page)) => show_main_page(app, page),
         Some(AppMenuAction::CheckForUpdates(page)) => {

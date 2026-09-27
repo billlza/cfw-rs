@@ -7,6 +7,20 @@ use super::*;
 const SYNTHETIC_VM_UUID: &str = "00000000-0000-4000-8000-000000000001";
 const SYNTHETIC_PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
+#[test]
+fn empty_clash_routing_rules_remain_explicit_errors() {
+    for scalar in ["", "~", "''", "!!str"] {
+        let document = format!(
+            "proxies:\n  - {{name: Node, type: socks5, server: node.example.com, port: 1080}}\nrules:\n  - {scalar}\n"
+        );
+        let error = import_subscription_document(&document).expect_err("empty routing rule");
+        assert!(
+            error.contains("rules[0] has an unsupported rule shape"),
+            "{error}"
+        );
+    }
+}
+
 fn vmess_uri_with_aid(aid: Option<Value>) -> String {
     let mut payload = json!({
         "ps": "Synthetic VMess",

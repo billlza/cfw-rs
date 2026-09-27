@@ -87,6 +87,16 @@ pub(crate) fn text(app: &AppHandle, message: &str) -> String {
         .map_or_else(|| message.to_owned(), Clone::clone)
 }
 
+#[cfg(feature = "native-dashboard")]
+pub(crate) fn locale_identifier(app: &AppHandle) -> &'static str {
+    match app.state::<NativeLanguage>().load() {
+        UiLanguage::SimplifiedChinese => "zh-Hans",
+        UiLanguage::TraditionalChinese => "zh-Hant",
+        UiLanguage::Japanese => "ja",
+        UiLanguage::English | UiLanguage::System => "en",
+    }
+}
+
 pub(crate) async fn apply(app: &AppHandle, language: UiLanguage) -> Result<(), String> {
     let resolved = crate::startup_state::prepare_off_main(move || prepare(language)).await?;
     if app.state::<NativeLanguage>().load() == resolved {
@@ -99,6 +109,9 @@ pub(crate) async fn apply(app: &AppHandle, language: UiLanguage) -> Result<(), S
         Ok(())
     })
     .await?;
+    #[cfg(feature = "native-dashboard")]
+    tauri::Emitter::emit(app, "cfm://native-overview-locale", ())
+        .map_err(|error| format!("native overview language update failed: {error}"))?;
     if app.tray_by_id(crate::shell::TRAY_ID).is_some() {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {

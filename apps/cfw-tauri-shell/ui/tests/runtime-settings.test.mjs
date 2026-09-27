@@ -1,9 +1,65 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRuntimeSettingsUI, preferencesFromRuntimeDraft, runtimeDraft } from "../src/runtime-settings.js";
+import { acceptNativeRuntimeDraft, createRuntimeSettingsUI, preferencesFromRuntimeDraft, runtimeDraft } from "../src/runtime-settings.js";
 
 const preferences = { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null };
 const response = () => ({ settings:structuredClone(preferences), revision:null, effective:{mixed_port:7890,log_level:"info",tunnel_mtu:1500,ipv6_dns_enabled:true,lan_proxy:null} });
+
+function nativeDraft(draft, edits = {}) {
+  const { initialIPv6DNS, ipv6DNSInherited, ...fields } = draft;
+  return { ...fields, ipv6DNSEdited: !ipv6DNSInherited, ...edits };
+}
+
+test("native form retains inherited IPv6 unless explicitly touched and rejects expanded drafts", () => {
+  const prior = runtimeDraft(preferences, { ipv6_dns_enabled: false });
+  const retained = acceptNativeRuntimeDraft(prior, nativeDraft(prior, { level: "debug" }));
+  assert.equal(Object.hasOwn(preferencesFromRuntimeDraft(retained), "ipv6_dns_enabled"), false);
+  const touched = acceptNativeRuntimeDraft(prior, nativeDraft(prior, { ipv6DNSEdited: true }));
+  assert.equal(preferencesFromRuntimeDraft(touched).ipv6_dns_enabled, false, "choosing then reverting is still explicit");
+  for (const invalid of [
+    { ...nativeDraft(prior), revision: "forged" },
+    nativeDraft(prior, { ipv6DNS: "false" }), nativeDraft(prior, { ipv6DNSEdited: 1 }),
+    nativeDraft(prior, { level: "other" }), nativeDraft(prior, { lanSources: "x".repeat(8193) }),
+  ]) assert.throws(() => acceptNativeRuntimeDraft(prior, invalid), /draft is invalid/u);
+});
+
+test("native settings submit uses the unchanged LAN validation, save revision and retained failure draft", async () => {
+  globalThis.document = { documentElement: { dataset: { theme: "dark" } } };
+  const state = { toggles: {}, engineMutationBusy: false, migrationHandoff: false };
+  const writes = [], frames = [];
+  let callbacks, rejectWrite, signalWrite;
+  const started = new Promise((resolve) => { signalWrite = resolve; });
+  const ui = createRuntimeSettingsUI({ state,
+    invoke: async (command, args) => {
+      if (command === "read_runtime_settings_snapshot") return { ...response(), revision: "original" };
+      assert.equal(command, "write_runtime_settings_snapshot");
+      writes.push(args); signalWrite();
+      await new Promise((_, reject) => { rejectWrite = reject; });
+    },
+    nativeDialog: { enabled: () => true, sync: (dialog, frame, handlers) => { frames.push(frame); callbacks = handlers; return null; } },
+    appendLog() {}, renderPage() {}, refreshRuntime() {}, dismissOtherDialogs() {},
+  });
+  await ui.open(true);
+  const dialog = state.runtimeSettingsDialog;
+  assert.match(ui.renderDialog(), /data-runtime-dismiss/u);
+  assert.equal(frames.at(-1).appearance, "dark");
+  await callbacks.onSubmit(nativeDraft(dialog.draft));
+  assert.equal(writes.length, 0, "opening native controls cannot grant LAN access");
+  assert.match(dialog.error, /trusted LAN source ranges/u);
+  const submitted = nativeDraft(dialog.draft, { lanSources: "192.168.1.0/24", port: "8990" });
+  const saving = callbacks.onSubmit(submitted);
+  await started;
+  assert.equal(dialog.saving, true);
+  ui.close(); assert.equal(state.runtimeSettingsDialog, dialog);
+  assert.equal(writes[0].revision, "original");
+  assert.equal(writes[0].settings.preferred_mixed_port, 8990);
+  rejectWrite(new Error("revision conflict"));
+  await saving;
+  assert.equal(state.runtimeSettingsDialog, dialog);
+  assert.equal(dialog.saving, false);
+  assert.equal(dialog.draft.port, "8990");
+  assert.match(dialog.error, /revision conflict/u);
+});
 
 test("runtime drafts require an explicit LAN scope and preserve automatic port selection", () => {
   const draft = runtimeDraft(preferences);

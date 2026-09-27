@@ -48,6 +48,31 @@ Reality and ECH cannot be combined.
 
 ## DNS transports
 
+### 0.5 preview bootstrap policy
+
+The next preview reuses suitable encrypted transports from `dns.servers` when
+`dns.bootstrap_servers` is absent. Each inherited resolver must have a usable
+numeric address and either an omitted route or explicit `direct` route. Its
+transport, port, TLS identity, certificate policy and configured order are
+preserved. Equivalent direct transports are deduplicated. Ordinary DNS keeps
+its original routing policy; only proxy-endpoint bootstrap uses the independent
+connection. Explicit `selected` or `rules` routes are never changed into direct
+bootstrap connections.
+
+An explicit `bootstrap_servers` pool always wins. If no eligible profile
+transport exists, the application bootstrap defaults retain their prior
+behavior. Failure of an inherited encrypted pool does not add a plaintext
+fallback. Named DNS endpoints still require explicit numeric bootstrap and
+disabled IPv6 still rejects IPv6-only DNS endpoints. No profile migration,
+credential replacement or system DNS change is performed by this projection.
+
+This source change is not present in frozen preview 50019. Its installed
+same-node HTTP/SOCKS5 test passed with an explicit encrypted bootstrap setting;
+the automatic selection still requires a new signed preview and installed
+validation.
+
+### Supported profile transports
+
 The optional top-level `dns.servers` array accepts one primary resolver and one
 optional fallback. Supported types are `udp`, `tcp`, `tls` (DoT), `quic`
 (DoQ), `https` (DoH), and `h3` (DoH over HTTP/3). For example:

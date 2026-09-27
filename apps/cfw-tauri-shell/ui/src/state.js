@@ -55,6 +55,7 @@ export const defaultEngineStatus = {
   tunnelAvailable: false,
   providerManagementAvailable: false,
   availabilityReason: null,
+  startupRecoveryAvailable: false,
   cutoverReady: false,
   cutoverReason: null,
   generation: 0,

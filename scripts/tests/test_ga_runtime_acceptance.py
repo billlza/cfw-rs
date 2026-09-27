@@ -9,9 +9,10 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts import ga_runtime_acceptance as ga_runtime
 from scripts.ga_runtime_acceptance import (
@@ -1731,6 +1732,89 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 with self.assertRaisesRegex(GARuntimeAcceptanceError, "ordinary release account"):
                     ga_runtime._capture_command_argv("utun6", 3, ())
 
+    def test_sender_failure_or_expired_budget_stops_before_later_markers(self) -> None:
+        for sender_seconds, exit_code, message in (
+            (0, 1, "start collection sender"),
+            (46, 0, "complete bounded deadline"),
+        ):
+            with self.subTest(sender_seconds=sender_seconds, exit_code=exit_code):
+                runtime = self._capture_runtime()
+                process = self._CaptureProcess(self._CapturePipe(21), self._CapturePipe(22))
+                process.poll = lambda: None
+                def communicate(timeout):
+                    process.returncode = 0
+                    return b"bounded fixture packet bytes", b""
+                process.communicate = communicate
+                selector = MagicMock()
+                selector.select.return_value = [(SimpleNamespace(fd=22), 0)]
+                elapsed = [0.0]
+                sent = []
+                def send(argv, *, timeout):
+                    sent.append((argv[argv.index("--stage") + 1], timeout))
+                    elapsed[0] += sender_seconds
+                    return command(argv, exit_code=exit_code, stderr="resolver failed" if exit_code else "")
+                with patch.object(runtime, "_tunnel_interface", return_value="utun6"), \
+                     patch.object(runtime, "run", side_effect=send), \
+                     patch.object(runtime, "_terminate_capture") as terminate, \
+                     patch.object(ga_runtime.subprocess, "Popen", return_value=process), \
+                     patch.object(ga_runtime.selectors, "DefaultSelector", return_value=selector), \
+                     patch.object(ga_runtime.os, "set_blocking"), \
+                     patch.object(ga_runtime.os, "read", side_effect=[b"listening on utun6\n", b"failed fixture packet", b"", b""]), \
+                     patch.object(ga_runtime.time, "monotonic", side_effect=lambda: elapsed[0]), \
+                     patch.object(ga_runtime.time, "sleep"), \
+                     patch.object(ga_runtime, "parse_packet_capture", return_value=SimpleNamespace(interfaces=[SimpleNamespace(link_type=0)])):
+                    with self.assertRaisesRegex(GARuntimeAcceptanceError, message) as failure:
+                        runtime._capture_traffic_bytes("dns_traffic", RuntimeFixture._traffic_tokens("dns_traffic"))
+                self.assertEqual([stage for stage, _ in sent], ["start"])
+                self.assertLessEqual(sent[0][1], 35)
+                terminate.assert_called_once_with(process)
+                self.assertTrue(process.stdout.closed)
+                self.assertTrue(process.stderr.closed)
+                retained = failure.exception.packet_capture_failure
+                self.assertEqual(retained.packet_bytes, b"failed fixture packet")
+                self.assertEqual(retained.stderr_bytes, b"listening on utun6\n")
+                self.assertTrue(retained.outputs_complete)
+                self.assertIs(retained.command["acceptance_valid"], False)
+                self.assertEqual(len(retained.send_commands), 1)
+                self.assertEqual(retained.retention_errors, ())
+
+    def test_interface_discovery_is_inside_complete_exercise_deadline(self) -> None:
+        runtime = self._capture_runtime()
+        elapsed = [0.0]
+        def interface():
+            elapsed[0] = 46.0
+            return "utun6"
+        with patch.object(runtime, "_tunnel_interface", side_effect=interface), \
+             patch.object(ga_runtime.time, "monotonic", side_effect=lambda: elapsed[0]), \
+             patch.object(ga_runtime.subprocess, "Popen") as spawn:
+            with self.assertRaisesRegex(GARuntimeAcceptanceError, "complete bounded deadline"):
+                runtime._capture_traffic_bytes("dns_traffic", RuntimeFixture._traffic_tokens("dns_traffic"))
+        spawn.assert_not_called()
+
+    def test_failed_capture_pipe_retention_is_bounded_and_distinguishes_eof(self) -> None:
+        for maximum, close_writer, expected, complete in (
+            (8, True, b"prefix12", False),
+            (32, True, b"prefix12345", True),
+            (32, False, b"prefix12345", False),
+        ):
+            with self.subTest(maximum=maximum, close_writer=close_writer):
+                read_fd, write_fd = os.pipe()
+                try:
+                    os.write(write_fd, b"12345")
+                    if close_writer:
+                        os.close(write_fd)
+                        write_fd = None
+                    with os.fdopen(read_fd, "rb", buffering=0) as stream:
+                        read_fd = None
+                        result = ga_runtime._failed_capture_pipe_snapshot(
+                            stream, b"prefix", maximum, ga_runtime.time.monotonic() + 1)
+                        self.assertEqual(result, (expected, complete))
+                finally:
+                    if read_fd is not None:
+                        os.close(read_fd)
+                    if write_fd is not None:
+                        os.close(write_fd)
+
     def test_capture_selector_initialization_failure_cleans_all_resources(
         self,
     ) -> None:
@@ -1756,7 +1840,9 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 ), patch.object(
                     runtime,
                     "_terminate_capture",
-                ) as terminate, self.assertRaises(
+                ) as terminate, patch.object(
+                    ga_runtime, "_failed_capture_pipe_snapshot", return_value=(b"", False),
+                ), self.assertRaises(
                     GARuntimeAcceptanceError
                 ) as captured:
                     runtime._capture_traffic_bytes(
@@ -1910,6 +1996,43 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 exercise_test=complete,
                 finish_capture=complete,
             )
+
+    def test_host_readiness_never_retries_when_process_cleanup_is_unproven(self) -> None:
+        for code in ("baseline_mismatch", "baseline_unavailable", "tunnel_unavailable", "app_control_unavailable"):
+            with self.subTest(code=code):
+                failure = PacketHostError(code, "initial transaction was not admitted")
+                failure.attach_cleanup_context(PacketHostError("host_cleanup_unproven", "owned group remains"))
+                def complete(_stage: object) -> PacketCaptureDisposition:
+                    self.fail("a failed readiness transaction cannot reach capture callbacks")
+                with patch("scripts.ga_runtime_acceptance.run_fixed_host_transaction", side_effect=[failure, typed_host_receipt("tcp-ipv4")]) as transaction, \
+                     patch("scripts.ga_runtime_acceptance.time.monotonic", return_value=0.0), \
+                     patch("scripts.ga_runtime_acceptance.time.sleep") as sleep, \
+                     patch("scripts.ga_runtime_acceptance.sys.stderr", new_callable=io.StringIO) as diagnostic:
+                    with self.assertRaises(PacketHostError) as raised:
+                        ProductionCollectorRuntime._run_packet_host_transaction(
+                            case_id="tcp-ipv4", begin_capture=complete,
+                            exercise_test=complete, finish_capture=complete)
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(raised.exception.cleanup_code, "host_cleanup_unproven")
+                transaction.assert_called_once_with(case_id="tcp-ipv4", begin_capture=complete,
+                                                    exercise_test=complete, finish_capture=complete)
+                sleep.assert_not_called()
+                self.assertEqual(diagnostic.getvalue(), "")
+
+    def test_host_readiness_still_retries_clean_app_control_failure(self) -> None:
+        unavailable = PacketHostError("app_control_unavailable", "Host is starting")
+        expected = typed_host_receipt("tcp-ipv4")
+        def complete(_stage: object) -> PacketCaptureDisposition:
+            return PacketCaptureDisposition.COMPLETE
+        with patch("scripts.ga_runtime_acceptance.run_fixed_host_transaction", side_effect=[unavailable, expected]) as transaction, \
+             patch("scripts.ga_runtime_acceptance.time.monotonic", return_value=0.0), \
+             patch("scripts.ga_runtime_acceptance.time.sleep") as sleep:
+            receipt = ProductionCollectorRuntime._run_packet_host_transaction(
+                case_id="tcp-ipv4", begin_capture=complete,
+                exercise_test=complete, finish_capture=complete)
+        self.assertIs(receipt, expected)
+        self.assertEqual(transaction.call_count, 2)
+        sleep.assert_called_once_with(0.25)
 
     def test_collect_observes_extension_after_first_operator_approval(self) -> None:
         runtime = FakeCollectorRuntime(self.fixture)

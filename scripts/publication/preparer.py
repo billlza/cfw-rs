@@ -430,15 +430,15 @@ _SOURCE_CLOSURE_PLANS = {
     },
     "tauri-cli": {
         "classification": "official-registry-source-archive",
-        "upstream": "https://crates.io/crates/tauri-cli/2.11.4",
-        "reference": "tauri-cli-2.11.4.crate",
+        "upstream": "https://crates.io/crates/tauri-cli/2.12.0",
+        "reference": "tauri-cli-2.12.0.crate",
         "closure_action": (
-            "bind the crates.io checksum, published Cargo.lock checksum, digest-pinned dependency lock "
-            "update, patched Cargo.lock checksum, cargo-install record, executable SHA-256, and "
+            "bind the crates.io checksum, unchanged published Cargo.lock checksum, "
+            "cargo-install record, executable SHA-256, and "
             "version as external build-tool provenance"
         ),
         "acceptance": (
-            "bind crate checksum, extracted tree digest, both lock checksums, lock-patch checksum, "
+            "bind crate checksum, extracted tree digest, unchanged published Cargo.lock checksum, "
             "cargo-install identity, and binary version"
         ),
     },

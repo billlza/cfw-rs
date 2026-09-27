@@ -68,7 +68,7 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' ci-no-masking
       - name: Verify evidence manifest lane (positive and negative)
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' evidence-manifest-lane
-      - name: Verify 0.4.0 version contract
+      - name: Verify 0.5.0 preview version contract
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' version-contract
       - name: Check Rust formatting
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-fmt
@@ -258,8 +258,9 @@ jobs:
           TMPDIR: ${{ runner.temp }}
       - name: Exercise real pinned updater signer boundary
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' updater-signer-integration
-      - name: Build and verify unsigned application skeleton
+      - name: Build and verify unsigned 0.5.0 validation skeleton (50000)
         run: >-
           ./scripts/build_unsigned_candidate.sh
+          --preview-validation
           --validation-python-executable
           '${{ steps.validation-python.outputs.python-path }}'

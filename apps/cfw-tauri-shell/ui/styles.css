@@ -3263,3 +3263,56 @@ html.native-window-glass .provider-section,
 html.native-window-glass .profile-inspector {
   gap: 8px;
 }
+
+/* The startup recovery notice: plain words first, the host's reason behind a
+ * disclosure. */
+.cfw-row-notice {
+  align-items: flex-start;
+  min-height: 0;
+  padding: 10px 4px;
+}
+
+.cfw-row-notice .cfw-row-left {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  line-height: 1.5;
+}
+
+.cfw-row-notice strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.cfw-row-notice span,
+.cfw-row-notice li {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cfw-row-notice-action strong {
+  color: var(--warn);
+}
+
+.cfw-row-notice ol {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.cfw-notice-detail {
+  margin-top: 4px;
+}
+
+.cfw-notice-detail summary {
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cfw-notice-detail small {
+  display: block;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-word;
+}

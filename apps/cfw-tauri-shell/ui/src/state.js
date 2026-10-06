@@ -226,6 +226,11 @@ export const primaryNavIds = new Set(PAGES.map((page) => page.id));
 export const MAX_LOG_ROWS = 200;
 export const MAX_CONNECTION_ROWS = 500;
 export const runtime = {
+  // A fresh installation restarts the background services while the dashboard
+  // makes its first status read. The host then offers the explicit recovery;
+  // the dashboard asks for it by itself at these delays before it asks the
+  // user. `attempts` counts the automatic requests of this process.
+  startupRecovery: { delays: [4000, 12000], attempts: 0, timer: null, exhausted: false },
   savedProfilePolicyEpoch: 0,
   renderFrame: null,
   connectionsPatchFrame: null,

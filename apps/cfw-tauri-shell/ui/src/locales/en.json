@@ -763,5 +763,13 @@
   "v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.": "v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.",
   "The native dialog could not deliver this action. Close it and try again.": "The native dialog could not deliver this action. Close it and try again.",
   "Native presentation of “{title}” failed: {error}": "Native presentation of “{title}” failed: {error}",
-  "Native window glass failed: {error}": "Native window glass failed: {error}"
+  "Native window glass failed: {error}": "Native window glass failed: {error}",
+  "Automatic background service recovery did not succeed yet: {error}": "Automatic background service recovery did not succeed yet: {error}",
+  "Technical details": "Technical details",
+  "Background services are restarting": "Background services are restarting",
+  "This happens after an installation or update. The dashboard retries by itself in a few seconds.": "This happens after an installation or update. The dashboard retries by itself in a few seconds.",
+  "Background services need your help": "Background services need your help",
+  "Click “{button}” on the core row.": "Click “{button}” on the core row.",
+  "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.": "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.",
+  "If it still fails, quit and reopen Clash for Mac.": "If it still fails, quit and reopen Clash for Mac."
 }

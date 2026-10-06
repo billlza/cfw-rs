@@ -165,11 +165,11 @@ fn parse_owned_process(
     mut executables: impl Iterator<Item = PathBuf>,
 ) -> Result<Option<ProcessRecord>, String> {
     let mut fields = line.split_ascii_whitespace();
-    let uid = fields
-        .next()
-        .ok_or_else(|| "ps process record is missing uid".to_owned())?
-        .parse::<u32>()
-        .map_err(|error| format!("ps process record has invalid uid: {error}"))?;
+    let uid = parse_uid(
+        fields
+            .next()
+            .ok_or_else(|| "ps process record is missing uid".to_owned())?,
+    )?;
     let pid = fields
         .next()
         .ok_or_else(|| "ps process record is missing pid".to_owned())?
@@ -192,6 +192,21 @@ fn parse_owned_process(
         executable,
         command,
     }))
+}
+
+/// `ps` renders a uid as a signed 32-bit number, so the `nobody` user
+/// (4294967294) appears as `-2`. Both renderings name the same uid.
+fn parse_uid(field: &str) -> Result<u32, String> {
+    let signed = field
+        .parse::<i64>()
+        .map_err(|error| format!("ps process record has invalid uid: {error}"))?;
+    let unsigned = if signed < 0 {
+        signed + (1_i64 << 32)
+    } else {
+        signed
+    };
+    u32::try_from(unsigned)
+        .map_err(|_| format!("ps process record has invalid uid: {field} is outside the uid range"))
 }
 
 /// Observe network-capable legacy runtime, not the presence of old user files.

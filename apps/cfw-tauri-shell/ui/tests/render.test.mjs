@@ -475,6 +475,9 @@ responses.profiles_snapshot = async () => {
 
 const appModule = await import("../src/app.js");
 const { PAGES, state, runtime } = await import("../src/state.js");
+// The dashboard's own startup recovery attempts are timed; the tests below
+// that exercise them set their own delays, every other test runs without.
+runtime.startupRecovery.delays = [];
 let bootstrapDeadline;
 try {
   await Promise.race([
@@ -4285,6 +4288,73 @@ test("startup service recovery is explicit, bounded to one request and stays Off
     delete responses.reconcile_startup_services;
     state.engineMutationError = originalError;
     state.migrationHandoff = originalHandoff;
+    await setEngine(originalEngine);
+  }
+});
+
+test("startup recovery is asked for by the dashboard itself after an installation and then explained", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalError = state.engineMutationError;
+  const failure = {
+    ...OFF_ENGINE,
+    snapshot: { desired_mode: "off", generation: 0, config_digest: null,
+      state: { state: "failed", target: "off", generation: 0, error: "CleanupUnproven: Global cleanup could not be proven." } },
+    startup_recovery_available: true,
+  };
+  const settle = async (predicate, label) => {
+    for (let waited = 0; waited < 2000; waited += 10) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  };
+  try {
+    runtime.startupRecovery.delays = [80, 80];
+    runtime.startupRecovery.attempts = 0;
+    runtime.startupRecovery.exhausted = false;
+    let calls = 0;
+    responses.reconcile_startup_services = () => {
+      calls += 1;
+      if (calls === 1) throw new Error("services still restarting");
+      return OFF_ENGINE;
+    };
+    await setEngine(failure);
+    const waiting = await renderPage("general");
+    assert.match(waiting, /Background services are restarting/u);
+    assert.match(waiting, /Global cleanup could not be proven/u, "the host's reason stays as technical detail");
+    assert.doesNotMatch(waiting, /Background services need your help/u);
+    await settle(() => calls === 2 && state.engine.state === "Off", "the second automatic attempt");
+    assert.equal(runtime.startupRecovery.attempts, 0, "a recovered engine ends and forgets the attempts");
+    assert.equal(runtime.startupRecovery.exhausted, false);
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+
+    // The host keeps refusing: after the last automatic attempt the page
+    // tells the user what to do, with the recovery button still there.
+    calls = 0;
+    responses.reconcile_startup_services = () => { calls += 1; throw new Error("services never came back"); };
+    await setEngine(failure);
+    assert.equal(runtime.startupRecovery.attempts, 1, "a fresh failure schedules the first attempt again");
+    assert.match(await renderPage("general"), /Background services are restarting/u);
+    await settle(() => runtime.startupRecovery.exhausted, "the attempts to be exhausted");
+    assert.equal(calls, 2);
+    const explained = await renderPage("general");
+    assert.match(explained, /Background services need your help/u);
+    assert.match(explained, /Login Items/u);
+    assert.match(explained, /data-action="reconcile-startup-services"/u);
+    assert.match(explained, /services never came back/u);
+
+    // A recovery the user asks for while the attempts are exhausted still works.
+    responses.reconcile_startup_services = () => OFF_ENGINE;
+    await appModule.handleAction("reconcile-startup-services");
+    assert.equal(state.engine.state, "Off");
+    assert.equal(runtime.startupRecovery.exhausted, false);
+    assert.equal(runtime.startupRecovery.attempts, 0);
+  } finally {
+    runtime.startupRecovery.delays = [];
+    runtime.startupRecovery.attempts = 0;
+    runtime.startupRecovery.exhausted = false;
+    delete responses.reconcile_startup_services;
+    state.engineMutationError = originalError;
     await setEngine(originalEngine);
   }
 });

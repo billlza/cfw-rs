@@ -763,5 +763,13 @@
   "v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.": "v{version} 已可安裝。Clash for Mac 將停止核心、結束並重新開啟。",
   "The native dialog could not deliver this action. Close it and try again.": "原生對話框未能提交此操作。請關閉後重試。",
   "Native presentation of “{title}” failed: {error}": "「{title}」的原生對話框顯示失敗：{error}",
-  "Native window glass failed: {error}": "原生視窗玻璃顯示失敗：{error}"
+  "Native window glass failed: {error}": "原生視窗玻璃顯示失敗：{error}",
+  "Automatic background service recovery did not succeed yet: {error}": "背景服務自動復原暫未成功：{error}",
+  "Technical details": "技術詳情",
+  "Background services are restarting": "背景服務正在重新啟動",
+  "This happens after an installation or update. The dashboard retries by itself in a few seconds.": "安裝或更新後會出現這種情況，幾秒後會自動重試，無需操作。",
+  "Background services need your help": "背景服務需要你的操作",
+  "Click “{button}” on the core row.": "點擊核心列的「{button}」。",
+  "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.": "如果 macOS 跳出「背景項目」提示，請打開 系統設定 → 一般 → 登入項目與延伸功能，允許 Clash for Mac。",
+  "If it still fails, quit and reopen Clash for Mac.": "仍然失敗時，結束並重新打開 Clash for Mac。"
 }

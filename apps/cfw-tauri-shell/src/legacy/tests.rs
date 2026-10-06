@@ -145,6 +145,33 @@ fn normal_start_rejects_real_legacy_runtime_but_not_cfw_or_unused_files() {
     assert!(require_no_legacy_runtime_processes("invalid process record", cores).is_err());
 }
 
+/// `ps` prints the uid of `nobody` (4294967294) as `-2`, and such a process
+/// is in every macOS process table. It is not a legacy runtime and must not
+/// make the whole table unreadable, which would refuse every network start.
+#[test]
+fn a_process_of_the_nobody_user_does_not_make_the_process_table_unreadable() {
+    let cores = Path::new("/Users/test/Library/Application Support/Clash for Mac/cores");
+    let table = "    -2 47975 Mon Oct  5 17:30:27 2026     /usr/libexec/dhcp6d\n    0 18 Mon Sep 7 10:00:00 2026 /sbin/launchd\n";
+    require_no_legacy_runtime_processes(table, cores)
+        .expect("nobody's process is not a legacy runtime");
+    let record = parse_managed_process(
+        &format!(
+            "-2 19 Mon Sep 7 10:00:00 2026 {}",
+            cores.join("mihomo").display()
+        ),
+        cores,
+    )
+    .expect("a readable record")
+    .expect("the managed executable");
+    assert_eq!(
+        record.uid,
+        u32::MAX - 1,
+        "the signed rendering maps back to the uid"
+    );
+    assert!(parse_managed_process("-4294967297 19 Mon Sep 7 10:00:00 2026 /x", cores).is_err());
+    assert!(parse_managed_process("4294967296 19 Mon Sep 7 10:00:00 2026 /x", cores).is_err());
+}
+
 #[test]
 fn only_network_capable_legacy_jobs_block_normal_start() {
     require_no_launchable_legacy_helper(LegacyServiceJobObservation::Unloaded).expect("unloaded");

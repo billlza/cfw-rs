@@ -206,7 +206,7 @@ import { createProxyDelayTest } from "./proxy-delay-test.js";
 import { createUpdateInstall, installAfterCheck, updateInstallView } from "./update-install.js";
 const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView, invoke, activeProfile, engineIsOff,
   controllerActionAllowed, captureEngineIdentityToken, engineIdentityTokenIsCurrent, appendLog, renderPage, errorText, delayFailureLabel });
-const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
+const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
 
 const runtimeSettingsUI = createRuntimeSettingsUI({ state, invoke, appendLog, renderPage,
   nativeDialog: nativeRuntimeSettings,
@@ -3171,6 +3171,83 @@ async function applyToggle(key, checked, source) {
   }
 }
 
+/// Asks for the host's startup recovery without the user, a few seconds after
+/// a status read that failed in a way the host says a fresh read can resolve,
+/// as it does right after an installation while the background services are
+/// restarting. Each status read decides again; after the last automatic
+/// attempt the page explains what the user can do.
+function scheduleStartupRecovery() {
+  const recovery = runtime.startupRecovery;
+  if (!state.engine.startupRecoveryAvailable || state.migrationHandoff) {
+    if (recovery.timer !== null) {
+      window.clearTimeout(recovery.timer);
+      recovery.timer = null;
+    }
+    if (!state.engine.startupRecoveryAvailable) {
+      recovery.attempts = 0;
+      recovery.exhausted = false;
+    }
+    return;
+  }
+  if (recovery.timer !== null || recovery.exhausted) return;
+  if (recovery.attempts >= recovery.delays.length) {
+    recovery.exhausted = true;
+    return;
+  }
+  const delay = recovery.delays[recovery.attempts];
+  recovery.attempts += 1;
+  recovery.timer = window.setTimeout(async () => {
+    recovery.timer = null;
+    if (state.engine.startupRecoveryAvailable && !state.migrationHandoff && !state.engineMutationBusy) {
+      try {
+        await reconcileStartupServices();
+      } catch (error) {
+        appendLog("warning", "engine", t("Automatic background service recovery did not succeed yet: {error}", { error: errorText(error) }));
+      }
+    }
+    // The status read inside the recovery decided the next step; with no
+    // attempt pending and none left, the page now explains.
+    scheduleStartupRecovery();
+    renderPage();
+  }, delay);
+}
+
+/// What the General page shows while the host offers startup recovery: the
+/// automatic retries in plain words, then the steps the user can take. The
+/// host's own reason stays available as technical detail.
+function renderStartupRecoveryNotice(reason) {
+  const recovery = runtime.startupRecovery;
+  const detail = reason
+    ? `<details class="cfw-notice-detail"><summary>${escapeHtml(t("Technical details"))}</summary><small>${escapeHtml(reason)}</small></details>`
+    : "";
+  if (!recovery.exhausted) {
+    return `
+      <div class="cfw-row cfw-row-notice" role="status">
+        <div class="cfw-row-left">
+          <strong>${escapeHtml(t("Background services are restarting"))}</strong>
+          <span>${escapeHtml(t("This happens after an installation or update. The dashboard retries by itself in a few seconds."))}</span>
+          ${detail}
+        </div>
+        <div class="cfw-row-right"></div>
+      </div>
+    `;
+  }
+  return `
+    <div class="cfw-row cfw-row-notice cfw-row-notice-action" role="alert">
+      <div class="cfw-row-left">
+        <strong>${escapeHtml(t("Background services need your help"))}</strong>
+        <ol>
+          <li>${escapeHtml(t("Click “{button}” on the core row.", { button: t("Recover background services") }))}</li>
+          <li>${escapeHtml(t("If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac."))}</li>
+          <li>${escapeHtml(t("If it still fails, quit and reopen Clash for Mac."))}</li>
+        </ol>
+        ${detail}
+      </div>
+      <div class="cfw-row-right"></div>
+    </div>
+  `;
+}
+
 async function reconcileStartupServices() {
   if (state.engineMutationBusy) throw new Error("A network mode change is already in progress");
   if (state.migrationHandoff || !state.engine.startupRecoveryAvailable) {
@@ -3972,6 +4049,7 @@ function applyEngineStatus(payload) {
     appendLog("error", "engine", t("Engine state could not be trusted: {error}", { error: errorText(error) }));
   }
   state.engine = next;
+  scheduleStartupRecovery();
   if (engineRuntimeIdentityChanged(previous, next)) {
     invalidateEngineBoundState(next.active);
   } else if (!next.active) {

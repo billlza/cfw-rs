@@ -763,5 +763,13 @@
   "v{version} is ready to install. Clash for Mac will stop the core, quit, and reopen.": "v{version} をインストールできます。Clash for Mac はコアを停止して終了し、再起動します。",
   "The native dialog could not deliver this action. Close it and try again.": "ネイティブダイアログから操作を送信できませんでした。閉じて再試行してください。",
   "Native presentation of “{title}” failed: {error}": "「{title}」のネイティブダイアログを表示できませんでした：{error}",
-  "Native window glass failed: {error}": "ネイティブのウィンドウガラスの表示に失敗しました: {error}"
+  "Native window glass failed: {error}": "ネイティブのウィンドウガラスの表示に失敗しました: {error}",
+  "Automatic background service recovery did not succeed yet: {error}": "バックグラウンドサービスの自動復旧はまだ成功していません: {error}",
+  "Technical details": "技術的な詳細",
+  "Background services are restarting": "バックグラウンドサービスを再起動しています",
+  "This happens after an installation or update. The dashboard retries by itself in a few seconds.": "インストールや更新の直後に起こります。数秒後に自動で再試行します。",
+  "Background services need your help": "バックグラウンドサービスには操作が必要です",
+  "Click “{button}” on the core row.": "コア行の「{button}」をクリックします。",
+  "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.": "macOS が「バックグラウンド項目」の通知を表示したら、システム設定 → 一般 → ログイン項目と機能拡張 で Clash for Mac を許可してください。",
+  "If it still fails, quit and reopen Clash for Mac.": "それでも失敗する場合は、Clash for Mac を終了して開き直してください。"
 }

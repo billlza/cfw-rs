@@ -1,7 +1,7 @@
 import { t } from "./i18n.js";
 // General page rendering has no native side effects. Runtime controls use the
 // same transaction commands as the settings page.
-export function createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS }) {
+export function createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS }) {
   return function renderGeneral() {
   const product = state.payload.product;
   const appVersion = product.version ?? "—";
@@ -59,7 +59,9 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
 
       <section class="cfw-content${migrationBanner ? " cfw-content-migration" : ""}">
         ${migrationBanner}
-        ${engineReason ? renderRowReason(engineReason) : ""}
+        ${engine.startupRecoveryAvailable && !state.migrationHandoff
+          ? renderStartupRecoveryNotice(engineReason)
+          : engineReason ? renderRowReason(engineReason) : ""}
         ${state.nativeGeneralPresentationError ? renderRowReason(state.nativeGeneralPresentationError) : ""}
         <div class="cfw-row">
           <div class="cfw-row-left">

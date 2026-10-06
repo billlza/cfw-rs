@@ -617,6 +617,7 @@ dependencies = [
  "dispatch2",
  "futures-util",
  "libc",
+ "minisign-verify",
  "objc2-app-kit",
  "plist",
  "qrcode",

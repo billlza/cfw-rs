@@ -168,7 +168,7 @@ pub(crate) use platform::{GeneralSwitchesState, cancel_for_reload};
 #[cfg(feature = "native-ui")]
 mod platform {
     use super::*;
-    use crate::native_components::profile_menu::require_window;
+    use crate::native_components::require_window;
     use std::sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},

@@ -17,6 +17,8 @@ MAX_ENTRY_COUNT = 50_000
 MAX_SINGLE_FILE_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
 MAX_PATH_BYTES = 1024
+# The kernel follows at most 32 links in one lookup (MAXSYMLINKS).
+MAX_SYMLINK_DEPTH = 32
 MAX_EXTENSION_ENTRY_BYTES = 64 * 1024
 MAX_TOTAL_EXTENSION_BYTES = 32 * 1024 * 1024
 RAW_ENTRY_MULTIPLIER = 4
@@ -280,6 +282,48 @@ def _validate_symlink(relative: str, target: str) -> None:
             resolved.append(component)
 
 
+def _resolve_through_links(
+    base: list[str],
+    target: str,
+    paths: dict[str, str],
+    links: dict[str, str],
+    depth: int,
+) -> list[str]:
+    """Follows `target` from the directory `base`, through every symlink on
+    the way, as the installer's extraction resolves it on disk. The result
+    names an entry of the archive; a step above the root, a name the archive
+    does not contain, or a chain deeper than the kernel follows is refused."""
+    if depth > MAX_SYMLINK_DEPTH:
+        raise ArchiveContractError("symlink chain is too deep")
+    resolved = list(base)
+    for component in target.split("/"):
+        if component == "..":
+            if not resolved:
+                raise ArchiveContractError("symlink target escapes the app root")
+            resolved.pop()
+            continue
+        resolved.append(component)
+        current = "/".join(resolved)
+        if current in links:
+            resolved.pop()
+            resolved = _resolve_through_links(
+                resolved, links[current], paths, links, depth + 1
+            )
+        elif current not in paths:
+            raise ArchiveContractError("symlink target does not exist in the archive")
+    return resolved
+
+
+def _require_symlinks_resolve(paths: dict[str, str], links: dict[str, str]) -> None:
+    """The lexical rule of `_validate_symlink` cannot see a link that climbs
+    through another link, nor a target that is absent. The installer refuses
+    both after extraction; the release gate refuses them here."""
+    for link, target in links.items():
+        parent = link.rsplit("/", 1)[0] if "/" in link else ""
+        base = parent.split("/") if parent else []
+        _resolve_through_links(base, target, paths, links, 0)
+
+
 def _tree_sha256(root_mode: str, entries: list[dict[str, object]]) -> str:
     digest = hashlib.sha256()
     root_record = {
@@ -304,6 +348,7 @@ def _inspect_archive(
     path: str, expected_root: str
 ) -> tuple[int, int, dict[str, object]]:
     paths: dict[str, str] = {}
+    links: dict[str, str] = {}
     required_directories: set[str] = set()
     manifest_entries: list[dict[str, object]] = []
     root_mode: str | None = None
@@ -342,8 +387,10 @@ def _inspect_archive(
             mode = member.mode
             if mode & ~0o777 or (kind != "symlink" and mode & 0o022):
                 raise ArchiveContractError("archive entry permissions are unsafe")
-            if kind == "directory" and mode & 0o500 != 0o500:
-                raise ArchiveContractError("archive directory is not owner-readable and traversable")
+            if kind == "directory" and mode & 0o700 != 0o700:
+                raise ArchiveContractError(
+                    "archive directory does not give its owner full access"
+                )
             if relative == "Contents/Info.plist" and mode & 0o400 == 0:
                 raise ArchiveContractError("Info.plist is not owner-readable")
             if relative == "Contents/MacOS/clash-for-mac" and mode & 0o500 != 0o500:
@@ -358,6 +405,7 @@ def _inspect_archive(
                     raise ArchiveContractError("archive exceeds the expanded-size limit")
             if kind == "symlink":
                 _validate_symlink(relative, member.linkname)
+                links[relative] = member.linkname
 
             parent = posixpath.dirname(relative)
             while parent:
@@ -416,6 +464,7 @@ def _inspect_archive(
         raise ArchiveContractError("archive omits an explicit parent directory")
     if root_mode is None:
         raise ArchiveContractError("archive omits the explicit application root")
+    _require_symlinks_resolve(paths, links)
     manifest_entries.sort(key=lambda entry: str(entry["path"]))
     manifest = {
         "algorithm": "sha256-tree-v2",

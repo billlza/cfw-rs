@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+mod app_update;
 mod bounded_command;
 mod language;
 mod launchctl;
@@ -25,6 +26,10 @@ mod release_security;
 #[cfg(target_os = "macos")]
 mod sysproxy_sc;
 
+pub use app_update::{
+    AppUpdateToolError, InstalledHostOutput, extract_update_archive, open_installed_application,
+    operating_system_version, run_installed_host, verify_update_application_signature,
+};
 pub use legacy_observation::{observe_legacy_process_table, observe_legacy_tcp_listener_table};
 pub use legacy_proxy::{LegacyProxyCutoverPlan, LegacyProxyServiceIdentity};
 pub use legacy_service::{

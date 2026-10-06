@@ -46,6 +46,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
   const page = webviewElement("section", "page");
   const body = webviewElement("body");
   const reload = webviewElement("button", "reload-button");
+  const overlays = webviewElement("div", "glass-menu-root");
   const documentStub = {
     documentElement: webviewElement("html"),
     body,
@@ -54,6 +55,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
     getElementById(id) {
       if (id === "page") return page;
       if (id === "reload-button") return reload;
+      if (id === "glass-menu-root") return overlays;
       return webviewElement("div", id);
     },
     querySelector: () => null,
@@ -67,6 +69,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
     document: documentStub,
     innerWidth: 900,
     innerHeight: 700,
+    addEventListener() {},
     requestAnimationFrame(callback) {
       callback();
       return 1;
@@ -87,7 +90,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
 
   const responses = {
     boot_payload: {
-      native_ui: { profile_menu: false, runtime_settings: false, general_switches: false },
+      native_ui: { profile_menu: false, runtime_settings: false, general_switches: false, prompt_dialog: false, window_glass: false },
       product: {
         name: "Clash for Mac",
         version: "0.4.0",
@@ -158,6 +161,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
       unavailable: ["default_route_interface"],
     },
     profiles_snapshot: [],
+    resolve_update_install: { outcome: { state: "none" }, pending: null },
   };
   globalThis.window.__TAURI_INTERNALS__ = {
     transformCallback(callback) {
@@ -202,4 +206,12 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
   ]) {
     assert.equal(invocations.includes(command), false, `${command} must not run from dist while Off`);
   }
+  assert.equal(
+    invocations.filter((command) => command === "resolve_update_install").length, 1,
+    "the built dashboard asks once what the previous update installation left behind",
+  );
+  assert.doesNotMatch(
+    overlays.innerHTML, /glass-dialog/u,
+    "and opens no dialog when nothing was left behind and nothing is held",
+  );
 });

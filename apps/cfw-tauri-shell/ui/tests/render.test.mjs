@@ -7,7 +7,7 @@
 // therefore fails in CI instead of in the app.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { t, getLocale } from "../src/i18n.js";
+import { t, getLocale, setLocale } from "../src/i18n.js";
 
 const listeners = new Map();
 const callbacks = new Map();
@@ -17,6 +17,7 @@ const documentListeners = new Map();
 const intervalCallbacks = [];
 let nextCallbackId = 1;
 let updateListenerWasReady = false;
+let updateOutcomeQueries = 0;
 
 function element(tag = "div", id = "") {
   return {
@@ -96,12 +97,17 @@ const documentStub = {
 };
 
 globalThis.document = documentStub;
+const windowListeners = new Map();
 globalThis.window = {
   document: documentStub,
   innerWidth: 900,
   innerHeight: 700,
+  addEventListener: (type, handler) => { windowListeners.set(type, handler); },
+  // As in a browser, the callback runs only after requestAnimationFrame has
+  // returned its handle. Running it first would leave every frame handle the
+  // dashboard stores set forever, and its schedulers dead after one use.
   requestAnimationFrame: (callback) => {
-    callback();
+    setImmediate(callback);
     return 1;
   },
   setTimeout: (callback, delay) => setTimeout(callback, delay),
@@ -229,7 +235,7 @@ const DIAGNOSTICS = {
 
 const responses = {
   boot_payload: {
-    native_ui: { profile_menu: false, runtime_settings: false, general_switches: false },
+    native_ui: { profile_menu: false, runtime_settings: false, general_switches: false, prompt_dialog: false, window_glass: false },
     product: {
       name: "Clash for Mac",
       version: "0.4.0",
@@ -337,6 +343,7 @@ const responses = {
   open_page: null,
   begin_migration_handoff: null,
   check_for_updates: { available: false, current: "0.4.0" },
+  resolve_update_install: { outcome: { state: "none" }, pending: null },
 };
 const BASE_CONTROLLER_SNAPSHOT = structuredClone(responses.controller_snapshot);
 
@@ -408,6 +415,7 @@ globalThis.window.__TAURI_INTERNALS__ = {
     if (command === "check_for_updates") {
       updateListenerWasReady = listeners.has("cfw://update-available");
     }
+    if (command === "resolve_update_install") updateOutcomeQueries += 1;
     invoked.push(command);
     invocationDetails.push({ command, args });
     if (command in rejected) throw new Error(rejected[command]);
@@ -484,6 +492,12 @@ delete globalThis.window.__CFM_STARTUP__;
 slowLoginItemQuery.resolve(initialLiveSettings);
 responses.read_settings_snapshot = initialLiveSettings;
 await new Promise((resolve) => setTimeout(resolve, 20));
+const startupUpdateReport = {
+  queries: updateOutcomeQueries,
+  errors: state.logs.filter((entry) => entry.source === "updater" && entry.level === "error"),
+  dialog: state.glassDialog,
+  install: state.updateInstall,
+};
 
 const emit = async (event, payload) => {
   const result = listeners.get(event)?.({ event, payload });
@@ -595,6 +609,73 @@ test("status bar clock preserves changing values without rewriting unchanged DOM
   } finally {
     Date.now = originalNow;
     for (const [id, node] of originalNodes) statusBarNodes.set(id, node);
+    await setEngine(originalEngine);
+  }
+});
+
+test("live connection snapshots refresh the General status bar without replacing the page", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalPaused = state.connectionPaused;
+  const originalStream = state.connectionStream;
+  const originalConnections = state.connections;
+  const originalTraffic = { ...state.traffic };
+  const originalNow = Date.now;
+  let now = 2_000_000;
+  // General renders no connection data. Replacing its DOM on every snapshot
+  // detaches the controls a pointer or an assistive client is about to use.
+  function countedMarkup(node) {
+    let markup = node.innerHTML, writes = 0;
+    Object.defineProperty(node, "innerHTML", {
+      configurable: true, enumerable: true,
+      get: () => markup,
+      set: (value) => { markup = value; writes += 1; },
+    });
+    return {
+      writes: () => writes,
+      restore: () => Object.defineProperty(node, "innerHTML", {
+        configurable: true, enumerable: true, writable: true, value: markup,
+      }),
+    };
+  }
+  const megabyte = 1024 * 1024;
+  const snapshot = (second) => streamEvent("connections", {
+    upload: second * megabyte,
+    download: second * 2 * megabyte,
+    connections: [{
+      id: `general-live-${second}`, upload: second, download: second,
+      start: "2026-01-01T00:00:00Z", chains: ["PROXY"], rule: "MATCH",
+      metadata: { host: "general.example" },
+    }],
+  }, RUNNING_ENGINE);
+  const counted = [];
+  try {
+    Date.now = () => now;
+    state.connectionPaused = false;
+    state.connectionStream = { at: 0, uploadTotal: 0, downloadTotal: 0, rows: new Map() };
+    responses.engine_snapshot = RUNNING_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    assert.ok(runtime.connectionsLiveStream.binding, "the running engine has a live connection stream");
+    const rendered = await renderPage("general");
+    assert.ok(rendered.includes('class="cfw-general-view'), "the General page is rendered");
+    counted.push(countedMarkup(page), countedMarkup(nav), countedMarkup(glassRoot));
+    for (let second = 1; second <= 5; second++) {
+      now += 1000;
+      await emit("cfw://connections-snapshot", snapshot(second));
+    }
+    assert.deepEqual(state.connections.map(({ id }) => id), ["general-live-5"],
+      "each snapshot is still applied to the shared connection state");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "2.0 MB/s");
+    assert.deepEqual(counted.map((node) => node.writes()), [0, 0, 0],
+      "snapshots must not replace the General page, navigation or overlay DOM");
+    assert.equal(page.innerHTML, rendered);
+  } finally {
+    for (const node of counted) node.restore();
+    Date.now = originalNow;
+    state.connectionPaused = originalPaused;
+    state.connectionStream = originalStream;
+    state.connections = originalConnections;
+    Object.assign(state.traffic, originalTraffic);
     await setEngine(originalEngine);
   }
 });
@@ -759,6 +840,8 @@ test("offline locator reveals the saved selection even when filter and list hide
     querySelectorElements.set('[data-proxy-node="Node B"]', { scrollIntoView() { scrolled = true; } });
     await renderPage("proxies");
     await appModule.handleAction("scroll-to-selected-proxy");
+    assert.equal(scrolled, false, "the card is scrolled to in the frame after it was rendered");
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(scrolled, true);
     assert.equal(state.proxyFilter, "");
     assert.match(page.innerHTML, /cfw-node-card selected blink/u);
@@ -2841,6 +2924,587 @@ test("every glass dialog renders", async () => {
   state.credentialGcPreview = null;
 });
 
+const IDLE_INSTALL = Object.freeze({
+  phase: "idle", version: null, downloaded: 0, total: null, failure: null, ended: null,
+});
+
+test("startup asks once what the previous update installation left behind", () => {
+  assert.equal(startupUpdateReport.queries, 1);
+  assert.deepEqual(
+    startupUpdateReport.errors, [],
+    "an absent installation record is not reported as a failure",
+  );
+  assert.equal(startupUpdateReport.dialog, null, "and nothing is shown for it");
+  assert.deepEqual(startupUpdateReport.install, IDLE_INSTALL, "nor is any installation re-attached");
+});
+
+test("the About dialog offers in-app installation only where the host supports it", async () => {
+  const about = (install, version = "0.4.1") => ({
+    kind: "product-about",
+    payload: { phase: "idle", update: { available: true, version, install } },
+  });
+  const original = { dialog: state.glassDialog, install: state.updateInstall };
+  const render = async () => {
+    glassRoot.innerHTML = "";
+    await renderPage("general");
+    return glassRoot.innerHTML;
+  };
+  try {
+    state.updateInstall = { ...IDLE_INSTALL };
+    state.glassDialog = about({ supported: true });
+    let html = await render();
+    assert.ok(html.includes("data-glass-update-install>Install Update v0.4.1<"));
+    assert.ok(html.includes('class="glass-btn ghost" data-glass-open-update'),
+      "the download page stays available as the secondary action");
+    assert.ok(html.includes('<div class="product-about-status">Update available: v0.4.1</div>'),
+      "without an installation the dialog keeps its own status line");
+
+    for (const install of [{ supported: false, code: "not_in_applications" }, undefined]) {
+      state.glassDialog = about(install);
+      html = await render();
+      assert.equal(html.includes("data-glass-update-"), false);
+      assert.ok(html.includes('class="glass-btn" data-glass-open-update'),
+        "without in-app installation the dialog is exactly the release-page dialog");
+    }
+
+    const nothingPresented = {
+      kind: "product-about",
+      payload: { phase: "idle", update: { available: false, current: "0.4.0", error: "offline" } },
+    };
+    for (const presented of [about({ supported: true }), about({ supported: true }, "0.4.2"), nothingPresented]) {
+      const context = JSON.stringify(presented.payload.update);
+      state.glassDialog = presented;
+      state.updateInstall = { ...IDLE_INSTALL, phase: "downloading", version: "0.4.1", downloaded: 30, total: 120 };
+      html = await render();
+      assert.ok(html.includes("Downloading update… 25%"), context);
+      assert.ok(html.includes("data-glass-update-cancel"), context);
+      assert.equal(html.includes("data-glass-open-update"), false, context);
+      assert.equal(html.includes("data-glass-update-install"), false, context);
+      assert.ok(html.includes("data-glass-check-update disabled"), context);
+      assert.ok(html.includes("data-glass-dismiss disabled"), context);
+
+      state.updateInstall = { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" };
+      html = await render();
+      assert.ok(html.includes("data-glass-update-commit>Install and Relaunch<"), context);
+      assert.ok(html.includes("data-glass-update-cancel"), context);
+      assert.ok(
+        html.includes("v0.4.1 is ready to install. Clash for Mac will stop the core, quit, and reopen."),
+        `the staged release is named whatever is presented: ${context}`,
+      );
+      assert.equal(html.includes("data-glass-open-update"), false, context);
+      assert.equal(html.includes("data-glass-update-install"), false, context);
+      assert.equal(html.includes("data-glass-check-update disabled"), false, context);
+    }
+
+    state.glassDialog = about({ supported: true });
+    state.updateInstall = {
+      ...IDLE_INSTALL, version: "0.4.1", failure: { code: "signature_mismatch", category: "authenticity" },
+    };
+    html = await render();
+    assert.ok(html.includes("(signature_mismatch)"));
+    assert.equal(html.includes("data-glass-open-update"), false,
+      "a download that failed its signature is not answered with another download");
+    assert.equal(html.includes("data-glass-update-install"), false);
+
+    state.glassDialog = about({ supported: false, code: "release_failed_authentication" });
+    state.updateInstall = { ...IDLE_INSTALL };
+    html = await render();
+    assert.ok(
+      html.includes("The downloaded update is not the signed release and was discarded. Do not install it from another source. (release_failed_authentication)"),
+      "the host's verdict is shown by a page that has no record of the failure",
+    );
+    assert.equal(html.includes("data-glass-open-update"), false);
+    assert.equal(html.includes("data-glass-update-"), false);
+
+    state.glassDialog = about({ supported: true });
+    for (const [ended, reason] of [
+      [{ failure: { code: "network", category: "network" } }, "The download did not complete. Check the connection and try again. (network)"],
+      [{ ended: "cancelled" }, "Update download cancelled"],
+      [{ ended: "unreported" }, "The update installation is no longer in progress. Check for updates again."],
+    ]) {
+      state.updateInstall = { ...IDLE_INSTALL, version: "0.4.1", ...ended };
+      html = await render();
+      assert.ok(html.includes(`<div class="product-about-status">${reason}</div>`), reason);
+      assert.equal(html.includes("data-glass-update-"), false, `${reason}: the consumed release is not offered for installation`);
+      assert.equal(html.includes("data-glass-open-update"), false, `${reason}: nor for download`);
+      assert.ok(html.includes("data-glass-check-update >Check for Update<"), `${reason}: a fresh check stays available`);
+      assert.equal(html.includes("data-glass-dismiss disabled"), false, `${reason}: and so does Close`);
+    }
+
+    state.glassDialog = { kind: "product-about", payload: { phase: "checking", update: { available: true, version: "0.4.1", install: { supported: true } } } };
+    state.updateInstall = { ...IDLE_INSTALL };
+    html = await render();
+    assert.equal(html.includes("data-glass-update-install"), false, "nothing is offered while a check is running");
+  } finally {
+    state.glassDialog = original.dialog;
+    state.updateInstall = original.install;
+  }
+});
+
+test("the About dialog buttons drive preparation, installation and cancellation through the host", async () => {
+  const original = { dialog: state.glassDialog, install: state.updateInstall, info: state.updateInfo };
+  const buttons = { install: interactiveElement(), commit: interactiveElement(), cancel: interactiveElement() };
+  querySelectorAllElements.set("[data-glass-update-install]", [buttons.install]);
+  querySelectorAllElements.set("[data-glass-update-commit]", [buttons.commit]);
+  querySelectorAllElements.set("[data-glass-update-cancel]", [buttons.cancel]);
+  const issued = (command) => invocationDetails.filter((entry) => entry.command === command);
+  try {
+    await emit("cfw://update-available", {
+      available: true, version: "0.4.1", current: "0.4.0", install: { supported: true },
+    });
+    assert.deepEqual(state.updateInfo.install, { supported: true });
+    state.glassDialog = { kind: "product-about", payload: { phase: "idle", update: state.updateInfo } };
+    state.updateInstall = { ...IDLE_INSTALL };
+    await renderPage("general");
+
+    responses.prepare_update_install = { version: "0.4.1" };
+    const prepared = issued("prepare_update_install").length;
+    await buttons.install.trigger("click");
+    assert.deepEqual(issued("prepare_update_install").slice(prepared).map(({ args }) => args),
+      [{ expectedVersion: "0.4.1" }]);
+    assert.equal(state.updateInstall.phase, "ready");
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-commit"),
+      "the dialog re-renders when the host stages the release");
+
+    await emit("cfw://update-progress", { phase: "downloading", version: "0.4.1", downloaded: 1, total: 2 });
+    assert.equal(state.updateInstall.phase, "ready", "late progress never unstages a release");
+
+    responses.commit_update_install = () => {
+      throw { code: "engine_stop_failed", category: "engine" };
+    };
+    await buttons.commit.trigger("click");
+    assert.equal(state.updateInstall.phase, "ready");
+    assert.ok(glassRoot.innerHTML.includes("The core could not be stopped. Stop the core and try again. (engine_stop_failed)"));
+
+    responses.cancel_update_install = { cancelled: "staged" };
+    const cancellations = issued("cancel_update_install").length;
+    await buttons.cancel.trigger("click");
+    assert.equal(issued("cancel_update_install").length, cancellations + 1);
+    assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "cancelled" });
+
+    state.updateInstall = { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" };
+    responses.commit_update_install = { version: "0.4.1" };
+    await buttons.commit.trigger("click");
+    assert.deepEqual(issued("commit_update_install").at(-1).args, { expectedVersion: "0.4.1" });
+    assert.equal(state.updateInstall.phase, "installing");
+    assert.ok(glassRoot.innerHTML.includes("Clash for Mac will reopen automatically"));
+  } finally {
+    for (const command of ["prepare_update_install", "commit_update_install", "cancel_update_install"]) {
+      delete responses[command];
+    }
+    querySelectorAllElements.clear();
+    state.glassDialog = original.dialog;
+    state.updateInstall = original.install;
+    state.updateInfo = original.info;
+  }
+});
+
+const RELEASE = Object.freeze({
+  available: true, version: "0.4.1", current: "0.4.0", install: { supported: true },
+});
+const OVERLAY_SLOTS = ["glassDialog", "profileContextMenu", "runtimeSettingsDialog", "automationDialog"];
+const UPDATE_COMMANDS = [
+  "prepare_update_install", "commit_update_install", "cancel_update_install", "open_available_update",
+];
+
+const issuedCount = (command) => invocationDetails.filter((entry) => entry.command === command).length;
+const updateOffers = () => ({
+  install: glassRoot.innerHTML.includes("data-glass-update-install"),
+  download: glassRoot.innerHTML.includes("data-glass-open-update"),
+});
+const NEITHER_OFFER = Object.freeze({ install: false, download: false });
+const BOTH_OFFERS = Object.freeze({ install: true, download: true });
+
+/// Runs `body` with the About dialog's buttons bound, no overlay open and no
+/// installation followed, then restores every fixture an update test scripts.
+async function withUpdateDialog(body) {
+  const original = {
+    overlays: OVERLAY_SLOTS.map((slot) => state[slot]),
+    install: state.updateInstall,
+    info: state.updateInfo,
+    check: responses.check_for_updates,
+    resolve: responses.resolve_update_install,
+  };
+  const buttons = {
+    install: interactiveElement(), commit: interactiveElement(), cancel: interactiveElement(),
+    open: interactiveElement(), check: interactiveElement(),
+  };
+  querySelectorAllElements.set("[data-glass-update-install]", [buttons.install]);
+  querySelectorAllElements.set("[data-glass-update-commit]", [buttons.commit]);
+  querySelectorAllElements.set("[data-glass-update-cancel]", [buttons.cancel]);
+  querySelectorAllElements.set("[data-glass-open-update]", [buttons.open]);
+  querySelectorAllElements.set("[data-glass-check-update]", [buttons.check]);
+  try {
+    for (const slot of OVERLAY_SLOTS) state[slot] = null;
+    state.updateInstall = { ...IDLE_INSTALL };
+    await body(buttons);
+  } finally {
+    for (const command of UPDATE_COMMANDS) delete responses[command];
+    delete rejected.check_for_updates;
+    responses.check_for_updates = original.check;
+    responses.resolve_update_install = original.resolve;
+    querySelectorAllElements.clear();
+    OVERLAY_SLOTS.forEach((slot, index) => { state[slot] = original.overlays[index]; });
+    state.updateInstall = original.install;
+    state.updateInfo = original.info;
+  }
+}
+
+test("after an installation attempt ended the About dialog offers nothing the host would reject", async () => {
+  await withUpdateDialog(async (buttons) => {
+    // Like the host, every preparation and every opened download page
+    // consumes the presented release, and only a check presents it again.
+    const host = { presented: false, staging: "succeeds" };
+    responses.check_for_updates = () => {
+      host.presented = true;
+      return RELEASE;
+    };
+    responses.prepare_update_install = () => {
+      if (!host.presented) throw { code: "missing_authorization", category: "state" };
+      host.presented = false;
+      if (host.staging === "fails") throw { code: "network", category: "network" };
+      return { version: "0.4.1" };
+    };
+    responses.open_available_update = () => {
+      if (!host.presented) throw new Error("no validated update check authorizes this release page");
+      host.presented = false;
+      return { opened: true, installed: false, version: "0.4.1" };
+    };
+    responses.cancel_update_install = { cancelled: "staged" };
+    const earlier = new Set(state.logs);
+    const rejectedByHost = () => state.logs.filter((entry) => !earlier.has(entry) && entry.source === "updater"
+      && (entry.message.includes("(missing_authorization)") || entry.message.startsWith("Could not open update")));
+    const checkAndCloseRemain = (context) => {
+      assert.ok(glassRoot.innerHTML.includes("data-glass-check-update >Check for Update<"), context);
+      assert.equal(glassRoot.innerHTML.includes("data-glass-dismiss disabled"), false, context);
+    };
+
+    await appModule.handleAction("check-for-updates");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS);
+
+    await buttons.install.trigger("click");
+    assert.equal(state.updateInstall.phase, "ready");
+    await buttons.cancel.trigger("click");
+    assert.deepEqual(updateOffers(), NEITHER_OFFER, "a cancelled attempt consumed the presented release");
+    assert.ok(glassRoot.innerHTML.includes('<div class="product-about-status">Update download cancelled</div>'));
+    checkAndCloseRemain("after a cancelled attempt");
+    const prepared = issuedCount("prepare_update_install");
+    await buttons.install.trigger("click");
+    assert.equal(issuedCount("prepare_update_install"), prepared, "the withdrawn installation issues no command");
+
+    await buttons.check.trigger("click");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS, "a fresh check presents the release again");
+
+    host.staging = "fails";
+    await buttons.install.trigger("click");
+    assert.deepEqual(updateOffers(), NEITHER_OFFER, "a failed attempt consumed the presented release");
+    assert.ok(glassRoot.innerHTML.includes("The download did not complete. Check the connection and try again. (network)"));
+    checkAndCloseRemain("after a failed attempt");
+
+    host.staging = "succeeds";
+    await buttons.check.trigger("click");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS, "a fresh check presents the release again");
+    await buttons.install.trigger("click");
+    assert.equal(state.updateInstall.phase, "ready", "the offered installation is one the host accepts");
+    await buttons.cancel.trigger("click");
+
+    await buttons.check.trigger("click");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS);
+    const opened = issuedCount("open_available_update");
+    await buttons.open.trigger("click");
+    assert.equal(issuedCount("open_available_update"), opened + 1);
+    assert.equal(state.glassDialog, null, "the offered download page is one the host opens");
+    assert.deepEqual(rejectedByHost(), [], "the host rejected nothing the dialog offered");
+  });
+});
+
+test("a staged installation stays in the About dialog whatever a later check presents", async () => {
+  await withUpdateDialog(async (buttons) => {
+    responses.check_for_updates = RELEASE;
+    responses.prepare_update_install = { version: "0.4.1" };
+    await appModule.handleAction("check-for-updates");
+    await buttons.install.trigger("click");
+
+    const stagedIsShown = (context) => {
+      const html = glassRoot.innerHTML;
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" }, context);
+      assert.ok(html.includes("v0.4.1 is ready to install."), context);
+      assert.ok(html.includes("data-glass-update-commit>Install and Relaunch<"), context);
+      assert.ok(html.includes("data-glass-update-cancel"), context);
+      assert.deepEqual(updateOffers(), NEITHER_OFFER, context);
+    };
+    stagedIsShown("the staged release is the presented one");
+
+    responses.check_for_updates = { ...RELEASE, version: "0.4.2" };
+    await buttons.check.trigger("click");
+    assert.equal(state.updateInfo.version, "0.4.2");
+    stagedIsShown("another release is presented");
+
+    rejected.check_for_updates = "update server unreachable";
+    await buttons.check.trigger("click");
+    delete rejected.check_for_updates;
+    assert.equal(state.updateInfo.available, false);
+    assert.equal(state.updateInfo.error, "update server unreachable");
+    stagedIsShown("the check failed");
+
+    await emit("cfw://update-available", { available: false, current: "0.4.0" });
+    assert.equal(state.updateInfo.error, null);
+    stagedIsShown("no release is presented");
+
+    responses.commit_update_install = () => {
+      throw { code: "engine_stop_failed", category: "engine" };
+    };
+    const committed = issuedCount("commit_update_install");
+    await buttons.commit.trigger("click");
+    assert.equal(issuedCount("commit_update_install"), committed + 1);
+    assert.deepEqual(
+      invocationDetails.findLast((entry) => entry.command === "commit_update_install").args,
+      { expectedVersion: "0.4.1" },
+      "Install and Relaunch acts on the staged release",
+    );
+    assert.equal(state.updateInstall.phase, "ready");
+    assert.ok(glassRoot.innerHTML.includes("(engine_stop_failed)"));
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-commit>Install and Relaunch<"));
+
+    responses.cancel_update_install = { cancelled: "staged" };
+    const cancellations = issuedCount("cancel_update_install");
+    await buttons.cancel.trigger("click");
+    assert.equal(issuedCount("cancel_update_install"), cancellations + 1, "Cancel discards the staged release");
+    assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "cancelled" });
+    assert.deepEqual(updateOffers(), NEITHER_OFFER);
+    assert.equal(glassRoot.innerHTML.includes("data-glass-update-"), false);
+  });
+});
+
+test("a release that failed authentication stays withdrawn through every later check", async () => {
+  await withUpdateDialog(async (buttons) => {
+    const verdict = { ...RELEASE, install: { supported: false, code: "release_failed_authentication" } };
+    const withdrawnWith = (code, context) => {
+      assert.deepEqual(updateOffers(), NEITHER_OFFER, context);
+      assert.ok(
+        glassRoot.innerHTML.includes(`The downloaded update is not the signed release and was discarded. Do not install it from another source. (${code})`),
+        context,
+      );
+    };
+    responses.check_for_updates = RELEASE;
+    responses.prepare_update_install = () => {
+      throw { code: "signature_mismatch", category: "authenticity" };
+    };
+    await appModule.handleAction("check-for-updates");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS);
+    await buttons.install.trigger("click");
+    withdrawnWith("signature_mismatch", "right after the failure");
+
+    responses.check_for_updates = verdict;
+    await buttons.check.trigger("click");
+    withdrawnWith("signature_mismatch", "a check that carries the host's verdict");
+
+    responses.check_for_updates = RELEASE;
+    await buttons.check.trigger("click");
+    withdrawnWith("signature_mismatch", "a check from the dialog");
+    await emit("cfw://update-available", RELEASE);
+    withdrawnWith("signature_mismatch", "the availability event");
+    await appModule.handleAction("check-for-updates");
+    withdrawnWith("signature_mismatch", "a check from the menu");
+    const prepared = issuedCount("prepare_update_install");
+    await buttons.install.trigger("click");
+    assert.equal(issuedCount("prepare_update_install"), prepared, "the withdrawn installation issues no command");
+
+    await emit("cfw://update-available", { ...RELEASE, version: "0.4.2" });
+    assert.deepEqual(updateOffers(), BOTH_OFFERS, "another release is offered as usual");
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-install>Install Update v0.4.2<"));
+
+    await emit("cfw://update-available", verdict);
+    assert.deepEqual(state.updateInstall, IDLE_INSTALL);
+    withdrawnWith("release_failed_authentication", "the host's verdict alone, as after a reload");
+  });
+});
+
+test("what the previous installation attempt left behind is logged and shown", async () => {
+  await withUpdateDialog(async () => {
+    const report = async (reply) => {
+      responses.resolve_update_install = reply;
+      await appModule.reportPreviousUpdateInstall();
+      return state.logs.find((entry) => entry.source === "updater");
+    };
+    const interrupted = (code) => ({ outcome: { state: "failed", version: "0.4.1", code }, pending: null });
+
+    let entry = await report(interrupted("installer_interrupted"));
+    const notice = {
+      title: "Update v0.4.1 was not installed",
+      body: "The previous version is still installed. Reason code: installer_interrupted",
+    };
+    assert.deepEqual(state.glassDialog, { kind: "info", payload: notice });
+    assert.ok(glassRoot.innerHTML.includes(`<h3>${notice.title}</h3>`));
+    assert.ok(glassRoot.innerHTML.includes(notice.body));
+    assert.deepEqual([entry.level, entry.message], ["error", `${notice.title}: ${notice.body}`]);
+
+    for (const [rejection, reason] of [
+      [
+        { code: "journal_failed", category: "storage" },
+        "The update could not be stored on this Mac. Free some disk space and try again. (journal_failed)",
+      ],
+      [
+        "journal task ended",
+        "The update could not be installed because of an internal error. (unexpected_error: journal task ended)",
+      ],
+    ]) {
+      state.glassDialog = null;
+      entry = await report(() => {
+        throw rejection;
+      });
+      const body = `The previous update attempt could not be reviewed: ${reason}`;
+      assert.deepEqual([entry.level, entry.message], ["error", body]);
+      assert.deepEqual(state.glassDialog, { kind: "info", payload: { title: "Updates", body } });
+      assert.ok(glassRoot.innerHTML.includes(body), "the reason is shown, not only logged");
+    }
+
+    state.glassDialog = null;
+    entry = await report({ outcome: { state: "installed", version: "0.4.1" }, pending: null });
+    assert.deepEqual([entry.level, entry.message], ["info", "Updated to v0.4.1"]);
+    assert.equal(state.glassDialog, null, "a completed installation is logged only");
+
+    const openOverlay = {
+      glassDialog: () => {
+        state.glassDialog = { kind: "dns-query", payload: { name: "a.test", type: "A", result: "" } };
+      },
+      profileContextMenu: () => {
+        state.profileContextMenu = { id: PROFILE_ID, x: 10, y: 10 };
+      },
+      runtimeSettingsDialog: () => appModule.handleAction("open-runtime-settings"),
+      automationDialog: () => appModule.handleAction("open-automation-settings"),
+    };
+    responses.read_automation_settings = {
+      settings: { shortcuts: [], network_enabled: false, network_rules: [] },
+      revision: "automation-v1", network: { kind: "wifi", interface: "en0", ssid: null },
+    };
+    try {
+      for (const slot of OVERLAY_SLOTS) {
+        for (const other of OVERLAY_SLOTS) state[other] = null;
+        await openOverlay[slot]();
+        const overlay = state[slot];
+        assert.ok(overlay, `${slot} is open`);
+        const code = `interrupted_with_${slot.toLowerCase()}_open`;
+        entry = await report(interrupted(code));
+        assert.deepEqual(
+          [entry.level, entry.message.endsWith(`Reason code: ${code}`)], ["error", true],
+          `${slot}: the failure is logged`,
+        );
+        assert.equal(state[slot], overlay, `${slot}: the open overlay is not replaced`);
+        if (slot !== "glassDialog") assert.equal(state.glassDialog, null, `${slot}: no dialog is put over it`);
+      }
+    } finally {
+      delete responses.read_automation_settings;
+      for (const slot of OVERLAY_SLOTS) state[slot] = null;
+    }
+
+    await report({ outcome: { state: "none" }, pending: { phase: "staged", version: "0.4.1" } });
+    assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" });
+    assert.equal(state.glassDialog, null, "re-attaching opens nothing by itself");
+    responses.check_for_updates = { available: false, current: "0.4.0" };
+    await appModule.handleAction("check-for-updates");
+    assert.ok(glassRoot.innerHTML.includes("v0.4.1 is ready to install."));
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-commit>Install and Relaunch<"));
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-cancel"));
+  });
+});
+
+/// Holds back every timer the dashboard starts, so a test decides when the
+/// wait between two questions about a re-attached installation elapses and no
+/// real timer outlives the test.
+function holdFollowWaits() {
+  const setTimeoutOfWindow = globalThis.window.setTimeout;
+  const waits = [];
+  globalThis.window.setTimeout = (callback, delay) => waits.push({ callback, delay });
+  return {
+    waits,
+    async elapse() {
+      assert.deepEqual(waits.map(({ delay }) => delay), [1000], "exactly one wait of a second is pending");
+      waits.shift().callback();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
+    release() {
+      globalThis.window.setTimeout = setTimeoutOfWindow;
+    },
+  };
+}
+
+test("a re-attached installation follows the host to its end", async () => {
+  await withUpdateDialog(async (buttons) => {
+    const follower = holdFollowWaits();
+    const holding = (phase, outcome = { state: "none" }) => ({
+      outcome, pending: phase === null ? null : { phase, version: "0.4.1" },
+    });
+    const reattach = async (phase) => {
+      responses.resolve_update_install = holding(phase);
+      await appModule.reportPreviousUpdateInstall();
+    };
+    try {
+      responses.check_for_updates = RELEASE;
+      await reattach("preparing");
+      await appModule.handleAction("check-for-updates");
+      assert.ok(glassRoot.innerHTML.includes('<div class="product-about-status">Downloading update…</div>'));
+      assert.ok(glassRoot.innerHTML.includes("data-glass-update-cancel"));
+
+      await follower.elapse();
+      assert.deepEqual(
+        state.updateInstall, { ...IDLE_INSTALL, phase: "downloading", version: "0.4.1" },
+        "a preparation the host still runs is waited for",
+      );
+
+      responses.resolve_update_install = holding("staged");
+      await follower.elapse();
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" });
+      assert.ok(
+        glassRoot.innerHTML.includes("data-glass-update-commit>Install and Relaunch<"),
+        "the open dialog offers the staged release as soon as the host reports it",
+      );
+      assert.deepEqual(follower.waits, [], "a staged release is not asked about");
+
+      responses.cancel_update_install = { cancelled: "staged" };
+      await buttons.cancel.trigger("click");
+      await reattach("committing");
+      assert.ok(glassRoot.innerHTML.includes("Installing update… Clash for Mac will reopen automatically."));
+      responses.resolve_update_install = holding(null);
+      await follower.elapse();
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "unreported" });
+      assert.ok(glassRoot.innerHTML.includes(
+        '<div class="product-about-status">The update installation is no longer in progress. Check for updates again.</div>',
+      ));
+      assert.deepEqual(updateOffers(), NEITHER_OFFER, "the release the lost installation consumed is not offered");
+      assert.ok(glassRoot.innerHTML.includes("data-glass-check-update >Check for Update<"));
+      assert.deepEqual(follower.waits, [], "nothing is asked once the host holds nothing");
+
+      state.glassDialog = null;
+      await reattach("preparing");
+      const interrupted = { state: "failed", version: "0.4.0", code: "installer_start_failed" };
+      responses.resolve_update_install = holding("preparing", interrupted);
+      await follower.elapse();
+      assert.deepEqual(state.glassDialog, {
+        kind: "info",
+        payload: {
+          title: "Update v0.4.0 was not installed",
+          body: "The previous version is still installed. Reason code: installer_start_failed",
+        },
+      }, "an outcome the host reports while it is followed is shown as at startup");
+      assert.equal(state.updateInstall.phase, "downloading");
+
+      state.glassDialog = null;
+      responses.resolve_update_install = holding("preparing");
+      await appModule.handleAction("check-for-updates");
+      responses.cancel_update_install = { cancelled: "preparation" };
+      await buttons.cancel.trigger("click");
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "cancelled" });
+      const asked = issuedCount("resolve_update_install");
+      await follower.elapse();
+      assert.equal(issuedCount("resolve_update_install"), asked, "nothing is asked after the user cancelled");
+      assert.deepEqual(follower.waits, []);
+    } finally {
+      follower.release();
+    }
+  });
+});
+
 test("the credential dialog asks for missing values only while the engine is Off", async () => {
   const setup = {
     profileId: PROFILE_ID,
@@ -2886,6 +3550,462 @@ test("the credential dialog asks for missing values only while the engine is Off
   );
   state.glassDialog = null;
   state.credentialSetup = null;
+});
+
+const PROMPT_DIALOGS = {
+  delete: {
+    dialog: () => ({ kind: "delete", id: PROFILE_ID }),
+    title: "Delete profile",
+    message: "Delete “Work”? This removes the managed profile from the repository.",
+    web: `
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Delete profile">
+          <h3>Delete profile</h3>
+          <p class="glass-dialog-copy">Delete “Work”? This removes the managed profile from the repository.</p>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
+            <button type="button" class="glass-btn danger" data-glass-delete-confirm="${PROFILE_ID}">Yes</button>
+          </div>
+        </div>
+      `,
+  },
+  reset: {
+    dialog: () => ({ kind: "reset-settings" }),
+    title: "Reset all settings",
+    message: "Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept.",
+    web: `
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Reset settings">
+          <h3>Reset all settings</h3>
+          <p class="glass-dialog-copy">Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept.</p>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
+            <button type="button" class="glass-btn danger" data-glass-reset-confirm>Yes</button>
+          </div>
+        </div>
+      `,
+  },
+  info: {
+    dialog: () => ({ kind: "info", payload: { title: "System DNS", body: "never <written>" } }),
+    title: "System DNS",
+    message: "never <written>",
+    web: `
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Info">
+          <h3>System DNS</h3>
+          <p class="glass-dialog-copy">never &lt;written&gt;</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+        </div>
+      `,
+  },
+};
+
+test("prompt dialogs keep their exact web markup when the host has no native prompt", async () => {
+  assert.equal(state.payload.native_ui.prompt_dialog, false);
+  const before = invoked.length;
+  try {
+    for (const [name, { dialog, web }] of Object.entries(PROMPT_DIALOGS)) {
+      state.glassDialog = dialog();
+      glassRoot.innerHTML = "";
+      await renderPage("feedback");
+      assert.equal(glassRoot.innerHTML, web, `the ${name} dialog changed its web markup`);
+    }
+    state.glassDialog = { kind: "info" };
+    await renderPage("feedback");
+    assert.match(glassRoot.innerHTML, /<h3>Info<\/h3>\s*<p class="glass-dialog-copy"><\/p>/u,
+      "an information dialog without a payload keeps its default title and empty body");
+    assert.deepEqual(invoked.slice(before).filter((command) => command.endsWith("_native_prompt_dialog")), [],
+      "a host without the native prompt never invokes its presentation commands");
+  } finally {
+    state.glassDialog = null;
+    await renderPage("feedback");
+  }
+});
+
+test("web confirmations run their business command once and keep a refused dialog open", async () => {
+  const confirmDelete = interactiveElement();
+  confirmDelete.dataset.glassDeleteConfirm = PROFILE_ID;
+  const confirmReset = interactiveElement();
+  const logged = (message) => state.logs.filter((entry) => entry.message === message).length;
+  const count = (command) => invoked.filter((name) => name === command).length;
+  try {
+    querySelectorAllElements.set("[data-glass-delete-confirm]", [confirmDelete]);
+    querySelectorAllElements.set("[data-glass-reset-confirm]", [confirmReset]);
+    await renderPage("profiles");
+
+    const refusedDelete = PROMPT_DIALOGS.delete.dialog();
+    state.glassDialog = refusedDelete;
+    rejected.delete_profile = "repository is locked";
+    invoked.length = 0;
+    await confirmDelete.trigger("click");
+    assert.equal(count("delete_profile"), 1);
+    assert.equal(state.glassDialog, refusedDelete, "a refused deletion keeps its dialog");
+    assert.equal(glassRoot.innerHTML, PROMPT_DIALOGS.delete.web);
+    assert.equal(logged("Delete failed: repository is locked"), 1);
+
+    delete rejected.delete_profile;
+    responses.delete_profile = true;
+    invoked.length = 0;
+    await confirmDelete.trigger("click");
+    assert.equal(count("delete_profile"), 1);
+    assert.deepEqual(invocationDetails.findLast(({ command }) => command === "delete_profile").args, { id: PROFILE_ID });
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(logged("Profile deleted: Work"), 1);
+
+    const refusedReset = PROMPT_DIALOGS.reset.dialog();
+    state.glassDialog = refusedReset;
+    rejected.reset_settings_snapshot = "settings store is read-only";
+    invoked.length = 0;
+    await confirmReset.trigger("click");
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, refusedReset, "a refused reset keeps its dialog");
+    assert.equal(glassRoot.innerHTML, PROMPT_DIALOGS.reset.web);
+    assert.equal(logged("Reset failed: settings store is read-only"), 1);
+
+    delete rejected.reset_settings_snapshot;
+    responses.reset_settings_snapshot = structuredClone(initialLiveSettings);
+    const resets = logged("Preferences reset to defaults");
+    invoked.length = 0;
+    await confirmReset.trigger("click");
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, null);
+    assert.equal(logged("Preferences reset to defaults"), resets + 1);
+  } finally {
+    delete rejected.delete_profile;
+    delete rejected.reset_settings_snapshot;
+    delete responses.delete_profile;
+    delete responses.reset_settings_snapshot;
+    querySelectorAllElements.clear();
+    state.glassDialog = null;
+    await renderPage("feedback");
+  }
+});
+
+test("a confirmation that finishes late closes only the dialog that started it", async () => {
+  const confirmDelete = interactiveElement();
+  confirmDelete.dataset.glassDeleteConfirm = PROFILE_ID;
+  const confirmReset = interactiveElement();
+  const logged = (message) => state.logs.filter((entry) => entry.message === message).length;
+  const removal = deferred();
+  const reset = deferred();
+  try {
+    querySelectorAllElements.set("[data-glass-delete-confirm]", [confirmDelete]);
+    querySelectorAllElements.set("[data-glass-reset-confirm]", [confirmReset]);
+    responses.delete_profile = () => removal.promise;
+    responses.reset_settings_snapshot = () => reset.promise;
+    for (const [confirm, question, answer, report] of [
+      [confirmDelete, PROMPT_DIALOGS.delete.dialog(), () => removal.resolve(true), "Profile deleted: Work"],
+      [confirmReset, PROMPT_DIALOGS.reset.dialog(), () => reset.resolve(structuredClone(initialLiveSettings)), "Preferences reset to defaults"],
+    ]) {
+      state.glassDialog = question;
+      await renderPage("profiles");
+      const running = confirm.trigger("click");
+      // The user dismisses the question and opens a notice while the request
+      // is still running. The late success must not close that notice.
+      const notice = PROMPT_DIALOGS.info.dialog();
+      state.glassDialog = notice;
+      await renderPage("profiles");
+      const reports = logged(report);
+      answer();
+      await running;
+      assert.equal(logged(report), reports + 1);
+      assert.equal(state.glassDialog, notice, `${question.kind}: the notice opened meanwhile stays open`);
+      assert.equal(glassRoot.innerHTML, PROMPT_DIALOGS.info.web);
+    }
+  } finally {
+    delete responses.delete_profile;
+    delete responses.reset_settings_snapshot;
+    querySelectorAllElements.clear();
+    state.glassDialog = null;
+    await renderPage("feedback");
+  }
+});
+
+const PROMPT_BACKDROP = '<div class="glass-dialog-backdrop" data-glass-dismiss></div>';
+const PROMPT_CONFIRMATION = [{ id: "cancel", title: "No", role: "cancel" }, { id: "confirm", title: "Yes", role: "destructive" }];
+
+/// Runs `body` against a host whose boot payload admits the native prompt. The
+/// page keeps one presentation adapter, so every case leaves no dialog behind.
+async function withNativePrompt(body) {
+  const prior = { enabled: state.payload.native_ui.prompt_dialog, handoff: state.migrationHandoff,
+    handoffStatus: state.migrationHandoffStatus, theme: document.documentElement.dataset.theme, locale: getLocale() };
+  const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  const native = (kind) => invocationDetails.filter(({ command }) => command === `${kind}_native_prompt_dialog`).map(({ args }) => args);
+  const backdrop = interactiveElement("div");
+  const deleteFromMenu = interactiveElement();
+  deleteFromMenu.dataset.profileMenu = "delete";
+  deleteFromMenu.dataset.profileId = PROFILE_ID;
+  responses.present_native_prompt_dialog = null;
+  responses.update_native_prompt_dialog = true;
+  responses.dismiss_native_prompt_dialog = true;
+  try {
+    state.payload.native_ui.prompt_dialog = true;
+    state.glassDialog = null;
+    querySelectorAllElements.set("[data-glass-dismiss]", [backdrop]);
+    querySelectorAllElements.set("[data-profile-menu]", [deleteFromMenu]);
+    await renderPage("profiles"); await flush();
+    await body({ flush, native, backdrop, deleteFromMenu,
+      logged: (message) => state.logs.filter((entry) => entry.message === message).length,
+      count: (command) => invoked.filter((name) => name === command).length,
+      escape: async () => {
+        for (const listener of documentListeners.get("keydown") ?? []) listener({ key: "Escape", preventDefault() {} });
+        await flush();
+      } });
+  } finally {
+    for (const command of ["present_native_prompt_dialog", "delete_profile", "reset_settings_snapshot"]) delete rejected[command];
+    state.migrationHandoff = prior.handoff;
+    state.migrationHandoffStatus = prior.handoffStatus;
+    document.documentElement.dataset.theme = prior.theme;
+    setLocale(prior.locale);
+    state.glassDialog = null;
+    await renderPage("feedback"); await flush();
+    state.payload.native_ui.prompt_dialog = prior.enabled;
+    querySelectorAllElements.clear();
+    for (const command of ["present_native_prompt_dialog", "update_native_prompt_dialog", "dismiss_native_prompt_dialog",
+      "delete_profile", "reset_settings_snapshot"]) delete responses[command];
+  }
+}
+
+test("a native prompt host presents each dialog over the page backdrop and opening issues no business IPC", async () => {
+  await withNativePrompt(async ({ flush, native, backdrop, deleteFromMenu, count, escape }) => {
+    invoked.length = 0;
+    const opened = async (open) => {
+      const before = invoked.length;
+      await open(); await flush();
+      assert.deepEqual(invoked.slice(before), ["present_native_prompt_dialog"], "opening a prompt only presents it");
+      assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP, "the page keeps only its backdrop under the native panel");
+      return native("present").at(-1);
+    };
+
+    const removal = await opened(() => deleteFromMenu.trigger("click"));
+    assert.deepEqual(removal.request, {
+      requestId: removal.request.requestId, sequence: 1, acknowledgedSubmission: 0,
+      locale: "en", appearance: document.documentElement.dataset.theme,
+      title: PROMPT_DIALOGS.delete.title, message: PROMPT_DIALOGS.delete.message, buttons: PROMPT_CONFIRMATION,
+      transportFailure: "The native dialog could not deliver this action. Close it and try again.",
+    });
+    assert.match(removal.request.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    assert.ok(["light", "dark"].includes(removal.request.appearance));
+    const stable = { presents: native("present").length, updates: native("update").length };
+    await renderPage("profiles"); await flush();
+    assert.deepEqual({ presents: native("present").length, updates: native("update").length }, stable,
+      "re-rendering an unchanged prompt sends nothing");
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+
+    // The dimmed page under the panel still dismisses, as it does for the web dialog.
+    await backdrop.trigger("click"); await flush();
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(native("dismiss").at(-1).requestId, removal.request.requestId);
+    removal.completion.onmessage({ kind: "activate", requestId: removal.request.requestId, submissionId: 1, buttonId: "confirm" });
+    await flush();
+    assert.equal(count("delete_profile"), 0, "a dismissed prompt can no longer confirm");
+
+    const reset = await opened(() => appModule.handleAction("reset-settings"));
+    assert.equal(reset.request.title, PROMPT_DIALOGS.reset.title);
+    assert.equal(reset.request.message, PROMPT_DIALOGS.reset.message);
+    assert.deepEqual(reset.request.buttons, PROMPT_CONFIRMATION);
+    setLocale("ja");
+    await renderPage("profiles"); await flush();
+    const translated = native("update").at(-1).request;
+    assert.equal(translated.requestId, reset.request.requestId);
+    assert.deepEqual([translated.sequence, translated.acknowledgedSubmission, translated.locale], [2, 0, "ja"]);
+    assert.equal(translated.title, "すべての設定をリセット");
+    assert.deepEqual(translated.buttons.map(({ id, title }) => [id, title]), [["cancel", "いいえ"], ["confirm", "はい"]]);
+    setLocale("en");
+    await escape();
+    assert.equal(state.glassDialog, null);
+    assert.equal(native("dismiss").at(-1).requestId, reset.request.requestId);
+    assert.equal(count("reset_settings_snapshot"), 0);
+
+    const notice = await opened(() => appModule.handleAction("allow-lan-info"));
+    assert.equal(notice.request.title, "Allow LAN");
+    assert.equal(notice.request.message, t("LAN sharing uses a separate listener restricted to explicitly trusted private source networks."));
+    assert.deepEqual(notice.request.buttons, [{ id: "cancel", title: "Close", role: "cancel" }]);
+    const dismissals = native("dismiss").length;
+    notice.completion.onmessage({ kind: "closed", requestId: notice.request.requestId });
+    await flush();
+    assert.equal(state.glassDialog, null, "the native Close button closes the dashboard's dialog");
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(native("dismiss").length, dismissals, "a panel that closed itself is not dismissed again");
+  });
+});
+
+test("native confirmations run the web confirm path once and a refusal keeps the prompt usable", async () => {
+  await withNativePrompt(async ({ flush, native, deleteFromMenu, logged, count }) => {
+    await appModule.handleAction("reset-settings"); await flush();
+    const resetDialog = state.glassDialog;
+    const reset = native("present").at(-1);
+    const activate = (prompt, submissionId) => {
+      prompt.completion.onmessage({ kind: "activate", requestId: prompt.request.requestId, submissionId, buttonId: "confirm" });
+      return flush();
+    };
+    const dismissed = (prompt) => native("dismiss").filter(({ requestId }) => requestId === prompt.request.requestId).length;
+
+    rejected.reset_settings_snapshot = "settings store is read-only";
+    let refusals = logged("Reset failed: settings store is read-only");
+    invoked.length = 0;
+    await activate(reset, 1);
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, resetDialog, "a refused reset keeps its prompt");
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+    assert.equal(logged("Reset failed: settings store is read-only"), refusals + 1);
+    assert.equal(dismissed(reset), 0);
+    const released = native("update").at(-1).request;
+    assert.deepEqual([released.requestId, released.sequence, released.acknowledgedSubmission],
+      [reset.request.requestId, 2, 1], "the refused action is acknowledged, so the native buttons work again");
+
+    delete rejected.reset_settings_snapshot;
+    responses.reset_settings_snapshot = structuredClone(initialLiveSettings);
+    const resets = logged("Preferences reset to defaults");
+    invoked.length = 0;
+    await activate(reset, 2);
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(logged("Preferences reset to defaults"), resets + 1);
+    assert.equal(dismissed(reset), 1, "the dashboard dismisses the prompt after its action succeeded");
+
+    await deleteFromMenu.trigger("click"); await flush();
+    const removalDialog = state.glassDialog;
+    const removal = native("present").at(-1);
+    rejected.delete_profile = "repository is locked";
+    refusals = logged("Delete failed: repository is locked");
+    invoked.length = 0;
+    await activate(removal, 1);
+    assert.equal(count("delete_profile"), 1);
+    assert.equal(state.glassDialog, removalDialog, "a refused deletion keeps its prompt");
+    assert.equal(logged("Delete failed: repository is locked"), refusals + 1);
+    assert.equal(native("update").at(-1).request.acknowledgedSubmission, 1);
+    assert.equal(native("update").at(-1).request.requestId, removal.request.requestId);
+
+    delete rejected.delete_profile;
+    responses.delete_profile = true;
+    const deletions = logged("Profile deleted: Work");
+    invoked.length = 0;
+    await activate(removal, 2);
+    assert.equal(count("delete_profile"), 1);
+    assert.deepEqual(invocationDetails.findLast(({ command }) => command === "delete_profile").args, { id: PROFILE_ID });
+    assert.equal(state.glassDialog, null);
+    assert.equal(logged("Profile deleted: Work"), deletions + 1);
+    assert.equal(dismissed(removal), 1);
+  });
+});
+
+test("the native prompt can be cancelled while its action runs, as the page dialog can", async () => {
+  await withNativePrompt(async ({ flush, native, logged, count }) => {
+    const reset = deferred();
+    responses.reset_settings_snapshot = () => reset.promise;
+    await appModule.handleAction("reset-settings"); await flush();
+    const prompt = native("present").at(-1);
+    invoked.length = 0;
+    prompt.completion.onmessage({ kind: "activate", requestId: prompt.request.requestId, submissionId: 1, buttonId: "confirm" });
+    await flush();
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+    // No or Escape in the panel while the request is still running.
+    prompt.completion.onmessage({ kind: "closed", requestId: prompt.request.requestId });
+    await flush();
+    assert.equal(state.glassDialog, null, "the running action does not hold the dialog open");
+    assert.equal(glassRoot.innerHTML, "");
+    const resets = logged("Preferences reset to defaults");
+    reset.resolve(structuredClone(initialLiveSettings));
+    await flush();
+    assert.equal(logged("Preferences reset to defaults"), resets + 1, "the action still completes and reports");
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, null);
+    assert.deepEqual(invoked.filter((command) => command.endsWith("_native_prompt_dialog")), [],
+      "a panel that closed itself needs no update or dismissal");
+  });
+});
+
+test("a refused native prompt keeps its text and states the failure without a confirmation", async () => {
+  await withNativePrompt(async ({ flush, logged, count, escape }) => {
+    // The alert and the log line pass through the diagnostic redaction.
+    rejected.present_native_prompt_dialog = "native prompt dialog presentation rejected (status 0) token=hunter2";
+    const refusal = "native prompt dialog presentation rejected (status 0) token=[redacted]";
+    const report = `Native presentation of “Reset all settings” failed: ${refusal}`;
+    let reported = logged(report);
+    invoked.length = 0;
+    await appModule.handleAction("reset-settings"); await flush();
+    assert.equal(glassRoot.innerHTML, `${PROMPT_BACKDROP}
+        <div class="glass-dialog" role="dialog" aria-label="Reset all settings">
+          <h3>Reset all settings</h3>
+          <p class="glass-dialog-copy">${PROMPT_DIALOGS.reset.message}</p>
+          <p class="glass-dialog-copy warning" role="alert">${refusal}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>No</button></div>
+        </div>`, "the question and the failure are stated and only dismissal is offered");
+    assert.equal(logged(report), reported + 1);
+    assert.equal(state.logs.some((entry) => entry.message.includes("hunter2")), false);
+    assert.equal(count("reset_settings_snapshot"), 0);
+    await escape();
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+
+    // A notice raised while its window is hidden is refused by the host. Its
+    // text must still be shown, or the user never learns what happened.
+    const hidden = "native prompt dialog parent is unavailable (status 2)";
+    rejected.present_native_prompt_dialog = hidden;
+    const notice = t("LAN sharing uses a separate listener restricted to explicitly trusted private source networks.");
+    reported = logged(`Native presentation of “Allow LAN” failed: ${hidden}`);
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.equal(glassRoot.innerHTML, `${PROMPT_BACKDROP}
+        <div class="glass-dialog" role="dialog" aria-label="Allow LAN">
+          <h3>Allow LAN</h3>
+          <p class="glass-dialog-copy">${notice}</p>
+          <p class="glass-dialog-copy warning" role="alert">${hidden}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+        </div>`);
+    assert.equal(logged(`Native presentation of “Allow LAN” failed: ${hidden}`), reported + 1);
+    await escape();
+    assert.equal(glassRoot.innerHTML, "");
+  });
+});
+
+test("dialogs the host or the native frame cannot take stay in the page", async () => {
+  await withNativePrompt(async ({ flush, native, escape }) => {
+    const presents = native("present").length;
+    const pageNotice = /<div class="glass-dialog" role="dialog" aria-label="Info">\s*<h3>Allow LAN<\/h3>/u;
+    // A migration handoff window, and a host with a handoff in progress,
+    // refuse every presentation command.
+    state.migrationHandoff = true;
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.match(glassRoot.innerHTML, pageNotice);
+    state.migrationHandoff = false;
+    await escape();
+    const idle = state.migrationHandoffStatus;
+    state.migrationHandoffStatus = { state: "in_progress" };
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.match(glassRoot.innerHTML, pageNotice);
+    state.migrationHandoffStatus = idle;
+    await escape();
+    // Until the page theme is resolved there is no appearance to give the panel.
+    const theme = document.documentElement.dataset.theme;
+    delete document.documentElement.dataset.theme;
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.match(glassRoot.innerHTML, pageNotice);
+    document.documentElement.dataset.theme = theme;
+    await escape();
+
+    // Text beyond the bounded native frame keeps the page dialog, uncut.
+    const long = "x".repeat(4097);
+    state.glassDialog = { kind: "info", payload: { title: "Legacy migration failed", body: long } };
+    await renderPage("profiles"); await flush();
+    assert.ok(glassRoot.innerHTML.includes(`<p class="glass-dialog-copy">${long}</p>`));
+    state.glassDialog = { kind: "copy", id: PROFILE_ID };
+    await renderPage("profiles"); await flush();
+    assert.match(glassRoot.innerHTML, /data-glass-copy-confirm/u);
+    assert.equal(native("present").length, presents, "none of these is presented natively");
+
+    // Replacing a native prompt with a page dialog releases the panel.
+    await appModule.handleAction("allow-lan-info"); await flush();
+    const notice = native("present").at(-1);
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+    await appModule.handleAction("dns-query"); await flush();
+    assert.match(glassRoot.innerHTML, /Resolve through the running engine/u);
+    assert.equal(native("dismiss").at(-1).requestId, notice.request.requestId);
+  });
 });
 
 test("profile cards show source type on first load without fetching URLs or inventing quota", async () => {

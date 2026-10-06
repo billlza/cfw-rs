@@ -1,16 +1,23 @@
 import AppKit
 import WebKit
 
-/// DOM coordinates start in the WK content viewport, below any titlebar safe
-/// area. Wry's full-size WKWebView may include that titlebar in its bounds.
+/// DOM coordinates start in the WK content viewport. Wry's full-size
+/// WKWebView may include the window's titlebar in its bounds: WebKit lays
+/// the page out below an opaque titlebar (the view's safe area) but under a
+/// transparent one, where the page spans the whole view.
 @MainActor
 struct WebContentGeometry {
   let viewport: NSRect
   let scale: CGFloat
   let flipped: Bool
 
+  /// The part of the view the page lays itself out in.
+  static func pageViewport(of webview: WKWebView) -> NSRect {
+    webview.window?.titlebarAppearsTransparent == true ? webview.bounds : webview.safeAreaRect
+  }
+
   init?(webview: WKWebView, width: Double, height: Double) {
-    let viewport = webview.safeAreaRect
+    let viewport = Self.pageViewport(of: webview)
     let scale = webview.pageZoom
     guard
       [viewport.minX, viewport.minY, viewport.width, viewport.height, scale]

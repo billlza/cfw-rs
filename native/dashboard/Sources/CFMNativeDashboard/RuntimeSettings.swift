@@ -284,8 +284,6 @@ final class RuntimeSettingsModel {
 struct RuntimeSettingsForm: View {
   let model: RuntimeSettingsModel
   let cancel: () -> Void
-  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-  @Environment(\.colorSchemeContrast) private var contrast
   @State private var textAreaDragStart: CGFloat?
 
   var body: some View {
@@ -303,27 +301,13 @@ struct RuntimeSettingsForm: View {
           .fixedSize(horizontal: false, vertical: true)
           .accessibilityLabel(error).accessibilityAddTraits(.updatesFrequently)
       }
-      HStack(spacing: 8) {
-        Spacer(minLength: 0)
-        if #available(macOS 26, *), !reduceTransparency, contrast != .increased {
-          GlassEffectContainer(spacing: 8) {
-            HStack(spacing: 8) {
-              Button(model.frame.labels.cancel, action: cancel).buttonStyle(.glass)
-                .keyboardShortcut(.cancelAction)
-              Button(model.busy ? model.frame.labels.applying : model.frame.labels.apply) {
-                model.submit()
-              }.buttonStyle(.glassProminent)
-            }
-          }
-        } else {
-          Button(model.frame.labels.cancel, action: cancel).buttonStyle(.bordered)
-            .keyboardShortcut(.cancelAction)
-          Button(model.busy ? model.frame.labels.applying : model.frame.labels.apply) {
-            model.submit()
-          }.buttonStyle(.borderedProminent)
-        }
+      DialogActions {
+        DialogButton(title: model.frame.labels.cancel, kind: .cancel, action: cancel)
+        DialogButton(
+          title: model.busy ? model.frame.labels.applying : model.frame.labels.apply,
+          kind: .action, action: { model.submit() })
       }
-      .controlSize(.regular).disabled(model.busy || model.closed).padding(.top, 4)
+      .disabled(model.busy || model.closed)
     }
     .padding(.horizontal, 18.5).padding(.top, 18.5).padding(.bottom, 14.5)
     .environment(\.locale, Locale(identifier: model.frame.locale))
@@ -422,35 +406,19 @@ private struct RuntimeSettingsSurface: View {
   let model: RuntimeSettingsModel
   let cancel: () -> Void
   let relayout: () -> Void
-  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-  @Environment(\.colorSchemeContrast) private var contrast
 
   var body: some View {
     ScrollView {
       RuntimeSettingsForm(model: model, cancel: cancel)
     }
-    .background {
-      if reduceTransparency || contrast == .increased {
-        RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .windowBackgroundColor))
-      } else {
-        RoundedRectangle(cornerRadius: 16).fill(.regularMaterial)
-      }
-    }
-    .overlay(
-      RoundedRectangle(cornerRadius: 16).stroke(
-        .separator, lineWidth: contrast == .increased ? 1 : 0.5)
-    )
-    .clipShape(RoundedRectangle(cornerRadius: 16))
+    .modifier(DialogSheet())
     .onExitCommand(perform: cancel)
     .onChange(of: model.error) { _, _ in relayout() }
     .onChange(of: model.textAreaHeight) { _, _ in relayout() }
   }
 }
 
-private final class RuntimeSettingsPanel: NSPanel {
-  override var canBecomeKey: Bool { true }
-  override var canBecomeMain: Bool { false }
-
+private final class RuntimeSettingsPanel: CenteredDialogPanel {
   override func sendEvent(_ event: NSEvent) {
     // A source-range list is a form field, not a document editor. Preserve the
     // original textarea's Tab navigation while leaving text/IME commands alone.
@@ -472,122 +440,40 @@ private final class RuntimeSettingsPanel: NSPanel {
 }
 
 @MainActor
-final class RuntimeSettingsWindow: NSObject, NSWindowDelegate {
+final class RuntimeSettingsWindow: CenteredDialogWindow {
   let model: RuntimeSettingsModel
-  let panel: NSPanel
-  private weak var parent: NSWindow?
-  private weak var priorResponder: NSResponder?
-  private var observers: [NSObjectProtocol] = []
-  private var closing = false
 
   init(
     frame: RuntimeSettingsFrame, parent: NSWindow, event: @escaping RuntimeSettingsEventCallback,
     closed: @escaping RuntimeSettingsClosedCallback, context: UInt
   ) {
-    self.parent = parent
-    priorResponder = parent.firstResponder
-    model = RuntimeSettingsModel(frame, event: event, closed: closed, context: context)
-    panel = RuntimeSettingsPanel(
-      contentRect: .zero, styleMask: [.borderless],
-      backing: .buffered, defer: false)
-    super.init()
-    panel.isReleasedWhenClosed = false
-    panel.isOpaque = false
-    panel.backgroundColor = .clear
-    panel.hasShadow = true
-    panel.hidesOnDeactivate = false
-    panel.level = .normal
-    panel.collectionBehavior = [.fullScreenAuxiliary]
-    panel.delegate = self
-    panel.appearance = NSAppearance(named: frame.appearance.name)
-  }
-
-  func show() -> Bool {
-    guard !closing, let parent, parent.isVisible, layout() else { return false }
-    panel.contentView = NSHostingView(
-      rootView: RuntimeSettingsSurface(
-        model: model, cancel: { [weak self] in self?.cancel() },
-        relayout: { [weak self] in _ = self?.layout() }))
-    parent.addChildWindow(panel, ordered: .above)
-    panel.makeKeyAndOrderFront(nil)
-    observe(NSWindow.willCloseNotification, object: parent) { $0.finish() }
-    observe(NSWindow.didResizeNotification, object: parent) { _ = $0.layout() }
-    observe(NSWindow.didMoveNotification, object: parent) { _ = $0.layout() }
-    observe(NSWindow.didMiniaturizeNotification, object: parent) { $0.panel.orderOut(nil) }
-    observe(NSWindow.didDeminiaturizeNotification, object: parent) { $0.restoreIfVisible() }
-    observe(NSWindow.didChangeOcclusionStateNotification, object: parent) { controller in
-      if controller.parent?.isVisible == true {
-        controller.restoreIfVisible()
-      } else {
-        controller.panel.orderOut(nil)
-      }
-    }
-    return true
-  }
-
-  @discardableResult func layout() -> Bool {
-    guard let parent else { return false }
-    let viewport = parent.convertToScreen(parent.contentLayoutRect)
-    let width = min(480, viewport.width - 40)
-    let maximumHeight = viewport.height - 48
-    model.setViewportHeight(viewport.height)
-    guard width >= 1, maximumHeight >= 1 else { return false }
-    let measure = NSHostingView(
-      rootView: RuntimeSettingsForm(model: model, cancel: {}).frame(width: width))
-    measure.appearance = panel.appearance
-    let height = min(maximumHeight, measure.fittingSize.height)
-    guard height.isFinite, height >= 1 else { return false }
-    panel.setFrame(
-      NSRect(
-        x: viewport.midX - width / 2, y: viewport.midY - height / 2,
-        width: width, height: height), display: false)
-    return true
-  }
-
-  private func restoreIfVisible() {
-    guard !closing, let parent, parent.isVisible, !parent.isMiniaturized else { return }
-    _ = layout()
-    if !panel.isVisible { panel.orderFront(nil) }
+    let model = RuntimeSettingsModel(frame, event: event, closed: closed, context: context)
+    self.model = model
+    super.init(
+      parent: parent, appearance: frame.appearance.name,
+      metrics: Metrics(maximumWidth: 480, horizontalMargin: 40, verticalMargin: 48),
+      content: Content(
+        busy: { model.busy },
+        surface: { cancel, relayout in
+          NSHostingView(
+            rootView: RuntimeSettingsSurface(model: model, cancel: cancel, relayout: relayout))
+        },
+        measured: { width in
+          NSHostingView(
+            rootView: RuntimeSettingsForm(model: model, cancel: {}).frame(width: width))
+        },
+        viewportHeightChanged: { model.setViewportHeight($0) },
+        finished: {
+          if runtimeSettingsWindow?.model === model { runtimeSettingsWindow = nil }
+          model.finish()
+        }),
+      panelClass: RuntimeSettingsPanel.self)
   }
 
   func update(_ next: RuntimeSettingsFrame) -> Int32 {
     let status = model.update(next)
-    if status == 1 {
-      panel.appearance = NSAppearance(named: next.appearance.name)
-      _ = layout()
-    }
+    if status == 1 { refresh(appearance: next.appearance.name) }
     return status
-  }
-
-  func cancel() { if !model.busy { finish() } }
-  func windowShouldClose(_ sender: NSWindow) -> Bool { !model.busy }
-  func windowWillClose(_ notification: Notification) { finish() }
-
-  private func observe(
-    _ name: Notification.Name, object: AnyObject,
-    action: @escaping @MainActor (RuntimeSettingsWindow) -> Void
-  ) {
-    observers.append(
-      NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) {
-        [weak self] _ in MainActor.assumeIsolated { if let self { action(self) } }
-      })
-  }
-
-  func finish() {
-    guard !closing else { return }
-    closing = true
-    let ownedFocus = panel.isKeyWindow
-    for observer in observers { NotificationCenter.default.removeObserver(observer) }
-    observers.removeAll()
-    parent?.removeChildWindow(panel)
-    panel.orderOut(nil)
-    panel.close()
-    if ownedFocus, NSApp.isActive, let parent, parent.isVisible {
-      parent.makeKey()
-      if let priorResponder { parent.makeFirstResponder(priorResponder) }
-    }
-    if runtimeSettingsWindow === self { runtimeSettingsWindow = nil }
-    model.finish()
   }
 }
 

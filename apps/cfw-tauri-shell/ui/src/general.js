@@ -54,6 +54,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
           <span>Clash for Mac</span>
           <small>v${escapeHtml(appVersion)}${updateBadge}</small>
         </div>
+        <span class="cfw-slogan" aria-hidden="true">Less Network<br>More Freedom</span>
       </section>
 
       <section class="cfw-content${migrationBanner ? " cfw-content-migration" : ""}">

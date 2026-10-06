@@ -131,6 +131,36 @@ pub(crate) fn run_bounded_command(
     maximum_stdout_bytes: usize,
     maximum_stderr_bytes: usize,
 ) -> Result<BoundedCommandOutput, BoundedCommandError> {
+    run_bounded_command_with_environment(
+        program,
+        args,
+        CommandEnvironment::Closed(&[]),
+        timeout,
+        maximum_stdout_bytes,
+        maximum_stderr_bytes,
+    )
+}
+
+/// What a bounded command sees of this process's environment.
+#[derive(Clone, Copy)]
+pub(crate) enum CommandEnvironment<'a> {
+    /// The fixed defaults and the named variables; nothing else of the
+    /// caller's environment reaches the child.
+    Closed(&'a [(&'a str, &'a std::ffi::OsStr)]),
+    /// This process's own environment, unchanged: for a command that starts
+    /// something meant to live in the user's session, not in a tool's.
+    Inherited,
+}
+
+/// Like [`run_bounded_command`], with the stated environment.
+pub(crate) fn run_bounded_command_with_environment(
+    program: &str,
+    args: &[&str],
+    environment: CommandEnvironment<'_>,
+    timeout: Duration,
+    maximum_stdout_bytes: usize,
+    maximum_stderr_bytes: usize,
+) -> Result<BoundedCommandOutput, BoundedCommandError> {
     let deadline =
         Instant::now()
             .checked_add(timeout)
@@ -138,12 +168,17 @@ pub(crate) fn run_bounded_command(
                 program: program.to_owned(),
                 timeout,
             })?;
-    let mut child = Command::new(program)
-        .args(args)
-        .env_clear()
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    let mut command = Command::new(program);
+    command.args(args);
+    if let CommandEnvironment::Closed(additions) = environment {
+        command
+            .env_clear()
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .envs(additions.iter().copied());
+    }
+    let mut child = command
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -396,5 +431,72 @@ mod tests {
         let error = run_bounded_command("/path/that/must/not/run", &[], Duration::MAX, 0, 0)
             .expect_err("overflowing timeout must fail before spawn");
         assert!(matches!(error, BoundedCommandError::InvalidTimeout { .. }));
+    }
+
+    #[test]
+    fn only_the_named_variables_join_the_closed_environment() {
+        // The test process itself runs with a far larger environment.
+        assert!(std::env::vars_os().count() > 4);
+        let output = run_bounded_command_with_environment(
+            "/usr/bin/env",
+            &[],
+            CommandEnvironment::Closed(&[("HOME", std::ffi::OsStr::new("/Users/example"))]),
+            Duration::from_secs(5),
+            1024,
+            32,
+        )
+        .expect("environment listing");
+        let mut variables = String::from_utf8(output.stdout)
+            .expect("UTF-8 environment")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        variables.sort();
+        assert_eq!(
+            variables,
+            [
+                "HOME=/Users/example",
+                "LANG=C",
+                "LC_ALL=C",
+                "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+            ]
+        );
+
+        let closed = run_bounded_command("/usr/bin/env", &[], Duration::from_secs(5), 1024, 32)
+            .expect("environment listing");
+        assert!(!String::from_utf8_lossy(&closed.stdout).contains("HOME="));
+    }
+
+    #[test]
+    fn an_inherited_environment_is_this_process_own_and_nothing_is_forced_into_it() {
+        let own = std::env::vars()
+            .filter(|(name, value)| !name.starts_with("DYLD_") && !value.contains('\n'))
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>();
+        assert!(own.iter().any(|variable| variable.starts_with("HOME=")));
+        let output = run_bounded_command_with_environment(
+            "/usr/bin/env",
+            &[],
+            CommandEnvironment::Inherited,
+            Duration::from_secs(5),
+            256 * 1024,
+            32,
+        )
+        .expect("environment listing");
+        let listed = String::from_utf8(output.stdout).expect("UTF-8 environment");
+        let listed = listed.lines().collect::<Vec<_>>();
+        for variable in &own {
+            assert!(
+                listed.contains(&variable.as_str()),
+                "{variable} was not inherited"
+            );
+        }
+        for forced in ["LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin:/usr/sbin:/sbin"] {
+            assert_eq!(
+                listed.contains(&forced),
+                own.iter().any(|variable| variable == forced),
+                "{forced}"
+            );
+        }
     }
 }

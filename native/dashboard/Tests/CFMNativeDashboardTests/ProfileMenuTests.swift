@@ -491,6 +491,26 @@ struct ProfileMenuTests {
     }
   }
 
+  @Test @MainActor func panelKeepsTheOrdinaryActivatingPolicy() throws {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    let parent = NSWindow(
+      contentRect: NSRect(x: 100, y: 100, width: 850, height: 603),
+      styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    parent.isReleasedWhenClosed = false
+    defer { parent.close() }
+    try withMenuLog { log throws in
+      let controller = ProfileMenuWindow(
+        frame: try ProfileMenuFrame.decode(menuPayload()), parent: parent,
+        callback: menuCallback, context: UInt(bitPattern: log))
+      defer { controller.finish(nil) }
+      // A nonactivating panel left the parent inactive after dismissal, so the
+      // parent lost its next click.
+      #expect(!controller.panel.styleMask.contains(.nonactivatingPanel))
+      #expect(controller.panel.canBecomeKey)
+      #expect(!controller.panel.canBecomeMain)
+    }
+  }
+
   @Test func offMainThreadCannotTouchAppKitOrReleaseContext() async {
     let status = await Task.detached { profileMenuDismiss(10_002) }.value
     #expect(status == 3)

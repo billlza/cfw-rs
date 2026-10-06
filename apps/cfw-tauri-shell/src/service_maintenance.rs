@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
@@ -8,7 +9,7 @@ use cfw_engine_api::{
     NativeServiceEngineStatus, NativeServiceMaintenanceAction, NativeServiceMaintenanceResult,
     NativeServiceOffProofProfile, NativeServiceRegistrationStatus,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::launch::ServiceMaintenanceAction;
 #[cfg(target_os = "macos")]
@@ -28,14 +29,52 @@ enum WorkerWaitOutcome {
     AbortDidNotSettle,
 }
 
-#[derive(Serialize)]
-struct MaintenanceReceipt {
+/// The one line a maintenance mode prints when it succeeded. The update
+/// installer reads it back from a child process, so this type is both ends of
+/// that contract.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MaintenanceReceipt {
     action: NativeServiceMaintenanceAction,
-    document: &'static str,
+    document: Cow<'static, str>,
     engine_status: Option<NativeServiceEngineStatus>,
     global_authority: NativeServiceRegistrationStatus,
     off_proof_profile: Option<NativeServiceOffProofProfile>,
     proxy_agent: NativeServiceRegistrationStatus,
+}
+
+impl MaintenanceReceipt {
+    fn of(result: &NativeServiceMaintenanceResult) -> Self {
+        Self {
+            action: result.action,
+            document: Cow::Borrowed(DOCUMENT),
+            engine_status: result.engine_status,
+            global_authority: result.global_authority,
+            off_proof_profile: result.off_proof_profile,
+            proxy_agent: result.proxy_agent,
+        }
+    }
+
+    /// Reads the receipt a maintenance mode printed and accepts it only if it
+    /// proves the postcondition of exactly `action`.
+    pub(crate) fn proven(
+        stdout: &str,
+        action: NativeServiceMaintenanceAction,
+    ) -> Result<NativeServiceMaintenanceResult, String> {
+        let receipt: Self = serde_json::from_str(stdout.trim_end_matches('\n'))
+            .map_err(|error| format!("receipt is not the expected document: {error}"))?;
+        let result = NativeServiceMaintenanceResult {
+            action: receipt.action,
+            engine_status: receipt.engine_status,
+            global_authority: receipt.global_authority,
+            off_proof_profile: receipt.off_proof_profile,
+            proxy_agent: receipt.proxy_agent,
+        };
+        if receipt.document != DOCUMENT || result.action != action || !result.validate() {
+            return Err("receipt does not prove the requested action".into());
+        }
+        Ok(result)
+    }
 }
 
 pub(crate) fn run(action: ServiceMaintenanceAction) -> Result<(), String> {
@@ -48,17 +87,9 @@ pub(crate) fn run(action: ServiceMaintenanceAction) -> Result<(), String> {
     }
     let action = native_action(action);
     let result = run_native_maintenance(bridge, action)?;
-    let receipt = MaintenanceReceipt {
-        action: result.action,
-        document: DOCUMENT,
-        engine_status: result.engine_status,
-        global_authority: result.global_authority,
-        off_proof_profile: result.off_proof_profile,
-        proxy_agent: result.proxy_agent,
-    };
     println!(
         "{}",
-        serde_json::to_string(&receipt)
+        serde_json::to_string(&MaintenanceReceipt::of(&result))
             .map_err(|_| "service maintenance receipt encoding failed".to_owned())?
     );
     Ok(())
@@ -356,6 +387,119 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(native_action(input), expected);
+        }
+    }
+
+    fn result(
+        action: NativeServiceMaintenanceAction,
+        proxy_agent: NativeServiceRegistrationStatus,
+        global_authority: NativeServiceRegistrationStatus,
+        proven_off: bool,
+    ) -> NativeServiceMaintenanceResult {
+        NativeServiceMaintenanceResult {
+            action,
+            engine_status: proven_off.then_some(NativeServiceEngineStatus::Off),
+            global_authority,
+            off_proof_profile: proven_off
+                .then_some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+            proxy_agent,
+        }
+    }
+
+    fn printed(result: &NativeServiceMaintenanceResult) -> String {
+        serde_json::to_string(&MaintenanceReceipt::of(result)).expect("receipt")
+    }
+
+    #[test]
+    fn a_printed_receipt_is_the_document_its_reader_accepts() {
+        use NativeServiceMaintenanceAction as Action;
+        use NativeServiceRegistrationStatus::{Enabled, NotRegistered, RequiresApproval};
+
+        let status = result(Action::Status, Enabled, RequiresApproval, false);
+        assert_eq!(
+            printed(&status),
+            concat!(
+                r#"{"action":"status","document":"cfw-current-service-maintenance-v2","#,
+                r#""engine_status":null,"global_authority":"requires_approval","#,
+                r#""off_proof_profile":null,"proxy_agent":"enabled"}"#,
+            ),
+            "the layout is read by installer processes of other builds"
+        );
+        for proven in [
+            status,
+            result(Action::UnregisterProxyAgent, NotRegistered, Enabled, true),
+            result(
+                Action::UnregisterGlobalAuthority,
+                NotRegistered,
+                NotRegistered,
+                true,
+            ),
+        ] {
+            assert_eq!(
+                MaintenanceReceipt::proven(&format!("{}\n", printed(&proven)), proven.action),
+                Ok(proven.clone()),
+                "{:?}",
+                proven.action
+            );
+        }
+    }
+
+    #[test]
+    fn a_receipt_must_prove_exactly_the_requested_action() {
+        use NativeServiceMaintenanceAction as Action;
+        use NativeServiceRegistrationStatus::{Enabled, NotRegistered};
+
+        let agent = printed(&result(
+            Action::UnregisterProxyAgent,
+            NotRegistered,
+            Enabled,
+            true,
+        ));
+        for (stdout, action) in [
+            (agent.clone(), Action::UnregisterGlobalAuthority),
+            (
+                printed(&result(
+                    Action::UnregisterProxyAgent,
+                    Enabled,
+                    Enabled,
+                    true,
+                )),
+                Action::UnregisterProxyAgent,
+            ),
+            (
+                printed(&result(
+                    Action::UnregisterProxyAgent,
+                    NotRegistered,
+                    Enabled,
+                    false,
+                )),
+                Action::UnregisterProxyAgent,
+            ),
+            (
+                printed(&result(
+                    Action::UnregisterGlobalAuthority,
+                    NotRegistered,
+                    Enabled,
+                    true,
+                )),
+                Action::UnregisterGlobalAuthority,
+            ),
+            (
+                agent.replace(DOCUMENT, "another-document"),
+                Action::UnregisterProxyAgent,
+            ),
+            (
+                agent.replacen('{', r#"{"extra":1,"#, 1),
+                Action::UnregisterProxyAgent,
+            ),
+            (format!("{agent}\n{agent}"), Action::UnregisterProxyAgent),
+            (String::new(), Action::Status),
+            ("not json".into(), Action::Status),
+        ] {
+            assert!(
+                MaintenanceReceipt::proven(&stdout, action).is_err(),
+                "{action:?} accepted {stdout}"
+            );
         }
     }
 }

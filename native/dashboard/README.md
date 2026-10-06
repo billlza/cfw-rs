@@ -149,22 +149,43 @@ never starts the production Rust host or its native networking services. See
 ## Corrected in-place components
 
 The `native-ui` feature enables the original Profiles menu, Network settings
-form and General switches as native components. It does not expose the rejected Overview menu entry.
+form, General switches and the delete, reset and information prompt dialogs as
+native components. It does not expose the rejected Overview menu entry.
 The existing nine pages and command handlers remain the product surface.
-`ProfileMenu.swift`, `RuntimeSettings.swift` and `GeneralSwitches.swift`, with matching C headers, receive
+`ProfileMenu.swift`, `RuntimeSettings.swift`, `GeneralSwitches.swift` and `PromptDialog.swift`, with matching C headers, receive
 bounded, versioned display frames and return intent to the original JS/Rust
 application handlers. The components do not invoke networking or change permissions.
 
 The menu preserves action order, source/engine disabled reasons and content-window
 positioning. The form preserves field order, labels, checkboxes, draft/error state,
-revision-based submission and busy cancellation rules. All three follow the effective
+revision-based submission and busy cancellation rules. The prompt preserves its
+texts, button order and confirmation step, and stays cancellable while a confirmed
+action runs, as the page dialog did; its frame is data, so a later dialog of
+the same shape needs no new export. All four follow the effective
 page theme. Supported systems use native SwiftUI glass for appropriate controls;
 older systems and accessibility settings retain standard readable materials.
+
+The form and the prompt are centered child panels hosted by `CenteredDialogWindow.swift`,
+which also holds the sheet and the buttons they share: the page dialog's sheet as
+one Liquid Glass shape, and its pill buttons as solid system capsules, so no
+control stacks glass on the glass sheet.
+Their Rust session ownership is `native_components/panel_session.rs`.
+
+`WindowGlass.swift` (`cfm_window_glass.h`) is the one family under the page
+instead of over it: inserted below the host window's WKWebView, it draws the
+window's Liquid Glass slab, the frosted sidebar and workspace panels, the
+sidebar cards and the selected navigation pill at the rectangles the page
+measures, and takes no input. The window is transparent for it; the page drops
+its own backgrounds only while the host confirms the glass, so a refused or
+closed backdrop leaves the page readable. Its session ownership is the same
+`panel_session.rs`, with no intent to admit. `WebContentGeometry.swift` maps the
+page's coordinates for every family and knows that WebKit lays the page out
+under a transparent titlebar but below an opaque one.
 
 The corresponding Rust adapter is `apps/cfw-tauri-shell/src/native_components/`.
 Frontend adapters live beside the original handlers, and retain all business
 validation there. Run host checks with `--features native-ui`; the normal Swift
-package suite includes all three components. See the implementation status for
+package suite includes all four components. See the implementation status for
 actual test counts and unresolved installed/visual/accessibility gates. The
 historical `Preview/build-preview.sh` is the rejected sample UI and must not be
 installed or handed over as the corrected 0.5 preview.

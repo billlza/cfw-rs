@@ -44,6 +44,10 @@ COMPONENT_EXPORTS = frozenset({
     "cfm_runtime_settings_dismiss_v1",
     "cfm_general_switches_sync_v1", "cfm_general_switches_focus_v1",
     "cfm_general_switches_dismiss_v1",
+    "cfm_prompt_dialog_present_v1", "cfm_prompt_dialog_update_v1",
+    "cfm_prompt_dialog_dismiss_v1",
+    "cfm_window_glass_present_v1", "cfm_window_glass_update_v1",
+    "cfm_window_glass_dismiss_v1",
 })
 METADATA_KEYS = frozenset({
     "productVersion", "buildNumber", "configuration", "target", "signingMode", "buildSystem",

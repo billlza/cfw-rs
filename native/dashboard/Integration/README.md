@@ -57,6 +57,11 @@ Suggested checks using the visible window:
 - Command+Q uses the normal application menu. Edit menu provides native clipboard
   keyboard actions for WKWebView and AppKit controls.
 
+The harness does not bridge the prompt dialog or the window glass commands.
+`fixtures.json` reports `prompt_dialog: false` and `window_glass: false`, so
+delete, reset and information dialogs remain the page dialogs here, the page
+keeps its own backgrounds, and this harness is no evidence for either family.
+
 Screenshots, keyboard checks and VoiceOver must use this live window. Offscreen
 rendering is not evidence that AppKit controls render or behave correctly. Even a
 successful harness run does not establish the production Tauri/Rust lifecycle,

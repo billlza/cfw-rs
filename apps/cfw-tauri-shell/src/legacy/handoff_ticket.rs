@@ -52,6 +52,14 @@ pub(crate) struct ProcessIdentity {
     pub(super) executable: PathBuf,
 }
 
+impl ProcessIdentity {
+    /// Whether the identity names the calling process, whatever path its
+    /// executable has by now.
+    pub(crate) fn is_this_process(&self) -> bool {
+        self.pid == std::process::id()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum LaunchArguments {
     Dashboard,
@@ -577,7 +585,10 @@ pub(super) fn identity_exists(expected: &ProcessIdentity) -> Result<bool, String
     Ok(observe_exact_process(expected.pid, &expected.executable)?.as_ref() == Some(expected))
 }
 
-fn observe_exact_process(pid: u32, executable: &Path) -> Result<Option<ProcessIdentity>, String> {
+pub(super) fn observe_exact_process(
+    pid: u32,
+    executable: &Path,
+) -> Result<Option<ProcessIdentity>, String> {
     observe_kernel_process(pid, executable)
 }
 
@@ -589,6 +600,11 @@ fn observe_kernel_process(
         return Err("process PID is outside Darwin's signed PID range".into());
     };
     if pid_signed <= 0 {
+        return Ok(None);
+    }
+    // The kernel refuses the full identity of another user's process. Such a
+    // process is never the one sought, and its owner is readable by anyone.
+    if process_owner(pid_signed)? != Some(unsafe { libc::geteuid() }) {
         return Ok(None);
     }
     let Some(before) = process_bsd_info(pid_signed)? else {
@@ -607,7 +623,10 @@ fn observe_kernel_process(
     };
     if path_length <= 0 {
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
+        // ESRCH: the process is gone. ENOENT: its executable no longer has a
+        // path, as after an application was replaced while running; it is
+        // then not the file at the expected path.
+        if matches!(error.raw_os_error(), Some(libc::ESRCH | libc::ENOENT)) {
             return Ok(None);
         }
         return Err(format!(
@@ -641,6 +660,49 @@ fn observe_kernel_process(
         },
         executable,
     }))
+}
+
+/// The effective user of a live process, from the short identity every user
+/// may read. An absent process has no owner.
+fn process_owner(pid: libc::pid_t) -> Result<Option<libc::uid_t>, String> {
+    classify_process_owner(pid, read_process_short_info(pid))
+}
+
+fn read_process_short_info(pid: libc::pid_t) -> std::io::Result<libc::proc_bsdshortinfo> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let expected = std::mem::size_of::<libc::proc_bsdshortinfo>();
+    let result = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            i32::try_from(expected).expect("proc_bsdshortinfo size fits i32"),
+        )
+    };
+    if result <= 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if result as usize != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("kernel process owner had unexpected size {result}"),
+        ));
+    }
+    Ok(unsafe { info.assume_init() })
+}
+
+fn classify_process_owner(
+    pid: libc::pid_t,
+    observation: std::io::Result<libc::proc_bsdshortinfo>,
+) -> Result<Option<libc::uid_t>, String> {
+    match observation {
+        Ok(info) => Ok(Some(info.pbsi_uid)),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Err(error) => Err(format!(
+            "failed to read kernel process owner for PID {pid}: {error}"
+        )),
+    }
 }
 
 fn process_bsd_info(pid: libc::pid_t) -> Result<Option<libc::proc_bsdinfo>, String> {
@@ -696,13 +758,15 @@ fn same_process_incarnation(left: &libc::proc_bsdinfo, right: &libc::proc_bsdinf
         && left.pbi_start_tvusec == right.pbi_start_tvusec
 }
 
+/// The processes of this user: the only ones an exact identity is sought
+/// among, and the only ones whose full identity the kernel reveals.
 fn process_ids() -> Result<Vec<u32>, String> {
-    const PROC_ALL_PIDS: u32 = 1;
+    const PROC_UID_ONLY: u32 = 4;
     let mut pids = vec![0_i32; MAX_PROCESS_LIST_BYTES / std::mem::size_of::<i32>()];
     let bytes = unsafe {
         libc::proc_listpids(
-            PROC_ALL_PIDS,
-            0,
+            PROC_UID_ONLY,
+            libc::geteuid(),
             pids.as_mut_ptr().cast(),
             i32::try_from(MAX_PROCESS_LIST_BYTES).expect("process list bound fits i32"),
         )
@@ -1417,6 +1481,13 @@ mod tests {
         assert_eq!(calls.load(Ordering::Acquire), 1);
     }
 
+    #[test]
+    fn only_the_identity_with_this_process_id_is_this_process() {
+        let executable = Path::new("/elsewhere/clash-for-mac");
+        assert!(fixture_identity(std::process::id(), executable).is_this_process());
+        assert!(!fixture_identity(4242, executable).is_this_process());
+    }
+
     fn fixture_identity(pid: u32, executable: &Path) -> ProcessIdentity {
         ProcessIdentity {
             uid: unsafe { libc::geteuid() },
@@ -1650,6 +1721,68 @@ mod tests {
     }
 
     #[test]
+    fn the_real_process_table_is_enumerated_to_exactly_this_users_matches() {
+        // The table holds processes of other users, whose full identity the
+        // kernel refuses to an unprivileged caller.
+        let executable = std::env::current_exe().expect("current executable");
+        let own = observe_exact_process(std::process::id(), &executable)
+            .expect("observe")
+            .expect("identity");
+        let listed = list_exact_processes(&executable).expect("the process table is observable");
+        assert!(listed.contains(&own), "{listed:?}");
+        assert!(
+            listed
+                .iter()
+                .all(|identity| identity.uid == own.uid && identity.executable == executable),
+            "{listed:?}"
+        );
+        assert_eq!(
+            list_exact_processes(Path::new("/nonexistent/executable")).expect("observable"),
+            []
+        );
+    }
+
+    #[test]
+    fn a_process_whose_executable_was_removed_is_not_the_exact_executable() {
+        // Any application replaced while it runs is such a process, and it
+        // must not make the whole table unobservable.
+        let scratch = tempfile::tempdir().expect("scratch");
+        let executable = std::fs::canonicalize(scratch.path())
+            .expect("canonical scratch")
+            .join("removed-while-running");
+        std::fs::copy("/bin/sleep", &executable).expect("copy a system tool");
+        let mut child = std::process::Command::new(&executable)
+            .arg("30")
+            .spawn()
+            .expect("run the copy");
+        std::fs::remove_file(&executable).expect("remove the running executable");
+
+        let observed = observe_exact_process(child.id(), &executable);
+        let listed = list_exact_processes(&executable);
+        child.kill().expect("stop the copy");
+        child.wait().expect("reap the copy");
+
+        assert_eq!(observed.expect("observable"), None);
+        assert_eq!(listed.expect("the process table is observable"), []);
+    }
+
+    #[test]
+    fn a_process_of_another_user_is_not_this_users_and_not_an_error() {
+        // launchd always runs, as root.
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "the tests do not run as root"
+        );
+        assert_eq!(
+            observe_exact_process(1, Path::new("/sbin/launchd")).expect("observable"),
+            None
+        );
+        let recorded_then_reused = fixture_identity(1, Path::new("/sbin/launchd"));
+        assert!(!identity_exists(&recorded_then_reused).expect("observable"));
+    }
+
+    #[test]
     fn missing_pid_is_a_proven_absence_not_an_observation_failure() {
         let missing = fixture_identity(
             i32::MAX as u32,
@@ -1678,6 +1811,29 @@ mod tests {
                 format!("failed to read kernel process identity for PID 42: {expected}")
             );
         }
+    }
+
+    #[test]
+    fn an_unreadable_process_owner_is_an_error_and_an_absent_process_has_none() {
+        assert_eq!(
+            classify_process_owner(42, Err(std::io::Error::from_raw_os_error(libc::ESRCH))),
+            Ok(None)
+        );
+        for errno in [libc::EPERM, libc::EIO] {
+            let expected = std::io::Error::from_raw_os_error(errno).to_string();
+            assert_eq!(
+                classify_process_owner(42, Err(std::io::Error::from_raw_os_error(errno))),
+                Err(format!(
+                    "failed to read kernel process owner for PID 42: {expected}"
+                ))
+            );
+        }
+        assert_eq!(process_owner(1).expect("launchd owner"), Some(0));
+        assert_eq!(
+            process_owner(libc::pid_t::try_from(std::process::id()).expect("pid"))
+                .expect("own owner"),
+            Some(unsafe { libc::geteuid() })
+        );
     }
 
     #[test]

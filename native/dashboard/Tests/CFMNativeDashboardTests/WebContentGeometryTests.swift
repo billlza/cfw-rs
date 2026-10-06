@@ -95,6 +95,50 @@ import WebKit
     }
   }
 
+  /// Under a transparent titlebar (the decorated host's overlay title bar)
+  /// WebKit lays the page out over the whole view, titlebar included.
+  @Test(.timeLimit(.minutes(1))) @MainActor
+  func transparentTitlebarPageSpansTheWholeViewAndSafeAreaFramesAreStale() async throws {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    let window = NSWindow(
+      contentRect: NSRect(x: 100, y: 100, width: 850, height: 603),
+      styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.titlebarAppearsTransparent = true
+    window.titleVisibility = .hidden
+    defer { window.close() }
+    let content = try #require(window.contentView)
+    let webview = WKWebView(frame: content.bounds)
+    content.addSubview(webview)
+    window.orderFront(nil)
+    content.layoutSubtreeIfNeeded()
+    let loader = GeometryPageLoader()
+    webview.navigationDelegate = loader
+    defer { withExtendedLifetime(loader) {} }
+    try await withCheckedThrowingContinuation { continuation in
+      loader.completion = continuation
+      webview.loadHTMLString(
+        "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'><p>TEST DATA ONLY</p>",
+        baseURL: nil)
+    }
+    try #require(webview.safeAreaInsets.top > 0)
+    let dimensions = try #require(
+      try await webview.evaluateJavaScript("[innerWidth, innerHeight]") as? [Double])
+    try #require(dimensions.count == 2)
+    #expect(abs(dimensions[1] - webview.bounds.height) < 1, "the page spans the titlebar")
+    #expect(WebContentGeometry.pageViewport(of: webview) == webview.bounds)
+    let geometry = try #require(
+      WebContentGeometry(webview: webview, width: dimensions[0], height: dimensions[1]))
+    let topLeft = geometry.rectangle(x: 0, y: 0, width: 0, height: 0).origin
+    #expect(abs(webview.convert(topLeft, to: nil).y - content.bounds.maxY) < 0.001)
+    #expect(
+      WebContentGeometry(
+        webview: webview, width: webview.safeAreaRect.width, height: webview.safeAreaRect.height)
+        == nil, "the safe area is not the page's viewport under a transparent titlebar")
+    window.titlebarAppearsTransparent = false
+    #expect(WebContentGeometry.pageViewport(of: webview) == webview.safeAreaRect)
+  }
+
   @Test @MainActor func windowLookupRejectsDetachedHiddenAndWrongViewWithoutOutput() {
     NSApplication.shared.setActivationPolicy(.prohibited)
     let window = NSWindow(

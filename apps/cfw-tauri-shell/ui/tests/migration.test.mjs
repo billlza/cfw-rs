@@ -25,7 +25,7 @@ const CHALLENGE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 function bootPayload({ handoff = false, rendererReady = null } = {}) {
   return {
-    native_ui: { profile_menu: false, runtime_settings: false, general_switches: false },
+    native_ui: { profile_menu: false, runtime_settings: false, general_switches: false, prompt_dialog: false, window_glass: false },
     product: {
       name: "Clash for Mac",
       version: "0.4.0",
@@ -64,6 +64,8 @@ test("boot payload strictly separates dashboard, challenge and published rendere
     { ...bootPayload(), native_ui: {} },
     { ...bootPayload(), native_ui: { profile_menu: "true" } },
     { ...bootPayload(), native_ui: { profile_menu: true, allow_network: true } },
+    { ...bootPayload(), native_ui: { profile_menu: false, runtime_settings: false, general_switches: false } },
+    { ...bootPayload(), native_ui: { ...bootPayload().native_ui, prompt_dialog: "true" } },
     bootPayload({ rendererReady: { state: "published" } }),
     bootPayload({ handoff: true, rendererReady: null }),
     bootPayload({ handoff: true, rendererReady: { state: "challenge", generation: 0, challenge: CHALLENGE } }),

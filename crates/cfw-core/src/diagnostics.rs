@@ -16,6 +16,7 @@ pub enum DiagnosticTopic {
     Startup,
     Network,
     NetworkWarnings,
+    Update,
 }
 
 impl DiagnosticTopic {
@@ -24,6 +25,7 @@ impl DiagnosticTopic {
             Self::Startup => "startup.json",
             Self::Network => "network-errors.json",
             Self::NetworkWarnings => "network-warnings.json",
+            Self::Update => "update.json",
         }
     }
 }

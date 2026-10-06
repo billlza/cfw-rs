@@ -124,9 +124,10 @@ export function normalizeBootPayload(value) {
   ])) {
     throw new TypeError("boot payload fields are invalid");
   }
-  if (!exactKeys(value.native_ui, ["profile_menu", "runtime_settings", "general_switches"])
+  if (!exactKeys(value.native_ui, ["profile_menu", "runtime_settings", "general_switches", "prompt_dialog", "window_glass"])
     || typeof value.native_ui.profile_menu !== "boolean" || typeof value.native_ui.runtime_settings !== "boolean"
-    || typeof value.native_ui.general_switches !== "boolean") {
+    || typeof value.native_ui.general_switches !== "boolean" || typeof value.native_ui.prompt_dialog !== "boolean"
+    || typeof value.native_ui.window_glass !== "boolean") {
     throw new TypeError("boot native UI capabilities are invalid");
   }
   if (!exactKeys(value.product, ["architecture", "license", "minimum_macos", "name", "version"])) {

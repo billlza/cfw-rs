@@ -1382,22 +1382,107 @@ directories are separate, but both reopen the same candidate through existing
 nonblocking exclusive locks. Concurrent packaging can fail with a lock conflict;
 session reuse does not change that coordination contract.
 
-The runtime performs only a bounded metadata check against the canonical
-official GitHub release identity and then opens the official DMG release page
-for a user-controlled update. It does not download, extract, or atomically swap
-the installed app and must not report a browser handoff as installation. After
-an external replacement, the `SMAppService` daemon requires an explicit,
-verified re-registration transaction before native services resume. That
-transaction is deliberately not exposed in-process, so runtime replacement is
-absent and no metadata/browser handoff is reported as a completed
-installation. The release-only `current_service_transaction.py` plus
-`dormant_app_install.py` sequence is the fixed, source-bound maintenance path;
-it is not callable from the renderer or updater and does not turn a browser
-handoff into installation. The former Tauri updater runtime, in-process archive installer,
-and privileged AppleScript fallback are not linked. See Apple's
+The runtime performs a bounded metadata check against the canonical official
+GitHub release identity. From a presented release the user can open the
+official DMG release page or, for an installation in `/Applications` that the
+user owns, install that release in place. A browser handoff is never reported
+as an installation.
+
+In-place installation is one transaction with a fixed order. Before anything
+is downloaded the dashboard reviews what an earlier attempt left behind and
+reads the registration of both background services through the Host's
+read-only `--service-maintenance-v2 status` mode; an installation whose
+services could not be unregistered later is refused here, while nothing has
+changed. With the core still running, the dashboard then downloads the release
+archive within the packaging size bound and keeps it only if the complete
+stream matches the embedded minisign key and the signature's trusted comment
+names exactly that archive. It extracts the archive into a private staging
+directory on the application volume and requires the staged bundle to be this
+product, the announced version, a strictly greater `CFBundleVersion`,
+compatible with the running macOS, and valid under the release Developer ID
+requirement including every nested signature. Nothing outside the staging
+directory changes before the user confirms the installation, and the user can
+discard the staged release instead. A release whose download failed
+authentication is neither installed nor offered through its download page
+again until the application is restarted or the published signature changes.
+
+On confirmation the dashboard reads the service registration once more,
+opens the installer log, records the hand-off, converges the engine to Off
+through the same admitted boundary as quitting (a shutdown error reported with
+the engine already Off is recorded and does not keep the application running
+with its networking stopped), and starts
+`clash-for-mac --finish-update-v1 <transaction>` in its own process group. It
+exits only after that installer process holds the update lease, and ends
+itself within a bounded time if the window teardown hangs; if the installer is
+not admitted in time the dashboard aborts the record and restarts itself
+unchanged. The installer process runs no window or renderer code. While it
+holds the lease an ordinary dashboard launch is refused. It waits for the
+dashboard to exit, requires that no other dashboard process exists (one that
+was just refused the lease and is still ending does not count), and verifies
+the staged bundle again. It then follows the order of the release-only
+`current_service_transaction.py` plus `dormant_app_install.py` sequence by
+running the installed Host's own `--service-maintenance-v2` modes as separate
+processes: `status`, `unregister-proxy-agent`, `unregister-global-authority`,
+`status`. The two unregister modes prove the engine Off natively before they
+act; every mode returns a receipt whose postcondition the installer checks.
+Only with both services NotRegistered and still no other dashboard process
+does it exchange the installed and staged bundles with one atomic rename,
+release the lease and start the new application, which registers its own
+services from the NotRegistered state like a fresh installation. A start
+counts only once a dashboard process other than the one that handed off is
+still running two seconds after `open` returned; otherwise it is retried. An
+`SMAppService` registration is therefore never carried across a bundle
+replacement. See Apple's
 [`SMAppService.register()`](https://developer.apple.com/documentation/servicemanagement/smappservice/register%28%29)
 documentation and the corresponding
 [Apple DTS guidance](https://developer.apple.com/forums/thread/783539).
+
+Every failure before the exchange leaves the installed application as it was
+and ends with the installer starting it again, unless the dashboard that
+handed off is still running, which is never opened. A failure in the installer
+process is recorded with a stable code in `update-install-v1.json` and
+reported by the next dashboard launch, which also removes the staging
+directory whatever access its entries give; the installer's own diagnostics
+are appended to `update-installer.log` (started over once it exceeds 1 MiB),
+and failures in the dashboard, the reviewed outcome of the previous attempt
+and one bounded line of the extractor's or `codesign`'s own output are
+appended to the `update.json` diagnostic journal. A record file that the
+running version cannot interpret or may not use is removed and reported once,
+so it cannot block later installations. After a successful
+exchange the replaced bundle stays in the staging directory until the new
+application has completed native startup; there is no automatic rollback. An
+installation that is not in `/Applications`, is not owned by the user, or
+cannot be replaced without elevation is refused before any download and keeps
+the release page as its only path. No privileged helper, AppleScript or
+elevation prompt is involved, and the former Tauri updater runtime is not
+linked.
+
+Installed clients are frozen consumers of this contract. Every later release
+must stay installable by them: the four-key `latest.json` with exactly the
+two Apple Silicon platform aliases, the versioned archive name and GitHub
+URL, the release-asset redirect host, the same minisign key, an archive within
+the packaging size bound whose only root is `Clash for Mac.app` containing
+`Contents/Info.plist` and `Contents/MacOS/clash-for-mac`, at most 50,000
+entries and 1 GiB expanded, only files, directories and symbolic links, no
+entry that is group- or other-writable or carries a setuid, setgid or sticky
+bit, no file with more than one hard link, no symbolic link that is dangling
+or resolves outside the bundle (through other links included), directories
+their owner can read, write and enter, the product identifier and release
+Developer ID, a canonical SemVer greater than every published version, and a
+positive decimal `CFBundleVersion` greater than every published build. The
+release gate `validate_updater_archive.py` enforces the same rules on every
+archive before it is published. A later release must also start correctly
+with both services NotRegistered and should resolve an
+`update-install-v1.json` record left by its predecessor. Changing any of these
+strands the clients already installed.
+
+The ordering and the failure paths of this transaction are unit-tested against
+a simulated machine and file-system fixtures. Nothing in that says how a
+signed installation behaves: `SMAppService` registration after the exchange,
+the maintenance modes started from a running dashboard and from the installer
+process, App Management consent, system-extension replacement and the relaunch
+must be demonstrated with signed builds on both sides of an update before the
+first release that contains it is published.
 
 The updater artifact key embedded in 0.3.5 is not available for 0.4.0 signing.
 Consequently, 0.3.5 to 0.4.0 is an explicit manual-DMG migration: publish no

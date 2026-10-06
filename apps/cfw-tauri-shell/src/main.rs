@@ -17,6 +17,7 @@ mod native_components;
 mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
+mod private_store;
 mod release_observation;
 mod service_maintenance;
 mod shell;
@@ -69,16 +70,25 @@ use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use native_components::general_switches::{
     dismiss_native_general_switches, focus_native_general_switch, sync_native_general_switches,
 };
+use native_components::prompt_dialog::{
+    dismiss_native_prompt_dialog, present_native_prompt_dialog, update_native_prompt_dialog,
+};
 use native_components::runtime_settings::{
     dismiss_native_runtime_settings, present_native_runtime_settings,
     update_native_runtime_settings,
+};
+use native_components::window_glass::{
+    dismiss_native_window_glass, present_native_window_glass, update_native_window_glass,
 };
 use native_components::{
     dismiss_native_profile_menu, present_native_profile_menu, update_native_profile_menu,
 };
 use shell::{TrayMenuState, build_app_menu, focus_main_window, handle_app_menu_event};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
-use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
+use updater::{
+    UpdateInstallLease, UpdaterSecurityState, cancel_update_install, check_for_updates,
+    commit_update_install, open_available_update, prepare_update_install, resolve_update_install,
+};
 use window_state::{WindowBoundsManager, handle_window_bounds_event};
 
 fn settings_store() -> Result<SettingsStore, String> {
@@ -146,10 +156,18 @@ fn main() {
         LaunchMode::Dashboard => {
             let available = settings_store().and_then(|store| {
                 store.ensure_layout().map_err(|error| error.to_string())?;
-                MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)
+                MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)?;
+                // The installer process holds this lease while it unregisters
+                // services and exchanges the bundles. No dashboard may start
+                // underneath that exchange.
+                UpdateInstallLease::acquire(&store.paths().app_home)
+                    .map(std::mem::drop)
+                    .map_err(|error| error.to_string())
             });
             if let Err(error) = available {
-                eprintln!("dashboard launch blocked while migration handoff is active: {error}");
+                eprintln!(
+                    "dashboard launch blocked while a migration handoff or update installation is active: {error}"
+                );
                 std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
             }
             LaunchContext::dashboard()
@@ -183,6 +201,9 @@ fn main() {
                 std::process::exit(70);
             }
             return;
+        }
+        LaunchMode::FinishUpdate { transaction } => {
+            std::process::exit(updater::run_update_finisher(&transaction));
         }
         #[cfg(feature = "physical-release-evidence")]
         LaunchMode::PacketEvidence => {
@@ -266,6 +287,10 @@ fn main() {
         delete_profile,
         check_for_updates,
         open_available_update,
+        prepare_update_install,
+        cancel_update_install,
+        commit_update_install,
+        resolve_update_install,
         controller_snapshot,
         controller_version,
         providers_snapshot,
@@ -334,12 +359,20 @@ fn main() {
         sync_native_general_switches,
         focus_native_general_switch,
         dismiss_native_general_switches,
+        present_native_prompt_dialog,
+        update_native_prompt_dialog,
+        dismiss_native_prompt_dialog,
+        present_native_window_glass,
+        update_native_window_glass,
+        dismiss_native_window_glass,
     ]);
     #[cfg(feature = "native-ui")]
     let builder = builder
         .manage(native_components::NativeProfileMenuState::default())
         .manage(native_components::runtime_settings::RuntimeSettingsState::default())
-        .manage(native_components::general_switches::GeneralSwitchesState::default());
+        .manage(native_components::general_switches::GeneralSwitchesState::default())
+        .manage(native_components::prompt_dialog::PromptDialogState::default())
+        .manage(native_components::window_glass::WindowGlassState::default());
     let application = builder
         .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
             if migration_handoff && !migration_handoff_command_allowed(invoke.message.command()) {
@@ -381,6 +414,14 @@ fn main() {
                     webview.label(),
                 );
                 native_components::general_switches::cancel_for_reload(
+                    webview.app_handle(),
+                    webview.label(),
+                );
+                native_components::prompt_dialog::cancel_for_reload(
+                    webview.app_handle(),
+                    webview.label(),
+                );
+                native_components::window_glass::cancel_for_reload(
                     webview.app_handle(),
                     webview.label(),
                 );
@@ -481,9 +522,15 @@ mod tests {
             "set_tun_enabled",
             "check_for_updates",
             "open_available_update",
+            "prepare_update_install",
+            "cancel_update_install",
+            "commit_update_install",
+            "resolve_update_install",
             "refresh_tray_menu",
             "begin_migration_handoff",
             "reload_dashboard",
+            "present_native_prompt_dialog",
+            "present_native_window_glass",
         ] {
             assert!(!migration_handoff_command_allowed(command), "{command}");
         }

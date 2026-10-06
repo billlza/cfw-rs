@@ -44,6 +44,22 @@ pub(crate) use journal::MigrationHandoffLease;
 pub use state_gate::LegacyRetirementGate;
 pub(crate) use state_gate::LegacyRetirementStatus;
 
+/// The exact kernel identity of this process, which must be running the given
+/// executable. A reused PID never compares equal to it.
+pub(crate) fn current_process_identity(executable: &Path) -> Result<ProcessIdentity, String> {
+    handoff_ticket::observe_exact_process(std::process::id(), executable)?
+        .ok_or_else(|| "this process is not running the expected executable".to_owned())
+}
+
+pub(crate) fn process_identity_exists(identity: &ProcessIdentity) -> Result<bool, String> {
+    handoff_ticket::identity_exists(identity)
+}
+
+/// Every process of this user that runs exactly the given executable.
+pub(crate) fn exact_processes(executable: &Path) -> Result<Vec<ProcessIdentity>, String> {
+    handoff_ticket::list_exact_processes(executable)
+}
+
 /// Normal networking does not depend on deleting legacy data. The existing
 /// mode/maintenance permit serializes this observation with explicit cleanup.
 pub(crate) fn require_network_start_allowed(

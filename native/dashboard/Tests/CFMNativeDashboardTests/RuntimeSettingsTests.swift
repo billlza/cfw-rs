@@ -592,6 +592,25 @@ struct RuntimeSettingsTests {
     #expect(probe.closedSessions == [90_001, 90_002])
   }
 
+  @Test @MainActor func panelKeepsTheOrdinaryActivatingPolicy() throws {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    let parent = NSWindow(
+      contentRect: NSRect(x: 100, y: 100, width: 850, height: 603),
+      styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    parent.isReleasedWhenClosed = false
+    defer { parent.close() }
+    let probe = RuntimeProbe()
+    let controller = RuntimeSettingsWindow(
+      frame: try RuntimeSettingsFrame.decode(runtimePayload()), parent: parent,
+      event: runtimeEvent, closed: runtimeClosed, context: probe.context)
+    defer { controller.finish() }
+    // A nonactivating panel left the parent inactive after dismissal, so the
+    // parent lost its next click.
+    #expect(!controller.panel.styleMask.contains(.nonactivatingPanel))
+    #expect(controller.panel.canBecomeKey)
+    #expect(!controller.panel.canBecomeMain)
+  }
+
   @Test func wrongThreadNeverEntersAppKit() async {
     #expect(await Task.detached { runtimeSettingsDismiss(90_002) }.value == 3)
   }

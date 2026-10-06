@@ -25,6 +25,7 @@ const LIFECYCLE_IDLE: u8 = 0;
 const LIFECYCLE_SHUTDOWN: u8 = 1;
 const LIFECYCLE_HANDOFF: u8 = 2;
 const LIFECYCLE_EXIT_READY: u8 = 3;
+const LIFECYCLE_UPDATE: u8 = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -72,6 +73,14 @@ enum ShutdownAdmission {
 }
 
 pub(crate) struct HandoffLifecycleLease {
+    shared: Arc<LifecycleShared>,
+    active: bool,
+}
+
+/// Exclusive ownership of the lifecycle while an update is handed to the
+/// installer process. Dropping it before the exit is prepared returns the
+/// application to normal operation.
+pub(crate) struct UpdateLifecycleLease {
     shared: Arc<LifecycleShared>,
     active: bool,
 }
@@ -126,6 +135,27 @@ impl AppLifecycle {
     fn begin_handoff_lease(&self) -> Result<HandoffLifecycleLease, String> {
         self.shared.begin_handoff()?;
         Ok(HandoffLifecycleLease {
+            shared: self.shared.clone(),
+            active: true,
+        })
+    }
+
+    fn begin_update_lease(&self) -> Result<UpdateLifecycleLease, String> {
+        self.shared
+            .owner
+            .compare_exchange(
+                LIFECYCLE_IDLE,
+                LIFECYCLE_UPDATE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|owner| {
+                format!(
+                    "update installation cannot start while application lifecycle is owned by {}",
+                    lifecycle_owner_name(owner)
+                )
+            })?;
+        Ok(UpdateLifecycleLease {
             shared: self.shared.clone(),
             active: true,
         })
@@ -225,6 +255,7 @@ fn lifecycle_owner_name(owner: u8) -> &'static str {
         LIFECYCLE_SHUTDOWN => "shutdown",
         LIFECYCLE_HANDOFF => "migration handoff",
         LIFECYCLE_EXIT_READY => "exit readiness",
+        LIFECYCLE_UPDATE => "update installation",
         _ => "an invalid lifecycle state",
     }
 }
@@ -237,38 +268,88 @@ pub(crate) async fn prepare_handoff_exit(
     app: AppHandle,
     lifecycle_lease: &mut HandoffLifecycleLease,
 ) -> Result<(), String> {
-    flush_window_bounds_for_exit(&app).await;
-    let lifecycle = app.state::<AppLifecycle>();
-    let outcome = match app.state::<ManagedEngine>().shutdown_to_completion().await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return Err(format!(
+    let shutdown_warning = prepare_owned_exit(&app, LIFECYCLE_HANDOFF)
+        .await
+        .map_err(|error| match error {
+            OwnedExitError::Admission(error) => format!(
                 "dashboard shutdown admission failed; migration handoff was cancelled: {error}"
-            ));
+            ),
+            OwnedExitError::Shutdown(error) => {
+                format!("dashboard shutdown failed; migration handoff was cancelled: {error}")
+            }
+            OwnedExitError::Finalization(error) => format!(
+                "dashboard shutdown finalization failed; migration handoff was cancelled: {error}"
+            ),
+        })?;
+    if let Some(warning) = shutdown_warning {
+        eprintln!("dashboard shutdown reported an error with the engine Off: {warning}");
+    }
+    lifecycle_lease.active = false;
+    Ok(())
+}
+
+pub(crate) fn begin_update_lifecycle(app: &AppHandle) -> Result<UpdateLifecycleLease, String> {
+    app.state::<AppLifecycle>().begin_update_lease()
+}
+
+/// Stops networking for an update hand-off. On success the engine is Off, no
+/// mode change can queue behind it, and the process may only exit. A shutdown
+/// error reported with the engine Off is returned for the caller's record.
+pub(crate) async fn prepare_update_exit(
+    app: &AppHandle,
+    lifecycle_lease: &mut UpdateLifecycleLease,
+) -> Result<Option<String>, String> {
+    let shutdown_warning = prepare_owned_exit(app, LIFECYCLE_UPDATE)
+        .await
+        .map_err(|error| match error {
+            OwnedExitError::Admission(error)
+            | OwnedExitError::Shutdown(error)
+            | OwnedExitError::Finalization(error) => error,
+        })?;
+    lifecycle_lease.active = false;
+    Ok(shutdown_warning)
+}
+
+enum OwnedExitError {
+    Admission(String),
+    Shutdown(String),
+    Finalization(String),
+}
+
+/// Converges the engine to Off for a lifecycle owner other than ordinary
+/// shutdown and marks the process ready to exit under that owner.
+///
+/// As for an ordinary quit, a shutdown that reports an error although the
+/// engine is Off has reached its goal: the exit goes ahead and the error is
+/// returned for the owner's record, instead of leaving the application
+/// running with its networking stopped.
+async fn prepare_owned_exit(app: &AppHandle, owner: u8) -> Result<Option<String>, OwnedExitError> {
+    flush_window_bounds_for_exit(app).await;
+    let lifecycle = app.state::<AppLifecycle>();
+    let coordinator = app.state::<ManagedEngine>().coordinator.clone();
+    let shutdown = app.state::<ManagedEngine>().shutdown_to_completion().await;
+    let (result, maintenance) = shutdown.map_err(OwnedExitError::Admission)?.into_parts();
+    let shutdown_warning = match result {
+        Ok(_) => None,
+        Err(error) => {
+            let safely_off = coordinator.snapshot().state == cfw_engine_api::EngineState::Off;
+            if !safely_off {
+                return Err(OwnedExitError::Shutdown(error));
+            }
+            Some(error)
         }
     };
-    let (result, maintenance) = outcome.into_parts();
-    match result {
-        Ok(_) => {
-            if let Err(error) = lifecycle.mark_exit_ready(LIFECYCLE_HANDOFF, maintenance) {
-                return Err(format!(
-                    "dashboard shutdown finalization failed; migration handoff was cancelled: {error}"
-                ));
-            }
-            lifecycle_lease.active = false;
-            app.state::<LiveStreams>().stop_all();
-            if let Err(error) = app
-                .state::<crate::commands::ManagedProviders>()
-                .stop_refresh()
-            {
-                eprintln!("provider refresh shutdown failed: {error}");
-            }
-            Ok(())
-        }
-        Err(error) => Err(format!(
-            "dashboard shutdown failed; migration handoff was cancelled: {error}"
-        )),
+    lifecycle
+        .mark_exit_ready(owner, maintenance)
+        .map_err(OwnedExitError::Finalization)?;
+    app.state::<LiveStreams>().stop_all();
+    if let Err(error) = app
+        .state::<crate::commands::ManagedProviders>()
+        .stop_refresh()
+    {
+        eprintln!("provider refresh shutdown failed: {error}");
     }
+    Ok(shutdown_warning)
 }
 
 fn finish_exit(
@@ -387,6 +468,17 @@ impl HandoffLifecycleLease {
     }
 }
 
+impl Drop for UpdateLifecycleLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Err(error) = self.shared.reset_owner_after_failure(LIFECYCLE_UPDATE) {
+            eprintln!("failed to release the update installation lifecycle: {error}");
+        }
+    }
+}
+
 impl Drop for HandoffLifecycleLease {
     fn drop(&mut self) {
         if !self.active {
@@ -413,6 +505,28 @@ mod tests {
             .expect("production lifecycle source");
         assert_eq!(source.matches("shutdown_to_completion().await").count(), 2);
         assert!(!source.contains("coordinator.shutdown().await"));
+        // A shutdown error with the engine already Off ends the process on
+        // every path; only an engine that is not Off keeps it running.
+        assert_eq!(
+            source
+                .matches("coordinator.snapshot().state == cfw_engine_api::EngineState::Off")
+                .count(),
+            3
+        );
+        let owned = source
+            .split("async fn prepare_owned_exit(")
+            .nth(1)
+            .expect("owned exit")
+            .split("\n}\n")
+            .next()
+            .expect("owned exit body");
+        let (before, after) = owned
+            .split_once("if !safely_off {")
+            .expect("the owned exit decides by the engine state");
+        assert!(before.contains("Err(error) =>"));
+        assert!(after.contains("return Err(OwnedExitError::Shutdown(error));"));
+        assert!(after.contains("Some(error)"));
+        assert!(after.contains(".mark_exit_ready(owner, maintenance)"));
         let quit = source
             .split("pub(crate) fn quit_app")
             .nth(1)
@@ -468,6 +582,37 @@ mod tests {
             .begin_handoff_lease()
             .expect("retry after task end");
         drop(retry);
+    }
+
+    #[test]
+    fn an_update_owns_the_lifecycle_alone_and_returns_it_when_abandoned() {
+        let lifecycle = AppLifecycle::default();
+        let update = lifecycle.begin_update_lease().expect("update admission");
+        assert!(!lifecycle.startup_work_allowed());
+        assert!(lifecycle.begin_update_lease().is_err());
+        assert!(lifecycle.begin_handoff_lease().is_err());
+        let refused = lifecycle
+            .begin_shutdown()
+            .expect_err("shutdown waits for the update");
+        assert!(refused.contains("update installation"), "{refused}");
+
+        drop(update);
+        assert!(
+            lifecycle.startup_work_allowed(),
+            "an abandoned update returns the application to normal operation"
+        );
+        let update = lifecycle.begin_update_lease().expect("a second update");
+        drop(update);
+
+        assert_eq!(
+            lifecycle.begin_shutdown().expect("shutdown admission"),
+            ShutdownAdmission::Started
+        );
+        let refused = lifecycle
+            .begin_update_lease()
+            .err()
+            .expect("no update during shutdown");
+        assert!(refused.contains("shutdown"), "{refused}");
     }
 
     #[test]

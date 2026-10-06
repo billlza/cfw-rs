@@ -3,7 +3,9 @@
     "native_ui": {
       "profile_menu": true,
       "runtime_settings": true,
-      "general_switches": true
+      "general_switches": true,
+      "prompt_dialog": false,
+      "window_glass": false
     },
     "product": {
       "name": "Clash for Mac",

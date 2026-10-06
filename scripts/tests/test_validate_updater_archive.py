@@ -126,6 +126,70 @@ class UpdaterArchiveContractTests(unittest.TestCase):
                 finally:
                     archive.cleanup()
 
+    def test_accepts_a_symlink_chain_that_stays_inside_the_root(self) -> None:
+        archive = ArchiveBuilder()
+        try:
+            archive.add_layout()
+            archive.add(symlink(f"{ROOT}/Contents/current", "MacOS"))
+            archive.add(symlink(f"{ROOT}/Contents/bin", "current/clash-for-mac"))
+            archive.add(symlink(f"{ROOT}/Contents/up", ".."))
+            archive.add(symlink(f"{ROOT}/Contents/MacOS/root", "../up/Contents"))
+            count, _expanded = validate_archive(archive.close(), ROOT)
+            self.assertEqual(count, 9)
+        finally:
+            archive.cleanup()
+
+    def test_rejects_symlinks_the_installer_cannot_resolve_inside_the_root(self) -> None:
+        cases = {
+            "dangling": [symlink(f"{ROOT}/Contents/missing", "nowhere")],
+            "dangling-through-link": [
+                symlink(f"{ROOT}/Contents/current", "MacOS"),
+                symlink(f"{ROOT}/Contents/bin", "current/absent"),
+            ],
+            "escape-through-link": [
+                symlink(f"{ROOT}/Contents/up", ".."),
+                symlink(f"{ROOT}/Contents/MacOS/escape", "../up/.."),
+            ],
+            "loop": [
+                symlink(f"{ROOT}/Contents/first", "second"),
+                symlink(f"{ROOT}/Contents/second", "first"),
+            ],
+        }
+        messages = {
+            "dangling": "does not exist",
+            "dangling-through-link": "does not exist",
+            "escape-through-link": "escapes the app root",
+            "loop": "too deep",
+        }
+        for case, entries in cases.items():
+            with self.subTest(case=case):
+                archive = ArchiveBuilder()
+                try:
+                    archive.add_layout()
+                    for entry in entries:
+                        archive.add(entry)
+                    with self.assertRaisesRegex(ArchiveContractError, messages[case]):
+                        validate_archive(archive.close(), ROOT)
+                finally:
+                    archive.cleanup()
+
+    def test_rejects_a_directory_its_owner_cannot_write_or_replace(self) -> None:
+        for mode in [0o555, 0o500, 0o300]:
+            with self.subTest(mode=oct(mode)):
+                archive = ArchiveBuilder()
+                try:
+                    for name in [f"{ROOT}/", f"{ROOT}/Contents/", f"{ROOT}/Contents/MacOS/"]:
+                        entry = directory(name)
+                        if name == f"{ROOT}/Contents/MacOS/":
+                            entry.mode = mode
+                        archive.add(entry)
+                    archive.add(*regular(f"{ROOT}/Contents/Info.plist", b"plist"))
+                    archive.add(*regular(f"{ROOT}/Contents/MacOS/clash-for-mac", b"binary"))
+                    with self.assertRaisesRegex(ArchiveContractError, "full access"):
+                        validate_archive(archive.close(), ROOT)
+                finally:
+                    archive.cleanup()
+
     def test_rejects_entry_and_expansion_limits(self) -> None:
         archive = ArchiveBuilder()
         try:

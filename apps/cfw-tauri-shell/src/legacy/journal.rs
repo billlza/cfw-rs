@@ -1,9 +1,4 @@
-use std::ffi::CString;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use cfw_engine_api::{CutoverPreflightRequest, EngineCommandContext, EngineMode};
@@ -16,11 +11,18 @@ use super::gui_handoff::LegacyGuiIdentity;
 use super::network_fingerprint::LegacyNetworkJournalIdentity;
 use super::process_cleanup::ProcessRecord;
 use super::runtime_plan::LegacyRuntimePlanKind;
+use crate::private_store::{AtomicWriteError, LockFileError, PrivateDirectory, PrivateDocument};
 
 const JOURNAL_FILE: &str = "legacy-cutover-journal-v1.json";
 const TEMPORARY_FILE: &str = ".legacy-cutover-journal-v1.tmp";
 const SCHEMA_VERSION: u16 = 3;
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
+const JOURNAL_DOCUMENT: PrivateDocument = PrivateDocument {
+    subject: "legacy cutover journal",
+    file: JOURNAL_FILE,
+    temporary: TEMPORARY_FILE,
+    maximum_bytes: MAX_JOURNAL_BYTES,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -301,10 +303,20 @@ impl From<JournalAdvanceError> for String {
     }
 }
 
-#[derive(Debug)]
-enum AtomicWriteError {
-    Failed(String),
-    CommitUncertain(String),
+fn open_journal_directory(root: &Path) -> Result<PrivateDirectory, String> {
+    PrivateDirectory::open_or_create(root, JOURNAL_DOCUMENT)
+}
+
+fn read_journal(directory: &PrivateDirectory) -> Result<Option<CutoverJournal>, String> {
+    let Some(bytes) = directory.read().map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let journal: CutoverJournal = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("legacy cutover journal JSON is invalid: {error}"))?;
+    if journal.canonical_bytes()? != bytes {
+        return Err("legacy cutover journal is not canonical JSON".into());
+    }
+    Ok(Some(journal))
 }
 
 impl CutoverJournalStore {
@@ -313,24 +325,31 @@ impl CutoverJournalStore {
     }
 
     pub(super) fn load(&self) -> Result<Option<CutoverJournal>, String> {
-        let directory = Directory::open_or_create(&self.root)?;
+        let directory = open_journal_directory(&self.root)?;
         directory.lock()?;
-        directory.read_journal()
+        read_journal(&directory)
     }
 
     pub(super) fn write_prepared(&self, journal: &CutoverJournal) -> Result<(), String> {
         if journal.phase != CutoverPhase::Prepared {
             return Err("only a Prepared journal can begin a cutover".into());
         }
-        let directory = Directory::open_or_create(&self.root)?;
+        let directory = open_journal_directory(&self.root)?;
         directory.lock()?;
-        if let Some(existing) = directory.read_journal()? {
+        if let Some(existing) = read_journal(&directory)? {
             return Err(format!(
                 "an existing legacy cutover journal in phase {:?} must be recovered and cannot be overwritten",
                 existing.phase
             ));
         }
-        directory.write_atomic(&journal.canonical_bytes()?)
+        directory
+            .write_atomic_with_directory_sync(&journal.canonical_bytes()?, File::sync_all)
+            .map_err(|error| match error {
+                AtomicWriteError::Failed(message) => message,
+                AtomicWriteError::CommitUncertain(message) => format!(
+                    "cutover journal commit durability is uncertain after rename: {message}"
+                ),
+            })
     }
 
     pub(super) fn advance(
@@ -352,10 +371,9 @@ impl CutoverJournalStore {
                 "invalid legacy cutover journal phase transition".into(),
             ));
         }
-        let directory = Directory::open_or_create(&self.root).map_err(JournalAdvanceError::from)?;
+        let directory = open_journal_directory(&self.root).map_err(JournalAdvanceError::from)?;
         directory.lock().map_err(JournalAdvanceError::from)?;
-        let mut journal = directory
-            .read_journal()
+        let mut journal = read_journal(&directory)
             .map_err(JournalAdvanceError::from)?
             .ok_or_else(|| {
                 JournalAdvanceError::Failed("legacy cutover journal is missing".to_owned())
@@ -389,10 +407,9 @@ impl CutoverJournalStore {
                 "cutover phase cannot be rebound for replacement recovery".into(),
             ));
         }
-        let directory = Directory::open_or_create(&self.root).map_err(JournalAdvanceError::from)?;
+        let directory = open_journal_directory(&self.root).map_err(JournalAdvanceError::from)?;
         directory.lock().map_err(JournalAdvanceError::from)?;
-        let mut journal = directory
-            .read_journal()
+        let mut journal = read_journal(&directory)
             .map_err(JournalAdvanceError::from)?
             .ok_or_else(|| {
                 JournalAdvanceError::Failed("legacy cutover journal is missing".to_owned())
@@ -474,10 +491,9 @@ impl CutoverJournalStore {
             ));
         }
 
-        let directory = Directory::open_or_create(&self.root).map_err(JournalAdvanceError::from)?;
+        let directory = open_journal_directory(&self.root).map_err(JournalAdvanceError::from)?;
         directory.lock().map_err(JournalAdvanceError::from)?;
-        let current = directory
-            .read_journal()
+        let current = read_journal(&directory)
             .map_err(JournalAdvanceError::from)?
             .ok_or_else(|| {
                 JournalAdvanceError::Failed("legacy cutover journal is missing".to_owned())
@@ -501,7 +517,7 @@ impl CutoverJournalStore {
 }
 
 fn commit_journal_with_directory_sync(
-    directory: &Directory,
+    directory: &PrivateDirectory,
     intended: CutoverJournal,
     bytes: Vec<u8>,
     sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
@@ -512,7 +528,7 @@ fn commit_journal_with_directory_sync(
         Err(AtomicWriteError::CommitUncertain(detail)) => {
             // The directory remains exclusively locked while binding the
             // visible journal back to the exact intended operation.
-            let persisted = directory.read_journal();
+            let persisted = read_journal(directory);
             Err(JournalAdvanceError::CommitUncertain(Box::new(
                 CommitUncertainJournal {
                     intended,
@@ -549,274 +565,22 @@ pub(crate) struct MigrationHandoffLease {
 impl MigrationHandoffLease {
     pub(crate) fn acquire(root: &Path) -> Result<Self, String> {
         const LOCK_FILE: &str = "legacy-cutover-handoff-v1.lock";
-        let directory = Directory::open_or_create(root)?;
-        let name = CString::new(LOCK_FILE).expect("fixed lock name");
-        let descriptor = unsafe {
-            libc::openat(
-                directory.file.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if descriptor == -1 {
-            return Err(format!(
-                "failed to open migration handoff lock: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let file = unsafe { File::from_raw_fd(descriptor) };
-        let metadata = file.metadata().map_err(|error| error.to_string())?;
-        if !metadata.file_type().is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err("migration handoff lock has unsafe metadata".into());
-        }
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 {
-            let error = std::io::Error::last_os_error();
-            return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
-                "another migration handoff instance is already running".into()
-            } else {
-                format!("failed to lock migration handoff: {error}")
-            });
-        }
-        Ok(Self { _file: file })
-    }
-}
-
-struct Directory {
-    file: File,
-}
-
-impl Directory {
-    fn open_or_create(path: &Path) -> Result<Self, String> {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.file_type().is_dir() => {
-                return Err("legacy cutover journal root is not a directory".into());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(path).map_err(|error| {
-                    format!("failed to create legacy cutover journal root: {error}")
-                })?;
-            }
-            Err(error) => return Err(format!("failed to inspect journal root: {error}")),
-        }
-        let path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| "legacy cutover journal path contains NUL".to_owned())?;
-        let descriptor = unsafe {
-            libc::open(
-                path.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if descriptor == -1 {
-            return Err(format!(
-                "failed to open legacy cutover journal root: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let file = unsafe { File::from_raw_fd(descriptor) };
-        let metadata = file.metadata().map_err(|error| error.to_string())?;
-        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-            return Err("legacy cutover journal root has unsafe ownership".into());
-        }
-        if unsafe { libc::fchmod(file.as_raw_fd(), 0o700) } == -1 {
-            return Err(format!(
-                "failed to secure legacy cutover journal root: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(Self { file })
-    }
-
-    fn lock(&self) -> Result<(), String> {
-        const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
-        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-        let deadline = std::time::Instant::now() + WAIT_LIMIT;
-        loop {
-            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(());
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                if std::time::Instant::now() >= deadline {
-                    return Err(
-                        "legacy cutover journal remained busy for 3 seconds; another process still owns its transaction lock"
-                            .into(),
-                    );
-                }
-                continue;
-            }
-            if error.kind() != std::io::ErrorKind::WouldBlock {
-                return Err(format!("failed to lock legacy cutover journal: {error}"));
-            }
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return Err(
-                    "legacy cutover journal remained busy for 3 seconds; another process still owns its transaction lock"
-                        .into(),
-                );
-            }
-            std::thread::sleep(RETRY_INTERVAL.min(deadline.saturating_duration_since(now)));
-        }
-    }
-
-    fn read_journal(&self) -> Result<Option<CutoverJournal>, String> {
-        let name = CString::new(JOURNAL_FILE).expect("fixed name");
-        let descriptor = unsafe {
-            libc::openat(
-                self.file.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if descriptor == -1 {
-            let error = std::io::Error::last_os_error();
-            return if error.kind() == std::io::ErrorKind::NotFound {
-                Ok(None)
-            } else {
-                Err(format!("failed to open legacy cutover journal: {error}"))
-            };
-        }
-        let mut file = unsafe { File::from_raw_fd(descriptor) };
-        let metadata = file.metadata().map_err(|error| error.to_string())?;
-        if !metadata.file_type().is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o077 != 0
-            || metadata.len() == 0
-            || metadata.len() > MAX_JOURNAL_BYTES
-        {
-            return Err("legacy cutover journal has unsafe metadata".into());
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        std::io::Read::by_ref(&mut file)
-            .take(MAX_JOURNAL_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("failed to read legacy cutover journal: {error}"))?;
-        if bytes.len() as u64 > MAX_JOURNAL_BYTES {
-            return Err("legacy cutover journal exceeds 16 KiB".into());
-        }
-        let journal: CutoverJournal = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("legacy cutover journal JSON is invalid: {error}"))?;
-        if journal.canonical_bytes()? != bytes {
-            return Err("legacy cutover journal is not canonical JSON".into());
-        }
-        Ok(Some(journal))
-    }
-
-    fn write_atomic(&self, bytes: &[u8]) -> Result<(), String> {
-        self.write_atomic_with_directory_sync(bytes, File::sync_all)
+        open_journal_directory(root)?
+            .acquire_lock_file(LOCK_FILE)
+            .map(|file| Self { _file: file })
             .map_err(|error| match error {
-                AtomicWriteError::Failed(message) => message,
-                AtomicWriteError::CommitUncertain(message) => format!(
-                    "cutover journal commit durability is uncertain after rename: {message}"
-                ),
+                LockFileError::Open(error) => {
+                    format!("failed to open migration handoff lock: {error}")
+                }
+                LockFileError::Inspect(error) => error.to_string(),
+                LockFileError::UnsafeMetadata => {
+                    "migration handoff lock has unsafe metadata".into()
+                }
+                LockFileError::Busy => {
+                    "another migration handoff instance is already running".into()
+                }
+                LockFileError::Lock(error) => format!("failed to lock migration handoff: {error}"),
             })
-    }
-
-    fn write_atomic_with_directory_sync(
-        &self,
-        bytes: &[u8],
-        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
-    ) -> Result<(), AtomicWriteError> {
-        self.remove_stale_temporary()
-            .map_err(AtomicWriteError::Failed)?;
-        let temporary = CString::new(TEMPORARY_FILE).expect("fixed name");
-        let descriptor = unsafe {
-            libc::openat(
-                self.file.as_raw_fd(),
-                temporary.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if descriptor == -1 {
-            return Err(AtomicWriteError::Failed(format!(
-                "failed to create legacy cutover journal temporary: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let mut file = unsafe { File::from_raw_fd(descriptor) };
-        let before_rename = (|| -> Result<(), String> {
-            if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } == -1 {
-                return Err(format!(
-                    "failed to secure journal temporary: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            file.write_all(bytes)
-                .map_err(|error| format!("failed to write cutover journal: {error}"))?;
-            file.sync_all()
-                .map_err(|error| format!("failed to fsync cutover journal: {error}"))?;
-            drop(file);
-            let destination = CString::new(JOURNAL_FILE).expect("fixed name");
-            if unsafe {
-                libc::renameat(
-                    self.file.as_raw_fd(),
-                    temporary.as_ptr(),
-                    self.file.as_raw_fd(),
-                    destination.as_ptr(),
-                )
-            } == -1
-            {
-                return Err(format!(
-                    "failed to commit cutover journal: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            Ok(())
-        })();
-        if let Err(error) = before_rename {
-            unsafe {
-                libc::unlinkat(self.file.as_raw_fd(), temporary.as_ptr(), 0);
-            }
-            return Err(AtomicWriteError::Failed(error));
-        }
-        sync_directory(&self.file).map_err(|error| {
-            AtomicWriteError::CommitUncertain(format!("directory fsync failed: {error}"))
-        })
-    }
-
-    fn remove_stale_temporary(&self) -> Result<(), String> {
-        let temporary = CString::new(TEMPORARY_FILE).expect("fixed name");
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        let result = unsafe {
-            libc::fstatat(
-                self.file.as_raw_fd(),
-                temporary.as_ptr(),
-                stat.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if result == -1 {
-            let error = std::io::Error::last_os_error();
-            return if error.kind() == std::io::ErrorKind::NotFound {
-                Ok(())
-            } else {
-                Err(format!("failed to inspect journal temporary: {error}"))
-            };
-        }
-        let stat = unsafe { stat.assume_init() };
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG
-            || stat.st_uid != unsafe { libc::geteuid() }
-            || stat.st_nlink != 1
-            || stat.st_mode & 0o077 != 0
-            || stat.st_size < 0
-            || stat.st_size as u64 > MAX_JOURNAL_BYTES
-        {
-            return Err("stale cutover journal temporary has unsafe metadata".into());
-        }
-        if unsafe { libc::unlinkat(self.file.as_raw_fd(), temporary.as_ptr(), 0) } == -1 {
-            return Err(format!(
-                "failed to remove stale journal temporary: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -860,6 +624,8 @@ fn sha256_digest(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use cfw_engine_api::{DirectIpv4HostRoutes, EngineStartRequest, TunnelNetworkOptions};
 

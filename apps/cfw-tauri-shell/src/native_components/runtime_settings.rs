@@ -1,4 +1,6 @@
 //! Presentation of the existing network settings form; no network mutation lives here.
+#[cfg(feature = "native-ui")]
+use super::panel_session;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, WebviewWindow};
 
@@ -148,7 +150,7 @@ pub(crate) async fn present_native_runtime_settings(
     request.validate()?;
     #[cfg(feature = "native-ui")]
     {
-        platform::present(app, window, request, completion).await
+        panel_session::present::<platform::Settings>(app, window, request, completion).await
     }
     #[cfg(not(feature = "native-ui"))]
     {
@@ -166,7 +168,7 @@ pub(crate) async fn update_native_runtime_settings(
     request.validate()?;
     #[cfg(feature = "native-ui")]
     {
-        platform::update(app, window, request).await
+        panel_session::update::<platform::Settings>(app, window, request).await
     }
     #[cfg(not(feature = "native-ui"))]
     {
@@ -183,7 +185,7 @@ pub(crate) async fn dismiss_native_runtime_settings(
 ) -> Result<bool, String> {
     #[cfg(feature = "native-ui")]
     {
-        platform::dismiss(app, window, request_id).await
+        panel_session::dismiss::<platform::Settings>(app, window, request_id).await
     }
     #[cfg(not(feature = "native-ui"))]
     {
@@ -198,33 +200,14 @@ pub(crate) use platform::{RuntimeSettingsState, cancel_for_reload};
 #[cfg(feature = "native-ui")]
 mod platform {
     use super::*;
-    use crate::native_components::profile_menu::{parent_of_webview, require_window};
-    use std::sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    };
-    use tauri::Manager;
+    use panel_session::{Abi, Family};
 
-    static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
-    type Active = Mutex<Option<Arc<Pending>>>;
-    #[derive(Default)]
-    pub(crate) struct RuntimeSettingsState(Arc<Active>, AtomicU64);
-    struct Pending {
-        owner: Weak<Active>,
-        request_id: String,
-        session: u64,
-        window_number: i64,
-        sequence: AtomicU64,
-        submission: AtomicU64,
-        finished: AtomicBool,
-        channel: tauri::ipc::Channel<ResultEvent>,
-    }
     unsafe extern "C" {
         fn cfm_runtime_settings_present_v1(
             bytes: *const u8,
             count: usize,
-            event: extern "C" fn(usize, u64, *const u8, usize) -> i32,
-            closed: extern "C" fn(usize, u64),
+            event: panel_session::EventCallback,
+            closed: panel_session::ClosedCallback,
             context: usize,
         ) -> i32;
         fn cfm_runtime_settings_update_v1(bytes: *const u8, count: usize) -> i32;
@@ -240,317 +223,79 @@ mod platform {
         },
     }
 
-    extern "C" fn event(context: usize, session: u64, bytes: *const u8, count: usize) -> i32 {
-        if bytes.is_null() || count == 0 || count > 16_384 {
-            return 0;
+    /// The form's draft stays in the native panel and the renderer; a session
+    /// keeps nothing beside its shared identity.
+    pub(crate) struct Settings;
+    pub(crate) type RuntimeSettingsState = panel_session::State<Settings>;
+
+    impl panel_session::Request for Request {
+        fn request_id(&self) -> &str {
+            &self.request_id
         }
-        // SAFETY: an accepted panel retains one Arc until its once-only closed
-        // callback, and borrows the event buffer synchronously on the UI thread.
-        let pending = unsafe { &*(context as *const Pending) };
-        if pending.session != session || pending.finished.load(Ordering::Acquire) {
-            return 0;
+        fn sequence(&self) -> u64 {
+            self.sequence
         }
-        let data = unsafe { std::slice::from_raw_parts(bytes, count) };
-        let Ok(Intent::Submit {
-            submission_id,
-            draft,
-        }) = serde_json::from_slice::<Intent>(data)
-        else {
-            return 0;
+        fn acknowledged_submission(&self) -> u64 {
+            self.acknowledged_submission
+        }
+    }
+    impl Family for Settings {
+        type Request = Request;
+        type Event = ResultEvent;
+        const LABEL: &'static str = "native settings";
+        const PRESENT_ACKNOWLEDGEMENT_REFUSED: &'static str =
+            "a new settings window cannot acknowledge a previous submission";
+        const CANCEL_FAILURE: &'static str = "native_settings_cancel_failed";
+        const ABI: Abi = Abi {
+            present: cfm_runtime_settings_present_v1,
+            update: cfm_runtime_settings_update_v1,
+            dismiss: cfm_runtime_settings_dismiss_v1,
         };
-        if draft.validate().is_err()
-            || submission_id == 0
-            || submission_id > 9_007_199_254_740_991
-            || submission_id <= pending.submission.load(Ordering::Acquire)
-        {
-            return 0;
+
+        fn begin(_request: &Request) -> Self {
+            Self
         }
-        pending.submission.store(submission_id, Ordering::Release);
-        match pending.channel.send(ResultEvent::Submit {
-            request_id: pending.request_id.clone(),
-            submission_id,
-            draft,
-        }) {
-            Ok(()) => 1,
-            Err(error) => {
-                eprintln!("native settings action could not be delivered: {error}");
-                0
-            }
-        }
-    }
-    extern "C" fn closed(context: usize, session: u64) {
-        // SAFETY: this callback consumes the one Arc retained by a successful present.
-        let pending = unsafe { Arc::<Pending>::from_raw(context as *const Pending) };
-        pending.finished.store(true, Ordering::Release);
-        if pending.session != session {
-            eprintln!("native settings close identity differs");
-            return;
-        }
-        if let Some(owner) = pending.owner.upgrade() {
-            match owner.lock() {
-                Ok(mut current) if current.as_ref().is_some_and(|v| v.session == session) => {
-                    *current = None
-                }
-                Ok(_) => {}
-                Err(_) => eprintln!("native settings state could not release its window"),
-            }
-        }
-        if let Err(error) = pending.channel.send(ResultEvent::Closed {
-            request_id: pending.request_id.clone(),
-        }) {
-            eprintln!("native settings close could not be delivered: {error}");
-        }
-    }
-    fn frame(request: &Request, session: u64, window: i64) -> Result<Vec<u8>, String> {
-        let serde_json::Value::Object(mut object) =
-            serde_json::to_value(request).map_err(|e| e.to_string())?
-        else {
-            return Err("invalid native settings frame".into());
-        };
-        object.remove("requestId");
-        object.insert("version".into(), 1.into());
-        object.insert("session".into(), session.into());
-        object.insert("windowNumber".into(), window.into());
-        let bytes = serde_json::to_vec(&object).map_err(|e| e.to_string())?;
-        if bytes.len() > 16_384 {
-            return Err("native settings frame exceeds its size bound".into());
-        }
-        Ok(bytes)
-    }
-    pub(super) async fn present(
-        app: AppHandle,
-        window: WebviewWindow,
-        request: Request,
-        channel: tauri::ipc::Channel<ResultEvent>,
-    ) -> Result<(), String> {
-        require_window(&app, &window)?;
-        if request.acknowledged_submission != 0 {
-            return Err("a new settings window cannot acknowledge a previous submission".into());
-        }
-        let epoch = app
-            .state::<RuntimeSettingsState>()
-            .1
-            .load(Ordering::Acquire);
-        let observed_window = window.clone();
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        window
-            .with_webview(move |webview| {
-                let outcome = (|| {
-                    require_window(&app, &observed_window)?;
-                    let state = app.state::<RuntimeSettingsState>();
-                    if state.1.load(Ordering::Acquire) != epoch {
-                        return Err("native settings renderer reloaded".into());
-                    }
-                    let number = parent_of_webview(webview.inner())?;
-                    let session = NEXT_SESSION
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
-                        .map_err(|_| "native settings session exhausted")?;
-                    let bytes = frame(&request, session, number)?;
-                    let pending = Arc::new(Pending {
-                        owner: Arc::downgrade(&state.0),
-                        request_id: request.request_id,
-                        session,
-                        window_number: number,
-                        sequence: AtomicU64::new(request.sequence),
-                        submission: AtomicU64::new(0),
-                        finished: AtomicBool::new(false),
-                        channel,
-                    });
-                    let pointer = Arc::into_raw(pending.clone()) as usize;
-                    // SAFETY: main-thread synchronous borrowed JSON; success transfers
-                    // the Arc to closed, while event callbacks borrow it only.
-                    let status = unsafe {
-                        cfm_runtime_settings_present_v1(
-                            bytes.as_ptr(),
-                            bytes.len(),
-                            event,
-                            closed,
-                            pointer,
-                        )
-                    };
-                    if status != 1 {
-                        unsafe {
-                            drop(Arc::<Pending>::from_raw(pointer as *const Pending));
-                        }
-                        return Err(format!(
-                            "native settings presentation rejected (status {status})"
-                        ));
-                    }
-                    if pending.finished.load(Ordering::Acquire) {
-                        return Ok(());
-                    }
-                    match state.0.lock() {
-                        Ok(mut active) => *active = Some(pending),
-                        Err(_) => {
-                            unsafe {
-                                cfm_runtime_settings_dismiss_v1(session);
-                            }
-                            return Err("native settings state lock failed".into());
-                        }
-                    }
-                    Ok(())
-                })();
-                let _receiver_closed = sender.send(outcome);
-            })
-            .map_err(|e| e.to_string())?;
-        receiver
-            .await
-            .map_err(|_| "native settings presentation ended without a result".to_owned())?
-    }
-    pub(super) async fn update(
-        app: AppHandle,
-        window: WebviewWindow,
-        request: Request,
-    ) -> Result<bool, String> {
-        require_window(&app, &window)?;
-        crate::startup::on_main(&app, move |app| {
-            require_window(&app, &window)?;
-            let current = app
-                .state::<RuntimeSettingsState>()
-                .0
-                .lock()
-                .map_err(|_| "native settings state lock failed")?
-                .clone();
-            let Some(pending) = current.filter(|p| p.request_id == request.request_id) else {
-                return Ok(false);
+        fn admit(&self, request_id: &str, data: &[u8]) -> Option<(u64, ResultEvent)> {
+            let Ok(Intent::Submit {
+                submission_id,
+                draft,
+            }) = serde_json::from_slice::<Intent>(data)
+            else {
+                return None;
             };
-            if request.sequence <= pending.sequence.load(Ordering::Acquire) {
-                return Ok(false);
-            }
-            if request.acknowledged_submission > pending.submission.load(Ordering::Acquire) {
-                return Err("native settings acknowledged an unknown submission".into());
-            }
-            let bytes = frame(&request, pending.session, pending.window_number)?;
-            // SAFETY: main-thread borrowed buffer; the session remains owned during this call.
-            match unsafe { cfm_runtime_settings_update_v1(bytes.as_ptr(), bytes.len()) } {
-                1 => {
-                    pending.sequence.store(request.sequence, Ordering::Release);
-                    Ok(true)
-                }
-                2 => Ok(false),
-                status => Err(format!("native settings update rejected (status {status})")),
-            }
-        })
-        .await
-    }
-    pub(super) async fn dismiss(
-        app: AppHandle,
-        window: WebviewWindow,
-        request_id: String,
-    ) -> Result<bool, String> {
-        if window.label() != "main" {
-            return Err("native settings dismissal requires main window".into());
+            draft.validate().ok()?;
+            Some((
+                submission_id,
+                ResultEvent::Submit {
+                    request_id: request_id.to_owned(),
+                    submission_id,
+                    draft,
+                },
+            ))
         }
-        crate::startup::on_main(&app, move |app| {
-            let current = app
-                .state::<RuntimeSettingsState>()
-                .0
-                .lock()
-                .map_err(|_| "native settings state lock failed")?
-                .clone();
-            let Some(pending) = current.filter(|p| p.request_id == request_id) else {
-                return Ok(false);
-            };
-            // SAFETY: on the UI thread with no lock held across the close callback.
-            match unsafe { cfm_runtime_settings_dismiss_v1(pending.session) } {
-                1 => Ok(true),
-                2 => Ok(false),
-                status => Err(format!(
-                    "native settings dismissal rejected (status {status})"
-                )),
-            }
-        })
-        .await
+        fn closed(request_id: String) -> ResultEvent {
+            ResultEvent::Closed { request_id }
+        }
     }
+
     pub(crate) fn cancel_for_reload(app: &AppHandle, label: &str) {
-        if label != "main" {
-            return;
-        }
-        let state = app.state::<RuntimeSettingsState>();
-        state.1.fetch_add(1, Ordering::AcqRel);
-        let current = match state.0.lock() {
-            Ok(current) => current.clone(),
-            Err(_) => {
-                crate::emit_startup_error(
-                    app,
-                    "native_settings_cancel_failed",
-                    "native settings state lock failed".into(),
-                );
-                return;
-            }
-        };
-        if let Some(pending) = current {
-            // SAFETY: the host page-load callback runs on the UI thread.
-            let status = unsafe { cfm_runtime_settings_dismiss_v1(pending.session) };
-            if !matches!(status, 1 | 2) {
-                crate::emit_startup_error(
-                    app,
-                    "native_settings_cancel_failed",
-                    format!("native settings dismissal rejected: {status}"),
-                );
-            }
-        }
+        panel_session::cancel_for_reload::<Settings>(app, label);
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::native_components::panel_session::tests::{callback_ownership, native_frame};
+
         #[test]
         fn settings_events_borrow_context_and_close_releases_it_once() {
             let request = super::super::tests::request();
-            let owner = Arc::new(Mutex::new(None));
-            let messages = Arc::new(Mutex::new(Vec::new()));
-            let sent = messages.clone();
-            let pending = Arc::new(Pending {
-                owner: Arc::downgrade(&owner),
-                request_id: request.request_id.clone(),
-                session: 3,
-                window_number: 7,
-                sequence: AtomicU64::new(1),
-                submission: AtomicU64::new(0),
-                finished: AtomicBool::new(false),
-                channel: tauri::ipc::Channel::new(move |message| {
-                    sent.lock().unwrap().push(message);
-                    Ok(())
-                }),
-            });
-            let weak = Arc::downgrade(&pending);
-            *owner.lock().unwrap() = Some(pending.clone());
-            let pointer = Arc::into_raw(pending) as usize;
             let valid = serde_json::to_vec(
                 &serde_json::json!({"action":"submit", "submissionId":1, "draft":request.draft}),
             )
             .unwrap();
-            assert_eq!(event(pointer, 2, valid.as_ptr(), valid.len()), 0);
-            assert_eq!(event(pointer, 3, b"{}".as_ptr(), 2), 0);
-            assert!(messages.lock().unwrap().is_empty());
-            assert_eq!(event(pointer, 3, valid.as_ptr(), valid.len()), 1);
-            assert_eq!(
-                event(pointer, 3, valid.as_ptr(), valid.len()),
-                0,
-                "replayed submits are rejected"
-            );
-            assert!(
-                weak.upgrade().is_some(),
-                "submitting a form borrows the existing observer"
-            );
-            closed(pointer, 3);
-            assert!(owner.lock().unwrap().is_none());
-            assert!(
-                weak.upgrade().is_none(),
-                "the close callback releases the observer"
-            );
-            let messages = messages.lock().unwrap();
-            assert_eq!(messages.len(), 2);
-            let json: Vec<serde_json::Value> = messages
-                .iter()
-                .map(|message| match message {
-                    tauri::ipc::InvokeResponseBody::Json(text) => {
-                        serde_json::from_str(text).unwrap()
-                    }
-                    _ => panic!("settings events must be JSON"),
-                })
-                .collect();
+            let json = callback_ownership::<Settings>(&request, &valid);
+            assert_eq!(json.len(), 2);
             assert_eq!(json[0]["kind"], "submit");
             assert_eq!(json[0]["draft"]["ipv6DNS"], true);
             assert_eq!(json[1]["kind"], "closed");
@@ -559,8 +304,7 @@ mod platform {
 
         #[test]
         fn native_frame_uses_the_exact_settings_contract_without_host_request_id() {
-            let bytes = frame(&super::super::tests::request(), 3, 7).unwrap();
-            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let value = native_frame::<Settings>(&super::super::tests::request());
             assert!(value.get("requestId").is_none());
             assert_eq!(value["version"], 1);
             assert_eq!(value["session"], 3);

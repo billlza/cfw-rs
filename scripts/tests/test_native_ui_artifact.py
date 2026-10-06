@@ -43,7 +43,8 @@ class NativeUiArtifactTests(unittest.TestCase):
     def test_release_component_symbols_match_headers_and_reject_missing_exports(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         headers = "\n".join((repository / "native/dashboard/include" / name).read_text()
-                            for name in ("cfm_profile_menu.h", "cfm_runtime_settings.h", "cfm_general_switches.h"))
+                            for name in ("cfm_profile_menu.h", "cfm_runtime_settings.h", "cfm_general_switches.h",
+                                         "cfm_prompt_dialog.h", "cfm_window_glass.h"))
         declared = set(re.findall(r"int32_t\s+(cfm_[a-z0-9_]+)\s*\(", headers))
         self.assertEqual(declared, ui.COMPONENT_EXPORTS)
         symbols = "\n".join(f"0000000000010000 T _{name}" for name in sorted(declared))

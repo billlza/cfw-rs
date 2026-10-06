@@ -13,9 +13,9 @@ use crate::transport_security::external_https_client_builder;
 
 const METADATA_URL: &str = "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const USER_AGENT: &str = concat!("cfw-rs/", env!("CARGO_PKG_VERSION"));
+pub(super) const USER_AGENT: &str = concat!("cfw-rs/", env!("CARGO_PKG_VERSION"));
 const RELEASE_ASSET_HOST: &str = "release-assets.githubusercontent.com";
 const RELEASE_ASSET_PATH_PREFIX: &str = "/github-production-release-asset/";
 
@@ -160,7 +160,10 @@ fn validate_metadata_redirect(
     }
 }
 
-fn sanitized_network_error(stage: DownloadFailureStage, error: &reqwest::Error) -> UpdateError {
+pub(super) fn sanitized_network_error(
+    stage: DownloadFailureStage,
+    error: &reqwest::Error,
+) -> UpdateError {
     let category = if error.is_timeout() {
         NetworkFailureCategory::Timeout
     } else if error.is_connect() {
@@ -183,7 +186,7 @@ fn sanitized_network_error(stage: DownloadFailureStage, error: &reqwest::Error) 
     }
 }
 
-fn validate_release_asset_url(url: &Url) -> std::result::Result<(), String> {
+pub(super) fn validate_release_asset_url(url: &Url) -> std::result::Result<(), String> {
     if url.scheme() != "https"
         || url.host_str() != Some(RELEASE_ASSET_HOST)
         || !url.username().is_empty()

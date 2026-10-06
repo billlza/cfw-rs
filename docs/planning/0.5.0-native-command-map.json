@@ -8,7 +8,7 @@
   "inspected_head": "9ce00dce5cfddc108a9dce9bc3c23c4b09bcc03d",
   "baseline_commit": "9e2f76cdd7ffb286614a7bc6fe55e75d3fc7a5b2",
   "baseline_command_count": 90,
-  "current_registered_command_count": 99,
+  "current_registered_command_count": 110,
   "additional_current_registered_commands": [
     "present_native_profile_menu",
     "update_native_profile_menu",
@@ -18,8 +18,24 @@
     "dismiss_native_runtime_settings",
     "sync_native_general_switches",
     "focus_native_general_switch",
-    "dismiss_native_general_switches"
+    "dismiss_native_general_switches",
+    "present_native_prompt_dialog",
+    "update_native_prompt_dialog",
+    "dismiss_native_prompt_dialog",
+    "present_native_window_glass",
+    "update_native_window_glass",
+    "dismiss_native_window_glass",
+    "reconcile_startup_services",
+    "prepare_update_install",
+    "cancel_update_install",
+    "commit_update_install",
+    "resolve_update_install"
   ],
+  "registered_command_count_alignment": {
+    "counted_on": "2026-10-05",
+    "counted_from": "tauri::generate_handler! in apps/cfw-tauri-shell/src/main.rs",
+    "note": "The count and the additional-command list were corrected to the registered handlers: 90 baseline, 12 presentation, 1 explicit startup recovery and 4 update installation commands. reconcile_startup_services was registered on 2026-09-26, after aligned_at, and had not been counted. The four update installation commands were added to the 0.4 line after the frozen 40073 baseline and carried forward on 2026-10-05; the baseline capture itself is unchanged. The three window glass commands (present/update/dismiss_native_window_glass) were registered on 2026-10-06 for the native glass behind the page: 110 in total. The source hashes, line ranges, definitions and frontend references in this inventory were not refreshed and remain as aligned at aligned_at."
+  },
   "baseline_registered_order_preserved": true,
   "resolved_baseline_command_count": 90,
   "missing_baseline_commands": [],
@@ -6847,5 +6863,5 @@
       "network_diagnostics"
     ]
   },
-  "additional_commands_scope": "Nine presentation-only commands for the existing profile context menu, runtime settings dialog and six in-place General switches. The 90 original business commands are unchanged; this inventory does not establish installed fidelity or network acceptance."
+  "additional_commands_scope": "Twelve presentation-only commands for the existing profile context menu, runtime settings dialog, six in-place General switches and the profile deletion, settings reset and information prompt dialogs, plus one explicit startup service recovery command. The 90 original business commands are unchanged; this inventory does not establish installed fidelity or network acceptance."
 }

@@ -5,8 +5,19 @@
 ## 0.5.0 - Unreleased
 
 - Prepare native SwiftUI components in the existing interface, preserving the
-  page layout, settings handlers and network controls. Preview validation uses
-  the separate 0.5.0/50001 identity; this entry does not mark a public release.
+  page layout, settings handlers and network controls: the Profiles menu, the
+  Network settings form, the General switches, and the profile deletion,
+  settings reset and information prompts. Preview validation uses separate
+  0.5.0 preview identities; this entry does not mark a public release.
+- Refresh only the status bar of the General page when connection updates
+  arrive. The page is no longer rebuilt once a second while the core runs.
+- Draw the window as Liquid Glass: the window is transparent with its title
+  bar hidden, and a native backdrop under the page carries the glass slab, the
+  frosted sidebar and workspace panels, the sidebar cards and the selected
+  navigation item at the rectangles the page measures. The page keeps its
+  layout and texts, shows glyphs beside the navigation labels and its slogan
+  beside the header, and paints its own backgrounds whenever the host does not
+  show the glass. The transparent WebView uses Tauri's macOS private API.
 
 ## 0.4.0 - Unreleased
 
@@ -411,19 +422,40 @@
   installed-resource patch, isolated resolved-only SwiftPM state, a real project
   generation probe, debug-path stripping, and a complete tree-v2 manifest.
 - Replace the generic updater runtime with a project-owned bounded metadata
-  check and one-use authorization. Before use, it revalidates the exact
-  canonical GitHub identity and opens the official DMG release page. The app
-  no longer downloads, extracts, or swaps its own installed bundle, and does
-  not replace that bundle in process.
+  check and one-use authorization that revalidates the exact canonical GitHub
+  identity before the release page is opened and before a download starts. The
+  official DMG release page stays available from About.
+- Install a presented release from About when the application runs from
+  `/Applications` and is owned by the user. The archive is downloaded within
+  fixed bounds and kept only if the complete stream matches the release
+  signature for that exact archive; the extracted bundle must be this product,
+  the announced version, a strictly newer build and signed by the release
+  Developer ID. The core keeps running until Install and Relaunch is chosen.
+  The dashboard then stops the core and exits once a separate installer
+  process of the same executable holds the installation; that process
+  unregisters the `SMAppService` agent and daemon through the existing
+  maintenance modes, exchanges the bundles with
+  one atomic rename and starts the new application, which registers its own
+  services; a start counts only once a new dashboard is still running two
+  seconds later. A failure before the exchange leaves the installed
+  application as it was, starts it again and is reported on the next launch;
+  the reviewed outcome, failures and one bounded line of the extractor's or
+  `codesign`'s own output go to the `update.json` diagnostic journal. A
+  release whose download failed authentication is not offered again in the
+  same run. The release gate `validate_updater_archive.py` applies the same
+  archive rules as the installer, including directories their owner can
+  fully use and symbolic links that resolve inside the bundle.
 - Rotate the updater artifact trust root for 0.4.0 after the 0.3.5 private key
   became unavailable. Existing 0.3.5 installations cannot authenticate the
   new release archive and must install 0.4.0 from its signed, notarized DMG;
   there is no unsigned or alternate-key fallback. The replacement public key
   is embedded in 0.4.0 and its private half remains outside the repository.
-- Keep in-process replacement intentionally absent because the required
-  verified `SMAppService` maintenance transaction is release-operator-only and
-  unavailable to the renderer/updater; metadata or a browser handoff is never
-  reported as installation.
+- Keep the `SMAppService` maintenance transaction out of the dashboard and
+  renderer: only the windowless installer process changes a registration, and
+  only after the dashboard that started it has exited. The dashboard itself
+  only reads the registration state, through the read-only status mode,
+  before it downloads and before it stops the core. Metadata or a browser
+  handoff is never reported as installation.
 - Release remains blocked until installed-identity proof for shared-Keychain
   provisioning and authenticated in-memory Tunnel injection, physical packet
   capture of the pinned resolver-failover behavior, exact Developer ID and

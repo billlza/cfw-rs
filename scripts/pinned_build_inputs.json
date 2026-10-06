@@ -2074,8 +2074,9 @@
       "MAX_EXPANDED_BYTES"
     ],
     "CHANGELOG.md": [
-      "opens the official DMG release page",
-      "longer downloads, extracts, or swaps its own installed bundle",
+      "official DMG release page stays available",
+      "kept only if the complete stream matches the release",
+      "one atomic rename and starts the new application",
       "SMAppService"
     ],
     "crates/cfw-release-verifier/src/main.rs": [
@@ -3527,10 +3528,10 @@
     "scripts/release_publication_path_contract.sh": "cd45f5141177728280d448834065ae1a217ec9d5c5b9f3dbac9ee372a815a60b",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "ce333777640d59e94dd8413211b2a07ed4959292b4db6fcc0a7245e6831d25c9",
+    "RELEASE.md": "1c88ac38642d10f45d56f478314ddb0d90ccfb6863207ecd8623c3446d9219f3",
     "scripts/updater_signing_launcher.py": "31a3841dba08f49aa080773e1aad10b8eb814e9de477aa95325855dc4969fb07",
-    "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
-    "CHANGELOG.md": "8be87402efabcde91e7bec25c75e24f43766d2d9b6a5c1b54fce2f4ca1d9d8fe",
+    "scripts/validate_updater_archive.py": "bee48aab736554ebeb0772687eaa44cea81426bcdc27d5581d399331b5814dca",
+    "CHANGELOG.md": "e74563f89294999d2803f8445cc6f3d2c86313ce0da7867ec28363e6bf8d4cc4",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
     "scripts/validate_notary_archive.py": "099ff41742da304d34ec8b92dd3b3c4f96d064f21bde697b21f5c99c2393f283",
     "scripts/tauri_host_skeleton.sh": "134681dc3c424b014c4f5d8812cd9f7d854e1adbe752a350c009a301c4c59977",
@@ -3637,7 +3638,7 @@
     "scripts/apple_validation_policy.py": "62bac572b87c0e96324b34215990809c6a08dc1d0e308fd68af94bc955af68da",
     "scripts/apple_validation_policy.sh": "7858530b4243c2edbb64fdc4db77d1d8fa13cbd2509af5cceeb780b1636bb56a",
     "scripts/build_native_ui.sh": "23c5ae952d571a2613fe8b8c3bbe1af357377a819bcf16cb3f8af860a7093a81",
-    "scripts/native_ui_artifact.py": "6991d5b65bd5ba389c358421f87990ba5fa835a475a3f21da1900b093cf13726",
+    "scripts/native_ui_artifact.py": "4888a5eb6c0a144bccab54fb2ccf9155a7f81c8dc2b67f7c7ab4b2750eb66e6a",
     "scripts/prepare_preview_candidate.sh": "9421d3191c3575e5f7a191de834530f6dc041469934e5b6cb43dbaef6ae8709b",
     "apps/cfw-tauri-shell/build_support/development_native_ui.rs": "0789e0f17a2c86c7ba7a491fc22a475e57cf6f3229605e2b47c651c8defefae9",
     "scripts/prepare_development_native_ui.py": "30d757277d18eb9345a367e1b76561522a1878634f884b646f10ab2d758c31ec",

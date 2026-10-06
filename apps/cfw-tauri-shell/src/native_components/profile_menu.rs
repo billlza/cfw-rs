@@ -1,4 +1,4 @@
-use super::{MenuItem, PROFILE_ACTIONS, ProfileMenuRequest, ProfileMenuResult};
+use super::{MenuItem, PROFILE_ACTIONS, ProfileMenuRequest, ProfileMenuResult, require_window};
 use serde::Serialize;
 use std::sync::{
     Arc, Mutex, Weak,
@@ -38,7 +38,6 @@ struct Frame {
     items: Vec<MenuItem>,
 }
 unsafe extern "C" {
-    fn cfm_webview_window_number_v1(view: *mut std::ffi::c_void, window: *mut i64) -> i32;
     fn cfm_profile_menu_anchor_v1(
         view: *mut std::ffi::c_void,
         x: f64,
@@ -57,33 +56,6 @@ unsafe extern "C" {
     ) -> i32;
     fn cfm_profile_menu_update_v1(bytes: *const u8, count: usize) -> i32;
     fn cfm_profile_menu_dismiss_v1(session: u64) -> i32;
-}
-pub(super) fn require_window(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
-    if window.label() != "main"
-        || app.state::<crate::LaunchContext>().is_migration_handoff()
-        || !app
-            .state::<crate::lifecycle::AppLifecycle>()
-            .startup_work_allowed()
-    {
-        return Err("native profile menus are unavailable for this window or lifecycle".into());
-    }
-    app.state::<crate::startup_state::NativeStartup>()
-        .require_ready()
-}
-
-/// Resolve the decorated host from the same borrowed WKWebView used for menus.
-/// Window lookup retains neither the view nor its parent and needs no DOM geometry.
-pub(super) fn parent_of_webview(view: *mut std::ffi::c_void) -> Result<i64, String> {
-    let mut number = 0_i64;
-    // SAFETY: caller is within Tauri's main-thread with_webview closure.
-    let status = unsafe { cfm_webview_window_number_v1(view, &mut number) };
-    if status == 1 {
-        Ok(number)
-    } else {
-        Err(format!(
-            "native settings parent is unavailable (status {status})"
-        ))
-    }
 }
 extern "C" fn completed(context: usize, session: u64, action: u32) {
     // SAFETY: exactly one retained Arc is transferred by a successful present.

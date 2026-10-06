@@ -37,6 +37,7 @@ impl Diagnostics {
                         let mut startup = Vec::new();
                         let mut network = Vec::new();
                         let mut network_warnings = Vec::new();
+                        let mut update = Vec::new();
                         let mut acknowledgements = Vec::new();
                         let mut add = |command| match command {
                             WriteCommand::Entry(DiagnosticTopic::Startup, entry) => {
@@ -47,6 +48,9 @@ impl Diagnostics {
                             }
                             WriteCommand::Entry(DiagnosticTopic::NetworkWarnings, entry) => {
                                 network_warnings.push(entry)
+                            }
+                            WriteCommand::Entry(DiagnosticTopic::Update, entry) => {
+                                update.push(entry)
                             }
                             WriteCommand::Flush(sender) => acknowledgements.push(sender),
                         };
@@ -68,6 +72,7 @@ impl Diagnostics {
                             (DiagnosticTopic::Startup, startup),
                             (DiagnosticTopic::Network, network),
                             (DiagnosticTopic::NetworkWarnings, network_warnings),
+                            (DiagnosticTopic::Update, update),
                         ] {
                             if let Err(error) = journal.append(topic, &entries) {
                                 record_failure(&worker_failure, &error.to_string());

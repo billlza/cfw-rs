@@ -4,8 +4,12 @@ use tauri::{AppHandle, WebviewWindow};
 
 pub(crate) mod general_switches;
 #[cfg(feature = "native-ui")]
+mod panel_session;
+#[cfg(feature = "native-ui")]
 mod profile_menu;
+pub(crate) mod prompt_dialog;
 pub(crate) mod runtime_settings;
+pub(crate) mod window_glass;
 
 pub(crate) const PROFILE_ACTIONS: [&str; 12] = [
     "select",
@@ -27,6 +31,8 @@ pub(crate) struct NativeUiCapabilities {
     pub profile_menu: bool,
     pub runtime_settings: bool,
     pub general_switches: bool,
+    pub prompt_dialog: bool,
+    pub window_glass: bool,
 }
 impl NativeUiCapabilities {
     pub fn current() -> Self {
@@ -34,8 +40,27 @@ impl NativeUiCapabilities {
             profile_menu: cfg!(feature = "native-ui"),
             runtime_settings: cfg!(feature = "native-ui"),
             general_switches: cfg!(feature = "native-ui"),
+            prompt_dialog: cfg!(feature = "native-ui"),
+            window_glass: cfg!(feature = "native-ui"),
         }
     }
+}
+
+/// Every native component is presented for the ready main window of a normal
+/// launch only.
+#[cfg(feature = "native-ui")]
+pub(crate) fn require_window(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
+    use tauri::Manager;
+    if window.label() != "main"
+        || app.state::<crate::LaunchContext>().is_migration_handoff()
+        || !app
+            .state::<crate::lifecycle::AppLifecycle>()
+            .startup_work_allowed()
+    {
+        return Err("native components are unavailable for this window or lifecycle".into());
+    }
+    app.state::<crate::startup_state::NativeStartup>()
+        .require_ready()
 }
 
 #[derive(Clone, Deserialize, Serialize)]

@@ -382,12 +382,31 @@ input::placeholder {
 
 .cfw-header {
   display: flex;
+  position: relative;
   height: 112px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
   gap: 24px;
   padding-top: 12px;
+}
+
+/* The product's slogan, in the rounded system face, set as plain text: a
+ * badge of words, not another glass element. */
+.cfw-slogan {
+  display: none;
+  position: absolute;
+  top: 30px;
+  right: 34px;
+  color: var(--muted);
+  font-family: ui-rounded, var(--sans);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+  text-align: center;
+  transform: rotate(-7deg);
+  pointer-events: none;
 }
 
 .cfw-app-mark {
@@ -2806,4 +2825,243 @@ pre {
   height: 24px;
   flex: 0 0 54px;
   justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------------------
+ * Native window glass. The host draws the window's glass slab and the frosted
+ * panels under the page while `html.native-window-glass` is set; the page
+ * then paints no background of its own. Without the class every rule above
+ * applies unchanged, so a transparent window never shows an unreadable page.
+ * ------------------------------------------------------------------------- */
+html.native-window-glass {
+  --glass-ink: #1c2b4a;
+  --glass-muted: #5b6b86;
+  --glass-blue: #3b82f6;
+  --glass-line: rgba(255, 255, 255, 0.55);
+  --glass-fill: rgba(255, 255, 255, 0.52);
+  --glass-fill-strong: rgba(255, 255, 255, 0.72);
+  --glass-hover: rgba(255, 255, 255, 0.3);
+  --glass-shadow: 0 1px 2px rgba(20, 40, 80, 0.08);
+  --fgc: var(--glass-ink);
+  --muted: var(--glass-muted);
+  --menu-fgc: var(--glass-muted);
+  --general-title-c: var(--glass-ink);
+  --bc: var(--glass-line);
+  /* Every page's own panels, cards and inputs become frosted fills on the
+   * workspace glass through the tokens they already use. */
+  --bgc: rgba(255, 255, 255, 0.5);
+  --mbgc: rgba(255, 255, 255, 0.34);
+  --general-item-bgc: var(--glass-fill);
+  --proxy-item-bgc: var(--glass-fill);
+  --proxy-item-border-c: var(--glass-line);
+  --log-item-border-c: var(--glass-line);
+  --input-bgc: var(--glass-fill-strong);
+  --setting-input-bgc: var(--glass-fill-strong);
+  --status-bgc: transparent;
+  --shadow: rgba(20, 40, 80, 0.08);
+}
+
+html.native-window-glass[data-theme="dark"] {
+  --glass-ink: #eef2f8;
+  --glass-muted: #a9b4c6;
+  --glass-blue: #7fb0ff;
+  --glass-line: rgba(255, 255, 255, 0.12);
+  --glass-fill: rgba(255, 255, 255, 0.1);
+  --glass-fill-strong: rgba(255, 255, 255, 0.16);
+  --glass-hover: rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --bgc: rgba(0, 0, 0, 0.28);
+  --mbgc: rgba(0, 0, 0, 0.2);
+  --shadow: rgba(0, 0, 0, 0.28);
+}
+
+html.native-window-glass,
+html.native-window-glass body,
+html.native-window-glass .app-shell,
+html.native-window-glass .sidebar,
+html.native-window-glass .nav-list,
+html.native-window-glass .nav-item,
+html.native-window-glass .nav-item.active,
+html.native-window-glass .traffic-pane,
+html.native-window-glass .runtime-pane,
+html.native-window-glass .sidebar-meta,
+html.native-window-glass .workspace,
+html.native-window-glass .page,
+html.native-window-glass .cfw-select,
+html.native-window-glass .status-bar {
+  background: transparent;
+}
+
+/* The title bar is hidden: the window's own traffic lights sit at the top
+ * left of the glass, and the status row stays as the drag region beside them. */
+html.native-window-glass .status-bar {
+  display: flex;
+  position: relative;
+  height: 36px;
+  flex-shrink: 0;
+  align-items: center;
+  padding-left: 84px;
+  color: var(--glass-muted);
+  font-size: 12px;
+}
+
+html.native-window-glass .status-progress {
+  top: 0;
+}
+
+html.native-window-glass .app-shell {
+  grid-template-columns: 196px minmax(0, 1fr);
+  height: calc(100vh - 36px);
+  gap: 14px;
+  padding: 0 14px 14px;
+  box-sizing: border-box;
+}
+
+html.native-window-glass .sidebar,
+html.native-window-glass .workspace {
+  border: 0;
+}
+
+html.native-window-glass .sidebar {
+  gap: 10px;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+html.native-window-glass .traffic-pane,
+html.native-window-glass .runtime-pane,
+html.native-window-glass .sidebar-meta {
+  border: 0;
+  border-radius: 16px;
+  padding: 10px 16px;
+}
+
+html.native-window-glass .traffic-pane {
+  flex: 0 0 auto;
+}
+
+/* The nine items share the sidebar's height between the cards: each grows
+ * with the window, as does its glyph and label, instead of leaving the space
+ * under the last item empty. */
+html.native-window-glass .nav-list {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  justify-content: space-evenly;
+  gap: 0;
+  border: 0;
+  padding: 4px 0;
+  overflow: hidden;
+}
+
+html.native-window-glass .nav-item {
+  flex: 0 1 auto;
+  justify-content: flex-start;
+  gap: clamp(12px, 1.4vh, 18px);
+  min-height: 38px;
+  height: clamp(38px, 5.4vh, 60px);
+  border-radius: 999px;
+  padding: 0 clamp(16px, 1.8vh, 22px);
+  color: var(--glass-muted);
+  transition: color 160ms ease;
+}
+
+html.native-window-glass .nav-item:hover {
+  color: var(--glass-ink);
+}
+
+html.native-window-glass .nav-item.active {
+  color: var(--glass-ink);
+  font-weight: 600;
+}
+
+html.native-window-glass .nav-item.active + .nav-item,
+html.native-window-glass .nav-item:has(+ .nav-item.active) {
+  border-radius: 999px;
+}
+
+.nav-item svg {
+  display: none;
+}
+
+html.native-window-glass .nav-item svg {
+  display: block;
+  width: clamp(20px, 2.5vh, 28px);
+  height: clamp(20px, 2.5vh, 28px);
+  flex-shrink: 0;
+  color: var(--glass-blue);
+  fill: currentColor;
+}
+
+html.native-window-glass .nav-item b {
+  font-size: clamp(14px, 1.75vh, 19px);
+}
+
+html.native-window-glass .runtime-pane {
+  min-height: 0;
+  flex: 0 0 auto;
+  align-items: flex-start;
+}
+
+html.native-window-glass .cfw-slogan {
+  display: block;
+}
+
+html.native-window-glass .cfw-content {
+  width: min(78vw, 880px);
+  max-width: 880px;
+  border-radius: 18px;
+  background: var(--glass-fill);
+  box-shadow: var(--glass-shadow);
+  padding: 4px 18px;
+  box-sizing: border-box;
+}
+
+/* Rows stay compact enough for the twelve General rows at the window's
+ * minimum height and grow with the window above it. */
+html.native-window-glass .cfw-row {
+  border-radius: 0;
+  padding: clamp(5px, calc((100vh - 603px) / 40 + 5px), 12px) 4px;
+}
+
+html.native-window-glass .cfw-row + .cfw-row {
+  border-top: 1px solid var(--glass-line);
+}
+
+html.native-window-glass .cfw-row:hover {
+  background: transparent;
+}
+
+html.native-window-glass .cfw-select,
+html.native-window-glass .cfw-row-right input[type="text"],
+html.native-window-glass .cfw-row-right input[type="number"],
+html.native-window-glass .button,
+html.native-window-glass .core-state-button,
+html.native-window-glass .cfw-text-button {
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  background: var(--glass-fill-strong);
+  box-shadow: var(--glass-shadow);
+  color: var(--glass-ink);
+  padding: 4px 12px;
+}
+
+html.native-window-glass .cfw-text-button:hover,
+html.native-window-glass .button:hover,
+html.native-window-glass .core-state-button:hover {
+  background: #fff;
+}
+
+html.native-window-glass[data-theme="dark"] .cfw-text-button:hover,
+html.native-window-glass[data-theme="dark"] .button:hover,
+html.native-window-glass[data-theme="dark"] .core-state-button:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+html.native-window-glass .status-button {
+  border-radius: 10px;
+}
+
+html.native-window-glass .status-button:hover {
+  background: var(--glass-hover);
 }

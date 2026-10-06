@@ -2,6 +2,9 @@ import { Channel } from "@tauri-apps/api/core";
 import { profileMenuItems, nativeMenuItems, createNativeProfileMenu } from "./native-profile-menu.js";
 import { createNativeRuntimeSettings } from "./native-runtime-settings.js";
 import { createNativeGeneralSwitches } from "./native-general-switches.js";
+import { createNativePromptDialog, promptDialogFrame } from "./native-prompt-dialog.js";
+import { createWindowGlass } from "./window-glass.js";
+import { navIcon } from "./nav-icons.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
@@ -23,6 +26,7 @@ import {
   listen,
   escapeHtml,
   errorText,
+  redactDiagnosticText,
   formatRuntime,
   engineStateLabel,
   normalizeEngineStatus,
@@ -100,6 +104,35 @@ const nativeGeneralSwitches = createNativeGeneralSwitches({
     scheduleRender();
   },
 });
+const nativePromptDialog = createNativePromptDialog({
+  // The host refuses presentation commands for a migration handoff window and
+  // while a handoff is in progress; those dialogs stay in the page.
+  enabled: () => state.payload?.native_ui?.prompt_dialog === true && !state.migrationHandoff
+    && state.migrationHandoffStatus?.state !== "in_progress",
+  invoke, makeChannel: (handler) => new Channel(handler),
+  // The dialog's own action did not fail; only its native presentation did.
+  onError: (error, title) => appendLog("error", "ui", t("Native presentation of “{title}” failed: {error}", { title, error: errorText(error) })),
+});
+
+const windowGlass = createWindowGlass({
+  // The glass follows the main window only; a migration handoff window keeps
+  // the page's own backgrounds.
+  enabled: () => state.payload?.native_ui?.window_glass === true && !state.migrationHandoff,
+  invoke, makeChannel: (handler) => new Channel(handler),
+  doc: document, win: window, randomUUID: () => crypto.randomUUID(),
+  onError: (error) => appendLog("error", "ui", t("Native window glass failed: {error}", { error: errorText(error) })),
+});
+let glassResizeQueued = false;
+/// A live resize fires many events per second; the glass follows once per
+/// frame, and the resized page measures itself again.
+function followWindowResize() {
+  if (glassResizeQueued) return;
+  glassResizeQueued = true;
+  requestAnimationFrame(() => {
+    glassResizeQueued = false;
+    windowGlass.refresh();
+  });
+}
 
 function nativeProfileMenuEnabled() { return state.payload?.native_ui?.profile_menu === true; }
 function reportProfileMenuFailure(error) {
@@ -170,6 +203,7 @@ const automationSettingsUI = createAutomationSettingsUI({ state, invoke, renderP
   dismissOtherDialogs: () => { dismissNativeProfileMenu(); runtimeSettingsUI.close(); state.glassDialog = null; state.profileContextMenu = null; } });
 
 import { createProxyDelayTest } from "./proxy-delay-test.js";
+import { createUpdateInstall, installAfterCheck, updateInstallView } from "./update-install.js";
 const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView, invoke, activeProfile, engineIsOff,
   controllerActionAllowed, captureEngineIdentityToken, engineIdentityTokenIsCurrent, appendLog, renderPage, errorText, delayFailureLabel });
 const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
@@ -383,6 +417,7 @@ function applyAppearance(settings) {
     ? (window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light")
     : requested;
   document.documentElement.dataset.theme = resolved;
+  windowGlass.refresh();
   const font = String(settings.font_family ?? "").trim();
   document.documentElement.style.setProperty(
     "--sans",
@@ -572,6 +607,7 @@ function renderNav() {
       return `
         <button class="nav-item${active}" data-page="${escapeHtml(page.id)}"${active ? ' aria-current="page"' : ""}>
           <span>${index + 1}</span>
+          ${navIcon(page.id)}
           <b>${escapeHtml(t(page.title))}</b>
         </button>
       `;
@@ -692,7 +728,9 @@ function applyUpdateInfo(payload) {
     notes: payload.notes ?? null,
     date: payload.date ?? null,
     error: payload.error ?? null,
+    install: payload.install ?? null,
   };
+  state.updateInstall = installAfterCheck(state.updateInstall, state.updateInfo);
 }
 
 function invalidateUpdateAuthorization(error) {
@@ -727,6 +765,7 @@ function openProductAboutDialog(options = {}) {
         notes: options.result.notes ?? null,
         error: options.result.error ?? null,
         date: options.result.date ?? null,
+        install: options.result.install ?? null,
       }
     : state.updateInfo;
   const phase = options.phase
@@ -741,6 +780,28 @@ function openProductAboutDialog(options = {}) {
     },
   };
   renderGlassOverlays();
+}
+
+/// Shows what the user must be told about an earlier update installation,
+/// unless another overlay is open at that moment: that one is not replaced,
+/// and the log entry is then the only report.
+function showUpdateNotice(notice) {
+  if (overlayOpen()) return;
+  state.glassDialog = { kind: "info", payload: notice };
+  renderGlassOverlays();
+}
+
+const updateInstall = createUpdateInstall({
+  state, invoke, appendLog, errorText, sleep,
+  notify: showUpdateNotice,
+  onChange: () => { if (state.glassDialog?.kind === "product-about") renderGlassOverlays(); },
+});
+
+/// Run once per page load. What the previous installation attempt left behind
+/// is logged, a failure of that attempt or of its review is also shown, and
+/// an installation the host still holds is shown again.
+export async function reportPreviousUpdateInstall() {
+  await updateInstall.resolveOutcome();
 }
 
 function productAboutStatusText(payload) {
@@ -1017,6 +1078,10 @@ function profileMenuIcon(kind) {
     trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 4h6l1 2h4v2H4V6h4l1-2zm1 5h2v9h-2V9zm4 0h2v9h-2V9zM7 9h2v9H7V9z"/></svg>`,
   };
   return icons[kind] ?? icons.gear;
+}
+
+function overlayOpen() {
+  return Boolean(state.profileContextMenu || state.glassDialog || state.runtimeSettingsDialog || state.automationDialog);
 }
 
 function closeGlassOverlays() {
@@ -1462,6 +1527,87 @@ function syncNativeProfileMenu() {
   });
 }
 
+/// The dialogs that only ask or inform, described once so the page markup and
+/// the native panel cannot drift apart. A button's `activate` is the confirm
+/// path its web button runs.
+function promptDialogContent(dialog, profile) {
+  if (profile && dialog.kind === "delete") {
+    return {
+      title: t("Delete profile"),
+      message: t("Delete “{name}”? This removes the managed profile from the repository.", { name: profile.name }),
+      buttons: [
+        { id: "cancel", title: t("No"), role: "cancel" },
+        { id: "confirm", title: t("Yes"), role: "destructive", activate: () => confirmProfileDeletion(dialog, profile.id) },
+      ],
+    };
+  }
+  if (dialog.kind === "reset-settings") {
+    return {
+      title: t("Reset all settings"),
+      message: t("Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept."),
+      buttons: [
+        { id: "cancel", title: t("No"), role: "cancel" },
+        { id: "confirm", title: t("Yes"), role: "destructive", activate: () => confirmSettingsReset(dialog) },
+      ],
+    };
+  }
+  if (dialog.kind === "info") {
+    return {
+      title: dialog.payload?.title ?? t("Info"),
+      message: dialog.payload?.body ?? "",
+      buttons: [{ id: "cancel", title: t("Close"), role: "cancel" }],
+    };
+  }
+  return null;
+}
+
+async function activatePromptDialog(dialog, prompt, buttonId) {
+  if (state.glassDialog !== dialog) return;
+  const button = prompt.buttons.find((item) => item.id === buttonId);
+  if (typeof button?.activate !== "function") throw new Error(`Prompt dialog button ${buttonId} has no action`);
+  await button.activate();
+}
+
+/// Closes the dialog that started an action. The user may have dismissed it or
+/// opened something else while the action ran; that is left as it is.
+function closeGlassDialog(dialog) {
+  if (state.glassDialog !== dialog) return;
+  state.glassDialog = null;
+  renderGlassOverlays();
+}
+
+/// A refused deletion keeps its dialog open and is reported in the log.
+async function confirmProfileDeletion(dialog, id) {
+  const profile = state.profiles.find((item) => item.id === id);
+  try {
+    const deleted = await invoke("delete_profile", { id });
+    await loadProfilesSnapshot();
+    closeGlassDialog(dialog);
+    appendLog(
+      deleted ? "warning" : "info",
+      "profile",
+      deleted ? t("Profile deleted: {value1}", { value1: profile?.name ?? id }) : t("Profile already missing: {id}", { id: id }),
+    );
+  } catch (error) {
+    appendLog("error", "profile", t("Delete failed: {error}", { error: errorText(error) }));
+  }
+  renderPage();
+}
+
+/// A refused reset keeps its dialog open and is reported in the log.
+async function confirmSettingsReset(dialog) {
+  try {
+    const snapshot = await invoke("reset_settings_snapshot");
+    applyPersistedSettings(snapshot);
+    await loadProfilesSnapshot();
+    closeGlassDialog(dialog);
+    appendLog("warning", "settings", t("Preferences reset to defaults"));
+  } catch (error) {
+    appendLog("error", "settings", t("Reset failed: {error}", { error: errorText(error) }));
+  }
+  renderPage();
+}
+
 
 function renderGlassOverlays() {
   // Dialogs also render independently of renderPageContent (for example,
@@ -1497,10 +1643,29 @@ function renderGlassOverlays() {
     }
   }
 
+  let nativePrompt = null;
   if (state.glassDialog) {
     const dialog = state.glassDialog;
     const profile = dialog.id ? state.profiles.find((item) => item.id === dialog.id) : null;
-    if (profile && dialog.kind === "copy") {
+    const prompt = promptDialogContent(dialog, profile);
+    nativePrompt = prompt && nativePromptDialog.enabled() ? promptDialogFrame(prompt) : null;
+    if (nativePrompt) {
+      const failure = nativePromptDialog.sync(dialog, nativePrompt, {
+        onActivate: (buttonId) => activatePromptDialog(dialog, prompt, buttonId),
+        onClose: () => { if (state.glassDialog === dialog) closeGlassOverlays(); },
+        onChange: renderGlassOverlays,
+      });
+      // Keep the page backdrop and its dismissal under the native panel. A
+      // refused presentation still says what the dialog had to say and states
+      // the failure; it never offers the confirmation.
+      parts.push(`<div class="glass-dialog-backdrop" data-glass-dismiss></div>${failure ? `
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(prompt.title)}">
+          <h3>${escapeHtml(prompt.title)}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(prompt.message)}</p>
+          <p class="glass-dialog-copy warning" role="alert">${escapeHtml(redactDiagnosticText(failure))}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(prompt.buttons[0].title)}</button></div>
+        </div>` : ""}`);
+    } else if (profile && dialog.kind === "copy") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Copy profile"))}">
@@ -1526,26 +1691,28 @@ function renderGlassOverlays() {
         </div>
       `);
     } else if (profile && dialog.kind === "delete") {
+      const [cancel, confirm] = prompt.buttons;
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Delete profile"))}">
-          <h3>${escapeHtml(t("Delete profile"))}</h3>
-          <p class="glass-dialog-copy">${escapeHtml(t("Delete “{name}”? This removes the managed profile from the repository.", { name: profile.name }))}</p>
+          <h3>${escapeHtml(prompt.title)}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(prompt.message)}</p>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("No"))}</button>
-            <button type="button" class="glass-btn danger" data-glass-delete-confirm="${escapeHtml(profile.id)}">${escapeHtml(t("Yes"))}</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(cancel.title)}</button>
+            <button type="button" class="glass-btn danger" data-glass-delete-confirm="${escapeHtml(profile.id)}">${escapeHtml(confirm.title)}</button>
           </div>
         </div>
       `);
     } else if (dialog.kind === "reset-settings") {
+      const [cancel, confirm] = prompt.buttons;
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Reset settings"))}">
-          <h3>${escapeHtml(t("Reset all settings"))}</h3>
-          <p class="glass-dialog-copy">${escapeHtml(t("Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept."))}</p>
+          <h3>${escapeHtml(prompt.title)}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(prompt.message)}</p>
           <div class="glass-dialog-actions">
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("No"))}</button>
-            <button type="button" class="glass-btn danger" data-glass-reset-confirm>${escapeHtml(t("Yes"))}</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(cancel.title)}</button>
+            <button type="button" class="glass-btn danger" data-glass-reset-confirm>${escapeHtml(confirm.title)}</button>
           </div>
         </div>
       `);
@@ -1661,19 +1828,22 @@ function renderGlassOverlays() {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Info"))}">
-          <h3>${escapeHtml(dialog.payload?.title ?? t("Info"))}</h3>
-          <p class="glass-dialog-copy">${escapeHtml(dialog.payload?.body ?? "")}</p>
-          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button></div>
+          <h3>${escapeHtml(prompt.title)}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(prompt.message)}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(prompt.buttons[0].title)}</button></div>
         </div>
       `);
     } else if (dialog.kind === "product-about") {
       const product = state.payload.product;
       const version = product.version ?? "—";
-      const status = productAboutStatusText(dialog.payload);
       const update = dialog.payload?.update;
       const phase = dialog.payload?.phase ?? (dialog.payload?.checking ? "checking" : "idle");
-      const busy = phase === "checking";
-      const canOpen = Boolean(update?.available && update?.version && !busy);
+      const installView = updateInstallView(update, state.updateInstall);
+      const status = phase === "checking" ? productAboutStatusText(dialog.payload)
+        : installView.status ?? productAboutStatusText(dialog.payload);
+      const busy = phase === "checking" || installView.busy;
+      const canOpen = Boolean(update?.available && update?.version && !busy && installView.offerDownloadPage);
+      const installAction = phase === "checking" ? null : installView.primary;
       const notes = update?.notes ? `<p class="product-about-notes">${escapeHtml(String(update.notes).slice(0, 280))}</p>` : "";
       const primaryLabel = phase === "checking"
         ? "Checking…"
@@ -1693,8 +1863,10 @@ function renderGlassOverlays() {
           <div class="product-about-status">${escapeHtml(status)}</div>
           ${notes}
           <div class="glass-dialog-actions column">
-            ${canOpen ? `<button type="button" class="glass-btn" data-glass-open-update>${primaryLabel}</button>` : ""}
-            ${busy && !canOpen ? `<button type="button" class="glass-btn" disabled>${primaryLabel}</button>` : ""}
+            ${installAction ? `<button type="button" class="glass-btn" data-glass-update-${installAction.action}>${escapeHtml(installAction.label)}</button>` : ""}
+            ${canOpen ? `<button type="button" class="glass-btn${installAction ? " ghost" : ""}" data-glass-open-update>${primaryLabel}</button>` : ""}
+            ${phase === "checking" ? `<button type="button" class="glass-btn" disabled>${primaryLabel}</button>` : ""}
+            ${installView.cancel ? `<button type="button" class="glass-btn ghost" data-glass-update-cancel>${escapeHtml(t("Cancel"))}</button>` : ""}
             <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : t("Check for Update")}</button>
             <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>${escapeHtml(t("Close"))}</button>
           </div>
@@ -1703,6 +1875,7 @@ function renderGlassOverlays() {
       `);
     }
   }
+  if (!nativePrompt) nativePromptDialog.sync(null);
 
   parts.push(runtimeSettingsUI.renderDialog());
   parts.push(automationSettingsUI.renderDialog());
@@ -1798,21 +1971,7 @@ function bindGlassOverlayEvents() {
     button.addEventListener("click", async (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const id = event.currentTarget.dataset.glassDeleteConfirm;
-      const profile = state.profiles.find((item) => item.id === id);
-      try {
-        const deleted = await invoke("delete_profile", { id });
-        await loadProfilesSnapshot();
-        closeGlassOverlays();
-        appendLog(
-          deleted ? "warning" : "info",
-          "profile",
-          deleted ? t("Profile deleted: {value1}", { value1: profile?.name ?? id }) : t("Profile already missing: {id}", { id: id }),
-        );
-      } catch (error) {
-        appendLog("error", "profile", t("Delete failed: {error}", { error: errorText(error) }));
-      }
-      renderPage();
+      await confirmProfileDeletion(state.glassDialog, event.currentTarget.dataset.glassDeleteConfirm);
     });
   });
 
@@ -1820,16 +1979,7 @@ function bindGlassOverlayEvents() {
     button.addEventListener("click", async (event) => {
       event.preventDefault();
       event.stopPropagation();
-      try {
-        const snapshot = await invoke("reset_settings_snapshot");
-        applyPersistedSettings(snapshot);
-        await loadProfilesSnapshot();
-        closeGlassOverlays();
-        appendLog("warning", "settings", t("Preferences reset to defaults"));
-      } catch (error) {
-        appendLog("error", "settings", t("Reset failed: {error}", { error: errorText(error) }));
-      }
-      renderPage();
+      await confirmSettingsReset(state.glassDialog);
     });
   });
 
@@ -2021,6 +2171,16 @@ function bindGlassOverlayEvents() {
       }
     });
   });
+
+  for (const [selector, action] of [
+    ["[data-glass-update-install]", updateInstall.prepare],
+    ["[data-glass-update-commit]", updateInstall.commit],
+    ["[data-glass-update-cancel]", updateInstall.cancel],
+  ]) {
+    document.querySelectorAll(selector).forEach((button) => {
+      button.addEventListener("click", () => action());
+    });
+  }
 
   document.querySelectorAll("[data-glass-open-update]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -2408,6 +2568,7 @@ function renderPageContent() {
   bindPageEvents();
   renderGlassOverlays();
   nativeGeneralSwitches.refresh();
+  windowGlass.refresh();
   if (state.profileInspector?.mode === "edit" && state.profileInspector.focusKey) {
     requestAnimationFrame(() => focusProfileEditorSection(state.profileInspector.focusKey));
   }
@@ -2828,9 +2989,10 @@ function bindGlobalEvents() {
   if (runtime.globalEventsBound) return;
   runtime.globalEventsBound = true;
   editingRender.bind();
+  window.addEventListener("resize", followWindowResize);
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && (state.profileContextMenu || state.glassDialog || state.runtimeSettingsDialog || state.automationDialog)) {
+    if (event.key === "Escape" && overlayOpen()) {
       event.preventDefault();
       closeGlassOverlays();
     }
@@ -4246,6 +4408,8 @@ async function bootstrap() {
     }
   });
 
+  await listen("cfw://update-progress", (event) => updateInstall.onProgress(event.payload));
+
   await listen("cfw://connections-snapshot", (event) => {
     if (state.connectionPaused) return;
     const payload = validatedStreamEventPayload(
@@ -4255,12 +4419,10 @@ async function bootstrap() {
     );
     if (payload === undefined) return;
     applyConnectionsSnapshot(payload);
+    // Only the status bar and the Connections page show snapshot data. Every
+    // other page keeps its DOM, so controls stay attached between snapshots.
     updateStatusBar();
-    if (state.activePage === "connections") {
-      scheduleConnectionsPatch();
-    } else if (state.activePage === "general") {
-      scheduleRender();
-    }
+    if (state.activePage === "connections") scheduleConnectionsPatch();
   });
 
   // Emitted with no payload when the legacy-retirement gate changes what the
@@ -4365,6 +4527,9 @@ async function bootstrap() {
   await acknowledgeMigrationHandoffRendererReady();
   window.__CFM_STARTUP__?.ready();
   void startupSettings.then(refreshStartupLoginItemStatus);
+
+  // The migration handoff instance has no update surface and never asks.
+  if (!state.migrationHandoff) await reportPreviousUpdateInstall();
 
   // Register every listener before the automatic check. The setup-time check
   // used to race this subscription and could lose the only availability event.

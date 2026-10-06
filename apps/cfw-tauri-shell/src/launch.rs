@@ -31,6 +31,10 @@ pub(crate) enum LaunchMode {
         token: String,
     },
     ServiceMaintenance(ServiceMaintenanceAction),
+    /// The installer process of one recorded update transaction.
+    FinishUpdate {
+        transaction: String,
+    },
     #[cfg(feature = "physical-release-evidence")]
     PacketEvidence,
 }
@@ -46,6 +50,10 @@ impl std::fmt::Debug for LaunchMode {
             Self::ServiceMaintenance(action) => formatter
                 .debug_tuple("ServiceMaintenance")
                 .field(action)
+                .finish(),
+            Self::FinishUpdate { transaction } => formatter
+                .debug_struct("FinishUpdate")
+                .field("transaction", transaction)
                 .finish(),
             #[cfg(feature = "physical-release-evidence")]
             Self::PacketEvidence => formatter.write_str("PacketEvidence"),
@@ -83,6 +91,16 @@ pub(crate) fn parse_launch_mode(arguments: &[OsString]) -> Result<LaunchMode, St
             _ => return Err("service maintenance action is not one fixed v2 operation".into()),
         };
         return Ok(LaunchMode::ServiceMaintenance(action));
+    }
+    if let [flag, transaction] = arguments
+        && flag == crate::updater::FINISH_UPDATE_FLAG
+    {
+        let transaction = transaction
+            .to_str()
+            .ok_or_else(|| "update installer transaction is not UTF-8".to_owned())?;
+        return Ok(LaunchMode::FinishUpdate {
+            transaction: transaction.to_owned(),
+        });
     }
     #[cfg(feature = "physical-release-evidence")]
     if arguments == [OsString::from(PACKET_EVIDENCE_FLAG)] {
@@ -180,6 +198,23 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn update_installer_mode_takes_exactly_one_transaction() {
+        let flag = OsString::from(crate::updater::FINISH_UPDATE_FLAG);
+        assert_eq!(
+            parse_launch_mode(&[
+                flag.clone(),
+                OsString::from("00000000-0000-4000-8000-000000000001"),
+            ])
+            .expect("installer mode"),
+            LaunchMode::FinishUpdate {
+                transaction: "00000000-0000-4000-8000-000000000001".into(),
+            }
+        );
+        assert!(parse_launch_mode(std::slice::from_ref(&flag)).is_err());
+        assert!(parse_launch_mode(&[flag, OsString::from("one"), OsString::from("two")]).is_err());
     }
 
     #[cfg(feature = "physical-release-evidence")]

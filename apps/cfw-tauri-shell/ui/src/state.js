@@ -1,4 +1,5 @@
 import pageDefinitions from "./pages.json" with { type: "json" };
+import { IDLE_UPDATE_INSTALL } from "./update-install.js";
 
 // Dashboard pages. 0.3.5 received this list from `boot_payload`; the 0.4.0
 // payload carries product identity only, so the renderer imports the shared
@@ -187,6 +188,8 @@ export const state = {
   /** @type {{ id: string, x: number, y: number } | null} */
   profileContextMenu: null,
   updateInfo: null,
+  /** Renderer view of an in-app installation; the host owns the installation. */
+  updateInstall: { ...IDLE_UPDATE_INSTALL },
   /** @type {{ kind: string, id?: string, payload?: any } | null} */
   glassDialog: null,
   /** Credential setup for one profile; secrets never enter this object. */

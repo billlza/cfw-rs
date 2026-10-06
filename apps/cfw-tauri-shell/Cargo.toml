@@ -43,6 +43,7 @@ cfw-singbox-config = { path = "../../crates/cfw-singbox-config" }
 base64.workspace = true
 futures-util.workspace = true
 libc.workspace = true
+minisign-verify.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 plist.workspace = true
@@ -52,7 +53,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tauri = { version = "=2.12.0", features = ["tray-icon"] }
+tauri = { version = "=2.12.0", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-single-instance = "=2.4.5"
 tauri-plugin-global-shortcut = "=2.3.2"
 thiserror.workspace = true

@@ -438,8 +438,12 @@ The private half of the updater key embedded in 0.3.5 is unavailable. Therefore
 0.3.5 cannot authenticate the 0.4.0 archive: the supported transition is a
 manual installation from the signed, notarized, stapled 0.4.0 DMG. No second
 signature, legacy key fallback, or unsigned compatibility archive is allowed.
-The application continues to open the canonical GitHub release page instead of
-performing an in-process bundle replacement.
+From 0.4.0 an installation the user owns in `/Applications` can install a
+later release in place. Installed clients accept an archive only if it is
+signed with the release key above and contains a bundle signed by the release
+Developer ID, so the custody of both and a tested backup of the key are
+release-critical. `RELEASE.md` describes the installation transaction and the
+contract installed clients depend on.
 
 The physical-evidence collector uses a separate trust domain from Apple
 notarization and the updater key. Its production policy is source-pinned and
@@ -497,8 +501,9 @@ The module-only, unfixable `GO-2026-5932` boundary also needs explicit release
 review. Updater
 metadata and its signed artifact contract have project-owned bounds in the
 publication script. Runtime revalidates bounded metadata and consumes a one-use
-authorization before opening the canonical GitHub release page; it does not
-download, extract, or replace the application bundle. Release scripts must
+authorization before opening the canonical GitHub release page or downloading
+the release archive, which it authenticates with the embedded release key
+before anything parses it. Release scripts must
 remain fail-closed until the remaining persistence, identity, publication, and
 device gates are satisfied;
 private KVC access, the old root helper, and downloaded alternate cores are

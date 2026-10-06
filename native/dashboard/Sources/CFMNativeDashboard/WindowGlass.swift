@@ -97,7 +97,6 @@ final class WindowGlassModel: ObservableObject {
 /// macOS 26 the slab is the system's behind-window material.
 struct WindowGlassView: View {
   @ObservedObject var model: WindowGlassModel
-  static let slabRadius: CGFloat = 28
 
   var body: some View {
     ZStack(alignment: .topLeading) {
@@ -116,13 +115,14 @@ struct WindowGlassView: View {
   }
 
   /// Fills the backdrop, so a resized window keeps its glass before the page
-  /// has measured its new layout.
+  /// has measured its new layout. The window's own shape rounds the corners:
+  /// a smaller glass shape would leave the window's material showing in the
+  /// corners around it.
   @ViewBuilder private var slab: some View {
-    let shape = RoundedRectangle(cornerRadius: Self.slabRadius, style: .continuous)
     if #available(macOS 26, *) {
-      Color.clear.glassEffect(.regular, in: shape)
+      Color.clear.glassEffect(.regular, in: Rectangle())
     } else {
-      BehindWindowMaterial(dark: model.dark).clipShape(shape)
+      BehindWindowMaterial(dark: model.dark)
     }
   }
 

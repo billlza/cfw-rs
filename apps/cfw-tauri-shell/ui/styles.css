@@ -396,11 +396,11 @@ input::placeholder {
 .cfw-slogan {
   display: none;
   position: absolute;
-  top: 30px;
-  right: 34px;
+  top: 8px;
+  right: 24px;
   color: var(--muted);
   font-family: ui-rounded, var(--sans);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
   letter-spacing: 0.02em;
   line-height: 1.35;
@@ -2923,8 +2923,8 @@ html.native-window-glass .workspace {
 }
 
 html.native-window-glass .sidebar {
-  gap: 10px;
-  padding: 10px;
+  gap: 6px;
+  padding: 8px;
   box-sizing: border-box;
 }
 
@@ -2932,8 +2932,30 @@ html.native-window-glass .traffic-pane,
 html.native-window-glass .runtime-pane,
 html.native-window-glass .sidebar-meta {
   border: 0;
-  border-radius: 16px;
-  padding: 10px 16px;
+  border-radius: 14px;
+  padding: 8px 14px;
+}
+
+/* Running time and connection state are one line each. */
+html.native-window-glass .runtime-pane {
+  min-height: 0;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+html.native-window-glass .runtime-pane strong {
+  font-size: 13px;
+}
+
+html.native-window-glass .sidebar-meta {
+  flex-shrink: 0;
+}
+
+html.native-window-glass .connected-line {
+  font-size: 12px;
 }
 
 html.native-window-glass .traffic-pane {
@@ -2955,11 +2977,12 @@ html.native-window-glass .nav-list {
 }
 
 html.native-window-glass .nav-item {
-  flex: 0 1 auto;
+  flex: 1 1 0;
   justify-content: flex-start;
   gap: clamp(12px, 1.4vh, 18px);
-  min-height: 38px;
-  height: clamp(38px, 5.4vh, 60px);
+  height: auto;
+  min-height: 30px;
+  max-height: 60px;
   border-radius: 999px;
   padding: 0 clamp(16px, 1.8vh, 22px);
   color: var(--glass-muted);
@@ -2997,19 +3020,20 @@ html.native-window-glass .nav-item b {
   font-size: clamp(14px, 1.75vh, 19px);
 }
 
-html.native-window-glass .runtime-pane {
-  min-height: 0;
-  flex: 0 0 auto;
-  align-items: flex-start;
-}
-
 html.native-window-glass .cfw-slogan {
   display: block;
 }
 
+@media (max-width: 900px) {
+  html.native-window-glass .cfw-slogan {
+    display: none;
+  }
+}
+
 html.native-window-glass .cfw-content {
-  width: min(78vw, 880px);
+  width: auto;
   max-width: 880px;
+  margin: 8px 16px 0;
   border-radius: 18px;
   background: var(--glass-fill);
   box-shadow: var(--glass-shadow);
@@ -3064,4 +3088,22 @@ html.native-window-glass .status-button {
 
 html.native-window-glass .status-button:hover {
   background: var(--glass-hover);
+}
+
+/* Short windows: the header and the rows give up their extra height so the
+ * twelve General rows stay inside the content card. */
+@media (max-height: 680px) {
+  html.native-window-glass .cfw-header {
+    height: 84px;
+    padding-top: 6px;
+  }
+
+  html.native-window-glass .cfw-content {
+    padding: 2px 16px;
+  }
+
+  html.native-window-glass .cfw-row {
+    min-height: 30px;
+    padding: 3px 4px;
+  }
 }

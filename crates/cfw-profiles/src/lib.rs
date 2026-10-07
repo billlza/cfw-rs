@@ -57,6 +57,10 @@ pub enum ProfileError {
     Io(#[from] std::io::Error),
     #[error("sing-box profile is invalid: {0}")]
     InvalidProfile(#[from] ConfigError),
+    /// A stored envelope no longer passes profile validation, for example a
+    /// node an earlier build accepted. The id names the file to remove.
+    #[error("stored profile {id} is invalid: {source}")]
+    StoredProfileInvalid { id: String, source: ConfigError },
     #[error("profile envelope JSON is invalid: {0}")]
     InvalidEnvelopeJson(#[from] serde_json::Error),
     #[error("selected-profile JSON is invalid: {0}")]

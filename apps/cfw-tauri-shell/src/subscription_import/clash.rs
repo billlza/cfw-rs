@@ -14,15 +14,24 @@
 //!   destination, trust, or framing), or fails the import with the key name.
 //! - Requests this app refuses to honour fail closed instead of being
 //!   silently dropped: `skip-cert-verify: true`, Shadowsocks plugins,
-//!   `udp-over-tcp`, `smux`, TLS
-//!   certificate pinning via `fingerprint`, and every proxy type outside the
+//!   `udp-over-tcp`, `smux`, and every proxy type outside the
 //!   closed schema. Hysteria2 port hopping accepts only canonical
 //!   canonical non-overlapping port sets and one fixed 1..=3600 second hop
 //!   interval are normalized into the pinned sing-box 1.13 fields; Mihomo's
 //!   newer randomized interval range remains rejected.
+//! - `fingerprint` is Mihomo's SHA-256 of the server's DER leaf certificate,
+//!   unrelated to `client-fingerprint`. It becomes one `certificate_sha256`
+//!   pin, never a public-key pin. The pin replaces CA-chain trust for that
+//!   node; the leaf must still be within its validity period, match the
+//!   server name and permit server authentication. An empty value counts as
+//!   absent; any other value that is not 64 hex digits (colons allowed) fails
+//!   the import, as does a pin without TLS or beside `reality-opts`.
 //! - `servername`/`sni`, `alpn`, and `client-fingerprint` are only mapped
 //!   while TLS is enabled; without TLS they have no wire effect in Clash
 //!   either, so dropping them preserves semantics.
+//! - `reality-opts` needs a non-empty `client-fingerprint`: sing-box runs
+//!   Reality only over uTLS, so a Reality node without one fails the import
+//!   instead of the engine start. No fingerprint is chosen on its behalf.
 //! - Node secrets keep their exact source bytes (the YAML loader never
 //!   applies number resolution to them) and leave this module only as
 //!   credential-vault entries, never inside the stored profile.

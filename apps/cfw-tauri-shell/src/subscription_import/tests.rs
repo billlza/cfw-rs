@@ -1708,6 +1708,77 @@ rules:
 }
 
 #[test]
+fn reality_imports_without_utls_fail_at_import_instead_of_engine_start() {
+    const PUBLIC_KEY: &str = "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0";
+    let clash_vless = |fingerprint: &str| {
+        format!(
+            "proxies:\n  - name: Reality\n    type: vless\n    server: vless.example.com\n    port: 443\n    uuid: 22222222-2222-4222-8222-222222222222\n    tls: true\n    servername: www.example.com\n{fingerprint}    reality-opts:\n      public-key: {PUBLIC_KEY}\n      short-id: 0123456789abcdef\n"
+        )
+    };
+    let clash_anytls = format!(
+        "proxies:\n  - name: AnyTLS\n    type: anytls\n    server: anytls.example.com\n    port: 443\n    password: TopSecretValue!\n    sni: front.example.com\n    reality-opts:\n      public-key: {PUBLIC_KEY}\n      short-id: 0123456789abcdef\n"
+    );
+    let vless_uri = |fingerprint: &str| {
+        format!(
+            "vless://22222222-2222-4222-8222-222222222222@vless.example.com:443?security=reality&sni=www.example.com&pbk={PUBLIC_KEY}&sid=0123456789abcdef{fingerprint}&encryption=none#Reality"
+        )
+    };
+    let sing_box = |utls: Value| {
+        let mut tls = json!({
+            "enabled": true,
+            "server_name": "www.example.com",
+            "reality": {"enabled": true, "public_key": PUBLIC_KEY, "short_id": "0123456789abcdef"},
+        });
+        if !utls.is_null() {
+            tls["utls"] = utls;
+        }
+        json!({"outbounds": [{
+            "type": "vless", "tag": "Reality", "server": "vless.example.com",
+            "server_port": 443, "uuid": "22222222-2222-4222-8222-222222222222", "tls": tls,
+        }]})
+        .to_string()
+    };
+
+    for (label, document) in [
+        ("Clash VLESS without client-fingerprint", clash_vless("")),
+        (
+            "Clash VLESS with an empty client-fingerprint",
+            clash_vless("    client-fingerprint: \"\"\n"),
+        ),
+        ("Clash AnyTLS without client-fingerprint", clash_anytls),
+        ("VLESS URI without fp", vless_uri("")),
+        ("VLESS URI with an empty fp", vless_uri("&fp=")),
+        ("sing-box JSON without utls", sing_box(Value::Null)),
+        (
+            "sing-box JSON with an empty disabled utls",
+            sing_box(json!({"enabled": false})),
+        ),
+    ] {
+        let error = import_subscription_document(&document).expect_err(label);
+        assert_eq!(
+            error,
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS",
+            "{label}"
+        );
+    }
+
+    let accepted = [
+        clash_vless("    client-fingerprint: chrome\n"),
+        vless_uri("&fp=chrome"),
+        sing_box(json!({"enabled": true, "fingerprint": "chrome"})),
+    ];
+    for document in accepted {
+        let imported = import_subscription_document(&document).expect("Reality with uTLS");
+        let profile: Value = serde_json::from_str(imported.profile.as_json()).expect("profile");
+        assert_eq!(
+            profile["outbounds"][0]["tls"]["utls"],
+            json!({"enabled": true, "fingerprint": "chrome"})
+        );
+        assert_eq!(profile["outbounds"][0]["tls"]["reality"]["enabled"], true);
+    }
+}
+
+#[test]
 fn clash_import_preserves_groups_process_geoip_and_ordered_rules() {
     let source = r#"
 proxies:

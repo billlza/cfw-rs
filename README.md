@@ -66,7 +66,10 @@ require sing-box 1.14 remain rejected by the pinned 1.13 runtime. VLESS Vision r
 transport streams and accepts only omitted or XUDP packet encoding. XHTTP and
 unknown transport semantics fail closed. Hysteria2 and TUIC use QUIC TLS and
 reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the
-schema's uTLS and Reality options. Every enabled remote TLS transport and authenticated DoH
+schema's uTLS and Reality options. Reality requires an enabled uTLS
+fingerprint (Clash `client-fingerprint`, URI `fp`, or sing-box `tls.utls`)
+because sing-box runs Reality only over uTLS; a node without one fails at
+import, and no fingerprint is chosen for it. Every enabled remote TLS transport and authenticated DoH
 projection has a product-owned TLS 1.2 minimum that profiles cannot lower;
 normal negotiation prefers TLS 1.3, and QUIC always requires TLS 1.3. TUIC also
 projects 0-RTT as explicitly disabled. Subscription and update clients are

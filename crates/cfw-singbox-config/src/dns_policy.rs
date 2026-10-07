@@ -470,10 +470,12 @@ impl ProfileDnsServer {
             | Self::Quic { tls, .. }
             | Self::Https { tls, .. }
             | Self::Http3 { tls, .. } => {
-                tls.validate(&format!("$.dns.servers[{index}]"))?;
+                // Checked before the TLS options themselves, so a Reality
+                // resolver is refused as such rather than asked for uTLS.
                 if !tls.enabled || tls.utls.is_some() || tls.reality.is_some() {
                     return Err(invalid("encrypted DNS requires authenticated standard TLS"));
                 }
+                tls.validate(&format!("$.dns.servers[{index}]"))?;
             }
         }
         if let Self::Https { path, .. } | Self::Http3 { path, .. } = self

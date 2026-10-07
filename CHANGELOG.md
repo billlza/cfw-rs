@@ -43,6 +43,15 @@
   the port no longer drifts from 7890 after switching System Proxy or TUN.
 - Say what to do when System Proxy authorization times out or is cancelled:
   turn the switch on again and approve the macOS prompt.
+- Refuse a Reality node without a uTLS fingerprint when it is imported or
+  saved, naming `outbounds[N].tls.utls`, instead of storing a profile the core
+  then cannot start. The Clash `client-fingerprint`, link `fp` or sing-box
+  `tls.utls` must name one; none is chosen for the node. A profile an earlier
+  build stored with such a node is now reported by its id when profiles load,
+  and System Proxy and TUN cannot start until it is removed: quit the app,
+  delete `<id>.profile.json` from `~/Library/Application Support/Clash for
+  Mac/sing-box-profiles-v1` (and `selected-profile-v1.json` there if that
+  profile was selected), then import the node again with a fingerprint.
 
 ## 0.4.0 - Unreleased
 

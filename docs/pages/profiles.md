@@ -52,6 +52,10 @@ The safe schema is intentionally closed:
 - V2Ray QUIC requires enabled standard TLS and rejects uTLS/Reality. VLESS
   Vision cannot use a V2Ray transport stream and accepts only omitted or XUDP
   packet encoding;
+- Reality requires an enabled `tls.utls` fingerprint, imported from Clash
+  `client-fingerprint`, URI `fp`, or sing-box `tls.utls`. sing-box runs
+  Reality only over uTLS, so a node without one fails at import instead of at
+  engine start; no fingerprint is chosen on its behalf;
 - HTTP/H2 preserves a bounded method/path/Host shape. Mihomo `http-opts` with
   one deterministic path and Host authorities is accepted; multiple path
   alternatives and arbitrary custom headers are rejected instead of dropped;

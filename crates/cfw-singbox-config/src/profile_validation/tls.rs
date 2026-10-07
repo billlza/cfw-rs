@@ -148,6 +148,14 @@ impl OutboundTls {
                 "Reality public_key or short_id is invalid",
             ));
         }
+        // sing-box builds its Reality client on uTLS and refuses to start an
+        // outbound without it. No fingerprint is chosen on the profile's behalf.
+        if self.reality.is_some() && !self.utls.as_ref().is_some_and(|utls| utls.enabled) {
+            return Err(unsupported_shape(
+                format!("{path}.tls.utls"),
+                "Reality requires uTLS",
+            ));
+        }
         Ok(())
     }
 }

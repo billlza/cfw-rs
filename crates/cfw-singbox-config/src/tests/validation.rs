@@ -346,6 +346,177 @@ fn reality_requires_enabled_canonical_x25519_public_material() {
 }
 
 #[test]
+fn reality_requires_enabled_utls_on_every_tls_stream_protocol() {
+    let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
+    for (protocol, credential) in [
+        ("http", String::new()),
+        (
+            "vmess",
+            format!(r#","credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}}"#),
+        ),
+        (
+            "vless",
+            format!(r#","credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}}"#),
+        ),
+        (
+            "trojan",
+            format!(r#","credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}}"#),
+        ),
+        (
+            "anytls",
+            format!(r#","credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}}"#),
+        ),
+    ] {
+        let profile = |tls_extensions: &str| {
+            format!(
+                r#"{{"outbounds":[{{"type":"{protocol}","tag":"proxy","server":"proxy.example.com","server_port":443{credential},"tls":{{"enabled":true,"server_name":"www.example.com",{tls_extensions}}}}}]}}"#
+            )
+        };
+
+        let error = ValidatedSingBoxProfile::parse(&profile(reality))
+            .expect_err("sing-box refuses a Reality client without uTLS");
+        assert_eq!(
+            error,
+            ConfigError::UnsupportedPolicyShape {
+                path: "$.outbounds[0].tls.utls".into(),
+                reason: "Reality requires uTLS".into(),
+            },
+            "{protocol}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS",
+            "{protocol}"
+        );
+
+        let disabled = ValidatedSingBoxProfile::parse(&profile(&format!(
+            r#""utls":{{"enabled":false,"fingerprint":"chrome"}},{reality}"#
+        )))
+        .expect_err("disabled uTLS cannot satisfy Reality");
+        assert!(
+            matches!(
+                &disabled,
+                ConfigError::UnsupportedPolicyShape { path, .. }
+                    if path == "$.outbounds[0].tls.utls.enabled"
+            ),
+            "{protocol}: {disabled}"
+        );
+
+        ValidatedSingBoxProfile::parse(&profile(&format!(
+            r#""utls":{{"enabled":true,"fingerprint":"chrome"}},{reality}"#
+        )))
+        .unwrap_or_else(|error| panic!("{protocol} Reality with uTLS: {error}"));
+    }
+}
+
+#[test]
+fn reality_without_utls_reports_a_more_specific_defect_first() {
+    let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
+    let disabled_reality = reality.replacen(r#""enabled":true"#, r#""enabled":false"#, 1);
+    let tls = |extensions: &str| {
+        format!(r#""tls":{{"enabled":true,"server_name":"www.example.com",{extensions}}}"#)
+    };
+    let vless = |tls: String, transport: &str| {
+        format!(
+            r#"{{"type":"vless","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},{tls}{transport}}}"#
+        )
+    };
+    let quic_transport = r#","transport":{"type":"quic"}"#;
+    let quic_unavailable = (
+        "$.outbounds[0].tls.reality",
+        "Reality is unavailable for QUIC-based protocols",
+    );
+    let outbound_shape = |reason: &'static str| ("$.outbounds[0]", reason);
+
+    for (label, outbound, (expected_path, expected_reason)) in [
+        (
+            "disabled Reality",
+            vless(tls(&disabled_reality), ""),
+            (
+                "$.outbounds[0].tls.reality",
+                "Reality public_key or short_id is invalid",
+            ),
+        ),
+        (
+            "certificate pin",
+            vless(
+                tls(&format!(
+                    r#""certificate_sha256":["q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="],{reality}"#
+                )),
+                "",
+            ),
+            outbound_shape("certificate pinning requires TLS, one pin kind, and no Reality"),
+        ),
+        (
+            "explicit curves",
+            vless(
+                tls(&format!(r#""curve_preferences":["X25519"],{reality}"#)),
+                "",
+            ),
+            outbound_shape(
+                "explicit key-exchange curves require standard TLS; this runtime's uTLS and Reality adapters do not apply them",
+            ),
+        ),
+        (
+            "ECH",
+            vless(
+                tls(&format!(
+                    r#""min_version":"1.3","ech":{{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----"]}},{reality}"#
+                )),
+                "",
+            ),
+            outbound_shape("ECH must be enabled with TLS 1.3 and cannot be combined with Reality"),
+        ),
+        (
+            "VMess V2Ray QUIC",
+            format!(
+                r#"{{"type":"vmess","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},{}{quic_transport}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+        (
+            "VLESS V2Ray QUIC",
+            vless(tls(reality), quic_transport),
+            quic_unavailable,
+        ),
+        (
+            "Trojan V2Ray QUIC",
+            format!(
+                r#"{{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}},{}{quic_transport}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+        (
+            "Hysteria2",
+            format!(
+                r#"{{"type":"hysteria2","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},{}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+        (
+            "TUIC",
+            format!(
+                r#"{{"type":"tuic","tag":"proxy","server":"proxy.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},{}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+    ] {
+        assert_eq!(
+            ValidatedSingBoxProfile::parse(&format!(r#"{{"outbounds":[{outbound}]}}"#)),
+            Err(ConfigError::UnsupportedPolicyShape {
+                path: expected_path.into(),
+                reason: expected_reason.into(),
+            }),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn vless_vision_and_active_tls_options_require_enabled_tls() {
     for tls in [
         "",

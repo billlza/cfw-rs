@@ -456,6 +456,59 @@ fn digest_tampering_is_reported_instead_of_skipped() {
 }
 
 #[test]
+fn stored_profile_that_fails_current_validation_is_reported_by_id() {
+    let (root, repository) = repository("stored-validation");
+    let reality = ValidatedSingBoxProfile::parse(
+        r#"{"outbounds":[{"type":"http","tag":"proxy","server":"proxy.example.com","server_port":443,"tls":{"enabled":true,"server_name":"www.example.com","utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}]}"#,
+    )
+    .expect("Reality with uTLS");
+    let other = repository
+        .import(None, &profile())
+        .expect("import other profile");
+    let imported = repository.import(None, &reality).expect("import profile");
+    repository.select(&imported.id).expect("select profile");
+    let path = stored_path(&root, &imported.id);
+    let raw = fs::read_to_string(&path).expect("read envelope");
+    // The canonical envelope an earlier build stored for the same node
+    // without a uTLS fingerprint.
+    let earlier = raw.replacen(r#","utls":{"enabled":true,"fingerprint":"chrome"}"#, "", 1);
+    assert_ne!(earlier, raw);
+    fs::write(&path, earlier).expect("write earlier envelope");
+
+    let error = repository
+        .list()
+        .expect_err("stored profile is revalidated");
+    assert!(
+        matches!(
+            &error,
+            ProfileError::StoredProfileInvalid { id, source }
+                if *id == imported.id
+                    && source.to_string()
+                        == "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS"
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains(&imported.id), "{error}");
+    assert!(matches!(
+        repository.load_selected(),
+        Err(ProfileError::StoredProfileInvalid { id, .. }) if id == imported.id
+    ));
+
+    // The documented manual recovery: remove the named envelope and, because
+    // it was selected, the selection record. The other profile then loads.
+    fs::remove_file(&path).expect("remove stored profile");
+    fs::remove_file(selection_path(&root)).expect("remove selection");
+    let listed = repository.list().expect("repository loads after recovery");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, other.id);
+    assert!(repository.load_selected().expect("no selection").is_none());
+    repository
+        .select(&other.id)
+        .expect("select remaining profile");
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
 fn oversized_stored_file_is_rejected_before_deserialization() {
     let (root, repository) = repository("oversized");
     let profiles_dir = root.join("profiles");

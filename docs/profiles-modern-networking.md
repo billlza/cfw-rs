@@ -44,7 +44,10 @@ honor those curve settings, so combining them is rejected. ECH requires
 `min_version: "1.3"` and an enabled `ech` object containing `config`: an array
 of public `ECH CONFIGS` PEM strings supplied by the server operator.
 No ECH key file or implicit bootstrap DNS discovery is read.
-Reality and ECH cannot be combined.
+Reality and ECH cannot be combined. Reality also requires an enabled `utls`
+object with an explicit fingerprint, because the pinned sing-box builds its
+Reality client only on uTLS; the profile is rejected rather than given a
+default fingerprint.
 
 ## DNS transports
 

@@ -134,7 +134,11 @@ pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEnvelop
         return Err(ProfileError::NonCanonicalEnvelope(expected_id.to_string()));
     }
 
-    let mut profile = ValidatedSingBoxProfile::parse(&serde_json::to_string(&envelope.profile)?)?;
+    let mut profile = ValidatedSingBoxProfile::parse(&serde_json::to_string(&envelope.profile)?)
+        .map_err(|source| ProfileError::StoredProfileInvalid {
+            id: expected_id.to_string(),
+            source,
+        })?;
     profile = profile.with_provider_sources(envelope.provider_sources.clone())?;
     if profile.digest() != envelope.digest {
         return Err(ProfileError::DigestMismatch {

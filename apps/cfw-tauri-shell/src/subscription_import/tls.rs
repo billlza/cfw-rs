@@ -55,4 +55,37 @@ mod tests {
         );
         assert!(certificate_fingerprint("ab").is_err());
     }
+
+    #[test]
+    fn clash_certificate_fingerprint_is_absent_when_empty_and_refused_without_tls_or_with_reality()
+    {
+        let vless = |extra: &str| {
+            format!(
+                "proxies:\n  - name: pinned\n    type: vless\n    server: vless.example.com\n    port: 443\n    uuid: 22222222-2222-4222-8222-222222222222\n{extra}"
+            )
+        };
+        let pin = format!("    fingerprint: {}\n", "ab".repeat(32));
+
+        let imported =
+            import_subscription_document(&vless("    tls: true\n    fingerprint: \"\"\n"))
+                .expect("an empty fingerprint is absent");
+        let profile: Value = serde_json::from_str(imported.profile.as_json()).unwrap();
+        assert!(
+            profile["outbounds"][0]["tls"]
+                .get("certificate_sha256")
+                .is_none()
+        );
+
+        let error = import_subscription_document(&vless(&pin)).expect_err("pin without TLS");
+        assert!(error.contains("certificate pin requires TLS"), "{error}");
+
+        let error = import_subscription_document(&vless(&format!(
+            "    tls: true\n    client-fingerprint: chrome\n{pin}    reality-opts:\n      public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0\n"
+        )))
+        .expect_err("pin beside Reality");
+        assert_eq!(
+            error,
+            "unsupported credential-free policy shape at $.outbounds[0]: certificate pinning requires TLS, one pin kind, and no Reality"
+        );
+    }
 }

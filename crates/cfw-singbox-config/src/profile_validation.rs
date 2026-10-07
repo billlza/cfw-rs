@@ -323,9 +323,9 @@ impl ProfileOutbound {
             } => {
                 validate_remote_endpoint(server, *server_port, path)?;
                 validate_reference_kind(credential_ref, CredentialKind::VmessUuid, path)?;
+                validate_transport_tls_compatibility(transport.as_ref(), tls.as_ref(), path)?;
                 validate_optional_tls(tls.as_ref(), path)?;
-                validate_optional_transport(transport.as_ref(), path)?;
-                validate_transport_tls_compatibility(transport.as_ref(), tls.as_ref(), path)
+                validate_optional_transport(transport.as_ref(), path)
             }
             Self::Vless {
                 server,
@@ -339,6 +339,7 @@ impl ProfileOutbound {
             } => {
                 validate_remote_endpoint(server, *server_port, path)?;
                 validate_reference_kind(credential_ref, CredentialKind::VlessUuid, path)?;
+                validate_transport_tls_compatibility(transport.as_ref(), tls.as_ref(), path)?;
                 validate_optional_tls(tls.as_ref(), path)?;
                 validate_vless_vision_compatibility(
                     flow.as_ref(),
@@ -355,8 +356,7 @@ impl ProfileOutbound {
                         "Reality requires enabled TLS",
                     ));
                 }
-                validate_optional_transport(transport.as_ref(), path)?;
-                validate_transport_tls_compatibility(transport.as_ref(), tls.as_ref(), path)
+                validate_optional_transport(transport.as_ref(), path)
             }
             Self::Trojan {
                 server,
@@ -368,9 +368,9 @@ impl ProfileOutbound {
             } => {
                 validate_remote_endpoint(server, *server_port, path)?;
                 validate_reference_kind(credential_ref, CredentialKind::TrojanPassword, path)?;
+                validate_transport_tls_compatibility(transport.as_ref(), Some(tls), path)?;
                 validate_required_tls(tls, path)?;
-                validate_optional_transport(transport.as_ref(), path)?;
-                validate_transport_tls_compatibility(transport.as_ref(), Some(tls), path)
+                validate_optional_transport(transport.as_ref(), path)
             }
             Self::Hysteria2 {
                 server,
@@ -399,8 +399,8 @@ impl ProfileOutbound {
                     ));
                 }
                 validate_reference_kind(credential_ref, CredentialKind::Hysteria2Password, path)?;
-                validate_required_tls(tls, path)?;
                 validate_quic_tls(tls, path)?;
+                validate_required_tls(tls, path)?;
                 for (field, value) in [("up_mbps", up_mbps), ("down_mbps", down_mbps)] {
                     if value.is_some_and(|value| value == 0 || value > 1_000_000) {
                         return Err(unsupported_shape(
@@ -450,8 +450,8 @@ impl ProfileOutbound {
                     path,
                     "password_credential_ref",
                 )?;
-                validate_required_tls(tls, path)?;
-                validate_quic_tls(tls, path)
+                validate_quic_tls(tls, path)?;
+                validate_required_tls(tls, path)
             }
         }
     }
@@ -585,6 +585,9 @@ fn validate_required_tls(tls: &OutboundTls, path: &str) -> Result<(), ConfigErro
     Ok(())
 }
 
+/// Rejects the TLS adapters QUIC cannot carry. Callers run it before
+/// [`OutboundTls::validate`], so a QUIC Reality node reports that Reality is
+/// unavailable rather than a Reality requirement such as uTLS.
 fn validate_quic_tls(tls: &OutboundTls, path: &str) -> Result<(), ConfigError> {
     if tls.utls.is_some() {
         return Err(unsupported_shape(

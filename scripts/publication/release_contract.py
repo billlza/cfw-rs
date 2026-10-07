@@ -5,6 +5,7 @@ import stat
 from pathlib import Path
 
 from .common import PublicationError
+from .durable_file import ensure_private_directory_locked, exclusive_rooted_directory_lock
 if __package__.startswith("scripts."):
     from scripts.release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
@@ -42,6 +43,21 @@ def native_products_root(repository: Path, build_number: str) -> Path:
 
 def _stage_inputs(repository: Path) -> Path:
     return ga_root(repository) / "stage-inputs"
+
+
+def ensure_private_stage_inputs(repository: Path) -> Path:
+    """Create or validate the private stage-input directory before a stage writes.
+
+    The hosted CI receipt and the notarization executor create this directory
+    0700 and reject any other mode, so publication writers use the same
+    contract instead of inheriting the caller's umask.
+    """
+    stage_inputs = _stage_inputs(repository)
+    with exclusive_rooted_directory_lock(
+        repository, stage_inputs.parent, require_private=True
+    ) as descriptor:
+        ensure_private_directory_locked(descriptor, stage_inputs.parent, stage_inputs.name)
+    return stage_inputs
 
 
 def prepared_root(repository: Path) -> Path:

@@ -12,6 +12,7 @@ from scripts.publication.bounded_process import BoundedProcessError
 from scripts.publication.common import PublicationError
 from scripts.publication import ga_release_contract, preparer
 from scripts.publication.release_app_verifier import verify_release_app
+from scripts.release_build_identity import ga_root
 from scripts.tests.release_app_verifier_fixture import (
     complete_verifier_stderr,
     complete_verifier_stdout,
@@ -119,6 +120,9 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
     def test_prepare_uses_the_typed_app_verifier_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
+            candidate = ga_root(repository)
+            candidate.mkdir(parents=True)
+            candidate.chmod(0o700)
             app = repository / "signed/Clash for Mac.app"
             output = repository / "publication-prepared"
             reviewed = repository / "component-review.json"
@@ -145,6 +149,9 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
     def test_prepare_derives_build_inputs_after_app_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
+            candidate = ga_root(repository)
+            candidate.mkdir(parents=True)
+            candidate.chmod(0o700)
             app = repository / "signed/Clash for Mac.app"
             native = repository / "signed-native-products"
             output = repository / "publication-prepared"

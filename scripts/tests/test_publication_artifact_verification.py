@@ -173,6 +173,9 @@ class PublicationArtifactPathTests(unittest.TestCase):
         self.assertEqual(len(digest), 64)
 
     def test_finalization_forwards_repository_before_review(self) -> None:
+        candidate = evidence_root(self.repository).parent.parent
+        candidate.mkdir(parents=True)
+        candidate.chmod(0o700)
         machine = {"components": [{"id": "application:fixture"}]}
         with (
             patch.object(finalize, "build_machine_closure", autospec=True, return_value=machine) as build,

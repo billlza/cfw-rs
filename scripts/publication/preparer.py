@@ -24,6 +24,7 @@ from .release_environment import release_tool_environment
 from .release_contract import (
     PRODUCT_NAME,
     blocker_report,
+    ensure_private_stage_inputs,
     evidence_root,
     native_products_root as release_native_products_root,
     prepared_root,
@@ -238,6 +239,7 @@ def prepare(
     require_fixed_path(output, fixed_output, "prepared evidence", repository=repository)
     if output.exists() or output.is_symlink():
         raise PublicationError(f"refusing to replace prepared publication evidence: {output}")
+    ensure_private_stage_inputs(repository)
     pins = load_pins(repository / "scripts/dependency_pins.env")
     release_environment = release_tool_environment(repository, pins)
     verify_release_app(
@@ -255,9 +257,6 @@ def prepare(
         release_environment,
     )
     reviews = _review_records(reviewed_components.resolve(strict=True), collected.components)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if output.parent.is_symlink():
-        raise PublicationError("publication release output parent is a symlink")
     staging = Path(tempfile.mkdtemp(prefix=".publication-prepared.", dir=output.parent))
     try:
         closure = {
@@ -565,6 +564,7 @@ def write_review_template(repository: Path, libbox_source: Path, output: Path) -
     require_fixed_path(blocker_path, blocker_path, "blocker report", repository=repository)
     if output.exists() or output.is_symlink() or blocker_path.exists() or blocker_path.is_symlink():
         raise PublicationError("refusing to replace an existing component review or blocker report")
+    ensure_private_stage_inputs(repository)
     pins = load_pins(repository / "scripts/dependency_pins.env")
     release_environment = release_tool_environment(repository, pins)
     collected = _complete_collected_graphs(
@@ -597,9 +597,6 @@ def write_review_template(repository: Path, libbox_source: Path, output: Path) -
         "product": {"name": PRODUCT_NAME, "version": RELEASE_VERSION},
         "components": records,
     }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if output.parent.is_symlink():
-        raise PublicationError("component review parent is a symlink")
     try:
         write_new(output, canonical_json(document))
         write_new(blocker_path, canonical_json(_blocker_document(records, collected.components)))

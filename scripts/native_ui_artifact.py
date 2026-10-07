@@ -123,6 +123,7 @@ def swift_compiler_version() -> str:
 
 
 class NativeUiContext(str, Enum):
+    RELEASE = "release"
     SIGNED_PREVIEW = "signed-preview"
     UNSIGNED_PREVIEW_VALIDATION = "unsigned-preview-validation"
 
@@ -130,18 +131,29 @@ class NativeUiContext(str, Enum):
 def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool,
                       context: NativeUiContext = NativeUiContext.SIGNED_PREVIEW) -> dict[str, str]:
     if __package__:
-        from .release_build_identity import SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD
+        from .release_build_identity import (
+            ACTIVE_RELEASE_IDENTITY, SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD,
+        )
         from .apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
     else:
-        from release_build_identity import SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD
+        from release_build_identity import (
+            ACTIVE_RELEASE_IDENTITY, SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD,
+        )
         from apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
     if not isinstance(context, NativeUiContext):
         raise NativeUiArtifactError("UI artifact context is invalid")
     if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
         if build != UNSIGNED_PREVIEW_VALIDATION_BUILD or signing != "unsigned-validation":
             raise NativeUiArtifactError("unsigned preview UI requires exact 50000 unsigned-validation identity")
+        product_version = SIGNED_PREVIEW_IDENTITY.product_version
+    elif context is NativeUiContext.RELEASE:
+        if build != ACTIVE_RELEASE_IDENTITY.ga_build or signing not in {"pre-sign", "developer-id"}:
+            raise NativeUiArtifactError("UI products require the exact release identity")
+        product_version = ACTIVE_RELEASE_IDENTITY.product_version
     elif build != SIGNED_PREVIEW_IDENTITY.build_number or signing not in {"pre-sign", "developer-id"}:
         raise NativeUiArtifactError("UI products require the exact signed-preview identity")
+    else:
+        product_version = SIGNED_PREVIEW_IDENTITY.product_version
     pins = dict(re.findall(r"^(XCODE_VERSION|XCODE_BUILD_VERSION)=([^\n]+)$",
                            (repository / "scripts/dependency_pins.env").read_text(), re.M))
     if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
@@ -154,7 +166,7 @@ def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool
     if command(["/usr/bin/xcodebuild", "-version"]) != expected_xcode:
         raise NativeUiArtifactError("native UI products require the exact selected Xcode identity")
     return {
-        "productVersion": SIGNED_PREVIEW_IDENTITY.product_version, "buildNumber": build,
+        "productVersion": product_version, "buildNumber": build,
         "configuration": "release", "target": TRIPLE, "signingMode": signing, "buildSystem": "swiftbuild",
         "uiSourceSha256": source_digest(repository),
         **current_identity(repository, require_clean=clean),
@@ -297,13 +309,17 @@ def verify_products(repository: Path, products: Path, *, build: str, signing: st
     pre_sign_products = None
     if signing == "developer-id":
         if __package__:
-            from .release_build_identity import preview_native_products_root
+            from .release_build_identity import ga_pre_sign_native_products_root, preview_native_products_root
             from .promote_signed_native_manifest import verify_promoted_manifest
         else:
-            from release_build_identity import preview_native_products_root
+            from release_build_identity import ga_pre_sign_native_products_root, preview_native_products_root
             from promote_signed_native_manifest import verify_promoted_manifest
-        pre_sign_products = preview_native_products_root(repository)
-        verify_products(repository, pre_sign_products, build=build, signing="pre-sign")
+        pre_sign_products = (
+            ga_pre_sign_native_products_root(repository)
+            if context is NativeUiContext.RELEASE
+            else preview_native_products_root(repository)
+        )
+        verify_products(repository, pre_sign_products, build=build, signing="pre-sign", context=context)
     verify_library(products / LIBRARY)
     verify_resources(products / RESOURCES)
     for name in (LIBRARY, RESOURCES):
@@ -379,11 +395,18 @@ def main() -> None:
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--products", type=Path, required=True)
     parser.add_argument("--build-number", required=True)
-    parser.add_argument("--unsigned-preview-validation", action="store_true")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--unsigned-preview-validation", action="store_true")
+    selection.add_argument("--release", action="store_true")
     arguments = parser.parse_args()
     try:
         repository = arguments.repository.resolve(strict=True)
-        context = NativeUiContext.UNSIGNED_PREVIEW_VALIDATION if arguments.unsigned_preview_validation else NativeUiContext.SIGNED_PREVIEW
+        if arguments.unsigned_preview_validation:
+            context = NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
+        elif arguments.release:
+            context = NativeUiContext.RELEASE
+        else:
+            context = NativeUiContext.SIGNED_PREVIEW
         signing = "unsigned-validation" if arguments.unsigned_preview_validation else "pre-sign"
         if arguments.operation == "build":
             build_products(repository, arguments.products, build=arguments.build_number, context=context)

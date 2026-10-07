@@ -200,7 +200,7 @@ case "$gate" in
   version-contract)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
     cfw_run_release_python_script \
-      "$repo_root" "$repo_root/scripts/verify_version_contract.py" --preview
+      "$repo_root" "$repo_root/scripts/verify_version_contract.py"
     ;;
   rust-fmt)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"

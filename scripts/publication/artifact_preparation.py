@@ -197,7 +197,7 @@ def _artifact_sources(
     app_manifest = signed_root / "Clash for Mac.app.manifest.json"
     notary_result = signed_root / "notarization.json"
     notary_submission = (
-        signed_root / f"Clash.for.Mac_0.4.0_{build_number}_notary.zip.manifest.json"
+        signed_root / f"Clash.for.Mac_0.5.0_{build_number}_notary.zip.manifest.json"
     )
     fixed_ga_root = ga_root(repository)
     product_input_path = fixed_ga_root / "product-input.json"
@@ -222,7 +222,7 @@ def _artifact_sources(
             not isinstance(product_input, dict)
             or product_input.get("document") != "cfm-ga-product-input-v1"
             or product_input.get("product")
-            != {"build_number": build_number, "version": "0.4.0"}
+            != {"build_number": build_number, "version": "0.5.0"}
             or product_input.get("source")
             != {
                 "repository_commit": source_identity["repositoryCommit"],
@@ -260,7 +260,7 @@ def _artifact_sources(
             "buildNumber": build_number,
             **source_identity,
             **toolchain_metadata,
-            "version": "0.4.0",
+            "version": "0.5.0",
         },
         "notarization submission manifest",
     )

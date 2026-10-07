@@ -124,7 +124,7 @@ def _nested_code() -> list[dict]:
 def _request(**overrides) -> dict:
     manifest = _artifact_manifest()
     request = {
-        "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
+        "product": {"version": "0.5.0", "build_number": BUILD_NUMBER},
         "commit": REPOSITORY_COMMIT,
         "final_artifacts": {
             "signed_app_tree_sha256": SIGNED_TREE,
@@ -717,7 +717,7 @@ class FinalCandidateEnvironmentStatusTests(_CleanWorkspaceMixin):
     def test_default_inputs_are_confined_to_the_active_ga_stage_root(self) -> None:
         self.assertEqual(
             DEFAULT_EVIDENCE_DIRECTORY,
-            "target/candidates/0.4.0/ga/40073/stage-inputs/final-candidate",
+            "target/candidates/0.5.0/ga/50026/stage-inputs/final-candidate",
         )
 
     def test_absent_inputs_report_not_run_and_block(self) -> None:

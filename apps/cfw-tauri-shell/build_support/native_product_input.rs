@@ -28,8 +28,14 @@ pub fn native_ui_verifier_command(
     ];
     let mut command = Command::new("/bin/bash");
     command.arg("-p").arg(script).arg("--verify");
-    if context == NativeProductContext::UnsignedPreviewValidation {
-        command.arg("--unsigned-preview-validation");
+    match context {
+        NativeProductContext::GaPreSign => {
+            command.arg("--release");
+        }
+        NativeProductContext::UnsignedPreviewValidation => {
+            command.arg("--unsigned-preview-validation");
+        }
+        NativeProductContext::UnsignedValidation => {}
     }
     command.env_clear().envs(
         environment
@@ -42,12 +48,12 @@ pub fn native_ui_verifier_command(
 const UNSIGNED_RELATIVE_ROOT: &str = "unsigned/native-products";
 const UNSIGNED_BUILD_NUMBER: &str = "40000";
 const UNSIGNED_SIGNING_MODE: &str = "unsigned-validation";
-const GA_PRE_SIGN_RELATIVE_ROOT: &str = "ga-preflight/40073/native-products";
-const GA_BUILD_NUMBER: &str = "40073";
+const GA_PRE_SIGN_RELATIVE_ROOT: &str = "ga-preflight/50026/native-products";
+const GA_BUILD_NUMBER: &str = "50026";
 const GA_PRE_SIGNING_MODE: &str = "pre-sign";
-const PREVIEW_CANDIDATE_ROOT: &str = "target/candidates/0.5.0";
-const PREVIEW_PRE_SIGN_RELATIVE_ROOT: &str = "preview-preflight/50025/native-products";
-const PREVIEW_BUILD_NUMBER: &str = "50025";
+/// The GA pre-sign output and the unsigned validation outputs share the one
+/// product version; the three are told apart by their exact relative roots.
+const CANDIDATE_ROOT: &str = "target/candidates/0.5.0";
 const UNSIGNED_PREVIEW_RELATIVE_ROOT: &str = "unsigned/50000/native-products";
 const UNSIGNED_PREVIEW_BUILD_NUMBER: &str = "50000";
 
@@ -56,26 +62,22 @@ pub enum NativeProductContext {
     UnsignedValidation,
     UnsignedPreviewValidation,
     GaPreSign,
-    PreviewPreSign,
 }
 
 impl NativeProductContext {
-    /// Hosted Xcode selection belongs only to the non-distributable 40000
-    /// validation context. GA and signed previews retain the production pins.
+    /// Hosted Xcode selection belongs only to the non-distributable unsigned
+    /// validation contexts. GA inputs retain the production pins.
     pub fn expected_apple_identity<'a>(
         self,
         pinned: (&'a str, &'a str),
         selected: (Option<&'a str>, Option<&'a str>),
         validation_python: Option<&str>,
     ) -> Result<(&'a str, &'a str), String> {
-        if matches!(self, Self::GaPreSign | Self::PreviewPreSign) {
+        if self == Self::GaPreSign {
             if selected.0.is_some() || selected.1.is_some() || validation_python.is_some() {
-                return Err(if self == Self::GaPreSign {
-                    "GA native inputs refuse unsigned-validation toolchain selection"
-                } else {
-                    "signed preview native inputs refuse unsigned-validation toolchain selection"
-                }
-                .into());
+                return Err(
+                    "GA native inputs refuse unsigned-validation toolchain selection".into(),
+                );
             }
             return Ok(pinned);
         }
@@ -114,14 +116,13 @@ impl NativeProductContext {
             Self::UnsignedValidation => UNSIGNED_BUILD_NUMBER,
             Self::UnsignedPreviewValidation => UNSIGNED_PREVIEW_BUILD_NUMBER,
             Self::GaPreSign => GA_BUILD_NUMBER,
-            Self::PreviewPreSign => PREVIEW_BUILD_NUMBER,
         }
     }
 
     pub const fn expected_signing_mode(self) -> &'static str {
         match self {
             Self::UnsignedValidation | Self::UnsignedPreviewValidation => UNSIGNED_SIGNING_MODE,
-            Self::GaPreSign | Self::PreviewPreSign => GA_PRE_SIGNING_MODE,
+            Self::GaPreSign => GA_PRE_SIGNING_MODE,
         }
     }
 
@@ -175,25 +176,21 @@ impl CandidateNativeProducts {
         }
         let unsigned = format!("{candidate_root_text}/{UNSIGNED_RELATIVE_ROOT}");
         let ga_pre_sign = format!("{candidate_root_text}/{GA_PRE_SIGN_RELATIVE_ROOT}");
-        let preview_pre_sign = format!("{candidate_root_text}/{PREVIEW_PRE_SIGN_RELATIVE_ROOT}");
         let unsigned_preview = format!("{candidate_root_text}/{UNSIGNED_PREVIEW_RELATIVE_ROOT}");
-        let context = if candidate_root.ends_with(PREVIEW_CANDIDATE_ROOT) {
-            if declared_output == preview_pre_sign {
-                NativeProductContext::PreviewPreSign
-            } else if declared_output == unsigned_preview {
-                NativeProductContext::UnsignedPreviewValidation
-            } else {
-                return Err(format!(
-                    "preview native-products output must be exactly {preview_pre_sign} or {unsigned_preview}, found {declared_output}"
-                ));
-            }
-        } else if declared_output == unsigned {
+        if !candidate_root.ends_with(CANDIDATE_ROOT) {
+            return Err(format!(
+                "candidate root must end with {CANDIDATE_ROOT}: {candidate_root_text}"
+            ));
+        }
+        let context = if declared_output == unsigned {
             NativeProductContext::UnsignedValidation
         } else if declared_output == ga_pre_sign {
             NativeProductContext::GaPreSign
+        } else if declared_output == unsigned_preview {
+            NativeProductContext::UnsignedPreviewValidation
         } else {
             return Err(format!(
-                "candidate native-products output must be exactly {unsigned} or {ga_pre_sign}, found {declared_output}"
+                "candidate native-products output must be exactly {unsigned}, {ga_pre_sign} or {unsigned_preview}, found {declared_output}"
             ));
         };
         if declared_build_number != context.expected_build_number() {
@@ -301,7 +298,7 @@ fn require_metadata(
 }
 
 #[cfg(test)]
-mod preview_tests {
+mod candidate_input_tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -317,7 +314,7 @@ mod preview_tests {
                 .expect("clock")
                 .as_nanos();
             let path = parent.join(format!(
-                "cfm-preview-input-test-{}-{nonce}-{}",
+                "cfm-native-input-test-{}-{nonce}-{}",
                 std::process::id(),
                 NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
             ));
@@ -345,7 +342,7 @@ mod preview_tests {
     #[test]
     fn native_ui_verifier_does_not_inherit_cargo_or_loader_environment() {
         let environment = [
-            ("CFW_BUILD_NUMBER", "50025"),
+            ("CFW_BUILD_NUMBER", "50026"),
             ("CFW_NATIVE_PRODUCTS_OUTPUT", "/candidate/native-products"),
             ("CFW_RELEASE_RUST_TOOLCHAIN", "private"),
             ("CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "reject-me"),
@@ -361,7 +358,7 @@ mod preview_tests {
         let command = native_ui_verifier_command(
             Path::new("/repo/scripts/build_native_ui.sh"),
             environment.map(|(key, value)| (key.into(), value.into())),
-            NativeProductContext::PreviewPreSign,
+            NativeProductContext::GaPreSign,
         );
         let passed = command
             .get_envs()
@@ -370,7 +367,7 @@ mod preview_tests {
         assert_eq!(
             passed,
             BTreeMap::from([
-                ("CFW_BUILD_NUMBER", "50025"),
+                ("CFW_BUILD_NUMBER", "50026"),
                 ("CFW_NATIVE_PRODUCTS_OUTPUT", "/candidate/native-products"),
                 ("CFW_RELEASE_RUST_TOOLCHAIN", "private"),
                 ("CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "reject-me"),
@@ -379,21 +376,26 @@ mod preview_tests {
         assert_eq!(command.get_program(), "/bin/bash");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["-p", "/repo/scripts/build_native_ui.sh", "--verify"]
+            [
+                "-p",
+                "/repo/scripts/build_native_ui.sh",
+                "--verify",
+                "--release"
+            ]
         );
     }
 
     #[test]
-    fn preview_path_build_and_manifest_are_one_exact_identity() {
+    fn ga_path_build_and_manifest_are_one_exact_identity() {
         let fixture = Fixture::new();
         let root = fixture.root("0.5.0");
-        let output = fixture.output("0.5.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT);
-        let resolved = CandidateNativeProducts::resolve(&root, &output, "50025").unwrap();
-        assert_eq!(resolved.context, NativeProductContext::PreviewPreSign);
-        assert_eq!(resolved.context.expected_build_number(), "50025");
+        let output = fixture.output("0.5.0", GA_PRE_SIGN_RELATIVE_ROOT);
+        let resolved = CandidateNativeProducts::resolve(&root, &output, "50026").unwrap();
+        assert_eq!(resolved.context, NativeProductContext::GaPreSign);
+        assert_eq!(resolved.context.expected_build_number(), "50026");
         assert_eq!(resolved.context.expected_signing_mode(), "pre-sign");
         let metadata = BTreeMap::from([
-            ("buildNumber".into(), "50025".into()),
+            ("buildNumber".into(), "50026".into()),
             ("signingMode".into(), "pre-sign".into()),
         ]);
         resolved
@@ -401,11 +403,11 @@ mod preview_tests {
             .require_manifest_identity(&metadata, "UI")
             .unwrap();
         for (key, value) in [
-            ("buildNumber", "40073"),
+            ("buildNumber", "50025"),
             ("buildNumber", "50017"),
             ("buildNumber", "50018"),
             ("buildNumber", "50019"),
-            ("buildNumber", "50026"),
+            ("buildNumber", "40073"),
             ("signingMode", "unsigned-validation"),
             ("signingMode", "developer-id"),
         ] {
@@ -419,19 +421,19 @@ mod preview_tests {
             );
         }
         assert!(
-            NativeProductContext::GaPreSign
+            NativeProductContext::UnsignedPreviewValidation
                 .require_manifest_identity(&metadata, "UI")
                 .is_err()
         );
     }
 
     #[test]
-    fn preview_refuses_other_builds_and_legacy_context_paths() {
+    fn release_refuses_other_builds_and_legacy_context_paths() {
         let fixture = Fixture::new();
         let root = fixture.root("0.5.0");
-        let output = fixture.output("0.5.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT);
+        let output = fixture.output("0.5.0", GA_PRE_SIGN_RELATIVE_ROOT);
         for build in [
-            "40073",
+            "50025",
             "40000",
             "50001",
             "50002",
@@ -450,11 +452,11 @@ mod preview_tests {
             "50017",
             "50018",
             "50019",
-            "50026",
-            "050025",
+            "40073",
+            "050026",
             "0",
-            "+50025",
-            "50025\n",
+            "+50026",
+            "50026\n",
             "9223372036854775808",
         ] {
             assert!(
@@ -462,51 +464,59 @@ mod preview_tests {
                 "{build}"
             );
         }
+        // The retained signed preview and every earlier preview root are
+        // verification subjects, never Host build inputs.
         for relative in [
             UNSIGNED_RELATIVE_ROOT,
-            GA_PRE_SIGN_RELATIVE_ROOT,
-            "preview-preflight/50008/native-products",
-            "preview-preflight/50009/native-products",
-            "preview-preflight/50012/native-products",
-            "preview-preflight/50013/native-products",
-            "preview-preflight/50014/native-products",
-            "preview-preflight/50015/native-products",
-            "preview-preflight/50017/native-products",
-            "preview-preflight/50018/native-products",
-            "preview-preflight/50019/native-products",
+            UNSIGNED_PREVIEW_RELATIVE_ROOT,
+            "ga-preflight/40073/native-products",
+            "ga-preflight/50025/native-products",
+            "preview-preflight/50025/native-products",
             "preview-preflight/50026/native-products",
             "preview/50025/signing-output/signed-native-products",
+            "ga/50026/signing-output/signed-native-products",
         ] {
             let wrong = fixture.output("0.5.0", relative);
             assert!(
-                CandidateNativeProducts::resolve(&root, &wrong, "50025").is_err(),
+                CandidateNativeProducts::resolve(&root, &wrong, "50026").is_err(),
                 "{relative}"
             );
         }
+        // The retired 0.4.0 candidate root is no longer a candidate root at all.
         let old_root = fixture.root("0.4.0");
-        let wrong = fixture.output("0.4.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT);
-        assert!(CandidateNativeProducts::resolve(&old_root, &wrong, "50025").is_err());
+        for relative in [
+            GA_PRE_SIGN_RELATIVE_ROOT,
+            UNSIGNED_RELATIVE_ROOT,
+            "ga-preflight/40073/native-products",
+        ] {
+            let old = fixture.output("0.4.0", relative);
+            for build in ["50026", "40073", "40000"] {
+                assert!(CandidateNativeProducts::resolve(&old_root, &old, build).is_err());
+            }
+        }
+        // Release and validation outputs live under the same 0.5.0 root and
+        // are told apart by their exact relative roots and build numbers.
         for (relative, build, expected) in [
-            (
-                GA_PRE_SIGN_RELATIVE_ROOT,
-                "40073",
-                NativeProductContext::GaPreSign,
-            ),
             (
                 UNSIGNED_RELATIVE_ROOT,
                 "40000",
                 NativeProductContext::UnsignedValidation,
             ),
+            (
+                UNSIGNED_PREVIEW_RELATIVE_ROOT,
+                "50000",
+                NativeProductContext::UnsignedPreviewValidation,
+            ),
         ] {
-            let old = fixture.output("0.4.0", relative);
+            let sibling = fixture.output("0.5.0", relative);
             assert_eq!(
-                CandidateNativeProducts::resolve(&old_root, &old, build)
+                CandidateNativeProducts::resolve(&root, &sibling, build)
                     .unwrap()
                     .context,
                 expected
             );
-            assert!(CandidateNativeProducts::resolve(&root, &old, build).is_err());
-            assert!(CandidateNativeProducts::resolve(&old_root, &old, "50025").is_err());
+            assert!(CandidateNativeProducts::resolve(&root, &sibling, "50026").is_err());
+            assert!(CandidateNativeProducts::resolve(&root, &output, build).is_err());
         }
     }
 
@@ -543,9 +553,9 @@ mod preview_tests {
             );
         }
         for (version, relative, build) in [
-            ("0.4.0", UNSIGNED_RELATIVE_ROOT, "40000"),
-            ("0.4.0", GA_PRE_SIGN_RELATIVE_ROOT, "40073"),
-            ("0.5.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT, "50025"),
+            ("0.5.0", UNSIGNED_RELATIVE_ROOT, "40000"),
+            ("0.5.0", GA_PRE_SIGN_RELATIVE_ROOT, "50026"),
+            ("0.5.0", "preview-preflight/50025/native-products", "50025"),
         ] {
             let other = fixture.output(version, relative);
             assert!(CandidateNativeProducts::resolve(&root, &output, build).is_err());
@@ -594,57 +604,28 @@ mod preview_tests {
     }
 
     #[test]
-    fn preview_requires_production_apple_toolchain() {
-        let context = NativeProductContext::PreviewPreSign;
-        let pinned = ("27.0", "27A266a");
-        assert_eq!(
-            context
-                .expected_apple_identity(pinned, (None, None), None)
-                .unwrap(),
-            pinned
-        );
-        for selected in [
-            (Some("27.0"), Some("27A266a")),
-            (Some("27.1"), Some("27B1")),
-            (Some(""), None),
-            (None, Some("27A266a")),
-        ] {
-            assert!(
-                context
-                    .expected_apple_identity(pinned, selected, None)
-                    .is_err()
-            );
-        }
-        assert!(
-            context
-                .expected_apple_identity(pinned, (None, None), Some("/python3"))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn preview_rejects_raw_alias_and_symlinked_roots() {
+    fn release_rejects_raw_alias_and_symlinked_roots() {
         let fixture = Fixture::new();
         let root = fixture.root("0.5.0");
-        let output = fixture.output("0.5.0", PREVIEW_PRE_SIGN_RELATIVE_ROOT);
+        let output = fixture.output("0.5.0", GA_PRE_SIGN_RELATIVE_ROOT);
         for wrong in [
-            output.replace("preview-preflight/", "preview-preflight//"),
-            output.replace("preview-preflight/", "preview-preflight/./"),
+            output.replace("ga-preflight/", "ga-preflight//"),
+            output.replace("ga-preflight/", "ga-preflight/./"),
             format!("{output}/"),
         ] {
-            assert!(CandidateNativeProducts::resolve(&root, &wrong, "50025").is_err());
+            assert!(CandidateNativeProducts::resolve(&root, &wrong, "50026").is_err());
         }
         let raw_root = root
             .to_str()
             .unwrap()
             .replace("candidates/", "candidates//");
-        let raw_output = format!("{raw_root}/{PREVIEW_PRE_SIGN_RELATIVE_ROOT}");
+        let raw_output = format!("{raw_root}/{GA_PRE_SIGN_RELATIVE_ROOT}");
         assert!(
-            CandidateNativeProducts::resolve(Path::new(&raw_root), &raw_output, "50025").is_err()
+            CandidateNativeProducts::resolve(Path::new(&raw_root), &raw_output, "50026").is_err()
         );
-        let moved = root.with_file_name("moved-preview");
+        let moved = root.with_file_name("moved-release");
         fs::rename(&root, &moved).unwrap();
         std::os::unix::fs::symlink(&moved, &root).unwrap();
-        assert!(CandidateNativeProducts::resolve(&root, &output, "50025").is_err());
+        assert!(CandidateNativeProducts::resolve(&root, &output, "50026").is_err());
     }
 }

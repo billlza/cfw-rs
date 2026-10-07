@@ -147,7 +147,7 @@ else:  # pragma: no cover - direct-script import path
 SCHEMA_VERSION = EVIDENCE_PROFILE["aggregate_schema_version"]
 AGGREGATOR_VERSION = EVIDENCE_PROFILE["aggregator_version"]
 RECEIPT_SCHEMA_VERSION = 3
-PRODUCT_VERSION = "0.4.0"
+PRODUCT_VERSION = "0.5.0"
 GRANTED_LEVEL = "Signed_Installed_Verified"
 if GRANTED_LEVEL not in LEVEL_ORDER:
     raise RuntimeError("physical evidence level is absent from Evidence_Manifest")

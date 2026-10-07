@@ -355,7 +355,7 @@ def _capture_context(context: object) -> tuple[dict[str, Any], dict[str, Any]]:
     ):
         raise PerformanceCaptureError(
             "not_final_candidate",
-            f"performance capture requires GA 0.4.0 build {GA_RELEASE_BUILD}",
+            f"performance capture requires GA 0.5.0 build {GA_RELEASE_BUILD}",
         )
     return candidate, run
 

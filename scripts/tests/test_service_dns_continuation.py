@@ -18,7 +18,7 @@ class DNSContinuationTests(unittest.TestCase):
         self.paths = self.fixture.paths
         self.transaction = self.fixture.transaction
         self.previous = install.AppIdentity(
-            "0.4.0", "40070", install.INSTALLED_40070_PREDECESSOR.tree_sha256
+            "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
         )
         self.old = guard()
         self.new = {**self.old, "dns_sha256": "a" * 64}
@@ -125,7 +125,7 @@ class DNSContinuationTests(unittest.TestCase):
 
     def test_changed_application_identity_cannot_create_continuation(self) -> None:
         self.fixture.runtime.guards = [self.new]
-        foreign = install.AppIdentity("0.4.0", "40070", "f" * 64)
+        foreign = install.AppIdentity("0.5.0", "50025", "f" * 64)
         with patch.object(self.transaction, "_identity_pair", return_value=(CANDIDATE, foreign)), self.assertRaises(install.InstallError) as error:
             self.transaction.continue_after_dns_change()
         self.assertEqual(error.exception.code, "service_identity_drift")

@@ -63,7 +63,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         errexit: bool = True,
         readonly_caller_tauri: Path | None = None,
         runtime_verifier_failure_call: int | None = None,
-        preview: bool = False,
+        release: bool = False,
         unsigned_preview: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         environment = dict(os.environ)
@@ -112,7 +112,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
                 'readonly config_override="$4"; '
                 'readonly variable="caller-variable"; '
             )
-        shell += 'cfw_build_tauri_host_skeleton "$2" "$3" "$4"' + (' "$9"; ' if preview or unsigned_preview else '; ')
+        shell += 'cfw_build_tauri_host_skeleton "$2" "$3" "$4"' + (' "$9"; ' if release or unsigned_preview else '; ')
         shell += (
             "contract_test_status=$?; "
             'if [[ "$contract_test_status" -eq 0 && '
@@ -136,7 +136,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             str(self.cargo_home),
             str(readonly_caller_tauri) if readonly_caller_tauri else "",
             str(runtime_verifier_failure_call or 0),
-            *( ["--native-ui-unsigned-preview"] if unsigned_preview else ["--native-ui-preview"] if preview else [] ),
+            *( ["--native-ui-unsigned-preview"] if unsigned_preview else ["--native-ui-release"] if release else [] ),
         ]
         return subprocess.run(
             command,
@@ -158,7 +158,7 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
                                        environment_updates={"CFW_BUILD_NUMBER": build})
             self.assertNotEqual(failed.returncode, 0)
             self.assertNotIn(b"[cargo-home=", failed.stdout)
-        production = self.run_contract(preview=True, override=override,
+        production = self.run_contract(release=True, override=override,
                                        environment_updates={"CFW_BUILD_NUMBER": "50000"})
         self.assertNotEqual(production.returncode, 0)
         self.assertNotIn(b"[cargo-home=", production.stdout)
@@ -201,10 +201,10 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         )
         self.assertNotIn("--no-sign", arguments)
 
-    def test_preview_build_is_explicit_and_does_not_enable_rejected_dashboard(self) -> None:
+    def test_release_build_is_explicit_and_does_not_enable_rejected_dashboard(self) -> None:
         self.write_config({"version": "0.5.0", "bundle": {"macOS": {}}})
-        override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50025"}}})
-        completed = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50025"})
+        override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50026"}}})
+        completed = self.run_contract(release=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50026"})
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         self.assertIn(b"[--features]\n[physical-release-evidence,native-ui]", completed.stdout)
         self.assertNotIn(b"native-dashboard", completed.stdout)
@@ -217,17 +217,18 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             ({"CFW_BUILD_NUMBER": "50015"}, override),
             ({"CFW_BUILD_NUMBER": "50017"}, override),
             ({"CFW_BUILD_NUMBER": "50018"}, override),
-            ({"CFW_BUILD_NUMBER": "50026"}, override),
+            ({"CFW_BUILD_NUMBER": "50025"}, override),
+            ({"CFW_BUILD_NUMBER": "50027"}, override),
             ({"CFW_BUILD_NUMBER": None}, override),
-            ({"CFW_BUILD_NUMBER": "50025"}, self.override),
-            ({"CFW_BUILD_NUMBER": "50025", "APPLE_SIGNING_IDENTITY": "unexpected"}, override),
+            ({"CFW_BUILD_NUMBER": "50026"}, self.override),
+            ({"CFW_BUILD_NUMBER": "50026", "APPLE_SIGNING_IDENTITY": "unexpected"}, override),
         ]:
             with self.subTest(environment=environment, override=config):
-                denied = self.run_contract(preview=True, override=config, environment_updates=environment)
+                denied = self.run_contract(release=True, override=config, environment_updates=environment)
                 self.assertNotEqual(denied.returncode, 0)
                 self.assertNotIn(b"[build]", denied.stdout)
         self.write_config({"version": "0.4.0", "bundle": {"macOS": {}}})
-        denied = self.run_contract(preview=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50025"})
+        denied = self.run_contract(release=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50026"})
         self.assertNotEqual(denied.returncode, 0)
         self.assertNotIn(b"[build]", denied.stdout)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture and live-verify the exact hosted GitHub Actions receipt for GA 40073.
+"""Capture and live-verify the exact hosted GitHub Actions receipt for GA 50026.
 
 This module is intentionally separate from the deterministic local CI-lane
 collector.  A local command result can corroborate a hosted run, but it can
@@ -104,13 +104,13 @@ class HostedCIReceiptError(PublicationError):
 
 SCHEMA_VERSION: Final = 5
 DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v5"
-PRODUCT_VERSION: Final = "0.4.0"
-GA_BUILD: Final = "40073"
+PRODUCT_VERSION: Final = "0.5.0"
+GA_BUILD: Final = "50026"
 
 API_ORIGIN: Final = "https://api.github.com"
 API_ACCEPT: Final = "application/vnd.github+json"
 API_VERSION: Final = "2022-11-28"
-API_USER_AGENT: Final = "cfw-rs-release-evidence/0.4.0"
+API_USER_AGENT: Final = "cfw-rs-release-evidence/0.5.0"
 API_TIMEOUT_SECONDS: Final = 30
 MAX_API_RESPONSE_BYTES: Final = 8 * 1024 * 1024
 MAX_RECEIPT_BYTES: Final = 4 * 1024 * 1024
@@ -164,7 +164,7 @@ REQUIRED_JOB_STEP_NAMES: Final = {
 }
 
 RECEIPT_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/ga/40073/stage-inputs/hosted-ci.json"
+    "target/candidates/0.5.0/ga/50026/stage-inputs/hosted-ci.json"
 )
 COMMIT_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 BRANCH_RE: Final = re.compile(r"^[^\x00-\x20\x7f~^:?*\\\[\]]{1,255}$")

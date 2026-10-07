@@ -13,7 +13,7 @@ source "$repo_root/scripts/release_toolchain_contract.sh"
 readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 
 readonly expected_team_id="YKUPL7Z869"
-expected_version="0.4.0"
+expected_version="0.5.0"
 readonly expected_app_id="com.bill.clashformac"
 readonly expected_extension_id="com.bill.clashformac.packet-tunnel"
 readonly expected_extension_wrapper="$expected_extension_id.systemextension"
@@ -366,16 +366,14 @@ configure_release_verification_context() {
   local before_notarization="$2"
   case "$context" in
     signing-attempt-work|signing-attempt-publish-ready|canonical-native-content)
-      expected_version="0.4.0"
-      expected_build_number="40073"
-      preview_ui=0
-      signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40073/profiles/signing-preflight.json"
-      pre_sign_native_products_root="$repo_root/target/candidates/0.4.0/ga/40073/native-products"
+      expected_version="0.5.0"
+      expected_build_number="50026"
+      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/ga/50026/profiles/signing-preflight.json"
+      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/ga/50026/native-products"
       ;;
     preview-signing-attempt-work|preview-signing-attempt-publish-ready|preview-canonical-native-content)
       expected_version="0.5.0"
       expected_build_number="50025"
-      preview_ui=1
       signing_preflight_manifest="$repo_root/target/candidates/0.5.0/preview-preflight/50025/profiles/signing-preflight.json"
       pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/preview-preflight/50025/native-products"
       ;;
@@ -466,7 +464,7 @@ native_products_root="${2:-}"
   die "usage: scripts/verify_release_app.sh [--pre-notary] APP NATIVE_PRODUCTS --context CONTEXT"
 verification_context="$4"
 configure_release_verification_context "$verification_context" "$pre_notary"
-readonly expected_version expected_build_number preview_ui
+readonly expected_version expected_build_number
 readonly signing_preflight_manifest pre_sign_native_products_root
 [[ "$app_path" == /* ]] || die "application path must be absolute"
 [[ "$native_products_root" == /* ]] || die "native products root must be absolute"
@@ -774,9 +772,8 @@ app_version="$(plist_value "$app_path/Contents/Info.plist" CFBundleShortVersionS
 verify_bundle_security "$app_path" host "$expected_app_id"
 verify_bundle_security "$extension_path" packet-tunnel "$expected_extension_id"
 verify_bundle_security "$agent_path" proxy-agent "$expected_agent_id"
-if [[ "$preview_ui" == "1" ]]; then
-  verify_native_ui_security "$app_path/Contents/Frameworks/libCFMNativeDashboard.dylib"
-fi
+# Every 0.5.0 application, release or preview, carries the SwiftUI library.
+verify_native_ui_security "$app_path/Contents/Frameworks/libCFMNativeDashboard.dylib"
 
 macho_count=0
 macho_candidates="$temporary_root/macho-candidates"

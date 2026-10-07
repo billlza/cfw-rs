@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Validate the complete, source-bound v0.4.0 release capability inventory.
+"""Validate the complete, source-bound v0.5.0 release capability inventory.
 
 The generic inner Evidence_Manifest format intentionally supports arbitrary
-capability names.  A production v0.4.0 outer seal must not inherit that
+capability names.  A production v0.5.0 outer seal must not inherit that
 generality: omitting a difficult capability would otherwise make a smaller
 subset appear fully sealed.  This module binds the release to one fixed
 capability per numbered requirements section and proves that every numbered

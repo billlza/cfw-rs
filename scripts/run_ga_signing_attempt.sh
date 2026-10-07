@@ -29,7 +29,7 @@ die() {
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40073"
+readonly frozen_root="$repo_root/target/candidates/0.5.0/ga/50026"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
 [[ -d "$attempt_work" && ! -L "$attempt_work" ]] ||
   die "transaction work root is not a real directory"
@@ -68,6 +68,8 @@ packet_extension="$staged_app/Contents/Library/SystemExtensions/com.bill.clashfo
 bridge="$staged_app/Contents/Frameworks/CFWNativeBridge.framework"
 authority="$staged_app/Contents/Library/HelperTools/CFWGlobalAuthority"
 tombstone="$staged_app/Contents/Library/HelperTools/cfw-helper-tombstone"
+ui_library="$staged_app/Contents/Frameworks/libCFMNativeDashboard.dylib"
+ui_resources="$staged_app/Contents/Resources/CFMNativeDashboard_CFMNativeDashboard.bundle"
 readonly authority_designated_requirement='designated => anchor apple generic and identifier "com.bill.clashformac.global-authority" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "YKUPL7Z869"'
 cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --identifier com.bill.clashformac.native-bridge \
@@ -108,7 +110,11 @@ cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$packet_extension"
 cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"
-for nested in "$bridge" "$authority" "$proxy_app" "$packet_extension" "$tombstone"; do
+# The SwiftUI library carries no entitlements; its resource bundle has no code
+# and is sealed by the outer host signature.
+cfw_codesign_distribution_bundle --force --options runtime --timestamp \
+  --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$ui_library"
+for nested in "$bridge" "$authority" "$proxy_app" "$packet_extension" "$tombstone" "$ui_library"; do
   /usr/bin/codesign --verify --strict --verbose=4 "$nested"
 done
 
@@ -122,12 +128,18 @@ mkdir -m 0700 "$signed_native_products/CFWLegacyTombstone"
 /usr/bin/ditto --noqtn \
   "$tombstone" \
   "$signed_native_products/CFWLegacyTombstone/cfw-helper-tombstone"
+/usr/bin/ditto --noqtn "$ui_library" "$signed_native_products/libCFMNativeDashboard.dylib"
+/usr/bin/ditto --noqtn \
+  "$ui_resources" \
+  "$signed_native_products/CFMNativeDashboard_CFMNativeDashboard.bundle"
 for product in \
   CFWGlobalAuthority \
   CFWNativeBridge.framework \
   CFWProxyAgent.app \
   com.bill.clashformac.packet-tunnel.systemextension \
-  CFWLegacyTombstone; do
+  CFWLegacyTombstone \
+  libCFMNativeDashboard.dylib \
+  CFMNativeDashboard_CFMNativeDashboard.bundle; do
   cfw_run_release_python_script \
     "$repo_root" \
     "$repo_root/scripts/promote_signed_native_manifest.py" \
@@ -140,7 +152,7 @@ for product in \
     "$repo_root/scripts/verify_artifact_manifest.py" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json" \
-    --metadata "buildNumber=40073" \
+    --metadata "buildNumber=50026" \
     --metadata "signingMode=developer-id"
 done
 

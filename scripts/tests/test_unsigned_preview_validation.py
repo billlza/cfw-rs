@@ -46,7 +46,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                     classifier(repository, native)
 
     def test_new_context_refuses_wrong_or_mixed_component_identity(self):
-        for build, version in (("40000", "0.5.0"), ("40073", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
+        for build, version in (("40000", "0.5.0"), ("50026", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
             with self.subTest(build=build, version=version), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary).resolve()
                 app, native = self.pair(repository, build=build, version=version)
@@ -64,8 +64,8 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()
             roots = {
-                "40000": repository / "target/candidates/0.4.0/unsigned/native-products",
-                "40073": identity.ga_pre_sign_native_products_root(repository),
+                "40000": repository / "target/candidates/0.5.0/unsigned/native-products",
+                "50026": identity.ga_pre_sign_native_products_root(repository),
                 "50000": identity.unsigned_preview_native_products_root(repository),
                 "50025": identity.preview_native_products_root(repository),
             }

@@ -24,7 +24,7 @@ else:
 
 
 PRODUCT_NAME = "Clash for Mac"
-RELEASE_VERSION = "0.4.0"
+RELEASE_VERSION = "0.5.0"
 
 
 def signed_app(repository: Path) -> Path:
@@ -83,7 +83,7 @@ def require_fixed_path(
     actual_absolute = Path(os.path.abspath(actual))
     expected_absolute = Path(os.path.abspath(expected))
     if actual_absolute != expected_absolute:
-        raise PublicationError(f"production {label} must use the fixed 0.4.0 path: {expected}")
+        raise PublicationError(f"production {label} must use the fixed 0.5.0 path: {expected}")
     try:
         relative = expected_absolute.relative_to(repository)
     except ValueError as error:

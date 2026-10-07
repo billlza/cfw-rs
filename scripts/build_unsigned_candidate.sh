@@ -54,9 +54,9 @@ toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 node_root="$toolchain_root/node-$NODE_VERSION"
 node_bin="$node_root/bin/node"
 tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
-product_version="0.4.0"
+product_version="0.5.0"
 build_version="40000"
-candidate_relative="target/candidates/0.4.0/unsigned"
+candidate_relative="target/candidates/0.5.0/unsigned"
 bundle_context="unsigned-host"
 app_artifact_kind="unsigned-application-validation-v1"
 # Keep real required arguments in every command/metadata array: Bash 3.2
@@ -65,12 +65,10 @@ version_contract_command=(
   cfw_run_release_python_script "$repo_root" "$repo_root/scripts/verify_version_contract.py"
 )
 if [[ $preview_validation -eq 1 ]]; then
-  product_version="0.5.0"
   build_version="50000"
   candidate_relative="target/candidates/0.5.0/unsigned/50000"
   bundle_context="unsigned-preview-host"
   app_artifact_kind="unsigned-preview-application-validation-v1"
-  version_contract_command+=(--preview)
 fi
 readonly product_version build_version candidate_relative bundle_context app_artifact_kind
 validation_app_metadata=(--metadata "version=$product_version")
@@ -215,6 +213,14 @@ if preview == "1":
     override["bundle"]["macOS"]["files"].update({
         "Frameworks/libCFMNativeDashboard.dylib": f"{native}/libCFMNativeDashboard.dylib",
         "Resources/CFMNativeDashboard_CFMNativeDashboard.bundle": f"{native}/CFMNativeDashboard_CFMNativeDashboard.bundle",
+    })
+else:
+    # The 40000 skeleton builds no native UI. The base configuration declares
+    # the library and resources every 0.5.0 application carries; the Tauri CLI
+    # applies this override as a JSON merge patch, where null removes an entry.
+    override["bundle"]["macOS"]["files"].update({
+        "Frameworks/libCFMNativeDashboard.dylib": None,
+        "Resources/CFMNativeDashboard_CFMNativeDashboard.bundle": None,
     })
 print(json.dumps(override, separators=(",", ":")))
 PY

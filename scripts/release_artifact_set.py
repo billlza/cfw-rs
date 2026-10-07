@@ -4478,9 +4478,9 @@ def self_check() -> None:
         raise ArtifactSetError("updater seal contract drifted")
     if DMG_SEAL_DOCUMENT != "cfw-dmg-release-set-seal-v2":
         raise ArtifactSetError("DMG seal contract drifted")
-    if _official_url("0.4.0", _updater_names("0.4.0")[0]) != (
-        "https://github.com/billlza/cfw-rs/releases/download/v0.4.0/"
-        "Clash.for.Mac_0.4.0_aarch64.app.tar.gz"
+    if _official_url("0.5.0", _updater_names("0.5.0")[0]) != (
+        "https://github.com/billlza/cfw-rs/releases/download/v0.5.0/"
+        "Clash.for.Mac_0.5.0_aarch64.app.tar.gz"
     ):
         raise ArtifactSetError("official release URL contract drifted")
     print("release artifact set self-check ok")

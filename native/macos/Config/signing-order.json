@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "teamIdentifier": "YKUPL7Z869",
-  "description": "Canonical inside-out nested code signing order for the Clash for Mac native product graph. Every nested component (framework, Global Authority daemon, ProxyAgent app, Packet Tunnel system extension, and the one-way legacy tombstone) is signed before the outer host app, so the outer seal always covers every embedded component. The outer host app is always signed last.",
+  "description": "Canonical inside-out nested code signing order for the Clash for Mac native product graph. Every nested component (framework, SwiftUI dashboard library, Global Authority daemon, ProxyAgent app, Packet Tunnel system extension, and the one-way legacy tombstone) is signed before the outer host app, so the outer seal always covers every embedded component. The outer host app is always signed last.",
   "nested": [
     {
       "name": "CFWNativeBridge",
@@ -9,6 +9,12 @@
       "destination": "Contents/Frameworks/CFWNativeBridge.framework",
       "stagedArtifact": "CFWNativeBridge.framework",
       "bundleIdentifier": "com.bill.clashformac.native-bridge"
+    },
+    {
+      "name": "CFMNativeDashboard",
+      "kind": "dynamic-library",
+      "destination": "Contents/Frameworks/libCFMNativeDashboard.dylib",
+      "stagedArtifact": "libCFMNativeDashboard.dylib"
     },
     {
       "name": "CFWGlobalAuthority",

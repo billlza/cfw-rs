@@ -124,7 +124,7 @@ def _app_from_stdout(
             for index, product in enumerate(_ARTIFACT_PRODUCTS)
         },
         4: f"candidate bundle verified: {app}",
-        5: f"identity: 0.4.0 ({expected_build_number}) / arm64 / macOS 15.0+",
+        5: f"identity: 0.5.0 ({expected_build_number}) / arm64 / macOS 15.0+",
         6: "Mach-O objects: 6",
         8: f"Processing: {app}",
         9: "The validate action worked!",

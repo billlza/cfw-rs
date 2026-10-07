@@ -19,7 +19,7 @@ from scripts import release_build_identity as identities
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
-    BUILD_NUMBER = "40073"
+    BUILD_NUMBER = "50026"
     DEPLOYMENT_TARGET = "15.0"
     RUST_VERSION = "1.98.1"
 
@@ -30,7 +30,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
         (source_root / "src").mkdir(parents=True)
         (source_root / "src/main.rs").write_text("fn main() {}\n", encoding="utf-8")
         (source_root / "Cargo.toml").write_text(
-            '[package]\nname = "cfw-legacy-tombstone"\nversion = "0.4.0"\n',
+            '[package]\nname = "cfw-legacy-tombstone"\nversion = "0.5.0"\n',
             encoding="utf-8",
         )
         (self.repository / "Cargo.lock").write_text(
@@ -39,7 +39,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
 
         ga_root = (
             self.repository
-            / "target/candidates/0.4.0/ga"
+            / "target/candidates/0.5.0/ga"
             / self.BUILD_NUMBER
         )
         self.pre_sign_root = ga_root / "native-products"
@@ -101,7 +101,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
     def digest(self, relative: str) -> str:
         return hashlib.sha256((self.repository / relative).read_bytes()).hexdigest()
 
-    def write_bundle_identity(self, build_number: str, version: str = "0.4.0") -> None:
+    def write_bundle_identity(self, build_number: str, version: str = "0.5.0") -> None:
         value = {
             "CFBundleShortVersionString": version,
             "CFBundleVersion": build_number,
@@ -252,8 +252,6 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
                 setattr(self, name, new_output / old_path.relative_to(old_output))
         self.bundle_plists = tuple(new_output / path.relative_to(old_output) for path in self.bundle_plists)
         self.BUILD_NUMBER = "50025"
-        manifest = self.repository / "crates/cfw-legacy-tombstone/Cargo.toml"
-        manifest.write_text(manifest.read_text().replace("0.4.0", "0.5.0"))
         self.write_bundle_identity(self.BUILD_NUMBER, "0.5.0")
         self.write_pre_sign_manifest()
         self.write_signed_manifest()
@@ -293,12 +291,12 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
             with self.subTest(context=context), self.assertRaises(provenance.LegacyTombstoneProvenanceError):
                 self.verify(context=context)
         context = provenance.CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
-        old_root = self.repository / "target/candidates/0.4.0/ga/40073/native-products"
+        old_root = self.repository / "target/candidates/0.5.0/ga/50026/native-products"
         with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "preview preflight root"):
             self.verify(context=context, unsigned_artifact=old_root / provenance.ARTIFACT_NAME,
                         unsigned_manifest=old_root / provenance.MANIFEST_NAME)
         with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "build number differs"):
-            self.verify(context=context, build_number="40073")
+            self.verify(context=context, build_number="50026")
 
     def test_preview_still_checks_promotion_source_and_embedded_bytes(self) -> None:
         self.configure_preview_fixture()

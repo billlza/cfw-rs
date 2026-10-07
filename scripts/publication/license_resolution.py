@@ -23,7 +23,7 @@ OPERATORS = {"AND", "OR", "WITH"}
 MAX_SPDX_BRANCHES = 128
 
 # Deliberately bounded, fail-closed subset of the SPDX License List 3.28.0
-# (2026-02-20) used by the fixed 0.4.0 closure and supported by _supports.
+# (2026-02-20) used by the fixed 0.5.0 closure and supported by _supports.
 # Source: https://github.com/spdx/license-list-data/tree/v3.28.0/json
 # licenses.json SHA-256:
 # f728c534d8bd1044fc515a2ddb2292be99559021d830bfa3281be0bcd36302ee

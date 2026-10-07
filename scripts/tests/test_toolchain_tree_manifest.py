@@ -962,8 +962,9 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         )
         self.assertNotIn("/usr/bin/codesign --force", signed)
         self.assertNotIn("/usr/bin/codesign --force", helper)
+        # Five nested components, the SwiftUI library and the outer application.
         self.assertEqual(
-            helper.count("cfw_codesign_distribution_bundle --force"), 6
+            helper.count("cfw_codesign_distribution_bundle --force"), 7
         )
         self.assertEqual(helper.count("\numask 077\n"), 1)
         self.assertNotIn("\numask 022\n", helper)
@@ -974,7 +975,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertNotIn('--sign "$MACOS_SIGN_IDENTITY"', helper)
         self.assertEqual(
             helper.count('--sign "$CFW_SIGNING_CERTIFICATE_SHA1"'),
-            6,
+            7,
         )
         self.assertEqual(helper.count("cfw_run_release_python_script"), 3)
         self.assertNotIn('"$python_bin" -I', helper)
@@ -997,7 +998,6 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn('bundle_context="unsigned-host"', unsigned)
         self.assertIn(
             'if [[ $preview_validation -eq 1 ]]; then\n'
-            '  product_version="0.5.0"\n'
             '  build_version="50000"\n'
             '  candidate_relative="target/candidates/0.5.0/unsigned/50000"\n'
             '  bundle_context="unsigned-preview-host"',
@@ -1619,7 +1619,7 @@ LIBBOX_VET_PACKAGES=(".")
         readme = (REPOSITORY / "native/macos/README.md").read_text(encoding="utf-8")
         self.assertIn("export CFW_BUILD_NUMBER=40000", readme)
         self.assertIn(
-            "target/candidates/0.4.0/native-validation/40000/native-products",
+            "target/candidates/0.5.0/native-validation/40000/native-products",
             readme,
         )
         self.assertNotIn(

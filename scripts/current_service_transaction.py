@@ -95,7 +95,7 @@ INSTALLED_40019_ACTIONS: Final = install.BoundInstallProfile(
     install.GA_INSTALL_PROFILE, install.INSTALLED_40019_PREDECESSOR
 ).service_actions
 CURRENT_PREDECESSOR_ACTIONS: Final = install.BoundInstallProfile(
-    install.GA_INSTALL_PROFILE, install.INSTALLED_40072_PREDECESSOR
+    install.GA_INSTALL_PROFILE, install.INSTALLED_50025_PREDECESSOR
 ).service_actions
 if INSTALLED_40019_ACTIONS != (
     "prepare",
@@ -136,6 +136,7 @@ if (
         "40070": install.INSTALLED_40070_PREDECESSOR,
         "40071": install.INSTALLED_40071_PREDECESSOR,
         "40072": install.INSTALLED_40072_PREDECESSOR,
+        "50025": install.INSTALLED_50025_PREDECESSOR,
     }
 ):
     raise RuntimeError("service maintenance profile differs from active GA identity")
@@ -290,7 +291,8 @@ def _validate_app(value: object, label: str) -> dict[str, str]:
     }:
         raise install.InstallError("service_journal_invalid", f"{label} shape is invalid")
     if (
-        value.get("version") != install.VERSION
+        not isinstance(value.get("version"), str)
+        or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["version"]) is None
         or not isinstance(value.get("build_number"), str)
         or re.fullmatch(r"[1-9][0-9]*", value["build_number"]) is None
         or not isinstance(value.get("tree_sha256"), str)
@@ -318,6 +320,10 @@ def _validate_candidate(value: object) -> dict[str, str]:
         {key: value[key] for key in ("build_number", "tree_sha256", "version")},
         "candidate",
     )
+    if value["version"] != install.VERSION:
+        raise install.InstallError(
+            "service_journal_invalid", "candidate identity is not the fixed product version"
+        )
     for key in ("manifest_sha256", "release_source_sha256"):
         if not isinstance(value[key], str) or re.fullmatch(r"[0-9a-f]{64}", value[key]) is None:
             raise install.InstallError(

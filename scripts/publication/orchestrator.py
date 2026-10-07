@@ -1,4 +1,4 @@
-"""Atomic publication owner for the three fixed v0.4.0 GA stages."""
+"""Atomic publication owner for the three fixed v0.5.0 GA stages."""
 
 from __future__ import annotations
 

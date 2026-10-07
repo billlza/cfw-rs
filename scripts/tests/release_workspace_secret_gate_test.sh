@@ -34,13 +34,13 @@ mkdir -p "$fixture_repo/scripts"
 /bin/cp "$repo_root/scripts/release_secret_material_blocker.py" "$fixture_repo/scripts/"
 
 bash "$fixture_repo/scripts/release_workspace_secret_gate.sh"
-mkdir -p "$fixture_repo/target/candidates/0.4.0"
-: >"$fixture_repo/target/candidates/0.4.0/candidate.key"
+mkdir -p "$fixture_repo/target/candidates/0.5.0"
+: >"$fixture_repo/target/candidates/0.5.0/candidate.key"
 if bash "$fixture_repo/scripts/release_workspace_secret_gate.sh" >/dev/null 2>&1; then
   echo "error: direct no-argument execution did not scan target/candidates" >&2
   exit 1
 fi
-/bin/rm "$fixture_repo/target/candidates/0.4.0/candidate.key"
+/bin/rm "$fixture_repo/target/candidates/0.5.0/candidate.key"
 
 # Managed heavy roots are deliberately not traversed; generated and
 # unexpected target children remain in scope.
@@ -50,7 +50,7 @@ bash "$fixture_repo/scripts/release_workspace_secret_gate.sh" "$fixture_repo"
 
 for relative_key in \
   "target/tmp/transient.pem" \
-  "target/candidates/0.4.0/AuthKey_GENERATED.p8" \
+  "target/candidates/0.5.0/AuthKey_GENERATED.p8" \
   "target/release/historical.key" \
   "target/unexpected/unexpected.key"
 do
@@ -73,7 +73,7 @@ fi
 /bin/rm "$fixture_repo/target/symlinked-subtree"
 
 # Sourcing the script defines functions but must not execute the gate.
-: >"$fixture_repo/target/candidates/0.4.0/source-mode.key"
+: >"$fixture_repo/target/candidates/0.5.0/source-mode.key"
 bash -c 'source "$1"; declare -F verify_release_workspace_has_no_key_material >/dev/null; echo sourced' \
   bash "$fixture_repo/scripts/release_workspace_secret_gate.sh" \
   | /usr/bin/grep -qx sourced

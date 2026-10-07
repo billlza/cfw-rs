@@ -27,7 +27,7 @@ publication_artifact_repository="$(cfw_run_release_python_script \
   "$publication_repo_root/scripts/release_executor_source.py" \
   --print-frozen-artifact-repository)"
 readonly publication_artifact_repository
-readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.4.0/ga/40073"
+readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.5.0/ga/50026"
 readonly publication_native_products="$publication_ga_root/signing-output/signed-native-products"
 
 run_production_ga_stage() {
@@ -109,8 +109,8 @@ verify_release_publication_evidence() {
 }
 
 verify_release_upload_artifacts() {
-  [[ $# -eq 1 && "$1" == "0.4.0" ]] || {
-    echo "error: upload authorization is fixed to version 0.4.0" >&2
+  [[ $# -eq 1 && "$1" == "0.5.0" ]] || {
+    echo "error: upload authorization is fixed to version 0.5.0" >&2
     return 1
   }
   run_hosted_ci_receipt verify
@@ -118,7 +118,7 @@ verify_release_upload_artifacts() {
   run_release_artifact_set \
     verify-release \
     --repository "$publication_artifact_repository" \
-    --version "0.4.0"
+    --version "0.5.0"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -161,7 +161,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       run_release_artifact_set \
         seal-release \
         --repository "$publication_artifact_repository" \
-        --version "0.4.0"
+        --version "0.5.0"
       ;;
     --verify-prepackage)
       [[ $# -eq 2 ]] || {
@@ -188,7 +188,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       ;;
     --upload-assets)
       [[ $# -eq 2 ]] || {
-        echo "error: usage: release_publication_gate.sh --upload-assets 0.4.0" >&2
+        echo "error: usage: release_publication_gate.sh --upload-assets 0.5.0" >&2
         exit 2
       }
       verify_release_upload_artifacts "$2"

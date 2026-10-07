@@ -230,12 +230,15 @@ class AuthorityRecovery:
 class PredecessorProfile:
     """The installed application a GA install may legitimately replace.
 
-    The service vocabulary is a wire protocol spoken to the outgoing signed
-    Host, so it is selected from the observed predecessor rather than declared
-    in advance. Both vocabularies below are already implemented by the shipped
-    application; nothing here invents an action name.
+    The supported predecessors are the exact lineage of installs this tooling
+    performed: each is identified by its product version, build number and
+    retained tree digest. The service vocabulary is a wire protocol spoken to
+    the outgoing signed Host, so it is selected from the observed predecessor
+    rather than declared in advance. Both vocabularies below are already
+    implemented by the shipped application; nothing here invents an action name.
     """
 
+    product_version: str
     build_number: str
     tree_sha256: str
     off_proof_profile: str
@@ -253,6 +256,7 @@ class PredecessorProfile:
 # `previous` identity recorded in the sealed 40019 -> 40041 install journal; it
 # cannot be re-observed because 40019 is no longer installed anywhere.
 INSTALLED_40019_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40019",
     tree_sha256="527ac309a3047fb5aa1ec8eebacd759de3cba8fc71c5f2b1910d0827dcf4b225",
     off_proof_profile=INSTALLED_40019_OFF_PROOF_PROFILE,
@@ -269,6 +273,7 @@ INSTALLED_40019_PREDECESSOR: Final = PredecessorProfile(
 # signed-application tree, independently recorded by the install journal's
 # `candidate` entry and by the DMG release seal.
 INSTALLED_40041_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40041",
     tree_sha256="d7b12dc1659ab0d812a249219195697f946329dbdd3fcf6b5f07b43a4c04ca37",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -281,6 +286,7 @@ INSTALLED_40041_PREDECESSOR: Final = PredecessorProfile(
 # tree is independently bound by the signed-app manifest and the completed
 # 40041 -> 40043 install journal; neither historical record is rewritten.
 INSTALLED_40043_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40043",
     tree_sha256="429d40db9095775a9498a9445799025536c88ff4e900dde14f7a018d8723edf5",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -293,6 +299,7 @@ INSTALLED_40043_PREDECESSOR: Final = PredecessorProfile(
 # signed tree remains bound by the original app manifest, both package seals
 # and the closed 40043 -> 40044 install journal.
 INSTALLED_40044_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40044",
     tree_sha256="41ae01c3903f8ab644d74c5ff185a282a5978e4b0a8376198518046408745248",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -305,6 +312,7 @@ INSTALLED_40044_PREDECESSOR: Final = PredecessorProfile(
 # exact notarized signed tree is preserved by the original application
 # manifest and the completed 40044 -> 40045 installation.
 INSTALLED_40045_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40045",
     tree_sha256="c5bf15b493b90b846705d93456c7695c3522f72d465a6dab47f70a6bdbcc4baf",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -316,6 +324,7 @@ INSTALLED_40045_PREDECESSOR: Final = PredecessorProfile(
 # Build 40046 retains the current service vocabulary. Its notarized tree is
 # bound by the original signed-app manifest and the closed 40045 -> 40046 install.
 INSTALLED_40046_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40046",
     tree_sha256="49f6b28e70b5e3bde5d86179f0c47a8e2e2ce29bca69c04b7d160d852f448e22",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -327,6 +336,7 @@ INSTALLED_40046_PREDECESSOR: Final = PredecessorProfile(
 # Build 40047 retains the current service vocabulary. Its notarized tree is
 # bound by the original signed-app manifest and the closed 40046 -> 40047 install.
 INSTALLED_40047_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40047",
     tree_sha256="7195dd5922cbf6cf38284c2aba83619cb727c1638f52559add6d780fb853b593",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -338,6 +348,7 @@ INSTALLED_40047_PREDECESSOR: Final = PredecessorProfile(
 # Build 40048 retains the current service vocabulary. Its notarized tree is
 # bound by the original signed-app manifest and the closed 40047 -> 40048 install.
 INSTALLED_40048_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40048",
     tree_sha256="dad5b7aae1667c8448b0ecfe0dce6956bf8ca9fc1f1767a253d57723b088abe7",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -349,6 +360,7 @@ INSTALLED_40048_PREDECESSOR: Final = PredecessorProfile(
 # The installed 40067 tree was compared byte-for-byte with its retained
 # notarized application. It uses the current native maintenance vocabulary.
 INSTALLED_40067_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40067",
     tree_sha256="c9788097d4c64c5801b6f2d6af1a70451c1441e17a47baf0b036c82d2306b38e",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -360,6 +372,7 @@ INSTALLED_40067_PREDECESSOR: Final = PredecessorProfile(
 # The installed 40068 and retained notarized app were independently hashed and
 # matched before allocating the ticket-startup correction.
 INSTALLED_40068_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40068",
     tree_sha256="422197244ef7f336b529f03d51d012a52b25d555178014c70dd519c8ee3e216c",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -371,6 +384,7 @@ INSTALLED_40068_PREDECESSOR: Final = PredecessorProfile(
 # Installed 40069 and its retained notarized app independently match this tree.
 # The IPv6 DNS switch changes product bytes while preserving this predecessor.
 INSTALLED_40069_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40069",
     tree_sha256="edca78995aacfbb35247e76e7f6aefa451c974e1b4cce4376cf0e1adfb7a91d5",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -383,6 +397,7 @@ INSTALLED_40069_PREDECESSOR: Final = PredecessorProfile(
 # The bounded dashboard-startup correction changes product bytes while keeping
 # the current engine v6 / Authority v1.1 maintenance vocabulary.
 INSTALLED_40070_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40070",
     tree_sha256="9adab1e77ce478799253e7fa5fc9e0314e2ee2b9b5a8ec8830782fcbb1b9e03f",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -394,6 +409,7 @@ INSTALLED_40070_PREDECESSOR: Final = PredecessorProfile(
 # The installed and retained notarized 40071 bundle was rehashed before this
 # successor was allocated. Its service vocabulary is unchanged.
 INSTALLED_40071_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40071",
     tree_sha256="78dce25dc8db98498f5637c47ad37e297451a81fe2f53f841c225d5486fd4754",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
@@ -404,8 +420,21 @@ INSTALLED_40071_PREDECESSOR: Final = PredecessorProfile(
 )
 # Exact installed and retained notarized predecessor; service vocabulary unchanged.
 INSTALLED_40072_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
     build_number="40072",
     tree_sha256="5951216697f671fc241605cb97b895e5ad8a668ca6601c92ab2efdaa5173beb1",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
+# Exact installed and retained notarized 0.5.0 preview predecessor; service
+# vocabulary unchanged.
+INSTALLED_50025_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.0",
+    build_number="50025",
+    tree_sha256="d5a8a7f951fa3530ed0fa1982cc01ac7b9d6ec1b7f4579ec59883f99303302b9",
     off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
     prove_off_action="prove-off",
     unregister_proxy_action="unregister-proxy-agent",
@@ -428,6 +457,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40070_PREDECESSOR.build_number: INSTALLED_40070_PREDECESSOR,
         INSTALLED_40071_PREDECESSOR.build_number: INSTALLED_40071_PREDECESSOR,
         INSTALLED_40072_PREDECESSOR.build_number: INSTALLED_40072_PREDECESSOR,
+        INSTALLED_50025_PREDECESSOR.build_number: INSTALLED_50025_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (
@@ -879,16 +909,17 @@ def resolve_predecessor(observed: AppIdentity, candidate_build: str) -> Predeces
     number: the build number alone is an unauthenticated bundle string.
     """
 
-    if observed.version != VERSION:
-        raise InstallError(
-            "install_identity_mismatch",
-            f"installed application version {observed.version} is not {VERSION}",
-        )
     predecessor = SUPPORTED_PREDECESSORS.get(observed.build_number)
     if predecessor is None:
         raise InstallError(
             "predecessor_unsupported",
             f"installed build {observed.build_number} is not a supported install predecessor",
+        )
+    if observed.version != predecessor.product_version:
+        raise InstallError(
+            "install_identity_mismatch",
+            f"installed build {observed.build_number} version {observed.version} is not "
+            f"its recorded product version {predecessor.product_version}",
         )
     if observed.tree_sha256 != predecessor.tree_sha256:
         raise InstallError(
@@ -915,6 +946,12 @@ def bind_journal_predecessor(previous: AppIdentity) -> PredecessorProfile:
         raise InstallError(
             "predecessor_unsupported",
             f"journalled build {previous.build_number} is not a supported install predecessor",
+        )
+    if previous.version != predecessor.product_version:
+        raise InstallError(
+            "install_identity_mismatch",
+            f"journalled build {previous.build_number} version {previous.version} is not "
+            f"its recorded product version {predecessor.product_version}",
         )
     if previous.tree_sha256 != predecessor.tree_sha256:
         raise InstallError(
@@ -2781,9 +2818,16 @@ def _validate_sha256(value: object, label: str) -> str:
 
 
 def _validate_app_document(value: object, label: str) -> dict[str, str]:
+    """Validate the shape of a recorded application identity.
+
+    The version is bound later against the identity it names: the candidate
+    against the fixed GA identity, the predecessor against its lineage entry.
+    """
+
     document = _strict_dict(value, {"build_number", "tree_sha256", "version"}, label)
-    if document["version"] != VERSION:
-        raise InstallError("journal_invalid", f"{label} has the wrong version")
+    version = document["version"]
+    if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        raise InstallError("journal_invalid", f"{label} version is invalid")
     try:
         build_number = canonical_build_version(
             document["build_number"], f"{label} build number"
@@ -2794,7 +2838,7 @@ def _validate_app_document(value: object, label: str) -> dict[str, str]:
     return {
         "build_number": build_number,
         "tree_sha256": tree_sha256,
-        "version": VERSION,
+        "version": version,
     }
 
 
@@ -3375,7 +3419,7 @@ def validate_journal(
     if not isinstance(candidate["repository_commit"], str) or re.fullmatch(r"[0-9a-f]{40}", candidate["repository_commit"]) is None:
         raise InstallError("journal_invalid", "candidate repository commit is invalid")
     previous_app = _validate_app_document(document["previous"], "previous application")
-    if candidate_app["build_number"] != profile.build_number:
+    if candidate_app["version"] != VERSION or candidate_app["build_number"] != profile.build_number:
         raise InstallError(
             "journal_invalid",
             "installation journal is not for the fixed GA identity",
@@ -4255,7 +4299,7 @@ def main() -> None:
         raise SystemExit(f"error: {code}: {error}") from error
     print(
         f"dormant install transaction {result['phase']}: "
-        f"0.4.0 ({result['candidate']['build_number']}); application was not launched"
+        f"0.5.0 ({result['candidate']['build_number']}); application was not launched"
     )
 
 

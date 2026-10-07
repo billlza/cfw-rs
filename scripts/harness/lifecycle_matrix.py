@@ -1648,7 +1648,7 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         )
     proof = parse_proof_binding(document["proof"])
     if proof["candidate"]["version"] != PRODUCT_VERSION:
-        raise LifecycleMatrixError("lifecycle matrix is not for version 0.4.0")
+        raise LifecycleMatrixError("lifecycle matrix is not for version 0.5.0")
     environment = _environment(document["environment"])
     probes = document["probes"]
     if not isinstance(probes, list) or len(probes) != len(REQUIRED_PROBES):

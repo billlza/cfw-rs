@@ -24,7 +24,7 @@ else:
     )
 
 
-PRODUCT_VERSION = "0.4.0"
+PRODUCT_VERSION = "0.5.0"
 POSITIVE_INTEGER_RE = re.compile(r"^[1-9][0-9]*$")
 MAX_BUILD_VERSION = 9_223_372_036_854_775_807
 MAX_BUILD_VERSION_TEXT = str(MAX_BUILD_VERSION)
@@ -81,7 +81,7 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40073")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "50026")
 PREVIEW_PRODUCT_VERSION: Final = "0.5.0"
 SIGNED_PREVIEW_BUILD: Final = "50025"
 
@@ -228,6 +228,29 @@ def bundle_build_identity(
         raise BuildIdentityError(f"Host/Agent/System Extension build versions differ: {identities}")
     return BundleBuildIdentity(expected_product_version, unique.pop())
 
+
+
+def _preview_namespaces(repository: Path) -> tuple[Path, Path, Path]:
+    """The candidate directories that only preview contexts may verify.
+
+    Preview and release identities share one product version, so the two
+    families are told apart by their fixed candidate subdirectories rather
+    than by version. The 40000 unsigned validation skeleton keeps its own
+    ``unsigned/native-products`` output beside the ``unsigned/50000`` preview
+    validation root and belongs to neither family.
+    """
+    base = repository / f"target/candidates/{PREVIEW_PRODUCT_VERSION}"
+    return (
+        base / "unsigned" / UNSIGNED_PREVIEW_VALIDATION_BUILD,
+        base / "preview-preflight",
+        base / "preview",
+    )
+
+
+def _ga_namespaces(repository: Path) -> tuple[Path, Path]:
+    """The candidate directories that only GA contexts may verify."""
+    base = repository / f"target/candidates/{PRODUCT_VERSION}"
+    return (base / "ga-preflight", base / "ga")
 
 def unsigned_preview_root(repository: Path) -> Path:
     return repository / f"target/candidates/{PREVIEW_PRODUCT_VERSION}/unsigned/{UNSIGNED_PREVIEW_VALIDATION_BUILD}"
@@ -517,14 +540,17 @@ def candidate_bundle_verification_paths(
         return _preview_bundle_verification_paths(
             canonical_repository, app_path, native_path, context
         )
-    preview_namespace = canonical_repository / f"target/candidates/{PREVIEW_PRODUCT_VERSION}"
-    if app_path.is_relative_to(preview_namespace) or native_path.is_relative_to(preview_namespace):
+    if any(
+        path.is_relative_to(namespace)
+        for path in (app_path, native_path)
+        for namespace in _preview_namespaces(canonical_repository)
+    ):
         raise BuildIdentityError("preview paths cannot be verified through a GA context")
     identity = bundle_build_identity(app_path)
 
     if context is CandidateBundleContext.UNSIGNED_HOST:
         if identity.build_version not in (UNSIGNED_VALIDATION_BUILD, ACTIVE_RELEASE_IDENTITY.ga_build):
-            raise BuildIdentityError("unsigned Host is not an admitted 0.4.0 build")
+            raise BuildIdentityError("unsigned Host is not an admitted 0.5.0 build")
         expected_native = candidate_native_products_output(
             canonical_repository,
             str(native_path),
@@ -651,8 +677,11 @@ def _preview_bundle_verification_paths(
     native: Path,
     context: CandidateBundleContext,
 ) -> CandidateBundleVerificationPaths:
-    ga_namespace = repository / f"target/candidates/{PRODUCT_VERSION}"
-    if app.is_relative_to(ga_namespace) or native.is_relative_to(ga_namespace):
+    if any(
+        path.is_relative_to(namespace)
+        for path in (app, native)
+        for namespace in _ga_namespaces(repository)
+    ):
         raise BuildIdentityError("GA paths cannot be verified through a preview context")
     identity = bundle_build_identity(app, expected_product_version=PREVIEW_PRODUCT_VERSION)
     if identity != BundleBuildIdentity(PREVIEW_PRODUCT_VERSION, SIGNED_PREVIEW_BUILD):

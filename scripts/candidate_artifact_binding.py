@@ -266,7 +266,7 @@ def validate_candidate_app_manifest(
         **expected_source,
         **toolchain_metadata,
         "teamID": team_id,
-        "version": "0.4.0",
+        "version": "0.5.0",
     }
     if document.get("metadata") != dict(sorted(expected_metadata.items())):
         raise CandidateBindingError(

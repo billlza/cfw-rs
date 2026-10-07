@@ -20,6 +20,7 @@ if __package__:
     from .hash_artifact import build_manifest
     from .hash_native_build_inputs import build_digest as native_build_digest
     from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
         CandidateBundleContext,
         PRODUCT_VERSION,
         SIGNED_PREVIEW_IDENTITY,
@@ -35,6 +36,7 @@ else:
     from hash_artifact import build_manifest
     from hash_native_build_inputs import build_digest as native_build_digest
     from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
         CandidateBundleContext,
         PRODUCT_VERSION,
         SIGNED_PREVIEW_IDENTITY,
@@ -420,7 +422,7 @@ def classify_binary(path: Path) -> bool:
     return macho
 
 
-def verify_preview_ui(
+def verify_native_ui(
     repository: Path,
     app: Path,
     native_products: Path,
@@ -428,16 +430,19 @@ def verify_preview_ui(
     context: CandidateBundleContext,
 ) -> None:
     unsigned = context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST
-    if context not in PREVIEW_CONTEXTS and not unsigned:
-        raise CandidateError("native UI bundle verification requires a preview context")
     if unsigned:
         signing = "unsigned-validation"
         build = UNSIGNED_PREVIEW_VALIDATION_BUILD
         ui_context = native_ui_artifact.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
-    else:
+    elif context in PREVIEW_CONTEXTS:
         signing = "pre-sign" if context is CandidateBundleContext.PREVIEW_PRE_SIGN else "developer-id"
         build = SIGNED_PREVIEW_IDENTITY.build_number
         ui_context = native_ui_artifact.NativeUiContext.SIGNED_PREVIEW
+    else:
+        # The 0.5.0 release carries the same SwiftUI library as its previews.
+        signing = "pre-sign" if context is CandidateBundleContext.UNSIGNED_HOST else "developer-id"
+        build = ACTIVE_RELEASE_IDENTITY.ga_build
+        ui_context = native_ui_artifact.NativeUiContext.RELEASE
     try:
         # Validate the staged bytes and their exact source/toolchain metadata
         # before comparing the embedded copies against those same manifests.
@@ -464,10 +469,10 @@ def verify_preview_ui(
             metadata,
         )
     except (ValueError, OSError, SourceIdentityError, subprocess.SubprocessError) as error:
-        raise CandidateError(f"preview UI artifact verification failed: {error}") from error
+        raise CandidateError(f"native UI artifact verification failed: {error}") from error
 
 
-def verify_preview_host_links(linked_libraries: str, load_commands: str) -> None:
+def verify_native_ui_host_links(linked_libraries: str, load_commands: str) -> None:
     dependencies = [
         line.strip().split(" (", 1)[0] for line in linked_libraries.splitlines()[1:]
     ]
@@ -514,6 +519,9 @@ def verify_candidate(
     unsigned_preview = context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST
     preview = context in PREVIEW_CONTEXTS or unsigned_preview
     expected_version = SIGNED_PREVIEW_IDENTITY.product_version if preview else EXPECTED_VERSION
+    # Every 0.5.0 application carries the SwiftUI library; only the retired
+    # 40000 unsigned validation lane of the 0.4.0 line does not.
+    native_ui = preview or build_identity.build_version == ACTIVE_RELEASE_IDENTITY.ga_build
     native_metadata = current_native_build_metadata(repository)
     if unsigned_preview:
         native_metadata = {**native_metadata, "signingMode": "unsigned-validation"}
@@ -643,8 +651,8 @@ def verify_candidate(
         build_identity.build_version,
         native_metadata,
     )
-    if preview:
-        verify_preview_ui(repository, app, native_products, context=context)
+    if native_ui:
+        verify_native_ui(repository, app, native_products, context=context)
     staged_tombstone = native_products / "CFWLegacyTombstone/cfw-helper-tombstone"
     require_regular_file(staged_tombstone)
     if sha256(tombstone) != sha256(staged_tombstone):
@@ -729,8 +737,8 @@ def verify_candidate(
     load_commands = command_output(["otool", "-l", str(main_binary)])
     if "path @executable_path/../Frameworks" not in load_commands:
         raise CandidateError("host executable has no bundle-relative Frameworks rpath")
-    if preview:
-        verify_preview_host_links(main_links, load_commands)
+    if native_ui:
+        verify_native_ui_host_links(main_links, load_commands)
 
     print(f"candidate bundle verified: {app}")
     print(

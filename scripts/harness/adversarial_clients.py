@@ -57,7 +57,7 @@ else:  # pragma: no cover - direct-script import path
 
 SCHEMA_VERSION: Final = 3
 HARNESS_VERSION: Final = "adversarial-clients-v3"
-PRODUCT_VERSION: Final = "0.4.0"
+PRODUCT_VERSION: Final = "0.5.0"
 MAX_REPORT_BYTES: Final = 1 * 1024 * 1024
 MAX_OBSERVATION_BYTES: Final = 1 * 1024 * 1024
 MAX_SIGNATURE_BYTES: Final = 256 * 1024
@@ -1873,7 +1873,7 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         )
     proof = parse_proof_binding(document["proof"])
     if proof["candidate"]["version"] != PRODUCT_VERSION:
-        raise AdversarialMatrixError("adversarial evidence is not for version 0.4.0")
+        raise AdversarialMatrixError("adversarial evidence is not for version 0.5.0")
     _platform(document["platform"])
 
     entries: dict[str, dict[str, Any]] = {}

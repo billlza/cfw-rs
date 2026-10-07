@@ -286,11 +286,11 @@ fn verify_release_native_ui(repository_root: &Path) -> Result<(), String> {
     let products = candidate_native_products_root(repository_root)?;
     if !matches!(
         products.context,
-        native_product_input::NativeProductContext::PreviewPreSign
+        native_product_input::NativeProductContext::GaPreSign
             | native_product_input::NativeProductContext::UnsignedPreviewValidation
     ) {
         return Err(
-            "native-ui release inputs require a closed signed or unsigned preview context".into(),
+            "native-ui release inputs require the GA pre-sign or unsigned preview validation context".into(),
         );
     }
     let script = repository_root.join("scripts/build_native_ui.sh");

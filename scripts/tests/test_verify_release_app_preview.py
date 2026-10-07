@@ -30,7 +30,7 @@ class SignedPreviewShellTests(unittest.TestCase):
 
     def test_signed_contexts_select_fixed_independent_version_and_preflight_paths(self) -> None:
         for prefix, version, build, preflight in (
-            ("", "0.4.0", "40073", "target/candidates/0.4.0/ga/40073"),
+            ("", "0.5.0", "50026", "target/candidates/0.5.0/ga/50026"),
             ("preview-", "0.5.0", "50025", "target/candidates/0.5.0/preview-preflight/50025"),
         ):
             for stage in ("signing-attempt-work", "signing-attempt-publish-ready", "canonical-native-content"):
@@ -39,13 +39,13 @@ class SignedPreviewShellTests(unittest.TestCase):
                     result = self.run_function(
                         'configure_release_verification_context "$1" 1; '
                         'printf "%s\\n" "$expected_version" "$expected_build_number" '
-                        '"$signing_preflight_manifest" "$pre_sign_native_products_root" "$preview_ui"',
+                        '"$signing_preflight_manifest" "$pre_sign_native_products_root"',
                         context,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout.splitlines(), [
                         version, build, str(REPOSITORY / preflight / "profiles/signing-preflight.json"),
-                        str(REPOSITORY / preflight / "native-products"), "1" if prefix else "0",
+                        str(REPOSITORY / preflight / "native-products"),
                     ])
 
     def test_unsigned_unknown_and_post_notary_private_contexts_are_rejected(self) -> None:

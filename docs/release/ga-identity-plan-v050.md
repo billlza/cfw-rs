@@ -1,16 +1,17 @@
-# 0.5.0 release identity plan (draft, not allocated)
+# 0.5.0 release identity
 
-This document proposes how the 0.5.0 line obtains a releasable identity under
+This document records how the 0.5.0 line obtained its releasable identity under
 the existing single-GA policy
 ([`ga-assurance-policy-v040.md`](ga-assurance-policy-v040.md)) and the
 forward-only lifecycle
-([`candidate-identity-lifecycle.md`](candidate-identity-lifecycle.md)). It
-allocates nothing: until the product decision in the first section is taken,
-`active_ga` stays 40073 in
-[`build-allocations-v040.json`](build-allocations-v040.json), and the 0.5.0
-previews stay what they are today, signed preview identities that
-`release_build_identity.py` tracks as `SIGNED_PREVIEW_BUILD` and that the
-release verifiers accept only with `--preview`.
+([`candidate-identity-lifecycle.md`](candidate-identity-lifecycle.md)).
+On 2026-10-07 ordering 1 below was chosen; the allocation in §2 and the
+tooling delta in §3 are applied on the branch. 40073 is retired in
+[`ga-build-40073-retirement.md`](ga-build-40073-retirement.md) and the
+v0.4.0 ledger is closed. The last signed preview, 50025, stays recorded as
+`SIGNED_PREVIEW_BUILD` only as the retained predecessor of the 50025 → 50026
+migration evidence; `verify_version_contract.py` checks the one release identity
+(its `--preview` selector and the preview build chain were removed on 2026-10-07).
 
 ## 1. Decision required first
 
@@ -86,8 +87,8 @@ superseded by the next preview). 50025 is the currently installed preview.
 ## 3. Tooling delta before the ledger can exist
 
 - `scripts/release_build_identity.py`: `PRODUCT_VERSION` becomes `0.5.0` and
-  the active release identity becomes 50026; `SIGNED_PREVIEW_BUILD` and the
-  `--preview` path stay for later 0.5.x previews.
+  the active release identity becomes 50026; `SIGNED_PREVIEW_BUILD` stays only
+  as the retained predecessor record (the `--preview` selector was removed).
 - `scripts/verify_release_build_allocations.py`: ledger path and the three
   frozen tables (`IMMUTABLE_RETIRED_PREFIX`, `POLICY_SUPERSEDED_ALLOCATION`,
   `RETIRED_GA_ALLOCATIONS`) are v0.4.0 constants. They need a per-version

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the frozen release, or the explicitly selected signed-preview version."""
+"""Verify that every version surface carries the one fixed release identity."""
 
 from __future__ import annotations
 
@@ -11,19 +11,20 @@ from pathlib import Path
 
 if __package__:
     from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
         PRODUCT_VERSION,
-        SIGNED_PREVIEW_IDENTITY,
         canonical_build_version,
     )
 else:
     from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
         PRODUCT_VERSION,
-        SIGNED_PREVIEW_IDENTITY,
         canonical_build_version,
     )
 
 
 EXPECTED_VERSION = PRODUCT_VERSION
+EXPECTED_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 PRODUCT_PACKAGES = frozenset(
     {
         "cfw-apple-network",
@@ -64,8 +65,9 @@ def package_versions(repository: Path) -> dict[str, str]:
     return versions
 
 
-def verify(repository: Path, *, preview: bool = False) -> None:
-    expected_version = SIGNED_PREVIEW_IDENTITY.product_version if preview else EXPECTED_VERSION
+def verify(repository: Path) -> None:
+    expected_version = EXPECTED_VERSION
+    expected_build = EXPECTED_BUILD
     versions = package_versions(repository)
     wrong = {name: version for name, version in versions.items() if version != expected_version}
     if wrong:
@@ -117,8 +119,8 @@ def verify(repository: Path, *, preview: bool = False) -> None:
             f"Xcode CFW_BUILD_NUMBER must occur once: {build_numbers}"
         )
     canonical_build_version(build_numbers[0], "Xcode CFW_BUILD_NUMBER")
-    if preview and build_numbers[0] != SIGNED_PREVIEW_IDENTITY.build_number:
-        raise ValueError("Xcode preview build differs from the fixed signed-preview identity")
+    if build_numbers[0] != expected_build:
+        raise ValueError("Xcode build differs from the fixed release identity")
     current_project_versions = re.findall(
         r"^\s*CURRENT_PROJECT_VERSION:\s*([^\s#]+)\s*$", project, re.M
     )
@@ -139,42 +141,39 @@ def verify(repository: Path, *, preview: bool = False) -> None:
     if not headings or headings[0] != expected_version:
         raise ValueError(f"the first changelog release is not {expected_version}")
 
-    if preview:
-        admission = (repository / "apps/cfw-tauri-shell/src/legacy/admission.rs").read_text(encoding="utf-8")
-        for constant, expected in (("RELEASE_VERSION", expected_version), ("RELEASE_BUILD", SIGNED_PREVIEW_IDENTITY.build_number)):
-            values = re.findall(rf'^const {constant}: &str = "([^"]+)";$', admission, re.M)
-            if values != [expected]:
-                raise ValueError(f"runtime migration admission {constant} differs from preview identity")
-        observation = (
-            repository / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
-        ).read_text(encoding="utf-8")
-        for name, expected in (
-            ("previewProductVersion", SIGNED_PREVIEW_IDENTITY.product_version),
-            ("previewBuildNumber", SIGNED_PREVIEW_IDENTITY.build_number),
-        ):
-            values = re.findall(
-                rf'^\s*static let {name} = "([^"]+)"$', observation, re.M
+    admission = (repository / "apps/cfw-tauri-shell/src/legacy/admission.rs").read_text(encoding="utf-8")
+    for constant, expected in (("RELEASE_VERSION", expected_version), ("RELEASE_BUILD", expected_build)):
+        values = re.findall(rf'^const {constant}: &str = "([^"]+)";$', admission, re.M)
+        if values != [expected]:
+            raise ValueError(
+                f"runtime migration admission {constant} differs from the release identity"
             )
-            if values != [expected]:
-                raise ValueError(f"native release observation {name} differs from preview identity")
+    observation = (
+        repository / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
+    ).read_text(encoding="utf-8")
+    for name, expected in (
+        ("releaseProductVersion", expected_version),
+        ("releaseBuildNumber", expected_build),
+    ):
+        values = re.findall(
+            rf'^\s*static let {name} = "([^"]+)"$', observation, re.M
+        )
+        if values != [expected]:
+            raise ValueError(f"native release observation {name} differs from the release identity")
 
     print(
-        f"version contract verified: {expected_version} ({'signed preview' if preview else 'release'}) "
+        f"version contract verified: {expected_version} (release {expected_build}) "
         f"across {len(versions)} Cargo packages and lock entries, cfw-core, Tauri, "
-        "Xcode marketing/build identity, and changelog"
+        "Xcode marketing/build identity, runtime admission, native observation, and changelog"
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--preview", action="store_true",
-        help="explicitly verify the fixed 0.5.0/50025 signed preview; default remains 0.4.0",
-    )
-    arguments = parser.parse_args()
+    parser.parse_args()
     repository = Path(__file__).resolve().parent.parent
     try:
-        verify(repository, preview=arguments.preview)
+        verify(repository)
     except (OSError, ValueError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
         raise SystemExit(f"error: version contract failed: {error}") from error
 

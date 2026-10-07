@@ -257,7 +257,7 @@ fn classify_legacy_gui_processes(
     match remaining.as_slice() {
         [] if expectation == LegacyGuiExpectation::Absent => Ok(None),
         [] => Err(
-            "upgrade cutover requires exactly one legacy GUI after excluding the ticket-bound 0.4.0 parent"
+            "upgrade cutover requires exactly one legacy GUI after excluding the ticket-bound parent"
                 .into(),
         ),
         [legacy] if expectation == LegacyGuiExpectation::Required => Ok(Some(legacy.clone())),
@@ -266,7 +266,7 @@ fn classify_legacy_gui_processes(
                 .into(),
         ),
         _ => Err(
-            "multiple legacy GUI identities remain after excluding the ticket-bound 0.4.0 parent"
+            "multiple legacy GUI identities remain after excluding the ticket-bound parent"
                 .into(),
         ),
     }

@@ -510,7 +510,7 @@ impl ConsumedHandoffTicket {
     pub(crate) fn require_parent_absent(&self) -> Result<(), String> {
         if !self.parent_absent()? {
             Err(
-                "the ticket-bound 0.4.0 dashboard parent is still running; cutover remains blocked"
+                "the ticket-bound dashboard parent is still running; cutover remains blocked"
                     .into(),
             )
         } else {

@@ -7,11 +7,13 @@ source "$repo_root/scripts/dependency_pins.env"
 source "$repo_root/scripts/release_tool_environment.sh"
 operation=build
 unsigned_preview=0
+release=0
 for argument in "$@"; do
   case "$argument" in
     --verify) [[ "$operation" == build ]] || exit 2; operation=verify ;;
-    --unsigned-preview-validation) [[ $unsigned_preview -eq 0 ]] || exit 2; unsigned_preview=1 ;;
-    *) echo "usage: scripts/build_native_ui.sh [--verify] [--unsigned-preview-validation]" >&2; exit 2 ;;
+    --unsigned-preview-validation) [[ $unsigned_preview -eq 0 && $release -eq 0 ]] || exit 2; unsigned_preview=1 ;;
+    --release) [[ $release -eq 0 && $unsigned_preview -eq 0 ]] || exit 2; release=1 ;;
+    *) echo "usage: scripts/build_native_ui.sh [--verify] [--unsigned-preview-validation|--release]" >&2; exit 2 ;;
   esac
 done
 if [[ $unsigned_preview -eq 1 ]]; then
@@ -31,5 +33,7 @@ artifact_command=(
 )
 if [[ $unsigned_preview -eq 1 ]]; then
   artifact_command+=(--unsigned-preview-validation)
+elif [[ $release -eq 1 ]]; then
+  artifact_command+=(--release)
 fi
 "${artifact_command[@]}"

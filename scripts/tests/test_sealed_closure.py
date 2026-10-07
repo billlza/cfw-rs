@@ -123,7 +123,7 @@ def _artifact_manifest() -> dict:
 
 def _request(**overrides) -> dict:
     request = {
-        "product": {"name": "Clash for Mac", "version": "0.4.0", "build_number": "40000"},
+        "product": {"name": "Clash for Mac", "version": "0.5.0", "build_number": "40000"},
         "commit": _sha("commit")[:40],
         "sbom": _sbom_graph(),
         "ccs": {"sha256": _sha("ccs-tree"), "archive_sha256": _sha("ccs-archive")},
@@ -309,7 +309,7 @@ class SealedClosureRejectionTests(unittest.TestCase):
 
 class CrossConsistentGraphTests(unittest.TestCase):
     def test_dependency_graph_must_cover_every_component(self) -> None:
-        product = {"name": "Clash for Mac", "version": "0.4.0", "build_number": "40000"}
+        product = {"name": "Clash for Mac", "version": "0.5.0", "build_number": "40000"}
         graph = _sbom_graph()
         from scripts.publication.sealed_closure import _sbom_graph as normalize
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal or verify the three fixed v0.4.0 GA release stages."""
+"""Seal or verify the three fixed v0.5.0 GA release stages."""
 
 from __future__ import annotations
 

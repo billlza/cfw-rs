@@ -86,7 +86,7 @@ def fixture() -> dict:
         )
     return {
         "schema_version": 1,
-        "product": {"version": "0.4.0", "build_number": "40000"},
+        "product": {"version": "0.5.0", "build_number": "50026"},
         "app_manifest_sha256": "b" * 64,
         "captured_at": "2026-07-22T00:00:00Z",
         "platform": {

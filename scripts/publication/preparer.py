@@ -66,7 +66,7 @@ def expected_blocker_report(repository: Path) -> Path:
 def require_fixed_signed_app(repository: Path, app: Path) -> Path:
     expected = signed_app(repository)
     if app.is_symlink() or not app.is_dir():
-        raise PublicationError("0.4.0 signed app is absent or is a symlink")
+        raise PublicationError("0.5.0 signed app is absent or is a symlink")
     require_fixed_path(app, expected, "signed app", repository=repository)
     return app.resolve(strict=True)
 
@@ -184,7 +184,7 @@ def _review_records(path: Path, seeds: dict[str, ComponentSeed]) -> dict[str, di
             "version": RELEASE_VERSION,
         }
     ):
-        raise PublicationError("reviewed component input is not for the fixed 0.4.0 product")
+        raise PublicationError("reviewed component input is not for the fixed 0.5.0 product")
     raw_records = document["components"]
     if not isinstance(raw_records, list):
         raise PublicationError("reviewed component input is not an array")

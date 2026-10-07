@@ -52,7 +52,7 @@ class CandidateFixture:
         self.context = context
         self.unsigned_preview = context is ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST
         self.preview = context in bundle.PREVIEW_CONTEXTS or self.unsigned_preview
-        self.version = "0.5.0" if self.preview else "0.4.0"
+        self.version = "0.5.0"
         self.build = "50000" if self.unsigned_preview else "50025" if self.preview else "40000"
         self.signing = "pre-sign"
         private = []
@@ -65,7 +65,7 @@ class CandidateFixture:
             self.native = ids.preview_native_products_root(repository)
         elif context is ids.CandidateBundleContext.UNSIGNED_HOST:
             self.app = repository / "unsigned" / ids.SIGNED_APP_NAME
-            self.native = repository / "target/candidates/0.4.0/unsigned/native-products"
+            self.native = repository / "target/candidates/0.5.0/unsigned/native-products"
         elif context is ids.CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT:
             self.signing = "developer-id"
             self.app = ids.preview_root(repository) / "signed" / ids.SIGNED_APP_NAME
@@ -313,7 +313,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.PREVIEW_PRE_SIGN)
             path = fixture.app / relative
             value = plistlib.loads(path.read_bytes())
-            value["CFBundleVersion"] = "40073"
+            value["CFBundleVersion"] = "50026"
             write_plist(path, value)
             with self.subTest(component=relative), self.assertRaises(bundle.CandidateError):
                 self.verify(fixture)

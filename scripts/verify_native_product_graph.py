@@ -120,10 +120,10 @@ AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
 # not an authentication mechanism and do not defend against the repository
 # owner. The release-freeze source digest independently binds the raw file.
 AUTHORITY_SIGNING_PREFIX_SHA256 = (
-    "4b610451278932f1761370ab7c61bace4e8735bee30d646bc63c093d01f8ab56"
+    "3bf6896f1d6aae55c0d5ff645fda858158ff670ef82128500dcea4b012a0a4d3"
 )
 AUTHORITY_SIGNING_SUFFIX_SHA256 = (
-    "6e0f0d550090308bd0996bb78ba4bee600ea5a8a384cfe0f2fedd380e16e6ee2"
+    "79e8f557b22e2017920c6f91d65900c26cf8d75fce58cd3a28daaf0527cc1b89"
 )
 DEPLOYMENT_TARGET = "15.0"
 TOMBSTONE_PROVENANCE_COMMAND = "\n".join(
@@ -967,6 +967,7 @@ def verify_signing_order(
         f"Contents/{AGENT_EMBED}": "proxy_app",
         f"Contents/{EXTENSION_EMBED}": "packet_extension",
         "Contents/Library/HelperTools/cfw-helper-tombstone": "tombstone",
+        "Contents/Frameworks/libCFMNativeDashboard.dylib": "ui_library",
     }
     for entry in nested:
         destination = entry["destination"]

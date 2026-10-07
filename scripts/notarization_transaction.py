@@ -170,7 +170,7 @@ else:
     )
 
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 EXPECTED_TEAM_ID = "YKUPL7Z869"
 EXPECTED_DEPLOYMENT_TARGET = "15.0"
 ATTEMPT_DOCUMENT = "cfw-notarization-attempt-v4"
@@ -2424,7 +2424,7 @@ def _validate_context(
     if context.deployment_target != EXPECTED_DEPLOYMENT_TARGET:
         raise TransactionError(
             "invalid_deployment_target",
-            "deployment target differs from the v0.4.0 release contract",
+            "deployment target differs from the v0.5.0 release contract",
         )
     if set(context.toolchain_metadata) != TOOLCHAIN_METADATA_KEYS or any(
         not SHA256_RE.fullmatch(value) for value in context.toolchain_metadata.values()

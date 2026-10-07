@@ -65,7 +65,7 @@ else:  # pragma: no cover - direct-script import path
 
 SCHEMA_VERSION = 3
 HARNESS_VERSION = "performance-gates-v3"
-PRODUCT_VERSION = "0.4.0"
+PRODUCT_VERSION = "0.5.0"
 MAX_REPORT_BYTES = 1 * 1024 * 1024
 
 RECOVERY_P95_MAX_MS = 10_000
@@ -320,7 +320,7 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         or proof["candidate"]["build_number"] != GA_BUILD
     ):
         raise PerformanceGateError(
-            f"performance evidence is not GA 0.4.0 build {GA_BUILD}"
+            f"performance evidence is not GA 0.5.0 build {GA_BUILD}"
         )
     ledger_descriptor, ledger = _read_ledger(artifacts, document["ledger_artifact"])
     derived = validate_performance_ledger(ledger, artifacts=artifacts)

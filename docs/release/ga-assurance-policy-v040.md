@@ -1,5 +1,11 @@
 # v0.4.0 GA and assurance policy calibration
 
+> **Superseded on 2026-10-07.** Build 40073 was retired unpublished and the
+> v0.4.0 allocation ledger is closed. The policy below continues to govern the
+> 0.5.0 release with the active identity 0.5.0/50026; see
+> [`ga-identity-plan-v050.md`](ga-identity-plan-v050.md) and
+> [`ga-build-40073-retirement.md`](ga-build-40073-retirement.md).
+
 Status: **accepted executable policy; GA evidence pending**.
 
 This decision corrects the release-policy boundary for v0.4.0. The executable

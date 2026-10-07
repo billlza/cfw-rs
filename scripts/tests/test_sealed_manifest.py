@@ -229,7 +229,7 @@ def ci_lanes(
 
 def sealed_closure_document(*, commit: str = COMMIT, signed_app: str = SIGNED_TREE) -> dict:
     request = _closure_request(
-        product={"name": "Clash for Mac", "version": "0.4.0", "build_number": BUILD_NUMBER},
+        product={"name": "Clash for Mac", "version": "0.5.0", "build_number": BUILD_NUMBER},
         commit=commit,
         signed_app={"sha256": signed_app},
         xcframework={"sha256": XCFRAMEWORK_SHA},
@@ -246,7 +246,7 @@ def final_candidate_document(
 ) -> dict:
     manifest = _artifact_hash_manifest()
     request = {
-        "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
+        "product": {"version": "0.5.0", "build_number": BUILD_NUMBER},
         "commit": commit,
         "final_artifacts": {
             "signed_app_tree_sha256": SIGNED_TREE,
@@ -310,7 +310,7 @@ def request(
     """
     aggregate = physical_fixture() if depth >= 2 else None
     return {
-        "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
+        "product": {"version": "0.5.0", "build_number": BUILD_NUMBER},
         "commit": commit,
         "evidence_manifest": inner_manifest(
             depth if claim_depth is None else claim_depth,
@@ -488,7 +488,7 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         bindings = manifest["bindings"]
         self.assertEqual(bindings["commit"], COMMIT)
         self.assertEqual(bindings["release_source_sha256"], RELEASE_SOURCE)
-        self.assertEqual(bindings["product"], {"version": "0.4.0", "build_number": BUILD_NUMBER})
+        self.assertEqual(bindings["product"], {"version": "0.5.0", "build_number": BUILD_NUMBER})
         self.assertEqual(bindings["signed_app_tree_sha256"], SIGNED_TREE)
         self.assertEqual(bindings["app_manifest_sha256"], APP_MANIFEST)
         self.assertIn(SIGNED_TREE, bindings["final_artifact_hashes"])
@@ -1049,7 +1049,7 @@ class SealedManifestContractTests(unittest.TestCase):
     def test_default_state_is_confined_to_the_active_ga_stage_root(self) -> None:
         self.assertEqual(
             DEFAULT_EVIDENCE_DIRECTORY,
-            "target/candidates/0.4.0/ga/40073/stage-inputs/sealed-manifest",
+            "target/candidates/0.5.0/ga/50026/stage-inputs/sealed-manifest",
         )
         self.assertEqual(
             DEFAULT_MANIFEST_PATH,

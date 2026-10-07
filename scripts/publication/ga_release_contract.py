@@ -1,11 +1,11 @@
-"""Read-only three-stage release contract for the single v0.4.0 GA identity.
+"""Read-only three-stage release contract for the single v0.5.0 GA identity.
 
 The only production state transition is::
 
     prepackage -> ga-acceptance -> publication
 
 Each stage is derived by reopening every required input and validating the
-exact 40073 identity.  State mutation is owned by ``orchestrator``; this module
+exact 50026 identity.  State mutation is owned by ``orchestrator``; this module
 only composes expected bytes and reopens immutable evidence.
 Assurance-only physical, performance, and capability-report evidence is kept
 outside this graph and can never satisfy a missing GA-required input.
@@ -349,7 +349,7 @@ def _verify_publication_adapter(repository: Path) -> None:
         or release_contract.evidence_root(repository) != expected_evidence
     ):
         raise PublicationError(
-            "GA publication verifier adapter is not migrated to ga/40073; "
+            "GA publication verifier adapter is not migrated to ga/50026; "
             "legacy path fallback is forbidden"
         )
 
@@ -483,8 +483,8 @@ def _verified_prepackage_inputs(
         verify_ga_workspace_path_preconditions(repository)
     except ReleaseWorkspaceError as error:
         raise PublicationError(str(error)) from error
-    if (PRODUCT_VERSION, GA_BUILD) != ("0.4.0", "40073"):
-        raise PublicationError("prepackage requires the fixed v0.4.0/40073 identity")
+    if (PRODUCT_VERSION, GA_BUILD) != ("0.5.0", "50026"):
+        raise PublicationError("prepackage requires the fixed v0.5.0/50026 identity")
     selected_freeze_verifier = (
         verify_frozen_candidate if freeze_verifier is None else freeze_verifier
     )
@@ -604,7 +604,7 @@ def _verified_prepackage_inputs(
         bundle_identity.product_version != PRODUCT_VERSION
         or bundle_identity.build_version != GA_BUILD
     ):
-        raise PublicationError("signed application is not exactly v0.4.0/40073")
+        raise PublicationError("signed application is not exactly v0.5.0/50026")
     environment = _release_environment(repository)
     _validate_release_application(repository, environment)
 
@@ -825,7 +825,7 @@ def _require_artifact_set_adapter(repository: Path):
     expected = _repo_relative(repository, _path(repository, SIGNED_APP))
     if release_artifact_set.CANDIDATE_APP_RELATIVE != expected:
         raise PublicationError(
-            "GA package verifier adapter is not migrated to ga/40073; "
+            "GA package verifier adapter is not migrated to ga/50026; "
             "legacy package fallback is forbidden"
         )
     return release_artifact_set
@@ -1390,10 +1390,10 @@ def derive_runtime_expectation(
 def self_check(repository: Path) -> None:
     repository = _canonical_source_repository(repository)
     if (
-        ACTIVE_RELEASE_IDENTITY.product_version != "0.4.0"
-        or ACTIVE_RELEASE_IDENTITY.ga_build != "40073"
+        ACTIVE_RELEASE_IDENTITY.product_version != "0.5.0"
+        or ACTIVE_RELEASE_IDENTITY.ga_build != "50026"
         or _path(repository, GA_ROOT)
-        != repository / "target/candidates/0.4.0/ga/40073"
+        != repository / "target/candidates/0.5.0/ga/50026"
         or STAGES != ("prepackage", "ga-acceptance", "publication")
         or STAGE_SCHEMA_VERSIONS
         != {"prepackage": 3, "ga-acceptance": 3, "publication": 3}

@@ -143,7 +143,7 @@ VERIFIED = "verified"
 BLOCKED = "blocked"
 STATUSES = {VERIFIED, BLOCKED}
 
-PRODUCT_VERSION = "0.4.0"
+PRODUCT_VERSION = "0.5.0"
 TEAM_ID = "YKUPL7Z869"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -763,7 +763,7 @@ def _secret_material_blocked(workspace_root: Path) -> bool:
 
 # This legacy binder remains a callable validator, so its default input root is
 # confined to the one active GA identity.  It must never recreate the retired
-# parallel ``target/candidates/0.4.0/release`` namespace.
+# parallel ``target/candidates/0.5.0/release`` namespace.
 DEFAULT_EVIDENCE_DIRECTORY = str(
     ga_root(Path()) / "stage-inputs/final-candidate"
 )

@@ -273,7 +273,7 @@ class SignedCandidateWiringTests(unittest.TestCase):
         self.assertEqual(helper.count("\numask 077\n"), 1)
         self.assertNotIn("\numask 022\n", helper)
         self.assertEqual(
-            helper.count("cfw_codesign_distribution_bundle --force"), 6
+            helper.count("cfw_codesign_distribution_bundle --force"), 7
         )
         self.assertNotIn("/usr/bin/codesign --force", helper)
         self.assertEqual(boundary.count("\n  umask 022\n"), 1)

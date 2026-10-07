@@ -80,7 +80,7 @@ def run_response(*, attempt: int = 2, head_sha: str = HEAD_SHA) -> dict[str, obj
         "conclusion": "success",
         "created_at": "2026-08-25T20:00:00Z",
         "event": "pull_request",
-        "head_branch": "release/macos-0.4.0",
+        "head_branch": "release/macos-0.5.0",
         "head_repository": {
             "full_name": hosted.REPOSITORY_FULL_NAME,
             "id": hosted.REPOSITORY_ID,
@@ -900,7 +900,7 @@ class HostedCICommandSessionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.executor = Path(temporary.name).resolve()
-        self.repository = self.executor / "target/release-worktrees/40073"
+        self.repository = self.executor / "target/release-worktrees/50026"
         workflow_path = self.repository / hosted.WORKFLOW_PATH
         workflow_path.parent.mkdir(parents=True)
         workflow_path.write_bytes(WORKFLOW_BYTES)

@@ -9,8 +9,8 @@ source "$tauri_host_contract_directory/release_cargo_inputs.sh"
 unset tauri_host_contract_directory
 
 cfw_build_tauri_host_skeleton() {
-  if [[ $# -ne 3 && ! ( $# -eq 4 && ( "$4" == "--native-ui-preview" || "$4" == "--native-ui-unsigned-preview" ) ) ]]; then
-    echo "error: cfw_build_tauri_host_skeleton requires APP_DIR TAURI_BIN CONFIG_OVERRIDE [--native-ui-preview|--native-ui-unsigned-preview]" >&2
+  if [[ $# -ne 3 && ! ( $# -eq 4 && ( "$4" == "--native-ui-release" || "$4" == "--native-ui-unsigned-preview" ) ) ]]; then
+    echo "error: cfw_build_tauri_host_skeleton requires APP_DIR TAURI_BIN CONFIG_OVERRIDE [--native-ui-release|--native-ui-unsigned-preview]" >&2
     return 1
   fi
 
@@ -126,11 +126,11 @@ for platform_name in (
 
 override = parse_json(sys.argv[2], "inline override")
 require_no_signing_identity(override, "inline override")
-if sys.argv[3] == "--native-ui-preview":
-    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50025":
-        raise SystemExit("error: native UI Host requires exact preview version/build 0.5.0/50025")
-    if override["bundle"]["macOS"].get("bundleVersion") != "50025":
-        raise SystemExit("error: native UI Host override must retain preview build 50025")
+if sys.argv[3] == "--native-ui-release":
+    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50026":
+        raise SystemExit("error: native UI Host requires exact release version/build 0.5.0/50026")
+    if override["bundle"]["macOS"].get("bundleVersion") != "50026":
+        raise SystemExit("error: native UI Host override must retain release build 50026")
 elif sys.argv[3] == "--native-ui-unsigned-preview":
     if base_config.get("version") != "0.5.0" or sys.argv[4] != "50000":
         raise SystemExit("error: unsigned native UI Host requires exact validation version/build 0.5.0/50000")
@@ -143,7 +143,7 @@ PY
       echo "error: cannot enter Tauri application root" >&2
       return 1
     }
-    if [[ "$contract_tauri_host_preview" == "--native-ui-preview" || "$contract_tauri_host_preview" == "--native-ui-unsigned-preview" ]]; then
+    if [[ "$contract_tauri_host_preview" == "--native-ui-release" || "$contract_tauri_host_preview" == "--native-ui-unsigned-preview" ]]; then
       /usr/bin/env \
         -u APPLE_CERTIFICATE \
         -u APPLE_CERTIFICATE_PASSWORD \

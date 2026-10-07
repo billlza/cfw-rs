@@ -11,7 +11,7 @@ from .common import MAX_JSON_BYTES, PublicationError, canonical_json
 from .bounded_process import BoundedProcessError, run_bounded_process
 
 
-RELEASE_VERSION = "0.4.0"
+RELEASE_VERSION = "0.5.0"
 MAX_COMMAND_BYTES = 256 * 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 600
 

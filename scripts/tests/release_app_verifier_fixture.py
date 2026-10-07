@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 
-def complete_verifier_stdout(app: str, build_number: str = "40073") -> bytes:
+def complete_verifier_stdout(app: str, build_number: str = "50026") -> bytes:
     candidate_root = os.path.dirname(os.path.dirname(app))
     native_products = os.path.join(
         candidate_root, "signing-output", "signed-native-products"
@@ -21,7 +21,7 @@ def complete_verifier_stdout(app: str, build_number: str = "40073") -> bytes:
             )
         ),
         f"candidate bundle verified: {app}",
-        f"identity: 0.4.0 ({build_number}) / arm64 / macOS 15.0+",
+        f"identity: 0.5.0 ({build_number}) / arm64 / macOS 15.0+",
         "Mach-O objects: 6",
         "legacy tombstone provenance verified: " + "a" * 64,
         f"Processing: {app}",

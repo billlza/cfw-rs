@@ -122,8 +122,8 @@ def _raw_artifacts() -> list[dict[str, object]]:
 
 def _candidate() -> dict[str, object]:
     return {
-        "version": "0.4.0",
-        "build_number": "40073",
+        "version": "0.5.0",
+        "build_number": "50026",
         "app_manifest_sha256": _sha("app-manifest"),
         "signed_app_tree_sha256": _sha("signed-app-tree"),
         "artifact_hash_manifest_sha256": _sha("artifact-manifest"),
@@ -152,7 +152,7 @@ def _context() -> dict[str, object]:
             "boot_environment_sha256": _sha("boot-macos15"),
             "boot_environment_scheme": EVIDENCE_PROFILE["boot_environment_scheme"],
             "clean_install": True,
-            "run_id": "run-40073-macos15",
+            "run_id": "run-50026-macos15",
         },
         "initialized_at": "2026-07-29T03:59:59Z",
     }
@@ -283,7 +283,7 @@ def _two_run_records() -> list[dict[str, object]]:
             "macos_version": "26.6",
             "macos_build": "25G72",
             "boot_environment_sha256": _sha("boot-current"),
-            "run_id": "run-40073-current-macos",
+            "run_id": "run-50026-current-macos",
             "run_nonce": _sha("nonce-current"),
             "captured_at": "2026-07-29T08:00:00Z",
             "completed_at": "2026-07-29T11:00:00Z",
@@ -298,7 +298,7 @@ def _two_run_records() -> list[dict[str, object]]:
 
 def _prepare_repository(root: Path) -> None:
     assurance_candidate = (
-        root / "target/candidates/0.4.0/assurance/physical-candidate"
+        root / "target/candidates/0.5.0/assurance/physical-candidate"
     )
     assurance_candidate.mkdir(parents=True, mode=0o700)
     os.chmod(assurance_candidate, 0o700)

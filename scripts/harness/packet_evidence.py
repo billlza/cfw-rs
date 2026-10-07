@@ -85,7 +85,7 @@ else:  # pragma: no cover - direct-script import path
 
 SCHEMA_VERSION = 4
 HARNESS_VERSION = "packet-evidence-v4"
-PRODUCT_VERSION = "0.4.0"
+PRODUCT_VERSION = "0.5.0"
 MAX_REPORT_BYTES = 1 * 1024 * 1024
 TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 PRODUCT_OBSERVATION_PREFIX = "cfw-release-observation-v1 "
@@ -2533,7 +2533,7 @@ def _validate(
         )
     proof = parse_proof_binding(document["proof"])
     if proof["candidate"]["version"] != PRODUCT_VERSION:
-        raise PacketEvidenceError("packet evidence is not for version 0.4.0")
+        raise PacketEvidenceError("packet evidence is not for version 0.5.0")
     _platform(document["platform"])
     declared_start = timestamp_fraction(document["captured_at"])
 

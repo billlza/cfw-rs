@@ -91,7 +91,7 @@ class PossessionFixture:
         tauri_config.write_bytes(TAURI_CONFIG_DATA)
         tauri_config.chmod(0o644)
         self.preflight_root = (
-            self.repository / "target/candidates/0.4.0/ga-preflight/40073"
+            self.repository / "target/candidates/0.5.0/ga-preflight/50026"
         )
         self.preflight_root.mkdir(parents=True, mode=0o700)
         self.preflight_root.chmod(0o700)
@@ -1212,7 +1212,7 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
 
     def test_frozen_root_verification_uses_the_same_proof(self) -> None:
         created = self.fixture.create()
-        frozen_root = self.fixture.repository / "target/candidates/0.4.0/ga/40073"
+        frozen_root = self.fixture.repository / "target/candidates/0.5.0/ga/50026"
         frozen_root.parent.mkdir(parents=True)
         self.fixture.preflight_root.rename(frozen_root)
 
@@ -1230,7 +1230,7 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
         for build_number in ("40037", "40038"):
             retired_root = (
                 self.fixture.repository
-                / f"target/candidates/0.4.0/ga/{build_number}"
+                / f"target/candidates/0.5.0/ga/{build_number}"
             )
 
             with self.subTest(build_number=build_number), self.assertRaisesRegex(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -15,7 +16,6 @@ else:
     from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parent.parent
-CONTRACT_PATH: Final = REPOSITORY_ROOT / "docs/release/build-allocations-v040.json"
 DOCUMENT: Final = "cfm-release-build-allocation-v2"
 PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 BUILD_PATTERN: Final = re.compile(r"\A[1-9][0-9]{4}\Z")
@@ -35,6 +35,8 @@ STATUSES: Final = frozenset(
         "retired_before_candidate_build_source_gate_contract_incomplete",
         "retired_unbuilt_policy_superseded",
         "retired_unbuilt_reserved_final_companion",
+        "retired_superseded_by_next_product_version",
+        "retired_preview_validation_consumed",
     }
 )
 IMMUTABLE_RETIRED_PREFIX: Final = (
@@ -279,7 +281,65 @@ RETIRED_GA_ALLOCATIONS: Final = (
         "ga",
         "retired_product_change_after_install_before_ga_runtime_acceptance",
     ),
+    (
+        "40073",
+        "ga",
+        "retired_superseded_by_next_product_version",
+    ),
 )
+
+
+PREVIEW_VALIDATION_PREFIX: Final = tuple(
+    (str(build), "validation", "retired_preview_validation_consumed")
+    for build in range(50001, 50026)
+)
+
+
+@dataclass(frozen=True)
+class LedgerPolicy:
+    """The fixed allocation history of one product version.
+
+    A closed product version has no active GA: every allocation is retired and
+    the ledger may only be read. The active product version ends its history
+    with exactly one `active_ga` allocation.
+    """
+
+    product_version: str
+    path: Path
+    immutable_prefix: tuple[tuple[str, str, str], ...]
+    superseded: tuple[str, str, str] | None
+    retired_ga: tuple[tuple[str, str, str], ...]
+    active_ga: str | None
+
+    @property
+    def closed(self) -> bool:
+        return self.active_ga is None
+
+
+POLICIES: Final = {
+    "0.4.0": LedgerPolicy(
+        "0.4.0",
+        REPOSITORY_ROOT / "docs/release/build-allocations-v040.json",
+        IMMUTABLE_RETIRED_PREFIX,
+        POLICY_SUPERSEDED_ALLOCATION,
+        RETIRED_GA_ALLOCATIONS,
+        None,
+    ),
+    "0.5.0": LedgerPolicy(
+        "0.5.0",
+        REPOSITORY_ROOT / "docs/release/build-allocations-v050.json",
+        PREVIEW_VALIDATION_PREFIX,
+        None,
+        (),
+        "50026",
+    ),
+}
+ACTIVE_POLICY: Final = POLICIES[PRODUCT_VERSION]
+CONTRACT_RELATIVE_PATH: Final = Path("docs/release/build-allocations-v050.json")
+CONTRACT_PATH: Final = ACTIVE_POLICY.path
+CLOSED_CONTRACT_PATHS: Final = {
+    version: policy.path for version, policy in POLICIES.items() if policy.closed
+}
 
 
 class ReleaseBuildAllocationError(ValueError):
@@ -317,26 +377,18 @@ def _exact_fields(value: dict[str, object], expected: frozenset[str], context: s
         raise ReleaseBuildAllocationError(f"{context} fields are not exact")
 
 
-def validate_contract(
+def _parse_allocations(
     value: dict[str, object],
-    *,
-    expected_ga: str,
-) -> None:
+) -> tuple[LedgerPolicy, list[dict[str, object]], dict[str, dict[str, object]], list[int]]:
     _exact_fields(
         value,
         frozenset({"active_ga", "allocations", "document", "product_version"}),
         "allocation ledger",
     )
-    if value["document"] != DOCUMENT or value["product_version"] != PRODUCT_VERSION:
+    product_version = value["product_version"]
+    policy = POLICIES.get(product_version) if isinstance(product_version, str) else None
+    if value["document"] != DOCUMENT or policy is None:
         raise ReleaseBuildAllocationError("allocation ledger identity is invalid")
-
-    active_ga = value["active_ga"]
-    if active_ga != expected_ga:
-        raise ReleaseBuildAllocationError(
-            "active GA build differs from release source constants"
-        )
-    if not isinstance(active_ga, str) or not BUILD_PATTERN.fullmatch(active_ga):
-        raise ReleaseBuildAllocationError("active GA build is not canonical")
 
     allocations = value["allocations"]
     if type(allocations) is not list or not allocations:
@@ -363,40 +415,94 @@ def validate_contract(
             raise ReleaseBuildAllocationError(f"build {build} role or status is invalid")
         records[build] = record
         ordered_builds.append(int(build))
+    return policy, allocations, records, ordered_builds
 
+
+def _require_fixed_history(
+    policy: LedgerPolicy, allocations: list[dict[str, object]]
+) -> int:
+    """Checks the immutable part of the history and returns the index after it."""
     observed_prefix = tuple(
         (record["build"], record["role"], record["status"])
-        for record in allocations[: len(IMMUTABLE_RETIRED_PREFIX)]
+        for record in allocations[: len(policy.immutable_prefix)]
     )
-    if observed_prefix != IMMUTABLE_RETIRED_PREFIX:
+    if observed_prefix != policy.immutable_prefix:
         raise ReleaseBuildAllocationError("immutable retired allocation prefix changed")
-    superseded_index = len(IMMUTABLE_RETIRED_PREFIX)
-    if superseded_index >= len(allocations):
-        raise ReleaseBuildAllocationError("policy-superseded allocation is absent")
-    superseded = allocations[superseded_index]
-    if (
-        superseded["build"],
-        superseded["role"],
-        superseded["status"],
-    ) != POLICY_SUPERSEDED_ALLOCATION:
-        raise ReleaseBuildAllocationError(
-            "policy-superseded 40030 allocation changed"
-        )
-    retired_ga_start = superseded_index + 1
-    retired_ga_end = retired_ga_start + len(RETIRED_GA_ALLOCATIONS)
+    index = len(policy.immutable_prefix)
+    if policy.superseded is not None:
+        if index >= len(allocations):
+            raise ReleaseBuildAllocationError("policy-superseded allocation is absent")
+        superseded = allocations[index]
+        if (
+            superseded["build"],
+            superseded["role"],
+            superseded["status"],
+        ) != policy.superseded:
+            raise ReleaseBuildAllocationError(
+                f"policy-superseded {policy.superseded[0]} allocation changed"
+            )
+        index += 1
+    retired_ga_end = index + len(policy.retired_ga)
     if retired_ga_end > len(allocations):
         raise ReleaseBuildAllocationError("retired GA allocations are incomplete")
     observed_retired_ga = tuple(
         (record["build"], record["role"], record["status"])
-        for record in allocations[retired_ga_start:retired_ga_end]
+        for record in allocations[index:retired_ga_end]
     )
-    if observed_retired_ga != RETIRED_GA_ALLOCATIONS:
+    if observed_retired_ga != policy.retired_ga:
         raise ReleaseBuildAllocationError("retired GA allocations changed")
+    return retired_ga_end
+
+
+def _require_gap_free(policy: LedgerPolicy, ordered_builds: list[int]) -> None:
     expected_range = list(
-        range(int(IMMUTABLE_RETIRED_PREFIX[0][0]), ordered_builds[-1] + 1)
+        range(int(policy.immutable_prefix[0][0]), ordered_builds[-1] + 1)
     )
     if ordered_builds != expected_range:
         raise ReleaseBuildAllocationError("allocation history must be ordered and gap-free")
+
+
+def _require_final_companions(records: dict[str, dict[str, object]]) -> None:
+    for build, record in records.items():
+        status = record["status"]
+        if status == "retired_unbuilt_reserved_final_companion":
+            predecessor = records.get(str(int(build) - 1))
+            if record["role"] != "final" or predecessor is None:
+                raise ReleaseBuildAllocationError(
+                    f"retired final companion {build} has no allocated validation predecessor"
+                )
+            if predecessor["role"] != "validation" or not str(
+                predecessor["status"]
+            ).startswith("retired_"):
+                raise ReleaseBuildAllocationError(
+                    f"retired final companion {build} is not paired with a retired validation"
+                )
+
+
+def validate_contract(
+    value: dict[str, object],
+    *,
+    expected_ga: str,
+) -> None:
+    """Validates the ledger of the active product version against its one GA."""
+    policy, allocations, records, ordered_builds = _parse_allocations(value)
+    if policy.closed:
+        raise ReleaseBuildAllocationError("allocation ledger product version is closed")
+
+    active_ga = value["active_ga"]
+    if active_ga != expected_ga:
+        raise ReleaseBuildAllocationError(
+            "active GA build differs from release source constants"
+        )
+    if not isinstance(active_ga, str) or not BUILD_PATTERN.fullmatch(active_ga):
+        raise ReleaseBuildAllocationError("active GA build is not canonical")
+    if active_ga != policy.active_ga:
+        raise ReleaseBuildAllocationError(
+            "active GA allocation differs from the fixed successor"
+        )
+
+    retired_end = _require_fixed_history(policy, allocations)
+    _require_gap_free(policy, ordered_builds)
     record = records.get(active_ga)
     if record is None:
         raise ReleaseBuildAllocationError(
@@ -416,11 +522,11 @@ def validate_contract(
     ]
     if active_records != [active_ga]:
         raise ReleaseBuildAllocationError("allocation ledger must have exactly one active GA")
-    if len(allocations) != retired_ga_end + 1:
+    if len(allocations) != retired_end + 1:
         raise ReleaseBuildAllocationError(
             "allocation ledger must end with exactly one active GA allocation"
         )
-    active_tail = allocations[retired_ga_end]
+    active_tail = allocations[retired_end]
     if (
         active_tail["build"],
         active_tail["role"],
@@ -429,29 +535,40 @@ def validate_contract(
         raise ReleaseBuildAllocationError(
             "active GA allocation differs from the fixed successor"
         )
-    for build, record in records.items():
-        status = record["status"]
-        if status == "retired_unbuilt_reserved_final_companion":
-            predecessor = records.get(str(int(build) - 1))
-            if record["role"] != "final" or predecessor is None:
-                raise ReleaseBuildAllocationError(
-                    f"retired final companion {build} has no allocated validation predecessor"
-                )
-            if predecessor["role"] != "validation" or not str(
-                predecessor["status"]
-            ).startswith("retired_"):
-                raise ReleaseBuildAllocationError(
-                    f"retired final companion {build} is not paired with a retired validation"
-                )
+    _require_final_companions(records)
+
+
+def validate_closed_contract(value: dict[str, object]) -> None:
+    """Validates the read-only ledger of a closed product version."""
+    policy, allocations, records, ordered_builds = _parse_allocations(value)
+    if not policy.closed:
+        raise ReleaseBuildAllocationError("allocation ledger product version is still active")
+    retired_end = _require_fixed_history(policy, allocations)
+    _require_gap_free(policy, ordered_builds)
+    if value["active_ga"] is not None or any(
+        record["status"] == "active_ga" for record in records.values()
+    ):
+        raise ReleaseBuildAllocationError("closed product version cannot have an active GA")
+    if len(allocations) != retired_end:
+        raise ReleaseBuildAllocationError(
+            "closed allocation history has allocations outside its fixed record"
+        )
+    _require_final_companions(records)
 
 
 def verify_source_bindings(value: dict[str, object]) -> None:
     validate_contract(value, expected_ga=ACTIVE_RELEASE_IDENTITY.ga_build)
 
 
+def verify_closed_ledgers() -> None:
+    for path in CLOSED_CONTRACT_PATHS.values():
+        validate_closed_contract(load_contract(path))
+
+
 def main() -> int:
     try:
         verify_source_bindings(load_contract())
+        verify_closed_ledgers()
     except (OSError, ReleaseBuildAllocationError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

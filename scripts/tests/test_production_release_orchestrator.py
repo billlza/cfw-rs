@@ -220,11 +220,11 @@ class StageFixture:
 
 class ProductionStageIdentityTests(unittest.TestCase):
     def test_contract_is_one_ga_root_and_three_ordered_stages(self) -> None:
-        self.assertEqual((PRODUCT_VERSION, GA_BUILD), ("0.4.0", "40073"))
+        self.assertEqual((PRODUCT_VERSION, GA_BUILD), ("0.5.0", "50026"))
         self.assertEqual(GA_APP_ARTIFACT_KIND, "notarized-ga-candidate-v1")
         self.assertEqual(
             GA_ROOT,
-            Path("target/candidates/0.4.0/ga/40073"),
+            Path("target/candidates/0.5.0/ga/50026"),
         )
         self.assertEqual(STAGES, ("prepackage", "ga-acceptance", "publication"))
         self.assertEqual(SIGNED_APP, GA_ROOT / "signed/Clash for Mac.app")
@@ -233,8 +233,8 @@ class ProductionStageIdentityTests(unittest.TestCase):
             GA_ROOT / "signing-output/signed-native-products",
         )
         self.assertEqual(PACKAGE_ROOT, GA_ROOT / "packages")
-        self.assertEqual(DMG_SET, PACKAGE_ROOT / "dmg/v0.4.0")
-        self.assertEqual(UPDATER_SET, PACKAGE_ROOT / "updater/v0.4.0")
+        self.assertEqual(DMG_SET, PACKAGE_ROOT / "dmg/v0.5.0")
+        self.assertEqual(UPDATER_SET, PACKAGE_ROOT / "updater/v0.5.0")
 
     def test_migration_journal_layout_is_owned_by_the_exporter(self) -> None:
         self.assertEqual(
@@ -674,7 +674,7 @@ class AdapterContractTests(unittest.TestCase):
         }
         for repository in (
             self.fixture.repository,
-            self.fixture.repository / "target/release-worktrees/40073",
+            self.fixture.repository / "target/release-worktrees/50026",
         ):
             with self.subTest(repository=repository):
                 self.assertEqual(
@@ -777,7 +777,7 @@ class AdapterContractTests(unittest.TestCase):
 
         self.assertEqual(
             adapter.CANDIDATE_APP_RELATIVE,
-            "target/candidates/0.4.0/ga/40073/signed/Clash for Mac.app",
+            "target/candidates/0.5.0/ga/50026/signed/Clash for Mac.app",
         )
         self.assertTrue(callable(adapter.verify_dmg_set))
         self.assertTrue(callable(adapter.verify_updater_set))
@@ -910,7 +910,7 @@ class AdapterContractTests(unittest.TestCase):
         module = ModuleType("scripts.ga_runtime_acceptance")
         module.validate_ga_runtime_acceptance = lambda **_kwargs: {
             "adapter": {
-                "path": "target/candidates/0.4.0/validation/runtime-acceptance.json",
+                "path": "target/candidates/0.5.0/validation/runtime-acceptance.json",
                 "sha256": "c" * 64,
             },
             "runtime_evidence": _tree_record(self.fixture.repository, evidence),
@@ -955,12 +955,12 @@ class AdapterContractTests(unittest.TestCase):
     def test_acceptance_binds_prepackage_journals_and_trusted_runtime_result(self) -> None:
         install = {
             "candidate": {
-                "build_number": "40073",
+                "build_number": "50026",
                 "manifest_sha256": "1" * 64,
                 "release_source_sha256": "2" * 64,
                 "repository_commit": "3" * 40,
                 "tree_sha256": "4" * 64,
-                "version": "0.4.0",
+                "version": "0.5.0",
             },
             "guards": [{"after": {"closed": True}}],
             "ga_environment_sha256": "9" * 64,
@@ -968,7 +968,7 @@ class AdapterContractTests(unittest.TestCase):
             "previous": {
                 "build_number": journal_export.PREVIOUS_BUILD,
                 "tree_sha256": "5" * 64,
-                "version": "0.4.0",
+                "version": "0.5.0",
             },
         }
         service_intent = {
@@ -1141,17 +1141,17 @@ class MigrationJournalContractIntegrationTests(unittest.TestCase):
         fixture = StageFixture()
         self.addCleanup(fixture.cleanup)
         expected_candidate = {
-            "build_number": "40073",
+            "build_number": "50026",
             "manifest_sha256": "1" * 64,
             "release_source_sha256": "2" * 64,
             "repository_commit": "3" * 40,
             "tree_sha256": "4" * 64,
-            "version": "0.4.0",
+            "version": "0.5.0",
         }
         previous = {
             "build_number": journal_export.PREVIOUS_BUILD,
             "tree_sha256": "5" * 64,
-            "version": "0.4.0",
+            "version": "0.5.0",
         }
         prepackage = _stage_manifest(
             "prepackage",

@@ -152,19 +152,25 @@ class PreviewShellOptionalArgumentsTests(unittest.TestCase):
                 self.assert_strict_shell(events)
                 python = [event["argv"] for event in events if event["kind"] == "python"]
                 calls = lambda name: [call for call in python if Path(call[1]).name == name]
-                self.assertEqual(calls("verify_version_contract.py"), [[str(root), str(root / "scripts/verify_version_contract.py"), *(["--preview"] if preview else [])]])
+                self.assertEqual(calls("verify_version_contract.py"), [[str(root), str(root / "scripts/verify_version_contract.py")]])
                 tauri = [event["argv"] for event in events if event["kind"] == "tauri"]
                 self.assertEqual(len(tauri), 1)
                 self.assertEqual(len(tauri[0]), 4 if preview else 3)
                 self.assertEqual(tauri[0][:2], [str(root / "apps/cfw-tauri-shell"), str(root / "target/toolchains/tauri-cli-2.11.4/bin/cargo-tauri")])
                 self.assertEqual(tauri[0][3:], ["--native-ui-unsigned-preview"] if preview else [])
-                version, build = ("0.5.0", "50000") if preview else ("0.4.0", "40000")
-                native = root / ("target/candidates/0.5.0/unsigned/50000/native-products" if preview else "target/candidates/0.4.0/unsigned/native-products")
+                version = "0.5.0"
+                build = "50000" if preview else "40000"
+                native = root / ("target/candidates/0.5.0/unsigned/50000/native-products" if preview else "target/candidates/0.5.0/unsigned/native-products")
                 config = json.loads(tauri[0][2])["bundle"]["macOS"]
                 self.assertEqual(config["bundleVersion"], build)
-                self.assertEqual(len(config["files"]), 7 if preview else 5)
+                self.assertEqual(len(config["files"]), 7)
+                dashboard_entries = {key: config["files"][key] for key in ("Frameworks/libCFMNativeDashboard.dylib", "Resources/CFMNativeDashboard_CFMNativeDashboard.bundle")}
                 if preview:
-                    self.assertEqual(config["files"]["Frameworks/libCFMNativeDashboard.dylib"], str(native / "libCFMNativeDashboard.dylib"))
+                    self.assertEqual(dashboard_entries, {"Frameworks/libCFMNativeDashboard.dylib": str(native / "libCFMNativeDashboard.dylib"),
+                                                         "Resources/CFMNativeDashboard_CFMNativeDashboard.bundle": str(native / "CFMNativeDashboard_CFMNativeDashboard.bundle")})
+                else:
+                    # The 40000 skeleton removes the base declaration through the merge patch.
+                    self.assertEqual(dashboard_entries, {"Frameworks/libCFMNativeDashboard.dylib": None, "Resources/CFMNativeDashboard_CFMNativeDashboard.bundle": None})
                 kind = "unsigned-preview-application-validation-v1" if preview else "unsigned-application-validation-v1"
                 metadata_groups = [("hash_artifact.py", 1), ("verify_artifact_manifest.py", 2)]
                 for name, count in metadata_groups:

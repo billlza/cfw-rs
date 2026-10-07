@@ -48,7 +48,7 @@ else:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="Prepare the exact offline 0.4.0 publication closure for legal review."
+        description="Prepare the exact offline 0.5.0 publication closure for legal review."
     )
     commands = result.add_subparsers(dest="command", required=True)
     template = commands.add_parser("review-template")

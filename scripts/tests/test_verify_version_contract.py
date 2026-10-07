@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import verify_version_contract as contract
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, SIGNED_PREVIEW_IDENTITY
-from scripts.verify_version_contract import EXPECTED_VERSION, PRODUCT_PACKAGES, verify
+from scripts.verify_version_contract import (
+    EXPECTED_BUILD,
+    EXPECTED_VERSION,
+    PRODUCT_PACKAGES,
+    verify,
+)
 
 
 class VersionContractTests(unittest.TestCase):
-    def make_repository(self, root: Path, *, preview: bool = False) -> None:
-        version = SIGNED_PREVIEW_IDENTITY.product_version if preview else EXPECTED_VERSION
-        build = SIGNED_PREVIEW_IDENTITY.build_number if preview else "40000"
+    def make_repository(self, root: Path) -> None:
+        version = EXPECTED_VERSION
+        build = EXPECTED_BUILD
         (root / "apps/cfw-tauri-shell").mkdir(parents=True)
         (root / "native/macos/Config").mkdir(parents=True)
         (root / "crates").mkdir()
@@ -54,16 +62,15 @@ class VersionContractTests(unittest.TestCase):
         (root / "CHANGELOG.md").write_text(
             f"# Changelog\n\n## {version} - Unreleased\n", encoding="utf-8"
         )
-        if preview:
-            admission = root / "apps/cfw-tauri-shell/src/legacy/admission.rs"
-            admission.parent.mkdir(parents=True)
-            admission.write_text(f'const RELEASE_VERSION: &str = "{version}";\nconst RELEASE_BUILD: &str = "{build}";\n')
-            observation = root / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
-            observation.parent.mkdir(parents=True)
-            observation.write_text(
-                f'  static let previewProductVersion = "{version}"\n'
-                f'  static let previewBuildNumber = "{build}"\n', encoding="utf-8",
-            )
+        admission = root / "apps/cfw-tauri-shell/src/legacy/admission.rs"
+        admission.parent.mkdir(parents=True)
+        admission.write_text(f'const RELEASE_VERSION: &str = "{version}";\nconst RELEASE_BUILD: &str = "{build}";\n')
+        observation = root / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
+        observation.parent.mkdir(parents=True)
+        observation.write_text(
+            f'  static let releaseProductVersion = "{version}"\n'
+            f'  static let releaseBuildNumber = "{build}"\n', encoding="utf-8",
+        )
 
     def test_complete_contract_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -76,48 +83,46 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository)
             (repository / "apps/cfw-tauri-shell/tauri.conf.json").write_text(
-                '{"version":"0.4.1"}', encoding="utf-8"
+                '{"version":"0.5.1"}', encoding="utf-8"
             )
             with self.assertRaisesRegex(ValueError, "Tauri version"):
                 verify(repository)
 
-    def test_complete_preview_contract_passes(self) -> None:
+    def test_runtime_admission_must_match_the_release_build(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
-            self.make_repository(repository, preview=True)
-            verify(repository, preview=True)
-
-    def test_preview_runtime_admission_must_match_package_build(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            self.make_repository(repository, preview=True)
+            self.make_repository(repository)
             source = repository / "apps/cfw-tauri-shell/src/legacy/admission.rs"
-            source.write_text(source.read_text().replace("50025", "50026"))
+            source.write_text(source.read_text().replace("50026", "50025"))
             with self.assertRaisesRegex(ValueError, "runtime migration admission RELEASE_BUILD"):
-                verify(repository, preview=True)
+                verify(repository)
 
-    def test_release_default_and_ga_identity_remain_frozen(self) -> None:
-        self.assertEqual(EXPECTED_VERSION, "0.4.0")
+    def test_release_identity_remains_frozen(self) -> None:
+        self.assertEqual((EXPECTED_VERSION, EXPECTED_BUILD), ("0.5.0", "50026"))
         self.assertEqual(
             (ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build),
-            ("0.4.0", "40073"),
+            ("0.5.0", "50026"),
         )
-        for preview in (False, True):
-            with self.subTest(preview=preview), tempfile.TemporaryDirectory() as temporary:
-                repository = Path(temporary)
-                self.make_repository(repository, preview=preview)
-                with self.assertRaisesRegex(ValueError, "product Cargo versions differ"):
-                    verify(repository, preview=not preview)
+        # The retained signed preview shares the product version; a tree still
+        # carrying its build number is not the release.
+        self.assertEqual(SIGNED_PREVIEW_IDENTITY.build_number, "50025")
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            self.make_repository(repository)
+            project = repository / "native/macos/project.yml"
+            project.write_text(project.read_text().replace("50026", "50025"))
+            with self.assertRaisesRegex(ValueError, "Xcode build differs from the fixed release identity"):
+                verify(repository)
 
     def test_controller_version_is_included(self) -> None:
         self.assertIn("cfw-controller", PRODUCT_PACKAGES)
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
-            self.make_repository(repository, preview=True)
+            self.make_repository(repository)
             manifest = repository / "crates/cfw-controller/Cargo.toml"
             manifest.write_text(manifest.read_text().replace("0.5.0", "0.4.0"))
             with self.assertRaisesRegex(ValueError, "cfw-controller"):
-                verify(repository, preview=True)
+                verify(repository)
 
     def test_lockfile_version_and_local_origin_are_checked(self) -> None:
         mutations = (
@@ -134,68 +139,75 @@ class VersionContractTests(unittest.TestCase):
         for mutate, error in mutations:
             with self.subTest(error=error), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
-                self.make_repository(repository, preview=True)
+                self.make_repository(repository)
                 lock = repository / "Cargo.lock"
                 lock.write_text(mutate(lock.read_text()))
                 with self.assertRaisesRegex(ValueError, error):
-                    verify(repository, preview=True)
+                    verify(repository)
 
     def test_core_version_is_checked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
-            self.make_repository(repository, preview=True)
+            self.make_repository(repository)
             source = repository / "crates/cfw-core/src/lib.rs"
             source.write_text(source.read_text().replace("0.5.0", "0.4.0"))
             with self.assertRaisesRegex(ValueError, "cfw-core PRODUCT_VERSION"):
-                verify(repository, preview=True)
+                verify(repository)
 
     def test_optional_workspace_version_is_checked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
-            self.make_repository(repository, preview=True)
+            self.make_repository(repository)
             (repository / "Cargo.toml").write_text(
                 '[workspace.package]\nversion = "0.4.0"\n'
             )
             with self.assertRaisesRegex(ValueError, "workspace package version"):
-                verify(repository, preview=True)
+                verify(repository)
 
-    def test_preview_build_is_exact_and_canonical(self) -> None:
-        for build in ("40073", "50001", "50002", "50003", "50004", "50005", "50006", "50007", "50008", "50009", "50012", "50013", "50014", "50015", "50017", "50018", "50019", "50026", "050025", "５００１１"):
+    def test_release_build_is_exact_and_canonical(self) -> None:
+        for build in ("40073", "50025", "50027", "050026", "5002", "+50026", "50026a"):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
-                self.make_repository(repository, preview=True)
+                self.make_repository(repository)
                 project = repository / "native/macos/project.yml"
-                project.write_text(project.read_text().replace("50025", build))
-                with self.assertRaisesRegex(ValueError, "preview build|canonical positive"):
-                    verify(repository, preview=True)
+                project.write_text(project.read_text().replace("50026", build))
+                with self.assertRaisesRegex(ValueError, "fixed release identity|canonical positive"):
+                    verify(repository)
 
-    def test_preview_observation_identity_is_checked(self) -> None:
-        for original, replacement in (("50025", "40073"), ("0.5.0", "0.4.0")):
+    def test_observation_identity_is_checked(self) -> None:
+        for original, replacement in (("50026", "50025"), ("0.5.0", "0.4.0")):
             with self.subTest(original=original), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
-                self.make_repository(repository, preview=True)
+                self.make_repository(repository)
                 observation = (
                     repository / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
                 )
                 observation.write_text(observation.read_text().replace(original, replacement))
                 with self.assertRaisesRegex(ValueError, "native release observation"):
-                    verify(repository, preview=True)
+                    verify(repository)
 
-    def test_preview_does_not_skip_existing_version_surfaces(self) -> None:
+    def test_every_version_surface_is_checked(self) -> None:
         for relative, old, new, error in (
             ("apps/cfw-tauri-shell/tauri.conf.json", "0.5.0", "0.4.0", "Tauri version"),
             ("native/macos/project.yml", "0.5.0", "0.4.0", "MARKETING_VERSION"),
             ("CHANGELOG.md", "0.5.0", "0.4.0", "first changelog release"),
             ("native/macos/Config/ProxyAgent-Info.plist", "$(CURRENT_PROJECT_VERSION)",
-             "40073", "must inherit the canonical"),
+             "50026", "must inherit the canonical"),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
-                self.make_repository(repository, preview=True)
+                self.make_repository(repository)
                 path = repository / relative
                 path.write_text(path.read_text().replace(old, new))
                 with self.assertRaisesRegex(ValueError, error):
-                    verify(repository, preview=True)
+                    verify(repository)
+
+    def test_the_preview_selector_is_retired(self) -> None:
+        # One tree carries one identity; there is no second contract to select.
+        with patch.object(sys, "argv", ["verify_version_contract.py", "--preview"]):
+            with self.assertRaises(SystemExit) as raised:
+                contract.main()
+        self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":

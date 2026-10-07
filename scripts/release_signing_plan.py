@@ -36,6 +36,7 @@ SOURCE_PLAN_RELATIVE: Final = Path("native/macos/Config/signing-order.json")
 PLAN_RELATIVE: Final = Path("signing-plan.json")
 COMPONENT_ORDER: Final = (
     "native-bridge",
+    "native-ui",
     "global-authority",
     "proxy-agent",
     "packet-tunnel",
@@ -44,6 +45,7 @@ COMPONENT_ORDER: Final = (
 )
 COMPONENT_INPUTS: Final[dict[str, tuple[str | None, str | None]]] = {
     "native-bridge": (None, None),
+    "native-ui": (None, None),
     "global-authority": ("entitlements/GlobalAuthority.entitlements", None),
     "proxy-agent": (
         "entitlements/ProxyAgent.release.xcent",
@@ -172,7 +174,7 @@ def _source_plan_sha256(repository: Path, candidate_root: Path) -> str:
         source_value["schemaVersion"] != 1
         or source_value["teamIdentifier"] != "YKUPL7Z869"
         or type(source_value["nested"]) is not list
-        or len(source_value["nested"]) != 5
+        or len(source_value["nested"]) != 6
         or type(source_value["outer"]) is not dict
         or source_value["outer"].get("signedLast") is not True
     ):

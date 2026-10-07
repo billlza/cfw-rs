@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durably freeze the one v0.4.0 GA candidate before any signing starts.
+"""Durably freeze the one v0.5.0 GA candidate before any signing starts.
 
 The builder owns the fixed ``ga-preflight`` tree.  This module validates and
 binds every signing input, commits one exclusive consumption intent, and then
@@ -55,6 +55,7 @@ if __package__:
     )
     from .verify_release_build_allocations import (
         ReleaseBuildAllocationError,
+        CONTRACT_RELATIVE_PATH as LEDGER_RELATIVE_PATH,
         validate_contract as validate_allocation_contract,
     )
 else:
@@ -84,6 +85,7 @@ else:
     )
     from verify_release_build_allocations import (
         ReleaseBuildAllocationError,
+        CONTRACT_RELATIVE_PATH as LEDGER_RELATIVE_PATH,
         validate_contract as validate_allocation_contract,
     )
 
@@ -92,7 +94,6 @@ DOCUMENT: Final = "cfm-candidate-freeze-intent-v3"
 SCHEMA_VERSION: Final = 3
 CONSUMPTION_STATE: Final = "candidate_frozen_consumed"
 QUARANTINED_STATE: Final = "quarantined_outcome_unknown"
-LEDGER_RELATIVE_PATH: Final = Path("docs/release/build-allocations-v040.json")
 INTENT_RELATIVE_PATH: Final = Path("candidate-freeze/intent.json")
 MAX_JSON_BYTES: Final = 4 * 1024 * 1024
 MAX_TREE_ENTRIES: Final = 250_000
@@ -201,6 +202,7 @@ _SIGNING_PLAN_FIELDS: Final = frozenset(
 )
 _SIGNING_COMPONENT_ORDER: Final = (
     "native-bridge",
+    "native-ui",
     "global-authority",
     "proxy-agent",
     "packet-tunnel",
@@ -387,17 +389,17 @@ def _fixed_roots(repository: Path) -> tuple[Path, Path]:
     if (
         not isinstance(identity.product_version, str)
         or not isinstance(identity.ga_build, str)
-        or identity.product_version != "0.4.0"
-        or identity.ga_build != "40073"
+        or identity.product_version != "0.5.0"
+        or identity.ga_build != "50026"
     ):
         raise CandidateFreezeError(
             "active_release_identity_invalid",
-            "candidate freeze requires the fixed v0.4.0 build 40073 identity",
+            "candidate freeze requires the fixed v0.5.0 build 50026 identity",
         )
-    base = repository / "target/candidates/0.4.0"
+    base = repository / "target/candidates/0.5.0"
     preflight = ga_preflight_root(repository)
     frozen = ga_root(repository)
-    if preflight != base / "ga-preflight/40073" or frozen != base / "ga/40073":
+    if preflight != base / "ga-preflight/50026" or frozen != base / "ga/50026":
         raise CandidateFreezeError(
             "active_release_path_invalid",
             "candidate-freeze roots differ from the fixed active release identity",

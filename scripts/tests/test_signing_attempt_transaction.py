@@ -23,7 +23,7 @@ class SigningAttemptFixture:
         self.repository = Path(self.temporary.name).resolve()
         build_number = transaction.ACTIVE_RELEASE_IDENTITY.ga_build
         self.root = (
-            self.repository / f"target/candidates/0.4.0/ga/{build_number}"
+            self.repository / f"target/candidates/0.5.0/ga/{build_number}"
         )
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
@@ -35,7 +35,7 @@ class SigningAttemptFixture:
             root=self.root,
             intent_path=intent,
             intent_sha256="a" * 64,
-            product_version="0.4.0",
+            product_version="0.5.0",
             build_number=build_number,
             recovered=False,
         )

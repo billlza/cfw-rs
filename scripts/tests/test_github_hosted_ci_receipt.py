@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 from scripts import candidate_freeze
 from scripts import github_hosted_ci_receipt as hosted
@@ -880,6 +881,20 @@ class HostedCIReceiptTests(unittest.TestCase):
                 self.assertRaises(hosted.HostedCIReceiptError),
             ):
                 hosted._fetch_api_json(path)
+
+    def test_http_error_response_is_closed_before_reporting(self) -> None:
+        path = hosted._run_api_path(RUN_ID)
+        body = io.BytesIO(b'{"message":"API rate limit exceeded"}')
+        opener = Mock()
+        opener.open.side_effect = HTTPError(
+            hosted.API_ORIGIN + path, 403, "rate limit exceeded", {}, body
+        )
+        with (
+            patch.object(hosted, "_api_opener", return_value=opener),
+            self.assertRaisesRegex(hosted.HostedCIReceiptError, "HTTP 403"),
+        ):
+            hosted._fetch_api_json(path)
+        self.assertTrue(body.closed)
 
     def test_cli_rejects_noncanonical_run_id_and_caller_selected_paths(self) -> None:
         for arguments in (

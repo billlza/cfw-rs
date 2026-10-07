@@ -341,6 +341,8 @@ def _fetch_api_json(path: str) -> Any:
     except HostedCIReceiptError:
         raise
     except HTTPError as error:
+        # The error owns the unread response; close it before reporting.
+        error.close()
         raise _error(f"GitHub API returned HTTP {error.code}; hosted CI is unavailable") from error
     except (URLError, TimeoutError, OSError, ssl.SSLError) as error:
         raise _error("GitHub API request failed; hosted CI is unavailable") from error

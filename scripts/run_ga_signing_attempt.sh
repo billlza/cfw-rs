@@ -29,7 +29,7 @@ die() {
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.5.0/ga/50026"
+readonly frozen_root="$repo_root/target/candidates/0.5.0/ga/50027"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
 [[ -d "$attempt_work" && ! -L "$attempt_work" ]] ||
   die "transaction work root is not a real directory"
@@ -152,7 +152,7 @@ for product in \
     "$repo_root/scripts/verify_artifact_manifest.py" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json" \
-    --metadata "buildNumber=50026" \
+    --metadata "buildNumber=50027" \
     --metadata "signingMode=developer-id"
 done
 

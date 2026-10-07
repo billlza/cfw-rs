@@ -13,6 +13,13 @@ v0.4.0 ledger is closed. The last signed preview, 50025, stays recorded as
 migration evidence; `verify_version_contract.py` checks the one release identity
 (its `--preview` selector and the preview build chain were removed on 2026-10-07).
 
+The first GA allocation below, 50026, was consumed on 2026-10-07 when its
+Developer ID signing attempt failed after signing started
+([`ga-build-50026-retirement.md`](ga-build-50026-retirement.md)). The ledger
+now records it as `retired_after_candidate_freeze_before_canonical_signing_output`
+and allocates 50027 as the single `active_ga`; the migration predecessor is
+still the installed preview 50025. Sections 1–3 keep the original 50026 plan.
+
 ## 1. Decision required first
 
 The 0.4.0 GA identity 40073 was frozen on 2026-09-20 and never published; the

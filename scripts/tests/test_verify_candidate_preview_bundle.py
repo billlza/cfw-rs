@@ -13,7 +13,7 @@ from unittest.mock import patch
 from scripts import native_ui_artifact as ui
 from scripts import release_build_identity as ids
 from scripts import verify_candidate_bundle as bundle
-from scripts.hash_artifact import build_manifest
+from scripts.hash_artifact import build_manifest, write_new_manifest
 from scripts.promote_signed_native_manifest import promote_manifest
 
 
@@ -172,7 +172,17 @@ class CandidateFixture:
             for locale in ui.LOCALES:
                 write(resources / f"Contents/Resources/{locale}.lproj/Localizable.strings", b'"key" = "value";\n')
             for name in (ui.LIBRARY, ui.RESOURCES):
-                self.manifest(self.native / name, self.ui_metadata)
+                if self.unsigned_preview:
+                    # native_ui_artifact.build_products writes through the
+                    # shared durable writer, owner-only.
+                    write_new_manifest(
+                        self.native / (name + ".manifest.json"),
+                        json.dumps(build_manifest(self.native / name, self.ui_metadata), indent=2, sort_keys=True)
+                        + "\n",
+                    )
+                else:
+                    # The retained signed preview trees recorded them 0644.
+                    self.manifest(self.native / name, self.ui_metadata)
             if self.signing == "developer-id":
                 pre_sign = ids.preview_native_products_root(repository)
                 pre_sign.mkdir(parents=True)
@@ -313,7 +323,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.PREVIEW_PRE_SIGN)
             path = fixture.app / relative
             value = plistlib.loads(path.read_bytes())
-            value["CFBundleVersion"] = "50026"
+            value["CFBundleVersion"] = "50027"
             write_plist(path, value)
             with self.subTest(component=relative), self.assertRaises(bundle.CandidateError):
                 self.verify(fixture)

@@ -1,11 +1,16 @@
-"""Anonymized fixture matching the complete observed release verifier transcript."""
+"""Anonymized fixture matching the complete observed release verifier transcript.
+
+The line order follows the observed post-notarization transcript of the
+signed 0.5.0 Host (seven Mach-O objects; the SwiftUI library adds three
+prepared/validated pairs and two codesign result pairs).
+"""
 
 from __future__ import annotations
 
 import os
 
 
-def complete_verifier_stdout(app: str, build_number: str = "50026") -> bytes:
+def complete_verifier_stdout(app: str, build_number: str = "50027") -> bytes:
     candidate_root = os.path.dirname(os.path.dirname(app))
     native_products = os.path.join(
         candidate_root, "signing-output", "signed-native-products"
@@ -22,7 +27,7 @@ def complete_verifier_stdout(app: str, build_number: str = "50026") -> bytes:
         ),
         f"candidate bundle verified: {app}",
         f"identity: 0.5.0 ({build_number}) / arm64 / macOS 15.0+",
-        "Mach-O objects: 6",
+        "Mach-O objects: 7",
         "legacy tombstone provenance verified: " + "a" * 64,
         f"Processing: {app}",
         "The validate action worked!",
@@ -55,11 +60,14 @@ def complete_verifier_stderr(app: str) -> bytes:
         + "/Contents/Library/SystemExtensions/"
         "com.bill.clashformac.packet-tunnel.systemextension"
     )
+    ui_library = app + "/Contents/Frameworks/libCFMNativeDashboard.dylib"
     lines = [
         f"{authority}: valid on disk",
         f"{authority}: satisfies its Designated Requirement",
         f"--prepared:{proxy_bundle}",
         f"--validated:{proxy_bundle}",
+        f"--prepared:{ui_library}",
+        f"--validated:{ui_library}",
         f"--prepared:{framework_current}",
         f"--validated:{framework_current}",
         f"{app}: valid on disk",
@@ -68,8 +76,12 @@ def complete_verifier_stderr(app: str) -> bytes:
         f"{extension_bundle}: satisfies its Designated Requirement",
         f"{proxy_bundle}: valid on disk",
         f"{proxy_bundle}: satisfies its Designated Requirement",
+        f"{ui_library}: valid on disk",
+        f"{ui_library}: satisfies its Designated Requirement",
         f"--prepared:{proxy_bundle}",
         f"--validated:{proxy_bundle}",
+        f"--prepared:{ui_library}",
+        f"--validated:{ui_library}",
         f"--prepared:{framework_current}",
         f"--validated:{framework_current}",
         f"{app}/Contents/MacOS/clash-for-mac: valid on disk",
@@ -94,6 +106,8 @@ def complete_verifier_stderr(app: str) -> bytes:
             f"{extension_bundle}/Contents/MacOS/CFWPacketTunnel: "
             "satisfies its Designated Requirement"
         ),
+        f"{ui_library}: valid on disk",
+        f"{ui_library}: satisfies its Designated Requirement",
         (
             f"{app}/Contents/Frameworks/CFWNativeBridge.framework/Versions/A/"
             "CFWNativeBridge: valid on disk"
@@ -102,6 +116,8 @@ def complete_verifier_stderr(app: str) -> bytes:
             f"{app}/Contents/Frameworks/CFWNativeBridge.framework/Versions/A/"
             "CFWNativeBridge: satisfies its Designated Requirement"
         ),
+        f"--prepared:{ui_library}",
+        f"--validated:{ui_library}",
         f"--prepared:{framework_current}",
         f"--validated:{framework_current}",
         f"--prepared:{proxy_bundle}",

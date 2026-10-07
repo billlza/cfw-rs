@@ -46,7 +46,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                     classifier(repository, native)
 
     def test_new_context_refuses_wrong_or_mixed_component_identity(self):
-        for build, version in (("40000", "0.5.0"), ("50026", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
+        for build, version in (("40000", "0.5.0"), ("50027", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
             with self.subTest(build=build, version=version), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary).resolve()
                 app, native = self.pair(repository, build=build, version=version)
@@ -65,7 +65,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             repository = Path(temporary).resolve()
             roots = {
                 "40000": repository / "target/candidates/0.5.0/unsigned/native-products",
-                "50026": identity.ga_pre_sign_native_products_root(repository),
+                "50027": identity.ga_pre_sign_native_products_root(repository),
                 "50000": identity.unsigned_preview_native_products_root(repository),
                 "50025": identity.preview_native_products_root(repository),
             }
@@ -88,7 +88,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             ("50015", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
             ("50017", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
             ("50018", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
-            ("50026", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
+            ("50027", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
             ("50013", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50014", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50015", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),

@@ -2,10 +2,11 @@
 """Prove that Developer ID signing changed only signatures and fixed profiles.
 
 The frozen and signed Host applications are copied into private temporary
-directories.  The fixed six code objects are normalized with the system
-``codesign --remove-signature`` operation, the three exact embedded profiles
-are removed only from the signed copy, and the resulting tree-v2 manifests
-must be identical.  A durable receipt records the exact transformation before
+directories.  The fixed seven code objects are normalized with the system
+``codesign --remove-signature`` operation (the SwiftUI library is already
+unsigned in the frozen app), the three exact embedded profiles are removed
+only from the signed copy, and the resulting tree-v2 manifests must be
+identical.  A durable receipt records the exact transformation before
 the first app-notarization submission is allowed to start.
 """
 
@@ -134,6 +135,9 @@ class _CodeObjectSpec:
     code_object: str
     executable: str
     signature_directory: str | None
+    # The frozen pre-sign app carries the linker's ad hoc signature on every
+    # code object except one whose build removed it.
+    unsigned_before_signing: bool = False
 
 
 # This order is the frozen signing-plan order: all nested objects, then Host.
@@ -148,6 +152,14 @@ CODE_OBJECT_SPECS: Final = (
             "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/"
             "_CodeSignature"
         ),
+    ),
+    # native_ui_artifact.remove_build_rpaths strips the compiler's signature,
+    # so Developer ID signing adds the only signature this library carries.
+    _CodeObjectSpec(
+        code_object="Contents/Frameworks/libCFMNativeDashboard.dylib",
+        executable="Contents/Frameworks/libCFMNativeDashboard.dylib",
+        signature_directory=None,
+        unsigned_before_signing=True,
     ),
     _CodeObjectSpec(
         code_object="Contents/Library/HelperTools/CFWGlobalAuthority",
@@ -714,6 +726,52 @@ def _normalize_removed_signature_macho(
         )
 
 
+def _normalize_unsigned_macho(path: Path, label: str) -> None:
+    """Canonicalize the page reservation an earlier signature removal left.
+
+    Removing a signature keeps __LINKEDIT's VM size, so an object that was
+    built unsigned still reserves the removed signature's pages. Only that
+    reservation is normalized, as for every signature removed here; the file
+    bytes themselves must already end exactly at __LINKEDIT.
+    """
+
+    data = _read_regular(path, label, MAX_MACHO_BYTES)
+    unsigned = _parse_macho(data, label)
+    expected_filesize = unsigned.file_size - unsigned.linkedit_fileoff
+    canonical_vmsize = _align_up(expected_filesize, ARM64_SEGMENT_ALIGNMENT)
+    if (
+        unsigned.code_signature_command_offset is not None
+        or unsigned.code_signature_dataoff is not None
+        or unsigned.code_signature_datasize is not None
+        or unsigned.code_signature_prefix is not None
+    ):
+        raise SigningTransformationError(
+            f"{label} must be unsigned in the frozen pre-sign application"
+        )
+    if (
+        unsigned.linkedit_filesize != expected_filesize
+        or unsigned.linkedit_fileoff % ARM64_SEGMENT_ALIGNMENT != 0
+        or unsigned.linkedit_vmaddr % ARM64_SEGMENT_ALIGNMENT != 0
+        or unsigned.linkedit_vmsize < canonical_vmsize
+        or unsigned.linkedit_vmsize % ARM64_SEGMENT_ALIGNMENT != 0
+    ):
+        raise SigningTransformationError(
+            f"{label} __LINKEDIT is not the unsigned tail of the file"
+        )
+    _patch_regular_file(
+        path,
+        offset=unsigned.linkedit_command_offset + 32,
+        expected=struct.pack("<Q", unsigned.linkedit_vmsize),
+        replacement=struct.pack("<Q", canonical_vmsize),
+        label=label,
+    )
+    reopened = _parse_macho(_read_regular(path, label, MAX_MACHO_BYTES), label)
+    if reopened != replace(unsigned, linkedit_vmsize=canonical_vmsize):
+        raise SigningTransformationError(
+            f"{label} unsigned Mach-O normalization is not exact"
+        )
+
+
 def _canonical_repository(repository: Path) -> Path:
     repository = Path(repository)
     try:
@@ -1006,7 +1064,9 @@ def production_codesign_runner(command: tuple[str, ...], repository: Path) -> No
         )
 
 
-def _normalize_copy(app: Path, repository: Path, runner: CodeSignRunner) -> None:
+def _normalize_copy(
+    app: Path, repository: Path, runner: CodeSignRunner, *, signed: bool
+) -> None:
     _require_code_objects(app)
     signature_directories = _signature_directory_inventory(app)
     if signature_directories not in (
@@ -1022,6 +1082,9 @@ def _normalize_copy(app: Path, repository: Path, runner: CodeSignRunner) -> None
         code_object = app if relative == "." else app.joinpath(*Path(relative).parts)
         executable = app.joinpath(*Path(executable_relative).parts)
         label = f"fixed Mach-O code object {executable_relative}"
+        if spec.unsigned_before_signing and not signed:
+            _normalize_unsigned_macho(executable, label)
+            continue
         signed_layout = _inspect_signed_macho(executable, label)
         runner(("/usr/bin/codesign", "--remove-signature", str(code_object)), repository)
         _normalize_removed_signature_macho(executable, label, signed_layout)
@@ -1102,8 +1165,8 @@ def _compose_receipt_for_app(
             signed_copy.parent.mkdir(mode=0o700)
             pre_source = _copy_exact(pre_sign_app, pre_copy, "pre-sign application")
             signed_source = _copy_exact(signed_app, signed_copy, "signed application")
-            _normalize_copy(pre_copy, repository, codesign_runner)
-            _normalize_copy(signed_copy, repository, codesign_runner)
+            _normalize_copy(pre_copy, repository, codesign_runner, signed=False)
+            _normalize_copy(signed_copy, repository, codesign_runner, signed=True)
             _remove_signed_profiles(signed_copy)
             normalized_pre = _tree_manifest(
                 pre_copy, "normalized pre-sign application"

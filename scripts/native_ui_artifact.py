@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and verify the portable SwiftUI library used by the real preview Host.
+"""Build and verify the portable SwiftUI library embedded in the Host.
 
 This produces code/resources only. It does not sign, install, launch, register
 services, or change networking. Candidate identity and signing remain separate.
@@ -20,10 +20,10 @@ import subprocess
 import sys
 
 if __package__:
-    from .hash_artifact import build_manifest
+    from .hash_artifact import build_manifest, write_new_manifest
     from .repository_source_identity import current_identity
 else:
-    from hash_artifact import build_manifest
+    from hash_artifact import build_manifest, write_new_manifest
     from repository_source_identity import current_identity
 
 LIBRARY = "libCFMNativeDashboard.dylib"
@@ -36,6 +36,11 @@ SOURCE_PATHS = (
     "scripts/build_native_ui.sh", "scripts/dependency_pins.env",
 )
 LOCALES = frozenset({"en", "ja", "zh-Hans", "zh-Hant"})
+# Every current native-product manifest, pre-sign or Developer ID signed, comes
+# from the shared durable writer, which creates it owner-only.
+MANIFEST_MODE = 0o600
+# The retained 50001-50025 signed preview trees recorded their manifests 0644.
+RETAINED_PREVIEW_MANIFEST_MODE = 0o644
 COMPONENT_EXPORTS = frozenset({
     "cfm_webview_window_number_v1",
     "cfm_profile_menu_present_v1", "cfm_profile_menu_update_v1",
@@ -297,7 +302,7 @@ def verify_resources(resources: Path) -> None:
 
 
 def verify_products(repository: Path, products: Path, *, build: str, signing: str = "pre-sign",
-                    context: NativeUiContext = NativeUiContext.SIGNED_PREVIEW) -> None:
+                    context: NativeUiContext) -> None:
     if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
         if __package__:
             from .release_build_identity import unsigned_preview_native_products_root
@@ -323,9 +328,10 @@ def verify_products(repository: Path, products: Path, *, build: str, signing: st
         verify_products(repository, pre_sign_products, build=build, signing="pre-sign", context=context)
     verify_library(products / LIBRARY)
     verify_resources(products / RESOURCES)
+    manifest_mode = RETAINED_PREVIEW_MANIFEST_MODE if context is NativeUiContext.SIGNED_PREVIEW else MANIFEST_MODE
     for name in (LIBRARY, RESOURCES):
         path = products / (name + ".manifest.json")
-        regular(path, mode=0o644)
+        regular(path, mode=manifest_mode)
         value = json.loads(path.read_text())
         artifact_metadata = expected
         if pre_sign_products is not None:
@@ -391,10 +397,10 @@ def build_products(repository: Path, products: Path, *, build: str, context: Nat
     if expected_metadata(repository, build, signing=signing, clean=True, context=context) != metadata:
         raise NativeUiArtifactError("SwiftUI source or compiler changed during the build")
     for name in (LIBRARY, RESOURCES):
-        with (products / (name + ".manifest.json")).open("x") as handle:
-            json.dump(build_manifest(products / name, metadata=metadata), handle, sort_keys=True, indent=2)
-            handle.write("\n")
-        os.chmod(products / (name + ".manifest.json"), 0o644)
+        write_new_manifest(
+            products / (name + ".manifest.json"),
+            json.dumps(build_manifest(products / name, metadata=metadata), indent=2, sort_keys=True) + "\n",
+        )
     verify_products(repository, products, build=build, signing=signing, context=context)
     # Candidate freeze admits only its fixed preflight entries. A failed build
     # returns before this point and keeps the scratch with its compiler log.

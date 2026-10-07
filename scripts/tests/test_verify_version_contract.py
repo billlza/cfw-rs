@@ -93,15 +93,15 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository)
             source = repository / "apps/cfw-tauri-shell/src/legacy/admission.rs"
-            source.write_text(source.read_text().replace("50026", "50025"))
+            source.write_text(source.read_text().replace("50027", "50025"))
             with self.assertRaisesRegex(ValueError, "runtime migration admission RELEASE_BUILD"):
                 verify(repository)
 
     def test_release_identity_remains_frozen(self) -> None:
-        self.assertEqual((EXPECTED_VERSION, EXPECTED_BUILD), ("0.5.0", "50026"))
+        self.assertEqual((EXPECTED_VERSION, EXPECTED_BUILD), ("0.5.0", "50027"))
         self.assertEqual(
             (ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build),
-            ("0.5.0", "50026"),
+            ("0.5.0", "50027"),
         )
         # The retained signed preview shares the product version; a tree still
         # carrying its build number is not the release.
@@ -110,7 +110,7 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository)
             project = repository / "native/macos/project.yml"
-            project.write_text(project.read_text().replace("50026", "50025"))
+            project.write_text(project.read_text().replace("50027", "50025"))
             with self.assertRaisesRegex(ValueError, "Xcode build differs from the fixed release identity"):
                 verify(repository)
 
@@ -165,17 +165,17 @@ class VersionContractTests(unittest.TestCase):
                 verify(repository)
 
     def test_release_build_is_exact_and_canonical(self) -> None:
-        for build in ("40073", "50025", "50027", "050026", "5002", "+50026", "50026a"):
+        for build in ("40073", "50025", "50026", "50028", "050027", "5002", "+50027", "50027a"):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository)
                 project = repository / "native/macos/project.yml"
-                project.write_text(project.read_text().replace("50026", build))
+                project.write_text(project.read_text().replace("50027", build))
                 with self.assertRaisesRegex(ValueError, "fixed release identity|canonical positive"):
                     verify(repository)
 
     def test_observation_identity_is_checked(self) -> None:
-        for original, replacement in (("50026", "50025"), ("0.5.0", "0.4.0")):
+        for original, replacement in (("50027", "50025"), ("0.5.0", "0.4.0")):
             with self.subTest(original=original), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository)
@@ -192,7 +192,7 @@ class VersionContractTests(unittest.TestCase):
             ("native/macos/project.yml", "0.5.0", "0.4.0", "MARKETING_VERSION"),
             ("CHANGELOG.md", "0.5.0", "0.4.0", "first changelog release"),
             ("native/macos/Config/ProxyAgent-Info.plist", "$(CURRENT_PROJECT_VERSION)",
-             "50026", "must inherit the canonical"),
+             "50027", "must inherit the canonical"),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)

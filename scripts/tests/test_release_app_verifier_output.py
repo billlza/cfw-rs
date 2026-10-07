@@ -13,8 +13,8 @@ from scripts.tests.release_app_verifier_fixture import (
 )
 
 
-APP = "/private/tmp/release/target/candidates/0.5.0/ga/50026/signed/Clash for Mac.app"
-APP_SUFFIX = "/target/candidates/0.5.0/ga/50026/signed/Clash for Mac.app"
+APP = "/private/tmp/release/target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app"
+APP_SUFFIX = "/target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app"
 FRAMEWORK_CURRENT = (
     APP + "/Contents/Frameworks/CFWNativeBridge.framework/Versions/Current/."
 )
@@ -29,22 +29,37 @@ class ReleaseAppVerifierOutputTests(unittest.TestCase):
             complete_verifier_stdout(APP) if stdout is None else stdout,
             complete_verifier_stderr(APP) if stderr is None else stderr,
             expected_app_suffix=APP_SUFFIX,
-            expected_build_number="50026",
+            expected_build_number="50027",
         )
 
     def test_complete_observed_transcript_shape_is_accepted(self) -> None:
         stdout = complete_verifier_stdout(APP)
         stderr = complete_verifier_stderr(APP)
         self.assertEqual(len(stdout.splitlines()), 15)
-        self.assertEqual(len(stderr.splitlines()), 34)
+        self.assertEqual(len(stderr.splitlines()), 44)
         self.parse(stdout=stdout, stderr=stderr)
+
+    def test_swiftui_library_lines_are_required_exactly(self) -> None:
+        stdout = complete_verifier_stdout(APP)
+        stderr = complete_verifier_stderr(APP)
+        library = (APP + "/Contents/Frameworks/libCFMNativeDashboard.dylib").encode()
+        lines = stderr.splitlines(keepends=True)
+        library_lines = [line for line in lines if library in line]
+        self.assertEqual(len(library_lines), 10)
+        for index, line in enumerate(library_lines):
+            with self.subTest(dropped=index), self.assertRaises(ReleaseAppVerifierOutputError):
+                self.parse(stderr=b"".join(item for item in lines if item is not line))
+        with self.assertRaises(ReleaseAppVerifierOutputError):
+            self.parse(stdout=stdout.replace(b"Mach-O objects: 7", b"Mach-O objects: 6", 1))
+        with self.assertRaises(ReleaseAppVerifierOutputError):
+            self.parse(stderr=stderr + library_lines[0])
 
     def test_exact_app_mode_is_accepted(self) -> None:
         parsed = parse_release_app_verifier_output(
             complete_verifier_stdout(APP),
             complete_verifier_stderr(APP),
             expected_app=APP,
-            expected_build_number="50026",
+            expected_build_number="50027",
         )
         self.assertEqual(parsed.app, APP)
 
@@ -97,7 +112,7 @@ class ReleaseAppVerifierOutputTests(unittest.TestCase):
                 b"A" * half_plus_one,
                 b"B" * half_plus_one,
                 expected_app=APP,
-                expected_build_number="50026",
+                expected_build_number="50027",
             )
 
     def test_prepared_and_validated_use_the_exact_subject_multiset(self) -> None:

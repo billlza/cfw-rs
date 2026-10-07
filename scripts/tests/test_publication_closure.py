@@ -26,6 +26,7 @@ EXPECTED_CODE_PATHS = {
     "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent",
     "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
     "Contents/Library/HelperTools/cfw-helper-tombstone",
+    "Contents/Frameworks/libCFMNativeDashboard.dylib",
 }
 
 
@@ -92,6 +93,14 @@ class PublicationClosureTests(unittest.TestCase):
             with self.assertRaisesRegex(PublicationError, "code closure is incomplete"):
                 scan_app_code(app, fixture=False)
 
+    def test_missing_swiftui_library_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Clash for Mac.app"
+            self.make_app_code(app)
+            (app / "Contents/Frameworks/libCFMNativeDashboard.dylib").unlink()
+            with self.assertRaisesRegex(PublicationError, "code closure is incomplete"):
+                scan_app_code(app, fixture=False)
+
     def test_reference_reverse_tree_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory) / "Clash for Mac.app"
@@ -112,7 +121,7 @@ class PublicationClosureTests(unittest.TestCase):
         )
 
     def test_prepackage_evidence_has_no_future_stage_dependency(self) -> None:
-        root = Path("target/candidates/0.5.0/ga/50026")
+        root = Path("target/candidates/0.5.0/ga/50027")
         sources = _prepackage_evidence_sources(root)
         self.assertEqual(
             set(sources),

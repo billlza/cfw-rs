@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -24,6 +25,59 @@ ADHOC_SIGNATURE_SIZE = 0x1000
 DEVELOPER_ID_SIGNATURE_SIZE = 0x5000
 FIXTURE_LINKEDIT_FILEOFF = 0x4000
 FIXTURE_SIGNATURE_DATAOFF = 0x4400
+
+
+@dataclass(frozen=True)
+class FixtureCodeObject:
+    code_object: str
+    executable: str
+    signature_directory: str | None
+    unsigned_before_signing: bool = False
+
+
+# The real 0.5.0 Host, independent of the module under test: every nested
+# object of native/macos/Config/signing-order.json in its order, then the Host.
+# The build strips the compiler's signature from the SwiftUI library, so it is
+# the one code object the frozen pre-sign app carries unsigned.
+FIXTURE_CODE_OBJECTS = (
+    FixtureCodeObject(
+        "Contents/Frameworks/CFWNativeBridge.framework",
+        "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/CFWNativeBridge",
+        "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/_CodeSignature",
+    ),
+    FixtureCodeObject(
+        "Contents/Frameworks/libCFMNativeDashboard.dylib",
+        "Contents/Frameworks/libCFMNativeDashboard.dylib",
+        None,
+        unsigned_before_signing=True,
+    ),
+    FixtureCodeObject(
+        "Contents/Library/HelperTools/CFWGlobalAuthority",
+        "Contents/Library/HelperTools/CFWGlobalAuthority",
+        None,
+    ),
+    FixtureCodeObject(
+        "Contents/Library/LoginItems/CFWProxyAgent.app",
+        "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent",
+        "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/_CodeSignature",
+    ),
+    FixtureCodeObject(
+        "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension",
+        "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension"
+        "/Contents/MacOS/CFWPacketTunnel",
+        "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension"
+        "/Contents/_CodeSignature",
+    ),
+    FixtureCodeObject(
+        "Contents/Library/HelperTools/cfw-helper-tombstone",
+        "Contents/Library/HelperTools/cfw-helper-tombstone",
+        None,
+    ),
+    FixtureCodeObject(".", "Contents/MacOS/clash-for-mac", "Contents/_CodeSignature"),
+)
+FIXTURE_BY_CODE_OBJECT = {item.code_object: item for item in FIXTURE_CODE_OBJECTS}
+AUTHORITY = FIXTURE_BY_CODE_OBJECT["Contents/Library/HelperTools/CFWGlobalAuthority"]
+UI_LIBRARY = FIXTURE_BY_CODE_OBJECT["Contents/Frameworks/libCFMNativeDashboard.dylib"]
 
 
 def fixture_signed_macho(
@@ -123,7 +177,7 @@ class SigningTransformationFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.root = (
-            self.repository / "target/candidates/0.5.0/ga/50026"
+            self.repository / "target/candidates/0.5.0/ga/50027"
         )
         self.pre_sign_app = self.root / transformation.PRE_SIGN_APP_RELATIVE
         self.signing_output = (
@@ -167,14 +221,14 @@ class SigningTransformationFixture:
     def _create_app(self, app: Path) -> None:
         (app / "Contents/Resources").mkdir(parents=True)
         (app / "Contents/Resources/config.json").write_bytes(b'{"fixed":true}\n')
-        for relative in transformation.CODE_OBJECTS:
-            path = app if relative == "." else app.joinpath(*Path(relative).parts)
-            if relative in transformation.DIRECTORY_CODE_OBJECTS:
+        for item in FIXTURE_CODE_OBJECTS:
+            path = app if item.code_object == "." else app.joinpath(*Path(item.code_object).parts)
+            if item.signature_directory is not None:
                 path.mkdir(parents=True, exist_ok=True)
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
-        for relative in transformation.MACHO_EXECUTABLES:
-            executable = app.joinpath(*Path(relative).parts)
+        for item in FIXTURE_CODE_OBJECTS:
+            executable = app.joinpath(*Path(item.executable).parts)
             executable.parent.mkdir(parents=True, exist_ok=True)
             executable.write_bytes(fixture_signed_macho(ADHOC_SIGNATURE_SIZE, b"A"))
             executable.chmod(0o755)
@@ -182,7 +236,7 @@ class SigningTransformationFixture:
     def _write_pre_sign_manifest(self) -> None:
         metadata = {
             "artifactKind": "pre-sign-application-v1",
-            "buildNumber": "50026",
+            "buildNumber": "50027",
             "version": "0.5.0",
         }
         value = build_manifest(
@@ -201,26 +255,25 @@ class SigningTransformationFixture:
         self, signature_size: int, signature_byte: bytes, label: str
     ) -> None:
         app = self.pre_sign_app if label == "adhoc" else self.signed_app
-        for code_relative, executable_relative in zip(
-            transformation.CODE_OBJECTS,
-            transformation.MACHO_EXECUTABLES,
-            strict=True,
-        ):
-            executable = app.joinpath(*Path(executable_relative).parts)
-            executable.write_bytes(
-                fixture_signed_macho(signature_size, signature_byte)
-            )
-            if code_relative in transformation.DIRECTORY_CODE_OBJECTS and label == "developer-id":
-                signature = app.joinpath(
-                    *Path(
-                        transformation.SIGNATURE_DIRECTORY_BY_CODE_OBJECT[
-                            code_relative
-                        ]
-                    ).parts
+        for item in FIXTURE_CODE_OBJECTS:
+            executable = app.joinpath(*Path(item.executable).parts)
+            if label == "adhoc" and item.unsigned_before_signing:
+                # The build removed a larger signature, so __LINKEDIT still
+                # reserves pages beyond the canonical end of the file.
+                executable.write_bytes(
+                    remove_fixture_signature(
+                        fixture_signed_macho(DEVELOPER_ID_SIGNATURE_SIZE, b"B")
+                    )
                 )
+            else:
+                executable.write_bytes(
+                    fixture_signed_macho(signature_size, signature_byte)
+                )
+            if item.signature_directory is not None and label == "developer-id":
+                signature = app.joinpath(*Path(item.signature_directory).parts)
                 signature.mkdir(exist_ok=True)
                 (signature / "CodeResources").write_bytes(
-                    f"{label}:{code_relative}\n".encode("ascii")
+                    f"{label}:{item.code_object}\n".encode("ascii")
                 )
 
     def _embed_profiles(self) -> None:
@@ -232,7 +285,7 @@ class SigningTransformationFixture:
 
     def _write_intent(self) -> None:
         value = {
-            "build_number": "50026",
+            "build_number": "50027",
             "consumption_state": "candidate_frozen_consumed",
             "document": "cfm-candidate-freeze-intent-v3",
             "pre_sign_app_tree_sha256": "a" * 64,
@@ -251,7 +304,7 @@ class SigningTransformationFixture:
             intent_path=self.intent_path,
             intent_sha256=hashlib.sha256(self.intent_path.read_bytes()).hexdigest(),
             product_version="0.5.0",
-            build_number="50026",
+            build_number="50027",
             recovered=False,
         )
 
@@ -266,8 +319,8 @@ class SigningTransformationFixture:
             parent for parent in path.parents if parent.name == "Clash for Mac.app"
         )
         relative = "." if path == app else path.relative_to(app).as_posix()
-        index = transformation.CODE_OBJECTS.index(relative)
-        executable = app.joinpath(*Path(transformation.MACHO_EXECUTABLES[index]).parts)
+        executable = app.joinpath(*Path(FIXTURE_BY_CODE_OBJECT[relative].executable).parts)
+        # Raises for an unsigned object: removal is only valid on signed code.
         executable.write_bytes(remove_fixture_signature(executable.read_bytes()))
         signature = path / "_CodeSignature" if path.is_dir() else None
         if signature is not None and signature.exists():
@@ -544,6 +597,116 @@ class MachONormalizationTests(unittest.TestCase):
             self.assertEqual(pre.read_bytes(), signed.read_bytes())
 
 
+class UnsignedPreSignNormalizationTests(unittest.TestCase):
+    def test_reserved_pages_are_the_only_normalized_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pre = root / "pre-sign"
+            signed = root / "developer-id"
+            # The build removed a larger signature than Developer ID adds, so
+            # the two sides reserve different page counts past the file end.
+            pre.write_bytes(remove_fixture_signature(fixture_signed_macho(0x9000, b"B")))
+            signed.write_bytes(fixture_signed_macho(DEVELOPER_ID_SIGNATURE_SIZE, b"D"))
+            for path in (pre, signed):
+                path.chmod(0o600)
+            self.assertNotEqual(pre.read_bytes(), remove_fixture_signature(signed.read_bytes()))
+            self.assertEqual(
+                len(pre.read_bytes()), len(remove_fixture_signature(signed.read_bytes()))
+            )
+            transformation._normalize_unsigned_macho(pre, "unsigned pre-sign fixture")
+            layout = transformation._inspect_signed_macho(signed, "signed fixture")
+            signed.write_bytes(remove_fixture_signature(signed.read_bytes()))
+            transformation._normalize_removed_signature_macho(signed, "signed fixture", layout)
+            self.assertEqual(pre.read_bytes(), signed.read_bytes())
+
+    def test_unsigned_pre_sign_layout_violations_fail_closed(self) -> None:
+        unsigned = remove_fixture_signature(fixture_signed_macho(DEVELOPER_ID_SIGNATURE_SIZE, b"B"))
+        layout = transformation._parse_macho(unsigned, "fixture")
+        vmsize_field = layout.linkedit_command_offset + 32
+        filesize_field = layout.linkedit_command_offset + 48
+
+        def patched(offset: int, value: int) -> bytes:
+            data = bytearray(unsigned)
+            struct.pack_into("<Q", data, offset, value)
+            return bytes(data)
+
+        cases = {
+            "signed": fixture_signed_macho(ADHOC_SIGNATURE_SIZE, b"A"),
+            "reservation-below-file-end": patched(vmsize_field, layout.linkedit_filesize),
+            "unaligned-reservation": patched(vmsize_field, layout.linkedit_vmsize + 0x10),
+            "linkedit-short-of-file-end": patched(filesize_field, layout.linkedit_filesize - 0x10),
+            "trailing-bytes": unsigned + b"\0" * 16,
+        }
+        for name, data in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "library"
+                path.write_bytes(data)
+                path.chmod(0o600)
+                with self.assertRaises(transformation.SigningTransformationError):
+                    transformation._normalize_unsigned_macho(path, name)
+                self.assertEqual(path.read_bytes(), data)
+
+    def test_real_unsigned_library_matches_its_signed_copy_on_darwin(self) -> None:
+        """Rebuild the SwiftUI library's lifecycle with the real Apple tools.
+
+        The real library's linker signature spans more than one page, so
+        removing it with its build-only rpath leaves __LINKEDIT reserving
+        pages past the file end. A large requirement stands in for that
+        signature here and for the Developer ID signature afterwards.
+        """
+        self.assertEqual(sys.platform, "darwin")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "library.c"
+            source.write_text("int cfm_fixture(void) { return 7; }\n", encoding="utf-8")
+            build_rpath = str(root / "toolchain/lib/swift-6.2/macosx")
+            pre = root / "pre-sign.dylib"
+            signed = root / "signed.dylib"
+
+            def tool(*arguments: str) -> str:
+                completed = subprocess.run(
+                    arguments, cwd=root, capture_output=True, text=True, timeout=60
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                return completed.stdout.strip()
+
+            def large_requirement(identifier: str, size: int) -> str:
+                return f'-r=designated => identifier "{identifier}" and info [CFMFixture] = "{"L" * size}"'
+
+            clang = tool("/usr/bin/xcrun", "--find", "clang")
+            sdk = tool("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")
+            tool(
+                clang, "-arch", "arm64", "-isysroot", sdk, "-mmacosx-version-min=15.0",
+                "-dynamiclib", "-install_name", "@rpath/libFixture.dylib",
+                "-Wl,-rpath," + build_rpath, "-Wall", "-Wextra", "-Werror",
+                str(source), "-o", str(pre),
+            )
+            tool("/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none",
+                 large_requirement("com.bill.cfw.compiler", 30000), str(pre))
+            # native_ui_artifact.remove_build_rpaths, in its order.
+            tool("/usr/bin/codesign", "--remove-signature", str(pre))
+            tool("/usr/bin/install_name_tool", "-delete_rpath", build_rpath, str(pre))
+            shutil.copy2(pre, signed)
+            tool("/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none",
+                 "--options", "runtime", large_requirement("com.bill.cfw.release", 60000), str(signed))
+            for path in (pre, signed):
+                path.chmod(0o600)
+            unsigned = transformation._parse_macho(pre.read_bytes(), "real pre-sign library")
+            canonical = transformation._align_up(
+                unsigned.linkedit_filesize, transformation.ARM64_SEGMENT_ALIGNMENT
+            )
+            self.assertIsNone(unsigned.code_signature_command_offset)
+            self.assertGreater(unsigned.linkedit_vmsize, canonical)
+            layout = transformation._inspect_signed_macho(signed, "real signed library")
+            self.assertGreater(layout.linkedit_vmsize, unsigned.linkedit_vmsize)
+            transformation._normalize_unsigned_macho(pre, "real pre-sign library")
+            transformation.production_codesign_runner(
+                ("/usr/bin/codesign", "--remove-signature", str(signed)), root
+            )
+            transformation._normalize_removed_signature_macho(signed, "real signed library", layout)
+            self.assertEqual(pre.read_bytes(), signed.read_bytes())
+
+
 class SigningTransformationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = SigningTransformationFixture()
@@ -685,22 +848,28 @@ class SigningTransformationTests(unittest.TestCase):
         self.assertEqual(receipt_path.read_bytes(), transformation.canonical_json(receipt))
         self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(receipt_path.parent.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(len(self.fixture.calls), 24)
-        for offset in range(0, 24, 6):
-            observed = self.fixture.calls[offset : offset + 6]
-            self.assertEqual(
-                tuple(
-                    "."
-                    if Path(command[2]).name == "Clash for Mac.app"
-                    else next(
-                        relative
-                        for relative in transformation.CODE_OBJECTS
-                        if relative != "." and command[2].endswith(relative)
-                    )
-                    for command in observed
-                ),
-                transformation.CODE_OBJECTS,
+        every_object = tuple(item.code_object for item in FIXTURE_CODE_OBJECTS)
+        signed_before_signing = tuple(
+            item.code_object
+            for item in FIXTURE_CODE_OBJECTS
+            if not item.unsigned_before_signing
+        )
+        observed = tuple(
+            "."
+            if Path(command[2]).name == "Clash for Mac.app"
+            else next(
+                relative
+                for relative in every_object
+                if relative != "." and command[2].endswith(relative)
             )
+            for command in self.fixture.calls
+        )
+        # create composes and then reopens the receipt; each run normalizes
+        # the pre-sign app, then the signed app. The unsigned SwiftUI library
+        # has no signature to remove.
+        self.assertEqual(
+            observed, (signed_before_signing + every_object) * 2
+        )
         self.assertEqual(self.fixture.verify(), receipt)
 
     def test_resource_tampering_is_not_a_signing_transformation(self) -> None:
@@ -714,15 +883,44 @@ class SigningTransformationTests(unittest.TestCase):
             self.fixture.create()
 
     def test_executable_tampering_is_not_hidden_by_signature_removal(self) -> None:
-        authority = self.fixture.signed_app.joinpath(
-            *Path(transformation.MACHO_EXECUTABLES[1]).parts
-        )
-        data = bytearray(authority.read_bytes())
-        data[0x200] ^= 0x01
-        authority.write_bytes(data)
+        for item in (AUTHORITY, UI_LIBRARY):
+            with self.subTest(executable=item.executable):
+                fixture = SigningTransformationFixture()
+                try:
+                    executable = fixture.signed_app.joinpath(*Path(item.executable).parts)
+                    data = bytearray(executable.read_bytes())
+                    data[0x200] ^= 0x01
+                    executable.write_bytes(data)
+                    with self.assertRaisesRegex(
+                        transformation.SigningTransformationError,
+                        "outside signatures and profiles",
+                    ):
+                        transformation.create_attempt_receipt(
+                            fixture.repository,
+                            fixture.signing_output,
+                            codesign_runner=fixture.codesign_runner,
+                            freeze_verifier=fixture.freeze_verifier,
+                        )
+                finally:
+                    fixture.cleanup()
+
+    def test_pre_sign_ui_library_must_be_unsigned(self) -> None:
+        library = self.fixture.pre_sign_app.joinpath(*Path(UI_LIBRARY.executable).parts)
+        library.write_bytes(fixture_signed_macho(ADHOC_SIGNATURE_SIZE, b"A"))
+        # Keep the frozen manifest consistent so only the signature state differs.
+        self.fixture._write_pre_sign_manifest()
         with self.assertRaisesRegex(
-            transformation.SigningTransformationError,
-            "outside signatures and profiles",
+            transformation.SigningTransformationError, "must be unsigned"
+        ):
+            self.fixture.create()
+
+    def test_signed_ui_library_must_carry_its_signature(self) -> None:
+        library = self.fixture.signed_app.joinpath(*Path(UI_LIBRARY.executable).parts)
+        library.write_bytes(
+            remove_fixture_signature(fixture_signed_macho(DEVELOPER_ID_SIGNATURE_SIZE, b"D"))
+        )
+        with self.assertRaisesRegex(
+            transformation.SigningTransformationError, "code-signature command"
         ):
             self.fixture.create()
 
@@ -763,7 +961,7 @@ class SigningTransformationTests(unittest.TestCase):
 
     def test_fixed_code_object_symlink_is_rejected(self) -> None:
         authority = self.fixture.signed_app.joinpath(
-            *Path(transformation.CODE_OBJECTS[1]).parts
+            *Path(AUTHORITY.code_object).parts
         )
         target = authority.with_name("authority-target")
         authority.rename(target)

@@ -16,7 +16,10 @@ original paths and retirement documents. The v0.4.0 allocation ledger is
 closed: it has no `active_ga`, every allocation is retired, and the verifier
 only reads it.
 
-The next releasable identity is 0.5.0 build 50026, allocated in
+The next releasable identity was 0.5.0 build 50026, allocated in
 `build-allocations-v050.json` after the twenty-five consumed preview
 validation lineages 50001–50025. See
-[`ga-identity-plan-v050.md`](ga-identity-plan-v050.md).
+[`ga-identity-plan-v050.md`](ga-identity-plan-v050.md). Build 50026 was
+consumed during Developer ID signing and retired
+([`ga-build-50026-retirement.md`](ga-build-50026-retirement.md)); 0.5.0 build
+50027 is the active GA.

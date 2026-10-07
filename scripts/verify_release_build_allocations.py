@@ -294,6 +294,10 @@ PREVIEW_VALIDATION_PREFIX: Final = tuple(
     for build in range(50001, 50026)
 )
 
+RETIRED_GA_ALLOCATIONS_V050: Final = (
+    ("50026", "ga", "retired_after_candidate_freeze_before_canonical_signing_output"),
+)
+
 
 @dataclass(frozen=True)
 class LedgerPolicy:
@@ -330,8 +334,8 @@ POLICIES: Final = {
         REPOSITORY_ROOT / "docs/release/build-allocations-v050.json",
         PREVIEW_VALIDATION_PREFIX,
         None,
-        (),
-        "50026",
+        RETIRED_GA_ALLOCATIONS_V050,
+        "50027",
     ),
 }
 ACTIVE_POLICY: Final = POLICIES[PRODUCT_VERSION]

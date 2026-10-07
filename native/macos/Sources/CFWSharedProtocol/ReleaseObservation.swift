@@ -159,7 +159,7 @@ public struct ReleaseObservationJournalDecision: Codable, Equatable, Sendable {
 
 public struct ReleaseObservationCandidate: Codable, Equatable, Sendable {
   static let releaseProductVersion = "0.5.0"
-  static let releaseBuildNumber = "50026"
+  static let releaseBuildNumber = "50027"
 
   public let version: String
   public let buildNumber: String

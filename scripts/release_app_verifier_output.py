@@ -125,7 +125,7 @@ def _app_from_stdout(
         },
         4: f"candidate bundle verified: {app}",
         5: f"identity: 0.5.0 ({expected_build_number}) / arm64 / macOS 15.0+",
-        6: "Mach-O objects: 6",
+        6: "Mach-O objects: 7",
         8: f"Processing: {app}",
         9: "The validate action worked!",
         11: f"release app verified: {app}",
@@ -181,11 +181,16 @@ def _expected_codesign_subjects(
         app + "/Contents/Frameworks/CFWNativeBridge.framework/Versions/Current"
     )
     proxy_bundle = app + "/Contents/Library/LoginItems/CFWProxyAgent.app"
-    prepared = Counter({framework_current: 3, proxy_bundle: 3})
-    prepared_raw = Counter({framework_current + "/.": 3, proxy_bundle: 3})
+    ui_library = app + "/Contents/Frameworks/libCFMNativeDashboard.dylib"
+    prepared = Counter({framework_current: 3, proxy_bundle: 3, ui_library: 3})
+    prepared_raw = Counter(
+        {framework_current + "/.": 3, proxy_bundle: 3, ui_library: 3}
+    )
     results = Counter(
         {
             app: 2,
+            # Its own Developer ID check, then the per-Mach-O pass.
+            ui_library: 2,
             app + "/Contents/Library/HelperTools/CFWGlobalAuthority": 2,
             (
                 app
@@ -214,9 +219,9 @@ def _expected_codesign_subjects(
 
 def _validate_codesign_stderr(stderr: str, app: str) -> None:
     lines = stderr[:-1].split("\n")
-    if len(lines) != 34:
+    if len(lines) != 44:
         raise ReleaseAppVerifierOutputError(
-            "verifier stderr does not match the fixed 34-line codesign transcript"
+            "verifier stderr does not match the fixed 44-line codesign transcript"
         )
     prepared: Counter[str] = Counter()
     prepared_raw: Counter[str] = Counter()

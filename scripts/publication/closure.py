@@ -73,6 +73,7 @@ ALLOWED_CODE_PATHS = {
     "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent",
     "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
     "Contents/Library/HelperTools/cfw-helper-tombstone",
+    "Contents/Frameworks/libCFMNativeDashboard.dylib",
 }
 MACHO_MAGICS = {
     b"\xfe\xed\xfa\xce",

@@ -359,9 +359,9 @@ the complete failed preparation with `git worktree move` in a new private
 history path outside the main workspace. Preserve its source, generated inputs,
 attempt logs and original receipt; the receipt remains in the original main
 Git administrative directory and does not authorize the moved history path.
-Recreate the fixed `target/release-worktrees/50026` path at the verified new
+Recreate the fixed `target/release-worktrees/50027` path at the verified new
 commit, create an empty `target` with mode `0700`, and run
-`scripts/authorize_release_worktree.sh 50026` from the main checkout before
+`scripts/authorize_release_worktree.sh 50027` from the main checkout before
 copying and revalidating managed dependency inputs. Never edit the old receipt
 or copy it into the new registration. Git may name the new administrative
 directory `400491`; scope identity comes from the reciprocal worktree path and
@@ -726,8 +726,8 @@ the sealed publication evidence but remains fail closed until that evidence has
 been prepared, legally reviewed, and finalized for the exact signed app. It has
 no success override and accepts only:
 
-- `target/candidates/0.5.0/ga/50026/signed/Clash for Mac.app` as the signed binary root;
-- `target/candidates/0.5.0/ga/50026/stage-inputs/publication` as the final evidence root.
+- `target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app` as the signed binary root;
+- `target/candidates/0.5.0/ga/50027/stage-inputs/publication` as the final evidence root.
 
 It never scans or accepts `target/release`, which retains historical 0.3.5
 signed artifacts containing the old core/helper layout.
@@ -772,8 +772,8 @@ been signed, notarized, and stapled. Tools use the fixed frozen checkout for
 all product inputs and outputs:
 
 ```bash
-publication_artifact_repository="$PWD/target/release-worktrees/50026"
-publication_ga="$publication_artifact_repository/target/candidates/0.5.0/ga/50026"
+publication_artifact_repository="$PWD/target/release-worktrees/50027"
+publication_ga="$publication_artifact_repository/target/candidates/0.5.0/ga/50027"
 publication_inputs="$publication_ga/stage-inputs"
 publication_libbox="$publication_artifact_repository/target/sources/sing-box-v1.14.2-patched"
 
@@ -807,7 +807,7 @@ the old approval and record the comparison separately. The current closure
 record must name its own digest and current release authorization; it must not
 pretend that the earlier reviewer saw a subsequently rebuilt source archive.
 
-### Single-GA 50026 release sequence
+### Single-GA 50027 release sequence
 
 The canonical allocation ledger is
 [`docs/release/build-allocations-v050.json`](docs/release/build-allocations-v050.json);
@@ -879,9 +879,13 @@ checks. The requested internationalization changes application bytes and require
 build 40073; see [`ga-build-40072-retirement.md`](docs/release/ga-build-40072-retirement.md).
 Build 40073 was retired unpublished on 2026-10-07 as
 `retired_superseded_by_next_product_version`; the v0.4.0 ledger is closed. The
-sole `active_ga` identity is now 0.5.0 build 50026, allocated in
+first 0.5.0 GA allocation, 50026, was consumed on 2026-10-07 when its Developer
+ID signing attempt failed after signing started; see
+[`ga-build-50026-retirement.md`](docs/release/ga-build-50026-retirement.md).
+The sole `active_ga` identity is now 0.5.0 build 50027, allocated in
 [`docs/release/build-allocations-v050.json`](docs/release/build-allocations-v050.json)
-after the consumed preview validation lineages 50001–50025; see
+after the consumed preview validation lineages 50001–50025 and the retired GA
+50026; see
 [`docs/release/ga-identity-plan-v050.md`](docs/release/ga-identity-plan-v050.md).
 The sequence below is the 0.5.0 GA sequence: its migration predecessor is the
 retained installed preview 50025, and the SwiftUI dashboard library is signed as
@@ -897,7 +901,7 @@ confirm that no freeze intent or signing mutation exists, then preserve the
 old preflight tree under a unique private history path. The builder refuses to
 overwrite an existing preflight root. Once
 `candidate-freeze/intent.json` exists, recovery may only continue an exact
-supported 50026 transaction without changing application or nested-code
+supported 50027 transaction without changing application or nested-code
 signature bytes. A transaction in the explicit post-receipt
 `verification_blocked` state may reopen and verify only its complete exact
 private work and receipt; it must not invoke the signing helper or receipt
@@ -945,7 +949,7 @@ wire proof.
 
    ```bash
    CFW_RELEASE_RUST_TOOLCHAIN=private \
-   CFW_BUILD_NUMBER=50026 \
+   CFW_BUILD_NUMBER=50027 \
    NOTARY_PROFILE=clashformac-notary \
    MACOS_SIGN_IDENTITY='Developer ID Application: Zi ang Li (YKUPL7Z869)' \
    HOST_PROVISIONING_PROFILE_PATH=/absolute/path/to/host.provisionprofile \
@@ -1034,9 +1038,9 @@ wire proof.
 
    ```bash
    scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
-     --artifact-repository /absolute/operator/target/release-worktrees/50026 \
-     --output /absolute/operator/target/release-worktrees/50026/target/candidates/0.5.0/ga/50026/stage-inputs/local-ci-lanes.json \
-     --journal /absolute/private/history/local-ci-50026
+     --artifact-repository /absolute/operator/target/release-worktrees/50027 \
+     --output /absolute/operator/target/release-worktrees/50027/target/candidates/0.5.0/ga/50027/stage-inputs/local-ci-lanes.json \
+     --journal /absolute/private/history/local-ci-50027
    ```
 
    Run this entry from the clean operator checkout. The explicit artifact path
@@ -1075,7 +1079,7 @@ wire proof.
    fixed recovery entry:
 
    ```bash
-   CFW_BUILD_NUMBER=50026 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=50027 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --resume-signing
    ```
 
@@ -1089,7 +1093,7 @@ wire proof.
    A helper failure, an interruption after signing may have started but before
    one complete receipt-bound output was durably recorded, or any other
    ambiguous signing state requires preserving the attempt, retiring build
-   50026, and allocating a successor. Never create fresh timestamped signature
+   50027, and allocating a successor. Never create fresh timestamped signature
    bytes under the same frozen build.
 
    When Apple upload traffic needs the running local proxy, explicitly set
@@ -1102,7 +1106,7 @@ wire proof.
    recover only with that observed ID:
 
    ```bash
-   CFW_BUILD_NUMBER=50026 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=50027 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --recover-notarization-id UUID
    ```
 
@@ -1136,7 +1140,7 @@ wire proof.
 
    Run post-freeze stage verification, packaging, installation, journal export and
    runtime acceptance from the clean **operator checkout** containing the
-   fixed `target/release-worktrees/50026` artifact checkout. These operations
+   fixed `target/release-worktrees/50027` artifact checkout. These operations
    never fall back to treating the operator checkout as artifact source.
    Publication preparation/draft/finalization remain artifact-source operations;
    keep their already reviewed fixed outputs in the frozen checkout. A corrected
@@ -1239,7 +1243,7 @@ wire proof.
    pending work, contradictory records, changed bytes or unsafe paths block it.
    It neither changes network/service state nor removes an application bundle.
 
-   For 50026 the fixed producer paths still hold the completed 40072 → 40073
+   For 50027 the fixed producer paths still hold the completed 40072 → 40073
    journals, while the installed application is the retained preview 50025
    that replaced 40073 through the retired preview installer. The explicit
    `--installed-build 50025` declaration retains those journals: the archiver
@@ -1304,7 +1308,7 @@ wire proof.
    environment; it must not overwrite an already published container;
 7. after the atomic journal export verifies, run the fixed GA runtime collector.
    It independently reopens the DMG set, proves the DMG's
-   contained app equals the installed 50026 tree, derives all twelve required
+   contained app equals the installed 50027 tree, derives all twelve required
    checks from bounded command output and packet captures, and proves shutdown
    restored the CFW guard. Before any command, `collection-intent-v3` stores a
    fresh complete CFW baseline and binds the closed installation/service
@@ -1525,7 +1529,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 50026. No updater key, Apple notarization key, local private key, or older
+build 50027. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
@@ -1557,10 +1561,10 @@ Tauri; neither the password nor a caller-selected key/signer path enters argv.
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
 receipt are sealed and atomically published as
-`target/candidates/0.5.0/ga/50026/packages/updater/vVERSION/`. The DMG, accepted result,
+`target/candidates/0.5.0/ga/50027/packages/updater/vVERSION/`. The DMG, accepted result,
 normalized log, private Gatekeeper evidence, submission receipt, and artifact
 manifest are sealed and atomically published for release operations as
-`target/candidates/0.5.0/ga/50026/packages/dmg/vVERSION/`. The canonical seals bind exact
+`target/candidates/0.5.0/ga/50027/packages/dmg/vVERSION/`. The canonical seals bind exact
 names, sizes, SHA-256 values, version/build/source identity, official URL, and
 verification result. Each component seal also binds the exact
 `Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
@@ -1585,7 +1589,7 @@ scripts/release_publication_gate.sh --upload-assets 0.5.0
 ```
 
 The atomic
-`ga/50026/packages/distribution/vVERSION/distribution-set.seal.json` joins the
+`ga/50027/packages/distribution/vVERSION/distribution-set.seal.json` joins the
 same signed app and app manifest to both package seals and every DMG/updater
 asset. It also binds the complete publication-evidence tree and records direct
 digests for the sealed outer Evidence Manifest, machine closure, inventory,

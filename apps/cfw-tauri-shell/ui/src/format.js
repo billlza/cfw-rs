@@ -315,6 +315,7 @@ export function normalizeEngineStatus(value) {
     startupRecoveryAvailable: value.startup_recovery_available === true
       && stateTag === "failed" && desiredMode === "off" && snapshot.state.target === "off",
     cutoverReady: value.cutover_ready === true,
+    observationRecheckPending: stateTag === "failed" && snapshot.state.recheck_pending === true,
     cutoverReason,
     generation: snapshot.generation,
     configDigest,
@@ -322,7 +323,14 @@ export function normalizeEngineStatus(value) {
   };
 }
 
+/// A failed state whose runtime is still leased and being re-observed is a
+/// wait, not a verdict.
+function failedStateLabel(engine) {
+  return t(engine.observationRecheckPending ? "Reconfirming…" : "Failed");
+}
+
 export function engineStateLabel(engine) {
+  if (engine?.state === "Failed") return failedStateLabel(engine);
   return t(ENGINE_STATE_TEXT[engine?.state] ?? "Unknown");
 }
 
@@ -333,7 +341,7 @@ export function systemProxyValueLabel(engine) {
   if (["ProxyStarting", "ProxyActive", "ProxyStopping"].includes(engine.state)) {
     return t(ENGINE_STATE_TEXT[engine.state]);
   }
-  if (engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)) return t("Failed");
+  if (engine.state === "Failed" && modeHasSystemProxy(engine.desiredMode)) return failedStateLabel(engine);
   return t("Off");
 }
 
@@ -343,7 +351,7 @@ export function tunnelValueLabel(engine) {
   if (!engine) return t("Unknown");
   const tunnelStates = ["TunnelInstalling", "AwaitingApproval", "TunnelStarting", "TunnelActive", "TunnelSystemProxyActive", "TunnelStopping"];
   if (tunnelStates.includes(engine.state)) return t(ENGINE_STATE_TEXT[engine.state]);
-  if (engine.state === "Failed" && modeHasTunnel(engine.desiredMode)) return t("Failed");
+  if (engine.state === "Failed" && modeHasTunnel(engine.desiredMode)) return failedStateLabel(engine);
   return t("Off");
 }
 

@@ -772,4 +772,8 @@
   "Click “{button}” on the core row.": "點擊核心列的「{button}」。",
   "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.": "如果 macOS 跳出「背景項目」提示，請打開 系統設定 → 一般 → 登入項目與延伸功能，允許 Clash for Mac。",
   "If it still fails, quit and reopen Clash for Mac.": "仍然失敗時，結束並重新打開 Clash for Mac。"
+,
+  "Reconfirming…": "重新確認中…",
+  "Confirming the core's state": "正在確認核心狀態",
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "背景服務沒有及時回應。核心與網路設定都保持原樣；服務一回應，這則提示會自動消失。"
 }

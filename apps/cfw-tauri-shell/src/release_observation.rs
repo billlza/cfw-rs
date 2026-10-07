@@ -548,6 +548,7 @@ mod tests {
                 generation: 4,
                 target: cfw_engine_api::EngineMode::SystemProxy,
                 error: "secret-bearing injected failure".to_owned(),
+                recheck_pending: false,
             },
             generation: 4,
             config_digest: None,

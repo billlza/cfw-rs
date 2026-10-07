@@ -772,4 +772,8 @@
   "Click “{button}” on the core row.": "コア行の「{button}」をクリックします。",
   "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.": "macOS が「バックグラウンド項目」の通知を表示したら、システム設定 → 一般 → ログイン項目と機能拡張 で Clash for Mac を許可してください。",
   "If it still fails, quit and reopen Clash for Mac.": "それでも失敗する場合は、Clash for Mac を終了して開き直してください。"
+,
+  "Reconfirming…": "再確認中…",
+  "Confirming the core's state": "コアの状態を確認しています",
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "バックグラウンドサービスが時間内に応答しませんでした。コアとネットワーク設定はそのままです。応答があり次第、この通知は自動的に消えます。"
 }

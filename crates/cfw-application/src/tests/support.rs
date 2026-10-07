@@ -42,6 +42,9 @@ pub(super) struct FakeBackend {
     pub(super) reject_stop_after_native_off: Mutex<bool>,
     pub(super) fail_query: Mutex<bool>,
     pub(super) query_error: Mutex<Option<BackendErrorKind>>,
+    /// Answers the next `n` status queries with `kind`, then falls through to
+    /// the scripted status: a bounded run of transient observation failures.
+    pub(super) query_error_budget: Mutex<Option<(BackendErrorKind, usize)>>,
     pub(super) query_gate: Mutex<Option<Arc<Notify>>>,
     /// When true, a successful stop attests the owner stopped (returns `Ok`) but
     /// does not clear the native observation, so a subsequent independent
@@ -241,6 +244,19 @@ impl EngineBackend for FakeBackend {
                 return Err(BackendError::new(
                     kind,
                     "native status reported a typed backend error",
+                ));
+            }
+            if let Some((kind, remaining)) = self
+                .query_error_budget
+                .lock()
+                .expect("query error budget lock")
+                .as_mut()
+                && *remaining > 0
+            {
+                *remaining -= 1;
+                return Err(BackendError::new(
+                    *kind,
+                    "native status reported a budgeted transient error",
                 ));
             }
             Ok(self

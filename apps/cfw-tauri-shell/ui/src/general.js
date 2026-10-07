@@ -1,7 +1,7 @@
 import { t } from "./i18n.js";
 // General page rendering has no native side effects. Runtime controls use the
 // same transaction commands as the settings page.
-export function createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS }) {
+export function createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderObservationRecheckNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS }) {
   return function renderGeneral() {
   const product = state.payload.product;
   const appVersion = product.version ?? "—";
@@ -19,9 +19,8 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const lan = settingsView?.settings.allow_lan ? settingsView.settings.lan_proxy : null;
   const bind = lan ? `${lan.listen}:${lan.port}` : t("Off");
   const logLevel = settingsView?.effective.log_level ?? projection.logLevel ?? state.logLevel ?? "info";
-  const engineLabel = state.controllerVersion?.version
-    ? `sing-box · ${state.controllerVersion.version}`
-    : `sing-box · ${engineStateLabel(engine)}`;
+  // The running engine names itself in its version string ("sing-box 1.14.2").
+  const engineLabel = state.controllerVersion?.version ?? `sing-box · ${engineStateLabel(engine)}`;
   const tunnelCapability = engineToggleCapability("tunMode");
   const proxyCapability = engineToggleCapability("systemProxy");
   const tunnelReason = tunnelCapability.available ? null : tunnelCapability.reason;
@@ -61,7 +60,9 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
         ${migrationBanner}
         ${engine.startupRecoveryAvailable && !state.migrationHandoff
           ? renderStartupRecoveryNotice(engineReason)
-          : engineReason ? renderRowReason(engineReason) : ""}
+          : engine.observationRecheckPending && !state.engineMutationError
+            ? renderObservationRecheckNotice(engineReason)
+            : engineReason ? renderRowReason(engineReason) : ""}
         ${state.nativeGeneralPresentationError ? renderRowReason(state.nativeGeneralPresentationError) : ""}
         <div class="cfw-row">
           <div class="cfw-row-left">

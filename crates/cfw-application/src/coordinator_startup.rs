@@ -67,13 +67,18 @@ impl ReconciliationFailure {
             )
             && state.native_lease.is_none()
             && state.quarantine.is_none()
-            && matches!(
-                &self.error,
+            && match &self.error {
+                // Unproven cleanup is settled by re-observing and cleaning up;
+                // a transient or registration-bound read is settled by the
+                // same fresh observation once the services answer.
                 EngineCoordinatorError::Backend {
                     operation: EngineOperation::QueryStatus,
                     source,
-                } if source.kind == BackendErrorKind::CleanupUnproven
-            )
+                } => {
+                    source.kind == BackendErrorKind::CleanupUnproven || self.allows_explicit_retry()
+                }
+                _ => false,
+            }
     }
 
     /// A failed startup observation may be repeated only at a later explicit
@@ -89,10 +94,8 @@ impl ReconciliationFailure {
         else {
             return false;
         };
-        matches!(
-            source.kind.retry_directive(),
-            RetryDirective::IdempotentReadOnly | RetryDirective::RegistrationStatusChange
-        )
+        source.kind.allows_read_only_recheck()
+            || source.kind.retry_directive() == RetryDirective::RegistrationStatusChange
     }
 }
 

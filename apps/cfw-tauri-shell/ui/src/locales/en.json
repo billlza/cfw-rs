@@ -772,4 +772,8 @@
   "Click “{button}” on the core row.": "Click “{button}” on the core row.",
   "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.": "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.",
   "If it still fails, quit and reopen Clash for Mac.": "If it still fails, quit and reopen Clash for Mac."
+,
+  "Reconfirming…": "Reconfirming…",
+  "Confirming the core's state": "Confirming the core's state",
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer."
 }

@@ -203,3 +203,31 @@ test("redacts and bounds engine boundary failures before they reach the log pane
   assert.equal(summarizeEngineEvent({ type: "state", message: "x".repeat(4096) }).length, 2048);
   assert.equal(summarizeEngineEvent(null), "invalid engine event payload");
 });
+
+test("a failed snapshot pending its recheck is flagged and labelled as a wait, not a verdict", () => {
+  const failed = (state) => proxyEnvelope({
+    snapshot: { desired_mode: "system_proxy", generation: 3, config_digest: null, state },
+  });
+  const pending = normalizeEngineStatus(failed({
+    state: "failed", target: "system_proxy", generation: 3, recheck_pending: true,
+    error: "native operation query_status failed: Busy: Global Authority mutation is busy.",
+  }));
+  assert.equal(pending.observationRecheckPending, true);
+  assert.equal(pending.state, "Failed");
+  assert.equal(pending.active, false, "a pending recheck never lights the network up");
+  assert.equal(engineStateLabel(pending), "Reconfirming…");
+  assert.equal(systemProxyValueLabel(pending), "Reconfirming…");
+  assert.equal(tunnelValueLabel(pending), "Off");
+
+  const definitive = normalizeEngineStatus(failed({
+    state: "failed", target: "system_proxy", generation: 3, recheck_pending: false, error: "denied",
+  }));
+  assert.equal(definitive.observationRecheckPending, false);
+  assert.equal(engineStateLabel(definitive), "Failed");
+  assert.equal(systemProxyValueLabel(definitive), "Failed");
+  for (const value of ["yes", 1, undefined]) {
+    const loose = normalizeEngineStatus(failed({ state: "failed", target: "system_proxy", generation: 3, recheck_pending: value, error: "x" }));
+    assert.equal(loose.observationRecheckPending, false, `recheck_pending=${String(value)} is not a pending recheck`);
+  }
+  assert.equal(normalizeEngineStatus(failed({ state: "off" })).observationRecheckPending, false);
+});

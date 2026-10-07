@@ -772,4 +772,8 @@
   "Click “{button}” on the core row.": "点击内核行的“{button}”。",
   "If macOS shows a “Background Items” notice, open System Settings → General → Login Items & Extensions and allow Clash for Mac.": "如果 macOS 弹出“后台项目”提示，请打开 系统设置 → 通用 → 登录项与扩展，允许 Clash for Mac。",
   "If it still fails, quit and reopen Clash for Mac.": "仍然失败时，退出并重新打开 Clash for Mac。"
+,
+  "Reconfirming…": "重新确认中…",
+  "Confirming the core's state": "正在确认内核状态",
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "后台服务没有及时应答。内核和网络设置都保持原样；服务一应答，这条提示会自动消失。"
 }

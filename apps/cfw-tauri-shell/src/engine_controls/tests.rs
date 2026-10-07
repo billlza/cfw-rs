@@ -161,6 +161,7 @@ fn explicit_retry_is_admitted_only_from_the_same_retryable_mode() {
             generation: 3,
             target: EngineMode::Tunnel,
             error: "approval was not complete".into(),
+            recheck_pending: false,
         },
     ] {
         assert_eq!(
@@ -180,6 +181,7 @@ fn explicit_retry_is_admitted_only_from_the_same_retryable_mode() {
                     generation: 3,
                     target: EngineMode::SystemProxy,
                     error: "inconsistent target".into(),
+                    recheck_pending: false,
                 },
             ),
             EngineMode::Tunnel,

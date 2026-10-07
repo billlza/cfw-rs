@@ -494,13 +494,19 @@ pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
                 generation,
                 target,
                 error,
+                recheck_pending,
             } = &snapshot.state
             {
+                let recheck = if *recheck_pending {
+                    " recheck=pending"
+                } else {
+                    ""
+                };
                 crate::diagnostics::record(
                     &app,
                     cfw_core::DiagnosticTopic::Network,
                     "engine_failed",
-                    &format!("generation={generation} target={target:?}: {error}"),
+                    &format!("generation={generation} target={target:?}{recheck}: {error}"),
                 );
             }
             // Evidence transactions may temporarily use a source-owned settings

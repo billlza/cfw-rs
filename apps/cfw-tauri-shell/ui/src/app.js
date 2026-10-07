@@ -206,7 +206,7 @@ import { createProxyDelayTest } from "./proxy-delay-test.js";
 import { createUpdateInstall, installAfterCheck, updateInstallView } from "./update-install.js";
 const runProxyDelayTest = createProxyDelayTest({ state, runtime, view: proxyView, invoke, activeProfile, engineIsOff,
   controllerActionAllowed, captureEngineIdentityToken, engineIdentityTokenIsCurrent, appendLog, renderPage, errorText, delayFailureLabel });
-const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
+const renderGeneral = createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderObservationRecheckNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS });
 
 const runtimeSettingsUI = createRuntimeSettingsUI({ state, invoke, appendLog, renderPage,
   nativeDialog: nativeRuntimeSettings,
@@ -3215,6 +3215,24 @@ function scheduleStartupRecovery() {
 /// What the General page shows while the host offers startup recovery: the
 /// automatic retries in plain words, then the steps the user can take. The
 /// host's own reason stays available as technical detail.
+/// The core is leased and running as far as the host knows, but its last
+/// status reads did not come back. The host keeps re-observing on its own.
+function renderObservationRecheckNotice(reason) {
+  const detail = reason
+    ? `<details class="cfw-notice-detail"><summary>${escapeHtml(t("Technical details"))}</summary><small>${escapeHtml(reason)}</small></details>`
+    : "";
+  return `
+    <div class="cfw-row cfw-row-notice" role="status">
+      <div class="cfw-row-left">
+        <strong>${escapeHtml(t("Confirming the core's state"))}</strong>
+        <span>${escapeHtml(t("The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer."))}</span>
+        ${detail}
+      </div>
+      <div class="cfw-row-right"></div>
+    </div>
+  `;
+}
+
 function renderStartupRecoveryNotice(reason) {
   const recovery = runtime.startupRecovery;
   const detail = reason

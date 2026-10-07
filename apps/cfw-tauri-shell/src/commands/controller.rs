@@ -1210,6 +1210,7 @@ mod tests {
                 generation: 1,
                 target: EngineMode::Tunnel,
                 error: "native failure".into(),
+                recheck_pending: false,
             },
             EngineState::ProxyActive {
                 runtime: runtime(false),

@@ -173,6 +173,11 @@ pub enum EngineState {
         generation: u64,
         target: EngineMode,
         error: String,
+        /// The runtime attested before this failure is still leased and the
+        /// coordinator keeps observing it: the state returns to active on the
+        /// next exact attestation, without any start or stop.
+        #[serde(default)]
+        recheck_pending: bool,
     },
 }
 
@@ -1111,6 +1116,16 @@ impl BackendErrorKind {
     pub const fn allows_automatic_retry(self, is_idempotent_read_only: bool) -> bool {
         is_idempotent_read_only
             && matches!(self.retry_directive(), RetryDirective::IdempotentReadOnly)
+    }
+
+    /// Whether a failed read-only status observation may simply be repeated.
+    /// Beyond the idempotent read-only kinds, `Busy` qualifies: a status read
+    /// that lands while the Authority or an owner is mid-mutation observes
+    /// nothing, and the same read settles once that mutation ends. Every other
+    /// kind is a definitive answer and is never repeated.
+    pub const fn allows_read_only_recheck(self) -> bool {
+        matches!(self.retry_directive(), RetryDirective::IdempotentReadOnly)
+            || matches!(self, Self::Busy)
     }
 
     pub const fn stable_message(self) -> &'static str {

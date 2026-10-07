@@ -287,7 +287,7 @@ const responses = {
     mtime_ms: null,
     size_bytes: null,
   },
-  controller_version: { version: "1.13.0", meta: true },
+  controller_version: { version: "sing-box 1.13.0", meta: true },
   read_runtime_config_text: PROJECTION,
   network_diagnostics: DIAGNOSTICS,
   profiles_snapshot: [{
@@ -2859,7 +2859,8 @@ test("the General page exposes runtime controls and explains unsupported feature
   await setEngine(RUNNING_ENGINE);
   const html = await renderPage("general");
   assert.match(html, /127\.0\.0\.1:7890/u);
-  assert.match(html, /sing-box · 1\.13\.0/u);
+  assert.match(html, /sing-box 1\.13\.0/u, "the engine names itself in its version string");
+  assert.doesNotMatch(html, /sing-box · sing-box/u);
   for (const needle of [
     "trusted private source networks",
     "validated runtime replacement",
@@ -4695,5 +4696,34 @@ test("language selection saves only UI preferences and a refused save restores t
     querySelectorAllElements.delete(selector);
     responses.read_settings_snapshot = original;
     await emit("cfw://settings-changed", original);
+  }
+});
+
+test("a missed observation of a leased core is explained as a recheck instead of a failure", async () => {
+  const reason = "native operation query_status failed: Timeout: query_status exceeded 2s";
+  const failure = (recheckPending) => ({
+    ...OFF_ENGINE,
+    snapshot: { desired_mode: "local_proxy", generation: 7, config_digest: null,
+      state: { state: "failed", target: "local_proxy", generation: 7, error: reason, recheck_pending: recheckPending } },
+  });
+  try {
+    await setEngine(failure(true));
+    assert.equal(state.engine.observationRecheckPending, true);
+    const rechecking = await renderPage("general");
+    assert.match(rechecking, /Confirming the core/u);
+    assert.match(rechecking, /left as they are/u);
+    assert.match(rechecking, /query_status exceeded 2s/u, "the host's reason stays as technical detail");
+    assert.match(rechecking, /sing-box · Reconfirming…/u);
+    assert.doesNotMatch(rechecking, /Background services/u);
+    assert.doesNotMatch(rechecking, /sing-box · Failed/u);
+
+    await setEngine(failure(false));
+    assert.equal(state.engine.observationRecheckPending, false);
+    const failed = await renderPage("general");
+    assert.doesNotMatch(failed, /Confirming the core/u);
+    assert.match(failed, /query_status exceeded 2s/u);
+    assert.match(failed, /sing-box · Failed/u);
+  } finally {
+    await setEngine(OFF_ENGINE);
   }
 });

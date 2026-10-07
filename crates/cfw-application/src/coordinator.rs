@@ -189,6 +189,7 @@ impl EngineModeCoordinator {
             generation: options.initial_generation,
             target: EngineMode::Off,
             error: "native startup reconciliation is pending".into(),
+            recheck_pending: false,
         };
         let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot.clone());
         let (reconciliation_tx, reconciliation_rx) = watch::channel(None);
@@ -319,7 +320,8 @@ impl EngineModeCoordinator {
                 .is_some_and(|outcome| outcome.recovery.is_some())
     }
 
-    /// Reobserves the one recoverable startup service failure and settles only
+    /// Reobserves the one recoverable startup service failure (an unproven
+    /// cleanup, or a read the services could not answer yet) and settles only
     /// at Off. It never follows recovery with a start. Accepted work survives
     /// cancellation of its caller, like other ownership-bearing actor commands.
     /// Stale/repeated offers are rejected without native I/O.

@@ -1758,6 +1758,28 @@ dd {
 .logs-layout .toolbar-panel {
   min-height: 80px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+/* The title, the level filter and the actions keep their width; only the
+   search box gives way, and a narrow window wraps the actions to a second
+   row instead of squeezing their labels into columns of characters. */
+.logs-layout .toolbar-panel > div:first-child,
+.logs-layout .segmented,
+.logs-layout .toolbar-actions {
+  flex-shrink: 0;
+}
+
+.logs-layout .toolbar-panel h3,
+.toolbar-actions .button,
+.segmented button {
+  white-space: nowrap;
+}
+
+.logs-layout .search-box {
+  flex: 1 1 140px;
+  min-width: 120px;
 }
 
 .connection-facets {
@@ -1900,7 +1922,7 @@ dd {
   display: grid;
   min-height: 54px;
   flex-shrink: 0;
-  grid-template-columns: repeat(6, 65px) 1fr 86px 118px;
+  grid-template-columns: repeat(6, 65px) 1fr auto auto;
   align-items: center;
   gap: 5px;
   border-bottom: 1px solid var(--bc);
@@ -1924,6 +1946,8 @@ dd {
 .cfw-conn-controls button.danger {
   background: #f05b62;
   font-size: 16px;
+  padding: 0 14px;
+  white-space: nowrap;
 }
 
 .cfw-conn-scroll {
@@ -2712,7 +2736,7 @@ pre {
 
 .profile-note {
   margin: 0 14px 6px;
-  color: var(--warn);
+  color: var(--muted);
   font-size: 11px;
   line-height: 1.4;
 }

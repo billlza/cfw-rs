@@ -25,6 +25,14 @@ pub(crate) struct NativeLease {
     pub(crate) context: EngineCommandContext,
 }
 
+/// Consecutive read-only observations of an attested runtime that may miss
+/// before it is published as failed. The native lease is retained either way;
+/// the grace only keeps a transport hiccup shorter than three polls out of
+/// the published state.
+pub(crate) const OBSERVATION_GRACE_MISSES: u32 = 3;
+// A grace shorter than two polls would publish every hiccup.
+const _: () = assert!(OBSERVATION_GRACE_MISSES >= 2);
+
 pub(crate) struct CoordinatorState {
     pub(crate) snapshot: EngineSnapshot,
     pub(crate) native_lease: Option<NativeLease>,
@@ -43,6 +51,10 @@ pub(crate) struct CoordinatorState {
     /// It is never published as active until a fresh native attestation agrees.
     /// Any transition failure, explicit Off or identity mismatch discards it.
     pub(crate) status_recheck: Option<EngineSnapshot>,
+    /// Consecutive read-only observations of the attested runtime that missed
+    /// (timed out, found a busy authority or an unavailable service). Reset by
+    /// every successful observation and every definitive state change.
+    pub(crate) missed_observations: u32,
 }
 
 /// Classifies a native failure whose only safe recovery is an explicit Off
@@ -152,18 +164,36 @@ pub(crate) async fn reconcile_active_runtime(
     )
     .await
     {
-        Ok(observation) => observation,
+        Ok(observation) => {
+            state.missed_observations = 0;
+            observation
+        }
         Err(source) => {
-            let recheck = source.kind.retry_directive() == RetryDirective::IdempotentReadOnly;
+            let transient = source.kind.allows_read_only_recheck();
             let error = backend_error(EngineOperation::QueryStatus, source);
             let generation = state.snapshot.generation;
-            set_failed(state, snapshots, expected_mode, generation, &error);
-            if recheck {
-                // Keep the actor's existing cadence and query deadline. No
-                // start, stop, retry of a mutation or generation allocation is
-                // performed to recover a missed observation.
-                state.status_recheck = Some(baseline);
+            if !transient {
+                set_failed(state, snapshots, expected_mode, generation, &error);
+                return Err(error);
             }
+            state.missed_observations = state.missed_observations.saturating_add(1);
+            if !recovering && state.missed_observations < OBSERVATION_GRACE_MISSES {
+                // A missed read proves nothing about the runtime and the lease
+                // is retained either way: the attested snapshot stays published
+                // through a short observation gap.
+                return Err(error);
+            }
+            // Keep the actor's existing cadence and query deadline. No start,
+            // stop, retry of a mutation or generation allocation is performed
+            // to recover a missed observation.
+            set_unobserved(
+                state,
+                snapshots,
+                expected_mode,
+                generation,
+                &error,
+                baseline,
+            );
             return Err(error);
         }
     };
@@ -415,6 +445,7 @@ pub(crate) fn backend_error(
 
 pub(crate) fn set_off(state: &mut CoordinatorState, snapshots: &watch::Sender<EngineSnapshot>) {
     state.status_recheck = None;
+    state.missed_observations = 0;
     state.snapshot.state = EngineState::Off;
     state.snapshot.config_digest = None;
     publish(state, snapshots);
@@ -428,10 +459,33 @@ pub(crate) fn set_failed(
     error: &EngineCoordinatorError,
 ) {
     state.status_recheck = None;
+    state.missed_observations = 0;
     state.snapshot.state = EngineState::Failed {
         generation,
         target,
         error: error.to_string(),
+        recheck_pending: false,
+    };
+    publish(state, snapshots);
+}
+
+/// Publishes a missed observation of a still-leased runtime. The attested
+/// baseline is retained so the next exact attestation restores it without any
+/// transition.
+pub(crate) fn set_unobserved(
+    state: &mut CoordinatorState,
+    snapshots: &watch::Sender<EngineSnapshot>,
+    target: EngineMode,
+    generation: u64,
+    error: &EngineCoordinatorError,
+    baseline: EngineSnapshot,
+) {
+    state.status_recheck = Some(baseline);
+    state.snapshot.state = EngineState::Failed {
+        generation,
+        target,
+        error: error.to_string(),
+        recheck_pending: true,
     };
     publish(state, snapshots);
 }

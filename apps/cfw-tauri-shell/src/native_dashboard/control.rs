@@ -252,6 +252,7 @@ mod tests {
                     generation: 4,
                     target: mode,
                     error: "denied".into(),
+                    recheck_pending: false,
                 },
                 generation: 4,
                 config_digest: None,
@@ -267,6 +268,7 @@ mod tests {
                 generation: 4,
                 target: EngineMode::Off,
                 error: "denied".into(),
+                recheck_pending: false,
             };
             assert_eq!(retry_target(&snapshot, EngineControl::Core), None);
             snapshot.state = EngineState::AwaitingApproval { generation: 4 };
@@ -307,6 +309,7 @@ mod tests {
             generation: 4,
             target: EngineMode::Tunnel,
             error: "denied".into(),
+            recheck_pending: false,
         };
         assert!(!needs_approval_settings(true, &result));
     }

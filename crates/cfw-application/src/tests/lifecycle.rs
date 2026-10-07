@@ -1132,8 +1132,8 @@ async fn concurrent_failed_startup_reconciliation_cannot_replay_the_same_offer()
 async fn explicit_startup_reconciliation_rejects_other_failure_and_unavailable_lineage() {
     for kind in [
         BackendErrorKind::IdentityRejected,
-        BackendErrorKind::Unavailable,
-        BackendErrorKind::ProxyAgentApprovalRequired,
+        BackendErrorKind::JournalCorrupt,
+        BackendErrorKind::Internal,
     ] {
         let backend = Arc::new(FakeBackend::default());
         *backend.query_error.lock().expect("query error") = Some(kind);
@@ -1255,6 +1255,7 @@ fn startup_service_reconciliation_admission_rejects_leases_and_quarantine() {
             generation: 0,
             target: EngineMode::Off,
             error: "typed".into(),
+            recheck_pending: false,
         },
         ..Default::default()
     };
@@ -1264,6 +1265,7 @@ fn startup_service_reconciliation_admission_rejects_leases_and_quarantine() {
         quarantine: None,
         restart_spec: None,
         status_recheck: None,
+        missed_observations: 0,
     };
     assert!(
         failure.allows_service_reconciliation(&state, StartupReconciliation::CleanupKnownLineage)
@@ -1404,4 +1406,90 @@ async fn startup_recovery_offer_is_captured_before_host_queue_await() {
     );
     assert!(backend.operations().is_empty());
     coordinator.shutdown().await.expect("unowned exit");
+}
+
+#[tokio::test]
+async fn explicit_command_retries_startup_after_a_busy_authority_settles() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend.query_error.lock().expect("query error lock") = Some(BackendErrorKind::Busy);
+    let coordinator = EngineModeCoordinator::spawn_persisted(
+        backend.clone(),
+        Arc::new(MemoryGenerationStore::new(0)),
+        Duration::from_millis(100),
+    )
+    .expect("persisted coordinator");
+
+    assert!(matches!(
+        coordinator.wait_for_reconciliation().await,
+        Err(EngineCoordinatorError::Backend {
+            operation: crate::EngineOperation::QueryStatus,
+            source: BackendError {
+                kind: BackendErrorKind::Busy,
+                ..
+            },
+        })
+    ));
+    assert_eq!(backend.query_count(), 1);
+    assert!(
+        coordinator.can_reconcile_startup(),
+        "a busy authority at startup is re-observed on request"
+    );
+
+    *backend.query_error.lock().expect("query error lock") = None;
+    let active = coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("explicit request re-observes the settled authority and starts");
+    assert!(matches!(active.state, EngineState::ProxyActive { .. }));
+    assert_eq!(backend.query_count(), 2);
+    assert_eq!(backend.operations(), vec!["start_proxy"]);
+    assert_eq!(coordinator.startup_failure(), None);
+    coordinator.shutdown().await.expect("shutdown barrier");
+}
+
+#[tokio::test]
+async fn explicit_startup_reconciliation_reobserves_reads_the_services_could_not_answer() {
+    for kind in [
+        BackendErrorKind::Unavailable,
+        BackendErrorKind::Timeout,
+        BackendErrorKind::Busy,
+        BackendErrorKind::ProxyAgentApprovalRequired,
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        *backend.query_error.lock().expect("query error") = Some(kind);
+        let coordinator = coordinator(backend.clone());
+        coordinator
+            .wait_for_reconciliation()
+            .await
+            .expect_err("startup failure");
+        assert!(
+            coordinator.can_reconcile_startup(),
+            "{kind:?} is settled by a fresh observation once the services answer"
+        );
+        *backend.query_error.lock().expect("query error") = None;
+        assert_eq!(
+            coordinator
+                .reconcile_startup()
+                .await
+                .expect("the fresh observation settles at Off")
+                .state,
+            EngineState::Off
+        );
+        assert_eq!(
+            backend.query_count(),
+            2,
+            "{kind:?} re-observes exactly once"
+        );
+        assert!(
+            backend.operations().is_empty(),
+            "recovery never starts a core"
+        );
+        assert_eq!(coordinator.startup_failure(), None);
+        coordinator.shutdown().await.expect("unowned exit");
+    }
 }

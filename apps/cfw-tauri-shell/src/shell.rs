@@ -1002,6 +1002,7 @@ mod tests {
                 generation: 2,
                 target: EngineMode::SystemProxy,
                 error: "fixture failure".into(),
+                recheck_pending: false,
             },
             EngineState::ProxyActive {
                 runtime: RuntimeIdentity {

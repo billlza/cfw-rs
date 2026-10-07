@@ -18,6 +18,14 @@
   layout and texts, shows glyphs beside the navigation labels and its slogan
   beside the header, and paints its own backgrounds whenever the host does not
   show the glass. The transparent WebView uses Tauri's macOS private API.
+- Keep a running core published while its status reads miss: a read that
+  times out, finds a busy authority or an unavailable service is retried for
+  three polls before the page says anything, the page then explains that the
+  core's state is being confirmed instead of calling it failed, and the
+  attested runtime returns on the next exact observation. A busy or
+  unanswered status read at launch is re-observed by the dashboard's own
+  recovery like an unproven cleanup. Mode switches prove the global Off
+  barrier with the operation deadline instead of the two-second poll deadline.
 
 ## 0.4.0 - Unreleased
 

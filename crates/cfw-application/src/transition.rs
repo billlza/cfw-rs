@@ -97,7 +97,7 @@ pub(crate) async fn transition(
     let owned_previous_runtime = state.native_lease.is_some();
     stop_owned_runtime(backend, state, snapshots, operation_timeout).await?;
     if owned_previous_runtime {
-        prove_global_off(backend, state, snapshots, status_query_timeout).await?;
+        prove_global_off(backend, state, snapshots, operation_timeout).await?;
     }
     set_off(state, snapshots);
 
@@ -151,7 +151,6 @@ pub(crate) async fn transition(
                         operation,
                         source,
                         operation_timeout,
-                        status_query_timeout,
                     )
                     .await;
                 }
@@ -162,15 +161,7 @@ pub(crate) async fn transition(
                 &context,
                 &request.config_digest,
             ) {
-                return fail_identity(
-                    backend,
-                    state,
-                    snapshots,
-                    error,
-                    operation_timeout,
-                    status_query_timeout,
-                )
-                .await;
+                return fail_identity(backend, state, snapshots, error, operation_timeout).await;
             }
             state.snapshot.state = if local {
                 EngineState::LocalProxyActive { runtime }
@@ -204,7 +195,6 @@ pub(crate) async fn transition(
                         operation,
                         source,
                         operation_timeout,
-                        status_query_timeout,
                     )
                     .await;
                 }
@@ -238,7 +228,6 @@ pub(crate) async fn transition(
                     EngineOperation::AuthorizeTunnelConfiguration,
                     source,
                     operation_timeout,
-                    status_query_timeout,
                 )
                 .await;
             }
@@ -260,7 +249,6 @@ pub(crate) async fn transition(
                         EngineOperation::StartTunnel,
                         source,
                         operation_timeout,
-                        status_query_timeout,
                     )
                     .await;
                 }
@@ -271,15 +259,7 @@ pub(crate) async fn transition(
                 &context,
                 &request.config_digest,
             ) {
-                return fail_identity(
-                    backend,
-                    state,
-                    snapshots,
-                    error,
-                    operation_timeout,
-                    status_query_timeout,
-                )
-                .await;
+                return fail_identity(backend, state, snapshots, error, operation_timeout).await;
             }
             state.snapshot.state = if target == EngineMode::TunnelSystemProxy {
                 EngineState::TunnelSystemProxyActive { runtime }
@@ -291,15 +271,7 @@ pub(crate) async fn transition(
     }
 
     if let Err(error) = crate::controller::restore_proxy_selections(profile, settings).await {
-        return fail_identity(
-            backend,
-            state,
-            snapshots,
-            error,
-            operation_timeout,
-            status_query_timeout,
-        )
-        .await;
+        return fail_identity(backend, state, snapshots, error, operation_timeout).await;
     }
     publish(state, snapshots);
     Ok(state.snapshot.clone())
@@ -398,7 +370,6 @@ async fn fail_backend(
     operation: EngineOperation,
     source: BackendError,
     operation_timeout: Duration,
-    status_query_timeout: Duration,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let target = state.snapshot.desired_mode;
     let generation = state.snapshot.generation;
@@ -429,7 +400,7 @@ async fn fail_backend(
     let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
         Ok(()) => {
             let start_error = source.clone();
-            match prove_global_off(backend, state, snapshots, status_query_timeout).await {
+            match prove_global_off(backend, state, snapshots, operation_timeout).await {
                 Ok(()) if endpoint_conflict => {
                     set_off(state, snapshots);
                     return Err(EngineCoordinatorError::StartEndpointConflictAfterOff {
@@ -473,7 +444,6 @@ async fn fail_identity(
     snapshots: &watch::Sender<EngineSnapshot>,
     error: EngineCoordinatorError,
     operation_timeout: Duration,
-    status_query_timeout: Duration,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let target = state.snapshot.desired_mode;
     let generation = state.snapshot.generation;
@@ -495,9 +465,7 @@ async fn fail_identity(
         set_failed(state, snapshots, target, generation, &combined);
         return Err(combined);
     }
-    if let Err(proof_error) =
-        prove_global_off(backend, state, snapshots, status_query_timeout).await
-    {
+    if let Err(proof_error) = prove_global_off(backend, state, snapshots, operation_timeout).await {
         let combined = EngineCoordinatorError::ValidationAndOffProofFailed {
             validation_error: Box::new(error),
             proof_error: Box::new(proof_error),

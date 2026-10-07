@@ -496,6 +496,7 @@ mod tests {
                 generation: 1,
                 target: EngineMode::Off,
                 error: "Unavailable".into(),
+                recheck_pending: false,
             },
             ..EngineSnapshot::default()
         };
@@ -605,6 +606,7 @@ mod tests {
                 generation: 1,
                 target: EngineMode::Off,
                 error: "x".repeat(MAX_FRAME_BYTES),
+                recheck_pending: false,
             },
             ..EngineSnapshot::default()
         };

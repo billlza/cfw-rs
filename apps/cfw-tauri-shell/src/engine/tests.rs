@@ -691,12 +691,14 @@ async fn mode_retry_loop_advances_endpoints_and_generation_after_exact_off() {
         |conflict| advance_test_mixed_endpoint(&endpoints, conflict),
     )
     .await
-    .expect("third bounded endpoint starts");
+    .expect("the second bounded endpoint starts after one retry of the first");
 
+    // The first conflict is retried on the same endpoint once (a listener the
+    // coordinator just stopped may still be closing); the second moves on.
     let base_port = EngineSettings::default().mixed_port;
     assert_eq!(
         backend.starts(),
-        vec![(1, base_port), (2, base_port + 1), (3, base_port + 2)]
+        vec![(1, base_port), (2, base_port), (3, base_port + 1)]
     );
     assert_eq!(backend.stops.load(Ordering::Acquire), 2);
     assert_eq!(snapshot.generation, 3);
@@ -731,17 +733,69 @@ async fn mode_retry_loop_stops_after_the_last_bounded_endpoint() {
 
     assert_eq!(error, "mixed endpoint candidates are exhausted");
     let starts = backend.starts();
-    assert_eq!(starts.len(), CANDIDATE_COUNT);
-    assert_eq!(backend.stops.load(Ordering::Acquire), CANDIDATE_COUNT);
+    // Eight candidates plus the one same-endpoint retry of the first conflict.
+    assert_eq!(starts.len(), CANDIDATE_COUNT + 1);
+    assert_eq!(backend.stops.load(Ordering::Acquire), CANDIDATE_COUNT + 1);
     assert_eq!(
         starts
             .iter()
             .map(|(generation, _)| *generation)
             .collect::<Vec<_>>(),
-        (1..=CANDIDATE_COUNT as u64).collect::<Vec<_>>()
+        (1..=CANDIDATE_COUNT as u64 + 1).collect::<Vec<_>>()
     );
-    assert!(starts.windows(2).all(|pair| pair[1].1 == pair[0].1 + 1));
+    assert_eq!(
+        starts[0].1, starts[1].1,
+        "the first conflict is retried in place"
+    );
+    assert!(
+        starts[1..]
+            .windows(2)
+            .all(|pair| pair[1].1 == pair[0].1 + 1)
+    );
     assert_eq!(coordinator.snapshot().state, EngineState::Off);
+}
+
+#[tokio::test]
+async fn a_single_endpoint_conflict_keeps_the_same_port_after_a_pause() {
+    let backend = Arc::new(EndpointRetryBackend::new(1));
+    let coordinator = endpoint_retry_coordinator(backend.clone());
+    let endpoints = std::sync::RwLock::new(endpoint_binding(EngineSettings::default()));
+    let rebinds = AtomicUsize::new(0);
+    let started = std::time::Instant::now();
+
+    let snapshot = set_mode_with_endpoint_rebind(
+        &coordinator,
+        &endpoints,
+        EngineMode::SystemProxy,
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        &ValidatedSingBoxProfile::direct(),
+        || Ok(()),
+        |_conflict| {
+            rebinds.fetch_add(1, Ordering::AcqRel);
+            Err("a transient conflict must not move the endpoint cursor".into())
+        },
+    )
+    .await
+    .expect("the same endpoint starts on the retry");
+
+    let base_port = EngineSettings::default().mixed_port;
+    assert_eq!(backend.starts(), vec![(1, base_port), (2, base_port)]);
+    assert_eq!(rebinds.load(Ordering::Acquire), 0);
+    assert!(
+        started.elapsed() >= super::ENDPOINT_CONFLICT_RETRY_DELAY,
+        "the retry waits for the previous listener to close"
+    );
+    assert_eq!(backend.stops.load(Ordering::Acquire), 1);
+    assert!(matches!(snapshot.state, EngineState::ProxyActive { .. }));
+    assert_eq!(
+        read_active_controller_access(
+            &endpoints,
+            2,
+            snapshot.config_digest.as_deref().expect("digest")
+        )
+        .map(|access| access.settings().mixed_port),
+        Ok(base_port)
+    );
 }
 
 #[path = "tests/runtime_settings.rs"]
@@ -749,3 +803,27 @@ mod runtime_settings;
 
 #[path = "tests/ticket_retry.rs"]
 mod ticket_retry;
+
+#[test]
+fn system_proxy_authorization_outcomes_tell_the_user_what_to_do() {
+    use cfw_apple_network::NativeBridgeErrorCode as Code;
+    let timed_out =
+        super::authorization_failure_message(Code::Timeout, "The native operation timed out.");
+    assert!(timed_out.contains("did not get an answer"), "{timed_out}");
+    assert!(
+        timed_out.contains("Turn System Proxy on again"),
+        "{timed_out}"
+    );
+    for code in [Code::ApprovalDenied, Code::PermissionDenied] {
+        let denied = super::authorization_failure_message(code, "denied");
+        assert!(denied.contains("cancelled or denied"), "{denied}");
+        assert!(denied.contains("Turn System Proxy on again"), "{denied}");
+    }
+    assert_eq!(
+        super::authorization_failure_message(
+            Code::Unavailable,
+            "signed macOS Host Bridge is not linked"
+        ),
+        "System Proxy authorization failed: Unavailable: signed macOS Host Bridge is not linked"
+    );
+}

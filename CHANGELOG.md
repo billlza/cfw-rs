@@ -1,8 +1,8 @@
 # Changelog
 
-- Add Simplified Chinese, Traditional Chinese, English and Japanese with Settings → Appearance → Language, system-language matching, and localized native menus. Language changes preserve the active network session.
-
 ## 0.5.0 - Unreleased
+
+### Interface
 
 - Prepare native SwiftUI components in the existing interface, preserving the
   page layout, settings handlers and network controls: the Profiles menu, the
@@ -18,16 +18,36 @@
   layout and texts, shows glyphs beside the navigation labels and its slogan
   beside the header, and paints its own backgrounds whenever the host does not
   show the glass. The transparent WebView uses Tauri's macOS private API.
+- Show the engine's own version string on the General page, keep the
+  Connections and Logs toolbars on one line or wrap them whole instead of
+  squeezing their labels, and use the ordinary hint colour for the Profiles
+  import note.
+
+### Reliability
+
+- Read the process table on macOS 27, where `ps` prints the `nobody` user's
+  uid as `-2`. Starting the core, saving runtime settings and recovering
+  background services no longer fail on such a row.
+- After an installation or update, the dashboard asks for background service
+  recovery by itself a few seconds after launch and, if that still fails,
+  explains the steps to take instead of showing the raw reason.
 - Keep a running core published while its status reads miss: a read that
   times out, finds a busy authority or an unavailable service is retried for
   three polls before the page says anything, the page then explains that the
   core's state is being confirmed instead of calling it failed, and the
-  attested runtime returns on the next exact observation. A busy or
-  unanswered status read at launch is re-observed by the dashboard's own
-  recovery like an unproven cleanup. Mode switches prove the global Off
-  barrier with the operation deadline instead of the two-second poll deadline.
+  attested runtime returns on the next exact observation. A busy or unanswered status read at
+  launch is re-observed by the dashboard's own recovery like an unproven
+  cleanup. Mode switches prove the global Off barrier with the operation
+  deadline instead of the two-second poll deadline.
+- Retry an automatic proxy port once in place before moving to the next
+  candidate: the listener a mode switch just stopped may still be closing, so
+  the port no longer drifts from 7890 after switching System Proxy or TUN.
+- Say what to do when System Proxy authorization times out or is cancelled:
+  turn the switch on again and approve the macOS prompt.
 
 ## 0.4.0 - Unreleased
+
+- Add Simplified Chinese, Traditional Chinese, English and Japanese with Settings → Appearance → Language, system-language matching, and localized native menus. Language changes preserve the active network session.
 
 ### Everyday proxy use and compatibility
 

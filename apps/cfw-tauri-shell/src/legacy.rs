@@ -784,6 +784,7 @@ async fn start_replacement_with_endpoint_rebind(
         ));
     }
 
+    let mut conflict_retry_used = false;
     loop {
         let settings = engine.engine_settings()?;
         if settings != journal.replacement_settings {
@@ -857,6 +858,13 @@ async fn start_replacement_with_endpoint_rebind(
                 return Ok((snapshot, request, journal));
             }
             Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
+                if !conflict_retry_used {
+                    // Same bounded retry as the dashboard mode switch: the
+                    // listener the coordinator just stopped may still be closing.
+                    conflict_retry_used = true;
+                    tokio::time::sleep(crate::engine::ENDPOINT_CONFLICT_RETRY_DELAY).await;
+                    continue;
+                }
                 let staged = engine.stage_endpoint_rebind(conflict)?;
                 let replacement_settings = staged.settings().clone();
                 let rebound_request = engine

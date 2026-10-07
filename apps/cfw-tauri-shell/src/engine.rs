@@ -6,6 +6,14 @@ pub(crate) use runtime_settings::change_runtime_preferences;
 #[cfg(feature = "physical-release-evidence")]
 pub mod packet_evidence;
 
+/// A start that finds its own loopback endpoint in use right after the
+/// coordinator stopped the previous runtime is usually seeing that listener
+/// still closing. The same endpoint is tried once more after this pause
+/// before the endpoint cursor moves on, so an automatic port stays put across
+/// mode switches.
+pub(crate) const ENDPOINT_CONFLICT_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
 #[cfg(test)]
 mod tests;
 
@@ -14,7 +22,7 @@ use std::time::Instant;
 
 use cfw_apple_network::{
     AppleNetworkBackend, KeychainEngineGenerationStore, NATIVE_BRIDGE_OUTER_WATCHDOG,
-    NativeFrameworkBridge,
+    NativeBridgeErrorCode, NativeFrameworkBridge,
 };
 use cfw_application::{EngineControllerAccess, EngineCoordinatorError, EngineModeCoordinator};
 use cfw_engine_api::{
@@ -668,6 +676,25 @@ where
     result
 }
 
+/// What the page shows when System Proxy authorization does not go through.
+/// macOS asks for consent in its own prompt, so the two outcomes a user can
+/// cause are an unanswered prompt and a cancelled one; both get the way back.
+fn authorization_failure_message(code: NativeBridgeErrorCode, message: &str) -> String {
+    match code {
+        NativeBridgeErrorCode::Timeout => {
+            "System Proxy authorization timed out: macOS did not get \
+             an answer to its prompt. Turn System Proxy on again and approve the prompt."
+                .into()
+        }
+        NativeBridgeErrorCode::ApprovalDenied | NativeBridgeErrorCode::PermissionDenied => {
+            "System Proxy authorization was cancelled or denied. Turn System Proxy on again and \
+             approve the prompt."
+                .into()
+        }
+        _ => format!("System Proxy authorization failed: {code:?}: {message}"),
+    }
+}
+
 async fn authorize_proxy_transition(
     authorization: &dyn cfw_apple_network::NativeBridge,
     restoration_only: bool,
@@ -675,12 +702,7 @@ async fn authorize_proxy_transition(
     authorization
         .authorize_system_proxy(restoration_only)
         .await
-        .map_err(|error| {
-            format!(
-                "System Proxy authorization failed: {:?}: {}",
-                error.code, error.message
-            )
-        })
+        .map_err(|error| authorization_failure_message(error.code, &error.message))
 }
 
 async fn set_mode_with_endpoint_rebind(
@@ -693,6 +715,7 @@ async fn set_mode_with_endpoint_rebind(
     mut rebind: impl FnMut(BackendErrorKind) -> Result<(), String>,
 ) -> Result<EngineSnapshot, String> {
     let mut ticket_retry_used = false;
+    let mut conflict_retry_used = false;
     loop {
         let settings = read_engine_settings(endpoints)?;
         match coordinator
@@ -705,6 +728,15 @@ async fn set_mode_with_endpoint_rebind(
             }
             Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
                 ensure_retry_current()?;
+                if !conflict_retry_used {
+                    // The coordinator has cleaned the failed attempt and proven
+                    // Off; the endpoint it could not bind was most likely the
+                    // listener it just stopped. Try the same endpoint once more
+                    // before the cursor moves on.
+                    conflict_retry_used = true;
+                    tokio::time::sleep(ENDPOINT_CONFLICT_RETRY_DELAY).await;
+                    continue;
+                }
                 rebind(conflict)?;
             }
             Err(EngineCoordinatorError::StartTicketExpiredAfterOff) if !ticket_retry_used => {

@@ -5537,7 +5537,7 @@ def _finalize_accepted_submission(
     except NotaryLogError as error:
         raise TransactionError(
             "notary_log_verification_failed",
-            "Apple notarization log failed strict binding validation",
+            f"Apple notarization log failed strict binding validation: {error}",
         ) from error
     notarization_log_path = work / "notarization-log.json"
     _write_json_exclusive(notarization_log_path, normalized_log)
@@ -7363,7 +7363,7 @@ def _read_accepted_recovery_evidence(
     except NotaryLogError as error:
         raise TransactionError(
             "notary_log_verification_failed",
-            "recovered Apple notarization log failed strict binding validation",
+            f"recovered Apple notarization log failed strict binding validation: {error}",
         ) from error
     log_upload_at = _parse_utc_timestamp(
         normalized_recovery_log["uploadDate"],

@@ -1033,6 +1033,34 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.close()
 
+    def test_code_free_resource_tickets_are_sealed_without_architecture(self) -> None:
+        bundle = (
+            f"{self.fixture.context.archive_name}/Clash for Mac.app/Contents/Resources/"
+            "CFMNativeDashboard_CFMNativeDashboard.bundle"
+        )
+        self.fixture.runner.log["ticketContents"] = [
+            {"path": bundle, "digestAlgorithm": "SHA-256", "cdhash": "b" * 40, "arch": None},
+            {"path": bundle + "/Contents/Info.plist", "digestAlgorithm": "SHA-256", "cdhash": "c" * 40},
+            *self.fixture.runner.log["ticketContents"],
+        ]
+        final_app = self.fixture.execute()
+        sealed = [
+            json.loads(path.read_text())
+            for path in final_app.parent.rglob("notarization-log.json")
+        ]
+        self.assertEqual(len(sealed), 1)
+        self.assertEqual(
+            sealed[0]["ticketContents"][0],
+            {"path": bundle, "digestAlgorithm": "SHA-256", "cdhash": "b" * 40},
+        )
+
+    def test_log_rejection_reports_the_validator_reason(self) -> None:
+        self.fixture.runner.log["ticketContents"][0]["arch"] = "powerpc"
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute()
+        self.assertEqual(raised.exception.code, "notary_log_verification_failed")
+        self.assertIn("ticket architecture is unsupported", str(raised.exception))
+
     def test_success_is_sealed_before_single_directory_publication(self) -> None:
         final_app = self.fixture.execute()
         self.assertEqual(final_app, self.fixture.context.final_root / "Clash for Mac.app")
@@ -4480,6 +4508,76 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
                 self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
                 self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_accepted_log_rejection_recovers_from_corrected_executor(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.runner.log["ticketContents"][0]["arch"] = None
+        # The executor that submitted the archive rejected the architecture-less
+        # ticket that Apple reports for the code-free resource bundle.
+        with patch.object(
+            transaction_module,
+            "validate_documents",
+            side_effect=transaction_module.NotaryLogError(
+                "notarytool ticket architecture is unsupported"
+            ),
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.execute()
+        self.assertEqual(raised.exception.code, "notary_log_verification_failed")
+        events = fixture.context.attempt_root / "events"
+        self.assertEqual(
+            [
+                json.loads(path.read_text(encoding="utf-8"))["state"]
+                for path in sorted(events.glob("*.json"))
+            ][-6:],
+            [
+                "submitted",
+                "direct_finalization_preparing",
+                "direct_finalization_ready",
+                "finalization_started",
+                "accepted",
+                "failed",
+            ],
+        )
+        self.assertFalse(fixture.context.final_root.exists())
+        self._clear_runner_observations(fixture)
+
+        final_app = fixture.recover(
+            recovery_tool_identity_reader=lambda _repository: {
+                "repositoryCommit": "e" * 40,
+                "releaseSourceSha256": "f" * 64,
+            }
+        )
+
+        self.assertEqual(final_app, fixture.context.final_root / "Clash for Mac.app")
+        self.assertEqual(
+            fixture.runner.calls,
+            [
+                CommandRole.FINAL_VERIFY,
+                CommandRole.INFO,
+                CommandRole.FETCH_LOG,
+                CommandRole.STAPLE,
+                CommandRole.STAPLE_VALIDATE,
+                CommandRole.FINAL_VERIFY,
+                CommandRole.FINAL_VERIFY,
+                CommandRole.DISTRIBUTION_CHECK,
+                CommandRole.FINAL_VERIFY,
+            ],
+        )
+        intent = json.loads(
+            (fixture.context.attempt_root / "recovery-intent.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(intent["recovery_tool_repository_commit"], "e" * 40)
+        self.assertEqual(intent["recovery_tool_release_source_sha256"], "f" * 64)
+        sealed = json.loads(
+            next(final_app.parent.rglob("notarization-log.json")).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertNotIn("arch", sealed["ticketContents"][0])
 
     def test_marker_first_crash_reconstructs_exact_continuation(self) -> None:
         continued_identity, marker_path = self._crash_after_continuation_marker()

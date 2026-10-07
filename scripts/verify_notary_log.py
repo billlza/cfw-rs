@@ -265,8 +265,11 @@ def _ticket(value: object) -> dict[str, str]:
         "digestAlgorithm": "SHA-256",
         "cdhash": cdhash,
     }
-    if "arch" in value:
-        arch = value["arch"]
+    # Apple reports a code-free signed resource (the SwiftUI resource bundle)
+    # with a null architecture and its files without one; both mean that the
+    # ticket has no architecture.
+    arch = value.get("arch")
+    if arch is not None:
         if arch not in ("arm64", "x86_64"):
             raise NotaryLogError("notarytool ticket architecture is unsupported")
         normalized["arch"] = arch

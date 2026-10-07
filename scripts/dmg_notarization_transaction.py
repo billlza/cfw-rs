@@ -1106,7 +1106,7 @@ def _fetch_log(
     except NotaryLogError as error:
         raise TransactionError(
             "notary_log_verification_failed",
-            "Apple notarization log does not bind the exact submitted DMG",
+            f"Apple notarization log does not bind the exact submitted DMG: {error}",
         ) from error
     _require_exact_or_write(
         attempt.context.attempt_root / "notarization.json",

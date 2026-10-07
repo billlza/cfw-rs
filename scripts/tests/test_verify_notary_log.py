@@ -168,11 +168,47 @@ class NotaryLogValidationTests(unittest.TestCase):
         log["ticketContents"][0]["path"] = "fixture.dmg"
         self.assertEqual(self.validate(log=log), log)
 
+    def test_code_free_resource_tickets_carry_no_architecture(self) -> None:
+        # Observed in Apple's Accepted log of the signed 0.5.0 Host: the
+        # SwiftUI resource bundle has a null architecture and its Info.plist
+        # none. Both normalize to a ticket without an architecture.
+        bundle = (
+            "Clash.for.Mac_0.5.0_50027_notary.zip/Clash for Mac.app/Contents/Resources/"
+            "CFMNativeDashboard_CFMNativeDashboard.bundle"
+        )
+        log = _log()
+        library = log["ticketContents"][0]
+        log["ticketContents"] = [
+            {"path": bundle, "digestAlgorithm": "SHA-256", "cdhash": "b" * 40, "arch": None},
+            {"path": bundle + "/Contents/Info.plist", "digestAlgorithm": "SHA-256", "cdhash": "c" * 40},
+            library,
+        ]
+        normalized = self.validate(log=log)
+        self.assertEqual(
+            normalized["ticketContents"],
+            [
+                {"path": bundle, "digestAlgorithm": "SHA-256", "cdhash": "b" * 40},
+                {"path": bundle + "/Contents/Info.plist", "digestAlgorithm": "SHA-256", "cdhash": "c" * 40},
+                library,
+            ],
+        )
+        self.assertEqual(
+            validate_normalized_documents(
+                _submission(), normalized, archive_filename=ARCHIVE, archive_sha256=ARCHIVE_SHA256,
+            ),
+            normalized,
+        )
+
     def test_ticket_fields_are_strictly_validated(self) -> None:
         mutations = (
             ("digestAlgorithm", "SHA-1", "digestAlgorithm"),
             ("cdhash", "not-a-cdhash", "cdhash"),
             ("arch", "powerpc", "architecture"),
+            ("arch", "", "architecture"),
+            ("arch", "arm64e", "architecture"),
+            ("arch", 0, "architecture"),
+            ("arch", False, "architecture"),
+            ("arch", [], "architecture"),
         )
         for field, value, pattern in mutations:
             with self.subTest(field=field):

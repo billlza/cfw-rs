@@ -1290,6 +1290,44 @@ class DormantInstallValidationTests(unittest.TestCase):
             validate_journal(document, GA_INSTALL_PROFILE)
         self.assertEqual(captured.exception.code, "predecessor_identity_mismatch")
 
+    def test_journal_candidate_must_match_the_profile_product_version(self) -> None:
+        transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        retained = install.INSTALLED_40073_PREDECESSOR
+        historical = replace(
+            GA_INSTALL_PROFILE, product_version="0.4.0", build_number="40073")
+        document = {
+            "candidate": {
+                **CANDIDATE.document(),
+                "version": "0.4.0",
+                "build_number": "40073",
+                "tree_sha256": retained.tree_sha256,
+            },
+            "document": install.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
+            "guards": [
+                {"after": None, "before": guard(), "operation": "install"}
+            ],
+            "phase": "prepared",
+            "previous": AppIdentity(
+                "0.4.0", "40072", install.INSTALLED_40072_PREDECESSOR.tree_sha256
+            ).document(),
+            "schema_version": install.SCHEMA_VERSION,
+            "sequence": 1,
+            "staging_name": f"{STAGING_PREFIX}{transaction_id}",
+            "transaction_id": transaction_id,
+        }
+        # A retained 0.4.0 journal is readable only with the profile bound to
+        # its own product version; the active GA profile does not read it.
+        validate_journal(document, historical)
+        self.assertEqual(GA_INSTALL_PROFILE.product_version, install.VERSION)
+        for profile in (GA_INSTALL_PROFILE, replace(historical, product_version="0.5.0")):
+            with self.subTest(profile=(profile.product_version, profile.build_number)):
+                with self.assertRaises(InstallError) as captured:
+                    validate_journal(document, profile)
+                self.assertEqual(captured.exception.code, "journal_invalid")
+
     def test_pre_environment_install_schema_is_rejected(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         legacy = {
@@ -2030,6 +2068,7 @@ class InstallPredecessorTests(unittest.TestCase):
                 "40070": install.INSTALLED_40070_PREDECESSOR,
                 "40071": install.INSTALLED_40071_PREDECESSOR,
                 "40072": install.INSTALLED_40072_PREDECESSOR,
+                "40073": install.INSTALLED_40073_PREDECESSOR,
                 "50025": install.INSTALLED_50025_PREDECESSOR,
             },
         )
@@ -2053,6 +2092,7 @@ class InstallPredecessorTests(unittest.TestCase):
             install.INSTALLED_40070_PREDECESSOR,
             install.INSTALLED_40071_PREDECESSOR,
             install.INSTALLED_40072_PREDECESSOR,
+            install.INSTALLED_40073_PREDECESSOR,
             install.INSTALLED_50025_PREDECESSOR,
         ):
             with self.subTest(previous=predecessor.build_number):

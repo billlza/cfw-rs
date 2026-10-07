@@ -192,6 +192,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                 "40070": install.INSTALLED_40070_PREDECESSOR,
                 "40071": install.INSTALLED_40071_PREDECESSOR,
                 "40072": install.INSTALLED_40072_PREDECESSOR,
+                "40073": install.INSTALLED_40073_PREDECESSOR,
                 "50025": install.INSTALLED_50025_PREDECESSOR,
             },
         )
@@ -279,7 +280,7 @@ class ServiceEventStoreTests(unittest.TestCase):
             "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         }
         with self.assertRaises(install.InstallError) as captured:
-            service.validate_intent(legacy)
+            service.validate_intent(legacy, product_version=install.VERSION)
         self.assertEqual(captured.exception.code, "service_journal_invalid")
 
         boolean_schema = {
@@ -294,8 +295,28 @@ class ServiceEventStoreTests(unittest.TestCase):
             "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         }
         with self.assertRaises(install.InstallError) as captured:
-            service.validate_intent(boolean_schema)
+            service.validate_intent(boolean_schema, product_version=install.VERSION)
         self.assertEqual(captured.exception.code, "service_journal_invalid")
+
+    def test_intent_candidate_must_match_the_expected_product_version(self) -> None:
+        intent = {
+            "candidate": CANDIDATE.document(),
+            "document": service.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
+            "off_proof_profile": install.CURRENT_OFF_PROOF_PROFILE,
+            "previous": PREVIOUS.document(),
+            "schema_version": service.SCHEMA_VERSION,
+            "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }
+        self.assertEqual(
+            service.validate_intent(intent, product_version=install.VERSION), intent
+        )
+        with self.assertRaises(install.InstallError) as captured:
+            service.validate_intent(intent, product_version="0.4.0")
+        self.assertEqual(captured.exception.code, "service_journal_invalid")
+        self.assertIn("expected product version", str(captured.exception))
 
     def test_service_event_rejects_boolean_schema_and_sequence(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:

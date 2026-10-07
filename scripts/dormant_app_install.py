@@ -429,6 +429,20 @@ INSTALLED_40072_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Installed through the 40072 -> 40073 GA transaction on 2026-09-20 and retired
+# unpublished when the product version moved to 0.5.0; the preview installer
+# later replaced it. Retained so its completed journals can be archived and
+# read with the vocabulary they were written in.
+INSTALLED_40073_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.4.0",
+    build_number="40073",
+    tree_sha256="9defff1b52c90ad2caf180fb016608eaedafe592532bd5df5e91e0de5f23f906",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 # Exact installed and retained notarized 0.5.0 preview predecessor; service
 # vocabulary unchanged.
 INSTALLED_50025_PREDECESSOR: Final = PredecessorProfile(
@@ -457,6 +471,7 @@ SUPPORTED_PREDECESSORS: Final = MappingProxyType(
         INSTALLED_40070_PREDECESSOR.build_number: INSTALLED_40070_PREDECESSOR,
         INSTALLED_40071_PREDECESSOR.build_number: INSTALLED_40071_PREDECESSOR,
         INSTALLED_40072_PREDECESSOR.build_number: INSTALLED_40072_PREDECESSOR,
+        INSTALLED_40073_PREDECESSOR.build_number: INSTALLED_40073_PREDECESSOR,
         INSTALLED_50025_PREDECESSOR.build_number: INSTALLED_50025_PREDECESSOR,
     }
 )
@@ -496,6 +511,10 @@ class InstallError(RuntimeError):
 class InstallProfile:
     """The fixed GA install identity.
 
+    `product_version` and `build_number` name the one candidate whose
+    journals this profile reads; history retention rebinds them to the
+    retained predecessor whose completed journals it reads.
+
     Deliberately says nothing about which build is being replaced: the
     predecessor is observed on the machine and bound through
     `BoundInstallProfile`, so an unbound profile cannot express a predecessor
@@ -503,6 +522,7 @@ class InstallProfile:
     """
 
     name: str
+    product_version: str
     build_number: str
     repository_relative: Path
     candidate_relative: Path
@@ -628,6 +648,7 @@ class BoundInstallProfile:
 
 GA_INSTALL_PROFILE: Final = InstallProfile(
     name="ga",
+    product_version=VERSION,
     build_number=BUILD_NUMBER,
     repository_relative=REPOSITORY_RELATIVE,
     candidate_relative=CANDIDATE_RELATIVE,
@@ -3419,7 +3440,7 @@ def validate_journal(
     if not isinstance(candidate["repository_commit"], str) or re.fullmatch(r"[0-9a-f]{40}", candidate["repository_commit"]) is None:
         raise InstallError("journal_invalid", "candidate repository commit is invalid")
     previous_app = _validate_app_document(document["previous"], "previous application")
-    if candidate_app["version"] != VERSION or candidate_app["build_number"] != profile.build_number:
+    if candidate_app["version"] != profile.product_version or candidate_app["build_number"] != profile.build_number:
         raise InstallError(
             "journal_invalid",
             "installation journal is not for the fixed GA identity",

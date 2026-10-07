@@ -1,7 +1,11 @@
 """Retain one completed installation before reusing its fixed journal namespace.
 
 This does not stop services, change networking, or remove application bundles.
-Both producer journals must be terminal and describe the exact installed app.
+Both producer journals must be terminal and describe the exact retained build.
+That build is normally still installed. When a later supported build replaced
+it through another verified transaction, the operator names that installed
+build explicitly; the receipts then record the superseding identity and never
+describe the archived records as the current installation.
 The original maintenance/service/install locks cover both atomic renames. A
 durable intent permits the same operation to resume after either rename.
 """
@@ -80,11 +84,48 @@ def _digests(paths: install.InstallPaths, service_parent: Path, journal: bytes) 
     }
 
 
+def _retention_installed_identity(
+    expected: install.AppIdentity, installed: install.AppIdentity | None
+) -> install.AppIdentity:
+    """The application that must be installed while the records are retained.
+
+    Normally that is the records' own candidate. An explicitly declared
+    installed build must be a strictly newer lineage entry that replaced the
+    archived build; the receipts record it, so the archived records are never
+    described as the current installation.
+    """
+    if installed is None:
+        return expected
+    install.canonical_build_version(installed.build_number, "installation history installed build")
+    if int(installed.build_number) <= int(expected.build_number):
+        _fail("the declared installed build must be newer than the archived build")
+    return installed
+
+
+def _require_installed(
+    observed: install.AppIdentity,
+    expected: install.AppIdentity,
+    installed: install.AppIdentity,
+) -> None:
+    if observed == installed:
+        return
+    if installed == expected:
+        _fail("the installed application changed before history retention")
+    _fail("the installed application is not the declared superseding build")
+
+
+def _superseded_record(superseded: install.AppIdentity | None) -> dict[str, dict[str, str]]:
+    if superseded is None:
+        return {}
+    return {"superseded_by_installed": superseded.document()}
+
+
 def _intent(
     service_snapshot: service.TerminalServiceJournalSnapshot,
     install_snapshot: install.TerminalInstallJournalSnapshot,
     executor_identity: dict[str, str],
     digests: dict[str, str],
+    superseded: install.AppIdentity | None,
 ) -> dict[str, object]:
     validate_source_identity(executor_identity, "installation history executor")
     return {
@@ -94,6 +135,7 @@ def _intent(
         "install_transaction_id": install_snapshot.document["transaction_id"],
         "executor": executor_identity,
         **digests,
+        **_superseded_record(superseded),
     }
 
 
@@ -104,9 +146,12 @@ def archive_completed_history(
     observe_installed: Callable[[], install.AppIdentity],
     require_source_unchanged: Callable[[], None],
     *,
+    installed: install.AppIdentity | None = None,
     move: Callable[..., None] = os.rename,
 ) -> Path:
     install.canonical_build_version(expected.build_number, "installation history build")
+    installed = _retention_installed_identity(expected, installed)
+    superseded = None if installed == expected else installed
     validate_source_identity(executor_identity, "installation history executor")
     if paths.profile.build_number != expected.build_number:
         _fail("history profile does not match the expected installed build")
@@ -139,13 +184,16 @@ def archive_completed_history(
                                 intent_data = service.ServiceEventStore._read(archive_fd, INTENT_NAME, "history intent")
                                 prior_intent = service._strict_json_bytes(intent_data, "history intent")
                                 digests = _digests(paths, destination, archived.data)
-                                if prior_intent != _intent(archived_service, archived, prior_intent.get("executor"), digests):
+                                if prior_intent != _intent(
+                                    archived_service, archived, prior_intent.get("executor"), digests, superseded
+                                ):
                                     _fail("completed installation history intent changed")
                                 if recorded != {
                                     "document": "cfm-install-history-complete-v1",
                                     "candidate": archived.document["candidate"],
                                     "intent_sha256": hashlib.sha256(intent_data).hexdigest(),
                                     **digests,
+                                    **_superseded_record(superseded),
                                 } or archived.document["candidate"]["tree_sha256"] != expected.tree_sha256:
                                     _fail("completed installation history changed")
                                 return destination
@@ -168,10 +216,11 @@ def archive_completed_history(
                             candidate = install_snapshot.document["candidate"]
                             if any(candidate[key] != value for key, value in expected.document().items()):
                                 _fail("completed records do not match the expected installed application")
-                            if observe_installed() != expected:
-                                _fail("the installed application changed before history retention")
+                            _require_installed(observe_installed(), expected, installed)
                             digests = _digests(paths, locations[0], install_snapshot.data)
-                            intent = _intent(service_snapshot, install_snapshot, executor_identity, digests)
+                            intent = _intent(
+                                service_snapshot, install_snapshot, executor_identity, digests, superseded
+                            )
                             if intent_path.exists():
                                 recorded = service._strict_json_bytes(
                                     service.ServiceEventStore._read(archive_fd, INTENT_NAME, "history intent"),
@@ -199,8 +248,9 @@ def archive_completed_history(
                                 install._fsync_directory_fd(archive_fd)
                                 install._fsync_directory_fd(service_store.parent_fd)
                             _, retained = _snapshot_pair(paths, destination, destination)
-                            if _digests(paths, destination, retained.data) != digests or observe_installed() != expected:
-                                _fail("installation history or installed application changed during retention")
+                            _require_installed(observe_installed(), expected, installed)
+                            if _digests(paths, destination, retained.data) != digests:
+                                _fail("installation history changed during retention")
                             require_source_unchanged()
                             _require_directory(history_fd, history)
                             _require_directory(archive_fd, destination)
@@ -209,6 +259,7 @@ def archive_completed_history(
                                 "candidate": candidate,
                                 "intent_sha256": hashlib.sha256(install._canonical_json(intent)).hexdigest(),
                                 **digests,
+                                **_superseded_record(superseded),
                             })
                             return destination
                         finally:
@@ -217,17 +268,48 @@ def archive_completed_history(
                         os.close(history_fd)
 
 
+def _retention_plan(
+    previous_build: str, installed_build: str | None
+) -> tuple[install.AppIdentity, install.AppIdentity, install.InstallProfile]:
+    """Bind the archived build, the build that must be installed, and the profile.
+
+    Each build names one lineage entry with its own product version and exact
+    retained tree; the journals are read with that entry's identity, not the
+    active GA identity of the operator running the retention.
+    """
+    predecessor = install.SUPPORTED_PREDECESSORS.get(previous_build)
+    if predecessor is None:
+        _fail("installation history build is not an explicitly supported predecessor")
+    expected = install.AppIdentity(
+        predecessor.product_version, predecessor.build_number, predecessor.tree_sha256
+    )
+    installed: install.AppIdentity | None = None
+    if installed_build is not None:
+        successor = install.SUPPORTED_PREDECESSORS.get(installed_build)
+        if successor is None:
+            _fail("the declared installed build is not an explicitly supported predecessor")
+        installed = install.AppIdentity(
+            successor.product_version, successor.build_number, successor.tree_sha256
+        )
+    profile = replace(
+        install.GA_INSTALL_PROFILE,
+        product_version=predecessor.product_version,
+        build_number=predecessor.build_number,
+    )
+    return expected, _retention_installed_identity(expected, installed), profile
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--previous-build", required=True)
+    parser.add_argument(
+        "--installed-build",
+        help="the newer supported build that replaced the archived build and is installed now",
+    )
     arguments = parser.parse_args()
     if os.geteuid() == 0:
         _fail("installation history must be retained by its owning administrator, not sudo")
-    predecessor = install.SUPPORTED_PREDECESSORS.get(arguments.previous_build)
-    if predecessor is None:
-        _fail("installation history build is not an explicitly supported predecessor")
-    expected = install.AppIdentity(install.VERSION, predecessor.build_number, predecessor.tree_sha256)
-    profile = replace(install.GA_INSTALL_PROFILE, build_number=predecessor.build_number)
+    expected, installed, profile = _retention_plan(arguments.previous_build, arguments.installed_build)
     paths = replace(install.InstallPaths.production(), profile=profile)
     repository = Path(__file__).resolve().parent.parent
     executor = capture_executor_source(repository)
@@ -235,8 +317,10 @@ def main() -> None:
         paths, expected, executor.identity,
         lambda: install.read_app_identity(paths.target_app),
         lambda: require_executor_unchanged(executor),
+        installed=None if installed == expected else installed,
     )
-    print(f"completed installation history retained: {predecessor.build_number} at {destination}")
+    superseded = "" if installed == expected else f" (superseded by installed {installed.build_number})"
+    print(f"completed installation history retained: {expected.build_number}{superseded} at {destination}")
 
 
 if __name__ == "__main__":

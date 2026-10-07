@@ -136,6 +136,7 @@ if (
         "40070": install.INSTALLED_40070_PREDECESSOR,
         "40071": install.INSTALLED_40071_PREDECESSOR,
         "40072": install.INSTALLED_40072_PREDECESSOR,
+        "40073": install.INSTALLED_40073_PREDECESSOR,
         "50025": install.INSTALLED_50025_PREDECESSOR,
     }
 ):
@@ -304,7 +305,7 @@ def _validate_app(value: object, label: str) -> dict[str, str]:
     return value
 
 
-def _validate_candidate(value: object) -> dict[str, str]:
+def _validate_candidate(value: object, product_version: str) -> dict[str, str]:
     if not isinstance(value, dict) or set(value) != {
         "build_number",
         "manifest_sha256",
@@ -320,9 +321,9 @@ def _validate_candidate(value: object) -> dict[str, str]:
         {key: value[key] for key in ("build_number", "tree_sha256", "version")},
         "candidate",
     )
-    if value["version"] != install.VERSION:
+    if value["version"] != product_version:
         raise install.InstallError(
-            "service_journal_invalid", "candidate identity is not the fixed product version"
+            "service_journal_invalid", "candidate identity is not the expected product version"
         )
     for key in ("manifest_sha256", "release_source_sha256"):
         if not isinstance(value[key], str) or re.fullmatch(r"[0-9a-f]{64}", value[key]) is None:
@@ -338,7 +339,7 @@ def _validate_candidate(value: object) -> dict[str, str]:
     return value
 
 
-def validate_intent(value: object) -> dict[str, Any]:
+def validate_intent(value: object, *, product_version: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "candidate",
         "document",
@@ -381,7 +382,7 @@ def validate_intent(value: object) -> dict[str, Any]:
         raise install.InstallError(
             "service_journal_invalid", "service transaction id is not canonical"
         )
-    candidate = _validate_candidate(value["candidate"])
+    candidate = _validate_candidate(value["candidate"], product_version)
     previous = _validate_app(value["previous"], "previous application")
     if int(candidate["build_number"]) <= int(previous["build_number"]):
         raise install.InstallError(
@@ -550,7 +551,10 @@ def validate_terminal_snapshot_files(
             "service_journal_invalid",
             "terminal service snapshot inventory is invalid",
         )
-    intent = validate_intent(_strict_json_bytes(files[INTENT_NAME], "service intent"))
+    intent = validate_intent(
+        _strict_json_bytes(files[INTENT_NAME], "service intent"),
+        product_version=profile.product_version,
+    )
     bound = _bound_from_intent(profile, intent)
     if (
         intent["candidate"]["build_number"] != profile.build_number
@@ -1169,7 +1173,8 @@ class ServiceEventStore:
                     "previous": previous.document(),
                     "schema_version": SCHEMA_VERSION,
                     "transaction_id": str(uuid.uuid4()),
-                }
+                },
+                product_version=self.paths.install_paths.profile.product_version,
             )
             self._require_profile_intent(intent)
             intent_sha256 = _sha256(_canonical_json(intent))
@@ -1295,7 +1300,8 @@ class ServiceEventStore:
                 _strict_json_bytes(
                     self._read(directory_fd, INTENT_NAME, "service intent"),
                     "service intent",
-                )
+                ),
+                product_version=self.paths.install_paths.profile.product_version,
             )
             bound = self._require_profile_intent(intent)
             if (

@@ -16,8 +16,8 @@ class InstallHistoryTests(unittest.TestCase):
     def setUp(self) -> None:
         # Construct a completed historical upgrade, then validate it through
         # today's operator whose active build is newer.
-        profile = replace(install.GA_INSTALL_PROFILE, build_number="40069")
-        self.expected = replace(fixture_module.CANDIDATE.app, build_number="40069")
+        profile = replace(install.GA_INSTALL_PROFILE, product_version="0.4.0", build_number="40069")
+        self.expected = replace(fixture_module.CANDIDATE.app, version="0.4.0", build_number="40069")
         candidate = replace(fixture_module.CANDIDATE, app=self.expected)
         previous = install.AppIdentity(
             "0.4.0", "40067", install.INSTALLED_40067_PREDECESSOR.tree_sha256)
@@ -29,6 +29,9 @@ class InstallHistoryTests(unittest.TestCase):
         self.paths = self.fixture.install_paths
         self.destination = self.paths.target_parent / archive.HISTORY_NAME / "40069"
         self.executor = {"repositoryCommit": "a" * 40, "releaseSourceSha256": "b" * 64}
+        # The retained preview that replaced the archived build on this Mac.
+        self.installed = install.AppIdentity(
+            "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256)
 
     def retain(self, **options: object) -> Path:
         return archive.archive_completed_history(
@@ -124,6 +127,78 @@ class InstallHistoryTests(unittest.TestCase):
         (self.destination / "unknown.json").write_bytes(b"{}")
         with self.assertRaisesRegex(install.InstallError, "inventory changed"):
             self.retain()
+
+    def test_receipts_of_a_still_installed_build_carry_no_superseding_identity(self) -> None:
+        self.retain()
+        for name in (archive.INTENT_NAME, archive.COMPLETE_NAME):
+            receipt = json.loads((self.destination / name).read_bytes())
+            self.assertEqual(receipt["candidate"]["version"], "0.4.0")
+            self.assertNotIn("superseded_by_installed", receipt)
+
+    def test_superseded_records_are_retained_for_the_declared_installed_build(self) -> None:
+        destination = archive.archive_completed_history(
+            self.paths, self.expected, self.executor,
+            lambda: self.installed, lambda: None, installed=self.installed)
+        self.assertEqual(destination, self.destination)
+        self.assertFalse(self.paths.journal.exists())
+        for name in (archive.INTENT_NAME, archive.COMPLETE_NAME):
+            receipt = json.loads((destination / name).read_bytes())
+            self.assertEqual(receipt["candidate"]["build_number"], "40069")
+            self.assertEqual(receipt["superseded_by_installed"], self.installed.document())
+        # Repeating the retention requires the same declaration and the same
+        # installed application; the archived build itself never satisfies it.
+        self.assertEqual(archive.archive_completed_history(
+            self.paths, self.expected, self.executor,
+            lambda: self.installed, lambda: None, installed=self.installed), destination)
+        with self.assertRaisesRegex(install.InstallError, "history intent changed"):
+            archive.archive_completed_history(
+                self.paths, self.expected, self.executor, lambda: self.expected, lambda: None)
+
+    def test_superseded_retention_requires_the_declared_build_to_be_installed(self) -> None:
+        for observed in (self.expected, replace(self.installed, tree_sha256="f" * 64)):
+            with self.subTest(observed=observed), self.assertRaisesRegex(
+                install.InstallError, "not the declared superseding build"
+            ):
+                archive.archive_completed_history(
+                    self.paths, self.expected, self.executor,
+                    lambda: observed, lambda: None, installed=self.installed)
+            self.assert_originals_present()
+
+    def test_superseded_retention_requires_a_newer_declared_build(self) -> None:
+        older = install.AppIdentity(
+            "0.4.0", "40067", install.INSTALLED_40067_PREDECESSOR.tree_sha256)
+        for declared in (older, self.expected):
+            with self.subTest(declared=declared.build_number), self.assertRaisesRegex(
+                install.InstallError, "must be newer than the archived build"
+            ):
+                archive.archive_completed_history(
+                    self.paths, self.expected, self.executor,
+                    lambda: declared, lambda: None, installed=declared)
+            self.assert_originals_present()
+
+    def test_retention_plan_binds_each_lineage_entry_to_its_own_identity(self) -> None:
+        retained = install.INSTALLED_40073_PREDECESSOR
+        expected, installed, profile = archive._retention_plan("40073", None)
+        self.assertEqual(expected, install.AppIdentity("0.4.0", "40073", retained.tree_sha256))
+        self.assertEqual(installed, expected)
+        self.assertEqual((profile.product_version, profile.build_number), ("0.4.0", "40073"))
+        self.assertEqual(
+            replace(profile, product_version=install.VERSION, build_number=install.BUILD_NUMBER),
+            install.GA_INSTALL_PROFILE,
+        )
+        expected, installed, _ = archive._retention_plan("40073", "50025")
+        self.assertEqual(expected.build_number, "40073")
+        self.assertEqual(installed, self.installed)
+        for previous, declared, message in (
+            ("50026", None, "not an explicitly supported predecessor"),
+            ("40073", "50026", "declared installed build is not an explicitly supported"),
+            ("40073", "40072", "must be newer than the archived build"),
+            ("40073", "40073", "must be newer than the archived build"),
+        ):
+            with self.subTest(previous=previous, declared=declared), self.assertRaisesRegex(
+                install.InstallError, message
+            ):
+                archive._retention_plan(previous, declared)
 
 
 if __name__ == "__main__":

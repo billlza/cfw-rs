@@ -1203,7 +1203,7 @@ wire proof.
    is added to the installer.
 
    ```bash
-   scripts/run_archive_install_history.sh --previous-build 40070
+   scripts/run_archive_install_history.sh --previous-build 40073 --installed-build 50025
    scripts/run_current_service_transaction.sh --decommission
    scripts/run_dormant_app_install.sh --install
    scripts/run_current_service_transaction.sh --recommission
@@ -1238,6 +1238,16 @@ wire proof.
    intent and completion receipt. A retry resumes the same two renames;
    pending work, contradictory records, changed bytes or unsafe paths block it.
    It neither changes network/service state nor removes an application bundle.
+
+   For 50026 the fixed producer paths still hold the completed 40072 → 40073
+   journals, while the installed application is the retained preview 50025
+   that replaced 40073 through the retired preview installer. The explicit
+   `--installed-build 50025` declaration retains those journals: the archiver
+   proves that they describe the retained 40073 identity and that exactly the
+   retained 50025 tree is installed, records that superseding identity in both
+   history receipts, and never describes 40073 as the current installation.
+   Without the declaration the archiver still requires the archived build
+   itself to be installed.
 
    Decommission and install each perform their own mandatory admission checks;
    separate `--preflight` calls remain available for diagnosis. The first

@@ -217,30 +217,42 @@ Apple references:
 
 ## libbox composition and remaining evidence
 
-`Dependencies.lock.json` pins sing-box `v1.14.1` at commit
-`1ac1a339cb1223e9c70eae14c44411c75033c02d`, Go `1.27.1`, and gomobile
+`Dependencies.lock.json` pins sing-box `v1.14.2` at commit
+`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`, Go `1.27.1`, and gomobile
 `v0.1.13` at commit `9f03b8f25789099c5c8abef4a02085da783ba923`. The
-materialization step applies four digest-pinned patches in a
+materialization step applies six digest-pinned patches in a
 fixed order:
 
-1. `sing-box-v1.14.1-security-dependencies.patch` updates the pinned Go module
-   graph, including go-chi `v5.3.0`, `x/crypto v0.56.0`, `x/mod v0.40.0`,
-   `x/net v0.58.0`, `x/sync v0.22.0`, `x/sys v0.47.0`, `x/term v0.45.0`,
-   `x/text v0.41.0`, `x/tools v0.49.0`, gRPC, and their exact coupled
-   requirements. The `x/mod` refresh removes the module-level
-   `GO-2026-6179` and `GO-2026-6180` findings without an ignore. The
-   `x/crypto v0.56.0` refresh fixes `GO-2026-6354` and `GO-2026-6355` and
-   requires the module's minimum Go version to be `1.26.0`; the release
-   compiler remains `1.27.1` and all other selected dependencies are unchanged.
-2. `sing-box-v1.14.1-raw-packet-tun.patch` adds the explicit Darwin raw-packet
+1. `sing-box-v1.14.2-security-dependencies.patch` updates the pinned Go module
+   graph, including go-chi `v5.3.2`, `x/crypto v0.57.0`, `x/mod v0.41.0`,
+   `x/net v0.59.0`, `x/sync v0.23.0`, `x/sys v0.48.0`, `x/term v0.46.0`,
+   `x/text v0.42.0`, `x/tools v0.50.0`, gRPC `v1.83.2`, and their exact coupled
+   requirements, and sets the module's Go directive to `1.27.1`. The `x/mod`
+   refresh keeps the module-level `GO-2026-6179` and `GO-2026-6180` findings
+   absent without an ignore. The `x/crypto` refresh fixes `GO-2026-6354` and
+   `GO-2026-6355`; `x/crypto v0.57.0` requires Go `1.26.0` or later, and the
+   release compiler is `1.27.1`.
+2. `sing-box-v1.14.2-raw-packet-tun.patch` adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and
    presents headerless IP datagrams to sing-tun.
-3. `sing-box-v1.14.1-dns-failover.patch` implements the bounded primary/fallback
+3. `sing-box-v1.14.2-dns-failover.patch` implements the bounded primary/fallback
    resolver contract required by the closed product projection.
-4. `sing-box-v1.14.1-endpoint-conflict.patch` reports only exact mixed-listener
+4. `sing-box-v1.14.2-endpoint-conflict.patch` reports only exact mixed-listener
    and controller `EADDRINUSE` failures as structured conflicts while preserving
    ordinary startup and cleanup failures.
+5. `sing-box-v1.14.2-profile-probe.patch` adds bounded, isolated profile
+   probes that originate application requests only: no inbounds, controller,
+   system interface, routing policy, persistent cache, or background URL tests,
+   and the probe instance is closed before it replies. It also makes ordered
+   failover follow the declared member order and commits a group's per-flow
+   member selection only when the TUN admits that flow.
+6. `sing-box-v1.14.2-socks-lifecycle.patch` keeps the upstream SOCKS protocol
+   implementation while giving each setup attempt its own cancellation scope;
+   a dial context owns the handshake, not the lifetime of an established
+   connection. It also carries the isolated build-workspace step that applies
+   the source-bound `sing` packet-address correction without changing the
+   original source or the checksum-verified module cache.
 
 `LibboxPacketEngineFactory` and `LibboxProxyEngineFactory` now construct
 `SourceBuiltLibboxRuntimeFactory`; `project.yml` links the same source-built

@@ -23,7 +23,7 @@ The machine-readable values live in
 | sing-box/libbox | `v1.14.2`, `af6e64c3b69e6132ebaee0e1a3d24e93903f6709` | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, endpoint-conflict, profile-probe and SOCKS-lifecycle patches, with individual and combined SHA-256 values |
 | iPhone Packet LAN peer (test-only) | signed thin-arm64 app tree `9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7` | source-tree identity, signed executable/profile/entitlements/certificate pins, dual-hash physical-device selection, CoreDevice receipt validation, and exact install/process/uninstall ownership |
 | Legacy Android packet peer (inactive) | Linux/arm64 artifact `268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c` | retained offline regression/build closure; it is not selected by the active Packet endpoint policy |
-| Apple provider reference | `afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa` | Git commit identity; reference only |
+| Apple provider reference | `2b1763a80f2c1dee1ab3ac62d84dbda7dc5178f4` | Git commit identity; reference only |
 | deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
 This table reflects the active 0.5.0 development pins after the September refresh;
@@ -52,7 +52,7 @@ application build, and immediately before final artifact sealing, with the same
 Rust SDK deployment is an explicit prerequisite to consuming the closed release
 environment. Release-Mac operations set `CFW_RELEASE_RUST_TOOLCHAIN=private` and
 use the effective account's
-`~/.cfm-release-tooling/rust-toolchains/1.97.1-aarch64-apple-darwin`;
+`~/.cfm-release-tooling/rust-toolchains/1.98.1-aarch64-apple-darwin`;
 `global` preserves the existing CI location under `~/.rustup/toolchains`.
 The selector controls deployment independently of the production or unsigned
 validation role. Only an unset bootstrap input defaults to `global`; sealed
@@ -96,7 +96,7 @@ Network access is isolated to explicit preparation:
    content, modes, and internal relative symlinks against the package-lock and
    verified Node tree. UI builds verify this tree before and after execution.
 4. `scripts/materialize_libbox_source.sh` accepts only a clean checkout at the
-   pinned commit, clones it locally without hard links, applies the four
+   pinned commit, clones it locally without hard links, applies the six
    digest-pinned patches in a fixed order, and verifies both the dependency-only
    module diff and the complete source diff.
 5. `scripts/prepare_libbox_modules.sh` accepts only that materialized source,

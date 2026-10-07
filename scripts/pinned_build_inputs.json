@@ -3513,7 +3513,7 @@
     "scripts/release_publication_path_contract.sh": "b1b500d9b5c7b72ee495e637c5f6760802a0df7a878c82aaca1cf14120380b70",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "4babfa61fb2d384a8c3781e6a4c0b06e5d4b5f295d76d28100d80889305b74a3",
+    "RELEASE.md": "242b874aeb5483d1d0a2a347a98a7a5fbf77b102deb8b7ff208d70b29128274e",
     "scripts/updater_signing_launcher.py": "31a3841dba08f49aa080773e1aad10b8eb814e9de477aa95325855dc4969fb07",
     "scripts/validate_updater_archive.py": "bee48aab736554ebeb0772687eaa44cea81426bcdc27d5581d399331b5814dca",
     "CHANGELOG.md": "7c29c0a465303d45d1ce196d11af316a4060890c178f5538b12989aeb5c5e903",

@@ -146,15 +146,15 @@ There is no private-API or old-helper fallback if one of these gates fails.
 Release inputs are recorded in
 [`scripts/dependency_pins.env`](./scripts/dependency_pins.env). Important pins:
 
-- Rust 1.97.1
-- Node.js 24.18.0 LTS
-- Go 1.26.6
+- Rust 1.98.1
+- Node.js 26.8.2
+- Go 1.27.1
 - SagerNet gomobile v0.1.13
 - cargo-deny 0.20.2
-- sing-box/libbox v1.13.15 at
-  `3708fa18766cda1f11b77f6ed9c7bd61688f17df`
+- sing-box/libbox v1.14.2 at
+  `af6e64c3b69e6132ebaee0e1a3d24e93903f6709`
 - Apple provider reference at
-  `afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa`
+  `2b1763a80f2c1dee1ab3ac62d84dbda7dc5178f4`
 
 The Apple provider repository is semantic reference material only. In
 particular, code that obtains a packet-flow file descriptor through KVC is not

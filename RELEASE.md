@@ -222,8 +222,8 @@ the earlier missing-link placeholders:
   ProxyAgent, and Provider. Each direction applies an exact public code-signing
   requirement before exporting its typed protocol.
 
-The libbox input is upstream sing-box `v1.14.1` at commit
-`1ac1a339cb1223e9c70eae14c44411c75033c02d` plus six digest-pinned repository
+The libbox input is upstream sing-box `v1.14.2` at commit
+`af6e64c3b69e6132ebaee0e1a3d24e93903f6709` plus six digest-pinned repository
 patches: security dependency updates, the public raw-packet adapter, bounded
 DNS failover, structured loopback endpoint-conflict reporting, isolated profile
 probes, and SOCKS lifecycle/concurrency corrections. The exact
@@ -377,7 +377,7 @@ is required where publication preparation and prepackage consume that evidence.
 
 Before invoking a closed release entrypoint, separately prepare the fixed Rust
 SDK at the effective account's
-`~/.cfm-release-tooling/rust-toolchains/1.97.1-aarch64-apple-darwin`.
+`~/.cfm-release-tooling/rust-toolchains/1.98.1-aarch64-apple-darwin`.
 This deployment/bootstrap step precedes environment consumption; release
 commands verify an existing SDK and never create, install, repair, or replace
 it automatically. On the release Mac, explicitly select `private` for input
@@ -403,11 +403,11 @@ TMPDIR="$tauri_install_tmp" ./scripts/run_release_ci_gate.sh install-tauri-cli
 ```
 
 `CFW_RELEASE_RUST_TOOLCHAIN=global` retains the existing CI SDK location,
-`~/.rustup/toolchains/1.97.1-aarch64-apple-darwin`. Only an unset bootstrap
+`~/.rustup/toolchains/1.98.1-aarch64-apple-darwin`. Only an unset bootstrap
 selection defaults to `global`; the sealed environment always records an
 explicit `global` or `private` selection. Neither selection accepts arbitrary
 paths or falls back to the other SDK on failure. Both require the same exact
-five-component `rustup-component-file-tree-v2` surface and unchanged
+six-component `rustup-component-file-tree-v2` surface and unchanged
 `RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256` pin. `CFW_TOOLCHAIN_ROOT` selects
 the other managed tool trees and does not select Rust.
 
@@ -460,7 +460,7 @@ Preparation is explicit and networked; the release build is offline:
 Release-critical shell entrypoints rebuild one closed execution environment
 from the effective macOS account rather than caller `HOME` or `PATH`.
 Production signing, publication, and physical-evidence entrypoints accept only
-the exact Rust SDK selected above and Python 3.14.6 Cellar path. The build-40000
+the exact Rust SDK selected above and Python 3.14.7 Cellar path. The build-40000
 unsigned CI entrypoint alone may accept the absolute Python executable emitted
 by the SHA-pinned `setup-python` action; it verifies the same exact version and
 real executable/runtime identities and includes their content digests in the
@@ -775,7 +775,7 @@ all product inputs and outputs:
 publication_artifact_repository="$PWD/target/release-worktrees/50026"
 publication_ga="$publication_artifact_repository/target/candidates/0.5.0/ga/50026"
 publication_inputs="$publication_ga/stage-inputs"
-publication_libbox="$publication_artifact_repository/target/sources/sing-box-v1.14.1-patched"
+publication_libbox="$publication_artifact_repository/target/sources/sing-box-v1.14.2-patched"
 
 scripts/prepare_publication_evidence.sh review-template \
   --libbox-source "$publication_libbox"

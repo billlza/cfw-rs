@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ from scripts.apple_validation_policy import selected_apple_identity
 from scripts.publication.common import PublicationError
 from scripts.publication.ci_lanes import Lane, lane_environment, release_tool_environment
 from scripts.publication.release_toolchains import verified_release_toolchain_trees
+from scripts.release_rust_toolchain import EXPECTED_COMPONENTS
 
 
 SCRIPTS = Path(__file__).resolve().parent.parent
@@ -1626,6 +1628,93 @@ LIBBOX_VET_PACKAGES=(".")
             "target/candidates/0.4.0/validation/40030/native-products",
             readme,
         )
+
+    def test_current_release_documents_name_the_active_pins(self) -> None:
+        pins = _pins()
+        sing_box = json.loads(
+            (REPOSITORY / "native/macos/Dependencies.lock.json").read_text(
+                encoding="utf-8"
+            )
+        )["singBox"]
+        patches = {
+            Path(entry["path"]).name
+            for entry in sing_box.values()
+            if isinstance(entry, dict) and "path" in entry
+        }
+        counts = {4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+        documents = {
+            relative: (REPOSITORY / relative).read_text(encoding="utf-8")
+            for relative in (
+                "README.md",
+                "RELEASE.md",
+                "docs/supply-chain.md",
+                "native/macos/README.md",
+            )
+        }
+        # Each pattern is a current-state statement. Dated history, such as the
+        # supply-chain advisory narrative, keeps the values it recorded.
+        statements = (
+            (
+                r"toolchains/([0-9]+[.][0-9]+[.][0-9]+)-aarch64-apple-darwin",
+                pins["RUST_VERSION"],
+            ),
+            (r"Python ([0-9]+[.][0-9]+[.][0-9]+) Cellar", pins["PYTHON_VERSION"]),
+            (
+                r"(\w+)-component\s+`rustup-component-file-tree-v2`",
+                counts[len(EXPECTED_COMPONENTS)],
+            ),
+            (
+                r"sing-box-(v[0-9.]+)-(?:patched|[a-z-]+[.]patch)",
+                pins["SING_BOX_VERSION"],
+            ),
+            (
+                r"sing-box(?:/libbox)?\s+`?(v[0-9.]+)`?\s+at(?:\s+commit)?\s+"
+                r"`([0-9a-f]{40})`",
+                (pins["SING_BOX_VERSION"], pins["SING_BOX_COMMIT"]),
+            ),
+            (
+                r"(\w+)\s+digest-pinned\s+(?:repository\s+)?patches",
+                counts[len(patches)],
+            ),
+            (
+                r"Apple provider reference[^`]*`([0-9a-f]{40})`",
+                pins["SING_BOX_APPLE_REFERENCE_COMMIT"],
+            ),
+        )
+        for pattern, expected in statements:
+            found = {
+                relative: re.findall(pattern, text)
+                for relative, text in documents.items()
+            }
+            with self.subTest(pattern=pattern):
+                self.assertTrue(any(found.values()), "no document states this pin")
+                for relative, values in found.items():
+                    self.assertEqual(
+                        [value for value in values if value != expected],
+                        [],
+                        relative,
+                    )
+        self.assertEqual(
+            set(
+                re.findall(
+                    r"sing-box-v[0-9.]+-[a-z-]+[.]patch",
+                    documents["native/macos/README.md"],
+                )
+            ),
+            patches,
+        )
+        readme = documents["README.md"]
+        pinned = readme[readme.index("## Pinned toolchain and dependencies"):]
+        pinned = pinned[: pinned.index("\n## ", 1)]
+        for label, key in (
+            ("Rust", "RUST_VERSION"),
+            ("Node.js", "NODE_VERSION"),
+            ("Go", "GO_VERSION"),
+            ("SagerNet gomobile", "GOMOBILE_VERSION"),
+            ("cargo-deny", "CARGO_DENY_VERSION"),
+        ):
+            with self.subTest(readme_pin=label):
+                self.assertIn(f"\n- {label} {pins[key]}\n", pinned)
 
     def test_tauri_installer_cleanup_preserves_failure_and_only_removes_own_success(
         self,

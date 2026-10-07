@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts.publication import license_resolution
 from scripts.publication.common import PublicationError
 from scripts.publication.graph_model import ComponentSeed
 from scripts.publication.license_resolution import (
@@ -75,6 +78,63 @@ class LicenseResolutionTests(unittest.TestCase):
             metadata_path=metadata,
             declared_license=declared_license,
         )
+
+    def donor_table(self, text: str) -> dict[str, tuple[str, str]]:
+        return {"MIT": ("donor-crate", hashlib.sha256(text.encode("utf-8")).hexdigest())}
+
+    def test_cargo_license_donor_is_identified_by_text_not_vendored_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            vendor = Path(directory)
+            root = vendor / "fixture-1.0.0"
+            root.mkdir()
+            seed = self.seed(root)
+            for version in ("3.0.0", "2.0.0"):
+                donor = vendor / f"donor-crate-{version}"
+                donor.mkdir()
+                (donor / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+            with patch.dict(
+                license_resolution._CARGO_LICENSE_DONORS, self.donor_table(MIT_TEXT), clear=True
+            ):
+                resolution = resolve_license(seed)
+                self.assertEqual(validate_automatic_resolution(seed, resolution), resolution)
+            self.assertEqual(resolution["status"], "automatic")
+            self.assertEqual(
+                [(item["path"], item["supports"]) for item in resolution["files"]],
+                [(str((vendor / "donor-crate-2.0.0/LICENSE").resolve(strict=True)), ["MIT"])],
+            )
+
+    def test_cargo_license_donor_requires_exact_text_and_crate_directory(self) -> None:
+        for case in ("changed-text", "lookalike-crate", "linked-file", "linked-directory"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                vendor = Path(directory)
+                root = vendor / "fixture-1.0.0"
+                root.mkdir()
+                seed = self.seed(root)
+                outside = vendor / "outside"
+                outside.mkdir()
+                (outside / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+                if case == "changed-text":
+                    donor = vendor / "donor-crate-1.0.0"
+                    donor.mkdir()
+                    (donor / "LICENSE").write_text(MIT_TEXT + "\nchanged\n", encoding="utf-8")
+                elif case == "lookalike-crate":
+                    donor = vendor / "donor-crate-macros-1.0.0"
+                    donor.mkdir()
+                    (donor / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+                elif case == "linked-file":
+                    donor = vendor / "donor-crate-1.0.0"
+                    donor.mkdir()
+                    (donor / "LICENSE").symlink_to(outside / "LICENSE")
+                else:
+                    (vendor / "donor-crate-1.0.0").symlink_to(outside)
+                with patch.dict(
+                    license_resolution._CARGO_LICENSE_DONORS,
+                    self.donor_table(MIT_TEXT),
+                    clear=True,
+                ):
+                    resolution = resolve_license(seed)
+                self.assertEqual(resolution["status"], "manual-required")
+                self.assertEqual(resolution["files"], [])
 
     def test_declared_spdx_and_source_text_resolve_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

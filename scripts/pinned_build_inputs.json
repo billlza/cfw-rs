@@ -3612,7 +3612,7 @@
     "scripts/publication/source_archive.py": "4a3e73c95aea8991e80f1872636db0a4b707427146ae01bd2e7c30d3af55cd71",
     "scripts/publication/sbom.py": "b14ac82f224ba4b2ff204238cbba72cb8fee6483422f760f188eeb596f84124e",
     "scripts/publication/legal_review.py": "b2d2941861c70cc89ebbe08888d5a0c31508133f1e8ea164e7435e653a3ee4f1",
-    "scripts/publication/license_resolution.py": "6012b2681e2253103d1bb7bff8fe078ba72488147525c4aea608ec24856937c8",
+    "scripts/publication/license_resolution.py": "ba0c17c7da5ff5f4c70a61b60f6d3132e8caabe8b22dc20e2dbf010d120405d3",
     "scripts/verify_release_authority_gate.py": "d8c240a7777da9d4f9fd24a760a452339a9ed3159f1abaac00eec0ddc10968b2",
     "scripts/verify_production_boundary_removal.py": "e32545944c88bdc1ac09ad5432ea18e5fb85460f38087b9b30341794c23f5159",
     "scripts/publication/__init__.py": "5fc6024921e18d7ea6ea3f9f02a00a102c4ab5e89166f881cd8d001b24919271",

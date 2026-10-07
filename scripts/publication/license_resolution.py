@@ -57,20 +57,26 @@ REVIEWED_SPDX_LICENSE_IDS = frozenset(
 # Only the exception used by the release graph is admitted. WITH is parsed
 # separately so an exception can never be used as a license operand.
 REVIEWED_SPDX_EXCEPTION_IDS = frozenset({"LLVM-exception"})
+# A donor is the exact LICENSE of a vendored crate, supplying the text for a
+# cargo component that declares the identifier but ships no text. The digest
+# identifies the reviewed text; the donor's vendored version does not, so a
+# dependency refresh keeps an unchanged text while any changed text fails
+# closed.
 _CARGO_LICENSE_DONORS = {
     "BSD-3-Clause": (
-        "alloc-no-stdlib-2.0.4/LICENSE",
+        "alloc-no-stdlib",
         "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
     ),
     "MIT": (
-        "ident_case-1.0.1/LICENSE",
+        "ident_case",
         "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
     ),
     "MPL-2.0": (
-        "cssparser-0.36.0/LICENSE",
+        "cssparser",
         "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
     ),
 }
+_CARGO_VENDORED_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?")
 
 
 def _is_license_operand(token: str) -> bool:
@@ -222,14 +228,18 @@ def _cargo_license_donors(seed: ComponentSeed) -> dict[str, Path]:
         return {}
     registry_root = seed.source_root.parent
     donors: dict[str, Path] = {}
-    for identifier, (relative, expected_digest) in _CARGO_LICENSE_DONORS.items():
-        path = registry_root / relative
-        if (
-            path.is_file()
+    for identifier, (crate, expected_digest) in _CARGO_LICENSE_DONORS.items():
+        matches = sorted(
+            path
+            for path in registry_root.glob(f"{crate}-*/LICENSE")
+            if _CARGO_VENDORED_VERSION_RE.fullmatch(path.parent.name[len(crate) + 1 :])
+            and not path.parent.is_symlink()
+            and path.is_file()
             and not path.is_symlink()
             and sha256_file(path) == expected_digest
-        ):
-            donors[identifier] = path.resolve(strict=True)
+        )
+        if matches:
+            donors[identifier] = matches[0].resolve(strict=True)
     return donors
 
 

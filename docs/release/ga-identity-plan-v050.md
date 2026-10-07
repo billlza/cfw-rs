@@ -105,8 +105,10 @@ superseded by the next preview). 50025 is the currently installed preview.
 - `scripts/tests/test_candidate_freeze.py`,
   `test_release_build_identity.py` and the allocation verifier tests gain the
   0.5.0 cases; the "future build" constant in those tests moves past 50026.
-- `CHANGELOG.md`: `## 0.5.0 - Unreleased` becomes `## 0.5.0 — <date>` at
-  publication; the 0.4.0 section stays as history under ordering 1.
+- `CHANGELOG.md`: `## 0.5.0 - Unreleased` becomes `## 0.5.0 — <date>` in the
+  release commit, dated by that commit, before candidate freeze: the frozen
+  file is published as `MODIFICATIONS.md` and cannot change afterwards. The
+  0.4.0 section stays as history under ordering 1.
 
 ## 4. GA evidence still owed for 0.5.0 (see RELEASE.md §1–§7)
 

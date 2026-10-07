@@ -1,14 +1,13 @@
 # Changelog
 
-## 0.5.0 - Unreleased
+## 0.5.0 — 2026-10-07
 
 ### Interface
 
-- Prepare native SwiftUI components in the existing interface, preserving the
+- Use native SwiftUI components in the existing interface, preserving the
   page layout, settings handlers and network controls: the Profiles menu, the
   Network settings form, the General switches, and the profile deletion,
-  settings reset and information prompts. Preview validation uses separate
-  0.5.0 preview identities; this entry does not mark a public release.
+  settings reset and information prompts.
 - Refresh only the status bar of the General page when connection updates
   arrive. The page is no longer rebuilt once a second while the core runs.
 - Draw the window as Liquid Glass: the window is transparent with its title

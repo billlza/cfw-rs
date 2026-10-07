@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts import native_ui_artifact as ui
+from scripts import release_build_identity as identity
 from scripts.hash_artifact import build_manifest
 from scripts.promote_signed_native_manifest import promote_manifest, SignedNativeManifestError
 
@@ -279,6 +280,112 @@ class NativeUiArtifactTests(unittest.TestCase):
                 (root / ui.RESOURCES / "Contents/Resources/en.lproj/Localizable.strings").write_text('"key" = "changed";')
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "bytes differ"):
                     ui.verify_products(root, root, build="50025")
+
+    def _release_metadata(self, signing: str) -> dict[str, str]:
+        metadata = {key: "bound" for key in ui.METADATA_KEYS}
+        metadata.update(configuration="release", buildNumber="50026", productVersion="0.5.0", signingMode=signing)
+        return metadata
+
+    def _release_expected(self, metadata: dict[str, str]):
+        def expected(_repository, build, *, signing, clean, context):
+            self.assertIs(context, ui.NativeUiContext.RELEASE)
+            self.assertEqual(build, "50026")
+            return {**metadata, "signingMode": signing}
+        return expected
+
+    def test_release_products_build_in_the_ga_preflight_and_keep_its_freeze_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            products = identity.ga_preflight_root(repository) / "native-products"
+            products.mkdir(parents=True)
+            output = repository / "swift-bin"
+            output.mkdir()
+            (output / ui.LIBRARY).write_bytes(b"release fixture library")
+            resources(output / ui.RESOURCES)
+            expected = self._release_expected(self._release_metadata("pre-sign"))
+            with patch.object(ui, "expected_metadata", side_effect=expected), patch.object(
+                ui.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+            ) as run, patch.object(ui, "command", return_value=f"{output}\n"), patch.object(
+                ui, "remove_build_rpaths"
+            ), patch.object(ui, "verify_library"):
+                frozen = identity.ga_root(repository) / "native-products"
+                frozen.mkdir(parents=True)
+                with self.assertRaisesRegex(ui.NativeUiArtifactError, "exact candidate products root"):
+                    ui.build_products(repository, frozen, build="50026", context=ui.NativeUiContext.RELEASE)
+                run.assert_not_called()
+                ui.build_products(repository, products, build="50026", context=ui.NativeUiContext.RELEASE)
+            self.assertEqual(
+                sorted(entry.name for entry in products.iterdir()),
+                sorted([ui.LIBRARY, ui.RESOURCES, ui.LIBRARY + ".manifest.json", ui.RESOURCES + ".manifest.json"]),
+            )
+            # Candidate freeze admits only its fixed preflight entries.
+            self.assertEqual(
+                [entry.name for entry in identity.ga_preflight_root(repository).iterdir()], ["native-products"]
+            )
+
+    def test_failed_release_build_keeps_its_compiler_log_inside_the_ga_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            products = identity.ga_preflight_root(repository) / "native-products"
+            products.mkdir(parents=True)
+            expected = self._release_expected(self._release_metadata("pre-sign"))
+            with patch.object(ui, "expected_metadata", side_effect=expected), patch.object(
+                ui.subprocess, "run", return_value=SimpleNamespace(returncode=1)
+            ):
+                with self.assertRaisesRegex(ui.NativeUiArtifactError, "SwiftUI Release build failed"):
+                    ui.build_products(repository, products, build="50026", context=ui.NativeUiContext.RELEASE)
+            self.assertTrue((identity.ga_preflight_root(repository) / "swift-ui-build/build.log").is_file())
+            self.assertEqual(list(products.iterdir()), [])
+
+    def test_retired_signed_preview_products_are_never_rebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            products = identity.preview_native_products_root(repository)
+            products.mkdir(parents=True)
+            with patch.object(ui, "expected_metadata") as expected, patch.object(ui.subprocess, "run") as run:
+                with self.assertRaisesRegex(ui.NativeUiArtifactError, "retired"):
+                    ui.build_products(
+                        repository, products, build="50025", context=ui.NativeUiContext.SIGNED_PREVIEW
+                    )
+            expected.assert_not_called()
+            run.assert_not_called()
+            self.assertEqual(list(products.iterdir()), [])
+
+    def test_signed_release_products_are_checked_against_the_frozen_pre_sign_products(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            # Candidate freeze promotes ga-preflight/50026 to ga/50026; signing
+            # happens only after that promotion.
+            pre_sign = identity.ga_root(repository) / "native-products"
+            signed = identity.ga_signing_attempts_root(repository) / "attempt/work/signed-native-products"
+            pre_sign.mkdir(parents=True)
+            signed.mkdir(parents=True)
+            (pre_sign / ui.LIBRARY).write_bytes(b"pre-sign release library")
+            (pre_sign / ui.LIBRARY).chmod(0o755)
+            resources(pre_sign / ui.RESOURCES)
+            metadata = self._release_metadata("pre-sign")
+            for name in (ui.LIBRARY, ui.RESOURCES):
+                (pre_sign / (name + ".manifest.json")).write_text(json.dumps(build_manifest(pre_sign / name, metadata)))
+                if (pre_sign / name).is_dir():
+                    shutil.copytree(pre_sign / name, signed / name)
+                else:
+                    shutil.copy2(pre_sign / name, signed / name)
+            (signed / ui.LIBRARY).write_bytes(b"signed release library")
+            for name in (ui.LIBRARY, ui.RESOURCES):
+                value = promote_manifest(pre_sign / name, pre_sign / (name + ".manifest.json"), signed / name)
+                (signed / (name + ".manifest.json")).write_text(json.dumps(value))
+            self.assertFalse(identity.ga_preflight_root(repository).exists())
+            with patch.object(ui, "expected_metadata", side_effect=self._release_expected(metadata)), patch.object(
+                ui, "verify_library"
+            ):
+                ui.verify_products(
+                    repository, signed, build="50026", signing="developer-id", context=ui.NativeUiContext.RELEASE
+                )
+                (pre_sign / ui.LIBRARY).write_bytes(b"replaced pre-sign library")
+                with self.assertRaises((ui.NativeUiArtifactError, SignedNativeManifestError)):
+                    ui.verify_products(
+                        repository, signed, build="50026", signing="developer-id", context=ui.NativeUiContext.RELEASE
+                    )
 
 
 if __name__ == "__main__":

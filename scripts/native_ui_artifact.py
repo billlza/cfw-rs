@@ -309,13 +309,14 @@ def verify_products(repository: Path, products: Path, *, build: str, signing: st
     pre_sign_products = None
     if signing == "developer-id":
         if __package__:
-            from .release_build_identity import ga_pre_sign_native_products_root, preview_native_products_root
+            from .release_build_identity import ga_frozen_native_products_root, preview_native_products_root
             from .promote_signed_native_manifest import verify_promoted_manifest
         else:
-            from release_build_identity import ga_pre_sign_native_products_root, preview_native_products_root
+            from release_build_identity import ga_frozen_native_products_root, preview_native_products_root
             from promote_signed_native_manifest import verify_promoted_manifest
+        # GA signing starts only after candidate freeze promoted the preflight.
         pre_sign_products = (
-            ga_pre_sign_native_products_root(repository)
+            ga_frozen_native_products_root(repository)
             if context is NativeUiContext.RELEASE
             else preview_native_products_root(repository)
         )
@@ -346,18 +347,26 @@ def verify_products(repository: Path, products: Path, *, build: str, signing: st
             raise NativeUiArtifactError(f"UI artifact bytes differ from the recorded manifest: {name}")
 
 
-def build_products(repository: Path, products: Path, *, build: str,
-                   context: NativeUiContext = NativeUiContext.SIGNED_PREVIEW) -> None:
+def build_products(repository: Path, products: Path, *, build: str, context: NativeUiContext) -> None:
     if __package__:
-        from .release_build_identity import preview_native_products_root, preview_preflight_root, unsigned_preview_native_products_root, unsigned_preview_root
+        from .release_build_identity import ga_pre_sign_native_products_root, ga_preflight_root, unsigned_preview_native_products_root, unsigned_preview_root
     else:
-        from release_build_identity import preview_native_products_root, preview_preflight_root, unsigned_preview_native_products_root, unsigned_preview_root
-    unsigned = context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
-    expected_root = unsigned_preview_native_products_root(repository) if unsigned else preview_native_products_root(repository)
-    scratch_root = unsigned_preview_root(repository) if unsigned else preview_preflight_root(repository)
-    signing = "unsigned-validation" if unsigned else "pre-sign"
+        from release_build_identity import ga_pre_sign_native_products_root, ga_preflight_root, unsigned_preview_native_products_root, unsigned_preview_root
+    # Each build context owns one fixed products root inside its candidate tree.
+    if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
+        expected_root = unsigned_preview_native_products_root(repository)
+        scratch_root = unsigned_preview_root(repository)
+        signing = "unsigned-validation"
+    elif context is NativeUiContext.RELEASE:
+        expected_root = ga_pre_sign_native_products_root(repository)
+        scratch_root = ga_preflight_root(repository)
+        signing = "pre-sign"
+    elif context is NativeUiContext.SIGNED_PREVIEW:
+        raise NativeUiArtifactError("signed preview UI products are retired; their retained trees are only verified")
+    else:
+        raise NativeUiArtifactError("UI artifact context is invalid")
     if products != expected_root or not products.is_dir() or products.resolve(strict=True) != products:
-        raise NativeUiArtifactError("UI products must be built inside the exact preview preflight")
+        raise NativeUiArtifactError("UI products must be built inside the exact candidate products root")
     metadata = expected_metadata(repository, build, signing=signing, clean=True, context=context)
     for name in (LIBRARY, RESOURCES, LIBRARY + ".manifest.json", RESOURCES + ".manifest.json"):
         path = products / name
@@ -387,6 +396,9 @@ def build_products(repository: Path, products: Path, *, build: str,
             handle.write("\n")
         os.chmod(products / (name + ".manifest.json"), 0o644)
     verify_products(repository, products, build=build, signing=signing, context=context)
+    # Candidate freeze admits only its fixed preflight entries. A failed build
+    # returns before this point and keeps the scratch with its compiler log.
+    shutil.rmtree(scratch)
 
 
 def main() -> None:

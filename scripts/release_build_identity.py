@@ -352,6 +352,15 @@ def ga_pre_sign_native_products_root(repository: Path) -> Path:
     return ga_preflight_root(repository) / "native-products"
 
 
+def ga_frozen_native_products_root(repository: Path) -> Path:
+    """Pre-sign native products once candidate freeze promoted the preflight.
+
+    Signing starts only after that promotion, so every signed component is
+    compared with this root, never with the consumed preflight path.
+    """
+    return ga_root(repository) / "native-products"
+
+
 def ga_signed_root(repository: Path) -> Path:
     return ga_root(repository) / "signed"
 

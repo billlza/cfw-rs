@@ -21,7 +21,7 @@ if __package__:
         BuildIdentityError,
         CandidateBundleContext,
         candidate_bundle_verification_paths,
-        ga_root,
+        ga_frozen_native_products_root,
         preview_native_products_root,
     )
     from .release_regular_file import (
@@ -38,7 +38,7 @@ else:
         BuildIdentityError,
         CandidateBundleContext,
         candidate_bundle_verification_paths,
-        ga_root,
+        ga_frozen_native_products_root,
         preview_native_products_root,
     )
     from release_regular_file import (
@@ -226,7 +226,7 @@ def verify_legacy_tombstone_provenance(
     preview = context in SIGNED_PREVIEW_CONTEXTS
     expected_pre_sign_root = (
         preview_native_products_root(repository)
-        if preview else ga_root(repository) / "native-products"
+        if preview else ga_frozen_native_products_root(repository)
     )
     if unsigned_artifact.parent != expected_pre_sign_root:
         raise LegacyTombstoneProvenanceError(

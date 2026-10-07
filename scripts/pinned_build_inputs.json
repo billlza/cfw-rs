@@ -3584,7 +3584,7 @@
     "scripts/promote_signed_native_manifest.py": "ac4c59c8b590d9567b3190c59bd3994a7caba60407125c874cff2dcd716276c7",
     "scripts/verify_legacy_tombstone_provenance.py": "01b76291c7a5fc711f98a32782069f548392a574e3eb6900b304e80d96b4dea4",
     "scripts/verify_signing_transformation.py": "f6b28f5cc4638b50f537dec7b361ab658d014acf6d49de6c278e222dadff1a54",
-    "scripts/github_hosted_ci_receipt.py": "4b3f18fe4cb6ce58c7bd20eeef6b6aacb97549e6d3a26bcdf1448e182a3ef27f",
+    "scripts/github_hosted_ci_receipt.py": "04d50febc031305dd87a2c4b1c3adbdc5a3633d2fa8017ab6c3f1fa423986a82",
     "scripts/ga_acceptance_environment.py": "e5c656e24a3d3f11a196c7620c4ce318fc092fba90bf8f5e295544e242c3e5ea",
     "scripts/ga_acceptance_journal_export.py": "f40d6a04deaa2cf5c86b8d288c21117c817c5b1271b3d04e7e79172d389ced01",
     "scripts/ga_runtime_acceptance.py": "97cc220320bfce28d14e67950ff740f8c459b5af86caef29245105da6cf1a4a8",

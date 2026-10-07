@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from unittest.mock import Mock, patch
 from scripts import candidate_freeze
 from scripts import github_hosted_ci_receipt as hosted
 from scripts import repository_source_identity as source_identity
+from scripts import verify_ci_no_masking as ci_policy
 from scripts.tests.test_repository_source_identity import git, git_output
 from scripts.publication.common import PublicationError
 from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
@@ -1183,6 +1185,24 @@ class HistoricalTestedSourceReceiptTests(unittest.TestCase):
             with self.subTest(api=api), self.assertRaises(hosted.HostedCIReceiptError):
                 self.capture(api)
             self.assertFalse(self.output.exists())
+
+
+class RepositoryWorkflowContractTests(unittest.TestCase):
+    def test_required_job_steps_are_declared_by_the_repository_workflow(self) -> None:
+        workflow = ci_policy.DEFAULT_WORKFLOW.read_text(encoding="utf-8")
+        declared: dict[str, set[str]] = {}
+        for body in ci_policy._split_jobs(workflow).values():
+            job_names = re.findall(r"^    name: (.+)$", body, re.MULTILINE)
+            self.assertEqual(len(job_names), 1)
+            declared[job_names[0]] = {
+                match.group(1)
+                for step in ci_policy._split_job_steps(body)
+                if (match := re.match(r"^      - name: (.+)$", step.splitlines()[0]))
+            }
+        self.assertEqual(set(hosted.REQUIRED_JOB_STEP_NAMES), set(hosted.EXPECTED_JOB_NAMES))
+        for job, required in hosted.REQUIRED_JOB_STEP_NAMES.items():
+            with self.subTest(job=job):
+                self.assertLessEqual(required, declared[job])
 
 
 if __name__ == "__main__":

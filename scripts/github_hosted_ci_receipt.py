@@ -158,7 +158,7 @@ REQUIRED_JOB_STEP_NAMES: Final = {
         {
             "Build and verify pinned packet LAN peer",
             "Build source-bound libbox",
-            "Build and verify unsigned application skeleton",
+            "Build and verify unsigned 0.5.0 validation skeleton (50000)",
         }
     ),
 }

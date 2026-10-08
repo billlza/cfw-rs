@@ -2,10 +2,11 @@
 
 > **Superseded on 2026-10-07.** Build 40073 was retired unpublished and the
 > v0.4.0 allocation ledger is closed. The policy below continues to govern the
-> 0.5.0 release with the active identity 0.5.0/50027; see
+> 0.5.0 release with the active identity 0.5.0/50028; see
 > [`ga-identity-plan-v050.md`](ga-identity-plan-v050.md),
-> [`ga-build-40073-retirement.md`](ga-build-40073-retirement.md) and
-> [`ga-build-50026-retirement.md`](ga-build-50026-retirement.md).
+> [`ga-build-40073-retirement.md`](ga-build-40073-retirement.md),
+> [`ga-build-50026-retirement.md`](ga-build-50026-retirement.md) and
+> [`ga-build-50027-retirement.md`](ga-build-50027-retirement.md).
 
 Status: **accepted executable policy; GA evidence pending**.
 

@@ -367,9 +367,9 @@ configure_release_verification_context() {
   case "$context" in
     signing-attempt-work|signing-attempt-publish-ready|canonical-native-content)
       expected_version="0.5.0"
-      expected_build_number="50027"
-      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/ga/50027/profiles/signing-preflight.json"
-      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/ga/50027/native-products"
+      expected_build_number="50028"
+      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/ga/50028/profiles/signing-preflight.json"
+      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/ga/50028/native-products"
       ;;
     preview-signing-attempt-work|preview-signing-attempt-publish-ready|preview-canonical-native-content)
       expected_version="0.5.0"

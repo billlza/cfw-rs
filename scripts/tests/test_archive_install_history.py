@@ -190,8 +190,8 @@ class InstallHistoryTests(unittest.TestCase):
         self.assertEqual(expected.build_number, "40073")
         self.assertEqual(installed, self.installed)
         for previous, declared, message in (
-            ("50027", None, "not an explicitly supported predecessor"),
-            ("40073", "50027", "declared installed build is not an explicitly supported"),
+            ("50028", None, "not an explicitly supported predecessor"),
+            ("40073", "50028", "declared installed build is not an explicitly supported"),
             ("40073", "40072", "must be newer than the archived build"),
             ("40073", "40073", "must be newer than the archived build"),
         ):

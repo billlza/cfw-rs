@@ -20,6 +20,13 @@ now records it as `retired_after_candidate_freeze_before_canonical_signing_outpu
 and allocates 50027 as the single `active_ga`; the migration predecessor is
 still the installed preview 50025. Sections 1–3 keep the original 50026 plan.
 
+Build 50027 was signed, notarized and sealed for prepackage, then retired on
+2026-10-08 before any package or installation, because protocol and import
+changes on the release line changed its application bytes
+([`ga-build-50027-retirement.md`](ga-build-50027-retirement.md)). The ledger
+records it as `retired_after_notarization_before_install` and allocates 50028 as
+the single `active_ga`; the migration predecessor is still 50025.
+
 ## 1. Decision required first
 
 The 0.4.0 GA identity 40073 was frozen on 2026-09-20 and never published; the

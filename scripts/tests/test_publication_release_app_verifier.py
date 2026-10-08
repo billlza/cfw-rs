@@ -20,10 +20,10 @@ from scripts.tests.release_app_verifier_fixture import (
 
 
 REPOSITORY = Path("/private/tmp/release")
-APP = REPOSITORY / "target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app"
+APP = REPOSITORY / "target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
 NATIVE_PRODUCTS = (
     REPOSITORY
-    / "target/candidates/0.5.0/ga/50027/signing-output/signed-native-products"
+    / "target/candidates/0.5.0/ga/50028/signing-output/signed-native-products"
 )
 
 
@@ -169,7 +169,7 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
             ) as verifier, patch.object(
                 preparer,
                 "bundle_build_identity",
-                return_value=SimpleNamespace(build_version="50027"),
+                return_value=SimpleNamespace(build_version="50028"),
             ) as build_identity, patch.object(
                 preparer, "release_native_products_root", return_value=native
             ) as native_root, patch.object(
@@ -181,7 +181,7 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
                     preparer.prepare(repository, app, repository, reviewed, output)
             verifier.assert_called_once()
             build_identity.assert_called_once_with(app)
-            native_root.assert_called_once_with(repository, "50027")
+            native_root.assert_called_once_with(repository, "50028")
 
     def test_source_contract_keeps_the_zero_stderr_graph_runner(self) -> None:
         repository = Path("/private/tmp/release")

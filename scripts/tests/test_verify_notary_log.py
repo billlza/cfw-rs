@@ -173,7 +173,7 @@ class NotaryLogValidationTests(unittest.TestCase):
         # SwiftUI resource bundle has a null architecture and its Info.plist
         # none. Both normalize to a ticket without an architecture.
         bundle = (
-            "Clash.for.Mac_0.5.0_50027_notary.zip/Clash for Mac.app/Contents/Resources/"
+            "Clash.for.Mac_0.5.0_50028_notary.zip/Clash for Mac.app/Contents/Resources/"
             "CFMNativeDashboard_CFMNativeDashboard.bundle"
         )
         log = _log()

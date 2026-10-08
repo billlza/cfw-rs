@@ -296,6 +296,7 @@ PREVIEW_VALIDATION_PREFIX: Final = tuple(
 
 RETIRED_GA_ALLOCATIONS_V050: Final = (
     ("50026", "ga", "retired_after_candidate_freeze_before_canonical_signing_output"),
+    ("50027", "ga", "retired_after_notarization_before_install"),
 )
 
 
@@ -335,7 +336,7 @@ POLICIES: Final = {
         PREVIEW_VALIDATION_PREFIX,
         None,
         RETIRED_GA_ALLOCATIONS_V050,
-        "50027",
+        "50028",
     ),
 }
 ACTIVE_POLICY: Final = POLICIES[PRODUCT_VERSION]

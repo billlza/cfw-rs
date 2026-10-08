@@ -29,7 +29,7 @@ PREVIOUS = install.AppIdentity(
     "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
 )
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.5.0", "50027", "b" * 64),
+    app=install.AppIdentity("0.5.0", "50028", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -888,7 +888,7 @@ class JournalExportSourceContractTests(unittest.TestCase):
                 journal_export.PREVIOUS_BUILD,
                 journal_export.GA_BUILD,
             ),
-            ("0.5.0", "50025", "50027"),
+            ("0.5.0", "50025", "50028"),
         )
         self.assertEqual(
             journal_export.ENVIRONMENT_RELATIVE,

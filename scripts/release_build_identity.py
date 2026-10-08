@@ -81,7 +81,7 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "50027")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "50028")
 PREVIEW_PRODUCT_VERSION: Final = "0.5.0"
 SIGNED_PREVIEW_BUILD: Final = "50025"
 

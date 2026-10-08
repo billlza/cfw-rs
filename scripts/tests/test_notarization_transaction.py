@@ -152,7 +152,7 @@ class Fixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.candidate = self.repository / "target/candidates/0.5.0"
-        self.build = self.candidate / "ga/50027"
+        self.build = self.candidate / "ga/50028"
         self.signing_output = self.build / "signing-output"
         self.native = self.signing_output / "signed-native-products"
         self.staging = self.signing_output / "signing-input"
@@ -182,7 +182,7 @@ class Fixture:
             "normalized_app_tree_sha256": "9" * 64,
             "pre_sign_app_manifest_sha256": "a" * 64,
             "pre_sign_app_tree_sha256": "b" * 64,
-            "product": {"build_number": "50027", "version": "0.5.0"},
+            "product": {"build_number": "50028", "version": "0.5.0"},
             "profiles": {
                 "host": "c" * 64,
                 "packet_tunnel": "d" * 64,
@@ -207,7 +207,7 @@ class Fixture:
         self.context = TransactionContext(
             repository=self.repository,
             build_kind="ga",
-            build_number="50027",
+            build_number="50028",
             staged_app=self.app,
             native_products=self.native,
             notary_profile=transaction_module.NOTARY_PROFILE,
@@ -289,7 +289,7 @@ class Fixture:
                         "candidate_freeze_intent_sha256"
                     ],
                     product_version="0.5.0",
-                    build_number="50027",
+                    build_number="50028",
                     recovered=False,
                 )
             ),
@@ -1359,7 +1359,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             intent_path=self.fixture.build / "candidate-freeze/intent.json",
             intent_sha256="f" * 64,
             product_version="0.5.0",
-            build_number="50027",
+            build_number="50028",
             recovered=False,
         )
         mutations = {
@@ -1693,18 +1693,18 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         final_app = self.fixture.execute()
         self.assertEqual(
             final_app,
-            self.fixture.candidate / "ga/50027/signed/Clash for Mac.app",
+            self.fixture.candidate / "ga/50028/signed/Clash for Mac.app",
         )
         self.assertEqual(
             context.native_products,
             (
                 self.fixture.candidate
-                / "ga/50027/signing-output/signed-native-products"
+                / "ga/50028/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(
             context.attempt_root,
-            self.fixture.candidate / "ga/50027/transactions/app-notary",
+            self.fixture.candidate / "ga/50028/transactions/app-notary",
         )
         manifest = json.loads(
             (final_app.parent / "Clash for Mac.app.manifest.json").read_text(
@@ -1716,7 +1716,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             manifest["metadata"]["artifactKind"],
             "notarized-ga-candidate-v1",
         )
-        self.assertEqual(manifest["metadata"]["buildNumber"], "50027")
+        self.assertEqual(manifest["metadata"]["buildNumber"], "50028")
 
     def test_nonfixed_notary_profile_is_rejected_before_attempt_or_remote_io(
         self,
@@ -2288,10 +2288,10 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
     def test_current_ga_fixture_continues_once_then_recovers_locally(self) -> None:
         fixture = self._current_ga_failed_finalization_fixture()
-        self.assertEqual(fixture.context.build_number, "50027")
+        self.assertEqual(fixture.context.build_number, "50028")
         self.assertEqual(
             fixture.context.archive_name,
-            "Clash.for.Mac_0.5.0_50027_notary.zip",
+            "Clash.for.Mac_0.5.0_50028_notary.zip",
         )
         attempt_root = fixture.context.attempt_root
         original_event_paths = sorted(
@@ -2318,7 +2318,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
         self.assertEqual(
             first,
-            fixture.candidate / "ga/50027/signed/Clash for Mac.app",
+            fixture.candidate / "ga/50028/signed/Clash for Mac.app",
         )
         self.assertTrue(first.is_dir())
         self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
@@ -2460,7 +2460,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 / "Clash for Mac.app.manifest.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(final_manifest["metadata"]["buildNumber"], "50027")
+        self.assertEqual(final_manifest["metadata"]["buildNumber"], "50028")
         self.assertEqual(
             final_manifest["metadata"]["repositoryCommit"],
             "a" * 40,
@@ -8341,10 +8341,10 @@ die() {{
   exit 1
 }}
 repo_root=/release
-candidate_root=/release/target/candidates/0.5.0/ga/50027
+candidate_root=/release/target/candidates/0.5.0/ga/50028
 staged_app="$candidate_root/signing-output/signing-input/Clash for Mac.app"
 toolchain_root=/release/target/toolchains
-CFW_BUILD_NUMBER=50027
+CFW_BUILD_NUMBER=50028
 signed_native_products="$candidate_root/signing-output/signed-native-products"
 NOTARY_PROFILE=clashformac-notary
 repository_commit={'a' * 40}
@@ -8395,10 +8395,10 @@ run_isolated_python_script() {{
             "--build-kind",
             "ga",
             "--build-number",
-            "50027",
+            "50028",
             *mode,
             "--native-products",
-            "/release/target/candidates/0.5.0/ga/50027/signing-output/signed-native-products",
+            "/release/target/candidates/0.5.0/ga/50028/signing-output/signed-native-products",
             "--notary-profile",
             "clashformac-notary",
             "--repository-commit",
@@ -8430,7 +8430,7 @@ run_isolated_python_script() {{
     def test_build_and_signing_resume_keep_full_signing_verification(self) -> None:
         staged = (
             "--staged-app",
-            "/release/target/candidates/0.5.0/ga/50027/signing-output/"
+            "/release/target/candidates/0.5.0/ga/50028/signing-output/"
             "signing-input/Clash for Mac.app",
         )
         cases = (
@@ -8493,9 +8493,9 @@ class ShellCleanupContractTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.preflight = self.root / "ga-preflight/50027"
+        self.preflight = self.root / "ga-preflight/50028"
         self.preflight.mkdir(parents=True, mode=0o700)
-        self.frozen = self.root / "ga/50027"
+        self.frozen = self.root / "ga/50028"
         self.cargo_runtime = self.root / "cargo-runtime"
         self.cargo_runtime.mkdir(mode=0o700)
         (self.cargo_runtime / "config.toml").write_bytes(b"owned runtime fixture")
@@ -8604,7 +8604,7 @@ class ShellCleanupContractTests(unittest.TestCase):
         die_end = self.source.index("\n}\n", die_start) + len("\n}\n")
         script = (
             "set -euo pipefail\n"
-            'preflight_root="$1"\nfrozen_root="$2"\nCFW_BUILD_NUMBER=50027\n'
+            'preflight_root="$1"\nfrozen_root="$2"\nCFW_BUILD_NUMBER=50028\n'
             'profiles_root="$preflight_root/profiles"\n'
             'entitlements_root="$preflight_root/entitlements"\n'
             'pre_sign_root="$preflight_root/pre-sign"\n'
@@ -9119,7 +9119,7 @@ class NotarizationCliTests(unittest.TestCase):
         self,
         *,
         build_kind: str = "ga",
-        build_number: str = "50027",
+        build_number: str = "50028",
     ) -> list[str]:
         return [
             "--build-kind",
@@ -9161,7 +9161,7 @@ class NotarizationCliTests(unittest.TestCase):
         mode_arguments: list[str],
         *,
         build_kind: str = "ga",
-        build_number: str = "50027",
+        build_number: str = "50028",
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -9286,7 +9286,7 @@ class NotarizationCliTests(unittest.TestCase):
             toolchain_root.mkdir()
             final_app = (
                 artifact_repository
-                / "target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app"
+                / "target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
             )
             argv = [
                 str(Path(transaction_module.__file__).resolve()),
@@ -9310,7 +9310,7 @@ class NotarizationCliTests(unittest.TestCase):
             self.assertEqual(
                 context.staged_app,
                 artifact_repository
-                / "target/candidates/0.5.0/ga/50027/signing-output/signing-input/Clash for Mac.app",
+                / "target/candidates/0.5.0/ga/50028/signing-output/signing-input/Clash for Mac.app",
             )
             self.assertEqual(
                 execute.call_args.kwargs,
@@ -9433,7 +9433,7 @@ class NotarizationCliTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("invalid choice", result.stderr)
-                self.assertIn("choose from '50027'", result.stderr)
+                self.assertIn("choose from '50028'", result.stderr)
 
     def test_recovery_dispatch_separates_artifact_tool_and_toolchain_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -9444,7 +9444,7 @@ class NotarizationCliTests(unittest.TestCase):
             toolchain_root.mkdir()
             final_app = (
                 artifact_repository
-                / "target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app"
+                / "target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
             )
             argv = [
                 str(Path(transaction_module.__file__).resolve()),
@@ -9572,7 +9572,7 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
     def _write_frozen_metadata(fixture: Fixture) -> None:
         product = {
             "document": "cfm-ga-product-input-v1",
-            "product": {"build_number": "50027", "version": "0.5.0"},
+            "product": {"build_number": "50028", "version": "0.5.0"},
             "schema_version": 1,
             "source": {
                 "release_source_sha256": fixture.context.release_source_sha256,
@@ -9586,7 +9586,7 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
         claim.mkdir(mode=0o700)
         intent = {name: "0" * 64 for name in freeze_module._INTENT_FIELDS}
         intent.update(
-            build_number="50027",
+            build_number="50028",
             consumption_state=freeze_module.CONSUMPTION_STATE,
             document=freeze_module.DOCUMENT,
             product_input_document_sha256=hashlib.sha256(product_raw).hexdigest(),

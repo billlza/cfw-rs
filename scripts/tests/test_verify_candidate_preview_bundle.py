@@ -323,7 +323,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.PREVIEW_PRE_SIGN)
             path = fixture.app / relative
             value = plistlib.loads(path.read_bytes())
-            value["CFBundleVersion"] = "50027"
+            value["CFBundleVersion"] = "50028"
             write_plist(path, value)
             with self.subTest(component=relative), self.assertRaises(bundle.CandidateError):
                 self.verify(fixture)

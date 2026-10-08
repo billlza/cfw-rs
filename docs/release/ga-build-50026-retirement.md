@@ -95,7 +95,10 @@ is now checked against `native/macos/Config/signing-order.json`.
 
 ## Successor generation
 
-Build 50027 is now the only active 0.5.0 GA successor. It must start from one
+Build 50027 was the only active 0.5.0 GA successor when 50026 was retired. It
+was itself retired before installation on 2026-10-08
+([`ga-build-50027-retirement.md`](ga-build-50027-retirement.md)); build 50028
+is now the active GA. Each successor must start from one
 new clean source identity and repeat the complete hosted-CI, build, freeze,
 signing, notarization, publication-evidence, package, installation, runtime,
 and final publication sequence. The retained installed preview 50025 remains

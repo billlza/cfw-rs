@@ -7,17 +7,17 @@ import Testing
 struct ReleaseObservationTests {
   @Test("release observation requires its explicit version and build")
   func fixedReleaseIdentity() throws {
-    let candidate = try ReleaseObservationCandidate(version: "0.5.0", buildNumber: "50027")
+    let candidate = try ReleaseObservationCandidate(version: "0.5.0", buildNumber: "50028")
     #expect(candidate.version == "0.5.0")
-    #expect(candidate.buildNumber == "50027")
+    #expect(candidate.buildNumber == "50028")
     for (version, build) in [
       ("0.5.0", "40073"), ("0.5.0", "50001"), ("0.5.0", "50002"), ("0.5.0", "50003"),
       ("0.5.0", "50004"), ("0.5.0", "50005"), ("0.5.0", "50007"), ("0.5.0", "50008"),
       ("0.5.0", "50009"), ("0.5.0", "50012"), ("0.5.0", "50013"), ("0.5.0", "50014"),
       ("0.5.0", "50015"), ("0.5.0", "50016"),
       ("0.5.0", "50017"), ("0.5.0", "50018"), ("0.5.0", "50019"), ("0.5.0", "50025"),
-      ("0.5.0", "50026"), ("0.5.0", "50028"), ("0.5.1", "50027"),
-      ("0.5.0", "050027"), ("0.5.0", "５００１１"),
+      ("0.5.0", "50026"), ("0.5.0", "50027"), ("0.5.0", "50029"), ("0.5.1", "50028"),
+      ("0.5.0", "050028"), ("0.5.0", "５００１１"),
     ] {
       #expect(throws: ReleaseObservationError.invalidCandidate) {
         _ = try ReleaseObservationCandidate(version: version, buildNumber: build)

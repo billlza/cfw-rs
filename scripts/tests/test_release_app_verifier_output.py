@@ -13,8 +13,8 @@ from scripts.tests.release_app_verifier_fixture import (
 )
 
 
-APP = "/private/tmp/release/target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app"
-APP_SUFFIX = "/target/candidates/0.5.0/ga/50027/signed/Clash for Mac.app"
+APP = "/private/tmp/release/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
+APP_SUFFIX = "/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
 FRAMEWORK_CURRENT = (
     APP + "/Contents/Frameworks/CFWNativeBridge.framework/Versions/Current/."
 )
@@ -29,7 +29,7 @@ class ReleaseAppVerifierOutputTests(unittest.TestCase):
             complete_verifier_stdout(APP) if stdout is None else stdout,
             complete_verifier_stderr(APP) if stderr is None else stderr,
             expected_app_suffix=APP_SUFFIX,
-            expected_build_number="50027",
+            expected_build_number="50028",
         )
 
     def test_complete_observed_transcript_shape_is_accepted(self) -> None:
@@ -59,7 +59,7 @@ class ReleaseAppVerifierOutputTests(unittest.TestCase):
             complete_verifier_stdout(APP),
             complete_verifier_stderr(APP),
             expected_app=APP,
-            expected_build_number="50027",
+            expected_build_number="50028",
         )
         self.assertEqual(parsed.app, APP)
 
@@ -112,7 +112,7 @@ class ReleaseAppVerifierOutputTests(unittest.TestCase):
                 b"A" * half_plus_one,
                 b"B" * half_plus_one,
                 expected_app=APP,
-                expected_build_number="50027",
+                expected_build_number="50028",
             )
 
     def test_prepared_and_validated_use_the_exact_subject_multiset(self) -> None:

@@ -43,7 +43,7 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
 
     def invoke(self) -> None:
         verify._verify_artifact_inputs(
-            self.repository, self.root, self.artifacts, self.app, "50027"
+            self.repository, self.root, self.artifacts, self.app, "50028"
         )
 
     def test_artifact_reader_receives_explicit_closed_git_environment(self) -> None:
@@ -58,9 +58,9 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
             self.invoke()
         reader.assert_called_once_with(
             self.repository,
-            native_products_root(self.repository, "50027"),
+            native_products_root(self.repository, "50028"),
             self.app,
-            "50027",
+            "50028",
             None,
             freeze_verifier=None,
         )
@@ -207,7 +207,7 @@ class PublicationCommandSourceTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.executor = Path(temporary.name).resolve()
-        self.repository = self.executor / "target/release-worktrees/50027"
+        self.repository = self.executor / "target/release-worktrees/50028"
         self.repository.mkdir(parents=True)
         self.sources = FrozenReleaseSources(
             ExecutorSource(self.executor, "a" * 40, "b" * 64),

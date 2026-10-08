@@ -19,7 +19,7 @@ from scripts import release_build_identity as identities
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
-    BUILD_NUMBER = "50027"
+    BUILD_NUMBER = "50028"
     DEPLOYMENT_TARGET = "15.0"
     RUST_VERSION = "1.98.1"
 
@@ -291,12 +291,12 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
             with self.subTest(context=context), self.assertRaises(provenance.LegacyTombstoneProvenanceError):
                 self.verify(context=context)
         context = provenance.CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK
-        old_root = self.repository / "target/candidates/0.5.0/ga/50027/native-products"
+        old_root = self.repository / "target/candidates/0.5.0/ga/50028/native-products"
         with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "preview preflight root"):
             self.verify(context=context, unsigned_artifact=old_root / provenance.ARTIFACT_NAME,
                         unsigned_manifest=old_root / provenance.MANIFEST_NAME)
         with self.assertRaisesRegex(provenance.LegacyTombstoneProvenanceError, "build number differs"):
-            self.verify(context=context, build_number="50027")
+            self.verify(context=context, build_number="50028")
 
     def test_preview_still_checks_promotion_source_and_embedded_bytes(self) -> None:
         self.configure_preview_fixture()

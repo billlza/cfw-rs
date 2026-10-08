@@ -287,13 +287,13 @@ class NativeUiArtifactTests(unittest.TestCase):
 
     def _release_metadata(self, signing: str) -> dict[str, str]:
         metadata = {key: "bound" for key in ui.METADATA_KEYS}
-        metadata.update(configuration="release", buildNumber="50027", productVersion="0.5.0", signingMode=signing)
+        metadata.update(configuration="release", buildNumber="50028", productVersion="0.5.0", signingMode=signing)
         return metadata
 
     def _release_expected(self, metadata: dict[str, str]):
         def expected(_repository, build, *, signing, clean, context):
             self.assertIs(context, ui.NativeUiContext.RELEASE)
-            self.assertEqual(build, "50027")
+            self.assertEqual(build, "50028")
             return {**metadata, "signingMode": signing}
         return expected
 
@@ -315,9 +315,9 @@ class NativeUiArtifactTests(unittest.TestCase):
                 frozen = identity.ga_root(repository) / "native-products"
                 frozen.mkdir(parents=True)
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "exact candidate products root"):
-                    ui.build_products(repository, frozen, build="50027", context=ui.NativeUiContext.RELEASE)
+                    ui.build_products(repository, frozen, build="50028", context=ui.NativeUiContext.RELEASE)
                 run.assert_not_called()
-                ui.build_products(repository, products, build="50027", context=ui.NativeUiContext.RELEASE)
+                ui.build_products(repository, products, build="50028", context=ui.NativeUiContext.RELEASE)
             self.assertEqual(
                 sorted(entry.name for entry in products.iterdir()),
                 sorted([ui.LIBRARY, ui.RESOURCES, ui.LIBRARY + ".manifest.json", ui.RESOURCES + ".manifest.json"]),
@@ -340,7 +340,7 @@ class NativeUiArtifactTests(unittest.TestCase):
                 ui.subprocess, "run", return_value=SimpleNamespace(returncode=1)
             ):
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "SwiftUI Release build failed"):
-                    ui.build_products(repository, products, build="50027", context=ui.NativeUiContext.RELEASE)
+                    ui.build_products(repository, products, build="50028", context=ui.NativeUiContext.RELEASE)
             self.assertTrue((identity.ga_preflight_root(repository) / "swift-ui-build/build.log").is_file())
             self.assertEqual(list(products.iterdir()), [])
 
@@ -372,7 +372,7 @@ class NativeUiArtifactTests(unittest.TestCase):
         ), patch.object(ui, "command", return_value=f"{output}\n"), patch.object(
             ui, "remove_build_rpaths"
         ), patch.object(ui, "verify_library"):
-            ui.build_products(repository, products, build="50027", context=ui.NativeUiContext.RELEASE)
+            ui.build_products(repository, products, build="50028", context=ui.NativeUiContext.RELEASE)
         return products
 
     def _freeze_and_sign(self, repository: Path) -> tuple[Path, Path]:
@@ -380,7 +380,7 @@ class NativeUiArtifactTests(unittest.TestCase):
         preflight = identity.ga_preflight_root(repository)
         frozen_root = identity.ga_root(repository)
         frozen_root.parent.mkdir(parents=True)
-        # Candidate freeze promotes ga-preflight/50027 to ga/50027; signing
+        # Candidate freeze promotes ga-preflight/50028 to ga/50028; signing
         # happens only after that promotion.
         preflight.rename(frozen_root)
         pre_sign = identity.ga_frozen_native_products_root(repository)
@@ -411,12 +411,12 @@ class NativeUiArtifactTests(unittest.TestCase):
                 ui, "verify_library"
             ):
                 ui.verify_products(
-                    repository, signed, build="50027", signing="developer-id", context=ui.NativeUiContext.RELEASE
+                    repository, signed, build="50028", signing="developer-id", context=ui.NativeUiContext.RELEASE
                 )
                 (pre_sign / ui.LIBRARY).write_bytes(b"replaced pre-sign library")
                 with self.assertRaises((ui.NativeUiArtifactError, SignedNativeManifestError)):
                     ui.verify_products(
-                        repository, signed, build="50027", signing="developer-id", context=ui.NativeUiContext.RELEASE
+                        repository, signed, build="50028", signing="developer-id", context=ui.NativeUiContext.RELEASE
                     )
 
     def test_manifest_mode_must_match_its_producer(self) -> None:
@@ -436,7 +436,7 @@ class NativeUiArtifactTests(unittest.TestCase):
                         ui.NativeUiArtifactError, re.escape(f"unexpected file mode: {manifest}")
                     ):
                         ui.verify_products(
-                            repository, signed, build="50027", signing="developer-id",
+                            repository, signed, build="50028", signing="developer-id",
                             context=ui.NativeUiContext.RELEASE,
                         )
 

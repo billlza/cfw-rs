@@ -4,8 +4,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ConfigError, CredentialRef, ReleaseDnsEvidenceCase, ReleasePacketEvidenceCase,
-    profile::ProfileDocument,
+    ConfigError, CredentialRef, ProfileParseError, ReleaseDnsEvidenceCase,
+    ReleasePacketEvidenceCase, profile::ProfileDocument,
 };
 
 pub use crate::capacity::{MAX_ENGINE_CONFIG_BYTES, MAX_PROFILE_BYTES};
@@ -75,24 +75,17 @@ pub(crate) enum DnsProjection {
 
 impl ValidatedSingBoxProfile {
     pub fn parse(input: &str) -> Result<Self, ConfigError> {
-        if input.len() > MAX_PROFILE_BYTES {
-            return Err(ConfigError::TooLarge {
-                actual: input.len(),
-                maximum: MAX_PROFILE_BYTES,
-            });
-        }
+        Self::parse_classified(input).map_err(ConfigError::from)
+    }
 
-        let value: Value = serde_json::from_str(input)?;
-        let object = value.as_object().ok_or(ConfigError::RootMustBeObject)?;
-        for key in object.keys() {
-            if !ALLOWED_PROFILE_KEYS.contains(&key.as_str()) {
-                return Err(ConfigError::UnsupportedTopLevelKey(key.clone()));
-            }
-        }
-        let mut visited_nodes = 0;
-        reject_forbidden_keys(&value, "$", &mut visited_nodes)?;
+    /// Parses like [`Self::parse`] and reports whether a rejected input was
+    /// read into the typed profile schema before it was rejected.
+    pub fn parse_classified(input: &str) -> Result<Self, ProfileParseError> {
+        let document = recognize_document(input).map_err(ProfileParseError::Unrecognized)?;
+        Self::from_document(document).map_err(ProfileParseError::Invalid)
+    }
 
-        let document = serde_json::from_value::<ProfileDocument>(value)?;
+    fn from_document(document: ProfileDocument) -> Result<Self, ConfigError> {
         document.validate()?;
         let canonical_value = canonicalize(serde_json::to_value(&document)?);
         let canonical_json = serde_json::to_string(&canonical_value)?;
@@ -280,6 +273,29 @@ impl ValidatedSingBoxProfile {
             .flat_map(|outbound| outbound.credential_refs().into_iter().cloned())
             .collect()
     }
+}
+
+/// Admits the input and reads it into the closed schema. Every failure here
+/// means the input is not a typed profile document; validation comes after.
+fn recognize_document(input: &str) -> Result<ProfileDocument, ConfigError> {
+    if input.len() > MAX_PROFILE_BYTES {
+        return Err(ConfigError::TooLarge {
+            actual: input.len(),
+            maximum: MAX_PROFILE_BYTES,
+        });
+    }
+
+    let value: Value = serde_json::from_str(input)?;
+    let object = value.as_object().ok_or(ConfigError::RootMustBeObject)?;
+    for key in object.keys() {
+        if !ALLOWED_PROFILE_KEYS.contains(&key.as_str()) {
+            return Err(ConfigError::UnsupportedTopLevelKey(key.clone()));
+        }
+    }
+    let mut visited_nodes = 0;
+    reject_forbidden_keys(&value, "$", &mut visited_nodes)?;
+
+    Ok(serde_json::from_value::<ProfileDocument>(value)?)
 }
 
 fn reject_forbidden_keys(

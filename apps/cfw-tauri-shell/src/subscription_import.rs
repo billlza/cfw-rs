@@ -3,7 +3,9 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
-use cfw_singbox_config::{CredentialKind, CredentialRef, MAX_OUTBOUNDS, ValidatedSingBoxProfile};
+use cfw_singbox_config::{
+    CredentialKind, CredentialRef, MAX_OUTBOUNDS, ProfileParseError, ValidatedSingBoxProfile,
+};
 use reqwest::Url;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -150,11 +152,25 @@ fn import_subscription_document_with_collector(
     if body.lines().any(|line| line.trim() == "[Interface]") {
         return wireguard::import_document(body, collector);
     }
-    if let Ok(profile) = ValidatedSingBoxProfile::parse(body) {
-        return Ok(ImportedSubscription {
-            profile,
-            credentials: Vec::new(),
-        });
+    match ValidatedSingBoxProfile::parse_classified(body) {
+        Ok(profile) => {
+            return Ok(ImportedSubscription {
+                profile,
+                credentials: Vec::new(),
+            });
+        }
+        // The typed schema read this document and rejected it. Its keys route
+        // it only to the node-list adapter, which would fail on its shape with
+        // a generic message, so the validator's error is the diagnosis.
+        Err(ProfileParseError::Invalid(error)) if !sing_box::matches_node_list_schema(body) => {
+            return Err(error.to_string());
+        }
+        // A node list both schemas read: the adapter renames tags and fills
+        // TLS defaults, then runs the same validator in `into_subscription`.
+        Err(ProfileParseError::Invalid(_)) => {}
+        // Not a typed profile: the importers below reject it with their own
+        // error or convert it and run the same validator.
+        Err(ProfileParseError::Unrecognized(_)) => {}
     }
 
     if matches!(body.trim_start().chars().next(), Some('{' | '[')) {

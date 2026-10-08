@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 use crate::{
-    ConfigError, CredentialKind, CredentialSecret, MAX_PROFILE_BYTES, MAX_PROFILE_NODES,
-    ValidatedSingBoxProfile,
+    ConfigError, CredentialKind, CredentialSecret, MAX_OUTBOUNDS, MAX_PROFILE_BYTES,
+    MAX_PROFILE_NODES, ProfileParseError, ValidatedSingBoxProfile,
 };
 
 const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -88,6 +88,157 @@ fn engine_managed_remote_resources_are_rejected() {
         health_check,
         ConfigError::ForbiddenKey { key, .. } if key == "url"
     ));
+}
+
+#[test]
+fn classified_parse_separates_unrecognized_input_from_invalid_profiles() {
+    let oversized = " ".repeat(MAX_PROFILE_BYTES + 1);
+    let too_wide = format!(
+        r#"{{"outbounds":[{}]}}"#,
+        std::iter::repeat_n("0", MAX_PROFILE_NODES)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    // `None` marks serde's own message: malformed syntax, then a schema shape.
+    for (label, input, expected) in [
+        (
+            "oversized",
+            oversized.as_str(),
+            Some(ConfigError::TooLarge {
+                actual: MAX_PROFILE_BYTES + 1,
+                maximum: MAX_PROFILE_BYTES,
+            }),
+        ),
+        (
+            "too many JSON nodes",
+            too_wide.as_str(),
+            Some(ConfigError::TooComplex {
+                maximum: MAX_PROFILE_NODES,
+            }),
+        ),
+        ("malformed JSON", "{", None),
+        ("array root", "[]", Some(ConfigError::RootMustBeObject)),
+        (
+            "application-owned key",
+            r#"{"inbounds":[]}"#,
+            Some(ConfigError::UnsupportedTopLevelKey("inbounds".into())),
+        ),
+        (
+            "forbidden key",
+            r#"{"route":{"rules":[{"process_name":["Safari"]}]}}"#,
+            Some(ConfigError::ForbiddenKey {
+                path: "$.route.rules[0]".into(),
+                key: "process_name".into(),
+            }),
+        ),
+        (
+            "remote resource",
+            r#"{"route":{"rule_set":[{"type":"remote","tag":"remote"}]}}"#,
+            Some(ConfigError::RemoteResource {
+                path: "$.route.rule_set[0]".into(),
+            }),
+        ),
+        (
+            "inline secret",
+            r#"{"outbounds":[{"type":"shadowsocks","tag":"s","server":"s.example","server_port":8388,"method":"aes-256-gcm","password":"secret"}]}"#,
+            Some(ConfigError::CredentialRequiresKeychain {
+                path: "$.outbounds[0]".into(),
+                key: "password".into(),
+            }),
+        ),
+        ("schema shape", r#"{"outbounds":[{"type":"direct"}]}"#, None),
+        (
+            "noncanonical credential id",
+            r#"{"outbounds":[{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{"id":"33333333333343338333333333333333","kind":"vless_uuid"}}]}"#,
+            None,
+        ),
+    ] {
+        let error = ValidatedSingBoxProfile::parse(input).expect_err(label);
+        match expected {
+            Some(expected) => assert_eq!(error, expected, "{label}"),
+            None => assert!(matches!(error, ConfigError::InvalidJson(_)), "{label}"),
+        }
+        assert_eq!(
+            ValidatedSingBoxProfile::parse_classified(input).expect_err(label),
+            ProfileParseError::Unrecognized(error),
+            "{label}"
+        );
+    }
+
+    let reality_without_utls = format!(
+        r#"{{"outbounds":[{{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"tls":{{"enabled":true,"server_name":"www.example.com","reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}}}}]}}"#
+    );
+    let wrong_kind = format!(
+        r#"{{"outbounds":[{{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vmess_uuid"}}}}]}}"#
+    );
+    let crossed_kinds = format!(
+        r#"{{"outbounds":[{{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}}}},{{"type":"vmess","tag":"vmess","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vmess_uuid"}}}}]}}"#
+    );
+    let policy_shape = |path: &str, reason: &str| ConfigError::UnsupportedPolicyShape {
+        path: path.into(),
+        reason: reason.into(),
+    };
+    for (label, input, expected) in [
+        (
+            "Reality without uTLS",
+            reality_without_utls.as_str(),
+            policy_shape("$.outbounds[0].tls.utls", "Reality requires uTLS"),
+        ),
+        (
+            "duplicate tags",
+            r#"{"outbounds":[{"type":"direct","tag":"d"},{"type":"block","tag":"d"}]}"#,
+            policy_shape("$.outbounds[1].tag", "outbound tags must be unique"),
+        ),
+        (
+            "dangling final route",
+            r#"{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"missing"}}"#,
+            policy_shape(
+                "$.route.final",
+                "final must reference a declared outbound tag",
+            ),
+        ),
+        (
+            "credential kind of another protocol",
+            wrong_kind.as_str(),
+            ConfigError::CredentialKindMismatch {
+                path: "$.outbounds[0].credential_ref".into(),
+                expected: CredentialKind::VlessUuid,
+                actual: CredentialKind::VmessUuid,
+            },
+        ),
+        (
+            "one credential id with two kinds",
+            crossed_kinds.as_str(),
+            ConfigError::ConflictingCredentialReference {
+                id: VLESS_ID.into(),
+            },
+        ),
+        (
+            "no outbounds",
+            r#"{"outbounds":[]}"#,
+            policy_shape(
+                "$.outbounds",
+                &format!("outbound count is outside the accepted 1..={MAX_OUTBOUNDS} range"),
+            ),
+        ),
+    ] {
+        assert_eq!(
+            ValidatedSingBoxProfile::parse_classified(input).expect_err(label),
+            ProfileParseError::Invalid(expected.clone()),
+            "{label}"
+        );
+        assert_eq!(
+            ValidatedSingBoxProfile::parse(input).expect_err(label),
+            expected,
+            "{label}"
+        );
+    }
+
+    let direct = r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#;
+    assert_eq!(
+        ValidatedSingBoxProfile::parse_classified(direct).expect("classified profile"),
+        ValidatedSingBoxProfile::parse(direct).expect("profile")
+    );
 }
 
 #[test]

@@ -121,6 +121,195 @@ fn passes_through_typed_sing_box_json_without_credentials() {
 }
 
 #[test]
+fn typed_profiles_report_their_validation_error_instead_of_the_node_list_schema() {
+    let vless = |tls: Value, transport: Option<Value>| {
+        let mut outbound = json!({
+            "type": "vless", "tag": "VLESS", "server": "vless.example.com", "server_port": 443,
+            "credential_ref": {"id": SYNTHETIC_VM_UUID, "kind": "vless_uuid"},
+            "tls": tls,
+        });
+        if let Some(transport) = transport {
+            outbound["transport"] = transport;
+        }
+        json!({ "outbounds": [outbound] }).to_string()
+    };
+    let reality_without_utls = vless(
+        json!({
+            "enabled": true,
+            "server_name": "www.example.com",
+            "reality": {
+                "enabled": true,
+                "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+                "short_id": "0123456789abcdef",
+            },
+        }),
+        None,
+    );
+    let relative_transport_path = vless(
+        json!({"enabled": true, "server_name": "vless.example.com"}),
+        Some(json!({"type": "ws", "path": "TopSecretValue123"})),
+    );
+
+    for (label, document, expected) in [
+        (
+            "credential reference with Reality and no uTLS",
+            reality_without_utls.as_str(),
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS",
+        ),
+        (
+            "credential reference with a relative transport path",
+            relative_transport_path.as_str(),
+            "unsupported credential-free policy shape at $.outbounds[0].transport.path: V2Ray transport path must be a bounded absolute path",
+        ),
+        (
+            "dangling final route",
+            r#"{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"missing"}}"#,
+            "unsupported credential-free policy shape at $.route.final: final must reference a declared outbound tag",
+        ),
+        (
+            "selector default outside its members",
+            r#"{"outbounds":[{"type":"direct","tag":"direct"},{"type":"selector","tag":"Select","outbounds":["direct"],"default":"missing"}]}"#,
+            "unsupported credential-free policy shape at $.outbounds[1]: selector requires unique members and a default from its members",
+        ),
+        (
+            "empty DNS resolver pool",
+            r#"{"dns":{"servers":[]},"outbounds":[{"type":"direct","tag":"direct"}]}"#,
+            "unsupported credential-free policy shape at $.dns: DNS resolver pools require one to eight entries",
+        ),
+    ] {
+        let error = import_subscription_document(document).expect_err(label);
+        assert_eq!(error, expected, "{label}");
+        let editor_error = ValidatedSingBoxProfile::parse(document)
+            .expect_err(label)
+            .to_string();
+        assert_eq!(error, editor_error, "{label}");
+    }
+}
+
+#[test]
+fn typed_profile_schema_errors_do_not_echo_document_values() {
+    let vless = |tls: Value, extra: Option<(&str, Value)>| {
+        let mut outbound = json!({
+            "type": "vless", "tag": "VLESS", "server": "vless.example.com", "server_port": 443,
+            "credential_ref": {"id": SYNTHETIC_VM_UUID, "kind": "vless_uuid"},
+            "tls": tls,
+        });
+        if let Some((key, value)) = extra {
+            outbound[key] = value;
+        }
+        json!({ "outbounds": [outbound] }).to_string()
+    };
+    let tls = json!({"enabled": true, "server_name": "vless.example.com"});
+    let mut unknown_fingerprint = tls.clone();
+    unknown_fingerprint["utls"] = json!({"enabled": true, "fingerprint": "TopSecretValue123"});
+
+    for (label, document) in [
+        ("unknown uTLS fingerprint", vless(unknown_fingerprint, None)),
+        (
+            "unknown outbound field",
+            vless(tls, Some(("TopSecretValue123", json!(true)))),
+        ),
+    ] {
+        // serde quotes the rejected value; only validation errors are reported.
+        let schema_error = ValidatedSingBoxProfile::parse(&document)
+            .expect_err(label)
+            .to_string();
+        assert!(
+            schema_error.contains("TopSecretValue123"),
+            "{label}: {schema_error}"
+        );
+
+        let error = import_subscription_document(&document).expect_err(label);
+        assert_eq!(
+            error, "sing-box source JSON does not match the supported node-list schema",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn credential_free_http_node_lists_keep_upstream_normalization() {
+    let http = |tag: &str, server: &str, tls: Option<Value>| {
+        let mut outbound =
+            json!({"type": "http", "tag": tag, "server": server, "server_port": 443});
+        if let Some(tls) = tls {
+            outbound["tls"] = tls;
+        }
+        outbound
+    };
+    let outbounds = |document: &str| -> Value {
+        let imported = import_subscription_document(document).expect("upstream HTTP node list");
+        assert!(imported.credentials.is_empty());
+        let profile: Value = serde_json::from_str(imported.profile.as_json()).expect("profile");
+        profile["outbounds"].clone()
+    };
+
+    let duplicate_tags = json!({"outbounds": [
+        http("Edge", "a.example.com", None),
+        http("Edge", "b.example.com", None),
+    ]})
+    .to_string();
+    let padded_tag = json!({"outbounds": [http(" Padded ", "c.example.com", None)]}).to_string();
+    let empty_server_name = json!({"outbounds": [http(
+        "Sni",
+        "d.example.com",
+        Some(json!({"enabled": true, "server_name": ""})),
+    )]})
+    .to_string();
+    let disabled_tls = json!({"outbounds": [http(
+        "Plain",
+        "e.example.com",
+        Some(json!({"enabled": false, "server_name": ""})),
+    )]})
+    .to_string();
+    let inert_reality = json!({"outbounds": [http(
+        "Inert",
+        "f.example.com",
+        Some(json!({
+            "enabled": true,
+            "server_name": "f.example.com",
+            "reality": {"enabled": false, "public_key": ""},
+        })),
+    )]})
+    .to_string();
+    let empty = r#"{"outbounds":[]}"#;
+    // Both schemas read each list, and the typed one rejects it only after
+    // deserializing it; the node-list adapter keeps its own handling.
+    for document in [
+        duplicate_tags.as_str(),
+        &padded_tag,
+        &empty_server_name,
+        &disabled_tls,
+        &inert_reality,
+        empty,
+    ] {
+        assert!(
+            matches!(
+                ValidatedSingBoxProfile::parse_classified(document),
+                Err(ProfileParseError::Invalid(_))
+            ),
+            "{document}"
+        );
+        assert!(sing_box::matches_node_list_schema(document), "{document}");
+    }
+
+    let renamed = outbounds(&duplicate_tags);
+    assert_eq!(renamed[0]["tag"], "Edge");
+    assert_eq!(renamed[1]["tag"], "Edge-2");
+    assert_eq!(outbounds(&padded_tag)[0]["tag"], "Padded");
+    assert_eq!(
+        outbounds(&empty_server_name)[0]["tls"]["server_name"],
+        "d.example.com"
+    );
+    assert!(outbounds(&disabled_tls)[0].get("tls").is_none());
+    assert!(outbounds(&inert_reality)[0]["tls"].get("reality").is_none());
+    assert_eq!(
+        import_subscription_document(empty).expect_err("empty node list"),
+        "sing-box source JSON contains no outbounds"
+    );
+}
+
+#[test]
 fn imports_restricted_upstream_sing_box_node_list_json() {
     let document = json!({
         "outbounds": [

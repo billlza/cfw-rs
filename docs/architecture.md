@@ -104,7 +104,13 @@ as downloaded sources. Only local canonical reference-only profiles retain
 the existing manual-provisioning path; source refresh remains vault-confirmed.
 It extracts source secrets before constructing the closed profile and rejects
 root-level sing-box DNS, inbounds, routes, selectors, scripts, and unknown
-fields. Source refresh reuses references in outbound order when possible; an
+fields.
+Typed profile JSON is tried first. A document the typed schema reads but
+validation rejects reports that validation error, unless it is also a node
+list the upstream sing-box adapter reads (a credential-free HTTP list); that
+adapter normalizes tags and TLS defaults and then runs the same validator.
+Every other such document would fail the adapter's schema with no detail.
+Source refresh reuses references in outbound order when possible; an
 exact immutable-material conflict is the sole authorization to rotate IDs.
 Repository-bound vault garbage collection runs before and after refresh so an
 old audience cannot accumulate silently or be deleted while still live.

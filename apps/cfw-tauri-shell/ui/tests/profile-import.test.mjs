@@ -19,6 +19,10 @@ test("subscription URLs and node links use distinct native import boundaries", (
   for (const source of ["socks://user:password@proxy.example:1080", "socks5://proxy.example:1080", "trojan://password@proxy.example:443", "file:///private/source", "not-a-link"]) {
     assert.equal(isSubscriptionSource(source), false, "local parser must not fetch non-HTTP sources");
   }
+  // The URL parser drops line breaks, so pasted text must not be mistaken for one URL.
+  for (const source of ["https://subscription.example/list\ntrojan://password@proxy.example:443", "https://subscription.example/a b"]) {
+    assert.equal(isSubscriptionSource(source), false, "pasted text is imported as a profile body");
+  }
 });
 
 test("file picker and drag-drop admit supported profile source extensions", () => {

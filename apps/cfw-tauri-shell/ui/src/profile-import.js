@@ -5,6 +5,8 @@ export const MAX_PROFILE_SOURCE_BYTES = 4 * 1024 * 1024;
 export const PROFILE_SOURCE_ACCEPT = ".json,.yaml,.yml,.conf,.txt,application/json,text/yaml,text/plain";
 
 export function isSubscriptionSource(source) {
+  // URL parsing drops line breaks; pasted multi-line text is a profile body.
+  if (/\s/u.test(source)) return false;
   if (!/^https?:\/\//iu.test(source)) return false;
   try {
     const parsed = new URL(source);

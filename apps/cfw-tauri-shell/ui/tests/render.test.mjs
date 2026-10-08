@@ -4346,6 +4346,9 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
     const html = await renderPage("profiles");
     assert.match(html, /HTTPS subscription or node link/u);
     assert.match(html, /accept="\.json,\.yaml,\.yml,\.conf,\.txt,/u);
+    // A single-line input strips pasted line breaks; the box must keep them.
+    assert.match(html, /<textarea data-profile-url rows="1"/u);
+    assert.doesNotMatch(html, /<input data-profile-url/u);
     input.value = link;
     let before = invocationDetails.length;
     await appModule.handleAction("import-profile");
@@ -4383,6 +4386,13 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
     assert.equal(onlineCalls.filter(({ command }) => command === "import_profile_text").length, 1);
     assert.equal(onlineCalls.filter(({ command }) => command === "select_profile").length, 1);
     assert.equal(onlineCalls.some(({ command }) => command === "apply_active_profile"), false, "online import must not dispatch a second renderer restart");
+
+    const links = `${link}\nsocks://second-user:second-secret@proxy.example.com:29178`;
+    input.value = links;
+    before = invocationDetails.length;
+    await appModule.handleAction("import-profile");
+    const pastedCalls = invocationDetails.slice(before);
+    assert.deepEqual(pastedCalls.find(({ command }) => command === "import_profile_text")?.args, { name: null, body: links }, "every pasted line reaches the importer");
   } finally {
     querySelectorElements.delete("[data-profile-url]");
     querySelectorElements.delete("[data-profile-file]");

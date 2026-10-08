@@ -2372,7 +2372,7 @@ function renderProfiles() {
     <div class="profiles-layout">
       <section class="cfw-profile-remote">
         <div class="cfw-url-box">
-          <input data-profile-url placeholder="${escapeHtml(t("HTTPS subscription or node link"))}" aria-label="${escapeHtml(t("Subscription URL or node link"))}" ${blocked} />
+          <textarea data-profile-url rows="1" spellcheck="false" autocomplete="off" placeholder="${escapeHtml(t("HTTPS subscription or node link"))}" aria-label="${escapeHtml(t("Subscription URL or node link"))}" ${blocked}></textarea>
           <button class="paste-icon" data-action="paste-profile-url" title="${escapeHtml(t("Paste URL"))}" ${blocked}>▣</button>
         </div>
         <button class="cfw-big-button" data-action="import-profile" ${blocked}>${escapeHtml(t("Import Link"))}</button>

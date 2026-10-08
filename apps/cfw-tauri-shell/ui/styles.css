@@ -1524,17 +1524,29 @@ dd {
   position: relative;
 }
 
-.cfw-url-box input {
+/* A textarea keeps pasted line breaks that a single-line input would strip;
+   it otherwise looks and behaves like the input it replaces. */
+.cfw-url-box textarea {
+  display: block;
   width: 100%;
   height: 45px;
   border: 1px solid var(--bc);
   border-radius: 4px;
-  padding: 0 48px 0 12px;
+  outline: none;
+  padding: 9px 48px 9px 12px;
+  background: var(--bgc);
   color: #444;
+  font: inherit;
   font-size: 20px;
+  line-height: 25px;
+  white-space: pre;
+  overflow: hidden;
+  resize: none;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
-.cfw-url-box input::placeholder {
+.cfw-url-box textarea::placeholder {
   color: #999;
 }
 
@@ -3258,7 +3270,7 @@ html.native-window-glass .cfw-big-button {
 html.native-window-glass input,
 html.native-window-glass textarea,
 html.native-window-glass .cfw-conn-search,
-html.native-window-glass .cfw-url-box input,
+html.native-window-glass .cfw-url-box textarea,
 html.native-window-glass .setting-input,
 html.native-window-glass .mixin-editor,
 html.native-window-glass .glass-dialog textarea,

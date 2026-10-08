@@ -244,10 +244,11 @@ macOS slice.
 
 The direct binder invocation adds the explicit `-macosversion 15.0` release
 requirement, which the upstream wrapper does not expose. The product tag set is
-intentionally smaller than the upstream Apple client: unsupported Naive,
-WireGuard, Tailscale, gVisor, and DHCP surfaces are not compiled, so their
-transitive archives and warning-prone Cronet payload are absent rather than
-suppressed.
+intentionally smaller than the upstream Apple client: the unsupported Naive,
+Tailscale and DHCP surfaces are not compiled, so their transitive archives and
+warning-prone Cronet payload are absent rather than suppressed. WireGuard and
+gVisor are compiled (`with_wireguard`, `with_gvisor`) for the userspace
+WireGuard endpoint described above.
 
 `with_clash_api` is not optional. The patched tree sets `needClashAPI` whenever a
 platform log writer is installed (`box.go`), and `daemon/instance.go` always

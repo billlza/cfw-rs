@@ -20,10 +20,10 @@ use saphyr_parser::{Event, Parser, ScalarStyle, Tag};
 
 use super::sanitized_token;
 
-/// Hard budget on parser events for one subscription document. The transport
-/// layer already caps source bodies at 512 KiB and every event consumes input,
-/// so a legitimate document stays far below this bound. The smaller canonical
-/// profile limit is enforced after conversion.
+/// Hard budget on parser events for one subscription document. Source bodies
+/// are already capped at `MAX_SUBSCRIPTION_SOURCE_BYTES` (4 MiB) and every
+/// event consumes input, so a legitimate document stays far below this bound.
+/// The smaller canonical profile limit is enforced after conversion.
 const MAX_YAML_EVENTS: usize = 200_000;
 /// Hard budget on container nesting. Clash documents need five levels
 /// (root → proxies → proxy → ws-opts → headers); sixteen leaves headroom
@@ -457,7 +457,7 @@ mod tests {
             let scalar_count = target_events - envelope_events;
             let body = format!("[{}]", vec!["x"; scalar_count].join(","));
             assert!(
-                body.len() <= 512 * 1024,
+                body.len() <= cfw_singbox_config::MAX_SUBSCRIPTION_SOURCE_BYTES,
                 "fixture fits the source-body limit"
             );
             let observed_events = event_count(&body);

@@ -181,7 +181,7 @@ Translate “strongest VPN support” into tested capabilities:
 Use the versioned sing-box source and official
 [WireGuard endpoint documentation](https://sing-box.sagernet.org/configuration/endpoint/wireguard/)
 for protocol contracts. Living documentation may include 1.15-only fields; do not
-project those into the stable 1.14.1 build.
+project those into the pinned 1.14.2 build.
 
 ## Implementation sequence and exits
 

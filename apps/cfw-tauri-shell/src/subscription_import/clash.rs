@@ -28,10 +28,19 @@
 //!   the import, as does a pin without TLS or beside `reality-opts`.
 //! - `servername`/`sni`, `alpn`, and `client-fingerprint` are only mapped
 //!   while TLS is enabled; without TLS they have no wire effect in Clash
-//!   either, so dropping them preserves semantics.
-//! - `reality-opts` needs a non-empty `client-fingerprint`: sing-box runs
-//!   Reality only over uTLS, so a Reality node without one fails the import
-//!   instead of the engine start. No fingerprint is chosen on its behalf.
+//!   either, so dropping them preserves semantics. `client-fingerprint: none`
+//!   keeps standard TLS, as in Mihomo.
+//! - The top-level `global-client-fingerprint` is applied as Mihomo did
+//!   until v1.19.27 removed it: a TLS VMess, VLESS, Trojan or AnyTLS node
+//!   whose `client-fingerprint` is absent or empty gets it as its own uTLS
+//!   fingerprint, and proxy providers store it for their refreshes. HTTP,
+//!   Hysteria2 and TUIC nodes never took it. `none` or an empty value sets
+//!   nothing and any other unsupported value fails the import. A V2Ray QUIC
+//!   node that takes it fails like one naming a fingerprint itself.
+//! - `reality-opts` needs a uTLS fingerprint from `client-fingerprint` or
+//!   `global-client-fingerprint`: sing-box runs Reality only over uTLS, so a
+//!   Reality node without one fails the import instead of the engine start.
+//!   The app never picks one on its behalf.
 //! - Node secrets keep their exact source bytes (the YAML loader never
 //!   applies number resolution to them) and leave this module only as
 //!   credential-vault entries, never inside the stored profile.
@@ -40,7 +49,7 @@ mod dns;
 mod policy;
 pub(super) mod resources;
 
-use cfw_singbox_config::{CredentialKind, MAX_OUTBOUNDS};
+use cfw_singbox_config::{CredentialKind, MAX_OUTBOUNDS, UtlsFingerprint};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -52,7 +61,8 @@ use super::{
     normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
     normalize_tuic_udp_relay_mode, normalize_v2ray_http_method, normalize_v2ray_packet_encoding,
     normalize_vless_flow, normalize_vmess_security, parse_hysteria2_hop_interval_seconds,
-    parse_utls, parse_vmess_alter_id, sanitized_token, tls_json, transport_from_parts,
+    parse_utls_fingerprint, parse_vmess_alter_id, sanitized_token, tls_json, transport_from_parts,
+    utls_json,
 };
 
 /// Proxy-entry keys that only tune local socket behaviour. They change
@@ -77,6 +87,7 @@ pub(super) fn import_clash_document(
         return Err("Clash subscription document must be a YAML mapping".to_owned());
     };
     let mut root = ProxyFields::new(root, "Clash profile".into());
+    let global_fingerprint = take_global_client_fingerprint(&mut root)?;
     let proxies = root.take("proxies");
     if proxies.is_none()
         && !root
@@ -103,8 +114,11 @@ pub(super) fn import_clash_document(
         let YamlValue::Mapping(proxy) = proxy else {
             return Err(format!("{context} must be a YAML mapping"));
         };
-        let (source_name, outbound) =
-            convert_proxy(&mut collector, ProxyFields::new(proxy, context))?;
+        let (source_name, outbound) = convert_proxy(
+            &mut collector,
+            ProxyFields::new(proxy, context),
+            global_fingerprint,
+        )?;
         let tag = outbound["tag"]
             .as_str()
             .ok_or("converted proxy has no tag")?
@@ -116,7 +130,8 @@ pub(super) fn import_clash_document(
         }
         collector.outbounds.push(outbound);
     }
-    let mut providers = resources::import_providers(&mut root, &mut collector, &mut names)?;
+    let mut providers =
+        resources::import_providers(&mut root, &mut collector, &mut names, global_fingerprint)?;
     policy::import_policy(&mut root, &mut collector, names, &mut providers)?;
     if !providers.proxies.is_empty() || !providers.rules.is_empty() {
         collector.providers = Some(providers);
@@ -125,9 +140,12 @@ pub(super) fn import_clash_document(
     collector.into_subscription()
 }
 
+/// Converts one proxy entry. `global_fingerprint` reaches only the TLS stream
+/// types Mihomo gave its `global-client-fingerprint` to.
 fn convert_proxy(
     collector: &mut OutboundCollector,
     mut fields: ProxyFields,
+    global_fingerprint: Option<UtlsFingerprint>,
 ) -> Result<(String, Value), String> {
     let kind = fields.require_string("type")?;
     let name = fields.require_string("name")?;
@@ -138,11 +156,11 @@ fn convert_proxy(
         "http" => convert_http_proxy(collector, &mut fields, name)?,
         "socks5" => convert_socks5(collector, &mut fields, name)?,
         "ss" => convert_shadowsocks(collector, &mut fields, name)?,
-        "vmess" => convert_vmess(collector, &mut fields, name)?,
-        "vless" => convert_vless(collector, &mut fields, name)?,
-        "trojan" => convert_trojan(collector, &mut fields, name)?,
+        "vmess" => convert_vmess(collector, &mut fields, name, global_fingerprint)?,
+        "vless" => convert_vless(collector, &mut fields, name, global_fingerprint)?,
+        "trojan" => convert_trojan(collector, &mut fields, name, global_fingerprint)?,
         "hysteria2" => convert_hysteria2(collector, &mut fields, name)?,
-        "anytls" => convert_anytls(collector, &mut fields, name)?,
+        "anytls" => convert_anytls(collector, &mut fields, name, global_fingerprint)?,
         "tuic" => convert_tuic(collector, &mut fields, name)?,
         "wireguard" => convert_wireguard(collector, &mut fields, name)?,
         other => {
@@ -206,7 +224,9 @@ fn convert_http_proxy(
     let username = fields.take_string("username")?;
     let password = fields.take_string("password")?;
     let tls = collect_tls(fields)?;
-    let tls = tls.into_optional_json(&fields.context, &server, false)?;
+    // Mihomo's HTTP outbound has no client-fingerprint, so it never took the
+    // global one either.
+    let tls = tls.into_optional_json(&fields.context, &server, false, None)?;
     collector.http_proxy_outbound(name, server, port, username, password, tls)
 }
 
@@ -311,6 +331,7 @@ fn convert_vmess(
     collector: &mut OutboundCollector,
     fields: &mut ProxyFields,
     name: String,
+    global_fingerprint: Option<UtlsFingerprint>,
 ) -> Result<Value, String> {
     for (key, feature) in [
         ("global-padding", "VMess global padding"),
@@ -374,7 +395,9 @@ fn convert_vmess(
     if let Some(packet_encoding) = packet_encoding {
         outbound["packet_encoding"] = Value::String(packet_encoding);
     }
-    if let Some(tls) = tls.into_optional_json(&fields.context, &server, false)? {
+    if let Some(tls) =
+        tls.into_optional_json(&fields.context, &server, false, global_fingerprint)?
+    {
         outbound["tls"] = tls;
     }
     if let Some(transport) = transport {
@@ -387,6 +410,7 @@ fn convert_vless(
     collector: &mut OutboundCollector,
     fields: &mut ProxyFields,
     name: String,
+    global_fingerprint: Option<UtlsFingerprint>,
 ) -> Result<Value, String> {
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
@@ -430,7 +454,7 @@ fn convert_vless(
     if let Some(packet_encoding) = packet_encoding {
         outbound["packet_encoding"] = Value::String(packet_encoding);
     }
-    if let Some(tls) = tls.into_optional_json(&fields.context, &server, true)? {
+    if let Some(tls) = tls.into_optional_json(&fields.context, &server, true, global_fingerprint)? {
         outbound["tls"] = tls;
     }
     if let Some(transport) = transport {
@@ -443,6 +467,7 @@ fn convert_trojan(
     collector: &mut OutboundCollector,
     fields: &mut ProxyFields,
     name: String,
+    global_fingerprint: Option<UtlsFingerprint>,
 ) -> Result<Value, String> {
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
@@ -453,7 +478,7 @@ fn convert_trojan(
     let tls = collect_tls(fields)?;
     let transport = collect_transport(fields)?;
     let tag = collector.unique_tag(name)?;
-    let tls = tls.into_required_json(&fields.context, &server)?;
+    let tls = tls.into_required_json(&fields.context, &server, global_fingerprint)?;
     let mut outbound = json!({
         "type": "trojan",
         "tag": tag,
@@ -555,6 +580,7 @@ fn convert_anytls(
     collector: &mut OutboundCollector,
     fields: &mut ProxyFields,
     name: String,
+    global_fingerprint: Option<UtlsFingerprint>,
 ) -> Result<Value, String> {
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
@@ -562,7 +588,11 @@ fn convert_anytls(
         CredentialKind::AnyTlsPassword,
         fields.require_string("password")?,
     );
-    let tls = collect_tls(fields)?.into_anytls_required_json(&fields.context, &server)?;
+    let tls = collect_tls(fields)?.into_anytls_required_json(
+        &fields.context,
+        &server,
+        global_fingerprint,
+    )?;
     let tag = collector.unique_tag(name)?;
     Ok(json!({
         "type": "anytls",
@@ -629,7 +659,7 @@ fn convert_tuic(
     Ok(outbound)
 }
 
-use tls::collect_tls;
+use tls::{collect_tls, take_global_client_fingerprint};
 mod tls;
 
 /// Maps `network` plus its option mapping onto the typed transport shape.

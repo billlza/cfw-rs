@@ -43,7 +43,7 @@ pub use credentials::{
     InvalidCredentialRef, InvalidCredentialSecret, MAX_CREDENTIAL_SLOTS,
 };
 pub use error::ConfigError;
-pub use profile::MAX_OUTBOUNDS;
+pub use profile::{MAX_OUTBOUNDS, UtlsFingerprint};
 pub use projection::{
     AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, DEFAULT_MIXED_PORT,
     EngineSettings, ProjectedConfig, ProjectionMode, TUNNEL_ADDRESS_PLAN, TunnelAddressPlan,

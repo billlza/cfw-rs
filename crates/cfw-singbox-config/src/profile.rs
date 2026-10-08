@@ -395,9 +395,10 @@ pub(crate) struct UtlsOptions {
     pub(crate) fingerprint: UtlsFingerprint,
 }
 
+/// uTLS ClientHello presets of the pinned runtime, by their sing-box names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum UtlsFingerprint {
+pub enum UtlsFingerprint {
     Chrome,
     Firefox,
     Edge,

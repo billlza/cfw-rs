@@ -69,7 +69,10 @@ reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the
 schema's uTLS and Reality options. Reality requires an enabled uTLS
 fingerprint (Clash `client-fingerprint`, URI `fp`, or sing-box `tls.utls`)
 because sing-box runs Reality only over uTLS; a node without one fails at
-import, and no fingerprint is chosen for it. Every enabled remote TLS transport and authenticated DoH
+import, and the app never picks one for it. A Clash document's top-level
+`global-client-fingerprint` applies, as in Mihomo before v1.19.27, to TLS
+VMess, VLESS, Trojan and AnyTLS nodes whose own `client-fingerprint` is
+absent or empty; a node's `client-fingerprint: none` keeps standard TLS. Every enabled remote TLS transport and authenticated DoH
 projection has a product-owned TLS 1.2 minimum that profiles cannot lower;
 normal negotiation prefers TLS 1.3, and QUIC always requires TLS 1.3. TUIC also
 projects 0-RTT as explicitly disabled. Subscription and update clients are

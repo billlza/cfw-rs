@@ -1,7 +1,7 @@
 use cfw_singbox_config::{
     MAX_PROVIDER_RULES, MAX_PROVIDERS, ProviderCatalog, ProviderFilter, ProviderHealthCheck,
     ProviderMember, ProviderRule, ProviderRuleBehavior, ProviderRuleFormat, ProviderSource,
-    ProxyProvider, RuleKind, RuleProvider,
+    ProxyProvider, RuleKind, RuleProvider, UtlsFingerprint,
 };
 use std::collections::BTreeMap;
 
@@ -256,10 +256,13 @@ fn decode_payload(
         .ok_or_else(|| format!("provider response is missing {key}"))
 }
 
+/// Imports materialized providers. Proxy providers keep the document's
+/// `global_fingerprint` so that refreshing their members applies it again.
 pub(super) fn import_providers(
     root: &mut ProxyFields,
     collector: &mut OutboundCollector,
     names: &mut BTreeMap<String, String>,
+    global_fingerprint: Option<UtlsFingerprint>,
 ) -> Result<ProviderCatalog, String> {
     let mut catalog = ProviderCatalog::default();
     if let Some(value) = root.take("proxy-providers") {
@@ -275,13 +278,21 @@ pub(super) fn import_providers(
                 .take("payload")
                 .ok_or("provider payload has not been downloaded")?;
             fields.reject_leftovers()?;
-            let members = import_proxy_payload(&name, payload, &filter, collector, names)?;
+            let members = import_proxy_payload(
+                &name,
+                payload,
+                &filter,
+                global_fingerprint,
+                collector,
+                names,
+            )?;
             catalog.proxies.push(ProxyProvider {
                 name,
                 source,
                 members,
                 filter,
                 health_check,
+                default_utls_fingerprint: global_fingerprint,
             });
         }
     }
@@ -329,6 +340,7 @@ fn import_proxy_payload(
     provider: &str,
     payload: YamlValue,
     filter: &ProviderFilter,
+    default_fingerprint: Option<UtlsFingerprint>,
     collector: &mut OutboundCollector,
     names: &mut BTreeMap<String, String>,
 ) -> Result<Vec<ProviderMember>, String> {
@@ -358,7 +370,7 @@ fn import_proxy_payload(
         if collector.outbounds.len() >= cfw_singbox_config::MAX_OUTBOUNDS {
             return Err("provider nodes exceed the supported outbound capacity".into());
         }
-        let (_, outbound) = convert_proxy(collector, fields)?;
+        let (_, outbound) = convert_proxy(collector, fields, default_fingerprint)?;
         let actual = outbound["tag"]
             .as_str()
             .ok_or("converted provider node has no tag")?
@@ -508,6 +520,7 @@ pub(crate) fn replacement(
                     &provider.name,
                     payload,
                     &provider.filter,
+                    provider.default_utls_fingerprint,
                     &mut collector,
                     &mut names,
                 )?;

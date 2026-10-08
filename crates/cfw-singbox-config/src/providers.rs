@@ -6,7 +6,7 @@ use std::fmt;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::profile::{ProfileDocument, ProfileOutbound};
+use crate::profile::{ProfileDocument, ProfileOutbound, UtlsFingerprint};
 use crate::routing::{ProfileRule, RuleKind};
 use crate::{ConfigError, ValidatedSingBoxProfile};
 
@@ -157,6 +157,11 @@ pub struct ProxyProvider {
     pub filter: ProviderFilter,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<ProviderHealthCheck>,
+    /// uTLS fingerprint for TLS members without their own: the source
+    /// document's Mihomo `global-client-fingerprint`. The document is not
+    /// kept, so a provider refresh applies the stored value again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_utls_fingerprint: Option<UtlsFingerprint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

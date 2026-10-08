@@ -775,5 +775,19 @@
 ,
   "Reconfirming…": "Reconfirming…",
   "Confirming the core's state": "Confirming the core's state",
-  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer."
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.",
+  "Selected, but invalid: {error}": "Selected, but invalid: {error}",
+  "Invalid: {error}": "Invalid: {error}",
+  "This profile fails validation and cannot be selected or started.": "This profile fails validation and cannot be selected or started.",
+  "Show subscription URL": "Show subscription URL",
+  "Delete this invalid profile": "Delete this invalid profile",
+  "{name} has no subscription URL": "{name} has no subscription URL",
+  "Import this URL again to replace “{name}”, then delete the invalid profile.": "Import this URL again to replace “{name}”, then delete the invalid profile.",
+  "Delete “{name}”? It is selected but fails validation; afterwards no profile is selected.": "Delete “{name}”? It is selected but fails validation; afterwards no profile is selected.",
+  "Delete “{name}”? It fails validation and cannot be used.": "Delete “{name}”? It fails validation and cannot be used.",
+  "Could not read the subscription URL of {name}: {error}": "Could not read the subscription URL of {name}: {error}",
+  "{action} is unavailable: the selected profile “{name}” is invalid: {error}": "{action} is unavailable: the selected profile “{name}” is invalid: {error}",
+  "the selected profile “{name}” is invalid: {error}": "the selected profile “{name}” is invalid: {error}",
+  "Subscription URL": "Subscription URL",
+  "Credential cleanup is unavailable: {error}": "Credential cleanup is unavailable: {error}"
 }

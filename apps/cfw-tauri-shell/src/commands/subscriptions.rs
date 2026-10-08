@@ -339,7 +339,8 @@ pub(crate) async fn save_profile_text(
         }
         let previous = mutation
             .selected_profile()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            .into_valid();
         let active = previous.as_ref().is_some_and(|prior| prior.record.id == id);
         let (profile, reset_proxy_groups) = validated_profile(&body, &settings)?
             .inherit_proxy_selections(&stored.profile)
@@ -553,7 +554,8 @@ async fn prepare_profile_import(
     };
     let previous = mutation
         .selected_profile()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .into_valid();
     let profile_id = profile_id.to_owned();
     let name = name.map(ToOwned::to_owned);
     let source_url = source_url.map(ToOwned::to_owned);
@@ -679,7 +681,8 @@ pub(super) async fn prepare_subscription_update_attempt(
     .map_err(SubscriptionUpdateCommitError::Credential)?;
     let previous = mutation
         .selected_profile()
-        .map_err(|error| SubscriptionUpdateCommitError::Mutation(error.to_string()))?;
+        .map_err(|error| SubscriptionUpdateCommitError::Mutation(error.to_string()))?
+        .into_valid();
     let activate = previous
         .as_ref()
         .is_some_and(|prior| prior.record.id == *profile_id);

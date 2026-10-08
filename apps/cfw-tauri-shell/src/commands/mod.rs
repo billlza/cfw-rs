@@ -27,7 +27,7 @@ pub(crate) use profiles::{
     ManagedProfiles, build_managed_profiles, cancel_credential_gc, commit_credential_gc,
     delete_profile, preview_credential_gc, profile_credential_presence,
     profile_credential_requirements, profiles_snapshot, provision_profile_credentials,
-    select_profile,
+    read_profile_source_url, select_profile,
 };
 pub(crate) use runtime::{
     apply_active_profile, geoip_database_status, read_runtime_config_text, update_geoip_database,

@@ -775,5 +775,19 @@
 ,
   "Reconfirming…": "重新確認中…",
   "Confirming the core's state": "正在確認核心狀態",
-  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "背景服務沒有及時回應。核心與網路設定都保持原樣；服務一回應，這則提示會自動消失。"
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "背景服務沒有及時回應。核心與網路設定都保持原樣；服務一回應，這則提示會自動消失。",
+  "Selected, but invalid: {error}": "已選取，但無效：{error}",
+  "Invalid: {error}": "無效：{error}",
+  "This profile fails validation and cannot be selected or started.": "此設定檔未通過驗證，無法選取或啟動。",
+  "Show subscription URL": "顯示訂閱 URL",
+  "Delete this invalid profile": "刪除此無效的設定檔",
+  "{name} has no subscription URL": "{name}沒有訂閱 URL",
+  "Import this URL again to replace “{name}”, then delete the invalid profile.": "請重新匯入此 URL 以取代「{name}」，然後刪除此無效的設定檔。",
+  "Delete “{name}”? It is selected but fails validation; afterwards no profile is selected.": "要刪除「{name}」嗎？它已被選取但未通過驗證；刪除後將不會選取任何設定檔。",
+  "Delete “{name}”? It fails validation and cannot be used.": "要刪除「{name}」嗎？它未通過驗證，無法使用。",
+  "Could not read the subscription URL of {name}: {error}": "無法讀取{name}的訂閱 URL：{error}",
+  "{action} is unavailable: the selected profile “{name}” is invalid: {error}": "{action}無法使用：所選取的設定檔「{name}」無效：{error}",
+  "the selected profile “{name}” is invalid: {error}": "所選取的設定檔「{name}」無效：{error}",
+  "Subscription URL": "訂閱 URL",
+  "Credential cleanup is unavailable: {error}": "無法清理憑證：{error}"
 }

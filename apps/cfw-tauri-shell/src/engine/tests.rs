@@ -18,8 +18,8 @@ use super::maintenance::{
 };
 use super::{
     ActiveControllerBinding, EngineEndpointBinding, StagedEndpointRebind, commit_endpoint_rebind,
-    read_active_controller_access, record_endpoint_runtime, selected_profile_for_mode,
-    set_mode_with_endpoint_rebind,
+    engine_snapshot_is_off, read_active_controller_access, record_endpoint_runtime,
+    selected_profile_for_mode, set_mode_with_endpoint_rebind,
 };
 use crate::engine::endpoints::{CANDIDATE_COUNT, EndpointCandidateCursor};
 use cfw_application::{EngineControllerAccess, EngineModeCoordinator};
@@ -360,6 +360,87 @@ fn non_off_mode_rejects_absent_or_stale_selection_but_off_remains_available() {
         selected_profile_for_mode(&repository, EngineMode::SystemProxy),
         Err(ProfileError::SelectedProfileMissing(id)) if id == imported.id
     ));
+    assert_eq!(
+        selected_profile_for_mode(&repository, EngineMode::Off).expect("Off profile"),
+        (
+            "00000000-0000-4000-8000-000000000000".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+        )
+    );
+}
+
+#[test]
+fn only_an_engine_requested_and_observed_off_counts_as_off() {
+    assert!(engine_snapshot_is_off(&EngineSnapshot::default()));
+    for (desired_mode, state) in [
+        (EngineMode::SystemProxy, EngineState::Off),
+        (EngineMode::LocalProxy, EngineState::Off),
+        (EngineMode::TunnelSystemProxy, EngineState::Off),
+        (
+            EngineMode::Off,
+            EngineState::ProxyStarting { generation: 1 },
+        ),
+        (
+            EngineMode::Off,
+            EngineState::ProxyStopping { generation: 1 },
+        ),
+        (
+            EngineMode::Off,
+            EngineState::TunnelStopping { generation: 1 },
+        ),
+        (
+            EngineMode::Off,
+            EngineState::Failed {
+                generation: 1,
+                target: EngineMode::Off,
+                error: "native startup reconciliation is pending".into(),
+                recheck_pending: true,
+            },
+        ),
+        (
+            EngineMode::Tunnel,
+            EngineState::TunnelStarting { generation: 1 },
+        ),
+    ] {
+        assert!(
+            !engine_snapshot_is_off(&EngineSnapshot {
+                desired_mode,
+                state: state.clone(),
+                ..EngineSnapshot::default()
+            }),
+            "{desired_mode:?} {state:?}"
+        );
+    }
+}
+
+#[test]
+fn non_off_mode_refuses_a_selected_profile_that_fails_validation_without_a_fallback() {
+    let root = tempfile::tempdir().expect("temporary repository");
+    let repository = ProfileRepository::new(root.path().join("profiles"));
+    repository
+        .import(Some("Other"), &ValidatedSingBoxProfile::direct())
+        .expect("import other profile");
+    let invalid_id = crate::profile_fixtures::store_selected_reality_without_utls(
+        root.path().join("profiles").as_path(),
+        &repository,
+    );
+    assert_eq!(
+        repository.snapshot().expect("snapshot").invalid_profiles[0].id,
+        invalid_id
+    );
+    for mode in [EngineMode::SystemProxy, EngineMode::Tunnel] {
+        let error = selected_profile_for_mode(&repository, mode).expect_err("refused");
+        assert!(
+            matches!(&error, ProfileError::StoredProfileInvalid { id, .. } if *id == invalid_id),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "stored profile \"Reality node\" ({invalid_id}) is invalid: unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS"
+            )
+        );
+    }
     assert_eq!(
         selected_profile_for_mode(&repository, EngineMode::Off).expect("Off profile"),
         (

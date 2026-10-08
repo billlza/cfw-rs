@@ -1171,6 +1171,11 @@ function runtimeProjectionActionAllowed(action, source = "profile") {
     appendLog("error", source, t("{action} is unavailable because the profile repository could not be read: {profilesUnavailableReason}", { action: action, profilesUnavailableReason: state.profilesUnavailableReason }));
     return false;
   }
+  const invalid = selectedInvalidProfile();
+  if (invalid) {
+    appendLog("error", source, t("{action} is unavailable: the selected profile “{name}” is invalid: {error}", { action: action, name: invalid.name, error: invalid.error }));
+    return false;
+  }
   if (!state.profiles.some((profile) => profile.active === true)) {
     appendLog("info", source, t("{action} requires a selected profile", { action: action }));
     return false;
@@ -1527,6 +1532,15 @@ function syncNativeProfileMenu() {
   });
 }
 
+/// The profile a dialog acts on. Only deletion and showing its subscription
+/// URL may name an invalid profile.
+function dialogProfile(dialog) {
+  if (!dialog.id) return null;
+  const invalid = dialog.kind === "delete-invalid" || dialog.kind === "invalid-profile-source";
+  const profiles = invalid ? state.invalidProfiles : state.profiles;
+  return profiles.find((item) => item.id === dialog.id) ?? null;
+}
+
 /// The dialogs that only ask or inform, described once so the page markup and
 /// the native panel cannot drift apart. A button's `activate` is the confirm
 /// path its web button runs.
@@ -1535,6 +1549,18 @@ function promptDialogContent(dialog, profile) {
     return {
       title: t("Delete profile"),
       message: t("Delete “{name}”? This removes the managed profile from the repository.", { name: profile.name }),
+      buttons: [
+        { id: "cancel", title: t("No"), role: "cancel" },
+        { id: "confirm", title: t("Yes"), role: "destructive", activate: () => confirmProfileDeletion(dialog, profile.id) },
+      ],
+    };
+  }
+  if (profile && dialog.kind === "delete-invalid") {
+    return {
+      title: t("Delete profile"),
+      message: profile.selected
+        ? t("Delete “{name}”? It is selected but fails validation; afterwards no profile is selected.", { name: profile.name })
+        : t("Delete “{name}”? It fails validation and cannot be used.", { name: profile.name }),
       buttons: [
         { id: "cancel", title: t("No"), role: "cancel" },
         { id: "confirm", title: t("Yes"), role: "destructive", activate: () => confirmProfileDeletion(dialog, profile.id) },
@@ -1578,7 +1604,8 @@ function closeGlassDialog(dialog) {
 
 /// A refused deletion keeps its dialog open and is reported in the log.
 async function confirmProfileDeletion(dialog, id) {
-  const profile = state.profiles.find((item) => item.id === id);
+  const profile = state.profiles.find((item) => item.id === id)
+    ?? state.invalidProfiles.find((item) => item.id === id);
   try {
     const deleted = await invoke("delete_profile", { id });
     await loadProfilesSnapshot();
@@ -1590,6 +1617,9 @@ async function confirmProfileDeletion(dialog, id) {
     );
   } catch (error) {
     appendLog("error", "profile", t("Delete failed: {error}", { error: errorText(error) }));
+    // A deletion that cleared the selection may still have failed to remove
+    // the profile; the list is re-read rather than assumed unchanged.
+    await loadProfilesSnapshot();
   }
   renderPage();
 }
@@ -1646,7 +1676,7 @@ function renderGlassOverlays() {
   let nativePrompt = null;
   if (state.glassDialog) {
     const dialog = state.glassDialog;
-    const profile = dialog.id ? state.profiles.find((item) => item.id === dialog.id) : null;
+    const profile = dialogProfile(dialog);
     const prompt = promptDialogContent(dialog, profile);
     nativePrompt = prompt && nativePromptDialog.enabled() ? promptDialogFrame(prompt) : null;
     if (nativePrompt) {
@@ -1690,7 +1720,7 @@ function renderGlassOverlays() {
           </div>
         </div>
       `);
-    } else if (profile && dialog.kind === "delete") {
+    } else if (profile && (dialog.kind === "delete" || dialog.kind === "delete-invalid")) {
       const [cancel, confirm] = prompt.buttons;
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
@@ -1722,6 +1752,19 @@ function renderGlassOverlays() {
         <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="${escapeHtml(t("Projected configuration preview"))}">
           <h3>${escapeHtml(t("Projected configuration"))}</h3>
           <p class="glass-dialog-copy">${escapeHtml(t("The selected profile projected for the current mode. The app-owned controller secret is redacted."))}</p>
+          <pre class="glass-code">${escapeHtml(dialog.payload ?? "")}</pre>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button>
+            <button type="button" class="glass-btn" data-glass-copy-text>${escapeHtml(t("Copy"))}</button>
+          </div>
+        </div>
+      `);
+    } else if (profile && dialog.kind === "invalid-profile-source") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="${escapeHtml(t("Subscription URL"))}">
+          <h3>${escapeHtml(t("Subscription URL"))}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(t("Import this URL again to replace “{name}”, then delete the invalid profile.", { name: profile.name }))}</p>
           <pre class="glass-code">${escapeHtml(dialog.payload ?? "")}</pre>
           <div class="glass-dialog-actions">
             <button type="button" class="glass-btn ghost" data-glass-dismiss>${escapeHtml(t("Close"))}</button>
@@ -2347,7 +2390,7 @@ function renderProfiles() {
             <p>${escapeHtml(repositoryReason)}</p>
             <button data-action="reload-dashboard">${escapeHtml(t("Reload profile repository"))}</button>
           </div>
-        ` : state.profiles.length ? state.profiles.map((profile) => `
+        ` : state.profiles.length || state.invalidProfiles.length ? state.profiles.map((profile) => `
           <article class="cfw-profile-card ${profile.active ? "active" : ""}" data-profile-card="${escapeHtml(profile.id)}" ${profile.active ? 'aria-current="true"' : ""}>
             <i></i>
             <div class="profile-card-main">
@@ -2358,7 +2401,7 @@ function renderProfiles() {
               <button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="${escapeHtml(t("Open this profile"))}">‹›</button>
             </div>
           </article>
-        `).join("") : `
+        `).join("") + state.invalidProfiles.map(renderInvalidProfileCard).join("") : `
           <div class="empty-profile-state">
             <p>${escapeHtml(t("No profiles found in the managed profiles directory."))}</p>
             <button data-action="migrate-legacy-profiles">${escapeHtml(t("Migrate selected legacy subscription"))}</button>
@@ -2368,6 +2411,47 @@ function renderProfiles() {
       ${renderProfileInspector()}
     </div>
   `;
+}
+
+/// A stored profile that fails current validation: shown with the validator
+/// message, never selectable, and offering only Delete and, for a
+/// subscription, copying its URL so it can be imported again.
+function renderInvalidProfileCard(profile) {
+  const id = escapeHtml(profile.id);
+  const reason = profile.selected
+    ? t("Selected, but invalid: {error}", { error: profile.error })
+    : t("Invalid: {error}", { error: profile.error });
+  return `
+    <article class="cfw-profile-card invalid" data-invalid-profile-card="${id}" ${profile.selected ? 'aria-current="true"' : ""} title="${escapeHtml(t("This profile fails validation and cannot be selected or started."))}">
+      <i></i>
+      <div class="profile-card-main">
+        <h3>${escapeHtml(profile.name)}</h3>
+        <p>${escapeHtml(profileSourceLabel(profile))} (${escapeHtml(profile.updated)})</p>
+        <p class="profile-card-invalid" role="note">${escapeHtml(reason)}</p>
+      </div>
+      <div class="profile-card-primary">
+        ${profile.sourceKind === "subscription" ? `<button data-invalid-profile-action="show-source-url" data-profile-id="${id}" title="${escapeHtml(t("Show subscription URL"))}" aria-label="${escapeHtml(t("Show subscription URL"))}">⧉</button>` : ""}
+        <button data-invalid-profile-action="delete" data-profile-id="${id}" title="${escapeHtml(t("Delete this invalid profile"))}" aria-label="${escapeHtml(t("Delete this invalid profile"))}">✕</button>
+      </div>
+    </article>
+  `;
+}
+
+/// The selected stored profile when it fails validation.
+function selectedInvalidProfile() {
+  return state.invalidProfiles.find((profile) => profile.selected);
+}
+
+/// The invalid subscription workaround imports its URL again. The URL is read
+/// on request and shown in a dialog whose Copy button writes the clipboard
+/// within its own click; it never reaches the list or the log.
+async function showInvalidProfileSource(id) {
+  const profile = state.invalidProfiles.find((item) => item.id === id);
+  if (!profile) throw new Error(t("profile not found: {id}", { id: id }));
+  const url = await invoke("read_profile_source_url", { id });
+  if (typeof url !== "string") throw new Error(t("{name} has no subscription URL", { name: profile.name }));
+  state.glassDialog = { kind: "invalid-profile-source", id, payload: url };
+  renderGlassOverlays();
 }
 
 function profileSourceLabel(profile) {
@@ -2887,6 +2971,32 @@ function bindPageEvents() {
         appendLog("error", "profile", t("{action} failed for {id}: {error}", { action: action, id: id, error: errorText(error) }));
       }
       renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-invalid-profile-action]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const action = event.currentTarget.dataset.invalidProfileAction;
+      const id = event.currentTarget.dataset.profileId;
+      switch (action) {
+        case "delete":
+          state.glassDialog = { kind: "delete-invalid", id };
+          renderGlassOverlays();
+          return;
+        case "show-source-url": {
+          const name = state.invalidProfiles.find((item) => item.id === id)?.name ?? id;
+          try {
+            await showInvalidProfileSource(id);
+          } catch (error) {
+            appendLog("error", "profile", t("Could not read the subscription URL of {name}: {error}", { name: name, error: errorText(error) }));
+          }
+          renderPage();
+          return;
+        }
+        default:
+          appendLog("error", "profile", t("unknown profile menu action: {action}", { action: action }));
+      }
     });
   });
 
@@ -3649,7 +3759,15 @@ export async function handleAction(action) {
       renderGlassOverlays();
       return;
     } catch (error) {
+      // A refusal, such as invalid profiles still listed, says what to do
+      // next; it is shown where the cleanup was asked for, not only logged.
       appendLog("error", "credentials", errorText(error));
+      state.glassDialog = {
+        kind: "info",
+        payload: { title: t("Unused credentials"), body: t("Credential cleanup is unavailable: {error}", { error: errorText(error) }) },
+      };
+      renderGlassOverlays();
+      return;
     }
   }
   if (action === "update-profile-from-inspector") {
@@ -4164,6 +4282,17 @@ async function loadRuntimeProjection() {
     };
     return false;
   }
+  const invalid = selectedInvalidProfile();
+  if (invalid) {
+    state.projection = {
+      mixedPort: null,
+      listenAddress: null,
+      controller: null,
+      logLevel: null,
+      error: t("the selected profile “{name}” is invalid: {error}", { name: invalid.name, error: invalid.error }),
+    };
+    return false;
+  }
   if (!state.profiles.some((profile) => profile.active === true)) {
     state.projection = {
       mixedPort: null,
@@ -4373,15 +4502,28 @@ async function loadSavedProfilePolicy() {
   }
 }
 
+/// The repository lists validated profiles and, separately, stored profiles
+/// that fail current validation. A malformed snapshot is a repository error.
+function parseProfilesSnapshot(snapshot) {
+  if (!Array.isArray(snapshot?.profiles) || !Array.isArray(snapshot?.invalid_profiles)) {
+    throw new TypeError("profile snapshot is malformed");
+  }
+  for (const profile of [...snapshot.profiles, ...snapshot.invalid_profiles]) {
+    if (profile.source_kind !== "local" && profile.source_kind !== "subscription") {
+      throw new TypeError("profile snapshot has an invalid source kind");
+    }
+  }
+  for (const profile of snapshot.invalid_profiles) {
+    if (typeof profile.error !== "string" || !profile.error || typeof profile.selected !== "boolean") {
+      throw new TypeError("an invalid profile in the snapshot has no validation error");
+    }
+  }
+  return snapshot;
+}
+
 async function loadProfilesSnapshot() {
   try {
-    const profiles = await invoke("profiles_snapshot");
-    if (!Array.isArray(profiles)) throw new TypeError("profile snapshot is not an array");
-    for (const profile of profiles) {
-      if (profile.source_kind !== "local" && profile.source_kind !== "subscription") {
-        throw new TypeError("profile snapshot has an invalid source kind");
-      }
-    }
+    const { profiles, invalid_profiles: invalidProfiles } = parseProfilesSnapshot(await invoke("profiles_snapshot"));
     const previousProfileId = state.profiles.find((profile) => profile.active)?.id ?? null;
     const known = new Map(state.profiles.map((profile) => [profile.id, profile]));
     state.profiles = profiles.map((profile) => ({
@@ -4399,6 +4541,16 @@ async function loadProfilesSnapshot() {
       sourceUrl: known.get(profile.id)?.sourceUrl,
       sourceError: known.get(profile.id)?.sourceError ?? null,
     }));
+    state.invalidProfiles = invalidProfiles.map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      updated: profile.updated_epoch_secs
+        ? formatRelativeUpdated(profile.updated_epoch_secs)
+        : "unknown",
+      sourceKind: profile.source_kind,
+      selected: profile.selected,
+      error: profile.error,
+    }));
     if (previousProfileId !== (state.profiles.find((profile) => profile.active)?.id ?? null)) providerSelectionChanged();
     state.profilesUnavailableReason = null;
     await loadSavedProfilePolicy();
@@ -4409,6 +4561,7 @@ async function loadProfilesSnapshot() {
     return true;
   } catch (error) {
     state.profiles = [];
+    state.invalidProfiles = [];
     providerSelectionChanged();
     runtime.savedProfilePolicyEpoch += 1;
     state.savedProfilePolicy = null;

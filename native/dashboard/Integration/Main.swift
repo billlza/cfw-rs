@@ -505,12 +505,13 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
     case "select_profile":
       guard let id = args["id"] as? String else { throw Failure("Missing fixture profile id") }
       _ = try selectedProfile(id)
-      let profiles = try profileList().map { profile -> [String: Any] in
+      var snapshot = try profileSnapshot()
+      snapshot["profiles"] = try profileList().map { profile -> [String: Any] in
         var copy = profile
         copy["active"] = profile["id"] as? String == id
         return copy
       }
-      fixtures["profiles_snapshot"] = profiles
+      fixtures["profiles_snapshot"] = snapshot
       record("fixture_profile_select", ["id": id])
       return NSNull()
     default:
@@ -553,8 +554,16 @@ private final class IntegrationHost: NSObject, NSApplicationDelegate, NSWindowDe
     guard let value = fixtures[command] else { throw Failure("Missing fixture \(command)") }
     return value
   }
+  private func profileSnapshot() throws -> [String: Any] {
+    guard let value = fixtures["profiles_snapshot"] as? [String: Any],
+      value["invalid_profiles"] is [[String: Any]]
+    else {
+      throw Failure("Invalid fixture profile snapshot")
+    }
+    return value
+  }
   private func profileList() throws -> [[String: Any]] {
-    guard let value = fixtures["profiles_snapshot"] as? [[String: Any]] else {
+    guard let value = try profileSnapshot()["profiles"] as? [[String: Any]] else {
       throw Failure("Invalid fixture profiles")
     }
     return value

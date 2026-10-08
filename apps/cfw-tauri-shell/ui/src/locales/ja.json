@@ -775,5 +775,19 @@
 ,
   "Reconfirming…": "再確認中…",
   "Confirming the core's state": "コアの状態を確認しています",
-  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "バックグラウンドサービスが時間内に応答しませんでした。コアとネットワーク設定はそのままです。応答があり次第、この通知は自動的に消えます。"
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "バックグラウンドサービスが時間内に応答しませんでした。コアとネットワーク設定はそのままです。応答があり次第、この通知は自動的に消えます。",
+  "Selected, but invalid: {error}": "選択中ですが無効です：{error}",
+  "Invalid: {error}": "無効：{error}",
+  "This profile fails validation and cannot be selected or started.": "このプロファイルは検証に失敗したため、選択も起動もできません。",
+  "Show subscription URL": "サブスクリプション URL を表示",
+  "Delete this invalid profile": "この無効なプロファイルを削除",
+  "{name} has no subscription URL": "{name} にはサブスクリプション URL がありません",
+  "Import this URL again to replace “{name}”, then delete the invalid profile.": "この URL をもう一度インポートして「{name}」を置き換えてから、無効なプロファイルを削除してください。",
+  "Delete “{name}”? It is selected but fails validation; afterwards no profile is selected.": "「{name}」を削除しますか？選択中ですが検証に失敗しています。削除後はどのプロファイルも選択されません。",
+  "Delete “{name}”? It fails validation and cannot be used.": "「{name}」を削除しますか？検証に失敗しているため使用できません。",
+  "Could not read the subscription URL of {name}: {error}": "{name} のサブスクリプション URL を読み取れませんでした：{error}",
+  "{action} is unavailable: the selected profile “{name}” is invalid: {error}": "{action} は利用できません。選択中のプロファイル「{name}」は無効です：{error}",
+  "the selected profile “{name}” is invalid: {error}": "選択中のプロファイル「{name}」は無効です：{error}",
+  "Subscription URL": "サブスクリプション URL",
+  "Credential cleanup is unavailable: {error}": "認証情報のクリーンアップは利用できません：{error}"
 }

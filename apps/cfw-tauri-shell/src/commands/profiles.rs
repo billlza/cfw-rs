@@ -11,8 +11,8 @@ use cfw_engine_api::{
     CredentialVaultError, CredentialVaultProvisioner, CredentialVaultReceipt,
 };
 use cfw_profiles::{
-    ProfileCredentialSnapshot, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
-    ProfileSourceKind,
+    InvalidProfileRecord, InvalidSelection, ProfileCredentialSnapshot, ProfileRecord,
+    ProfileRepository, ProfileRepositorySnapshot, ProfileSourceKind,
 };
 use cfw_singbox_config::{CredentialRef, CredentialSecret};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,51 @@ impl UiProfileRecord {
             source_kind: record.source_kind,
         }
     }
+}
+
+/// A stored profile that fails current validation. It is shown with its
+/// validator message so it can be deleted; `selected` means the selection
+/// names it, never that it can start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiInvalidProfileRecord {
+    id: String,
+    name: String,
+    selected: bool,
+    updated_epoch_secs: u64,
+    source_kind: ProfileSourceKind,
+    error: String,
+}
+
+impl UiInvalidProfileRecord {
+    fn from_record(record: InvalidProfileRecord, selected: bool) -> Self {
+        Self {
+            id: record.id,
+            name: record.name,
+            selected,
+            updated_epoch_secs: record.created_epoch_secs,
+            source_kind: record.source_kind,
+            error: listed_error(&record.error),
+        }
+    }
+}
+
+/// A card shows at most this many characters of a validator message.
+const MAX_LISTED_ERROR_CHARS: usize = 512;
+
+/// Validator messages are short, but one quoting a document value is bounded
+/// on the card and marked as cut.
+fn listed_error(error: &cfw_singbox_config::ConfigError) -> String {
+    let text = error.to_string();
+    match text.char_indices().nth(MAX_LISTED_ERROR_CHARS) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiProfileSnapshot {
+    profiles: Vec<UiProfileRecord>,
+    invalid_profiles: Vec<UiInvalidProfileRecord>,
 }
 
 #[derive(Debug)]
@@ -148,11 +193,27 @@ pub(crate) fn build_managed_profiles(
 #[tauri::command]
 pub(crate) async fn profiles_snapshot(
     profiles: State<'_, ManagedProfiles>,
-) -> Result<Vec<UiProfileRecord>, String> {
+) -> Result<UiProfileSnapshot, String> {
     read_repository(profiles.repository(), |repository| {
         repository
             .snapshot()
-            .map(snapshot_records)
+            .map(snapshot_view)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+/// Subscription URL of one stored profile, including one that fails
+/// validation, so its source can be imported again before the entry is
+/// deleted. The profile list never carries URLs; this is one explicit read.
+#[tauri::command]
+pub(crate) async fn read_profile_source_url(
+    profiles: State<'_, ManagedProfiles>,
+    id: String,
+) -> Result<Option<String>, String> {
+    read_repository(profiles.repository(), move |repository| {
+        repository
+            .source_url(&id)
             .map_err(|error| error.to_string())
     })
     .await
@@ -472,7 +533,8 @@ pub(crate) async fn select_profile(
         let stored = mutation.profile(&id).map_err(|error| error.to_string())?;
         let previous = mutation
             .selected_profile()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            .into_valid();
         Ok(cfw_application::ProfileChange {
             profile_id: id.clone(),
             profile: stored.profile,
@@ -495,25 +557,58 @@ pub(crate) async fn delete_profile(
     profiles: State<'_, ManagedProfiles>,
     id: String,
 ) -> Result<bool, String> {
-    let _maintenance = engine
+    let maintenance = engine
         .reserve_maintenance()
         .map_err(|error| error.to_string())?;
+    // Nothing can run the selected profile only while the engine is Off, and
+    // the held reservation keeps it Off for the whole deletion.
+    let invalid_selection = if engine.is_off_under(&maintenance) {
+        InvalidSelection::Clear
+    } else {
+        InvalidSelection::Keep
+    };
     let repository = profiles.repository.clone();
-    crate::startup_state::prepare_off_main(move || {
-        repository.delete(&id).map_err(|error| error.to_string())
+    let deleted = crate::startup_state::prepare_off_main(move || {
+        repository
+            .delete(&id, invalid_selection)
+            .map_err(deletion_error)
     })
-    .await
+    .await;
+    drop(maintenance);
+    deleted
 }
 
-fn snapshot_records(snapshot: ProfileRepositorySnapshot) -> Vec<UiProfileRecord> {
-    snapshot
-        .profiles
-        .into_iter()
-        .map(|record| {
-            let active = snapshot.selected_profile_id.as_deref() == Some(record.id.as_str());
-            UiProfileRecord::from_record(record, active)
-        })
-        .collect()
+/// The repository keeps an invalid selection only when the engine was not
+/// proven Off, so that refusal says how to go on.
+fn deletion_error(error: cfw_profiles::ProfileError) -> String {
+    match error {
+        cfw_profiles::ProfileError::InvalidSelectionKept(profile) => format!(
+            "the selected profile {profile} is invalid; stop the core, or select another profile, before deleting it"
+        ),
+        error => error.to_string(),
+    }
+}
+
+fn snapshot_view(snapshot: ProfileRepositorySnapshot) -> UiProfileSnapshot {
+    let selected = snapshot.selected_profile_id.as_deref();
+    UiProfileSnapshot {
+        profiles: snapshot
+            .profiles
+            .into_iter()
+            .map(|record| {
+                let active = selected == Some(record.id.as_str());
+                UiProfileRecord::from_record(record, active)
+            })
+            .collect(),
+        invalid_profiles: snapshot
+            .invalid_profiles
+            .into_iter()
+            .map(|record| {
+                let selected = selected == Some(record.id.as_str());
+                UiInvalidProfileRecord::from_record(record, selected)
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -690,35 +785,139 @@ mod tests {
         assert_eq!(value["source_kind"], "subscription");
     }
 
+    fn invalid_record(id: &str) -> InvalidProfileRecord {
+        InvalidProfileRecord {
+            id: id.into(),
+            name: "Reality node".into(),
+            created_epoch_secs: 3,
+            source_kind: ProfileSourceKind::Subscription,
+            error: cfw_singbox_config::ConfigError::UnsupportedPolicyShape {
+                path: "$.outbounds[0].tls.utls".into(),
+                reason: "Reality requires uTLS".into(),
+            },
+        }
+    }
+
+    fn valid_records(selected_id: &str, other_id: &str) -> Vec<ProfileRecord> {
+        vec![
+            ProfileRecord {
+                id: selected_id.into(),
+                name: "Selected".into(),
+                bytes: 10,
+                digest: "01".repeat(32),
+                created_epoch_secs: 1,
+                source_kind: ProfileSourceKind::Local,
+            },
+            ProfileRecord {
+                id: other_id.into(),
+                name: "Other".into(),
+                bytes: 11,
+                digest: "02".repeat(32),
+                created_epoch_secs: 2,
+                source_kind: ProfileSourceKind::Subscription,
+            },
+        ]
+    }
+
     #[test]
     fn snapshot_marks_only_the_digest_bound_selection_active() {
-        let selected_id = "34db18b6-9903-4e9f-8854-15648e19e4f3".to_owned();
-        let other_id = "62b37965-02bb-45a8-a1a5-3b617c5cbd17".to_owned();
-        let records = snapshot_records(ProfileRepositorySnapshot {
-            profiles: vec![
-                ProfileRecord {
-                    id: selected_id.clone(),
-                    name: "Selected".into(),
-                    bytes: 10,
-                    digest: "01".repeat(32),
-                    created_epoch_secs: 1,
-                    source_kind: ProfileSourceKind::Local,
-                },
-                ProfileRecord {
-                    id: other_id,
-                    name: "Other".into(),
-                    bytes: 11,
-                    digest: "02".repeat(32),
-                    created_epoch_secs: 2,
-                    source_kind: ProfileSourceKind::Subscription,
-                },
-            ],
-            selected_profile_id: Some(selected_id),
+        let selected_id = "34db18b6-9903-4e9f-8854-15648e19e4f3";
+        let other_id = "62b37965-02bb-45a8-a1a5-3b617c5cbd17";
+        let invalid_id = "3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d";
+        let view = snapshot_view(ProfileRepositorySnapshot {
+            profiles: valid_records(selected_id, other_id),
+            invalid_profiles: vec![invalid_record(invalid_id)],
+            selected_profile_id: Some(selected_id.into()),
         });
 
-        assert_eq!(records.len(), 2);
-        assert!(records[0].active);
-        assert!(!records[1].active);
+        assert_eq!(view.profiles.len(), 2);
+        assert!(view.profiles[0].active);
+        assert!(!view.profiles[1].active);
+        assert_eq!(view.invalid_profiles.len(), 1);
+        assert!(!view.invalid_profiles[0].selected);
+    }
+
+    #[test]
+    fn a_selected_invalid_profile_is_reported_selected_and_no_valid_profile_is_active() {
+        let invalid_id = "3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d";
+        let view = snapshot_view(ProfileRepositorySnapshot {
+            profiles: valid_records(
+                "34db18b6-9903-4e9f-8854-15648e19e4f3",
+                "62b37965-02bb-45a8-a1a5-3b617c5cbd17",
+            ),
+            invalid_profiles: vec![invalid_record(invalid_id)],
+            selected_profile_id: Some(invalid_id.into()),
+        });
+
+        assert!(view.profiles.iter().all(|record| !record.active));
+        assert!(view.invalid_profiles[0].selected);
+        let value = serde_json::to_value(&view).expect("serialize snapshot");
+        assert_eq!(
+            value
+                .as_object()
+                .expect("snapshot object")
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["invalid_profiles".to_string(), "profiles".to_string()])
+        );
+        let invalid = &value["invalid_profiles"][0];
+        assert_eq!(
+            invalid
+                .as_object()
+                .expect("invalid record object")
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "error".to_string(),
+                "id".to_string(),
+                "name".to_string(),
+                "selected".to_string(),
+                "source_kind".to_string(),
+                "updated_epoch_secs".to_string(),
+            ])
+        );
+        assert_eq!(
+            invalid["error"],
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS"
+        );
+        assert_eq!(invalid["source_kind"], "subscription");
+        assert_eq!(invalid["updated_epoch_secs"], 3);
+        assert!(!value.to_string().contains("digest"));
+        assert!(!value.to_string().contains("url"));
+    }
+
+    #[test]
+    fn a_kept_invalid_selection_tells_the_user_how_to_delete_it() {
+        assert_eq!(
+            deletion_error(cfw_profiles::ProfileError::InvalidSelectionKept(
+                cfw_profiles::ProfileLabel {
+                    id: "3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d".into(),
+                    name: "Reality node".into(),
+                }
+            )),
+            "the selected profile \"Reality node\" (3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d) is invalid; stop the core, or select another profile, before deleting it"
+        );
+        assert_eq!(
+            deletion_error(cfw_profiles::ProfileError::NoSelectedProfile),
+            "no profile is selected"
+        );
+    }
+
+    #[test]
+    fn a_long_validator_message_is_bounded_on_the_card() {
+        let short = invalid_record("3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d");
+        assert_eq!(
+            UiInvalidProfileRecord::from_record(short, false).error,
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS"
+        );
+        let mut long = invalid_record("3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d");
+        long.error = cfw_singbox_config::ConfigError::InvalidJson("界".repeat(600));
+        let listed = UiInvalidProfileRecord::from_record(long, false).error;
+        assert_eq!(listed.chars().count(), MAX_LISTED_ERROR_CHARS + 1);
+        assert!(listed.starts_with("sing-box profile JSON is invalid: 界"));
+        assert!(listed.ends_with('…'));
     }
 
     #[test]
@@ -918,6 +1117,72 @@ mod tests {
             .expect_err("live references require an existing vault");
         assert_eq!(error, CredentialVaultError::MissingVault.to_string());
         assert_eq!(vault.preview_count.load(Ordering::SeqCst), 1);
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_credential_cleanup_is_refused_while_an_invalid_profile_is_listed() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let profiles_dir = temporary.path().join("profiles");
+        let repository = ProfileRepository::new(&profiles_dir);
+        let invalid_id = crate::profile_fixtures::store_selected_reality_without_utls(
+            &profiles_dir,
+            &repository,
+        );
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: None,
+            orphan_bindings: vec![OrphanGcVault::orphan_binding()],
+            orphan_count: 1,
+            deleted_count: 1,
+            mutate_repository_before_commit: None,
+        };
+
+        let error = execute_previewed_credential_gc(&repository, &vault)
+            .await
+            .expect_err("cleanup keeps the credentials of a listed profile");
+        assert_eq!(
+            error,
+            format!(
+                "credential cleanup needs every stored profile to pass validation; delete the invalid profiles first: \"Reality node\" ({invalid_id})"
+            )
+        );
+        assert_eq!(vault.preview_count.load(Ordering::SeqCst), 0);
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_profile_that_becomes_invalid_after_the_preview_blocks_the_commit() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let profiles_dir = temporary.path().join("profiles");
+        let repository = ProfileRepository::new(&profiles_dir);
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: None,
+            orphan_bindings: vec![OrphanGcVault::orphan_binding()],
+            orphan_count: 1,
+            deleted_count: 1,
+            mutate_repository_before_commit: None,
+        };
+        let preview = prepare_credential_gc(&repository, &vault)
+            .await
+            .expect("preview of a valid repository")
+            .expect("orphan preview");
+        let invalid_id = crate::profile_fixtures::store_selected_reality_without_utls(
+            &profiles_dir,
+            &repository,
+        );
+
+        let error = complete_credential_gc(&repository, &vault, &preview)
+            .await
+            .expect_err("the commit re-reads the repository under its lock");
+        assert!(error.contains(&invalid_id), "{error}");
+        assert!(
+            error.starts_with("credential cleanup needs every stored profile"),
+            "{error}"
+        );
         assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
     }
 

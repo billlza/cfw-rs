@@ -287,13 +287,16 @@ impl ManagedEngine {
                     ProfileControlError::StateUnavailable
                 }
             })?;
-        let snapshot = self.coordinator.snapshot();
-        if snapshot.desired_mode != EngineMode::Off
-            || snapshot.state != cfw_engine_api::EngineState::Off
-        {
+        if !self.is_off_under(&lease) {
             return Err(ProfileControlError::EngineNotOff);
         }
         Ok(lease)
+    }
+
+    /// Whether the engine is Off. While `_held` lives no mode or profile
+    /// change can start, so the answer holds until the lease drops.
+    pub(crate) fn is_off_under(&self, _held: &EngineMaintenanceLease) -> bool {
+        engine_snapshot_is_off(&self.coordinator.snapshot())
     }
 
     /// Converges the engine to Off under an exclusive maintenance reservation.
@@ -877,6 +880,12 @@ fn commit_endpoint_rebind(
     }
     *current = staged.replacement;
     Ok(())
+}
+
+/// Off both as requested and as observed; a pending, failed or stopping
+/// engine is not Off.
+fn engine_snapshot_is_off(snapshot: &EngineSnapshot) -> bool {
+    snapshot.desired_mode == EngineMode::Off && snapshot.state == EngineState::Off
 }
 
 fn selected_profile_for_mode(

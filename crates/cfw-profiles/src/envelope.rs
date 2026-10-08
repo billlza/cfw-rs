@@ -4,7 +4,7 @@ use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cfw_singbox_config::ValidatedSingBoxProfile;
+use cfw_singbox_config::{ConfigError, ValidatedSingBoxProfile, sha256_hex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -36,12 +36,33 @@ struct ProfileEnvelope {
     provider_sources: BTreeMap<String, String>,
 }
 
+/// A stored envelope that passed every file, schema, identity, canonical-form
+/// and digest check.
+pub(crate) enum DecodedEntry {
+    Valid(Box<DecodedEnvelope>),
+    /// The document, its provider sources or its saved proxy selections fail
+    /// current profile validation, for example a node an earlier build
+    /// accepted. It never becomes a [`ValidatedSingBoxProfile`].
+    Invalid(InvalidEnvelope),
+}
+
 pub(crate) struct DecodedEnvelope {
     pub(crate) name: String,
     pub(crate) digest: String,
     pub(crate) created_epoch_secs: u64,
     pub(crate) source_url: Option<String>,
     pub(crate) profile: ValidatedSingBoxProfile,
+}
+
+pub(crate) struct InvalidEnvelope {
+    pub(crate) name: String,
+    pub(crate) digest: String,
+    /// SHA-256 of the canonical envelope bytes, which a pending selected
+    /// replacement records for the entry it replaces or writes.
+    pub(crate) envelope_digest: String,
+    pub(crate) created_epoch_secs: u64,
+    pub(crate) source_url: Option<String>,
+    pub(crate) error: ConfigError,
 }
 
 pub(crate) fn encode(
@@ -84,7 +105,7 @@ pub(crate) fn encode_with_timestamp(
     Ok(bytes)
 }
 
-pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEnvelope, ProfileError> {
+pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEntry, ProfileError> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file()
         || metadata.file_type().is_symlink()
@@ -134,27 +155,65 @@ pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEnvelop
         return Err(ProfileError::NonCanonicalEnvelope(expected_id.to_string()));
     }
 
-    let mut profile = ValidatedSingBoxProfile::parse(&serde_json::to_string(&envelope.profile)?)
-        .map_err(|source| ProfileError::StoredProfileInvalid {
-            id: expected_id.to_string(),
-            source,
-        })?;
-    profile = profile.with_provider_sources(envelope.provider_sources.clone())?;
+    let document = serde_json::to_string(&envelope.profile)?;
+    // The document, its provider sources and its saved proxy selections are
+    // validated together; a failure in any of them lists the entry as
+    // invalid once the stored document is shown to be intact.
+    let profile = match ValidatedSingBoxProfile::parse(&document)
+        .and_then(|profile| profile.with_provider_sources(envelope.provider_sources.clone()))
+    {
+        Ok(profile) => profile,
+        Err(error) => return decode_invalid(expected_id, envelope, &bytes, &document, error),
+    };
     if profile.digest() != envelope.digest {
         return Err(ProfileError::DigestMismatch {
             id: expected_id.to_string(),
         });
     }
-    for (group, selected) in &envelope.proxy_selections {
-        profile = profile.with_selected_outbound(group, selected)?;
-    }
-    Ok(DecodedEnvelope {
+    let profile = match envelope
+        .proxy_selections
+        .iter()
+        .try_fold(profile, |profile, (group, selected)| {
+            profile.with_selected_outbound(group, selected)
+        }) {
+        Ok(profile) => profile,
+        Err(error) => return decode_invalid(expected_id, envelope, &bytes, &document, error),
+    };
+    Ok(DecodedEntry::Valid(Box::new(DecodedEnvelope {
         name: envelope.name,
         digest: envelope.digest,
         created_epoch_secs: envelope.created_epoch_secs,
         source_url: envelope.source_url,
         profile,
-    })
+    })))
+}
+
+/// A document that fails validation has no recomputed digest to compare.
+/// Every envelope this format has written stores the validated document's
+/// canonical text, whose SHA-256 is the stored digest, and the canonical-form
+/// check makes `document` exactly that stored text. The integrity check
+/// therefore hashes it directly: an edited document still fails as a digest
+/// mismatch rather than being listed as invalid.
+fn decode_invalid(
+    expected_id: &str,
+    envelope: ProfileEnvelope,
+    bytes: &[u8],
+    document: &str,
+    error: ConfigError,
+) -> Result<DecodedEntry, ProfileError> {
+    if sha256_hex(document.as_bytes()) != envelope.digest {
+        return Err(ProfileError::DigestMismatch {
+            id: expected_id.to_string(),
+        });
+    }
+    Ok(DecodedEntry::Invalid(InvalidEnvelope {
+        name: envelope.name,
+        digest: envelope.digest,
+        envelope_digest: sha256_hex(bytes),
+        created_epoch_secs: envelope.created_epoch_secs,
+        source_url: envelope.source_url,
+        error,
+    }))
 }
 
 fn effective_user_id() -> u32 {

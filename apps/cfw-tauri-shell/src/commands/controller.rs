@@ -275,7 +275,7 @@ pub(crate) async fn select_proxy_with_persistence(
     let coordinator = engine.coordinator.clone();
     let (result, lease) = lease.run_to_completion(async move {
         let mutation = repository.begin_credential_profile_mutation().map_err(|error| error.to_string())?;
-        let stored = mutation.selected_profile().map_err(|error| error.to_string())?.ok_or("no active profile is selected")?;
+        let stored = mutation.selected_profile().and_then(cfw_profiles::ProfileSelectionState::into_loaded).map_err(|error| error.to_string())?.ok_or("no active profile is selected")?;
         if profile_id.as_deref().is_some_and(|id| id != stored.record.id) {
             return Err("the displayed profile is no longer selected".into());
         }

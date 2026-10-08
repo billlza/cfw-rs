@@ -111,6 +111,32 @@ mod tests {
     }
 
     #[test]
+    fn an_inherited_global_fingerprint_decides_the_reality_key_share_requirement() {
+        let document = |global: &str| {
+            format!(
+                "global-client-fingerprint: {global}\nproxies:\n  - name: reality\n    type: vless\n    server: vless.example.com\n    port: 443\n    uuid: 22222222-2222-4222-8222-222222222222\n    tls: true\n    servername: www.example.com\n    reality-opts:\n      public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0\n      short-id: 0123456789abcdef\n      support-x25519mlkem768: true\n"
+            )
+        };
+        let imported = import_subscription_document(&document("chrome")).unwrap();
+        let stored: Value = serde_json::from_str(imported.profile.as_json()).unwrap();
+        assert_eq!(
+            stored["outbounds"][0]["tls"]["utls"]["fingerprint"],
+            "chrome"
+        );
+        assert_eq!(
+            stored["outbounds"][0]["tls"]["reality"]["support_x25519mlkem768"],
+            true
+        );
+
+        let error = import_subscription_document(&document("firefox"))
+            .expect_err("an inherited non-chrome fingerprint cannot carry the key share");
+        assert_eq!(
+            error,
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls.fingerprint: Reality X25519MLKEM768 requires the chrome uTLS fingerprint"
+        );
+    }
+
+    #[test]
     fn clash_certificate_fingerprint_is_absent_when_empty_and_refused_without_tls_or_with_reality()
     {
         let vless = |extra: &str| {

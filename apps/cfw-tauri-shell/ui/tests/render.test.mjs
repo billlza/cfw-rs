@@ -391,7 +391,7 @@ responses.read_settings_snapshot = (args) => {
   return initialLiveSettings;
 };
 const rejected = {
-  providers_snapshot: "controller capability `provider management` is unsupported by pinned engine sing-box 1.13.15",
+  providers_snapshot: "controller capability `provider management` is unsupported by the pinned sing-box engine",
 };
 globalThis.window.__TAURI_INTERNALS__ = {
   transformCallback(callback) {

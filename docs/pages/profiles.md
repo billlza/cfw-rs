@@ -67,8 +67,10 @@ The safe schema is intentionally closed:
   alternatives and arbitrary custom headers are rejected instead of dropped;
 - Hysteria2 port hopping stores only canonical non-overlapping port/range
   entries and an optional fixed 1..=3600-second interval. Projection emits the
-  pinned sing-box 1.13 `server_ports`/`hop_interval` fields; randomized
-  Mihomo intervals remain a visible unsupported error;
+  pinned sing-box 1.14 `server_ports`/`hop_interval` fields. That runtime can
+  also randomize the interval up to `hop_interval_max`, but the profile has no
+  field for it, so randomized Mihomo or URI ranges and sing-box
+  `hop_interval_max` remain a visible unsupported error;
 - Shadowsocks 2022 URI import follows SIP002's plain percent-encoded userinfo
   form; Base64 userinfo and legacy whole-link envelopes are rejected for 2022
   methods. Every colon-delimited PSK is canonical standard Base64 and has the

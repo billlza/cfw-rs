@@ -458,9 +458,10 @@ pub(crate) fn prepare_managed_engine(
             local_proxy: native_available && lineage_failure.is_none(),
             system_proxy: native_available && lineage_failure.is_none(),
             tunnel: native_available && lineage_failure.is_none(),
-            // The pinned sing-box 1.13.15 schema cannot construct proxy or
-            // rule providers. Keep the controller commands as explicit
-            // fail-closed backstops, but do not advertise or probe them.
+            // Providers are application-owned resources (commands::providers).
+            // The pinned sing-box 1.14.2 schema has no proxy or rule providers,
+            // so the controller's provider methods stay fail-closed backstops
+            // that nothing probes.
             provider_management: true,
         },
         unavailable_reason: lineage_failure.or(native_failure),

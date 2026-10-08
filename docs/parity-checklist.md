@@ -20,8 +20,9 @@ restricted controls and the installed runtime defect separately.
 - [x] SOCKS5 anonymous/authenticated URI, Clash YAML and sing-box source import,
       TCP/UDP policy preservation, and local/remote vault-first import parity
 - [x] Rust `NativeFrameworkBridge` C ABI wired into the production application
-- [x] source-built sing-box `v1.13.15` plus digest-pinned security, raw-packet,
-      DNS, and endpoint-conflict patches linked into ProxyAgent and Packet Tunnel
+- [x] source-built sing-box `v1.14.2` plus digest-pinned security, raw-packet,
+      DNS-failover, profile-probe, endpoint-conflict, and SOCKS-lifecycle
+      patches linked into ProxyAgent and Packet Tunnel
 - [x] Swift 6 Host Bridge, `SMAppService` registration, System Extension and
       Network Extension control paths, and public bounded packet pump
 - [x] root-context Global Authority with one durable global lease, hash-chained

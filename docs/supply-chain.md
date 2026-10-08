@@ -237,7 +237,8 @@ Reality servers since XTLS/REALITY 8cdf7bf refuse a hello without it. The
 authentication key still comes from the separate X25519 share, which those
 servers use. The patch is checked against the upstream commit and complete
 patched source. `scripts/test_advanced_protocols.sh` exercises these paths with
-real local protocol peers and the race detector.
+real local protocol peers and the race detector; its Reality target reports
+the key exchange each connection negotiated.
 
 `with_low_memory` is the upstream non-macOS-only tag and is not applied to the
 macOS slice.

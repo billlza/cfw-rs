@@ -94,6 +94,12 @@
 - Import a Clash node's `ech-opts` with an inline base64 `config` as ECH with
   TLS 1.3. A node without one, which Mihomo would look up over DNS, and
   `query-server-name` fail import instead of sending a plaintext ClientHello.
+- The local protocol checks now run live Hysteria2, TUIC, AnyTLS, VMess,
+  Shadowsocks 2022 and VLESS Reality peers, each of which must refuse a wrong
+  credential; the Reality check confirms which key exchange was negotiated.
+  The 0.4.0 compatibility assessment listed Hysteria2 and TUIC as locally
+  interoperable when only WireGuard had a live peer, and now carries a dated
+  correction.
 
 ## 0.4.0 - Unreleased
 

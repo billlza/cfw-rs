@@ -15,6 +15,13 @@ A protocol name alone is not a compatibility guarantee.
 | Shadowsocks external plugins, arbitrary smux, SSH | Not exposed | No complete application/credential/runtime contract in this release |
 | XHTTP and Xray VLESS Encryption | Not implemented | Optional backend assessment below; never silently translated into a different transport |
 
+Correction, 2026-10-08: the Hysteria2 and TUIC part of the row above overstated
+the evidence at the assessment date. `scripts/test_advanced_protocols.sh` then
+ran a live peer with wrong-key rejection only for WireGuard; Hysteria2 and
+TUIC had import, validation and projection tests but no live protocol peer.
+The 0.5.0 checks add live Hysteria2 and TUIC peers with rejection paths; see
+[Reproduce protocol checks](profiles-modern-networking.md#reproduce-protocol-checks).
+
 The new HTTP username/password slots remain in the native credential path.
 Subscription HTTP requests use the running local proxy when available, preserving
 public-address validation and TLS verification. Proxy failure does not trigger

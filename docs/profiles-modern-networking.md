@@ -138,9 +138,13 @@ CFW_TOOLCHAIN_ROOT=/absolute/toolchains \
 ```
 
 Use the test Mac's own IPv4 address. The checks create temporary authenticated
-proxy/WireGuard servers and DNS/echo listeners. They use generated test keys
-and a temporary certificate trust store, without changing macOS networking.
-They verify real TCP/UDP payloads, automatic selection, multihop failure
-behavior, DNS transports and policy, server-observed hybrid TLS/ECH and rejection paths
-under the race detector. Installed System Proxy/TUN acceptance remains a
-separate check.
+protocol servers and DNS/echo listeners. They use generated test keys and a
+temporary certificate trust store, without changing macOS networking. Under
+the race detector they verify real payloads through WireGuard, Hysteria2
+(salamander and gecko obfuscation), TUIC, AnyTLS, VMess, Shadowsocks 2022 and
+VLESS Reality peers, each of which must refuse a wrong credential, plus
+automatic selection, multihop failure behavior, DNS transports and policy,
+and server-observed hybrid TLS, ECH and Reality key exchange. The Reality check
+leaves out the `xtls-rprx-vision` flow, whose upstream implementation the race
+detector's pointer checks reject. Installed System Proxy/TUN acceptance remains
+a separate check.

@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -27,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	box "github.com/sagernet/sing-box"
@@ -127,12 +129,26 @@ func prepareListeners(config object, address string) {
 }
 
 func tcpExchange(instance *box.Box, tag, target string) {
+	tcpExchangeClosing(instance, tag, target, closeChecked)
+}
+
+// closeQUICStream accepts the one error quic-go reports for closing a stream
+// that the echo server has already finished; the payload has round-tripped by
+// then. Every other close failure still fails the probe.
+func closeQUICStream(closer io.Closer) {
+	if err := closer.Close(); err != nil && !errors.Is(err, net.ErrClosed) &&
+		!strings.HasPrefix(err.Error(), "close called for canceled stream") {
+		panic(err)
+	}
+}
+
+func tcpExchangeClosing(instance *box.Box, tag, target string, closeConn func(io.Closer)) {
 	outbound, exists := instance.Outbound().Outbound(tag)
 	require(exists, "projected outbound missing")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn := checked(outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target)))
-	defer closeChecked(conn)
+	defer closeConn(conn)
 	require(conn.SetDeadline(time.Now().Add(5*time.Second)) == nil, "TCP deadline")
 	require(func() bool { _, err := conn.Write([]byte("cfm-roundtrip")); return err == nil }(), "TCP write")
 	body := make([]byte, len("cfm-roundtrip"))
@@ -147,7 +163,8 @@ func udpExchange(instance *box.Box, tag, target string, expected bool) {
 	defer cancel()
 	conn := checked(outbound.ListenPacket(ctx, M.ParseSocksaddr(target)))
 	defer closeChecked(conn)
-	require(conn.SetDeadline(time.Now().Add(2*time.Second)) == nil, "UDP deadline")
+	// Only the read can block; Hysteria2 packet connections refuse a combined deadline.
+	require(conn.SetReadDeadline(time.Now().Add(2*time.Second)) == nil, "UDP read deadline")
 	_, writeErr := conn.WriteTo([]byte("cfm-datagram"), checked(net.ResolveUDPAddr("udp", target)))
 	if !expected && writeErr != nil {
 		return
@@ -253,16 +270,29 @@ func wireguardProbe(projector, address, tcpTarget, udpTarget string) {
 	fmt.Println("PASS WireGuard TCP, UDP and wrong-preshared-key rejection")
 }
 
-func requireDialFailure(instance *box.Box, tag, target, detail string) {
+// requireExchangeRefused requires that no payload round-trips. Protocols that
+// authenticate lazily (TUIC, VMess, Shadowsocks) return a local stream before
+// the server has checked the credential, so a successful dial alone proves
+// nothing; the echo must not come back.
+func requireExchangeRefused(instance *box.Box, tag, target, detail string) {
 	outbound, exists := instance.Outbound().Outbound(tag)
 	require(exists, "projected outbound missing")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
-	if err == nil {
-		closeChecked(conn)
+	if err != nil {
+		return
 	}
-	require(err != nil, detail)
+	// The server has already torn down a refused stream; closing it reports that
+	// teardown, not a probe failure.
+	defer func() { _ = conn.Close() }()
+	require(conn.SetReadDeadline(time.Now().Add(3*time.Second)) == nil, "refused exchange read deadline")
+	if _, err := conn.Write([]byte("cfm-roundtrip")); err != nil {
+		return
+	}
+	body := make([]byte, len("cfm-roundtrip"))
+	_, err = io.ReadFull(conn, body)
+	require(err != nil || string(body) != "cfm-roundtrip", detail)
 }
 
 func projectedOutbound(config object, tag string) map[string]any {
@@ -274,27 +304,288 @@ func projectedOutbound(config object, tag string) map[string]any {
 	panic("projected outbound " + tag + " missing")
 }
 
+// serverIdentity is a self-signed server leaf with its PEM encoding and the
+// SHA-256 SPKI pin a projected client trusts it by.
+type serverIdentity struct {
+	certificate, key string
+	pin              [32]byte
+}
+
+func newServerIdentity(name string, signer crypto.Signer) serverIdentity {
+	template := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: name},
+		DNSNames: []string{name}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der := checked(x509.CreateCertificate(rand.Reader, template, template, signer.Public(), signer))
+	return serverIdentity{
+		certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		key:         string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: checked(x509.MarshalPKCS8PrivateKey(signer))})),
+		pin:         sha256.Sum256(checked(x509.ParseCertificate(der)).RawSubjectPublicKeyInfo),
+	}
+}
+
+func ecdsaServerIdentity(name string) serverIdentity {
+	key := checked(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+	return newServerIdentity(name, key)
+}
+
+func (identity serverIdentity) inboundTLS() object {
+	return object{"enabled": true, "certificate": []string{identity.certificate}, "key": []string{identity.key}}
+}
+
+func (identity serverIdentity) pinnedTLS(name string) object {
+	return object{"enabled": true, "server_name": name,
+		"certificate_public_key_sha256": []string{base64.StdEncoding.EncodeToString(identity.pin[:])}}
+}
+
+// credentialCase holds the secret fields written into the projected outbound
+// and whether the server must accept them.
+type credentialCase struct {
+	secrets  map[string]any
+	accepted bool
+}
+
+// credentialProbe starts one in-process server per case, projects the CFM
+// profile, fills the projected secret fields and requires the exchange to
+// succeed only with the server's own credentials.
+func credentialProbe(projector, address, tcpTarget, udpTarget, tag string, udp bool, network string,
+	server func(port int) object, profile func(port int) object, cases []credentialCase, detail string) {
+	closeConn := closeChecked
+	if network == "udp" {
+		closeConn = closeQUICStream
+	}
+	for _, current := range cases {
+		port := localPort(address, network)
+		instance := start(server(port))
+		config := project(projector, object{"outbounds": []any{profile(port)}})
+		prepareListeners(config, address)
+		outbound := projectedOutbound(config, tag)
+		for field, value := range current.secrets {
+			outbound[field] = value
+		}
+		client := start(config)
+		if current.accepted {
+			tcpExchangeClosing(client, tag, tcpTarget, closeConn)
+			if udp {
+				udpExchange(client, tag, udpTarget, true)
+			}
+		} else {
+			requireExchangeRefused(client, tag, tcpTarget, detail)
+		}
+		closeChecked(client)
+		closeChecked(instance)
+	}
+}
+
+func tuicProbe(projector, address, tcpTarget, udpTarget string) {
+	identity := ecdsaServerIdentity("tuic.example.com")
+	const uuid = "33333333-3333-4333-8333-333333333333"
+	credentialProbe(projector, address, tcpTarget, udpTarget, "tuic", true, "udp",
+		func(port int) object {
+			return object{"log": object{"level": "error"},
+				"inbounds": []any{object{"type": "tuic", "tag": "tuic-in", "listen": address, "listen_port": port,
+					"users": []any{object{"uuid": uuid, "password": "tuic-secret"}}, "congestion_control": "bbr",
+					"tls": identity.inboundTLS()}},
+				"outbounds": []any{object{"type": "direct", "tag": "direct"}}}
+		},
+		func(port int) object {
+			return object{"type": "tuic", "tag": "tuic", "server": address, "server_port": port,
+				"uuid_credential_ref":     object{"id": profileID, "kind": "tuic_uuid"},
+				"password_credential_ref": object{"id": sharedID, "kind": "tuic_password"},
+				"congestion_control":      "bbr", "udp_relay_mode": "native", "tls": identity.pinnedTLS("tuic.example.com")}
+		},
+		[]credentialCase{
+			{map[string]any{"uuid": uuid, "password": "tuic-secret"}, true},
+			{map[string]any{"uuid": uuid, "password": "wrong-secret"}, false},
+		}, "TUIC accepted a wrong password")
+	fmt.Println("PASS TUIC TCP and UDP over a pinned QUIC leaf, wrong-password rejection")
+}
+
+func anytlsProbe(projector, address, tcpTarget, udpTarget string) {
+	identity := ecdsaServerIdentity("anytls.example.com")
+	credentialProbe(projector, address, tcpTarget, udpTarget, "anytls", false, "tcp",
+		func(port int) object {
+			return object{"log": object{"level": "error"},
+				"inbounds": []any{object{"type": "anytls", "tag": "anytls-in", "listen": address, "listen_port": port,
+					"users": []any{object{"password": "anytls-secret"}}, "tls": identity.inboundTLS()}},
+				"outbounds": []any{object{"type": "direct", "tag": "direct"}}}
+		},
+		func(port int) object {
+			return object{"type": "anytls", "tag": "anytls", "server": address, "server_port": port,
+				"credential_ref": object{"id": profileID, "kind": "anytls_password"},
+				"tls":            identity.pinnedTLS("anytls.example.com")}
+		},
+		[]credentialCase{
+			{map[string]any{"password": "anytls-secret"}, true},
+			{map[string]any{"password": "wrong-secret"}, false},
+		}, "AnyTLS accepted a wrong password")
+	fmt.Println("PASS AnyTLS TCP over a pinned TLS leaf, wrong-password rejection")
+}
+
+func vmessProbe(projector, address, tcpTarget, udpTarget string) {
+	const uuid = "44444444-4444-4444-8444-444444444444"
+	credentialProbe(projector, address, tcpTarget, udpTarget, "vmess", true, "tcp",
+		func(port int) object {
+			return object{"log": object{"level": "error"},
+				"inbounds":  []any{object{"type": "vmess", "tag": "vmess-in", "listen": address, "listen_port": port, "users": []any{object{"uuid": uuid}}}},
+				"outbounds": []any{object{"type": "direct", "tag": "direct"}}}
+		},
+		func(port int) object {
+			return object{"type": "vmess", "tag": "vmess", "server": address, "server_port": port,
+				"credential_ref": object{"id": profileID, "kind": "vmess_uuid"}, "security": "auto"}
+		},
+		[]credentialCase{
+			{map[string]any{"uuid": uuid}, true},
+			{map[string]any{"uuid": "55555555-5555-4555-8555-555555555555"}, false},
+		}, "VMess accepted a wrong UUID")
+	fmt.Println("PASS VMess TCP and UDP, wrong-UUID rejection")
+}
+
+func shadowsocksProbe(projector, address, tcpTarget, udpTarget string) {
+	key := make([]byte, 16)
+	_, err := rand.Read(key)
+	require(err == nil, "Shadowsocks key")
+	wrong := append([]byte(nil), key...)
+	wrong[0] ^= 1
+	encode := base64.StdEncoding.EncodeToString
+	credentialProbe(projector, address, tcpTarget, udpTarget, "ss", true, "tcp",
+		func(port int) object {
+			return object{"log": object{"level": "error"},
+				"inbounds": []any{object{"type": "shadowsocks", "tag": "ss-in", "listen": address, "listen_port": port,
+					"method": "2022-blake3-aes-128-gcm", "password": encode(key)}},
+				"outbounds": []any{object{"type": "direct", "tag": "direct"}}}
+		},
+		func(port int) object {
+			return object{"type": "shadowsocks", "tag": "ss", "server": address, "server_port": port,
+				"method": "2022-blake3-aes-128-gcm", "credential_ref": object{"id": profileID, "kind": "shadowsocks_password"}}
+		},
+		[]credentialCase{
+			{map[string]any{"password": encode(key)}, true},
+			{map[string]any{"password": encode(wrong)}, false},
+		}, "Shadowsocks 2022 accepted a wrong key")
+	fmt.Println("PASS Shadowsocks 2022 TCP and UDP, wrong-key rejection")
+}
+
+// realityTarget is the TLS 1.3 site a Reality server borrows its handshake
+// from. Like a conventional HTTPS front end it sends its session ticket in
+// the first flight and prefers X25519MLKEM768. Go selects that group only
+// when the client sent its key share; otherwise it asks for a retry, which a
+// Reality server does not authenticate. An authenticated Reality handshake
+// uses the group this target selects, so each connection reports the group
+// the client actually used.
+func realityTarget(address string) (int, <-chan tls.CurveID, func()) {
+	identity := ecdsaServerIdentity("www.example.com")
+	certificate := checked(tls.X509KeyPair([]byte(identity.certificate), []byte(identity.key)))
+	listener := checked(tls.Listen("tcp", net.JoinHostPort(address, "0"), &tls.Config{
+		Certificates:     []tls.Certificate{certificate},
+		MinVersion:       tls.VersionTLS13,
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519},
+		NextProtos:       []string{"h2", "http/1.1"},
+	}))
+	observed := make(chan tls.CurveID, 4)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if err != nil {
+				panic(err)
+			}
+			go func() {
+				defer closeChecked(conn)
+				target := conn.(*tls.Conn)
+				// An authenticated Reality client never finishes this handshake.
+				_ = target.Handshake()
+				observed <- target.ConnectionState().CurveID
+				_, _ = io.Copy(io.Discard, conn)
+			}()
+		}
+	}()
+	return listener.Addr().(*net.TCPAddr).Port, observed, func() {
+		closeChecked(listener)
+		<-done
+	}
+}
+
+// vlessRealityProbe runs the projected VLESS Reality client against an
+// in-process Reality server with and without the X25519MLKEM768 key share,
+// then proves that a client holding another server key is refused. The probe
+// leaves out the xtls-rprx-vision flow: sing-vmess builds Vision's TLS buffer
+// pointers from a stored uintptr, which the race detector's checkptr rejects,
+// and the flow does not take part in the Reality handshake under test.
+func vlessRealityProbe(projector, address, tcpTarget string) {
+	targetPort, observed, stopTarget := realityTarget(address)
+	defer stopTarget()
+	serverKey := checked(ecdh.X25519().GenerateKey(rand.Reader))
+	otherKey := checked(ecdh.X25519().GenerateKey(rand.Reader))
+	encode := base64.RawURLEncoding.EncodeToString
+	const uuid = "66666666-6666-4666-8666-666666666666"
+	for _, scenario := range []struct {
+		hybrid    bool
+		publicKey []byte
+		accepted  bool
+	}{
+		{false, serverKey.PublicKey().Bytes(), true},
+		{true, serverKey.PublicKey().Bytes(), true},
+		{false, otherKey.PublicKey().Bytes(), false},
+	} {
+		port := localPort(address, "tcp")
+		server := start(object{"log": object{"level": "error"},
+			"inbounds": []any{object{"type": "vless", "tag": "vless-in", "listen": address, "listen_port": port,
+				"users": []any{object{"uuid": uuid}},
+				"tls": object{"enabled": true, "server_name": "www.example.com",
+					"reality": object{"enabled": true, "private_key": encode(serverKey.Bytes()), "short_id": []string{"a1b2c3d4"},
+						"handshake": object{"server": address, "server_port": targetPort}}}}},
+			"outbounds": []any{object{"type": "direct", "tag": "direct"}}})
+		reality := object{"enabled": true, "public_key": encode(scenario.publicKey), "short_id": "a1b2c3d4"}
+		if scenario.hybrid {
+			reality["support_x25519mlkem768"] = true
+		}
+		config := project(projector, object{"outbounds": []any{object{"type": "vless", "tag": "reality",
+			"server": address, "server_port": port,
+			"credential_ref": object{"id": profileID, "kind": "vless_uuid"},
+			"tls": object{"enabled": true, "server_name": "www.example.com",
+				"utls": object{"enabled": true, "fingerprint": "chrome"}, "reality": reality}}}})
+		prepareListeners(config, address)
+		projectedOutbound(config, "reality")["uuid"] = uuid
+		client := start(config)
+		if scenario.accepted {
+			tcpExchange(client, "reality", tcpTarget)
+		} else {
+			requireExchangeRefused(client, "reality", tcpTarget, "Reality authenticated a server with another key")
+		}
+		closeChecked(client)
+		closeChecked(server)
+		select {
+		case group := <-observed:
+			expected := tls.X25519
+			if scenario.hybrid {
+				expected = tls.X25519MLKEM768
+			}
+			require(!scenario.accepted || group == expected,
+				fmt.Sprintf("Reality target negotiated %v, expected %v", group, expected))
+		case <-time.After(10 * time.Second):
+			panic("Reality target never reported its connection")
+		}
+	}
+	select {
+	case group := <-observed:
+		panic(fmt.Sprintf("unexpected extra Reality target connection negotiated %v", group))
+	default:
+	}
+	fmt.Println("PASS VLESS Reality TCP with target-observed X25519 and X25519MLKEM768 key exchange, wrong-key rejection")
+}
+
 // hysteria2Probe runs the projected Hysteria2 client against an in-process
 // Hysteria2 server for salamander and gecko obfuscation, then proves that a
 // wrong obfuscation password and a wrong pinned key are both refused.
 func hysteria2Probe(projector, address, tcpTarget, udpTarget string) {
-	type serverIdentity struct{ certificate, key string; pin [32]byte }
-	identity := func(signer any, public any) serverIdentity {
-		template := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "hy2.example.com"},
-			DNSNames: []string{"hy2.example.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-		der := checked(x509.CreateCertificate(rand.Reader, template, template, public, signer))
-		return serverIdentity{
-			certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
-			key:         string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: checked(x509.MarshalPKCS8PrivateKey(signer))})),
-			pin:         sha256.Sum256(checked(x509.ParseCertificate(der)).RawSubjectPublicKeyInfo),
-		}
-	}
-	ecdsaKey := checked(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
-	ecdsaServer := identity(ecdsaKey, &ecdsaKey.PublicKey)
-	edPublic, edPrivate, err := ed25519.GenerateKey(rand.Reader)
+	ecdsaServer := ecdsaServerIdentity("hy2.example.com")
+	_, edPrivate, err := ed25519.GenerateKey(rand.Reader)
 	require(err == nil, "Ed25519 server key")
-	ed25519Server := identity(edPrivate, edPublic)
+	ed25519Server := newServerIdentity("hy2.example.com", edPrivate)
 	otherPin := sha256.Sum256([]byte("a different server key"))
 	encode := base64.StdEncoding.EncodeToString
 	gecko := object{"min_packet_size": 400, "max_packet_size": 1400}
@@ -337,10 +628,10 @@ func hysteria2Probe(projector, address, tcpTarget, udpTarget string) {
 		outbound["obfs"].(map[string]any)["password"] = scenario.obfsPassword
 		client := start(config)
 		if scenario.accepted {
-			tcpExchange(client, "hy2", tcpTarget)
+			tcpExchangeClosing(client, "hy2", tcpTarget, closeQUICStream)
 			udpExchange(client, "hy2", udpTarget, true)
 		} else {
-			requireDialFailure(client, "hy2", tcpTarget, scenario.detail)
+			requireExchangeRefused(client, "hy2", tcpTarget, scenario.detail)
 		}
 		closeChecked(client)
 		closeChecked(server)
@@ -671,4 +962,9 @@ func main() {
 	loadBalanceProbe(projector, address, tcpTarget, udpTarget)
 	wireguardProbe(projector, address, tcpTarget, udpTarget)
 	hysteria2Probe(projector, address, tcpTarget, udpTarget)
+	tuicProbe(projector, address, tcpTarget, udpTarget)
+	anytlsProbe(projector, address, tcpTarget, udpTarget)
+	vmessProbe(projector, address, tcpTarget, udpTarget)
+	shadowsocksProbe(projector, address, tcpTarget, udpTarget)
+	vlessRealityProbe(projector, address, tcpTarget)
 }

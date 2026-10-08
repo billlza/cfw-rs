@@ -94,7 +94,10 @@ The subscription source boundary accepts only a restricted upstream sing-box
 or a bounded URI bundle. VMess accepts traditional base64 JSON and the
 URL-shaped AEAD form; the latter cannot carry legacy `alterId` state.
 Hysteria2 multi-port sources normalize into a bounded non-overlapping port set
-and an optional fixed-second hop interval before projection to sing-box 1.13.
+and an optional fixed-second hop interval before projection to the pinned
+sing-box 1.14 `server_ports`/`hop_interval` fields. The runtime's randomized
+`hop_interval_max` has no profile field, so randomized source ranges fail
+import.
 Shadowsocks 2022 sources normalize the method first and validate each
 standard-base64 key in a single- or multi-user PSK chain before allocating any
 credential reference; SIP002 URI input additionally rejects Base64 userinfo.
@@ -160,8 +163,8 @@ patch represents both resolver roles as strict primary/fallback pairs and
 permits one bounded fallback after a rejected response or transport error. It
 never falls back after cancellation and never attempts either server more than
 once. Building that exact patch into libbox and proving both paths by physical
-packet capture remain release gates; unpatched sing-box 1.13 does not provide
-these semantics.
+packet capture remain release gates; unpatched sing-box 1.14.2 does not
+provide these semantics.
 
 Engine generation lineage is a canonical, bounded document in the host app's
 own Data Protection Keychain access group. Its revision label is the SHA-256 of

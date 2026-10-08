@@ -348,14 +348,6 @@ impl ProfileOutbound {
                     transport.as_ref(),
                     path,
                 )?;
-                if tls.as_ref().is_some_and(|tls| tls.reality.is_some())
-                    && !tls.as_ref().is_some_and(|tls| tls.enabled)
-                {
-                    return Err(unsupported_shape(
-                        format!("{path}.tls.enabled"),
-                        "Reality requires enabled TLS",
-                    ));
-                }
                 validate_optional_transport(transport.as_ref(), path)
             }
             Self::Trojan {

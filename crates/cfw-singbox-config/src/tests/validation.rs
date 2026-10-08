@@ -517,6 +517,47 @@ fn reality_without_utls_reports_a_more_specific_defect_first() {
 }
 
 #[test]
+fn disabled_tls_refuses_reality_on_every_tls_stream_protocol() {
+    let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
+    let utls_reality = format!(r#""utls":{{"enabled":true,"fingerprint":"chrome"}},{reality}"#);
+    for (protocol, credential) in [
+        ("http", String::new()),
+        (
+            "vmess",
+            format!(r#","credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}}"#),
+        ),
+        (
+            "vless",
+            format!(r#","credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}}"#),
+        ),
+        (
+            "trojan",
+            format!(r#","credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}}"#),
+        ),
+        (
+            "anytls",
+            format!(r#","credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}}"#),
+        ),
+    ] {
+        // With uTLS present, no later TLS check catches disabled TLS, so the
+        // enabled-TLS requirement alone has to refuse the node.
+        for extensions in [reality, utls_reality.as_str()] {
+            let input = format!(
+                r#"{{"outbounds":[{{"type":"{protocol}","tag":"proxy","server":"proxy.example.com","server_port":443{credential},"tls":{{"enabled":false,"server_name":"www.example.com",{extensions}}}}}]}}"#
+            );
+            assert_eq!(
+                ValidatedSingBoxProfile::parse(&input),
+                Err(ConfigError::UnsupportedPolicyShape {
+                    path: "$.outbounds[0].tls.enabled".into(),
+                    reason: "TLS options require enabled TLS".into(),
+                }),
+                "{protocol} with {extensions}"
+            );
+        }
+    }
+}
+
+#[test]
 fn vless_vision_and_active_tls_options_require_enabled_tls() {
     for tls in [
         "",

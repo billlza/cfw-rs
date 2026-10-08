@@ -15,10 +15,11 @@
 //! - Requests this app refuses to honour fail closed instead of being
 //!   silently dropped: `skip-cert-verify: true`, Shadowsocks plugins,
 //!   `udp-over-tcp`, `smux`, and every proxy type outside the
-//!   closed schema. Hysteria2 port hopping accepts only canonical
-//!   canonical non-overlapping port sets and one fixed 1..=3600 second hop
-//!   interval are normalized into the pinned sing-box 1.13 fields; Mihomo's
-//!   newer randomized interval range remains rejected.
+//!   closed schema. Hysteria2 port hopping accepts only canonical,
+//!   non-overlapping port sets and one fixed 1..=3600 second
+//!   `hop-interval`. A randomized range such as `15-30` fails the import:
+//!   the pinned sing-box 1.14 runtime could express it with
+//!   `hop_interval_max`, but the typed profile stores a single interval.
 //! - `fingerprint` is Mihomo's SHA-256 of the server's DER leaf certificate,
 //!   unrelated to `client-fingerprint`. It becomes one `certificate_sha256`
 //!   pin, never a public-key pin. The pin replaces CA-chain trust for that

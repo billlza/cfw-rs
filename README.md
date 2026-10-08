@@ -61,8 +61,10 @@ HTTPUpgrade, and V2Ray QUIC transport shapes are preserved. Mihomo HTTP
 imports preserve a closed method/path/Host subset and reject nondeterministic
 multi-path or arbitrary custom-header semantics. Hysteria2 accepts canonical,
 non-overlapping multi-port sets and a fixed bounded hop interval from its
-official URI, Mihomo YAML, or sing-box JSON; randomized interval ranges that
-require sing-box 1.14 remain rejected by the pinned 1.13 runtime. VLESS Vision rejects V2Ray
+official URI, Mihomo YAML, or sing-box JSON. Randomized intervals (a Mihomo or
+URI range such as `15-30`, or sing-box `hop_interval_max`) are rejected at
+import because the stored profile keeps one fixed interval, although the
+pinned sing-box 1.14 runtime supports them. VLESS Vision rejects V2Ray
 transport streams and accepts only omitted or XUDP packet encoding. XHTTP and
 unknown transport semantics fail closed. Hysteria2 and TUIC use QUIC TLS and
 reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the
@@ -139,7 +141,7 @@ bootstrap pair. The pinned source patch gives both roles one bounded fallback
 for rejected responses or transport errors. Each resolver is attempted at most
 once, cancellation never triggers fallback, and two failures preserve both
 causes. A source-built libbox carrying that patch and physical capture proof
-remain release blockers; upstream sing-box 1.13 without the patch must not be
+remain release blockers; upstream sing-box 1.14.2 without the patch must not be
 described as providing this failover.
 
 There is no private-API or old-helper fallback if one of these gates fails.

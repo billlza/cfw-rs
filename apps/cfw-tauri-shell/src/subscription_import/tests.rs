@@ -1092,8 +1092,13 @@ fn hysteria2_port_hopping_rejects_ambiguous_or_unprojectable_ranges() {
             "invalid port",
         ),
         (
-            "random hop interval unsupported by pinned engine",
+            "Mihomo randomized hop interval outside the fixed-interval profile",
             "proxies:\n  - name: Hop\n    type: hysteria2\n    server: hy.example.com\n    port: 443\n    ports: 5000-5002\n    hop-interval: 15-30\n    password: TopSecretValue!\n",
+            "canonical 1..=3600 second",
+        ),
+        (
+            "URI randomized hop interval outside the fixed-interval profile",
+            "hysteria2://TopSecretValue!@hy.example.com:443,5000-5002/?sni=hy.example.com&hop-interval=15-30#Hop",
             "canonical 1..=3600 second",
         ),
     ] {
@@ -1101,6 +1106,29 @@ fn hysteria2_port_hopping_rejects_ambiguous_or_unprojectable_ranges() {
         assert!(error.contains(expected), "{label}: {error}");
         assert!(!error.contains("TopSecretValue!"), "{label}: {error}");
     }
+
+    let sing_box = |hop_interval_max: Option<&str>| {
+        let mut outbound = json!({
+            "type": "hysteria2",
+            "tag": "SingBox-Hop",
+            "server": "hy.example.com",
+            "server_ports": ["443", "5000:5002"],
+            "hop_interval": "15s",
+            "password": "TopSecretValue!",
+            "tls": { "enabled": true, "server_name": "hy.example.com" }
+        });
+        if let Some(value) = hop_interval_max {
+            outbound["hop_interval_max"] = json!(value);
+        }
+        json!({ "outbounds": [outbound] }).to_string()
+    };
+    import_subscription_document(&sing_box(None)).expect("fixed sing-box hop interval");
+    let error = import_subscription_document(&sing_box(Some("30s")))
+        .expect_err("sing-box hop_interval_max has no fixed-interval representation");
+    assert_eq!(
+        error,
+        "sing-box source JSON does not match the supported node-list schema"
+    );
 }
 
 #[test]

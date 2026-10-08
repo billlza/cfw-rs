@@ -418,6 +418,11 @@ pub(crate) struct RealityOptions {
     pub(crate) public_key: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) short_id: String,
+    /// Offers the X25519MLKEM768 key share ahead of X25519, which REALITY
+    /// servers since XTLS/REALITY 8cdf7bf require. Off by default because
+    /// older servers may mishandle the hybrid share.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) support_x25519mlkem768: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

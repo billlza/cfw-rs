@@ -1358,6 +1358,50 @@ fn configuration_identity_schema_matches_the_engine_owner_contract() {
     assert_eq!(projected.digest(), expected);
 }
 
+#[test]
+fn reality_x25519mlkem768_key_share_is_stored_and_projected_only_when_requested() {
+    let profile = |hybrid: &str| {
+        ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"{hybrid}}}}}}}],"route":{{"final":"proxy"}}}}"#
+        ))
+        .expect("typed Reality profile")
+    };
+    let reality = |profile: &ValidatedSingBoxProfile| {
+        let stored: serde_json::Value =
+            serde_json::from_str(profile.as_json()).expect("stored profile");
+        let projected = profile
+            .project(
+                PROFILE_ID,
+                ProjectionMode::SystemProxy,
+                &EngineSettings::default(),
+            )
+            .expect("Reality projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("projected config");
+        (
+            stored["outbounds"][0]["tls"]["reality"].clone(),
+            config["outbounds"][0]["tls"]["reality"].clone(),
+        )
+    };
+    let existing = serde_json::json!({
+        "enabled": true,
+        "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+        "short_id": "0123456789abcdef",
+    });
+    for disabled in ["", r#","support_x25519mlkem768":false"#] {
+        assert_eq!(
+            reality(&profile(disabled)),
+            (existing.clone(), existing.clone())
+        );
+    }
+    let mut hybrid = existing.clone();
+    hybrid["support_x25519mlkem768"] = serde_json::Value::Bool(true);
+    assert_eq!(
+        reality(&profile(r#","support_x25519mlkem768":true"#)),
+        (hybrid.clone(), hybrid)
+    );
+}
+
 fn shadowsocks_profile(credential_id: &str) -> ValidatedSingBoxProfile {
     ValidatedSingBoxProfile::parse(&format!(
         r#"{{"outbounds":[{{"type":"shadowsocks","tag":"proxy","server":"ss.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{credential_id}","kind":"shadowsocks_password"}}}}],"route":{{"final":"proxy"}}}}"#

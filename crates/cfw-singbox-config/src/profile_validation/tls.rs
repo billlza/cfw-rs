@@ -2,7 +2,7 @@
 use super::{unsupported_shape, validate_server_name};
 use crate::{
     ConfigError,
-    profile::{OutboundTls, TlsCurve, TlsMinimumVersion},
+    profile::{OutboundTls, TlsCurve, TlsMinimumVersion, UtlsFingerprint},
 };
 use base64::{
     Engine as _,
@@ -154,6 +154,22 @@ impl OutboundTls {
             return Err(unsupported_shape(
                 format!("{path}.tls.utls"),
                 "Reality requires uTLS",
+            ));
+        }
+        // Only the uTLS chrome hello carries the hybrid key share; the other
+        // fingerprints would silently send a hello such servers refuse.
+        if self
+            .reality
+            .as_ref()
+            .is_some_and(|reality| reality.support_x25519mlkem768)
+            && !self
+                .utls
+                .as_ref()
+                .is_some_and(|utls| utls.fingerprint == UtlsFingerprint::Chrome)
+        {
+            return Err(unsupported_shape(
+                format!("{path}.tls.utls.fingerprint"),
+                "Reality X25519MLKEM768 requires the chrome uTLS fingerprint",
             ));
         }
         Ok(())

@@ -47,7 +47,10 @@ No ECH key file or implicit bootstrap DNS discovery is read.
 Reality and ECH cannot be combined. Reality also requires an enabled `utls`
 object with an explicit fingerprint, because the pinned sing-box builds its
 Reality client only on uTLS; the profile is rejected rather than given a
-default fingerprint.
+default fingerprint. `reality.support_x25519mlkem768: true` keeps the
+X25519MLKEM768 key share ahead of X25519 in the hello, which Reality servers
+since XTLS/REALITY 8cdf7bf require; upstream sing-box strips it. It requires
+the `chrome` uTLS fingerprint and stays off unless a node asks for it.
 
 ## DNS transports
 

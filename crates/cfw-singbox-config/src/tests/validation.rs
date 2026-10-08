@@ -410,6 +410,52 @@ fn reality_requires_enabled_utls_on_every_tls_stream_protocol() {
 }
 
 #[test]
+fn reality_x25519mlkem768_key_share_requires_the_chrome_fingerprint() {
+    let profile = |fingerprint: &str, hybrid: &str| {
+        format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"{fingerprint}"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"{hybrid}}}}}}}]}}"#
+        )
+    };
+    let hybrid = r#","support_x25519mlkem768":true"#;
+    ValidatedSingBoxProfile::parse(&profile("chrome", hybrid))
+        .expect("the chrome hello carries the X25519MLKEM768 key share");
+    for fingerprint in [
+        "firefox",
+        "edge",
+        "safari",
+        "360",
+        "qq",
+        "ios",
+        "android",
+        "random",
+        "randomized",
+    ] {
+        let error = ValidatedSingBoxProfile::parse(&profile(fingerprint, hybrid))
+            .expect_err("only the chrome hello carries the hybrid key share");
+        assert_eq!(
+            error,
+            ConfigError::UnsupportedPolicyShape {
+                path: "$.outbounds[0].tls.utls.fingerprint".into(),
+                reason: "Reality X25519MLKEM768 requires the chrome uTLS fingerprint".into(),
+            },
+            "{fingerprint}"
+        );
+        for disabled in ["", r#","support_x25519mlkem768":false"#] {
+            ValidatedSingBoxProfile::parse(&profile(fingerprint, disabled))
+                .unwrap_or_else(|error| panic!("{fingerprint} without the key share: {error}"));
+        }
+    }
+    let error =
+        ValidatedSingBoxProfile::parse(&profile("chrome", r#","support_x25519mlkem768":"true""#))
+            .expect_err("the key share flag is a JSON boolean");
+    assert!(
+        matches!(&error, ConfigError::InvalidJson(_))
+            && error.to_string().contains("expected a boolean"),
+        "{error}"
+    );
+}
+
+#[test]
 fn reality_without_utls_reports_a_more_specific_defect_first() {
     let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
     let disabled_reality = reality.replacen(r#""enabled":true"#, r#""enabled":false"#, 1);

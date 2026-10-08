@@ -57,6 +57,60 @@ mod tests {
     }
 
     #[test]
+    fn reality_x25519mlkem768_key_share_is_an_opt_in_imported_from_clash_and_sing_box() {
+        let reality = |imported: &crate::subscription_import::ImportedSubscription| {
+            let stored: Value = serde_json::from_str(imported.profile.as_json()).unwrap();
+            stored["outbounds"][0]["tls"]["reality"].clone()
+        };
+        let clash = |fingerprint: &str, extra: &str| {
+            format!(
+                "proxies:\n  - name: reality\n    type: vless\n    server: vless.example.com\n    port: 443\n    uuid: 22222222-2222-4222-8222-222222222222\n    tls: true\n    servername: www.example.com\n    client-fingerprint: {fingerprint}\n    reality-opts:\n      public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0\n      short-id: 0123456789abcdef\n{extra}"
+            )
+        };
+        let sing_box = |extra: &str| {
+            format!(
+                r#"{{"outbounds":[{{"type":"vless","tag":"reality","server":"vless.example.com","server_port":443,"uuid":"22222222-2222-4222-8222-222222222222","tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"{extra}}}}}}}]}}"#
+            )
+        };
+
+        for source in [
+            clash("chrome", "      support-x25519mlkem768: true\n"),
+            sing_box(r#","support_x25519mlkem768":true"#),
+        ] {
+            let imported = import_subscription_document(&source).unwrap();
+            assert_eq!(
+                reality(&imported)["support_x25519mlkem768"],
+                true,
+                "{source}"
+            );
+        }
+        for source in [
+            clash("chrome", ""),
+            clash("chrome", "      support-x25519mlkem768: false\n"),
+            sing_box(""),
+            sing_box(r#","support_x25519mlkem768":false"#),
+        ] {
+            let imported = import_subscription_document(&source).unwrap();
+            assert!(
+                reality(&imported).get("support_x25519mlkem768").is_none(),
+                "{source}"
+            );
+        }
+
+        let error =
+            import_subscription_document(&clash("firefox", "      support-x25519mlkem768: true\n"))
+                .expect_err("only the chrome hello carries the hybrid key share");
+        assert_eq!(
+            error,
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls.fingerprint: Reality X25519MLKEM768 requires the chrome uTLS fingerprint"
+        );
+        let error =
+            import_subscription_document(&clash("chrome", "      support-x25519mlkem768: on\n"))
+                .expect_err("the key share flag is a YAML boolean");
+        assert!(error.contains("support-x25519mlkem768"), "{error}");
+    }
+
+    #[test]
     fn clash_certificate_fingerprint_is_absent_when_empty_and_refused_without_tls_or_with_reality()
     {
         let vless = |extra: &str| {

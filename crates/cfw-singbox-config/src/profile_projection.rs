@@ -700,14 +700,15 @@ pub(crate) fn project_tls(tls: &OutboundTls) -> Result<Value, ConfigError> {
         );
     }
     if let Some(reality) = &tls.reality {
-        object.insert(
-            "reality".into(),
-            json!({
-                "enabled": reality.enabled,
-                "public_key": reality.public_key,
-                "short_id": reality.short_id,
-            }),
-        );
+        let mut projected = json!({
+            "enabled": reality.enabled,
+            "public_key": reality.public_key,
+            "short_id": reality.short_id,
+        });
+        if reality.support_x25519mlkem768 {
+            projected["support_x25519mlkem768"] = Value::Bool(true);
+        }
+        object.insert("reality".into(), projected);
     }
     Ok(Value::Object(object))
 }

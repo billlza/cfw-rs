@@ -69,7 +69,10 @@ reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the
 schema's uTLS and Reality options. Reality requires an enabled uTLS
 fingerprint (Clash `client-fingerprint`, URI `fp`, or sing-box `tls.utls`)
 because sing-box runs Reality only over uTLS; a node without one fails at
-import, and no fingerprint is chosen for it. Every enabled remote TLS transport and authenticated DoH
+import, and no fingerprint is chosen for it. A Reality node may opt in to the
+post-quantum X25519MLKEM768 key share that newer Reality servers require
+(`reality-opts.support-x25519mlkem768` or `tls.reality.support_x25519mlkem768`),
+which needs the `chrome` fingerprint. Every enabled remote TLS transport and authenticated DoH
 projection has a product-owned TLS 1.2 minimum that profiles cannot lower;
 normal negotiation prefers TLS 1.3, and QUIC always requires TLS 1.3. TUIC also
 projects 0-RTT as explicitly disabled. Subscription and update clients are

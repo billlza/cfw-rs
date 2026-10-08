@@ -7,8 +7,15 @@ pub(super) struct TlsFields {
     server_name: Option<String>,
     alpn: Vec<String>,
     client_fingerprint: Option<String>,
-    reality: Option<(String, String)>,
+    reality: Option<RealityFields>,
     certificate_pin: Option<String>,
+}
+
+/// Clash `reality-opts`, named after the mihomo keys they come from.
+struct RealityFields {
+    public_key: String,
+    short_id: String,
+    support_x25519mlkem768: bool,
 }
 
 pub(super) fn collect_tls(fields: &mut ProxyFields) -> Result<TlsFields, String> {
@@ -39,8 +46,15 @@ pub(super) fn collect_tls(fields: &mut ProxyFields) -> Result<TlsFields, String>
             let mut reality = ProxyFields::from_nested(value, fields, "reality-opts")?;
             let public_key = reality.require_string("public-key")?;
             let short_id = reality.take_string("short-id")?.unwrap_or_default();
+            let support_x25519mlkem768 = reality
+                .take_bool("support-x25519mlkem768")?
+                .unwrap_or(false);
             reality.reject_leftovers()?;
-            Some((public_key, short_id))
+            Some(RealityFields {
+                public_key,
+                short_id,
+                support_x25519mlkem768,
+            })
         }
     };
     Ok(TlsFields {
@@ -127,12 +141,16 @@ impl TlsFields {
             None => None,
             Some(fingerprint) => parse_utls(fingerprint)?,
         };
-        let reality = self.reality.map(|(public_key, short_id)| {
-            json!({
+        let reality = self.reality.map(|reality| {
+            let mut value = json!({
                 "enabled": true,
-                "public_key": public_key,
-                "short_id": short_id,
-            })
+                "public_key": reality.public_key,
+                "short_id": reality.short_id,
+            });
+            if reality.support_x25519mlkem768 {
+                value["support_x25519mlkem768"] = json!(true);
+            }
+            value
         });
         let mut tls = tls_json(build_tls_parts(
             true,

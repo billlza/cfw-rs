@@ -56,6 +56,12 @@ The safe schema is intentionally closed:
   `client-fingerprint`, URI `fp`, or sing-box `tls.utls`. sing-box runs
   Reality only over uTLS, so a node without one fails at import instead of at
   engine start; no fingerprint is chosen on its behalf;
+- Reality offers the X25519MLKEM768 key share only when a node opts in with
+  Clash `reality-opts.support-x25519mlkem768: true` or sing-box
+  `tls.reality.support_x25519mlkem768: true`. Servers since XTLS/REALITY
+  8cdf7bf (Xray v26.9.8 and later) require it. The option needs the `chrome`
+  uTLS fingerprint, the only hello that carries the share, and is off by
+  default because older servers may mishandle it;
 - HTTP/H2 preserves a bounded method/path/Host shape. Mihomo `http-opts` with
   one deterministic path and Host authorities is accepted; multiple path
   alternatives and arbitrary custom headers are rejected instead of dropped;

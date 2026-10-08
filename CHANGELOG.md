@@ -52,6 +52,13 @@
   delete `<id>.profile.json` from `~/Library/Application Support/Clash for
   Mac/sing-box-profiles-v1` (and `selected-profile-v1.json` there if that
   profile was selected), then import the node again with a fingerprint.
+- Connect to Reality servers that require the post-quantum X25519MLKEM768 key
+  share, as Xray releases from v26.9.8 do. A node opts in with Clash
+  `reality-opts.support-x25519mlkem768: true` or sing-box
+  `tls.reality.support_x25519mlkem768: true`; the `chrome` uTLS fingerprint is
+  then required, because only its hello carries that share. The option is off
+  by default because older servers may mishandle the hybrid share. A profile
+  saved with it is rejected by earlier builds, which do not know the field.
 
 ## 0.4.0 - Unreleased
 

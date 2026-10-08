@@ -42,10 +42,11 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # only form of this assertion that still fails when a pin drifts.
 # This revision includes all six patches, the utun resolver, synchronized SOCKS
 # packet addresses, Go 1.27 debug-crash compatibility, and bounded DNS probe
-# shutdown lifecycle, with the probe's question captured before goroutine launch.
+# shutdown lifecycle, with the probe's question captured before goroutine launch,
+# and the opt-in REALITY X25519MLKEM768 key share.
 # Independently recomputed from the canonical materialized patched source.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "2c9714697fd7b03d1d067fc87c4b7104d01a1851ddd3e8b8ff0908942d2f5da5"
+    "a28b5932848144d04af3fe5eb0a390eec3c219cde8cdd2c793b5436094cd41cb"
 )
 
 

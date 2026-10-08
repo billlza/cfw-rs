@@ -248,6 +248,8 @@ struct SourceReality {
     public_key: String,
     #[serde(default)]
     short_id: String,
+    #[serde(default)]
+    support_x25519mlkem768: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -732,15 +734,24 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
     let reality = match tls.reality {
         None => None,
         Some(reality)
-            if !reality.enabled && reality.public_key.is_empty() && reality.short_id.is_empty() =>
+            if !reality.enabled
+                && reality.public_key.is_empty()
+                && reality.short_id.is_empty()
+                && !reality.support_x25519mlkem768 =>
         {
             None
         }
-        Some(reality) if reality.enabled => Some(json!({
-            "enabled": true,
-            "public_key": reality.public_key,
-            "short_id": reality.short_id,
-        })),
+        Some(reality) if reality.enabled => {
+            let mut value = json!({
+                "enabled": true,
+                "public_key": reality.public_key,
+                "short_id": reality.short_id,
+            });
+            if reality.support_x25519mlkem768 {
+                value["support_x25519mlkem768"] = json!(true);
+            }
+            Some(value)
+        }
         Some(_) => return Err("disabled sing-box Reality contains active options".into()),
     };
     let mut value = tls_json(build_tls_parts(

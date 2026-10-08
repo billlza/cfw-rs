@@ -231,7 +231,11 @@ WireGuard uses the userspace stack (`system=false`); NetworkExtension remains
 the only owner of system tunnel interfaces. The security dependency patch also
 repairs the pinned URL-test group's concurrent interface assignments using an
 immutable atomic selection snapshot, and preserves an explicitly configured
-zero tolerance. The patch is checked against the upstream commit and complete
+zero tolerance. It also lets a Reality outbound opt in to the X25519MLKEM768
+key share with `support_x25519mlkem768`: upstream strips that share, and
+Reality servers since XTLS/REALITY 8cdf7bf refuse a hello without it. The
+authentication key still comes from the separate X25519 share, which those
+servers use. The patch is checked against the upstream commit and complete
 patched source. `scripts/test_advanced_protocols.sh` exercises these paths with
 real local protocol peers and the race detector.
 

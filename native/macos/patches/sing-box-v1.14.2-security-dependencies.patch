@@ -178,6 +178,311 @@ index 0000000000000000000000000000000000000000..df09b2c3193ddd5ae10429876225bd6f
 +		t.Fatal("expired certificate pin accepted")
 +	}
 +}
+diff --git a/common/tls/reality_client.go b/common/tls/reality_client.go
+index 13f88e385bf9ba2613995bfd93cd83b6d7f0346d..3f4f9dd87d58254c5a1ea2d12c8b1a2b38c023ff 100644
+--- a/common/tls/reality_client.go
++++ b/common/tls/reality_client.go
+@@ -48,4 +48,5 @@ type RealityClientConfig struct {
+-	ctx       context.Context
+-	uClient   *UTLSClientConfig
+-	publicKey []byte
+-	shortID   [8]byte
++	ctx                   context.Context
++	uClient               *UTLSClientConfig
++	publicKey             []byte
++	shortID               [8]byte
++	supportX25519MLKEM768 bool
+@@ -87 +88,8 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
+-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
++	// random draws one browser per process, so only a fingerprint that always
++	// resolves to the chrome hello reliably carries the hybrid key share.
++	supportX25519MLKEM768 := options.Reality.SupportX25519MLKEM768
++	if supportX25519MLKEM768 && (options.UTLS.Fingerprint == "random" || uClient.(*UTLSClientConfig).id != utls.HelloChrome_Auto) {
++		return nil, E.New("reality X25519MLKEM768 requires the chrome uTLS fingerprint")
++	}
++
++	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, supportX25519MLKEM768}
+@@ -148,5 +156,4 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+-	for _, extension := range uConn.Extensions {
+-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
+-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
+-				return curveID != utls.X25519MLKEM768
+-			})
++	if e.supportX25519MLKEM768 {
++		err = requireRealityHybridKeyShares(uConn)
++		if err != nil {
++			return nil, err
+@@ -154,4 +161,16 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
+-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
+-				return share.Group != utls.X25519MLKEM768
+-			})
++	} else {
++		for _, extension := range uConn.Extensions {
++			if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
++				ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
++					return curveID != utls.X25519MLKEM768
++				})
++			}
++			if ks, ok := extension.(*utls.KeyShareExtension); ok {
++				ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
++					return share.Group != utls.X25519MLKEM768
++				})
++			}
++		}
++		err = uConn.BuildHandshakeState()
++		if err != nil {
++			return nil, err
+@@ -159,4 +177,0 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
+-	}
+-	err = uConn.BuildHandshakeState()
+-	if err != nil {
+-		return nil, err
+@@ -243,0 +259,33 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
++// requireRealityHybridKeyShares admits only the hello that a REALITY server
++// requiring X25519MLKEM768 accepts: the hybrid share followed by a separate
++// X25519 share. Such servers derive the authentication key from the separate
++// X25519 share, which is the Ecdhe key that seals the session ID.
++func requireRealityHybridKeyShares(uConn *utls.UConn) error {
++	var groups []utls.CurveID
++	for _, extension := range uConn.Extensions {
++		if ks, ok := extension.(*utls.KeyShareExtension); ok {
++			for _, share := range ks.KeyShares {
++				if !isGREASECurve(share.Group) {
++					groups = append(groups, share.Group)
++				}
++			}
++		}
++	}
++	if len(groups) != 2 || groups[0] != utls.X25519MLKEM768 || groups[1] != utls.X25519 {
++		return E.New("reality X25519MLKEM768 requires the X25519MLKEM768 and X25519 key shares in that order, got ", fmt.Sprint(groups))
++	}
++	keys := uConn.HandshakeState.State13.KeyShareKeys
++	if keys == nil || keys.Ecdhe == nil || keys.Mlkem == nil || keys.MlkemEcdhe == nil {
++		return E.New("reality X25519MLKEM768 key shares were not generated")
++	}
++	if keys.Ecdhe.Curve() != ecdh.X25519() {
++		return E.New("reality X25519MLKEM768 requires the X25519 share to seal the session ID")
++	}
++	return nil
++}
++
++func isGREASECurve(curveID utls.CurveID) bool {
++	value := uint16(curveID)
++	return value&0x0f0f == 0x0a0a && value>>8 == value&0xff
++}
++
+@@ -273,0 +322 @@ func (e *RealityClientConfig) Clone() Config {
++		e.supportX25519MLKEM768,
+diff --git a/common/tls/reality_hybrid_test.go b/common/tls/reality_hybrid_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..409a5ef460fce5e41660c7c49e9d80c7f8119717
+--- /dev/null
++++ b/common/tls/reality_hybrid_test.go
+@@ -0,0 +1,203 @@
++//go:build with_utls
++
++package tls
++
++import (
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/binary"
++	"io"
++	"net"
++	"slices"
++	"strings"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/logger"
++
++	utls "github.com/metacubex/utls"
++)
++
++func newTestRealityClient(t *testing.T, fingerprint string, hybrid bool) (Config, error) {
++	t.Helper()
++	key, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return NewRealityClient(context.Background(), logger.NOP(), "127.0.0.1:443", option.OutboundTLSOptions{
++		Enabled:    true,
++		ServerName: "example.test",
++		UTLS:       &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint},
++		Reality: &option.OutboundRealityOptions{
++			Enabled:               true,
++			PublicKey:             base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()),
++			ShortID:               "a1b2c3d4",
++			SupportX25519MLKEM768: hybrid,
++		},
++	})
++}
++
++// clientHelloGroups returns the non-GREASE key share and supported group
++// identifiers of the ClientHello that the REALITY client writes.
++func clientHelloGroups(t *testing.T, config Config) (keyShares, supported []utls.CurveID) {
++	t.Helper()
++	client, server := net.Pipe()
++	defer server.Close()
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		defer client.Close()
++		_, _ = config.(*RealityClientConfig).ClientHandshake(context.Background(), client)
++	}()
++	header := make([]byte, 5)
++	if _, err := io.ReadFull(server, header); err != nil {
++		t.Fatal(err)
++	}
++	record := make([]byte, binary.BigEndian.Uint16(header[3:]))
++	if _, err := io.ReadFull(server, record); err != nil {
++		t.Fatal(err)
++	}
++	server.Close()
++	<-done
++	if header[0] != 22 || record[0] != 1 {
++		t.Fatalf("first record is not a ClientHello: %x %x", header[0], record[0])
++	}
++	body := record[4:]
++	offset := 2 + 32
++	offset += 1 + int(body[offset])
++	offset += 2 + int(binary.BigEndian.Uint16(body[offset:]))
++	offset += 1 + int(body[offset])
++	end := offset + 2 + int(binary.BigEndian.Uint16(body[offset:]))
++	for offset += 2; offset+4 <= end; {
++		kind := binary.BigEndian.Uint16(body[offset:])
++		data := body[offset+4 : offset+4+int(binary.BigEndian.Uint16(body[offset+2:]))]
++		offset += 4 + len(data)
++		switch kind {
++		case 0x0033:
++			for rest := data[2:]; len(rest) >= 4; rest = rest[4+int(binary.BigEndian.Uint16(rest[2:])):] {
++				if group := utls.CurveID(binary.BigEndian.Uint16(rest)); !isGREASECurve(group) {
++					keyShares = append(keyShares, group)
++				}
++			}
++		case 0x000a:
++			for rest := data[2:]; len(rest) >= 2; rest = rest[2:] {
++				if group := utls.CurveID(binary.BigEndian.Uint16(rest)); !isGREASECurve(group) {
++					supported = append(supported, group)
++				}
++			}
++		}
++	}
++	return keyShares, supported
++}
++
++func TestRealityClientHelloKeySharesFollowTheHybridOption(t *testing.T) {
++	plain, err := newTestRealityClient(t, "chrome", false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	keyShares, supported := clientHelloGroups(t, plain)
++	if !slices.Equal(keyShares, []utls.CurveID{utls.X25519}) || slices.Contains(supported, utls.X25519MLKEM768) {
++		t.Fatalf("default hello offers X25519MLKEM768: shares %v groups %v", keyShares, supported)
++	}
++
++	hybrid, err := newTestRealityClient(t, "chrome", true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	keyShares, supported = clientHelloGroups(t, hybrid)
++	if !slices.Equal(keyShares, []utls.CurveID{utls.X25519MLKEM768, utls.X25519}) {
++		t.Fatalf("hybrid hello shares %v, want X25519MLKEM768 then X25519", keyShares)
++	}
++	if slices.Index(supported, utls.X25519MLKEM768) != 0 || slices.Index(supported, utls.X25519) != 1 {
++		t.Fatalf("hybrid hello groups %v, want X25519MLKEM768 then X25519 first", supported)
++	}
++}
++
++func TestRealityHybridKeyShareRequiresTheChromeFingerprint(t *testing.T) {
++	for _, fingerprint := range []string{"firefox", "safari", "edge", "ios", "android", "random", "randomized"} {
++		if _, err := newTestRealityClient(t, fingerprint, true); err == nil ||
++			!strings.Contains(err.Error(), "requires the chrome uTLS fingerprint") {
++			t.Fatalf("%s: got %v, want the chrome fingerprint requirement", fingerprint, err)
++		}
++		if _, err := newTestRealityClient(t, fingerprint, false); err != nil {
++			t.Fatalf("%s without the hybrid share: %v", fingerprint, err)
++		}
++	}
++}
++
++func TestRealityHybridKeyShareRejectsRandomEvenWhenItDrawsChrome(t *testing.T) {
++	drawn := randomFingerprint
++	randomFingerprint = utls.HelloChrome_Auto
++	t.Cleanup(func() { randomFingerprint = drawn })
++	if _, err := newTestRealityClient(t, "random", true); err == nil ||
++		!strings.Contains(err.Error(), "requires the chrome uTLS fingerprint") {
++		t.Fatalf("random with a chrome draw: got %v, want the chrome fingerprint requirement", err)
++	}
++	for _, fingerprint := range []string{"chrome", "", "chrome_psk", "chrome_pq"} {
++		if _, err := newTestRealityClient(t, fingerprint, true); err != nil {
++			t.Fatalf("%q resolves to the chrome hello: %v", fingerprint, err)
++		}
++	}
++}
++
++func TestRealityHybridKeySharesRejectAnUnexpectedLayout(t *testing.T) {
++	build := func(t *testing.T) *utls.UConn {
++		t.Helper()
++		client, server := net.Pipe()
++		t.Cleanup(func() { client.Close(); server.Close() })
++		uConn := utls.UClient(client, &utls.Config{ServerName: "example.test"}, utls.HelloChrome_Auto)
++		if err := uConn.BuildHandshakeState(); err != nil {
++			t.Fatal(err)
++		}
++		return uConn
++	}
++	keyShares := func(uConn *utls.UConn) *utls.KeyShareExtension {
++		for _, extension := range uConn.Extensions {
++			if ks, ok := extension.(*utls.KeyShareExtension); ok {
++				return ks
++			}
++		}
++		t.Fatal("chrome hello has no key share extension")
++		return nil
++	}
++	if err := requireRealityHybridKeyShares(build(t)); err != nil {
++		t.Fatalf("chrome hello: %v", err)
++	}
++	mutations := map[string]func(*utls.UConn){
++		"reversed shares": func(uConn *utls.UConn) {
++			ks := keyShares(uConn)
++			ks.KeyShares[1], ks.KeyShares[2] = ks.KeyShares[2], ks.KeyShares[1]
++		},
++		"no hybrid share": func(uConn *utls.UConn) {
++			ks := keyShares(uConn)
++			ks.KeyShares = slices.DeleteFunc(ks.KeyShares, func(share utls.KeyShare) bool { return share.Group == utls.X25519MLKEM768 })
++		},
++		"no X25519 key": func(uConn *utls.UConn) {
++			uConn.HandshakeState.State13.KeyShareKeys.Ecdhe = nil
++		},
++		"P-256 key": func(uConn *utls.UConn) {
++			key, err := ecdh.P256().GenerateKey(rand.Reader)
++			if err != nil {
++				t.Fatal(err)
++			}
++			uConn.HandshakeState.State13.KeyShareKeys.Ecdhe = key
++		},
++	}
++	for name, mutate := range mutations {
++		uConn := build(t)
++		mutate(uConn)
++		if err := requireRealityHybridKeyShares(uConn); err == nil {
++			t.Fatalf("%s: accepted", name)
++		}
++	}
++}
++
++func TestIsGREASECurve(t *testing.T) {
++	for value, want := range map[uint16]bool{0x0a0a: true, 0x1a1a: true, 0xfafa: true, 0x0a1a: false, 0x11ec: false, 0x001d: false} {
++		if got := isGREASECurve(utls.CurveID(value)); got != want {
++			t.Fatalf("isGREASECurve(%#04x) = %v", value, got)
++		}
++	}
++}
 diff --git a/common/tls/std_client.go b/common/tls/std_client.go
 index 80fa6cb284f795572fe7649f5a9dd8008b958e08..4ea0a4af2d9f43ede446107c40735a0aa23ee0ea 100644
 --- a/common/tls/std_client.go
@@ -890,8 +1195,16 @@ index 3172be80a0688016c8aa88e50c6dec77b6399c80..21692db6e33ba8092ac4af740ce69062
 +lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
 +lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
 diff --git a/option/tls.go b/option/tls.go
-index 5c807d6763354cd7bf4f3ecb33ebb021aad31e07..012097d32930d70ba4ce154f57d38e2e2f15e4e8 100644
+index 5c807d6763354cd7bf4f3ecb33ebb021aad31e07..074f0e2a6b4045a555f8a87e70e91feb918f9f47 100644
 --- a/option/tls.go
 +++ b/option/tls.go
 @@ -107,0 +108 @@ type OutboundTLSOptions struct {
 +	CertificateSHA256          badoption.Listable[[]byte]          `json:"certificate_sha256,omitempty"`
+@@ -253,3 +254,4 @@ type OutboundRealityOptions struct {
+-	Enabled   bool   `json:"enabled,omitempty"`
+-	PublicKey string `json:"public_key,omitempty"`
+-	ShortID   string `json:"short_id,omitempty"`
++	Enabled               bool   `json:"enabled,omitempty"`
++	PublicKey             string `json:"public_key,omitempty"`
++	ShortID               string `json:"short_id,omitempty"`
++	SupportX25519MLKEM768 bool   `json:"support_x25519mlkem768,omitempty"`

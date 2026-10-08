@@ -95,6 +95,36 @@ import Testing
     try SourceBuiltLibboxConfigurationChecker().check(configuration: configuration)
   }
 
+  @Test func pinnedLibboxAcceptsTheRealityHybridKeyShareOnlyWithChrome() throws {
+    func configuration(fingerprint: String) throws -> Data {
+      try JSONSerialization.data(withJSONObject: [
+        "log": ["level": "error"],
+        "outbounds": [
+          [
+            "type": "vless", "tag": "reality", "server": "1.1.1.1", "server_port": 443,
+            "uuid": "11111111-1111-4111-8111-111111111111",
+            "tls": [
+              "enabled": true, "server_name": "www.example.com",
+              "utls": ["enabled": true, "fingerprint": fingerprint],
+              "reality": [
+                "enabled": true,
+                "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+                "short_id": "0123456789abcdef",
+                "support_x25519mlkem768": true,
+              ],
+            ],
+          ]
+        ],
+        "route": ["final": "reality"],
+      ])
+    }
+    let checker = SourceBuiltLibboxConfigurationChecker()
+    try checker.check(configuration: configuration(fingerprint: "chrome"))
+    #expect(throws: LibboxRuntimeError.self) {
+      try checker.check(configuration: configuration(fingerprint: "firefox"))
+    }
+  }
+
   @Test func pinnedLibboxAcceptsProjectedAnyTLSAndTUICShape() throws {
     let configuration = Data(
       #"""

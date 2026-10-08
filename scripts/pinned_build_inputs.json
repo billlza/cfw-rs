@@ -395,7 +395,7 @@
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "6dc9d6c3abcd5935b34b4fbc4d3a58a0d4f2b04b3d10a91547d32c3350b1d73c"
+      "sha256": "d2ddb176d0063a9cba1727c6dd76828ef47c7185a83363df5866f2c44b5603c3"
     },
     {
       "name": "sing-box raw packet tun patch",
@@ -429,7 +429,7 @@
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "2c9714697fd7b03d1d067fc87c4b7104d01a1851ddd3e8b8ff0908942d2f5da5",
+  "combinedDiffSha256": "a28b5932848144d04af3fe5eb0a390eec3c219cde8cdd2c793b5436094cd41cb",
   "sourceContract": {
     "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
     "patchedDiffSha256": "009b75e74077b754d5e9bcfae44df2d71ad463d9b48f055e21d4e8cddc97dec5",
@@ -3524,7 +3524,7 @@
     "RELEASE.md": "ed40465a00e64d0b63ffacf390c7f723556f27a7ecd04f79ef51cfdd3af87072",
     "scripts/updater_signing_launcher.py": "31a3841dba08f49aa080773e1aad10b8eb814e9de477aa95325855dc4969fb07",
     "scripts/validate_updater_archive.py": "bee48aab736554ebeb0772687eaa44cea81426bcdc27d5581d399331b5814dca",
-    "CHANGELOG.md": "99617c8fe837f78d9e53dfa89160243f5d81abeb34426f13a0ff6b9d8bc28d34",
+    "CHANGELOG.md": "4700210ce420febea39df2c5bbe6c7864808e58e97708c21edfdb191547364c6",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
     "scripts/validate_notary_archive.py": "099ff41742da304d34ec8b92dd3b3c4f96d064f21bde697b21f5c99c2393f283",
     "scripts/tauri_host_skeleton.sh": "4ba1842ae2a61b0921c98617a0031ce3da464deb220bbd2158c7b45afcfa9f92",

@@ -71,7 +71,10 @@ reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the
 schema's uTLS and Reality options. Reality requires an enabled uTLS
 fingerprint (Clash `client-fingerprint`, URI `fp`, or sing-box `tls.utls`)
 because sing-box runs Reality only over uTLS; a node without one fails at
-import, and no fingerprint is chosen for it. A Reality node may opt in to the
+import, and the app never picks one for it. A Clash document's top-level
+`global-client-fingerprint` applies, as in Mihomo before v1.19.27, to TLS
+VMess, VLESS, Trojan and AnyTLS nodes whose own `client-fingerprint` is
+absent or empty; a node's `client-fingerprint: none` keeps standard TLS. A Reality node may opt in to the
 post-quantum X25519MLKEM768 key share that newer Reality servers require
 (`reality-opts.support-x25519mlkem768` or `tls.reality.support_x25519mlkem768`),
 which needs the `chrome` fingerprint. Every enabled remote TLS transport and authenticated DoH

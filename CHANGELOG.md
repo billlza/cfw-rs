@@ -45,13 +45,28 @@
   turn the switch on again and approve the macOS prompt.
 - Refuse a Reality node without a uTLS fingerprint when it is imported or
   saved, naming `outbounds[N].tls.utls`, instead of storing a profile the core
-  then cannot start. The Clash `client-fingerprint`, link `fp` or sing-box
-  `tls.utls` must name one; none is chosen for the node. A profile an earlier
+  then cannot start. The Clash `client-fingerprint` (or the document's
+  `global-client-fingerprint`, below), link `fp` or sing-box `tls.utls` must
+  name one; the app never picks one for the node. A profile an earlier
   build stored with such a node is now reported by its id when profiles load,
   and System Proxy and TUN cannot start until it is removed: quit the app,
   delete `<id>.profile.json` from `~/Library/Application Support/Clash for
   Mac/sing-box-profiles-v1` (and `selected-profile-v1.json` there if that
   profile was selected), then import the node again with a fingerprint.
+- Honour a Clash document's top-level `global-client-fingerprint` as Mihomo
+  did until v1.19.27 removed it: a TLS VMess, VLESS (Reality included),
+  Trojan or AnyTLS node without a non-empty `client-fingerprint` of its own
+  gets that uTLS fingerprint, so such Reality nodes import again. Earlier
+  builds ignored the key, so updating such a subscription switches those
+  nodes from standard TLS to the named browser ClientHello. A node's own
+  value wins, and `client-fingerprint: none` now keeps standard TLS instead
+  of failing the import. A global `none` or empty value sets nothing; any
+  other value the app does not support fails the import and names the key.
+  HTTP, Hysteria2 and TUIC nodes never take it, and a V2Ray QUIC node that
+  would take it fails like an explicit fingerprint there. Proxy providers
+  store the value so refreshing them applies it again; a profile that stores
+  it cannot be loaded by an earlier build, and providers imported before
+  this version keep standard TLS until the subscription itself is updated.
 - Importing typed profile JSON (nodes with `credential_ref`) whose fields are
   well formed but fail validation, such as Reality without uTLS, names the
   field and the reason, as saving it in the profile editor does, instead of

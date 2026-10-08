@@ -1,5 +1,28 @@
 //! Shared Clash TLS fields and protocol-specific compatibility.
-use super::{ProxyFields, Value, build_tls_parts, json, parse_utls, tls_json};
+use super::{
+    ProxyFields, UtlsFingerprint, Value, build_tls_parts, json, parse_utls_fingerprint, tls_json,
+    utls_json,
+};
+
+const GLOBAL_CLIENT_FINGERPRINT: &str = "global-client-fingerprint";
+
+/// Takes Mihomo's top-level `global-client-fingerprint`, the uTLS
+/// fingerprint that Mihomo before v1.19.27 gave every TLS VMess, VLESS,
+/// Trojan and AnyTLS node without a non-empty `client-fingerprint`. `none`,
+/// an empty value and null set no fingerprint; any other value must be a
+/// supported one even when no node would use it.
+pub(super) fn take_global_client_fingerprint(
+    root: &mut ProxyFields,
+) -> Result<Option<UtlsFingerprint>, String> {
+    let Some(value) = root.take_string(GLOBAL_CLIENT_FINGERPRINT)? else {
+        return Ok(None);
+    };
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    parse_utls_fingerprint(&value)
+        .map_err(|error| format!("{}.{GLOBAL_CLIENT_FINGERPRINT}: {error}", root.context()))
+}
 
 /// TLS-related keys shared by the TLS-capable proxy types.
 pub(super) struct TlsFields {
@@ -68,12 +91,15 @@ pub(super) fn collect_tls(fields: &mut ProxyFields) -> Result<TlsFields, String>
 }
 
 impl TlsFields {
-    /// TLS object for proxy types where TLS is optional (vmess, vless).
+    /// TLS object for proxy types where TLS is optional (http, vmess, vless).
+    /// `inherited` is the document's global fingerprint for the types Mihomo
+    /// gave it to, and `None` for the others.
     pub(super) fn into_optional_json(
         self,
         context: &str,
         server: &str,
         reality_allowed: bool,
+        inherited: Option<UtlsFingerprint>,
     ) -> Result<Option<Value>, String> {
         if self.reality.is_some() {
             if !reality_allowed {
@@ -91,36 +117,44 @@ impl TlsFields {
             // effect in Clash either; dropping them preserves semantics.
             return Ok(None);
         }
-        self.build(server).map(Some)
+        self.build(server, inherited).map(Some)
     }
 
     /// TLS object for always-TLS stream protocols that allow uTLS but not Reality.
-    pub(super) fn into_required_json(self, context: &str, server: &str) -> Result<Value, String> {
-        self.into_required_json_with_capabilities(context, server, true, false)
+    pub(super) fn into_required_json(
+        self,
+        context: &str,
+        server: &str,
+        inherited: Option<UtlsFingerprint>,
+    ) -> Result<Value, String> {
+        self.into_required_json_with_capabilities(context, server, true, false, inherited)
     }
 
+    /// QUIC TLS has no uTLS, so these types never inherit a fingerprint.
     pub(super) fn into_quic_required_json(
         self,
         context: &str,
         server: &str,
     ) -> Result<Value, String> {
-        self.into_required_json_with_capabilities(context, server, false, false)
+        self.into_required_json_with_capabilities(context, server, false, false, None)
     }
 
     pub(super) fn into_anytls_required_json(
         self,
         context: &str,
         server: &str,
+        inherited: Option<UtlsFingerprint>,
     ) -> Result<Value, String> {
-        self.into_required_json_with_capabilities(context, server, true, true)
+        self.into_required_json_with_capabilities(context, server, true, true, inherited)
     }
 
-    pub(super) fn into_required_json_with_capabilities(
+    fn into_required_json_with_capabilities(
         self,
         context: &str,
         server: &str,
         utls_allowed: bool,
         reality_allowed: bool,
+        inherited: Option<UtlsFingerprint>,
     ) -> Result<Value, String> {
         if self.reality.is_some() && !reality_allowed {
             return Err(format!("{context} does not support Reality"));
@@ -133,13 +167,16 @@ impl TlsFields {
                 "{context} declares tls: false for an always-TLS proxy type"
             ));
         }
-        self.build(server)
+        self.build(server, inherited)
     }
 
-    fn build(self, server: &str) -> Result<Value, String> {
-        let utls = match self.client_fingerprint.as_deref() {
-            None => None,
-            Some(fingerprint) => parse_utls(fingerprint)?,
+    fn build(self, server: &str, inherited: Option<UtlsFingerprint>) -> Result<Value, String> {
+        // Mihomo used the global value only in place of an empty one; its own
+        // `none` keeps standard TLS whatever the document sets globally.
+        let fingerprint = match self.client_fingerprint.as_deref() {
+            None | Some("") => inherited,
+            Some(own) if own.eq_ignore_ascii_case("none") => None,
+            Some(own) => parse_utls_fingerprint(own)?,
         };
         let reality = self.reality.map(|reality| {
             let mut value = json!({
@@ -156,7 +193,7 @@ impl TlsFields {
             true,
             self.server_name.unwrap_or_else(|| server.to_owned()),
             self.alpn,
-            utls,
+            fingerprint.map(utls_json),
             reality,
         ));
         if let Some(pin) = self.certificate_pin {

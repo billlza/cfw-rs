@@ -55,7 +55,14 @@ The safe schema is intentionally closed:
 - Reality requires an enabled `tls.utls` fingerprint, imported from Clash
   `client-fingerprint`, URI `fp`, or sing-box `tls.utls`. sing-box runs
   Reality only over uTLS, so a node without one fails at import instead of at
-  engine start; no fingerprint is chosen on its behalf;
+  engine start; the app never picks one on its behalf;
+- a Clash document's top-level `global-client-fingerprint`, which Mihomo
+  honoured until v1.19.27, is written as `tls.utls` onto every TLS VMess,
+  VLESS, Trojan and AnyTLS node without a non-empty `client-fingerprint` of
+  its own, Reality nodes included. A node's own value wins and its `none`
+  keeps standard TLS; a global `none` or empty value sets nothing, and an
+  unsupported value fails the import. HTTP, Hysteria2 and TUIC nodes never
+  take it. Proxy providers keep the value so their refreshes apply it again;
 - Reality offers the X25519MLKEM768 key share only when a node opts in with
   Clash `reality-opts.support-x25519mlkem768: true` or sing-box
   `tls.reality.support_x25519mlkem768: true`. Servers since XTLS/REALITY

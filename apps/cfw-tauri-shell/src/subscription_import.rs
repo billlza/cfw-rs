@@ -4,7 +4,8 @@ use std::fmt;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use cfw_singbox_config::{
-    CredentialKind, CredentialRef, MAX_OUTBOUNDS, ProfileParseError, ValidatedSingBoxProfile,
+    CredentialKind, CredentialRef, MAX_OUTBOUNDS, ProfileParseError, UtlsFingerprint,
+    ValidatedSingBoxProfile,
 };
 use reqwest::Url;
 use serde_json::{Value, json};
@@ -1020,23 +1021,30 @@ fn normalize_tuic_udp_relay_mode(value: &str) -> Result<String, String> {
 }
 
 fn parse_utls(value: &str) -> Result<Option<Value>, String> {
+    Ok(parse_utls_fingerprint(value)?.map(utls_json))
+}
+
+/// Maps a case-insensitive uTLS name onto the runtime's preset set; an empty
+/// name requests no uTLS.
+fn parse_utls_fingerprint(value: &str) -> Result<Option<UtlsFingerprint>, String> {
     if value.is_empty() {
         return Ok(None);
     }
-    let fingerprint = match value.to_ascii_lowercase().as_str() {
-        "chrome" | "firefox" | "edge" | "safari" | "360" | "qq" | "ios" | "android" | "random"
-        | "randomized" => value.to_ascii_lowercase(),
-        other => {
-            return Err(format!(
+    serde_json::from_value(Value::String(value.to_ascii_lowercase()))
+        .map(Some)
+        .map_err(|_| {
+            format!(
                 "uTLS fingerprint is unsupported: {}",
-                sanitized_token(other)
-            ));
-        }
-    };
-    Ok(Some(json!({
+                sanitized_token(value)
+            )
+        })
+}
+
+fn utls_json(fingerprint: UtlsFingerprint) -> Value {
+    json!({
         "enabled": true,
         "fingerprint": fingerprint,
-    })))
+    })
 }
 
 fn build_tls_parts(

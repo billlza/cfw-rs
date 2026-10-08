@@ -3524,7 +3524,7 @@
     "RELEASE.md": "ed40465a00e64d0b63ffacf390c7f723556f27a7ecd04f79ef51cfdd3af87072",
     "scripts/updater_signing_launcher.py": "31a3841dba08f49aa080773e1aad10b8eb814e9de477aa95325855dc4969fb07",
     "scripts/validate_updater_archive.py": "bee48aab736554ebeb0772687eaa44cea81426bcdc27d5581d399331b5814dca",
-    "CHANGELOG.md": "bdaaa0296c994b1de0c5c545de97658bc979745c64ab0f9637a2cc0b238df550",
+    "CHANGELOG.md": "bf9e7b88d6533935c6f8ac346cbca44929616e28b3ac5b6ece4370c09132443d",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
     "scripts/validate_notary_archive.py": "099ff41742da304d34ec8b92dd3b3c4f96d064f21bde697b21f5c99c2393f283",
     "scripts/tauri_host_skeleton.sh": "4ba1842ae2a61b0921c98617a0031ce3da464deb220bbd2158c7b45afcfa9f92",

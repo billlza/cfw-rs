@@ -15,14 +15,28 @@ mod storage_tests;
 
 pub use cfw_singbox_config::ValidatedSingBoxProfile;
 pub use repository::{
-    ExactProfileImportOutcome, LockedCredentialProfileMutation, LockedProfileCredentialSnapshot,
-    LockedSelectedProfile, ProfileCredentialCatalogEntry, ProfileCredentialSnapshot,
-    ProfileImportResult, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
-    ProfileSourceKind, StoredProfile,
+    ExactProfileImportOutcome, InvalidProfileRecord, InvalidSelection,
+    LockedCredentialProfileMutation, LockedProfileCredentialSnapshot, LockedSelectedProfile,
+    ProfileCredentialCatalogEntry, ProfileCredentialSnapshot, ProfileImportResult, ProfileRecord,
+    ProfileRepository, ProfileRepositorySnapshot, ProfileSelectionState, ProfileSourceKind,
+    StoredProfile,
 };
 
 use cfw_singbox_config::{ConfigError, MAX_PROFILE_BYTES};
 use thiserror::Error;
+
+/// Names a stored profile in an error so the user can find it in the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileLabel {
+    pub id: String,
+    pub name: String,
+}
+
+impl std::fmt::Display for ProfileLabel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "\"{}\" ({})", self.name, self.id)
+    }
+}
 
 const PROFILE_SCHEMA_VERSION: u16 = 1;
 const PROFILE_FILE_SUFFIX: &str = ".profile.json";
@@ -58,9 +72,14 @@ pub enum ProfileError {
     #[error("sing-box profile is invalid: {0}")]
     InvalidProfile(#[from] ConfigError),
     /// A stored envelope no longer passes profile validation, for example a
-    /// node an earlier build accepted. The id names the file to remove.
-    #[error("stored profile {id} is invalid: {source}")]
-    StoredProfileInvalid { id: String, source: ConfigError },
+    /// node an earlier build accepted. It is listed so it can be deleted, and
+    /// every attempt to load, select or start it reports this error.
+    #[error("stored profile \"{name}\" ({id}) is invalid: {source}")]
+    StoredProfileInvalid {
+        id: String,
+        name: String,
+        source: ConfigError,
+    },
     #[error("profile envelope JSON is invalid: {0}")]
     InvalidEnvelopeJson(#[from] serde_json::Error),
     #[error("selected-profile JSON is invalid: {0}")]
@@ -91,6 +110,14 @@ pub enum ProfileError {
     TooManyCredentialReferences,
     #[error("stored profile has an invalid credential audience: {0}")]
     InvalidCredentialAudience(String),
+    /// Credential cleanup keeps every reference a stored document names. An
+    /// entry that fails validation yields none, so cleanup could remove the
+    /// credentials of a profile that is still listed.
+    #[error(
+        "credential cleanup needs every stored profile to pass validation; delete the invalid profiles first: {}",
+        .profiles.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    CredentialCleanupBlocked { profiles: Vec<ProfileLabel> },
     #[error(
         "profile repository would exceed the {MAX_REPOSITORY_BYTES}-byte aggregate limit: {actual} bytes"
     )]
@@ -135,6 +162,8 @@ pub enum ProfileError {
     SelectedReplaceRecovery { operation: String, recovery: String },
     #[error("selected profile does not exist: {0}")]
     SelectedProfileMissing(String),
+    #[error("profile does not exist: {0}")]
+    ProfileNotFound(String),
     #[error("no profile is selected")]
     NoSelectedProfile,
     #[error(
@@ -147,6 +176,10 @@ pub enum ProfileError {
     },
     #[error("selected profile must be deselected or replaced before deletion: {0}")]
     SelectedProfileDeletion(String),
+    /// Deleting the selected entry that fails validation also removes the
+    /// selection, which the caller did not allow.
+    #[error("the selected profile {0} is invalid; deleting it would also clear the selection")]
+    InvalidSelectionKept(ProfileLabel),
     #[error("profile already exists: {0}")]
     AlreadyExists(String),
     #[error(

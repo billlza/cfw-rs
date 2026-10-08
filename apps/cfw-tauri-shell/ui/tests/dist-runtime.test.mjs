@@ -160,7 +160,7 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
       proxied_services: [],
       unavailable: ["default_route_interface"],
     },
-    profiles_snapshot: [],
+    profiles_snapshot: { profiles: [], invalid_profiles: [] },
     resolve_update_install: { outcome: { state: "none" }, pending: null },
   };
   globalThis.window.__TAURI_INTERNALS__ = {

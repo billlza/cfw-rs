@@ -1689,6 +1689,21 @@ dd {
   font-size: 12px;
 }
 
+/* A stored profile that fails validation can be deleted but not selected. */
+.cfw-profile-card.invalid {
+  cursor: default;
+}
+
+.cfw-profile-card.invalid > i {
+  background: var(--danger);
+}
+
+.profile-card-main .profile-card-invalid {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .profile-list,
 .provider-section {
   display: grid;

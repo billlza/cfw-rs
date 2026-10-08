@@ -775,5 +775,19 @@
 ,
   "Reconfirming…": "重新确认中…",
   "Confirming the core's state": "正在确认内核状态",
-  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "后台服务没有及时应答。内核和网络设置都保持原样；服务一应答，这条提示会自动消失。"
+  "The background services did not answer in time. The core and your network settings were left as they are; this notice clears by itself once they answer.": "后台服务没有及时应答。内核和网络设置都保持原样；服务一应答，这条提示会自动消失。",
+  "Selected, but invalid: {error}": "已选择，但无效：{error}",
+  "Invalid: {error}": "无效：{error}",
+  "This profile fails validation and cannot be selected or started.": "此配置文件未通过校验，无法选择或启动。",
+  "Show subscription URL": "显示订阅 URL",
+  "Delete this invalid profile": "删除此无效配置文件",
+  "{name} has no subscription URL": "{name}没有订阅 URL",
+  "Import this URL again to replace “{name}”, then delete the invalid profile.": "请重新导入此 URL 以替换“{name}”，然后删除此无效配置文件。",
+  "Delete “{name}”? It is selected but fails validation; afterwards no profile is selected.": "删除“{name}”？它已被选择但未通过校验；删除后将不选择任何配置文件。",
+  "Delete “{name}”? It fails validation and cannot be used.": "删除“{name}”？它未通过校验，无法使用。",
+  "Could not read the subscription URL of {name}: {error}": "无法读取{name}的订阅 URL：{error}",
+  "{action} is unavailable: the selected profile “{name}” is invalid: {error}": "{action}不可用：所选配置文件“{name}”无效：{error}",
+  "the selected profile “{name}” is invalid: {error}": "所选配置文件“{name}”无效：{error}",
+  "Subscription URL": "订阅 URL",
+  "Credential cleanup is unavailable: {error}": "无法清理凭据：{error}"
 }

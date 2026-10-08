@@ -122,5 +122,24 @@ contain at most 256 MiB. Listing and
 importing validate every existing entry under the repository lock; malformed,
 linked, oversized, or unexpected entries are reported instead of skipped.
 Selection is a separate private, versioned record bound to the profile digest.
-Proxy or Tunnel start fails when selection is absent, missing, or stale;
-turning the engine Off never depends on profile state.
+Proxy or Tunnel start fails when selection is absent, missing, stale, or names
+an invalid profile; turning the engine Off never depends on profile state.
+
+An intact entry whose document, provider sources or saved node selections
+fail the current validation, such as a Reality node an earlier version stored
+without uTLS, is not corrupt. It is listed under its name as invalid, with the
+validator's message, and does not block the other profiles: they can still be
+imported, selected and started. An invalid profile cannot be selected, edited,
+updated, exported or started, and no other profile is chosen in its place.
+Delete removes it. For a subscription, the card shows the subscription URL on
+request, with a Copy button, so it can be imported again first; the list
+itself still carries no URL. The envelope is checked as strictly as any other:
+an unsafe or linked file, an oversized or non-canonical envelope, or a stored
+document that no longer matches its digest still blocks the repository with
+that error. If the selected profile is invalid, the list shows it as selected;
+System Proxy, TUN, runtime settings and the configuration preview report its
+validation error until another profile is selected or it is deleted. Deleting
+it requires the core to be stopped and leaves no profile selected. Credential
+cleanup is refused while any invalid profile is listed, naming each one,
+because a document that does not validate yields no credential references;
+its Keychain items stay until it is deleted and cleanup runs.

@@ -1,20 +1,22 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use cfw_singbox_config::{CredentialAudience, CredentialRef, ValidatedSingBoxProfile, sha256_hex};
+use cfw_singbox_config::{
+    ConfigError, CredentialAudience, CredentialRef, ValidatedSingBoxProfile, sha256_hex,
+};
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::envelope::{
-    decode, encode, encode_with_timestamp, normalize_name, normalize_source_url, profile_file_name,
-    profile_id_from_file_name, validate_profile_id,
+    DecodedEntry, decode, encode, encode_with_timestamp, normalize_name, normalize_source_url,
+    profile_file_name, profile_id_from_file_name, validate_profile_id,
 };
 use crate::selected_replace::{self, SelectedProfileReplaceIntent};
 use crate::selection::{ProfileSelection, decode as decode_selection, encode as encode_selection};
 use crate::storage::RepositoryDirectory;
 use crate::storage::ensure_entry_capacity;
 use crate::{
-    MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError,
+    MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError, ProfileLabel,
     SELECTED_REPLACE_FILE_NAME, SELECTION_FILE_NAME,
 };
 
@@ -85,9 +87,99 @@ pub struct StoredProfile {
     pub source_url: Option<String>,
 }
 
+/// A stored profile whose envelope is intact but whose document, provider
+/// sources or saved proxy selections fail current profile validation, for
+/// example a node an earlier build accepted.
+///
+/// It carries no document, so it cannot be selected, loaded, started or used
+/// in place of another profile. Deleting it is the only operation it supports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InvalidProfileRecord {
+    pub id: String,
+    pub name: String,
+    pub created_epoch_secs: u64,
+    pub source_kind: ProfileSourceKind,
+    #[serde(serialize_with = "serialize_validation_error")]
+    pub error: ConfigError,
+}
+
+impl InvalidProfileRecord {
+    fn label(&self) -> ProfileLabel {
+        ProfileLabel {
+            id: self.id.clone(),
+            name: self.name.clone(),
+        }
+    }
+
+    /// The error every load, selection or start of this entry reports.
+    fn load_error(&self) -> ProfileError {
+        ProfileError::StoredProfileInvalid {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            source: self.error.clone(),
+        }
+    }
+}
+
+fn serialize_validation_error<S: serde::Serializer>(
+    error: &ConfigError,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(error)
+}
+
+/// What [`ProfileRepository::delete`] may do when the selection names the
+/// deleted entry and that entry fails validation. A selected valid profile is
+/// never deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidSelection {
+    /// Refuse, keeping the entry and the selection.
+    Keep,
+    /// Remove the selection with the entry, leaving no profile selected. The
+    /// caller must know that nothing can be running the selected profile.
+    Clear,
+}
+
+/// What the selection record names, read under the repository lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileSelectionState {
+    Unselected,
+    Valid(Box<StoredProfile>),
+    /// The selected entry fails validation. Nothing can be running it, since
+    /// no build that rejects its document starts it.
+    Invalid(InvalidProfileRecord),
+}
+
+impl ProfileSelectionState {
+    /// The prior profile of an online change (`ProfileChange::previous_profile`),
+    /// which carries its proxy selections and is compared with the running
+    /// runtime. An invalid selection yields none: every start loads the
+    /// selected profile strictly, so no runtime can be running an entry that
+    /// fails validation. Any other use needs [`Self::into_loaded`].
+    pub fn into_valid(self) -> Option<StoredProfile> {
+        match self {
+            Self::Valid(stored) => Some(*stored),
+            Self::Unselected | Self::Invalid(_) => None,
+        }
+    }
+
+    /// The selected profile for an operation that uses it; an invalid
+    /// selection is reported with its validation error.
+    pub fn into_loaded(self) -> Result<Option<StoredProfile>, ProfileError> {
+        match self {
+            Self::Unselected => Ok(None),
+            Self::Valid(stored) => Ok(Some(*stored)),
+            Self::Invalid(record) => Err(record.load_error()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProfileRepositorySnapshot {
     pub profiles: Vec<ProfileRecord>,
+    /// Entries that fail current validation, ordered like `profiles`. The
+    /// selection may name one of them; it is then reported, never loaded.
+    pub invalid_profiles: Vec<InvalidProfileRecord>,
     pub selected_profile_id: Option<String>,
 }
 
@@ -150,17 +242,18 @@ impl LockedProfileCredentialSnapshot {
 
 impl LockedCredentialProfileMutation {
     /// Reads selection under the lock retained through online preparation.
-    pub fn selected_profile(&self) -> Result<Option<StoredProfile>, ProfileError> {
+    pub fn selected_profile(&self) -> Result<ProfileSelectionState, ProfileError> {
         let snapshot = self.repository.read_all(&self.directory)?;
-        snapshot
-            .selection
-            .map(|selection| {
-                self.repository.decode(
-                    selection.profile_id(),
-                    self.directory.open_profile_file(selection.profile_id())?,
-                )
-            })
-            .transpose()
+        let Some(selection) = snapshot.selection else {
+            return Ok(ProfileSelectionState::Unselected);
+        };
+        let file = self.directory.open_profile_file(selection.profile_id())?;
+        Ok(
+            match self.repository.decode_entry(selection.profile_id(), file)? {
+                StoredEntry::Valid(stored) => ProfileSelectionState::Valid(stored),
+                StoredEntry::Invalid(entry) => ProfileSelectionState::Invalid(entry.record),
+            },
+        )
     }
 
     pub fn profile(&self, id: &str) -> Result<StoredProfile, ProfileError> {
@@ -331,16 +424,44 @@ impl LockedCredentialProfileMutation {
 
 struct RepositorySnapshot {
     records: Vec<ProfileRecord>,
+    invalid: Vec<InvalidEntry>,
     stored_bytes: u64,
     selection: Option<ProfileSelection>,
     credential_catalog: Vec<ProfileCredentialCatalogEntry>,
 }
 
+impl RepositorySnapshot {
+    fn invalid(&self, id: &str) -> Option<&InvalidEntry> {
+        find_invalid(&self.invalid, id)
+    }
+}
+
+fn find_invalid<'a>(entries: &'a [InvalidEntry], id: &str) -> Option<&'a InvalidEntry> {
+    entries.iter().find(|entry| entry.record.id == id)
+}
+
 struct RepositoryProfiles {
     records: Vec<ProfileRecord>,
+    invalid: Vec<InvalidEntry>,
     stored_bytes: u64,
     has_selection: bool,
     credential_catalog: Vec<ProfileCredentialCatalogEntry>,
+}
+
+/// The stored digest binds a selection to an invalid entry exactly as it does
+/// to a valid one; it stays private because nothing can run that document.
+/// The subscription URL stays out of the listed record, as it does for valid
+/// profiles.
+struct InvalidEntry {
+    record: InvalidProfileRecord,
+    digest: String,
+    envelope_digest: String,
+    source_url: Option<String>,
+}
+
+enum StoredEntry {
+    Valid(Box<StoredProfile>),
+    Invalid(InvalidEntry),
 }
 
 #[derive(Serialize)]
@@ -440,7 +561,13 @@ impl ProfileRepository {
         let name = normalize_name(name.unwrap_or("Local profile"))?;
         // Do not add new state alongside a corrupt, legacy, or interrupted
         // entry. The one-way migration API is the only path that clears those.
+        // An intact entry that fails validation does not block other imports,
+        // since importing a corrected node is how it is replaced; its own id
+        // stays taken, and reported as invalid, until it is deleted.
         let existing = self.read_all(directory)?;
+        if let Some(entry) = existing.invalid(id) {
+            return Err(entry.record.load_error());
+        }
         if existing.records.iter().any(|record| record.id == id) {
             let current = self.decode(id, directory.open_profile_file(id)?)?;
             if current.record.name == name
@@ -459,6 +586,8 @@ impl ProfileRepository {
             }
             return Err(ProfileError::AlreadyExists(id.to_owned()));
         }
+        // The catalog counts validated documents only; the native vault still
+        // enforces its own capacity for references an invalid entry kept.
         let prospective_bindings = credential_binding_count(&existing.credential_catalog)?
             .checked_add(profile.credential_references().len())
             .ok_or(ProfileError::TooManyCredentialReferences)?;
@@ -467,7 +596,7 @@ impl ProfileRepository {
         // documented limit. Import must still reject the next write when it
         // is already full; otherwise the 4,097th entry would be committed and
         // only discovered by a later operation.
-        ensure_entry_capacity(existing.records.len())?;
+        ensure_entry_capacity(existing.records.len() + existing.invalid.len())?;
         let bytes = encode(id, &name, profile, source_url)?;
         ensure_repository_bytes(existing.stored_bytes, bytes.len())?;
         directory.write_new_atomic(&profile_file_name(id), &bytes)?;
@@ -780,10 +909,6 @@ impl ProfileRepository {
         Ok(record)
     }
 
-    pub fn list(&self) -> Result<Vec<ProfileRecord>, ProfileError> {
-        self.snapshot().map(|snapshot| snapshot.profiles)
-    }
-
     /// Repository entry name of an existing profile.
     ///
     /// This is the only path from a profile id to a filesystem name. It returns
@@ -809,6 +934,7 @@ impl ProfileRepository {
         let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
             return Ok(ProfileRepositorySnapshot {
                 profiles: Vec::new(),
+                invalid_profiles: Vec::new(),
                 selected_profile_id: None,
             });
         };
@@ -817,6 +943,11 @@ impl ProfileRepository {
         self.read_all(&directory)
             .map(|snapshot| ProfileRepositorySnapshot {
                 profiles: snapshot.records,
+                invalid_profiles: snapshot
+                    .invalid
+                    .into_iter()
+                    .map(|entry| entry.record)
+                    .collect(),
                 selected_profile_id: snapshot
                     .selection
                     .map(|selection| selection.profile_id().to_owned()),
@@ -826,14 +957,15 @@ impl ProfileRepository {
     /// Returns one lock-consistent, secret-free identity for credential vault
     /// garbage collection. Every managed profile contributes its immutable
     /// references, including selected and newly imported unselected profiles.
+    /// It is refused while any entry fails validation, whose references are
+    /// unknown, until that entry is deleted.
     pub fn credential_snapshot(&self) -> Result<ProfileCredentialSnapshot, ProfileError> {
         let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
             return build_credential_snapshot(&[], None);
         };
         directory.lock_exclusive()?;
         self.recover_repository(&directory)?;
-        let snapshot = self.read_all(&directory)?;
-        build_credential_snapshot(&snapshot.credential_catalog, snapshot.selection.as_ref())
+        repository_credential_snapshot(&self.read_all(&directory)?)
     }
 
     pub fn lock_credential_snapshot(
@@ -842,9 +974,7 @@ impl ProfileRepository {
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
         self.recover_repository(&directory)?;
-        let snapshot = self.read_all(&directory)?;
-        let snapshot =
-            build_credential_snapshot(&snapshot.credential_catalog, snapshot.selection.as_ref())?;
+        let snapshot = repository_credential_snapshot(&self.read_all(&directory)?)?;
         Ok(LockedProfileCredentialSnapshot {
             snapshot,
             _directory: directory,
@@ -947,7 +1077,7 @@ impl ProfileRepository {
         intent: &SelectedProfileReplaceIntent,
     ) -> Result<SelectedReplaceState, ProfileError> {
         let current = self
-            .decode(
+            .decode_entry(
                 intent.profile_id(),
                 directory
                     .open_profile_file(intent.profile_id())
@@ -978,8 +1108,15 @@ impl ProfileRepository {
             ));
         }
 
-        let current_envelope_digest = stored_envelope_digest(&current)?;
-        let current_profile_digest = current.record.digest.as_str();
+        // An interrupted replacement still resolves when this build rejects
+        // either document: an invalid entry is matched by its stored digests.
+        let (current_envelope_digest, current_profile_digest) = match &current {
+            StoredEntry::Valid(stored) => (
+                stored_envelope_digest(stored)?,
+                stored.record.digest.as_str(),
+            ),
+            StoredEntry::Invalid(entry) => (entry.envelope_digest.clone(), entry.digest.as_str()),
+        };
         let selected_profile_digest = selection.profile_digest();
         if current_envelope_digest == intent.previous_envelope_digest()
             && current_profile_digest == intent.previous_profile_digest()
@@ -1030,24 +1167,32 @@ impl ProfileRepository {
         };
 
         if let Some(selection) = &selection {
-            let record = profiles
+            // A selection naming an invalid entry is still bound to its stored
+            // digest; it is reported as selected and refused by every load.
+            let digest = profiles
                 .records
                 .iter()
                 .find(|record| record.id == selection.profile_id())
+                .map(|record| &record.digest)
+                .or_else(|| {
+                    find_invalid(&profiles.invalid, selection.profile_id())
+                        .map(|entry| &entry.digest)
+                })
                 .ok_or_else(|| {
                     ProfileError::SelectedProfileMissing(selection.profile_id().to_owned())
                 })?;
-            if record.digest != selection.profile_digest() {
+            if digest != selection.profile_digest() {
                 return Err(ProfileError::SelectedProfileDigestMismatch {
                     id: selection.profile_id().to_owned(),
                     expected: selection.profile_digest().to_owned(),
-                    actual: record.digest.clone(),
+                    actual: digest.clone(),
                 });
             }
         }
 
         Ok(RepositorySnapshot {
             records: profiles.records,
+            invalid: profiles.invalid,
             stored_bytes,
             selection,
             credential_catalog: profiles.credential_catalog,
@@ -1073,6 +1218,7 @@ impl ProfileRepository {
         ids.sort_unstable();
 
         let mut records = Vec::with_capacity(ids.len());
+        let mut invalid = Vec::new();
         let mut credential_catalog = Vec::with_capacity(ids.len());
         let mut credential_binding_count = 0_usize;
         let mut stored_bytes = 0_u64;
@@ -1087,7 +1233,13 @@ impl ProfileRepository {
                     actual: stored_bytes,
                 });
             }
-            let stored = self.decode(&id, file)?;
+            let stored = match self.decode_entry(&id, file)? {
+                StoredEntry::Valid(stored) => *stored,
+                StoredEntry::Invalid(entry) => {
+                    invalid.push(entry);
+                    continue;
+                }
+            };
             let mut references = stored.profile.credential_references();
             references.sort();
             credential_binding_count = credential_binding_count
@@ -1102,14 +1254,18 @@ impl ProfileRepository {
             });
             records.push(stored.record);
         }
-        records.sort_by(|left, right| {
-            left.name
-                .cmp(&right.name)
-                .then_with(|| left.id.cmp(&right.id))
+        records
+            .sort_by(|left, right| listing_order((&left.name, &left.id), (&right.name, &right.id)));
+        invalid.sort_by(|left, right| {
+            listing_order(
+                (&left.record.name, &left.record.id),
+                (&right.record.name, &right.record.id),
+            )
         });
         credential_catalog.sort_by(|left, right| left.audience.cmp(&right.audience));
         Ok(RepositoryProfiles {
             records,
+            invalid,
             stored_bytes,
             has_selection,
             credential_catalog,
@@ -1130,6 +1286,29 @@ impl ProfileRepository {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Subscription URL of one stored profile, including one that fails
+    /// validation, so its source can be imported again before it is deleted.
+    /// Like [`Self::load`] it reads a single entry; lists never carry URLs.
+    pub fn source_url(&self, id: &str) -> Result<Option<String>, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let missing = || ProfileError::ProfileNotFound(id.to_owned());
+        let directory =
+            RepositoryDirectory::open_if_present(&self.profiles_dir)?.ok_or_else(missing)?;
+        directory.lock_exclusive()?;
+        self.recover_repository(&directory)?;
+        let file = match directory.open_profile_file(id) {
+            Ok(file) => file,
+            Err(ProfileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(missing());
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(match self.decode_entry(id, file)? {
+            StoredEntry::Valid(stored) => stored.source_url,
+            StoredEntry::Invalid(entry) => entry.source_url,
+        })
     }
 
     pub fn load_selected(&self) -> Result<Option<StoredProfile>, ProfileError> {
@@ -1186,12 +1365,15 @@ impl ProfileRepository {
         // for malformed or stale selection metadata. Profile envelopes remain
         // fully validated before the replacement is committed.
         let profiles = self.read_profiles(directory)?;
-        let record = profiles
-            .records
-            .iter()
-            .find(|record| record.id == id)
-            .cloned()
-            .ok_or_else(|| ProfileError::SelectedProfileMissing(id.to_owned()))?;
+        let record = match profiles.records.iter().find(|record| record.id == id) {
+            Some(record) => record.clone(),
+            None => {
+                return Err(match find_invalid(&profiles.invalid, id) {
+                    Some(entry) => entry.record.load_error(),
+                    None => ProfileError::SelectedProfileMissing(id.to_owned()),
+                });
+            }
+        };
         let selection = ProfileSelection::new(&record.id, &record.digest)?;
         let bytes = encode_selection(&selection)?;
         ensure_repository_bytes(profiles.stored_bytes, bytes.len())?;
@@ -1199,7 +1381,14 @@ impl ProfileRepository {
         Ok(record)
     }
 
-    pub fn delete(&self, id: &str) -> Result<bool, ProfileError> {
+    /// Deletes one unselected profile, or the selected one when it fails
+    /// validation and the caller holds the engine Off. Deleting never selects
+    /// another profile.
+    pub fn delete(
+        &self,
+        id: &str,
+        invalid_selection: InvalidSelection,
+    ) -> Result<bool, ProfileError> {
         let id = validate_profile_id(id)?;
         let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
             return Ok(false);
@@ -1207,12 +1396,18 @@ impl ProfileRepository {
         directory.lock_exclusive()?;
         self.recover_repository(&directory)?;
         let snapshot = self.read_all(&directory)?;
-        if snapshot
+        let clears_selection = snapshot
             .selection
             .as_ref()
-            .is_some_and(|selection| selection.profile_id() == id)
-        {
-            return Err(ProfileError::SelectedProfileDeletion(id.to_owned()));
+            .is_some_and(|selection| selection.profile_id() == id);
+        if clears_selection {
+            match (snapshot.invalid(id), invalid_selection) {
+                (None, _) => return Err(ProfileError::SelectedProfileDeletion(id.to_owned())),
+                (Some(entry), InvalidSelection::Keep) => {
+                    return Err(ProfileError::InvalidSelectionKept(entry.record.label()));
+                }
+                (Some(_), InvalidSelection::Clear) => {}
+            }
         }
         let file = match directory.open_profile_file(id) {
             Ok(file) => file,
@@ -1221,7 +1416,15 @@ impl ProfileRepository {
             }
             Err(error) => return Err(error),
         };
-        self.decode(id, file)?;
+        // An entry that fails validation is deleted like a valid one; corrupt
+        // or unsafe entries still fail closed before anything is unlinked.
+        self.decode_entry(id, file)?;
+        if clears_selection {
+            // Selection first: an interrupted deletion leaves the entry listed
+            // and unselected, never a selection naming a missing profile.
+            directory.unlink(SELECTION_FILE_NAME)?;
+            directory.sync_committed(SELECTION_FILE_NAME)?;
+        }
         directory.unlink(&profile_file_name(id))?;
         directory.sync_committed(&profile_file_name(id))?;
         Ok(true)
@@ -1265,22 +1468,52 @@ impl ProfileRepository {
         Ok(entries.len())
     }
 
+    /// Loads one profile for use; an entry that fails validation is an error.
     fn decode(&self, id: &str, file: File) -> Result<StoredProfile, ProfileError> {
-        let decoded = decode(id, file)?;
-        let source_kind = ProfileSourceKind::from_source_url(decoded.source_url.as_deref());
-        Ok(StoredProfile {
-            source_url: decoded.source_url,
-            record: ProfileRecord {
-                id: id.to_string(),
-                name: decoded.name,
-                bytes: decoded.profile.as_json().len(),
+        match self.decode_entry(id, file)? {
+            StoredEntry::Valid(stored) => Ok(*stored),
+            StoredEntry::Invalid(entry) => Err(entry.record.load_error()),
+        }
+    }
+
+    fn decode_entry(&self, id: &str, file: File) -> Result<StoredEntry, ProfileError> {
+        Ok(match decode(id, file)? {
+            DecodedEntry::Valid(decoded) => {
+                let decoded = *decoded;
+                StoredEntry::Valid(Box::new(StoredProfile {
+                    record: ProfileRecord {
+                        id: id.to_string(),
+                        name: decoded.name,
+                        bytes: decoded.profile.as_json().len(),
+                        digest: decoded.digest,
+                        created_epoch_secs: decoded.created_epoch_secs,
+                        source_kind: ProfileSourceKind::from_source_url(
+                            decoded.source_url.as_deref(),
+                        ),
+                    },
+                    profile: decoded.profile,
+                    source_url: decoded.source_url,
+                }))
+            }
+            DecodedEntry::Invalid(decoded) => StoredEntry::Invalid(InvalidEntry {
+                record: InvalidProfileRecord {
+                    id: id.to_string(),
+                    name: decoded.name,
+                    created_epoch_secs: decoded.created_epoch_secs,
+                    source_kind: ProfileSourceKind::from_source_url(decoded.source_url.as_deref()),
+                    error: decoded.error,
+                },
                 digest: decoded.digest,
-                created_epoch_secs: decoded.created_epoch_secs,
-                source_kind,
-            },
-            profile: decoded.profile,
+                envelope_digest: decoded.envelope_digest,
+                source_url: decoded.source_url,
+            }),
         })
     }
+}
+
+/// Profiles are listed by name, then id, whether or not they validate.
+fn listing_order(left: (&str, &str), right: (&str, &str)) -> std::cmp::Ordering {
+    left.0.cmp(right.0).then_with(|| left.1.cmp(right.1))
 }
 
 fn validate_stored_profile(stored: &StoredProfile) -> Result<(), ProfileError> {
@@ -1319,6 +1552,21 @@ fn stored_envelope_digest(stored: &StoredProfile) -> Result<String, ProfileError
         stored.record.created_epoch_secs,
     )?;
     Ok(sha256_hex(&bytes))
+}
+
+fn repository_credential_snapshot(
+    snapshot: &RepositorySnapshot,
+) -> Result<ProfileCredentialSnapshot, ProfileError> {
+    if !snapshot.invalid.is_empty() {
+        return Err(ProfileError::CredentialCleanupBlocked {
+            profiles: snapshot
+                .invalid
+                .iter()
+                .map(|entry| entry.record.label())
+                .collect(),
+        });
+    }
+    build_credential_snapshot(&snapshot.credential_catalog, snapshot.selection.as_ref())
 }
 
 fn build_credential_snapshot(
@@ -1779,6 +2027,116 @@ mod tests {
                 .exists()
         );
         fs::remove_dir_all(third_root).expect("remove third-profile repository");
+    }
+
+    /// A selected Reality node rewritten as a build before Reality required
+    /// uTLS stored it: digest and selection follow the edited document.
+    /// Returns the id, the stored digest and the canonical envelope bytes.
+    fn store_selected_invalid(
+        root: &Path,
+        repository: &ProfileRepository,
+    ) -> (String, String, Vec<u8>) {
+        let reality = ValidatedSingBoxProfile::parse(
+            r#"{"outbounds":[{"type":"http","tag":"proxy","server":"proxy.example.com","server_port":443,"tls":{"enabled":true,"server_name":"www.example.com","utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}]}"#,
+        )
+        .expect("Reality with uTLS");
+        let imported = repository
+            .import(Some("Reality node"), &reality)
+            .expect("import Reality node");
+        repository
+            .select(&imported.id)
+            .expect("select Reality node");
+        let earlier =
+            reality
+                .as_json()
+                .replacen(r#","utls":{"enabled":true,"fingerprint":"chrome"}"#, "", 1);
+        let digest = sha256_hex(earlier.as_bytes());
+        let profiles = root.join("profiles");
+        let envelope = fs::read_to_string(profiles.join(profile_file_name(&imported.id)))
+            .expect("read envelope")
+            .replacen(reality.as_json(), &earlier, 1)
+            .replacen(reality.digest(), &digest, 1);
+        write_private(
+            &profiles.join(profile_file_name(&imported.id)),
+            envelope.as_bytes(),
+        );
+        write_private(
+            &profiles.join(SELECTION_FILE_NAME),
+            &encode_selection(&ProfileSelection::new(&imported.id, &digest).expect("selection"))
+                .expect("selection bytes"),
+        );
+        (imported.id, digest, envelope.into_bytes())
+    }
+
+    #[test]
+    fn selected_replace_recovery_resolves_an_entry_that_no_longer_validates() {
+        // Aborted: the intent replaced the entry that is now invalid.
+        let (root, aborted) = repository("invalid-intent-previous");
+        let (id, digest, envelope) = store_selected_invalid(&root, &aborted);
+        let replacement = profile("direct-replacement");
+        let replacement_bytes =
+            encode_with_timestamp(&id, "Replacement", &replacement, None, 1).expect("replacement");
+        let intent = SelectedProfileReplaceIntent::new(
+            &id,
+            &digest,
+            replacement.digest(),
+            &sha256_hex(&envelope),
+            &sha256_hex(&replacement_bytes),
+        )
+        .expect("intent");
+        write_private(
+            &root.join("profiles").join(SELECTED_REPLACE_FILE_NAME),
+            &intent.encode().expect("intent bytes"),
+        );
+        let snapshot = aborted.snapshot().expect("recover the untouched intent");
+        assert!(
+            !root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        assert_eq!(snapshot.selected_profile_id.as_deref(), Some(id.as_str()));
+        assert_eq!(snapshot.invalid_profiles[0].id, id);
+        fs::remove_dir_all(root).expect("remove test repository");
+
+        // Rolled forward: the replacement written before the interruption is
+        // the entry that is now invalid.
+        let (root, rolled) = repository("invalid-intent-replacement");
+        let original = profile("direct-original");
+        let (id, digest, envelope) = store_selected_invalid(&root, &rolled);
+        let original_bytes =
+            encode_with_timestamp(&id, "Original", &original, None, 1).expect("original");
+        let intent = SelectedProfileReplaceIntent::new(
+            &id,
+            original.digest(),
+            &digest,
+            &sha256_hex(&original_bytes),
+            &sha256_hex(&envelope),
+        )
+        .expect("intent");
+        write_private(
+            &root.join("profiles").join(SELECTED_REPLACE_FILE_NAME),
+            &intent.encode().expect("intent bytes"),
+        );
+        write_private(
+            &root.join("profiles").join(SELECTION_FILE_NAME),
+            &encode_selection(&ProfileSelection::new(&id, original.digest()).expect("selection"))
+                .expect("selection bytes"),
+        );
+        let snapshot = rolled.snapshot().expect("roll the selection forward");
+        assert!(
+            !root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        assert_eq!(snapshot.selected_profile_id.as_deref(), Some(id.as_str()));
+        assert_eq!(snapshot.invalid_profiles[0].id, id);
+        assert!(matches!(
+            rolled.load_selected(),
+            Err(ProfileError::StoredProfileInvalid { id: invalid, .. }) if invalid == id
+        ));
+        fs::remove_dir_all(root).expect("remove test repository");
     }
 
     #[test]

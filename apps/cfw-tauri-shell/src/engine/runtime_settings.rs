@@ -69,8 +69,12 @@ pub(crate) async fn change_runtime_preferences(
                 let guard = repository
                     .begin_credential_profile_mutation()
                     .map_err(|error| error.to_string())?;
+                // The settings view returned after the change derives effective DNS
+                // from the selected document, so an invalid selection is refused
+                // before anything is committed, even with the engine Off.
                 let selected = guard
                     .selected_profile()
+                    .and_then(cfw_profiles::ProfileSelectionState::into_loaded)
                     .map_err(|error| error.to_string())?;
                 if mode != EngineMode::Off && selected.is_none() {
                     return Err("a running engine has no selected profile".into());

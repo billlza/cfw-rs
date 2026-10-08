@@ -180,6 +180,10 @@ export const state = {
     rows: new Map(),
   },
   profiles: [],
+  // Stored profiles that fail current validation. They are listed with the
+  // validator message so they can be deleted, and are never selectable,
+  // startable or counted as the active profile.
+  invalidProfiles: [],
   // A failed repository snapshot is distinct from a successfully read empty
   // repository. Migration and projection may only interpret the latter as
   // "no selected profile".

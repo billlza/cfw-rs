@@ -48,11 +48,17 @@
   then cannot start. The Clash `client-fingerprint` (or the document's
   `global-client-fingerprint`, below), link `fp` or sing-box `tls.utls` must
   name one; the app never picks one for the node. A profile an earlier
-  build stored with such a node is now reported by its id when profiles load,
-  and System Proxy and TUN cannot start until it is removed: quit the app,
-  delete `<id>.profile.json` from `~/Library/Application Support/Clash for
-  Mac/sing-box-profiles-v1` (and `selected-profile-v1.json` there if that
-  profile was selected), then import the node again with a fingerprint.
+  build stored with such a node is listed as invalid, as below.
+- List a stored profile that fails the current validation on the Profiles page
+  as invalid, with the validator's message, instead of failing the whole
+  profile list. Other profiles can still be imported, selected, started and
+  deleted. An invalid profile cannot be selected or started and nothing is
+  chosen in its place; while it is selected, System Proxy and TUN refuse with
+  its message. Delete removes it, and deleting the selected one needs the
+  core stopped and leaves no profile selected. A subscription's card shows its
+  URL on request so it can be imported again first. Credential cleanup is
+  refused, naming the invalid profiles, until they are deleted. Corrupt,
+  unsafe or digest-mismatched entries still block the profile list as before.
 - Honour a Clash document's top-level `global-client-fingerprint` as Mihomo
   did until v1.19.27 removed it: a TLS VMess, VLESS (Reality included),
   Trojan or AnyTLS node without a non-empty `client-fingerprint` of its own

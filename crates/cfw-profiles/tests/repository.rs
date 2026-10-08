@@ -4,7 +4,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use cfw_profiles::{ProfileError, ProfileRepository, ValidatedSingBoxProfile};
+use cfw_profiles::{
+    InvalidSelection, ProfileError, ProfileLabel, ProfileRecord, ProfileRepository,
+    ProfileSelectionState, ProfileSourceKind, ValidatedSingBoxProfile,
+};
+use cfw_singbox_config::{ConfigError, sha256_hex};
 use uuid::Uuid;
 
 const MAX_STORED_BYTES: usize = cfw_singbox_config::MAX_PROFILE_BYTES + 256 * 1024;
@@ -89,6 +93,579 @@ fn selection_path(root: &std::path::Path) -> PathBuf {
     root.join("profiles").join("selected-profile-v1.json")
 }
 
+/// The valid profiles of a repository these tests expect to hold no invalid
+/// entry; one would fail the call instead of being left out.
+fn listed(repository: &ProfileRepository) -> Result<Vec<ProfileRecord>, ProfileError> {
+    let snapshot = repository.snapshot()?;
+    assert!(
+        snapshot.invalid_profiles.is_empty(),
+        "unexpected invalid profiles: {:?}",
+        snapshot.invalid_profiles
+    );
+    Ok(snapshot.profiles)
+}
+
+/// A subscription VLESS Reality node without a uTLS fingerprint, exactly as
+/// the 0.5 line stored and selected it before Reality required uTLS (bytes
+/// written by commit 8415a1b).
+const EARLIER_REALITY_ID: &str = "3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d";
+const EARLIER_REALITY_DIGEST: &str =
+    "0a212f0622cc414ed98a9a138233c8b6224b7625fc6e7d6f9ab1db756d5bc5fa";
+const EARLIER_REALITY_ENVELOPE: &str = r#"{"schema_version":1,"id":"3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d","name":"Reality node","profile":{"outbounds":[{"credential_ref":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","kind":"vless_uuid"},"flow":"xtls-rprx-vision","server":"vless.example.com","server_port":443,"tag":"proxy","tls":{"enabled":true,"reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"},"server_name":"www.example.com"},"type":"vless"}],"route":{"final":"proxy"}},"digest":"0a212f0622cc414ed98a9a138233c8b6224b7625fc6e7d6f9ab1db756d5bc5fa","created_epoch_secs":1791415969,"source_url":"https://subscription.example/profile?token=private-test-value"}"#;
+const EARLIER_REALITY_SELECTION: &str = r#"{"schema_version":1,"profile_id":"3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d","profile_digest":"0a212f0622cc414ed98a9a138233c8b6224b7625fc6e7d6f9ab1db756d5bc5fa"}"#;
+
+fn write_private(path: &std::path::Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("write repository entry");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("set private entry mode");
+}
+
+/// Places the earlier envelope in an existing repository, optionally with
+/// the selection record the earlier build wrote for it.
+fn store_earlier_reality_profile(root: &std::path::Path, selected: bool) -> PathBuf {
+    let path = stored_path(root, EARLIER_REALITY_ID);
+    write_private(&path, EARLIER_REALITY_ENVELOPE.as_bytes());
+    if selected {
+        write_private(&selection_path(root), EARLIER_REALITY_SELECTION.as_bytes());
+    }
+    path
+}
+
+/// The document text inside the earlier envelope.
+fn earlier_document() -> &'static str {
+    EARLIER_REALITY_ENVELOPE
+        .split_once(r#""profile":"#)
+        .and_then(|(_, rest)| rest.split_once(r#","digest":"#))
+        .map(|(document, _)| document)
+        .expect("earlier envelope has a document")
+}
+
+/// The earlier envelope for an edited document, with the digest an earlier
+/// build would have stored for that document.
+fn earlier_envelope_with_document(edit: impl FnOnce(&str) -> String) -> String {
+    let edited = edit(earlier_document());
+    EARLIER_REALITY_ENVELOPE
+        .replacen(earlier_document(), &edited, 1)
+        .replacen(EARLIER_REALITY_DIGEST, &sha256_hex(edited.as_bytes()), 1)
+}
+
+fn reality_requires_utls() -> ConfigError {
+    ConfigError::UnsupportedPolicyShape {
+        path: "$.outbounds[0].tls.utls".into(),
+        reason: "Reality requires uTLS".into(),
+    }
+}
+
+fn earlier_label() -> ProfileLabel {
+    ProfileLabel {
+        id: EARLIER_REALITY_ID.into(),
+        name: "Reality node".into(),
+    }
+}
+
+fn is_earlier_invalid(error: &ProfileError) -> bool {
+    matches!(
+        error,
+        ProfileError::StoredProfileInvalid { id, name, source }
+            if id == EARLIER_REALITY_ID && name == "Reality node" && *source == reality_requires_utls()
+    )
+}
+
+#[test]
+fn the_earlier_digest_is_the_hash_of_its_stored_document() {
+    // The integrity check for an entry that no longer validates relies on it.
+    assert_eq!(
+        sha256_hex(earlier_document().as_bytes()),
+        EARLIER_REALITY_DIGEST
+    );
+    let (root, repository) = repository("stored-document-digest");
+    let imported = repository
+        .import_with_source(
+            Some("Current"),
+            &credential_profile("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+            Some("https://subscription.example/current"),
+        )
+        .expect("import current profile");
+    let stored = fs::read_to_string(stored_path(&root, &imported.id)).expect("read envelope");
+    let document = stored
+        .split_once(r#""profile":"#)
+        .and_then(|(_, rest)| rest.split_once(r#","digest":"#))
+        .map(|(document, _)| document)
+        .expect("stored document");
+    assert_eq!(sha256_hex(document.as_bytes()), imported.digest);
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn earlier_profile_failing_validation_is_listed_and_does_not_block_the_repository() {
+    let (root, repository) = repository("earlier-invalid");
+    let other = repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    let path = store_earlier_reality_profile(&root, false);
+
+    let snapshot = repository
+        .snapshot()
+        .expect("an invalid profile does not block the snapshot");
+    assert_eq!(
+        snapshot
+            .profiles
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![other.id.as_str()]
+    );
+    assert_eq!(snapshot.invalid_profiles.len(), 1);
+    let invalid = &snapshot.invalid_profiles[0];
+    assert_eq!(invalid.id, EARLIER_REALITY_ID);
+    assert_eq!(invalid.name, "Reality node");
+    assert_eq!(invalid.created_epoch_secs, 1_791_415_969);
+    assert_eq!(invalid.source_kind, ProfileSourceKind::Subscription);
+    assert_eq!(invalid.error, reality_requires_utls());
+    assert_eq!(snapshot.selected_profile_id, None);
+    let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+    assert!(json.contains(
+        "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS"
+    ));
+    for secret in [
+        "subscription.example",
+        "private-test-value",
+        "source_url",
+        EARLIER_REALITY_DIGEST,
+    ] {
+        assert!(!json.contains(secret), "snapshot exposes {secret}");
+    }
+
+    repository
+        .import(Some("Third"), &profile())
+        .expect("import beside an invalid profile");
+    repository
+        .select(&other.id)
+        .expect("select a valid profile");
+    assert!(
+        repository
+            .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+            .expect("delete the unselected invalid profile")
+    );
+    assert!(!path.exists());
+    let after = repository.snapshot().expect("snapshot after deletion");
+    assert!(after.invalid_profiles.is_empty());
+    assert_eq!(after.profiles.len(), 2);
+    assert_eq!(
+        after.selected_profile_id.as_deref(),
+        Some(other.id.as_str())
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn invalid_profile_is_never_loaded_selected_or_rewritten() {
+    let (root, repository) = repository("earlier-refused");
+    let other = repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    repository.select(&other.id).expect("select other profile");
+    let path = store_earlier_reality_profile(&root, false);
+    let selection = fs::read(selection_path(&root)).expect("read selection");
+
+    let error = repository
+        .load(EARLIER_REALITY_ID)
+        .expect_err("load is refused");
+    assert!(is_earlier_invalid(&error), "{error}");
+    assert_eq!(
+        error.to_string(),
+        "stored profile \"Reality node\" (3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d) is invalid: unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS"
+    );
+    // Each attempt releases the repository lock before the next one runs.
+    let attempts: [&dyn Fn() -> Result<(), ProfileError>; 5] = [
+        &|| repository.select(EARLIER_REALITY_ID).map(|_| ()),
+        &|| {
+            repository
+                .replace(EARLIER_REALITY_ID, None, &profile(), None)
+                .map(|_| ())
+        },
+        &|| {
+            repository
+                .update_metadata(EARLIER_REALITY_ID, Some("Renamed"), None)
+                .map(|_| ())
+        },
+        &|| {
+            repository
+                .begin_credential_profile_mutation()?
+                .profile(EARLIER_REALITY_ID)
+                .map(|_| ())
+        },
+        &|| {
+            repository
+                .begin_credential_profile_mutation()?
+                .commit_selection(EARLIER_REALITY_ID)
+                .map(|_| ())
+        },
+    ];
+    for attempt in attempts {
+        let error = attempt().expect_err("an invalid profile is refused");
+        assert!(is_earlier_invalid(&error), "{error}");
+    }
+    // An exact-id import, such as a migration replay, names the invalid entry.
+    let error = repository
+        .import_with_id_and_source(EARLIER_REALITY_ID, Some("Reality node"), &profile(), None)
+        .expect_err("the id is taken by an invalid entry");
+    assert!(is_earlier_invalid(&error), "{error}");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read envelope"),
+        EARLIER_REALITY_ENVELOPE
+    );
+    assert_eq!(
+        fs::read(selection_path(&root)).expect("read selection"),
+        selection
+    );
+    assert_eq!(
+        repository
+            .require_selected()
+            .expect("selection unchanged")
+            .record
+            .id,
+        other.id
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn selected_invalid_profile_is_reported_and_never_started_or_replaced() {
+    let (root, repository) = repository("earlier-selected");
+    let other = repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    store_earlier_reality_profile(&root, true);
+
+    let snapshot = repository.snapshot().expect("snapshot");
+    assert_eq!(
+        snapshot.selected_profile_id.as_deref(),
+        Some(EARLIER_REALITY_ID)
+    );
+    assert_eq!(snapshot.invalid_profiles[0].id, EARLIER_REALITY_ID);
+    for error in [
+        repository.load_selected().map(|_| ()).expect_err("load"),
+        repository
+            .require_selected()
+            .map(|_| ())
+            .expect_err("require"),
+        repository.lock_selected().map(|_| ()).expect_err("lock"),
+    ] {
+        assert!(is_earlier_invalid(&error), "{error}");
+    }
+    {
+        let mutation = repository
+            .begin_credential_profile_mutation()
+            .expect("mutation lock");
+        let state = mutation.selected_profile().expect("selection state");
+        assert!(matches!(
+            &state,
+            ProfileSelectionState::Invalid(record)
+                if record.id == EARLIER_REALITY_ID && record.error == reality_requires_utls()
+        ));
+        assert_eq!(state.clone().into_valid(), None);
+        let error = state.into_loaded().expect_err("invalid selection");
+        assert!(is_earlier_invalid(&error), "{error}");
+    }
+
+    // Choosing a valid profile is the in-app way off an invalid selection.
+    repository
+        .select(&other.id)
+        .expect("select a valid profile");
+    assert_eq!(
+        repository
+            .require_selected()
+            .expect("valid selection")
+            .record
+            .id,
+        other.id
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn deleting_the_selected_invalid_profile_needs_the_engine_off_and_selects_nothing() {
+    let (root, repository) = repository("earlier-selected-delete");
+    let other = repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    let path = store_earlier_reality_profile(&root, true);
+
+    let error = repository
+        .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+        .expect_err("a selected profile is kept while the engine may run");
+    assert!(matches!(
+        &error,
+        ProfileError::InvalidSelectionKept(profile) if *profile == earlier_label()
+    ));
+    assert_eq!(
+        error.to_string(),
+        "the selected profile \"Reality node\" (3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d) is invalid; deleting it would also clear the selection"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("envelope kept"),
+        EARLIER_REALITY_ENVELOPE
+    );
+    assert_eq!(
+        fs::read_to_string(selection_path(&root)).expect("selection kept"),
+        EARLIER_REALITY_SELECTION
+    );
+
+    assert!(
+        repository
+            .delete(EARLIER_REALITY_ID, InvalidSelection::Clear)
+            .expect("delete with the engine Off")
+    );
+    assert!(!path.exists());
+    assert!(!selection_path(&root).exists());
+    let snapshot = repository.snapshot().expect("snapshot after deletion");
+    assert_eq!(snapshot.selected_profile_id, None);
+    assert!(snapshot.invalid_profiles.is_empty());
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(snapshot.profiles[0].id, other.id);
+    assert!(
+        repository.load_selected().expect("no selection").is_none(),
+        "no other profile is selected in its place"
+    );
+    assert!(matches!(
+        repository.require_selected(),
+        Err(ProfileError::NoSelectedProfile)
+    ));
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn credential_cleanup_is_refused_while_an_invalid_profile_is_listed() {
+    let (root, repository) = repository("earlier-credential-cleanup");
+    let other = repository
+        .import(
+            Some("Other"),
+            &credential_profile("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        )
+        .expect("import other profile");
+    store_earlier_reality_profile(&root, false);
+
+    for error in [
+        repository
+            .credential_snapshot()
+            .map(|_| ())
+            .expect_err("snapshot refused"),
+        repository
+            .lock_credential_snapshot()
+            .map(|_| ())
+            .expect_err("locked snapshot refused"),
+    ] {
+        assert!(matches!(
+            &error,
+            ProfileError::CredentialCleanupBlocked { profiles } if *profiles == [earlier_label()]
+        ));
+        assert_eq!(
+            error.to_string(),
+            "credential cleanup needs every stored profile to pass validation; delete the invalid profiles first: \"Reality node\" (3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d)"
+        );
+    }
+
+    repository
+        .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+        .expect("delete invalid profile");
+    let snapshot = repository
+        .credential_snapshot()
+        .expect("cleanup is available again");
+    assert_eq!(snapshot.profile_count, 1);
+    assert_eq!(snapshot.catalog[0].audience.profile_id(), other.id);
+    assert!(repository.lock_credential_snapshot().is_ok());
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn the_source_of_an_invalid_subscription_can_be_read_and_imported_again() {
+    const URL: &str = "https://subscription.example/profile?token=private-test-value";
+    let (root, repository) = repository("earlier-reimport");
+    let local = repository
+        .import(Some("Local"), &profile())
+        .expect("import local profile");
+    store_earlier_reality_profile(&root, false);
+
+    assert_eq!(
+        repository
+            .source_url(EARLIER_REALITY_ID)
+            .expect("source of the invalid entry")
+            .as_deref(),
+        Some(URL)
+    );
+    assert_eq!(
+        repository
+            .source_url(&local.id)
+            .expect("source of a local profile"),
+        None
+    );
+    assert!(matches!(
+        repository.source_url("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        Err(ProfileError::ProfileNotFound(id)) if id == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ));
+
+    let replacement = repository
+        .import_with_source(Some("Reality node"), &profile(), Some(URL))
+        .expect("the same subscription imports beside the invalid entry");
+    assert_eq!(
+        repository
+            .source_url(&replacement.id)
+            .expect("replacement source")
+            .as_deref(),
+        Some(URL)
+    );
+    repository
+        .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+        .expect("delete the old entry");
+    let snapshot = repository.snapshot().expect("snapshot");
+    assert!(snapshot.invalid_profiles.is_empty());
+    assert_eq!(snapshot.profiles.len(), 2);
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn a_document_that_no_longer_deserializes_is_listed_invalid() {
+    let (root, repository) = repository("earlier-unknown-field");
+    repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    let envelope = earlier_envelope_with_document(|document| {
+        document.replacen(
+            r#""flow":"xtls-rprx-vision","#,
+            r#""flow":"xtls-rprx-vision","legacy_option":true,"#,
+            1,
+        )
+    });
+    assert_ne!(envelope, EARLIER_REALITY_ENVELOPE);
+    write_private(&stored_path(&root, EARLIER_REALITY_ID), envelope.as_bytes());
+
+    let snapshot = repository.snapshot().expect("an intact envelope is listed");
+    assert_eq!(snapshot.invalid_profiles.len(), 1);
+    assert!(
+        matches!(&snapshot.invalid_profiles[0].error, ConfigError::InvalidJson(message) if message.contains("legacy_option")),
+        "{:?}",
+        snapshot.invalid_profiles[0].error
+    );
+    assert!(
+        repository
+            .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+            .expect("delete")
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn damaged_invalid_profiles_still_fail_closed_and_are_never_deleted() {
+    type Expect = fn(&ProfileError) -> bool;
+    let cases: [(&str, String, Expect); 6] = [
+        (
+            "document edited, digest kept",
+            EARLIER_REALITY_ENVELOPE.replacen(r#""server_port":443"#, r#""server_port":444"#, 1),
+            |error| matches!(error, ProfileError::DigestMismatch { id } if id == EARLIER_REALITY_ID),
+        ),
+        (
+            "digest edited",
+            EARLIER_REALITY_ENVELOPE.replacen(EARLIER_REALITY_DIGEST, &"00".repeat(32), 1),
+            |error| matches!(error, ProfileError::DigestMismatch { id } if id == EARLIER_REALITY_ID),
+        ),
+        (
+            "non-canonical",
+            format!("{EARLIER_REALITY_ENVELOPE}\n"),
+            |error| matches!(error, ProfileError::NonCanonicalEnvelope(id) if id == EARLIER_REALITY_ID),
+        ),
+        (
+            "unknown envelope field",
+            format!(
+                "{},\"unexpected\":true}}",
+                EARLIER_REALITY_ENVELOPE
+                    .strip_suffix('}')
+                    .expect("envelope object")
+            ),
+            |error| matches!(error, ProfileError::InvalidEnvelopeJson(_)),
+        ),
+        (
+            "schema version",
+            EARLIER_REALITY_ENVELOPE.replacen(r#""schema_version":1"#, r#""schema_version":2"#, 1),
+            |error| matches!(error, ProfileError::UnsupportedSchema(2)),
+        ),
+        (
+            "identity",
+            EARLIER_REALITY_ENVELOPE.replacen(
+                EARLIER_REALITY_ID,
+                "4c0e7d3f-5a2b-4f9c-8d8e-3b6a9f2c1d5e",
+                1,
+            ),
+            |error| matches!(error, ProfileError::IdentityMismatch { .. }),
+        ),
+    ];
+    for (case, envelope, expected) in cases {
+        let (root, repository) = repository("earlier-damaged");
+        repository
+            .import(Some("Other"), &profile())
+            .expect("import other profile");
+        let path = stored_path(&root, EARLIER_REALITY_ID);
+        write_private(&path, envelope.as_bytes());
+        let error = repository.snapshot().expect_err(case);
+        assert!(expected(&error), "{case}: {error}");
+        let error = repository
+            .delete(EARLIER_REALITY_ID, InvalidSelection::Clear)
+            .expect_err(case);
+        assert!(expected(&error), "{case}: {error}");
+        assert_eq!(
+            fs::read_to_string(&path).expect("entry kept"),
+            envelope,
+            "{case}"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    for case in ["mode", "hard link"] {
+        let (root, repository) = repository("earlier-unsafe");
+        repository
+            .import(Some("Other"), &profile())
+            .expect("import other profile");
+        let path = store_earlier_reality_profile(&root, false);
+        if case == "mode" {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("weaken mode");
+        } else {
+            fs::hard_link(&path, root.join("external-link.json")).expect("hard link");
+        }
+        assert!(
+            matches!(repository.snapshot(), Err(ProfileError::UnsafeProfileFile(id)) if id == EARLIER_REALITY_ID),
+            "{case}"
+        );
+        assert!(
+            matches!(
+                repository.delete(EARLIER_REALITY_ID, InvalidSelection::Clear),
+                Err(ProfileError::UnsafeProfileFile(_))
+            ),
+            "{case}"
+        );
+        assert!(path.exists(), "{case}");
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+}
+
+#[test]
+fn a_selection_bound_to_another_digest_of_an_invalid_profile_fails_closed() {
+    let (root, repository) = repository("earlier-stale-selection");
+    repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    store_earlier_reality_profile(&root, true);
+    write_private(
+        &selection_path(&root),
+        EARLIER_REALITY_SELECTION
+            .replacen(EARLIER_REALITY_DIGEST, &"11".repeat(32), 1)
+            .as_bytes(),
+    );
+    assert!(matches!(
+        repository.snapshot(),
+        Err(ProfileError::SelectedProfileDigestMismatch { id, .. }) if id == EARLIER_REALITY_ID
+    ));
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
 #[test]
 fn prepared_online_selection_is_invisible_until_commit_and_drop_keeps_the_prior_profile() {
     let (root, repository) = repository("online-selection");
@@ -99,7 +676,13 @@ fn prepared_online_selection_is_invisible_until_commit_and_drop_keeps_the_prior_
     {
         let mutation = repository.begin_credential_profile_mutation().unwrap();
         assert_eq!(
-            mutation.selected_profile().unwrap().unwrap().record.id,
+            mutation
+                .selected_profile()
+                .unwrap()
+                .into_valid()
+                .unwrap()
+                .record
+                .id,
             first.id
         );
         assert_eq!(mutation.profile(&second.id).unwrap().record.id, second.id);
@@ -176,7 +759,7 @@ fn import_list_load_and_delete_round_trip_is_private_and_atomic() {
     );
     assert!(!entries[0].file_name().to_string_lossy().contains(".tmp"));
 
-    let records = repository.list().expect("list profiles");
+    let records = listed(&repository).expect("list profiles");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].id, imported.id);
     assert_eq!(records[0].digest, imported.digest);
@@ -186,9 +769,17 @@ fn import_list_load_and_delete_round_trip_is_private_and_atomic() {
         .expect("stored profile");
     assert_eq!(loaded.profile, profile());
 
-    assert!(repository.delete(&imported.id).expect("delete profile"));
-    assert!(!repository.delete(&imported.id).expect("idempotent delete"));
-    assert!(repository.list().expect("empty list").is_empty());
+    assert!(
+        repository
+            .delete(&imported.id, InvalidSelection::Keep)
+            .expect("delete profile")
+    );
+    assert!(
+        !repository
+            .delete(&imported.id, InvalidSelection::Keep)
+            .expect("idempotent delete")
+    );
+    assert!(listed(&repository).expect("empty list").is_empty());
     fs::remove_dir_all(root).expect("remove test directory");
 }
 
@@ -240,7 +831,7 @@ fn exact_id_import_is_idempotent_and_never_overwrites_a_conflict() {
     ] {
         assert!(matches!(conflict, Err(ProfileError::AlreadyExists(existing)) if existing == id));
     }
-    assert_eq!(repository.list().expect("single exact profile").len(), 1);
+    assert_eq!(listed(&repository).expect("single exact profile").len(), 1);
     fs::remove_dir_all(root).expect("remove test directory");
 }
 
@@ -296,7 +887,7 @@ fn credential_snapshot_is_stable_and_preserves_cross_profile_reference_ownership
         .expect("select second profile");
     assert!(
         repository
-            .delete(&first.id)
+            .delete(&first.id, InvalidSelection::Keep)
             .expect("delete unselected shared profile")
     );
     let retained = repository
@@ -328,7 +919,7 @@ fn credential_snapshot_is_stable_and_preserves_cross_profile_reference_ownership
         .expect("select rotated profile");
     assert!(
         repository
-            .delete(&second.id)
+            .delete(&second.id, InvalidSelection::Keep)
             .expect("delete obsolete profile")
     );
     let completed_rotation = repository
@@ -449,62 +1040,9 @@ fn digest_tampering_is_reported_instead_of_skipped() {
     fs::write(&path, tampered).expect("tamper envelope");
 
     assert!(matches!(
-        repository.list(),
+        listed(&repository),
         Err(ProfileError::DigestMismatch { .. })
     ));
-    fs::remove_dir_all(root).expect("remove test directory");
-}
-
-#[test]
-fn stored_profile_that_fails_current_validation_is_reported_by_id() {
-    let (root, repository) = repository("stored-validation");
-    let reality = ValidatedSingBoxProfile::parse(
-        r#"{"outbounds":[{"type":"http","tag":"proxy","server":"proxy.example.com","server_port":443,"tls":{"enabled":true,"server_name":"www.example.com","utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}]}"#,
-    )
-    .expect("Reality with uTLS");
-    let other = repository
-        .import(None, &profile())
-        .expect("import other profile");
-    let imported = repository.import(None, &reality).expect("import profile");
-    repository.select(&imported.id).expect("select profile");
-    let path = stored_path(&root, &imported.id);
-    let raw = fs::read_to_string(&path).expect("read envelope");
-    // The canonical envelope an earlier build stored for the same node
-    // without a uTLS fingerprint.
-    let earlier = raw.replacen(r#","utls":{"enabled":true,"fingerprint":"chrome"}"#, "", 1);
-    assert_ne!(earlier, raw);
-    fs::write(&path, earlier).expect("write earlier envelope");
-
-    let error = repository
-        .list()
-        .expect_err("stored profile is revalidated");
-    assert!(
-        matches!(
-            &error,
-            ProfileError::StoredProfileInvalid { id, source }
-                if *id == imported.id
-                    && source.to_string()
-                        == "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS"
-        ),
-        "{error}"
-    );
-    assert!(error.to_string().contains(&imported.id), "{error}");
-    assert!(matches!(
-        repository.load_selected(),
-        Err(ProfileError::StoredProfileInvalid { id, .. }) if id == imported.id
-    ));
-
-    // The documented manual recovery: remove the named envelope and, because
-    // it was selected, the selection record. The other profile then loads.
-    fs::remove_file(&path).expect("remove stored profile");
-    fs::remove_file(selection_path(&root)).expect("remove selection");
-    let listed = repository.list().expect("repository loads after recovery");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].id, other.id);
-    assert!(repository.load_selected().expect("no selection").is_none());
-    repository
-        .select(&other.id)
-        .expect("select remaining profile");
     fs::remove_dir_all(root).expect("remove test directory");
 }
 
@@ -521,7 +1059,7 @@ fn oversized_stored_file_is_rejected_before_deserialization() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("set file permissions");
 
     assert!(matches!(
-        repository.list(),
+        listed(&repository),
         Err(ProfileError::StoredProfileTooLarge { .. })
     ));
     fs::remove_dir_all(root).expect("remove test directory");
@@ -540,7 +1078,7 @@ fn traversal_and_noncanonical_ids_are_rejected() {
             Err(ProfileError::InvalidProfileId(_))
         ));
         assert!(matches!(
-            repository.delete(id),
+            repository.delete(id, InvalidSelection::Keep),
             Err(ProfileError::InvalidProfileId(_))
         ));
     }
@@ -558,7 +1096,7 @@ fn symlink_profile_is_rejected_without_reading_target() {
     symlink(&outside, stored_path(&root, &id)).expect("create symlink");
 
     assert!(matches!(
-        repository.list(),
+        listed(&repository),
         Err(ProfileError::UnsafeProfileFile(_))
     ));
     assert_eq!(fs::read(&outside).expect("outside target"), b"secret");
@@ -576,7 +1114,7 @@ fn hard_link_profile_is_rejected() {
     .expect("create hard link");
 
     assert!(matches!(
-        repository.list(),
+        listed(&repository),
         Err(ProfileError::UnsafeProfileFile(_))
     ));
     fs::remove_dir_all(root).expect("remove test directory");
@@ -594,7 +1132,7 @@ fn one_way_cleanup_unlinks_symlinks_without_touching_targets() {
         repository.clear_managed_profiles().expect("clear profiles"),
         2
     );
-    assert!(repository.list().expect("empty profile list").is_empty());
+    assert!(listed(&repository).expect("empty profile list").is_empty());
     assert_eq!(fs::read(&outside).expect("external target"), b"external");
     fs::remove_dir_all(root).expect("remove test directory");
 }
@@ -606,7 +1144,7 @@ fn malformed_or_unexpected_entries_are_not_silently_skipped() {
     fs::write(root.join("profiles").join("legacy.yaml"), b"proxies: []")
         .expect("write legacy entry");
     assert!(matches!(
-        repository.list(),
+        listed(&repository),
         Err(ProfileError::UnexpectedEntry(_))
     ));
     fs::remove_dir_all(root).expect("remove test directory");
@@ -616,7 +1154,11 @@ fn malformed_or_unexpected_entries_are_not_silently_skipped() {
 fn concurrent_listing_never_observes_an_atomic_write_temporary() {
     let (root, repository) = repository("concurrent-list");
     let repository = Arc::new(repository);
-    assert!(repository.list().expect("initial profile list").is_empty());
+    assert!(
+        listed(&repository)
+            .expect("initial profile list")
+            .is_empty()
+    );
     let barrier = Arc::new(Barrier::new(2));
 
     let writer_repository = Arc::clone(&repository);
@@ -632,12 +1174,10 @@ fn concurrent_listing_never_observes_an_atomic_write_temporary() {
 
     barrier.wait();
     for _ in 0..48 {
-        repository
-            .list()
-            .expect("listing must not observe an in-flight temporary file");
+        listed(&repository).expect("listing must not observe an in-flight temporary file");
     }
     writer.join().expect("writer thread");
-    assert_eq!(repository.list().expect("final profile list").len(), 12);
+    assert_eq!(listed(&repository).expect("final profile list").len(), 12);
     fs::remove_dir_all(root).expect("remove test directory");
 }
 
@@ -654,7 +1194,10 @@ fn abandoned_import_and_selection_temporaries_are_recovered_under_the_lock() {
             .expect("private temporary mode");
     }
 
-    assert_eq!(repository.list().expect("recover before listing").len(), 1);
+    assert_eq!(
+        listed(&repository).expect("recover before listing").len(),
+        1
+    );
     assert!(!import_temporary.exists());
     assert!(!selection_temporary.exists());
     repository
@@ -676,7 +1219,7 @@ fn unsafe_matching_temporary_is_rejected_without_following_it() {
     symlink(&outside, &temporary).expect("matching temporary symlink");
 
     assert!(matches!(
-        repository.list(),
+        listed(&repository),
         Err(ProfileError::UnexpectedEntry(_))
     ));
     assert_eq!(fs::read(&outside).expect("outside target"), b"external");
@@ -710,10 +1253,14 @@ fn selection_round_trip_is_private_digest_bound_and_blocks_selected_deletion() {
             .id,
         imported.id
     );
-    assert!(matches!(
-        repository.delete(&imported.id),
-        Err(ProfileError::SelectedProfileDeletion(id)) if id == imported.id
-    ));
+    // Only an invalid selected profile may be deleted with the engine Off.
+    for engine in [InvalidSelection::Keep, InvalidSelection::Clear] {
+        assert!(matches!(
+            repository.delete(&imported.id, engine),
+            Err(ProfileError::SelectedProfileDeletion(id)) if id == imported.id
+        ));
+    }
+    assert!(stored_path(&root, &imported.id).exists());
 
     fs::remove_dir_all(root).expect("remove test directory");
 }
@@ -830,7 +1377,7 @@ fn subscription_url_survives_a_round_trip_and_is_bounded() {
             .source_url,
         None
     );
-    let listed = serde_json::to_string(&repository.list().expect("list profiles"))
+    let listed = serde_json::to_string(&repository.snapshot().expect("list profiles"))
         .expect("serialize records");
     assert!(!listed.contains("token=t"));
     assert!(!listed.contains("source_url"));
@@ -1198,5 +1745,344 @@ fn profile_entry_name_resolves_only_existing_canonical_ids() {
     );
     assert!(repository.profile_entry_name("../escape").is_err());
 
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn invalid_profiles_count_toward_the_entry_limit() {
+    // Mirrors the crate's 4,096-entry repository limit.
+    const MAX_ENTRIES: usize = 4_096;
+    let (root, repository) = repository("invalid-capacity");
+    let seed = repository
+        .import(Some("Seed"), &profile())
+        .expect("import seed profile");
+    let template = fs::read_to_string(stored_path(&root, &seed.id)).expect("read seed envelope");
+    // The seed, the copies and the invalid entry fill the repository.
+    for _ in 0..MAX_ENTRIES - 2 {
+        let id = Uuid::new_v4().hyphenated().to_string();
+        write_private(
+            &stored_path(&root, &id),
+            template.replacen(&seed.id, &id, 1).as_bytes(),
+        );
+    }
+    store_earlier_reality_profile(&root, false);
+    let snapshot = repository
+        .snapshot()
+        .expect("a full repository still lists");
+    assert_eq!(snapshot.profiles.len(), MAX_ENTRIES - 1);
+    assert_eq!(snapshot.invalid_profiles.len(), 1);
+
+    assert!(matches!(
+        repository.import(Some("One too many"), &profile()),
+        Err(ProfileError::TooManyEntries)
+    ));
+    repository
+        .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+        .expect("delete the invalid profile");
+    repository
+        .import(Some("Fits again"), &profile())
+        .expect("the freed entry admits one import");
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+/// Appends optional envelope metadata in its canonical position at the end.
+fn with_envelope_metadata(envelope: &str, metadata: &str) -> String {
+    format!(
+        "{},{metadata}}}",
+        envelope.strip_suffix('}').expect("envelope object")
+    )
+}
+
+#[test]
+fn metadata_that_fails_current_validation_lists_the_profile_invalid() {
+    let selector = ValidatedSingBoxProfile::parse(
+        r#"{"outbounds":[{"type":"selector","tag":"Proxy","outbounds":["direct"]},{"type":"direct","tag":"direct"}],"route":{"final":"Proxy"}}"#,
+    )
+    .expect("selector profile");
+    for (case, profile, metadata, reason) in [
+        (
+            "provider sources",
+            profile(),
+            r#""provider_sources":{"proxy:missing":"https://provider.example/list"}"#,
+            "unsupported credential-free policy shape at $.providers: provider URLs have no matching catalog",
+        ),
+        (
+            "proxy selections",
+            selector.clone(),
+            r#""proxy_selections":{"Proxy":"missing"}"#,
+            "unsupported credential-free policy shape at $.outbounds: selection must name a member of the group",
+        ),
+    ] {
+        let (root, repository) = repository("metadata-invalid");
+        let other = repository
+            .import(Some("Other"), &selector)
+            .expect("import other profile");
+        let target = repository
+            .import(Some("Target"), &profile)
+            .expect("import target profile");
+        let path = stored_path(&root, &target.id);
+        let envelope =
+            with_envelope_metadata(&fs::read_to_string(&path).expect("read envelope"), metadata);
+        write_private(&path, envelope.as_bytes());
+
+        let snapshot = repository.snapshot().expect(case);
+        assert_eq!(snapshot.profiles.len(), 1, "{case}");
+        assert_eq!(snapshot.profiles[0].id, other.id, "{case}");
+        assert_eq!(snapshot.invalid_profiles.len(), 1, "{case}");
+        assert_eq!(snapshot.invalid_profiles[0].id, target.id, "{case}");
+        assert_eq!(
+            snapshot.invalid_profiles[0].error.to_string(),
+            reason,
+            "{case}"
+        );
+        assert!(matches!(
+            repository.load(&target.id),
+            Err(ProfileError::StoredProfileInvalid { id, .. }) if id == target.id
+        ));
+        repository.select(&other.id).expect(case);
+        assert!(
+            repository
+                .delete(&target.id, InvalidSelection::Keep)
+                .expect(case)
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+}
+
+#[test]
+fn a_loaded_profile_that_later_fails_validation_is_never_replaced_or_restored() {
+    const URL: &str = "https://subscription.example/profile?token=private-test-value";
+    let (root, repository) = repository("earlier-stale-load");
+    repository
+        .import_with_id_and_source(
+            EARLIER_REALITY_ID,
+            Some("Reality node"),
+            &profile(),
+            Some(URL),
+        )
+        .expect("import a valid profile under the earlier id");
+    let stored = repository
+        .load(EARLIER_REALITY_ID)
+        .expect("load")
+        .expect("stored profile");
+    let path = store_earlier_reality_profile(&root, false);
+
+    let attempts: [&dyn Fn() -> Result<(), ProfileError>; 4] = [
+        &|| {
+            repository
+                .begin_credential_profile_mutation_if_unchanged(&stored)
+                .map(|_| ())
+        },
+        &|| {
+            repository
+                .replace_if_unchanged(&stored, None, &profile(), Some(URL))
+                .map(|_| ())
+        },
+        &|| repository.restore(&stored).map(|_| ()),
+        &|| {
+            repository
+                .restore_if_unchanged(&stored, &stored)
+                .map(|_| ())
+        },
+    ];
+    for attempt in attempts {
+        let error = attempt().expect_err("an invalid entry is never overwritten");
+        assert!(is_earlier_invalid(&error), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(&path).expect("read envelope"),
+        EARLIER_REALITY_ENVELOPE
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn invalid_profiles_are_listed_and_named_in_profile_order() {
+    const SECOND_ID: &str = "f0000000-0000-4000-8000-000000000001";
+    let (root, repository) = repository("earlier-order");
+    repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    store_earlier_reality_profile(&root, false);
+    write_private(
+        &stored_path(&root, SECOND_ID),
+        EARLIER_REALITY_ENVELOPE
+            .replacen(EARLIER_REALITY_ID, SECOND_ID, 1)
+            .replacen(r#""name":"Reality node""#, r#""name":"A Reality node""#, 1)
+            .as_bytes(),
+    );
+
+    let snapshot = repository.snapshot().expect("snapshot");
+    // By name, then id: the id order alone would list them the other way.
+    assert_eq!(
+        snapshot
+            .invalid_profiles
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![SECOND_ID, EARLIER_REALITY_ID]
+    );
+    let error = repository
+        .credential_snapshot()
+        .expect_err("cleanup refused");
+    assert_eq!(
+        error.to_string(),
+        "credential cleanup needs every stored profile to pass validation; delete the invalid profiles first: \"A Reality node\" (f0000000-0000-4000-8000-000000000001), \"Reality node\" (3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d)"
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn linked_or_oversized_invalid_profiles_still_fail_closed() {
+    for case in ["symlink", "oversized"] {
+        let (root, repository) = repository("earlier-linked");
+        repository
+            .import(Some("Other"), &profile())
+            .expect("import other profile");
+        let path = stored_path(&root, EARLIER_REALITY_ID);
+        let outside = root.join("outside.profile.json");
+        if case == "symlink" {
+            write_private(&outside, EARLIER_REALITY_ENVELOPE.as_bytes());
+            symlink(&outside, &path).expect("create symlink");
+        } else {
+            write_private(
+                &path,
+                format!("{EARLIER_REALITY_ENVELOPE}{}", " ".repeat(MAX_STORED_BYTES)).as_bytes(),
+            );
+        }
+        for result in [
+            repository.snapshot().map(|_| ()),
+            repository
+                .delete(EARLIER_REALITY_ID, InvalidSelection::Clear)
+                .map(|_| ()),
+        ] {
+            let error = result.expect_err(case);
+            assert!(
+                matches!(
+                    (case, &error),
+                    ("symlink", ProfileError::UnsafeProfileFile(_))
+                        | ("oversized", ProfileError::StoredProfileTooLarge { .. })
+                ),
+                "{case}: {error}"
+            );
+        }
+        assert!(path.symlink_metadata().is_ok(), "{case}: entry kept");
+        if case == "symlink" {
+            assert_eq!(
+                fs::read_to_string(&outside).expect("target untouched"),
+                EARLIER_REALITY_ENVELOPE
+            );
+        }
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+}
+
+#[test]
+fn the_source_of_a_damaged_missing_or_malformed_entry_is_not_read() {
+    let (root, repository) = repository("earlier-source-errors");
+    assert!(matches!(
+        repository.source_url(EARLIER_REALITY_ID),
+        Err(ProfileError::ProfileNotFound(id)) if id == EARLIER_REALITY_ID
+    ));
+    repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    write_private(
+        &stored_path(&root, EARLIER_REALITY_ID),
+        EARLIER_REALITY_ENVELOPE
+            .replacen(EARLIER_REALITY_DIGEST, &"00".repeat(32), 1)
+            .as_bytes(),
+    );
+    assert!(matches!(
+        repository.source_url(EARLIER_REALITY_ID),
+        Err(ProfileError::DigestMismatch { id }) if id == EARLIER_REALITY_ID
+    ));
+    assert!(matches!(
+        repository.source_url("../x"),
+        Err(ProfileError::InvalidProfileId(_))
+    ));
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn selecting_a_valid_profile_repairs_a_stale_selection_of_an_invalid_one() {
+    let (root, repository) = repository("earlier-stale-repair");
+    let other = repository
+        .import(Some("Other"), &profile())
+        .expect("import other profile");
+    store_earlier_reality_profile(&root, true);
+    let stale = EARLIER_REALITY_SELECTION.replacen(EARLIER_REALITY_DIGEST, &"11".repeat(32), 1);
+    write_private(&selection_path(&root), stale.as_bytes());
+    for result in [
+        repository
+            .delete(EARLIER_REALITY_ID, InvalidSelection::Clear)
+            .map(|_| ()),
+        repository.import(Some("Blocked"), &profile()).map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(ProfileError::SelectedProfileDigestMismatch { id, .. }) if id == EARLIER_REALITY_ID
+        ));
+    }
+    assert_eq!(
+        fs::read_to_string(selection_path(&root)).expect("selection kept"),
+        stale
+    );
+
+    repository
+        .select(&other.id)
+        .expect("selecting a valid profile replaces the stale record");
+    let snapshot = repository.snapshot().expect("snapshot");
+    assert_eq!(
+        snapshot.selected_profile_id.as_deref(),
+        Some(other.id.as_str())
+    );
+    assert_eq!(snapshot.invalid_profiles[0].id, EARLIER_REALITY_ID);
+    assert!(
+        repository
+            .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+            .expect("delete the unselected invalid profile")
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn a_repository_holding_only_a_selected_invalid_profile_admits_its_replacement() {
+    const URL: &str = "https://subscription.example/profile?token=private-test-value";
+    let (root, repository) = repository("earlier-only");
+    fs::create_dir_all(root.join("profiles")).expect("create repository");
+    fs::set_permissions(root.join("profiles"), fs::Permissions::from_mode(0o700))
+        .expect("private repository");
+    store_earlier_reality_profile(&root, true);
+
+    let snapshot = repository.snapshot().expect("snapshot");
+    assert!(snapshot.profiles.is_empty());
+    assert_eq!(
+        snapshot.selected_profile_id.as_deref(),
+        Some(EARLIER_REALITY_ID)
+    );
+    let url = repository
+        .source_url(EARLIER_REALITY_ID)
+        .expect("source")
+        .expect("subscription URL");
+    assert_eq!(url, URL);
+    let replacement = repository
+        .import_with_source(Some("Reality node"), &profile(), Some(&url))
+        .expect("import the subscription again");
+    repository
+        .select(&replacement.id)
+        .expect("select the replacement");
+    assert!(
+        repository
+            .delete(EARLIER_REALITY_ID, InvalidSelection::Keep)
+            .expect("delete the old entry")
+    );
+    let snapshot = repository.snapshot().expect("snapshot");
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert!(snapshot.invalid_profiles.is_empty());
+    assert_eq!(
+        snapshot.selected_profile_id.as_deref(),
+        Some(replacement.id.as_str())
+    );
     fs::remove_dir_all(root).expect("remove test directory");
 }

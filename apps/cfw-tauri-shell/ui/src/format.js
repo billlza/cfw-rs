@@ -71,6 +71,7 @@ export const UI_COMMANDS = Object.freeze([
   "providers_snapshot",
   "provision_profile_credentials",
   "quit_app",
+  "read_profile_source_url",
   "read_profile_text",
   "read_runtime_config_text",
   "read_settings_snapshot",
@@ -502,8 +503,8 @@ export function pageById(id) {
   return page;
 }
 
+/// The selected valid profile. Another listed profile never stands in for it.
 export function activeProfile() {
   return state.profiles.find((profile) => profile.active)
-    ?? state.profiles[0]
     ?? { id: "none", name: "No Profile", updated: "never", traffic: "0 B", active: false };
 }

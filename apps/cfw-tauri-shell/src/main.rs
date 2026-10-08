@@ -18,6 +18,8 @@ mod native_dashboard;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
 mod private_store;
+#[cfg(test)]
+mod profile_fixtures;
 mod release_observation;
 mod service_maintenance;
 mod shell;
@@ -48,12 +50,12 @@ use commands::{
     open_profile_externally, parse_deep_links, preview_credential_gc,
     preview_legacy_cfw_profile_migration, profile_credential_presence,
     profile_credential_requirements, profile_qrcode_svg, profiles_snapshot, providers_snapshot,
-    provision_profile_credentials, read_profile_text, read_runtime_config_text,
-    read_runtime_settings_snapshot, read_settings_snapshot, reconcile_startup_services,
-    refresh_tray_menu, reset_settings_snapshot, reveal_home_directory, reveal_logs_directory,
-    reveal_profile, rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
-    set_bind_address, set_core_enabled, set_launch_at_login_enabled, set_log_level,
-    set_mixin_enabled, set_proxy_mode, set_system_proxy_enabled, set_tun_enabled,
+    provision_profile_credentials, read_profile_source_url, read_profile_text,
+    read_runtime_config_text, read_runtime_settings_snapshot, read_settings_snapshot,
+    reconcile_startup_services, refresh_tray_menu, reset_settings_snapshot, reveal_home_directory,
+    reveal_logs_directory, reveal_profile, rules_snapshot, save_profile_text, select_profile,
+    select_proxy, set_allow_lan, set_bind_address, set_core_enabled, set_launch_at_login_enabled,
+    set_log_level, set_mixin_enabled, set_proxy_mode, set_system_proxy_enabled, set_tun_enabled,
     start_connections_stream, start_log_stream, stop_connections_stream, stop_log_stream,
     system_proxy_state, test_proxy_delays, toggle_devtools, tun_runtime_state,
     update_all_providers, update_all_proxy_providers, update_all_rule_providers,
@@ -277,6 +279,7 @@ fn main() {
         set_launch_at_login_enabled,
         import_profile_text,
         profiles_snapshot,
+        read_profile_source_url,
         profile_credential_requirements,
         profile_credential_presence,
         provision_profile_credentials,
@@ -516,6 +519,7 @@ mod tests {
             "apply_active_profile",
             "write_settings_snapshot",
             "select_profile",
+            "read_profile_source_url",
             "set_core_enabled",
             "reconcile_startup_services",
             "set_system_proxy_enabled",

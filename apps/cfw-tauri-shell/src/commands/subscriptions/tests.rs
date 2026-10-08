@@ -15,6 +15,7 @@ use super::*;
 use reqwest::Client;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{CONTENT_ENCODING, HeaderMap, HeaderValue};
+use reqwest::redirect::Policy;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -533,6 +534,79 @@ fn ipv6_special_mapped_and_translation_ranges_are_classified_fail_closed() {
         let address = rejected.parse().expect("non-public IPv6 address");
         assert!(!is_public_ipv6(address), "accepted {rejected}");
     }
+}
+
+/// Serves `/k` as a redirect to `/k+1` until `/length`, which answers 200.
+async fn redirect_chain_server(length: usize) -> SocketAddr {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("redirect chain listener");
+    let address = listener.local_addr().expect("redirect chain address");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).await.expect("redirect request");
+                assert!(count > 0, "redirect request closed early");
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let line = String::from_utf8_lossy(&request);
+            let step = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|path| path.trim_start_matches('/').parse::<usize>().ok())
+                .expect("redirect step");
+            let response = if step < length {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: /{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    step + 1
+                )
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_owned()
+            };
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("redirect response");
+        }
+    });
+    address
+}
+
+#[tokio::test]
+async fn subscription_redirect_budget_follows_exactly_the_maximum() {
+    crate::transport_security::ensure_tls_crypto_provider().expect("rustls provider");
+    // A plain loopback client: the counting rule, not URL admission, is tested.
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(Policy::custom(|attempt| {
+            if subscription_redirect_budget_exhausted(&attempt) {
+                attempt.error("too many subscription redirects")
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .expect("redirect test client");
+    let within = redirect_chain_server(MAX_SUBSCRIPTION_REDIRECTS).await;
+    let response = client
+        .get(format!("http://{within}/0"))
+        .send()
+        .await
+        .expect("a chain of exactly the maximum redirects");
+    assert_eq!(response.status(), 200);
+    let beyond = redirect_chain_server(MAX_SUBSCRIPTION_REDIRECTS + 1).await;
+    let error = client
+        .get(format!("http://{beyond}/0"))
+        .send()
+        .await
+        .expect_err("one redirect beyond the maximum");
+    assert!(error.is_redirect(), "{error}");
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@ use crate::transport_security::external_https_client_builder;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING, HeaderMap, HeaderValue};
-use reqwest::redirect::Policy;
+use reqwest::redirect::{Attempt, Policy};
 use reqwest::{Client, Url};
 use std::error::Error as StdError;
 use std::fmt;
@@ -477,7 +477,7 @@ pub(super) fn subscription_client_with_resolver<R: Resolve + 'static>(
         .no_zstd()
         .dns_resolver(PublicSubscriptionDnsResolver::new(resolver))
         .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_SUBSCRIPTION_REDIRECTS {
+            if subscription_redirect_budget_exhausted(&attempt) {
                 return attempt.error("too many subscription redirects");
             }
             match validate_subscription_url(attempt.url().as_str()) {
@@ -514,6 +514,13 @@ pub(super) fn validate_subscription_content_encoding(headers: &HeaderMap) -> Res
         }
     }
     Ok(())
+}
+
+/// reqwest lists the original URL and every earlier redirect target, so
+/// the decision for the Nth redirect sees N entries; the chain may follow
+/// exactly `MAX_SUBSCRIPTION_REDIRECTS` redirects.
+pub(super) fn subscription_redirect_budget_exhausted(attempt: &Attempt<'_>) -> bool {
+    attempt.previous().len() > MAX_SUBSCRIPTION_REDIRECTS
 }
 
 /// Transport failures are reported by category only. A subscription URL can

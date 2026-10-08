@@ -1303,6 +1303,56 @@ fn hysteria2_port_hopping_projects_to_pinned_sing_box_fields() {
 }
 
 #[test]
+fn hysteria2_sing_box_1_14_options_project_only_when_present() {
+    let hysteria2 = |fields: &str| {
+        ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"outbounds":[{{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"server_ports":["5000:5100"],"hop_interval_seconds":10,{fields}"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}}}}]}}"#
+        ))
+        .expect("Hysteria2 profile")
+    };
+    let projected = |profile: &ValidatedSingBoxProfile| {
+        let projected = profile
+            .project(
+                PROFILE_ID,
+                ProjectionMode::SystemProxy,
+                &EngineSettings::default(),
+            )
+            .expect("Hysteria2 projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("runtime JSON");
+        config["outbounds"]
+            .as_array()
+            .expect("runtime outbounds")
+            .iter()
+            .find(|outbound| outbound["type"] == "hysteria2")
+            .expect("runtime Hysteria2")
+            .clone()
+    };
+
+    let options = projected(&hysteria2(&format!(
+        r#""hop_interval_max_seconds":60,"bbr_profile":"aggressive","obfs":{{"type":"gecko","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}},"min_packet_size":400,"max_packet_size":1400}},"#
+    )));
+    assert_eq!(options["hop_interval"], "10s");
+    assert_eq!(options["hop_interval_max"], "60s");
+    assert_eq!(options["bbr_profile"], "aggressive");
+    assert_eq!(
+        options["obfs"],
+        serde_json::json!({"type":"gecko","password":"","min_packet_size":400,"max_packet_size":1400})
+    );
+
+    let existing = projected(&hysteria2(&format!(
+        r#""obfs":{{"type":"salamander","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}}},"#
+    )));
+    for absent in ["hop_interval_max", "bbr_profile"] {
+        assert!(existing.get(absent).is_none(), "{absent}");
+    }
+    assert_eq!(
+        existing["obfs"],
+        serde_json::json!({"type":"salamander","password":""})
+    );
+}
+
+#[test]
 fn rust_tunnel_address_plan_matches_the_cross_language_contract() {
     let contract: TunnelAddressPlanContract = serde_json::from_str(include_str!(
         "../../../../contracts/tunnel-address-plan-v1.json"

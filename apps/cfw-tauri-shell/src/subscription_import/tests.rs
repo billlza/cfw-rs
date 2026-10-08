@@ -1281,13 +1281,18 @@ fn hysteria2_port_hopping_rejects_ambiguous_or_unprojectable_ranges() {
             "invalid port",
         ),
         (
-            "Mihomo randomized hop interval outside the fixed-interval profile",
-            "proxies:\n  - name: Hop\n    type: hysteria2\n    server: hy.example.com\n    port: 443\n    ports: 5000-5002\n    hop-interval: 15-30\n    password: TopSecretValue!\n",
-            "canonical 1..=3600 second",
+            "Mihomo descending hop interval range",
+            "proxies:\n  - name: Hop\n    type: hysteria2\n    server: hy.example.com\n    port: 443\n    ports: 5000-5002\n    hop-interval: 30-15\n    password: TopSecretValue!\n",
+            "hop interval maximum must be between hop_interval_seconds and 3600 seconds",
         ),
         (
-            "URI randomized hop interval outside the fixed-interval profile",
-            "hysteria2://TopSecretValue!@hy.example.com:443,5000-5002/?sni=hy.example.com&hop-interval=15-30#Hop",
+            "Mihomo hop interval below the runtime minimum",
+            "proxies:\n  - name: Hop\n    type: hysteria2\n    server: hy.example.com\n    port: 443\n    ports: 5000-5002\n    hop-interval: 3\n    password: TopSecretValue!\n",
+            "hop interval must be between 5 and 3600 seconds",
+        ),
+        (
+            "URI open hop interval range",
+            "hysteria2://TopSecretValue!@hy.example.com:443,5000-5002/?sni=hy.example.com&hop-interval=15-#Hop",
             "canonical 1..=3600 second",
         ),
     ] {
@@ -1312,12 +1317,179 @@ fn hysteria2_port_hopping_rejects_ambiguous_or_unprojectable_ranges() {
         json!({ "outbounds": [outbound] }).to_string()
     };
     import_subscription_document(&sing_box(None)).expect("fixed sing-box hop interval");
-    let error = import_subscription_document(&sing_box(Some("30s")))
-        .expect_err("sing-box hop_interval_max has no fixed-interval representation");
-    assert_eq!(
-        error,
-        "sing-box source JSON does not match the supported node-list schema"
+    let error = import_subscription_document(&sing_box(Some("10s")))
+        .expect_err("a sing-box hop_interval_max below hop_interval");
+    assert!(
+        error
+            .contains("hop interval maximum must be between hop_interval_seconds and 3600 seconds"),
+        "{error}"
     );
+}
+
+#[test]
+fn hysteria2_hop_interval_ranges_import_from_every_format() {
+    let sing_box = json!({
+        "outbounds": [{
+            "type": "hysteria2",
+            "tag": "SingBox-Range",
+            "server": "hy.example.com",
+            "server_ports": ["5000:5002"],
+            "hop_interval": "15s",
+            "hop_interval_max": "30s",
+            "password": "hy-secret",
+            "tls": { "enabled": true, "server_name": "hy.example.com" }
+        }]
+    })
+    .to_string();
+    for (label, document, expected) in [
+        (
+            "Clash",
+            "proxies:\n  - name: Range\n    type: hysteria2\n    server: hy.example.com\n    port: 443\n    ports: 5000-5002\n    hop-interval: 15-30\n    password: hy-secret\n".to_owned(),
+            (15, Some(30)),
+        ),
+        (
+            "Clash single-valued range",
+            "proxies:\n  - name: Range\n    type: hysteria2\n    server: hy.example.com\n    port: 443\n    ports: 5000-5002\n    hop-interval: 20-20\n    password: hy-secret\n".to_owned(),
+            (20, None),
+        ),
+        (
+            "URI",
+            "hysteria2://hy-secret@hy.example.com:443,5000-5002/?sni=hy.example.com&hop-interval=15-30#Range".to_owned(),
+            (15, Some(30)),
+        ),
+        ("sing-box", sing_box, (15, Some(30))),
+    ] {
+        let imported = import_subscription_document(&document).expect(label);
+        let profile: Value =
+            serde_json::from_str(imported.profile.as_json()).expect("canonical profile");
+        let outbound = &profile["outbounds"][0];
+        assert_eq!(outbound["hop_interval_seconds"], expected.0, "{label}");
+        match expected.1 {
+            Some(maximum) => assert_eq!(outbound["hop_interval_max_seconds"], maximum, "{label}"),
+            None => assert!(outbound.get("hop_interval_max_seconds").is_none(), "{label}"),
+        }
+        let projected = imported
+            .profile
+            .project(SYNTHETIC_PROFILE_ID, ProjectionMode::SystemProxy, &EngineSettings::default())
+            .expect("Hysteria2 range projection");
+        let runtime: Value = serde_json::from_str(projected.as_json()).expect("runtime JSON");
+        let hysteria2 = runtime["outbounds"]
+            .as_array()
+            .expect("runtime outbounds")
+            .iter()
+            .find(|candidate| candidate["type"] == "hysteria2")
+            .expect("runtime Hysteria2");
+        assert_eq!(hysteria2["hop_interval"], format!("{}s", expected.0), "{label}");
+        match expected.1 {
+            Some(maximum) => {
+                assert_eq!(hysteria2["hop_interval_max"], format!("{maximum}s"), "{label}")
+            }
+            None => assert!(hysteria2.get("hop_interval_max").is_none(), "{label}"),
+        }
+    }
+}
+
+#[test]
+fn hysteria2_gecko_obfs_and_bbr_profile_import_from_clash_and_sing_box() {
+    let clash = |extra: &str| {
+        format!(
+            "proxies:\n  - name: Gecko\n    type: hysteria2\n    server: hy.example.com\n    port: 443\n    password: hy-secret\n{extra}"
+        )
+    };
+    let sing_box = |extra: Value| {
+        let mut outbound = json!({
+            "type": "hysteria2",
+            "tag": "Gecko",
+            "server": "hy.example.com",
+            "server_port": 443,
+            "password": "hy-secret",
+            "tls": { "enabled": true, "server_name": "hy.example.com" }
+        });
+        for (key, value) in extra.as_object().expect("extra fields") {
+            outbound[key] = value.clone();
+        }
+        json!({ "outbounds": [outbound] }).to_string()
+    };
+    for (label, document) in [
+        (
+            "Clash",
+            clash(
+                "    obfs: gecko\n    obfs-password: mask-secret\n    obfs-min-packet-size: 400\n    obfs-max-packet-size: 1400\n    bbr-profile: conservative\n",
+            ),
+        ),
+        (
+            "sing-box",
+            sing_box(json!({
+                "obfs": {"type": "gecko", "password": "mask-secret", "min_packet_size": 400, "max_packet_size": 1400},
+                "bbr_profile": "conservative"
+            })),
+        ),
+    ] {
+        let imported = import_subscription_document(&document).expect(label);
+        let profile: Value =
+            serde_json::from_str(imported.profile.as_json()).expect("canonical profile");
+        let outbound = &profile["outbounds"][0];
+        assert_eq!(outbound["obfs"]["type"], "gecko", "{label}");
+        assert_eq!(
+            outbound["obfs"]["credential_ref"]["kind"], "hysteria2_obfs_password",
+            "{label}"
+        );
+        assert_eq!(outbound["obfs"]["min_packet_size"], 400, "{label}");
+        assert_eq!(outbound["obfs"]["max_packet_size"], 1400, "{label}");
+        assert_eq!(outbound["bbr_profile"], "conservative", "{label}");
+        assert!(
+            imported
+                .credentials
+                .iter()
+                .any(|credential| credential.secret == "mask-secret"),
+            "{label}"
+        );
+    }
+    let defaults =
+        import_subscription_document(&clash("    obfs: gecko\n    obfs-password: mask-secret\n"))
+            .expect("gecko with the runtime packet sizes");
+    let profile: Value = serde_json::from_str(defaults.profile.as_json()).expect("profile");
+    assert!(
+        profile["outbounds"][0]["obfs"]
+            .get("min_packet_size")
+            .is_none()
+    );
+
+    for (label, document, expected) in [
+        (
+            "Clash unknown BBR profile",
+            clash("    bbr-profile: fast\n"),
+            "bbr-profile",
+        ),
+        (
+            "Clash BBR profile beside Brutal upload",
+            clash("    up: 100\n    bbr-profile: standard\n"),
+            "bbr_profile is ignored when up_mbps selects Brutal",
+        ),
+        (
+            "Clash salamander packet size",
+            clash(
+                "    obfs: salamander\n    obfs-password: mask-secret\n    obfs-min-packet-size: 400\n",
+            ),
+            "unsupported keys",
+        ),
+        (
+            "Clash gecko packet size beyond the wire limit",
+            clash(
+                "    obfs: gecko\n    obfs-password: mask-secret\n    obfs-max-packet-size: 4096\n",
+            ),
+            "gecko packet sizes",
+        ),
+        (
+            "sing-box Chrome parrot switch",
+            sing_box(json!({"disable_chrome_parrot": true})),
+            "disable_chrome_parrot is unsupported",
+        ),
+    ] {
+        let error = import_subscription_document(&document).expect_err(label);
+        assert!(error.contains(expected), "{label}: {error}");
+        assert!(!error.contains("mask-secret"), "{label}: {error}");
+    }
 }
 
 #[test]

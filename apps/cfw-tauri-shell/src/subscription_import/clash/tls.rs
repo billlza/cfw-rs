@@ -1,4 +1,6 @@
 //! Shared Clash TLS fields and protocol-specific compatibility.
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 use super::{
     ProxyFields, UtlsFingerprint, Value, build_tls_parts, json, parse_utls_fingerprint, tls_json,
     utls_json,
@@ -32,6 +34,8 @@ pub(super) struct TlsFields {
     client_fingerprint: Option<String>,
     reality: Option<RealityFields>,
     certificate_pin: Option<String>,
+    /// Inline `ech-opts` config as sing-box ECH CONFIGS PEM lines.
+    ech_config: Option<Vec<String>>,
 }
 
 /// Clash `reality-opts`, named after the mihomo keys they come from.
@@ -80,6 +84,40 @@ pub(super) fn collect_tls(fields: &mut ProxyFields) -> Result<TlsFields, String>
             })
         }
     };
+    let ech_config = match fields.take("ech-opts") {
+        None => None,
+        Some(value) => {
+            let context = format!("{}.ech-opts", fields.context());
+            let mut ech = ProxyFields::from_nested(value, fields, "ech-opts")?;
+            let enabled = ech.take_bool("enable")?.unwrap_or(false);
+            let config = ech.take_string("config")?.filter(|value| !value.is_empty());
+            let query_server_name = ech
+                .take_string("query-server-name")?
+                .filter(|value| !value.is_empty());
+            ech.reject_leftovers()?;
+            // Mihomo fetches the config over DNS when it is absent, a lookup
+            // that censors can block or forge; only an inline config is used.
+            match (enabled, config, query_server_name) {
+                (false, None, None) => None,
+                (false, ..) => {
+                    return Err(format!(
+                        "{context} is disabled but carries a config or query-server-name"
+                    ));
+                }
+                (true, _, Some(_)) => {
+                    return Err(format!(
+                        "{context} query-server-name is unsupported: ECH configs are never fetched over DNS"
+                    ));
+                }
+                (true, None, None) => {
+                    return Err(format!(
+                        "{context} requires an inline config; ECH configs are never fetched over DNS"
+                    ));
+                }
+                (true, Some(config), None) => Some(ech_config_pem_lines(&config, &context)?),
+            }
+        }
+    };
     Ok(TlsFields {
         certificate_pin,
         enabled_flag,
@@ -87,7 +125,26 @@ pub(super) fn collect_tls(fields: &mut ProxyFields) -> Result<TlsFields, String>
         alpn,
         client_fingerprint,
         reality,
+        ech_config,
     })
+}
+
+/// Re-encodes Mihomo's base64 ECHConfigList as the line-split ECH CONFIGS PEM
+/// block that sing-box reads; the profile model checks the list itself.
+fn ech_config_pem_lines(config: &str, context: &str) -> Result<Vec<String>, String> {
+    let list = STANDARD
+        .decode(config)
+        .map_err(|_| format!("{context}.config is not standard base64"))?;
+    let encoded = STANDARD.encode(list);
+    let mut lines = vec!["-----BEGIN ECH CONFIGS-----".to_owned()];
+    lines.extend(
+        encoded
+            .as_bytes()
+            .chunks(64)
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned()),
+    );
+    lines.push("-----END ECH CONFIGS-----".to_owned());
+    Ok(lines)
 }
 
 impl TlsFields {
@@ -112,6 +169,9 @@ impl TlsFields {
         if self.enabled_flag != Some(true) {
             if self.certificate_pin.is_some() {
                 return Err(format!("{context} certificate pin requires TLS"));
+            }
+            if self.ech_config.is_some() {
+                return Err(format!("{context} ECH requires TLS"));
             }
             // Without TLS, servername/alpn/client-fingerprint have no wire
             // effect in Clash either; dropping them preserves semantics.
@@ -198,6 +258,11 @@ impl TlsFields {
         ));
         if let Some(pin) = self.certificate_pin {
             tls["certificate_sha256"] = json!([pin]);
+        }
+        if let Some(lines) = self.ech_config {
+            // ECH exists only in TLS 1.3, which the profile states explicitly.
+            tls["min_version"] = json!("1.3");
+            tls["ech"] = json!({"enabled": true, "config": lines});
         }
         Ok(tls)
     }

@@ -836,6 +836,33 @@ fn parse_hysteria2_hop_interval_seconds(value: &str, label: &str) -> Result<u32,
         .ok_or_else(|| format!("{label} must be a canonical 1..=3600 second value"))
 }
 
+/// Parses a Hysteria2 hop interval written as `N` or as Mihomo's `N-M` range.
+/// Bounds and ordering are left to the profile model, which names the field.
+fn parse_hysteria2_hop_interval_range(
+    value: &str,
+    label: &str,
+) -> Result<(u32, Option<u32>), String> {
+    match value.split_once('-') {
+        None => Ok((parse_hysteria2_hop_interval_seconds(value, label)?, None)),
+        Some((minimum, maximum)) => {
+            let minimum = parse_hysteria2_hop_interval_seconds(minimum, label)?;
+            let maximum = parse_hysteria2_hop_interval_seconds(maximum, label)?;
+            Ok((minimum, (maximum != minimum).then_some(maximum)))
+        }
+    }
+}
+
+fn parse_hysteria2_bbr_profile(value: &str, label: &str) -> Result<&'static str, String> {
+    match value {
+        "standard" => Ok("standard"),
+        "conservative" => Ok("conservative"),
+        "aggressive" => Ok("aggressive"),
+        _ => Err(format!(
+            "{label} must be standard, conservative or aggressive"
+        )),
+    }
+}
+
 fn split_host_port(value: &str) -> Result<(String, u16), String> {
     let parsed = Url::parse(&format!("tcp://{value}"))
         .map_err(|_| "subscription endpoint host or port is invalid".to_owned())?;

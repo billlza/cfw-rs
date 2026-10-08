@@ -4,8 +4,8 @@ use std::net::IpAddr;
 mod tls;
 
 use crate::profile::{
-    MAX_OUTBOUNDS, OutboundTls, ProfileDocument, ProfileOutbound, V2RayPacketEncoding,
-    V2RayTransport, VlessFlow,
+    Hysteria2Obfs, Hysteria2ObfsType, MAX_OUTBOUNDS, OutboundTls, ProfileDocument, ProfileOutbound,
+    V2RayPacketEncoding, V2RayTransport, VlessFlow,
 };
 use crate::{ConfigError, CredentialKind, CredentialRef};
 
@@ -13,6 +13,13 @@ const MAX_TAG_BYTES: usize = 128;
 const MAX_SERVER_BYTES: usize = 253;
 const MAX_PATH_BYTES: usize = 2_048;
 const MAX_HYSTERIA2_SERVER_PORT_ITEMS: usize = 64;
+// The pinned sing-quic refuses to dial a hop interval below five seconds.
+const MIN_HYSTERIA2_HOP_INTERVAL_SECONDS: u32 = 5;
+const MAX_HYSTERIA2_HOP_INTERVAL_SECONDS: u32 = 3_600;
+// sing-quic's gecko defaults and its on-wire packet bound.
+const GECKO_DEFAULT_MIN_PACKET_SIZE: u16 = 512;
+const GECKO_DEFAULT_MAX_PACKET_SIZE: u16 = 1_200;
+const GECKO_MAX_PACKET_SIZE: u16 = 2_048;
 
 impl ProfileDocument {
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
@@ -369,27 +376,23 @@ impl ProfileOutbound {
                 server_port,
                 server_ports,
                 hop_interval_seconds,
+                hop_interval_max_seconds,
                 credential_ref,
                 tls,
                 up_mbps,
                 down_mbps,
                 obfs,
+                bbr_profile,
                 ..
             } => {
                 validate_remote_endpoint(server, *server_port, path)?;
                 validate_hysteria2_server_ports(server_ports.as_deref(), path)?;
-                if hop_interval_seconds.is_some() && server_ports.is_none() {
-                    return Err(unsupported_shape(
-                        format!("{path}.hop_interval_seconds"),
-                        "hop interval requires server_ports",
-                    ));
-                }
-                if hop_interval_seconds.is_some_and(|seconds| !(1..=3_600).contains(&seconds)) {
-                    return Err(unsupported_shape(
-                        format!("{path}.hop_interval_seconds"),
-                        "hop interval must be between 1 and 3600 seconds",
-                    ));
-                }
+                validate_hysteria2_hop_interval(
+                    server_ports.is_some(),
+                    *hop_interval_seconds,
+                    *hop_interval_max_seconds,
+                    path,
+                )?;
                 validate_reference_kind(credential_ref, CredentialKind::Hysteria2Password, path)?;
                 validate_quic_tls(tls, path)?;
                 validate_required_tls(tls, path)?;
@@ -401,12 +404,21 @@ impl ProfileOutbound {
                         ));
                     }
                 }
+                // up_mbps makes sing-quic pace uploads with Brutal, which
+                // would silently ignore the BBR profile.
+                if bbr_profile.is_some() && up_mbps.is_some() {
+                    return Err(unsupported_shape(
+                        format!("{path}.bbr_profile"),
+                        "bbr_profile is ignored when up_mbps selects Brutal",
+                    ));
+                }
                 if let Some(obfs) = obfs {
                     validate_reference_kind(
                         &obfs.credential_ref,
                         CredentialKind::Hysteria2ObfsPassword,
                         path,
                     )?;
+                    validate_hysteria2_obfs_packet_sizes(obfs, path)?;
                 }
                 Ok(())
             }
@@ -594,6 +606,73 @@ fn validate_quic_tls(tls: &OutboundTls, path: &str) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
+}
+
+fn validate_hysteria2_hop_interval(
+    has_server_ports: bool,
+    minimum: Option<u32>,
+    maximum: Option<u32>,
+    path: &str,
+) -> Result<(), ConfigError> {
+    let hopping = MIN_HYSTERIA2_HOP_INTERVAL_SECONDS..=MAX_HYSTERIA2_HOP_INTERVAL_SECONDS;
+    if let Some(minimum) = minimum {
+        if !has_server_ports {
+            return Err(unsupported_shape(
+                format!("{path}.hop_interval_seconds"),
+                "hop interval requires server_ports",
+            ));
+        }
+        if !hopping.contains(&minimum) {
+            return Err(unsupported_shape(
+                format!("{path}.hop_interval_seconds"),
+                "hop interval must be between 5 and 3600 seconds",
+            ));
+        }
+    }
+    if let Some(maximum) = maximum {
+        let Some(minimum) = minimum else {
+            return Err(unsupported_shape(
+                format!("{path}.hop_interval_max_seconds"),
+                "hop interval maximum requires hop_interval_seconds",
+            ));
+        };
+        if !(minimum..=MAX_HYSTERIA2_HOP_INTERVAL_SECONDS).contains(&maximum) {
+            return Err(unsupported_shape(
+                format!("{path}.hop_interval_max_seconds"),
+                "hop interval maximum must be between hop_interval_seconds and 3600 seconds",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_hysteria2_obfs_packet_sizes(
+    obfs: &Hysteria2Obfs,
+    path: &str,
+) -> Result<(), ConfigError> {
+    let sized = obfs.min_packet_size.is_some() || obfs.max_packet_size.is_some();
+    match obfs.kind {
+        Hysteria2ObfsType::Salamander if sized => Err(unsupported_shape(
+            format!("{path}.obfs"),
+            "packet sizes apply only to gecko obfs",
+        )),
+        Hysteria2ObfsType::Salamander => Ok(()),
+        Hysteria2ObfsType::Gecko => {
+            let minimum = obfs
+                .min_packet_size
+                .unwrap_or(GECKO_DEFAULT_MIN_PACKET_SIZE);
+            let maximum = obfs
+                .max_packet_size
+                .unwrap_or(GECKO_DEFAULT_MAX_PACKET_SIZE);
+            if minimum == 0 || minimum > maximum || maximum > GECKO_MAX_PACKET_SIZE {
+                return Err(unsupported_shape(
+                    format!("{path}.obfs"),
+                    "gecko packet sizes must satisfy 1 <= min <= max <= 2048 (defaults 512 and 1200)",
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn validate_hysteria2_server_ports(

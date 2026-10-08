@@ -94,10 +94,11 @@ The subscription source boundary accepts only a restricted upstream sing-box
 or a bounded URI bundle. VMess accepts traditional base64 JSON and the
 URL-shaped AEAD form; the latter cannot carry legacy `alterId` state.
 Hysteria2 multi-port sources normalize into a bounded non-overlapping port set
-and an optional fixed-second hop interval before projection to the pinned
-sing-box 1.14 `server_ports`/`hop_interval` fields. The runtime's randomized
-`hop_interval_max` has no profile field, so randomized source ranges fail
-import.
+and an optional hop interval with an optional randomization maximum before
+projection to the pinned sing-box 1.14 `server_ports`, `hop_interval` and
+`hop_interval_max` fields. Gecko obfuscation and the BBR profile project to the
+same runtime fields; the profile enforces the runtime's five-second hop
+minimum and gecko packet bounds at import.
 Shadowsocks 2022 sources normalize the method first and validate each
 standard-base64 key in a single- or multi-user PSK chain before allocating any
 credential reference; SIP002 URI input additionally rejects Base64 userinfo.

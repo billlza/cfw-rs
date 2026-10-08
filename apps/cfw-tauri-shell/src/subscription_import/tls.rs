@@ -137,6 +137,91 @@ mod tests {
     }
 
     #[test]
+    fn clash_ech_opts_import_an_inline_config_and_refuse_dns_fetched_ones() {
+        let trojan = |extra: &str| {
+            format!(
+                "proxies:\n  - name: ech\n    type: trojan\n    server: proxy.example.com\n    port: 443\n    password: synthetic\n    sni: inner.example.com\n{extra}"
+            )
+        };
+        let mut list = vec![0u8, 98];
+        list.extend([0x5a; 98]);
+        let config = STANDARD.encode(&list);
+        let imported = import_subscription_document(&trojan(&format!(
+            "    ech-opts:\n      enable: true\n      config: {config}\n"
+        )))
+        .expect("inline ECH config");
+        let stored: Value = serde_json::from_str(imported.profile.as_json()).unwrap();
+        let tls = &stored["outbounds"][0]["tls"];
+        assert_eq!(tls["min_version"], "1.3");
+        assert_eq!(tls["ech"]["enabled"], true);
+        let lines = tls["ech"]["config"].as_array().expect("PEM lines");
+        assert_eq!(lines.first().unwrap(), "-----BEGIN ECH CONFIGS-----");
+        assert_eq!(lines.last().unwrap(), "-----END ECH CONFIGS-----");
+        let body = lines[1..lines.len() - 1]
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(body.iter().all(|line| line.len() <= 64), "{body:?}");
+        assert_eq!(STANDARD.decode(body.concat()).unwrap(), list);
+        let projected = imported
+            .profile
+            .project(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                ProjectionMode::SystemProxy,
+                &EngineSettings::default(),
+            )
+            .unwrap();
+        let runtime: Value = serde_json::from_str(projected.as_json()).unwrap();
+        assert_eq!(
+            runtime["outbounds"][0]["tls"]["ech"]["config"],
+            tls["ech"]["config"]
+        );
+
+        let disabled =
+            import_subscription_document(&trojan("    ech-opts:\n      enable: false\n"))
+                .expect("disabled ECH sets nothing");
+        let stored: Value = serde_json::from_str(disabled.profile.as_json()).unwrap();
+        assert!(stored["outbounds"][0]["tls"].get("ech").is_none());
+
+        for (label, extra, expected) in [
+            (
+                "DNS-fetched config",
+                "    ech-opts:\n      enable: true\n".to_owned(),
+                "ech-opts requires an inline config",
+            ),
+            (
+                "query server name",
+                format!(
+                    "    ech-opts:\n      enable: true\n      config: {config}\n      query-server-name: ech.example.com\n"
+                ),
+                "query-server-name is unsupported",
+            ),
+            (
+                "invalid base64",
+                "    ech-opts:\n      enable: true\n      config: not*base64\n".to_owned(),
+                "ech-opts.config",
+            ),
+            (
+                "disabled with a config",
+                format!("    ech-opts:\n      enable: false\n      config: {config}\n"),
+                "ech-opts is disabled but carries",
+            ),
+            (
+                "malformed ECHConfigList",
+                "    ech-opts:\n      enable: true\n      config: AAEC\n".to_owned(),
+                "ECHConfigList length is invalid",
+            ),
+        ] {
+            let error = import_subscription_document(&trojan(&extra)).expect_err(label);
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+
+        let vless = "proxies:\n  - name: ech\n    type: vless\n    server: vless.example.com\n    port: 443\n    uuid: 22222222-2222-4222-8222-222222222222\n    ech-opts:\n      enable: true\n      config: AAT+DQAA\n";
+        let error = import_subscription_document(vless).expect_err("ECH without TLS");
+        assert!(error.contains("ECH requires TLS"), "{error}");
+    }
+
+    #[test]
     fn clash_certificate_fingerprint_is_absent_when_empty_and_refused_without_tls_or_with_reality()
     {
         let vless = |extra: &str| {

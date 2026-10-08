@@ -494,11 +494,13 @@ impl ProfileOutbound {
                 server_port,
                 server_ports,
                 hop_interval_seconds,
+                hop_interval_max_seconds,
                 credential_ref,
                 tls,
                 up_mbps,
                 down_mbps,
                 obfs,
+                bbr_profile,
             } => {
                 let mut object =
                     remote_outbound("hysteria2", tag, server, *server_port, bootstrap_resolver);
@@ -522,6 +524,9 @@ impl ProfileOutbound {
                 if let Some(seconds) = hop_interval_seconds {
                     object.insert("hop_interval".into(), json!(format!("{seconds}s")));
                 }
+                if let Some(seconds) = hop_interval_max_seconds {
+                    object.insert("hop_interval_max".into(), json!(format!("{seconds}s")));
+                }
                 object.insert("password".into(), Value::String(String::new()));
                 object.insert("tls".into(), project_tls(tls)?);
                 if let Some(value) = up_mbps {
@@ -530,19 +535,26 @@ impl ProfileOutbound {
                 if let Some(value) = down_mbps {
                     object.insert("down_mbps".into(), json!(value));
                 }
+                if let Some(profile) = bbr_profile {
+                    object.insert("bbr_profile".into(), json!(profile));
+                }
                 let mut slots = vec![CredentialSlot::new(
                     credential_ref.clone(),
                     CredentialTarget::Hysteria2Password,
                     index,
                 )?];
                 if let Some(obfs) = obfs {
-                    object.insert(
-                        "obfs".into(),
-                        json!({
-                            "type": obfs.kind,
-                            "password": "",
-                        }),
-                    );
+                    let mut projected = json!({
+                        "type": obfs.kind,
+                        "password": "",
+                    });
+                    if let Some(size) = obfs.min_packet_size {
+                        projected["min_packet_size"] = json!(size);
+                    }
+                    if let Some(size) = obfs.max_packet_size {
+                        projected["max_packet_size"] = json!(size);
+                    }
+                    object.insert("obfs".into(), projected);
                     slots.push(CredentialSlot::new(
                         obfs.credential_ref.clone(),
                         CredentialTarget::Hysteria2ObfsPassword,

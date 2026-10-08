@@ -43,7 +43,10 @@ Explicit curves require standard TLS. The pinned uTLS/Reality adapters do not
 honor those curve settings, so combining them is rejected. ECH requires
 `min_version: "1.3"` and an enabled `ech` object containing `config`: an array
 of public `ECH CONFIGS` PEM strings supplied by the server operator.
-No ECH key file or implicit bootstrap DNS discovery is read.
+No ECH key file or implicit bootstrap DNS discovery is read. A Clash node's
+`ech-opts` with `enable: true` and an inline base64 `config` imports as that
+PEM block with TLS 1.3; an empty `config`, which Mihomo would look up over DNS,
+and `query-server-name` are refused.
 Reality and ECH cannot be combined. Reality also requires an enabled `utls`
 object with an explicit fingerprint, because the pinned sing-box builds its
 Reality client only on uTLS; the profile is rejected rather than given a

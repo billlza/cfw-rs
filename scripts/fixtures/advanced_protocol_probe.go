@@ -7,8 +7,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -248,6 +251,101 @@ func wireguardProbe(projector, address, tcpTarget, udpTarget string) {
 		closeChecked(client)
 	}
 	fmt.Println("PASS WireGuard TCP, UDP and wrong-preshared-key rejection")
+}
+
+func requireDialFailure(instance *box.Box, tag, target, detail string) {
+	outbound, exists := instance.Outbound().Outbound(tag)
+	require(exists, "projected outbound missing")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(target))
+	if err == nil {
+		closeChecked(conn)
+	}
+	require(err != nil, detail)
+}
+
+func projectedOutbound(config object, tag string) map[string]any {
+	for _, candidate := range config["outbounds"].([]any) {
+		if outbound := candidate.(map[string]any); outbound["tag"] == tag {
+			return outbound
+		}
+	}
+	panic("projected outbound " + tag + " missing")
+}
+
+// hysteria2Probe runs the projected Hysteria2 client against an in-process
+// Hysteria2 server for salamander and gecko obfuscation, then proves that a
+// wrong obfuscation password and a wrong pinned key are both refused.
+func hysteria2Probe(projector, address, tcpTarget, udpTarget string) {
+	type serverIdentity struct{ certificate, key string; pin [32]byte }
+	identity := func(signer any, public any) serverIdentity {
+		template := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "hy2.example.com"},
+			DNSNames: []string{"hy2.example.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+		der := checked(x509.CreateCertificate(rand.Reader, template, template, public, signer))
+		return serverIdentity{
+			certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+			key:         string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: checked(x509.MarshalPKCS8PrivateKey(signer))})),
+			pin:         sha256.Sum256(checked(x509.ParseCertificate(der)).RawSubjectPublicKeyInfo),
+		}
+	}
+	ecdsaKey := checked(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+	ecdsaServer := identity(ecdsaKey, &ecdsaKey.PublicKey)
+	edPublic, edPrivate, err := ed25519.GenerateKey(rand.Reader)
+	require(err == nil, "Ed25519 server key")
+	ed25519Server := identity(edPrivate, edPublic)
+	otherPin := sha256.Sum256([]byte("a different server key"))
+	encode := base64.StdEncoding.EncodeToString
+	gecko := object{"min_packet_size": 400, "max_packet_size": 1400}
+	for _, scenario := range []struct {
+		server       serverIdentity
+		obfs         string
+		sizes        object
+		obfsPassword string
+		pin          [32]byte
+		accepted     bool
+		detail       string
+	}{
+		{ecdsaServer, "salamander", nil, "mask-secret", ecdsaServer.pin, true, ""},
+		{ecdsaServer, "gecko", gecko, "mask-secret", ecdsaServer.pin, true, ""},
+		{ecdsaServer, "gecko", gecko, "wrong-mask", ecdsaServer.pin, false, "Hysteria2 accepted a wrong obfuscation password"},
+		{ecdsaServer, "gecko", gecko, "mask-secret", otherPin, false, "Hysteria2 accepted a certificate outside its pin"},
+		// The Chrome QUIC parrot offers no Ed25519 signature algorithm.
+		{ed25519Server, "salamander", nil, "mask-secret", ed25519Server.pin, false, "Hysteria2 completed a Chrome QUIC handshake with an Ed25519 certificate"},
+	} {
+		port := localPort(address, "udp")
+		serverObfs := object{"type": scenario.obfs, "password": "mask-secret"}
+		profileObfs := object{"type": scenario.obfs, "credential_ref": object{"id": sharedID, "kind": "hysteria2_obfs_password"}}
+		for name, value := range scenario.sizes {
+			serverObfs[name] = value
+			profileObfs[name] = value
+		}
+		server := start(object{"log": object{"level": "error"},
+			"inbounds": []any{object{"type": "hysteria2", "tag": "hy2-in", "listen": address, "listen_port": port,
+				"users": []any{object{"password": "hy-secret"}}, "obfs": serverObfs,
+				"tls": object{"enabled": true, "certificate": []string{scenario.server.certificate}, "key": []string{scenario.server.key}}}},
+			"outbounds": []any{object{"type": "direct", "tag": "direct"}}})
+		config := project(projector, object{"outbounds": []any{object{"type": "hysteria2", "tag": "hy2",
+			"server": address, "server_port": port, "bbr_profile": "conservative",
+			"credential_ref": object{"id": profileID, "kind": "hysteria2_password"},
+			"tls":            object{"enabled": true, "server_name": "hy2.example.com", "certificate_public_key_sha256": []string{encode(scenario.pin[:])}},
+			"obfs":           profileObfs}}})
+		prepareListeners(config, address)
+		outbound := projectedOutbound(config, "hy2")
+		outbound["password"] = "hy-secret"
+		outbound["obfs"].(map[string]any)["password"] = scenario.obfsPassword
+		client := start(config)
+		if scenario.accepted {
+			tcpExchange(client, "hy2", tcpTarget)
+			udpExchange(client, "hy2", udpTarget, true)
+		} else {
+			requireDialFailure(client, "hy2", tcpTarget, scenario.detail)
+		}
+		closeChecked(client)
+		closeChecked(server)
+	}
+	fmt.Println("PASS Hysteria2 salamander and gecko TCP and UDP; wrong obfuscation password, wrong pin and Ed25519 certificate rejection")
 }
 
 func socksServer(address, tag string, port int, username, password string) *box.Box {
@@ -572,4 +670,5 @@ func main() {
 	fallbackProbe(projector, address, tcpTarget, udpTarget)
 	loadBalanceProbe(projector, address, tcpTarget, udpTarget)
 	wireguardProbe(projector, address, tcpTarget, udpTarget)
+	hysteria2Probe(projector, address, tcpTarget, udpTarget)
 }

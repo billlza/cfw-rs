@@ -279,6 +279,124 @@ fn typed_remote_outbounds_persist_only_canonical_credential_references() {
 }
 
 #[test]
+fn hysteria2_sing_box_1_14_options_follow_the_runtime_bounds() {
+    let hysteria2 = |fields: &str| {
+        format!(
+            r#"{{"outbounds":[{{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,{fields}"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}}}}]}}"#
+        )
+    };
+    let obfs = |kind: &str, sizes: &str| {
+        format!(
+            r#""obfs":{{"type":"{kind}","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}{sizes}}},"#
+        )
+    };
+
+    let full = format!(
+        r#""server_ports":["5000:5100"],"hop_interval_seconds":10,"hop_interval_max_seconds":60,"bbr_profile":"conservative","down_mbps":200,{}"#,
+        obfs("gecko", r#","min_packet_size":400,"max_packet_size":1400"#)
+    );
+    let profile = ValidatedSingBoxProfile::parse(&hysteria2(&full)).expect("1.14 options");
+    let value: Value = serde_json::from_str(profile.as_json()).expect("canonical profile JSON");
+    let outbound = &value["outbounds"][0];
+    assert_eq!(outbound["hop_interval_max_seconds"], 60);
+    assert_eq!(outbound["bbr_profile"], "conservative");
+    assert_eq!(outbound["obfs"]["type"], "gecko");
+    assert_eq!(outbound["obfs"]["min_packet_size"], 400);
+    assert_eq!(outbound["obfs"]["max_packet_size"], 1400);
+    for accepted in [
+        obfs("gecko", ""),
+        obfs("gecko", r#","min_packet_size":1200"#),
+        obfs("gecko", r#","max_packet_size":512"#),
+        obfs("gecko", r#","min_packet_size":1,"max_packet_size":2048"#),
+        r#""server_ports":["5000:5100"],"hop_interval_seconds":5,"#.to_owned(),
+        r#""server_ports":["5000:5100"],"hop_interval_seconds":3600,"hop_interval_max_seconds":3600,"#.to_owned(),
+        r#""bbr_profile":"aggressive","down_mbps":100,"#.to_owned(),
+    ] {
+        ValidatedSingBoxProfile::parse(&hysteria2(&accepted))
+            .unwrap_or_else(|error| panic!("{accepted}: {error}"));
+    }
+
+    for (label, fields, expected_path) in [
+        (
+            "hop below the runtime minimum",
+            r#""server_ports":["5000:5100"],"hop_interval_seconds":4,"#.to_owned(),
+            "$.outbounds[0].hop_interval_seconds",
+        ),
+        (
+            "range without ports",
+            r#""hop_interval_seconds":10,"hop_interval_max_seconds":60,"#.to_owned(),
+            "$.outbounds[0].hop_interval_seconds",
+        ),
+        (
+            "range without minimum",
+            r#""server_ports":["5000:5100"],"hop_interval_max_seconds":60,"#.to_owned(),
+            "$.outbounds[0].hop_interval_max_seconds",
+        ),
+        (
+            "range below minimum",
+            r#""server_ports":["5000:5100"],"hop_interval_seconds":60,"hop_interval_max_seconds":30,"#.to_owned(),
+            "$.outbounds[0].hop_interval_max_seconds",
+        ),
+        (
+            "range above bound",
+            r#""server_ports":["5000:5100"],"hop_interval_seconds":60,"hop_interval_max_seconds":3601,"#.to_owned(),
+            "$.outbounds[0].hop_interval_max_seconds",
+        ),
+        (
+            "bbr profile beside Brutal upload",
+            r#""bbr_profile":"standard","up_mbps":100,"#.to_owned(),
+            "$.outbounds[0].bbr_profile",
+        ),
+        (
+            "salamander packet size",
+            obfs("salamander", r#","min_packet_size":512"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko minimum above maximum",
+            obfs("gecko", r#","min_packet_size":1300,"max_packet_size":1200"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko minimum above default maximum",
+            obfs("gecko", r#","min_packet_size":1300"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko maximum below default minimum",
+            obfs("gecko", r#","max_packet_size":511"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko maximum above the wire limit",
+            obfs("gecko", r#","max_packet_size":2049"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko zero minimum",
+            obfs("gecko", r#","min_packet_size":0"#),
+            "$.outbounds[0].obfs",
+        ),
+    ] {
+        let error = ValidatedSingBoxProfile::parse(&hysteria2(&fields)).expect_err(label);
+        assert!(
+            matches!(error, ConfigError::UnsupportedPolicyShape { ref path, .. } if path == expected_path),
+            "{label}: {error:?}"
+        );
+    }
+    for (label, fields) in [
+        ("unknown bbr profile", r#""bbr_profile":"fast","#),
+        ("chrome parrot switch", r#""disable_chrome_parrot":true,"#),
+    ] {
+        let error = ValidatedSingBoxProfile::parse(&hysteria2(fields)).expect_err(label);
+        assert!(
+            matches!(error, ConfigError::InvalidJson(_)),
+            "{label}: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn hysteria2_port_hopping_is_canonical_bounded_and_non_overlapping() {
     let valid = format!(
         r#"{{"outbounds":[{{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"server_ports":["443","5000:5002"],"hop_interval_seconds":30,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}}}}]}}"#

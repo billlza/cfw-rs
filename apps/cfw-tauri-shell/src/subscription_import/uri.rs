@@ -6,11 +6,11 @@ use super::{
     credential_ref_json, decode_base64_text, decode_url_component, decoded_fragment_strict,
     host_string, normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
     normalize_tuic_udp_relay_mode, normalize_v2ray_packet_encoding, normalize_vless_flow,
-    parse_hysteria2_hop_interval_seconds, parse_hysteria2_share_url, parse_positive_u32,
-    parse_utls, port_from_url, port_from_url_or_default, reject_query_leftovers,
-    required_url_password, required_url_username, sanitized_token, split_csv,
-    split_fragment_strict, split_host_port, split_query_strict, strict_query_map, take_query_alias,
-    tls_json, transport_from_parts, validate_share_url_path,
+    parse_hysteria2_hop_interval_range, parse_hysteria2_share_url, parse_positive_u32, parse_utls,
+    port_from_url, port_from_url_or_default, reject_query_leftovers, required_url_password,
+    required_url_username, sanitized_token, split_csv, split_fragment_strict, split_host_port,
+    split_query_strict, strict_query_map, take_query_alias, tls_json, transport_from_parts,
+    validate_share_url_path,
 };
 use cfw_singbox_config::CredentialKind;
 use reqwest::Url;
@@ -283,10 +283,12 @@ impl OutboundCollector {
             "Hysteria2",
             "hop interval",
         )? {
-            outbound["hop_interval_seconds"] = json!(parse_hysteria2_hop_interval_seconds(
-                &value,
-                "Hysteria2 hop interval"
-            )?);
+            let (minimum, maximum) =
+                parse_hysteria2_hop_interval_range(&value, "Hysteria2 hop interval")?;
+            outbound["hop_interval_seconds"] = json!(minimum);
+            if let Some(maximum) = maximum {
+                outbound["hop_interval_max_seconds"] = json!(maximum);
+            }
         }
         if let Some(value) = query.remove("upmbps") {
             outbound["up_mbps"] = json!(parse_positive_u32(&value, "Hysteria2 upmbps")?);

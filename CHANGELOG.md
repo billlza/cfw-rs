@@ -84,6 +84,16 @@
   then required, because only its hello carries that share. The option is off
   by default because older servers may mishandle the hybrid share. A profile
   saved with it is rejected by earlier builds, which do not know the field.
+- Import the Hysteria2 options of the sing-box 1.14 runtime: a randomized hop
+  interval (Mihomo or link `hop-interval: 15-30`, sing-box `hop_interval_max`),
+  gecko obfuscation with optional packet-size bounds, and a BBR profile that
+  cannot be combined with an upload rate, which would select Brutal. A hop
+  interval under five seconds, which the runtime never dialed, now fails
+  import, and a stored profile with one is listed as invalid. Profiles saved
+  with the new options are rejected by earlier builds.
+- Import a Clash node's `ech-opts` with an inline base64 `config` as ECH with
+  TLS 1.3. A node without one, which Mihomo would look up over DNS, and
+  `query-server-name` fail import instead of sending a plaintext ClientHello.
 
 ## 0.4.0 - Unreleased
 

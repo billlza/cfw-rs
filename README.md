@@ -60,11 +60,13 @@ URL-shaped AEAD form without `alterId`. VMess/VLESS packet encoding and the clos
 HTTPUpgrade, and V2Ray QUIC transport shapes are preserved. Mihomo HTTP
 imports preserve a closed method/path/Host subset and reject nondeterministic
 multi-path or arbitrary custom-header semantics. Hysteria2 accepts canonical,
-non-overlapping multi-port sets and a fixed bounded hop interval from its
-official URI, Mihomo YAML, or sing-box JSON. Randomized intervals (a Mihomo or
-URI range such as `15-30`, or sing-box `hop_interval_max`) are rejected at
-import because the stored profile keeps one fixed interval, although the
-pinned sing-box 1.14 runtime supports them. VLESS Vision rejects V2Ray
+non-overlapping multi-port sets and a 5–3600-second hop interval, fixed or
+randomized up to a maximum (a Mihomo or URI range such as `15-30`, or sing-box
+`hop_interval_max`), from its official URI, Mihomo YAML, or sing-box JSON. It
+also takes gecko obfuscation with optional packet-size bounds and a BBR
+profile, which cannot be combined with an upload rate because that selects
+Brutal. The server certificate must be ECDSA or RSA: the Chrome QUIC hello
+offers no Ed25519 signature. VLESS Vision rejects V2Ray
 transport streams and accepts only omitted or XUDP packet encoding. XHTTP and
 unknown transport semantics fail closed. Hysteria2 and TUIC use QUIC TLS and
 reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the

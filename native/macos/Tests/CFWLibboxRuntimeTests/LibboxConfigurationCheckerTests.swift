@@ -125,6 +125,35 @@ import Testing
     }
   }
 
+  @Test func pinnedLibboxAcceptsProjectedHysteria2SingBox114Options() throws {
+    func configuration(obfs: [String: Any], extra: [String: Any]) throws -> Data {
+      var outbound: [String: Any] = [
+        "type": "hysteria2", "tag": "hy2", "server": "1.1.1.1", "server_port": 443,
+        "server_ports": ["5000:5100"], "hop_interval": "10s", "password": "hy-secret",
+        "obfs": obfs,
+        "tls": ["enabled": true, "server_name": "hy2.example.com"],
+      ]
+      outbound.merge(extra) { _, new in new }
+      return try JSONSerialization.data(withJSONObject: [
+        "log": ["level": "error"], "outbounds": [outbound], "route": ["final": "hy2"],
+      ])
+    }
+    let checker = SourceBuiltLibboxConfigurationChecker()
+    try checker.check(
+      configuration: configuration(
+        obfs: [
+          "type": "gecko", "password": "mask-secret", "min_packet_size": 400,
+          "max_packet_size": 1400,
+        ],
+        extra: ["hop_interval_max": "60s", "bbr_profile": "conservative"]))
+    #expect(throws: LibboxRuntimeError.self) {
+      try checker.check(
+        configuration: configuration(
+          obfs: ["type": "gecko", "password": "mask-secret"],
+          extra: ["bbr_profile": "fast"]))
+    }
+  }
+
   @Test func pinnedLibboxAcceptsProjectedAnyTLSAndTUICShape() throws {
     let configuration = Data(
       #"""

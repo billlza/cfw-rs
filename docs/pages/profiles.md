@@ -73,11 +73,19 @@ The safe schema is intentionally closed:
   one deterministic path and Host authorities is accepted; multiple path
   alternatives and arbitrary custom headers are rejected instead of dropped;
 - Hysteria2 port hopping stores only canonical non-overlapping port/range
-  entries and an optional fixed 1..=3600-second interval. Projection emits the
-  pinned sing-box 1.14 `server_ports`/`hop_interval` fields. That runtime can
-  also randomize the interval up to `hop_interval_max`, but the profile has no
-  field for it, so randomized Mihomo or URI ranges and sing-box
-  `hop_interval_max` remain a visible unsupported error;
+  entries and an optional 5..=3600-second interval, which the pinned sing-box
+  1.14 runtime randomizes up to an optional maximum: a Mihomo or URI range
+  such as `15-30`, or sing-box `hop_interval_max`. The runtime never dials an
+  interval under five seconds, so such values fail import instead of the
+  connection;
+- Hysteria2 obfuscation is `salamander` or `gecko`; gecko may bound its padded
+  packet sizes (Mihomo `obfs-min-packet-size`/`obfs-max-packet-size`, sing-box
+  `min_packet_size`/`max_packet_size`, defaults 512 and 1200, at most 2048).
+  A BBR profile (`bbr-profile`/`bbr_profile`: standard, conservative or
+  aggressive) cannot be combined with an upload rate, because `up` makes the
+  runtime pace uploads with Brutal and ignore it. `disable_chrome_parrot` is
+  refused; the server certificate must be ECDSA or RSA, since the Chrome QUIC
+  hello offers no Ed25519 signature;
 - Shadowsocks 2022 URI import follows SIP002's plain percent-encoded userinfo
   form; Base64 userinfo and legacy whole-link envelopes are rejected for 2022
   methods. Every colon-delimited PSK is canonical standard Base64 and has the

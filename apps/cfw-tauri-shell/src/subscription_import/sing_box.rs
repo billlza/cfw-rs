@@ -17,8 +17,8 @@ use super::{
     credential_ref_json, normalize_hysteria2_server_ports,
     normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
     normalize_tuic_udp_relay_mode, normalize_v2ray_packet_encoding, normalize_vless_flow,
-    normalize_vmess_alter_id, normalize_vmess_security, parse_hysteria2_hop_interval_seconds,
-    parse_utls, tls_json,
+    normalize_vmess_alter_id, normalize_vmess_security, parse_hysteria2_bbr_profile,
+    parse_hysteria2_hop_interval_seconds, parse_utls, tls_json,
 };
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +146,12 @@ enum SourceOutbound {
         #[serde(default)]
         hop_interval: Option<String>,
         #[serde(default)]
+        hop_interval_max: Option<String>,
+        #[serde(default)]
+        bbr_profile: Option<String>,
+        #[serde(default)]
+        disable_chrome_parrot: bool,
+        #[serde(default)]
         network: Option<Value>,
         #[serde(default)]
         brutal_debug: bool,
@@ -192,6 +198,10 @@ struct SourceHysteria2Obfs {
     #[serde(rename = "type")]
     kind: String,
     password: String,
+    #[serde(default)]
+    min_packet_size: Option<u16>,
+    #[serde(default)]
+    max_packet_size: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -522,12 +532,20 @@ fn convert_outbound(
             obfs,
             server_ports,
             hop_interval,
+            hop_interval_max,
+            bbr_profile,
+            disable_chrome_parrot,
             network,
             brutal_debug,
         } => {
             reject_present(network, "Hysteria2 network restriction")?;
             if brutal_debug {
                 return Err("sing-box Hysteria2 brutal debug is unsupported".into());
+            }
+            // Without the Chrome QUIC parrot the handshake is a plain
+            // quic-go fingerprint; the option is refused, not dropped.
+            if disable_chrome_parrot {
+                return Err("sing-box Hysteria2 disable_chrome_parrot is unsupported".into());
             }
             let server_ports = server_ports
                 .map(|values| {
@@ -556,6 +574,17 @@ fn convert_outbound(
             if hop_interval_seconds.is_some() && server_ports.is_none() {
                 return Err("sing-box Hysteria2 hop_interval requires server_ports".into());
             }
+            let hop_interval_max_seconds = hop_interval_max
+                .map(|value| {
+                    parse_hysteria2_hop_interval_seconds(
+                        &value,
+                        "sing-box Hysteria2 hop_interval_max",
+                    )
+                })
+                .transpose()?;
+            let bbr_profile = bbr_profile
+                .map(|value| parse_hysteria2_bbr_profile(&value, "sing-box Hysteria2 bbr_profile"))
+                .transpose()?;
             let reference = collector.push_secret(CredentialKind::Hysteria2Password, password);
             let mut outbound = remote(
                 "hysteria2",
@@ -571,6 +600,12 @@ fn convert_outbound(
             if let Some(seconds) = hop_interval_seconds {
                 outbound["hop_interval_seconds"] = json!(seconds);
             }
+            if let Some(seconds) = hop_interval_max_seconds {
+                outbound["hop_interval_max_seconds"] = json!(seconds);
+            }
+            if let Some(profile) = bbr_profile {
+                outbound["bbr_profile"] = json!(profile);
+            }
             outbound["tls"] = source_tls(tls, &server, true)?;
             if let Some(value) = up_mbps {
                 outbound["up_mbps"] = json!(value);
@@ -579,17 +614,29 @@ fn convert_outbound(
                 outbound["down_mbps"] = json!(value);
             }
             if let Some(obfs) = obfs {
-                if obfs.kind != "salamander" || obfs.password.is_empty() {
+                let gecko = obfs.kind == "gecko";
+                let sized = obfs.min_packet_size.is_some() || obfs.max_packet_size.is_some();
+                if !(gecko || obfs.kind == "salamander") || obfs.password.is_empty() {
                     return Err(
                         "sing-box Hysteria2 obfuscation is unsupported or incomplete".into(),
                     );
                 }
+                if sized && !gecko {
+                    return Err("sing-box Hysteria2 packet sizes apply only to gecko obfs".into());
+                }
                 let reference =
                     collector.push_secret(CredentialKind::Hysteria2ObfsPassword, obfs.password);
-                outbound["obfs"] = json!({
-                    "type": "salamander",
+                let mut projected = json!({
+                    "type": obfs.kind,
                     "credential_ref": credential_ref_json(&reference),
                 });
+                if let Some(size) = obfs.min_packet_size {
+                    projected["min_packet_size"] = json!(size);
+                }
+                if let Some(size) = obfs.max_packet_size {
+                    projected["max_packet_size"] = json!(size);
+                }
+                outbound["obfs"] = projected;
             }
             Ok(outbound)
         }

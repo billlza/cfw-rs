@@ -16,10 +16,14 @@
 //!   silently dropped: `skip-cert-verify: true`, Shadowsocks plugins,
 //!   `udp-over-tcp`, `smux`, and every proxy type outside the
 //!   closed schema. Hysteria2 port hopping accepts only canonical,
-//!   non-overlapping port sets and one fixed 1..=3600 second
-//!   `hop-interval`. A randomized range such as `15-30` fails the import:
-//!   the pinned sing-box 1.14 runtime could express it with
-//!   `hop_interval_max`, but the typed profile stores a single interval.
+//!   non-overlapping port sets and a `hop-interval` of 5..=3600 seconds,
+//!   either fixed or a range such as `15-30` that the pinned sing-box 1.14
+//!   runtime randomizes up to `hop_interval_max`. Mihomo raises an interval
+//!   under five seconds to five; here it fails the import instead. Gecko
+//!   obfuscation sizes and `bbr-profile` map onto the same runtime fields.
+//! - `ech-opts` with `enable: true` imports only an inline base64 `config`,
+//!   which also pins TLS 1.3. An empty `config`, which Mihomo would look up
+//!   over DNS, and `query-server-name` fail the import.
 //! - `fingerprint` is Mihomo's SHA-256 of the server's DER leaf certificate,
 //!   unrelated to `client-fingerprint`. It becomes one `certificate_sha256`
 //!   pin, never a public-key pin. The pin replaces CA-chain trust for that
@@ -61,9 +65,9 @@ use super::{
     credential_ref_json, normalize_hysteria2_server_ports,
     normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
     normalize_tuic_udp_relay_mode, normalize_v2ray_http_method, normalize_v2ray_packet_encoding,
-    normalize_vless_flow, normalize_vmess_security, parse_hysteria2_hop_interval_seconds,
-    parse_utls_fingerprint, parse_vmess_alter_id, sanitized_token, tls_json, transport_from_parts,
-    utls_json,
+    normalize_vless_flow, normalize_vmess_security, parse_hysteria2_bbr_profile,
+    parse_hysteria2_hop_interval_range, parse_utls_fingerprint, parse_vmess_alter_id,
+    sanitized_token, tls_json, transport_from_parts, utls_json,
 };
 
 /// Proxy-entry keys that only tune local socket behaviour. They change
@@ -512,9 +516,13 @@ fn convert_hysteria2(
         )?),
         (None, None) => None,
     };
-    let hop_interval_seconds = fields
+    let hop_interval = fields
         .take_string("hop-interval")?
-        .map(|value| parse_hysteria2_hop_interval_seconds(&value, "Clash Hysteria2 hop-interval"))
+        .map(|value| parse_hysteria2_hop_interval_range(&value, "Clash Hysteria2 hop-interval"))
+        .transpose()?;
+    let bbr_profile = fields
+        .take_string("bbr-profile")?
+        .map(|value| parse_hysteria2_bbr_profile(&value, "Clash Hysteria2 bbr-profile"))
         .transpose()?;
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
@@ -541,6 +549,30 @@ fn convert_hysteria2(
                 "credential_ref": credential_ref_json(&reference),
             }))
         }
+        Some(mode) if mode == "gecko" => {
+            let password = fields.require_string("obfs-password")?;
+            let reference = collector.push_secret(CredentialKind::Hysteria2ObfsPassword, password);
+            let mut obfs = json!({
+                "type": "gecko",
+                "credential_ref": credential_ref_json(&reference),
+            });
+            for (key, field) in [
+                ("obfs-min-packet-size", "min_packet_size"),
+                ("obfs-max-packet-size", "max_packet_size"),
+            ] {
+                if let Some(value) = fields.take_string(key)? {
+                    let size = value
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|size| size.to_string() == value)
+                        .ok_or_else(|| {
+                            format!("{}.{key} must be a canonical packet size", fields.context())
+                        })?;
+                    obfs[field] = json!(size);
+                }
+            }
+            Some(obfs)
+        }
         Some(other) => {
             return Err(format!(
                 "Hysteria2 obfs mode is unsupported: {}",
@@ -562,8 +594,14 @@ fn convert_hysteria2(
     if let Some(ports) = ports {
         outbound["server_ports"] = json!(ports);
     }
-    if let Some(seconds) = hop_interval_seconds {
-        outbound["hop_interval_seconds"] = json!(seconds);
+    if let Some((minimum, maximum)) = hop_interval {
+        outbound["hop_interval_seconds"] = json!(minimum);
+        if let Some(maximum) = maximum {
+            outbound["hop_interval_max_seconds"] = json!(maximum);
+        }
+    }
+    if let Some(profile) = bbr_profile {
+        outbound["bbr_profile"] = json!(profile);
     }
     if let Some(up_mbps) = up_mbps {
         outbound["up_mbps"] = json!(up_mbps);

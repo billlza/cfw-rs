@@ -173,6 +173,8 @@ pub(crate) enum ProfileOutbound {
         server_ports: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         hop_interval_seconds: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hop_interval_max_seconds: Option<u32>,
         credential_ref: CredentialRef,
         tls: OutboundTls,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,6 +183,8 @@ pub(crate) enum ProfileOutbound {
         down_mbps: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         obfs: Option<Hysteria2Obfs>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bbr_profile: Option<Hysteria2BbrProfile>,
     },
     #[serde(rename = "anytls")]
     AnyTls {
@@ -501,12 +505,27 @@ pub(crate) struct Hysteria2Obfs {
     #[serde(rename = "type")]
     pub(crate) kind: Hysteria2ObfsType,
     pub(crate) credential_ref: CredentialRef,
+    /// Gecko packet size bounds; the runtime defaults are used when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) min_packet_size: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_packet_size: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Hysteria2ObfsType {
     Salamander,
+    Gecko,
+}
+
+/// BBR tuning for uploads that are not rate-limited by `up_mbps` (Brutal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Hysteria2BbrProfile {
+    Standard,
+    Conservative,
+    Aggressive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

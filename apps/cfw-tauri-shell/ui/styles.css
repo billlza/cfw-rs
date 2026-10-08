@@ -1525,7 +1525,9 @@ dd {
 }
 
 /* A textarea keeps pasted line breaks that a single-line input would strip;
-   it otherwise looks and behaves like the input it replaces. */
+   it otherwise looks and behaves like the input it replaces. Overflow clips at
+   the padding box, so vertical padding would expose part of a second line;
+   the one visible line is centred by its line height (45px less the borders). */
 .cfw-url-box textarea {
   display: block;
   width: 100%;
@@ -1533,12 +1535,12 @@ dd {
   border: 1px solid var(--bc);
   border-radius: 4px;
   outline: none;
-  padding: 9px 48px 9px 12px;
+  padding: 0 48px 0 12px;
   background: var(--bgc);
   color: #444;
   font: inherit;
   font-size: 20px;
-  line-height: 25px;
+  line-height: 43px;
   white-space: pre;
   overflow: hidden;
   resize: none;

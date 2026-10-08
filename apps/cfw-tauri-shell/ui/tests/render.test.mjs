@@ -6,6 +6,7 @@
 // General page is allowed to claim. A render-time crash or a missing reason
 // therefore fails in CI instead of in the app.
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { t, getLocale, setLocale } from "../src/i18n.js";
 
@@ -4406,6 +4407,24 @@ test("SOCKS5 links, local YAML, and dropped text use native conversion and never
     await setEngine(originalEngine);
     await reloadButton.click();
   }
+});
+
+test("the single-row import box shows its first line whole and no part of the next", async () => {
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const body = styles.match(/^\.cfw-url-box textarea\s*\{(?<body>[^}]*)\}/mu)?.groups.body;
+  assert.ok(body, "the import box rule exists");
+  const rule = Object.fromEntries(
+    body.split(";").map((declaration) => declaration.split(":").map((part) => part.trim())).filter(([property]) => property),
+  );
+  // Overflow clips at the padding box: vertical padding would show the top of a
+  // pasted second line, so one line fills the box inside its 1px borders.
+  assert.equal(rule.overflow, "hidden");
+  assert.equal(rule["box-sizing"], undefined, "the box inherits the global border-box sizing");
+  assert.match(styles, /^\*\s*\{[^}]*box-sizing:\s*border-box/mu);
+  assert.equal(rule.height, "45px");
+  assert.match(rule.border, /^1px solid /u);
+  assert.equal(rule.padding, "0 48px 0 12px");
+  assert.equal(rule["line-height"], "43px");
 });
 
 test("network switches remain off while startup is pending or fails and cancellation remains available", async () => {

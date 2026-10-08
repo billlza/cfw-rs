@@ -52,6 +52,10 @@
   delete `<id>.profile.json` from `~/Library/Application Support/Clash for
   Mac/sing-box-profiles-v1` (and `selected-profile-v1.json` there if that
   profile was selected), then import the node again with a fingerprint.
+- Importing typed profile JSON (nodes with `credential_ref`) whose fields are
+  well formed but fail validation, such as Reality without uTLS, names the
+  field and the reason, as saving it in the profile editor does, instead of
+  reporting that the JSON does not match the sing-box node-list schema.
 - Connect to Reality servers that require the post-quantum X25519MLKEM768 key
   share, as Xray releases from v26.9.8 do. A node opts in with Clash
   `reality-opts.support-x25519mlkem768: true` or sing-box

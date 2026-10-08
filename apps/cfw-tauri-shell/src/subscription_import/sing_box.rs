@@ -307,6 +307,13 @@ enum SourceTransport {
     },
 }
 
+/// True when `body` has the node-list shape this adapter converts, which lets
+/// the dispatcher tell a node list the typed schema also reads (credential-free
+/// HTTP lists) from a typed profile this adapter would reject.
+pub(super) fn matches_node_list_schema(body: &str) -> bool {
+    serde_json::from_str::<SourceDocument>(body).is_ok()
+}
+
 pub(super) fn import_sing_box_document(
     body: &str,
     mut collector: OutboundCollector,

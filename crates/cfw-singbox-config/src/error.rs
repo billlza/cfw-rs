@@ -57,3 +57,26 @@ impl From<serde_json::Error> for ConfigError {
         Self::InvalidJson(error.to_string())
     }
 }
+
+/// Where profile parsing stopped. An importer that also reads other source
+/// formats needs to know whether the typed schema described the input at all.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ProfileParseError {
+    /// The input never became a typed profile document: it is too large or
+    /// too complex, not a JSON object, has a top-level key outside the profile,
+    /// carries forbidden, remote or inline-credential keys, or does not match
+    /// the closed schema.
+    #[error(transparent)]
+    Unrecognized(ConfigError),
+    /// The input was read into the closed schema, then rejected.
+    #[error(transparent)]
+    Invalid(ConfigError),
+}
+
+impl From<ProfileParseError> for ConfigError {
+    fn from(error: ProfileParseError) -> Self {
+        match error {
+            ProfileParseError::Unrecognized(error) | ProfileParseError::Invalid(error) => error,
+        }
+    }
+}

@@ -466,16 +466,13 @@ mod candidate_input_tests {
                 "{build}"
             );
         }
-        // The retained signed preview and every earlier preview root are
-        // verification subjects, never Host build inputs.
+        // Sibling validation roots, other builds' roots and the signed output
+        // are never GA pre-sign Host build inputs.
         for relative in [
             UNSIGNED_RELATIVE_ROOT,
             UNSIGNED_PREVIEW_RELATIVE_ROOT,
             "ga-preflight/40073/native-products",
             "ga-preflight/50025/native-products",
-            "preview-preflight/50025/native-products",
-            "preview-preflight/50028/native-products",
-            "preview/50025/signing-output/signed-native-products",
             "ga/50028/signing-output/signed-native-products",
         ] {
             let wrong = fixture.output("0.5.0", relative);
@@ -557,7 +554,6 @@ mod candidate_input_tests {
         for (version, relative, build) in [
             ("0.5.0", UNSIGNED_RELATIVE_ROOT, "40000"),
             ("0.5.0", GA_PRE_SIGN_RELATIVE_ROOT, "50028"),
-            ("0.5.0", "preview-preflight/50025/native-products", "50025"),
         ] {
             let other = fixture.output(version, relative);
             assert!(CandidateNativeProducts::resolve(&root, &output, build).is_err());

@@ -20,47 +20,45 @@ Timestamp=Sep 22, 2026 at 12:00:00
 """
 
 
-class SignedPreviewShellTests(unittest.TestCase):
+class ReleaseAppVerifierShellTests(unittest.TestCase):
     def run_function(self, code: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["/bin/bash", "-p", "-c", 'source "$1"; shift; ' + code, "preview-verifier-test", str(VERIFIER), *arguments],
+            ["/bin/bash", "-p", "-c", 'source "$1"; shift; ' + code, "release-verifier-test", str(VERIFIER), *arguments],
             env={**os.environ, "CFW_RELEASE_PYTHON_EXECUTABLE": sys.executable},
             capture_output=True, text=True, check=False, timeout=20,
         )
 
-    def test_signed_contexts_select_fixed_independent_version_and_preflight_paths(self) -> None:
-        for prefix, version, build, preflight in (
-            ("", "0.5.0", "50028", "target/candidates/0.5.0/ga/50028"),
-            ("preview-", "0.5.0", "50025", "target/candidates/0.5.0/preview-preflight/50025"),
-        ):
-            for stage in ("signing-attempt-work", "signing-attempt-publish-ready", "canonical-native-content"):
-                context = prefix + stage
-                with self.subTest(context=context):
-                    result = self.run_function(
-                        'configure_release_verification_context "$1" 1; '
-                        'printf "%s\\n" "$expected_version" "$expected_build_number" '
-                        '"$signing_preflight_manifest" "$pre_sign_native_products_root"',
-                        context,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout.splitlines(), [
-                        version, build, str(REPOSITORY / preflight / "profiles/signing-preflight.json"),
-                        str(REPOSITORY / preflight / "native-products"),
-                    ])
+    def test_signed_contexts_select_the_fixed_ga_version_and_preflight_paths(self) -> None:
+        preflight = "target/candidates/0.5.0/ga/50028"
+        for context in ("signing-attempt-work", "signing-attempt-publish-ready", "canonical-native-content"):
+            with self.subTest(context=context):
+                result = self.run_function(
+                    'configure_release_verification_context "$1" 1; '
+                    'printf "%s\\n" "$expected_version" "$expected_build_number" '
+                    '"$signing_preflight_manifest" "$pre_sign_native_products_root"',
+                    context,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [
+                    "0.5.0", "50028", str(REPOSITORY / preflight / "profiles/signing-preflight.json"),
+                    str(REPOSITORY / preflight / "native-products"),
+                ])
 
     def test_unsigned_unknown_and_post_notary_private_contexts_are_rejected(self) -> None:
         for context, pre_notary in (
-            ("unsigned-host", "1"), ("unsigned-preview-host", "1"), ("preview-pre-sign", "1"), ("preview", "1"),
+            ("unsigned-host", "1"), ("unsigned-preview-host", "1"), ("preview", "1"),
+            # The removed signed-preview contexts are unknown contexts now.
+            ("preview-pre-sign", "1"), ("preview-signing-attempt-work", "1"),
+            ("preview-signing-attempt-publish-ready", "1"),
+            ("preview-canonical-native-content", "0"),
             ("signing-attempt-work", "0"), ("signing-attempt-publish-ready", "0"),
-            ("preview-signing-attempt-work", "0"), ("preview-signing-attempt-publish-ready", "0"),
         ):
             with self.subTest(context=context):
                 result = self.run_function('configure_release_verification_context "$1" "$2"', context, pre_notary)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("error:", result.stderr)
-        for context in ("canonical-native-content", "preview-canonical-native-content"):
-            result = self.run_function('configure_release_verification_context "$1" 0', context)
-            self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_function('configure_release_verification_context "$1" 0', "canonical-native-content")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def verify_ui(self, root: Path, *, entitlements: bytes = b"", details: str = DETAILS,
                   wrong_certificate: bool = False, strict_failure: bool = False) -> subprocess.CompletedProcess[str]:
@@ -121,7 +119,7 @@ verify_native_ui_security "$temporary_root/libCFMNativeDashboard.dylib"
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("malformed", result.stderr)
 
-    def test_preview_main_path_retains_nested_and_notarization_gates(self) -> None:
+    def test_main_path_retains_nested_and_notarization_gates(self) -> None:
         source = VERIFIER.read_text()
         main = source[source.index('pre_notary=0\n'):]
         for required in (

@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from scripts.release_build_identity import SIGNED_PREVIEW_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE = Path(os.environ.get("CFW_SHELL_DISPATCH_SOURCE_ROOT", str(REPOSITORY))).resolve()
@@ -98,7 +98,7 @@ class PreviewShellOptionalArgumentsTests(unittest.TestCase):
             "CFW_FIXTURE_ROOT": str(root), "CFW_FIXTURE_PYTHON": sys.executable,
             "CFW_FIXTURE_DIGEST": "d" * 64,
             "CFW_NATIVE_PRODUCTS_OUTPUT": str(root / "fixture-native-products"),
-            "CFW_BUILD_NUMBER": "50000" if unsigned else SIGNED_PREVIEW_IDENTITY.build_number,
+            "CFW_BUILD_NUMBER": "50000" if unsigned else ACTIVE_RELEASE_IDENTITY.ga_build,
         })
         if unsigned:
             environment["CFW_UNSIGNED_VALIDATION_PYTHON"] = sys.executable
@@ -125,22 +125,37 @@ class PreviewShellOptionalArgumentsTests(unittest.TestCase):
                 self.assertIn("u", flags)
                 self.assertIn("p", flags)
 
-    def test_native_ui_build_and_verify_keep_exact_optional_flag_argv(self):
+    def test_native_ui_build_and_verify_keep_exact_mode_flag_argv(self):
         for operation in ("build", "verify"):
             for unsigned in (False, True):
                 with self.subTest(operation=operation, unsigned=unsigned):
                     root = self.fixture()
-                    arguments = (["--verify"] if operation == "verify" else []) + (["--unsigned-preview-validation"] if unsigned else [])
+                    mode = "--unsigned-preview-validation" if unsigned else "--release"
+                    arguments = (["--verify"] if operation == "verify" else []) + [mode]
                     result, events = self.run_script(f"producer-{operation}-{unsigned}", root, "build_native_ui.sh", arguments, unsigned=unsigned)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assert_strict_shell(events)
                     expected = [str(root), str(root / "scripts/native_ui_artifact.py"), operation,
                                 "--repository", str(root), "--products", str(root / "fixture-native-products"),
-                                "--build-number", "50000" if unsigned else SIGNED_PREVIEW_IDENTITY.build_number]
-                    if unsigned:
-                        expected.append("--unsigned-preview-validation")
+                                "--build-number", "50000" if unsigned else ACTIVE_RELEASE_IDENTITY.ga_build, mode]
                     self.assertEqual([event["argv"] for event in events if event["kind"] == "python"], [expected])
                     self.assertEqual(events[0]["argv"][0], "unsigned-validation" if unsigned else "production")
+
+    def test_native_ui_requires_exactly_one_mode_before_any_tool_call(self):
+        for case, arguments in (
+            ("no-mode", []),
+            ("verify-without-mode", ["--verify"]),
+            ("two-modes", ["--release", "--unsigned-preview-validation"]),
+            ("repeated-mode", ["--release", "--release"]),
+            ("repeated-verify", ["--verify", "--verify", "--release"]),
+            ("unknown", ["--signed-preview"]),
+        ):
+            with self.subTest(case=case):
+                root = self.fixture()
+                result, events = self.run_script(f"producer-usage-{case}", root, "build_native_ui.sh", arguments)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("usage: scripts/build_native_ui.sh", result.stderr)
+                self.assertEqual(events, [])
 
     def test_unsigned_builder_modes_preserve_all_three_optional_argument_groups(self):
         for preview, validation_python in ((False, False), (False, True), (True, True)):
@@ -228,10 +243,13 @@ class PreviewShellOptionalArgumentsTests(unittest.TestCase):
                 self.assertEqual(calls("candidate_artifact_binding.py"), [binding, binding])
 
     def test_dispatched_failure_remains_fatal_and_does_not_run_later_stages(self):
-        for script, failure in (("build_native_ui.sh", "native_ui_artifact.py"), ("build_unsigned_candidate.sh", "verify_version_contract.py")):
+        for script, arguments, failure in (
+            ("build_native_ui.sh", ["--release"], "native_ui_artifact.py"),
+            ("build_unsigned_candidate.sh", [], "verify_version_contract.py"),
+        ):
             with self.subTest(script=script):
                 root = self.fixture()
-                result, events = self.run_script("failure-" + script, root, script, fail_script=failure)
+                result, events = self.run_script("failure-" + script, root, script, arguments, fail_script=failure)
                 self.assertEqual(result.returncode, 37, result.stderr)
                 self.assertFalse(any(event["kind"] == "tauri" for event in events))
                 self.assert_strict_shell(events)

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import MappingProxyType
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -48,7 +49,6 @@ from scripts.dormant_app_install import (
     _parse_system_extension_identities,
     _require_fixed_command,
     _run_bounded_process,
-    production_command_runner,
     parse_service_maintenance_receipt,
     require_cfm_dormant,
     require_single_interactive_local_user,
@@ -58,14 +58,7 @@ from scripts.dormant_app_install import (
     exclusive_release_maintenance_lock,
 )
 from scripts.dormant_app_install import (
-    INSTALLED_40019_PREDECESSOR,
-    INSTALLED_40041_PREDECESSOR,
-    INSTALLED_40043_PREDECESSOR,
-    INSTALLED_40044_PREDECESSOR,
-    INSTALLED_40045_PREDECESSOR,
-    INSTALLED_40046_PREDECESSOR,
-    INSTALLED_40047_PREDECESSOR,
-    INSTALLED_40048_PREDECESSOR,
+    INSTALLED_50025_PREDECESSOR,
     SUPPORTED_PREDECESSORS,
     bind_journal_predecessor,
     require_target_application_present,
@@ -73,14 +66,11 @@ from scripts.dormant_app_install import (
 )
 
 
-# The predecessor fixture carries the real frozen 40019 tree identity: the
-# install admits a predecessor only against its exact recorded tree digest,
-# so an invented digest would be rejected as a tampered bundle, not admitted.
-OLD = AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256)
+# The predecessor fixture is the installed 50025 with its real frozen tree
+# identity: the install admits a predecessor only against its exact recorded
+# tree digest, so an invented digest would be rejected as a tampered bundle.
+OLD = AppIdentity("0.5.0", "50025", INSTALLED_50025_PREDECESSOR.tree_sha256)
 NEW = AppIdentity("0.5.0", "50028", "b" * 64)
-# The installed 50025 with its real frozen tree identity: the production
-# predecessor of this build.
-INSTALLED = AppIdentity("0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -391,13 +381,12 @@ class DormantInstallTransactionTests(unittest.TestCase):
     def test_install_admits_only_a_supported_newer_installed_application(self) -> None:
         cases = (
             (AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
-            (AppIdentity("0.4.0", "40019", "f" * 64), "predecessor_identity_mismatch"),
-            (AppIdentity("0.4.0", "40043", "f" * 64), "predecessor_identity_mismatch"),
-            (AppIdentity("0.4.0", "40044", "f" * 64), "predecessor_identity_mismatch"),
-            (AppIdentity("0.4.0", "40045", "f" * 64), "predecessor_identity_mismatch"),
+            # Earlier installs are no longer predecessors of any GA install.
+            (AppIdentity("0.4.0", "40073", "a" * 64), "predecessor_unsupported"),
+            (AppIdentity("0.5.0", "50025", "f" * 64), "predecessor_identity_mismatch"),
             # The GA build itself is never a predecessor.
             (NEW, "predecessor_unsupported"),
-            (AppIdentity("0.3.5", "40019", OLD.tree_sha256), "install_identity_mismatch"),
+            (AppIdentity("0.4.0", "50025", OLD.tree_sha256), "install_identity_mismatch"),
         )
         for installed, code in cases:
             with self.subTest(code=code):
@@ -417,25 +406,19 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(self.fixture.copy_count, 0)
         self.assertEqual(self.fixture.swap_count, 0)
 
-    def test_install_records_each_exact_current_vocabulary_predecessor(self) -> None:
-        for previous in (
-            AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-            AppIdentity("0.4.0", "40043", INSTALLED_40043_PREDECESSOR.tree_sha256),
-            INSTALLED,
-        ):
-            with self.subTest(previous=previous.build_number):
-                fixture = DormantInstallFixture()
-                self.addCleanup(fixture.cleanup)
-                fixture._write_identity(fixture.target, previous)
-                result = fixture.transaction().install()
+    def test_install_records_the_exact_supported_predecessor(self) -> None:
+        fixture = DormantInstallFixture()
+        self.addCleanup(fixture.cleanup)
+        fixture._write_identity(fixture.target, OLD)
+        result = fixture.transaction().install()
 
-                self.assertEqual(result["phase"], "installed")
-                self.assertEqual(fixture.read_identity(fixture.target), NEW)
-                self.assertEqual(fixture.read_identity(fixture.staging_payload()), previous)
-                self.assertEqual(fixture.swap_count, 1)
-                journal = fixture.journal()
-                self.assertEqual(journal["previous"], previous.document())
-                validate_journal(journal, GA_INSTALL_PROFILE)
+        self.assertEqual(result["phase"], "installed")
+        self.assertEqual(fixture.read_identity(fixture.target), NEW)
+        self.assertEqual(fixture.read_identity(fixture.staging_payload()), OLD)
+        self.assertEqual(fixture.swap_count, 1)
+        journal = fixture.journal()
+        self.assertEqual(journal["previous"], OLD.document())
+        validate_journal(journal, GA_INSTALL_PROFILE)
 
     def test_registered_or_running_cfm_blocks_before_any_journal_or_copy(self) -> None:
         def blocked(_guard) -> None:
@@ -1031,15 +1014,14 @@ class DormantInstallValidationTests(unittest.TestCase):
             self.assertTrue(lock_path.is_file())
 
     def test_service_maintenance_receipt_engine_status_contract(self) -> None:
+        def encoded(value: object) -> str:
+            return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
         actions = (
             "status",
             "prove-off",
-            "prove-installed-40019-off",
             "unregister-proxy-agent",
-            "unregister-installed-40019-proxy-agent",
             "unregister-global-authority",
-            "unregister-installed-40019-global-authority",
-            install.INSTALLED_40019_RECOVERY_ACTION,
             "register-global-authority",
             "register-proxy-agent",
         )
@@ -1052,29 +1034,14 @@ class DormantInstallValidationTests(unittest.TestCase):
                 "engine_status": expected_engine_status,
                 "global_authority": "not_registered",
                 "off_proof_profile": (
-                    None
-                    if registration_only
-                    else (
-                        install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-                        if action == install.INSTALLED_40019_RECOVERY_ACTION
-                        else (
-                            install.INSTALLED_40019_OFF_PROOF_PROFILE
-                            if "installed-40019" in action
-                            else install.CURRENT_OFF_PROOF_PROFILE
-                        )
-                    )
+                    None if registration_only else install.CURRENT_OFF_PROOF_PROFILE
                 ),
                 "proxy_agent": "not_registered",
             }
-            stdout = json.dumps(
-                receipt,
-                sort_keys=True,
-                separators=(",", ":"),
-            ) + "\n"
             with self.subTest(action=action):
                 self.assertEqual(
                     parse_service_maintenance_receipt(
-                        CommandResult(0, stdout, ""),
+                        CommandResult(0, encoded(receipt), ""),
                         action,
                     ),
                     receipt,
@@ -1086,14 +1053,9 @@ class DormantInstallValidationTests(unittest.TestCase):
                         "off" if expected_engine_status is None else None
                     ),
                 }
-                invalid_stdout = json.dumps(
-                    invalid_receipt,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ) + "\n"
                 with self.assertRaises(InstallError) as captured:
                     parse_service_maintenance_receipt(
-                        CommandResult(0, invalid_stdout, ""),
+                        CommandResult(0, encoded(invalid_receipt), ""),
                         action,
                     )
                 self.assertEqual(
@@ -1102,120 +1064,50 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
 
                 if action != "status":
-                    wrong_profile = {
-                        **receipt,
-                        "off_proof_profile": (
-                            install.CURRENT_OFF_PROOF_PROFILE
-                            if receipt["off_proof_profile"]
-                            == install.INSTALLED_40019_OFF_PROOF_PROFILE
-                            else install.INSTALLED_40019_OFF_PROOF_PROFILE
-                        ),
-                    }
-                    with self.assertRaises(InstallError) as profile_error:
-                        parse_service_maintenance_receipt(
-                            CommandResult(
-                                0,
-                                json.dumps(
-                                    wrong_profile,
-                                    sort_keys=True,
-                                    separators=(",", ":"),
-                                )
-                                + "\n",
-                                "",
-                            ),
-                            action,
+                    for wrong in (
+                        install.CURRENT_OFF_PROOF_PROFILE
+                        if registration_only
+                        else "installed_40019_engine_v5_authority_v1_0",
+                        [receipt["off_proof_profile"]],
+                    ):
+                        wrong_profile = {**receipt, "off_proof_profile": wrong}
+                        with self.assertRaises(InstallError) as profile_error:
+                            parse_service_maintenance_receipt(
+                                CommandResult(0, encoded(wrong_profile), ""),
+                                action,
+                            )
+                        self.assertEqual(
+                            profile_error.exception.code,
+                            "cfm_service_status_invalid",
                         )
-                    self.assertEqual(
-                        profile_error.exception.code,
-                        "cfm_service_status_invalid",
-                    )
 
-        recovery_receipt = {
-            "action": "recover_installed_40019_global_authority",
-            "document": "cfw-current-service-maintenance-v2",
-            "engine_status": "off",
-            "global_authority": "not_registered",
-            "off_proof_profile": (
-                install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-            ),
-            "proxy_agent": "not_registered",
-        }
-        recovery_stdout = json.dumps(
-            recovery_receipt,
-            sort_keys=True,
-            separators=(",", ":"),
-        ) + "\n"
-        self.assertEqual(
-            parse_service_maintenance_receipt(
-                CommandResult(0, recovery_stdout, ""),
-                install.INSTALLED_40019_RECOVERY_ACTION,
-            ),
-            recovery_receipt,
-        )
-        wrong_profile_for_proxy = {
-            **recovery_receipt,
-            "action": "unregister_installed_40019_proxy_agent",
-            "global_authority": "enabled",
-        }
-        wrong_profile_stdout = json.dumps(
-            wrong_profile_for_proxy,
-            sort_keys=True,
-            separators=(",", ":"),
-        ) + "\n"
-        with self.assertRaises(InstallError) as wrong_action:
-            parse_service_maintenance_receipt(
-                CommandResult(0, wrong_profile_stdout, ""),
-                "unregister-installed-40019-proxy-agent",
+        # The retired installed-40019 compatibility actions are outside the
+        # fixed receipt contract, whatever receipt the Host returns.
+        for retired in (
+            "prove-installed-40019-off",
+            "unregister-installed-40019-proxy-agent",
+            "unregister-installed-40019-global-authority",
+            "recover-installed-40019-global-authority",
+        ):
+            retired_receipt = {
+                "action": retired.replace("-", "_"),
+                "document": "cfw-current-service-maintenance-v2",
+                "engine_status": "off",
+                "global_authority": "not_registered",
+                "off_proof_profile": install.CURRENT_OFF_PROOF_PROFILE,
+                "proxy_agent": "not_registered",
+            }
+            with self.subTest(retired=retired), self.assertRaisesRegex(
+                InstallError, "outside the fixed receipt contract"
+            ) as retired_error:
+                parse_service_maintenance_receipt(
+                    CommandResult(0, encoded(retired_receipt), ""),
+                    retired,
+                )
+            self.assertEqual(
+                retired_error.exception.code,
+                "cfm_service_status_invalid",
             )
-        self.assertEqual(wrong_action.exception.code, "cfm_service_status_invalid")
-
-        malformed_profile = {
-            **recovery_receipt,
-            "off_proof_profile": [
-                install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-            ],
-        }
-        with self.assertRaises(InstallError) as malformed_error:
-            parse_service_maintenance_receipt(
-                CommandResult(
-                    0,
-                    json.dumps(
-                        malformed_profile,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    + "\n",
-                    "",
-                ),
-                install.INSTALLED_40019_RECOVERY_ACTION,
-            )
-        self.assertEqual(
-            malformed_error.exception.code,
-            "cfm_service_status_invalid",
-        )
-
-        legacy_mislabel = {
-            **recovery_receipt,
-            "action": "unregister_installed_40019_global_authority",
-        }
-        with self.assertRaises(InstallError) as legacy_error:
-            parse_service_maintenance_receipt(
-                CommandResult(
-                    0,
-                    json.dumps(
-                        legacy_mislabel,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    + "\n",
-                    "",
-                ),
-                "unregister-installed-40019-global-authority",
-            )
-        self.assertEqual(
-            legacy_error.exception.code,
-            "cfm_service_status_invalid",
-        )
 
     def test_candidate_admission_rejects_toolchain_environment_override(self) -> None:
         with patch.dict(
@@ -1281,7 +1173,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         with self.assertRaises(InstallError) as captured:
             validate_journal(document, GA_INSTALL_PROFILE)
         # A retired build was never a supported predecessor, so the journal
-        # cannot even be read with a vocabulary; that is the precise reason.
+        # cannot be read at all; that is the precise reason.
         self.assertEqual(captured.exception.code, "predecessor_unsupported")
 
         # The recorded build number alone is not trusted either.
@@ -1292,14 +1184,20 @@ class DormantInstallValidationTests(unittest.TestCase):
 
     def test_journal_candidate_must_match_the_profile_product_version(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-        retained = install.INSTALLED_40073_PREDECESSOR
+        # Synthetic older-version lineage entries stand in for any retained
+        # journal written under another product version.
+        recorded_previous = install.PredecessorProfile("0.4.0", "40998", "1" * 64)
+        retained = install.PredecessorProfile("0.4.0", "40999", "2" * 64)
+        registry = MappingProxyType(
+            {**SUPPORTED_PREDECESSORS, recorded_previous.build_number: recorded_previous}
+        )
         historical = replace(
-            GA_INSTALL_PROFILE, product_version="0.4.0", build_number="40073")
+            GA_INSTALL_PROFILE, product_version="0.4.0", build_number="40999")
         document = {
             "candidate": {
                 **CANDIDATE.document(),
                 "version": "0.4.0",
-                "build_number": "40073",
+                "build_number": "40999",
                 "tree_sha256": retained.tree_sha256,
             },
             "document": install.DOCUMENT,
@@ -1311,22 +1209,23 @@ class DormantInstallValidationTests(unittest.TestCase):
             ],
             "phase": "prepared",
             "previous": AppIdentity(
-                "0.4.0", "40072", install.INSTALLED_40072_PREDECESSOR.tree_sha256
+                "0.4.0", "40998", recorded_previous.tree_sha256
             ).document(),
             "schema_version": install.SCHEMA_VERSION,
             "sequence": 1,
             "staging_name": f"{STAGING_PREFIX}{transaction_id}",
             "transaction_id": transaction_id,
         }
-        # A retained 0.4.0 journal is readable only with the profile bound to
-        # its own product version; the active GA profile does not read it.
-        validate_journal(document, historical)
-        self.assertEqual(GA_INSTALL_PROFILE.product_version, install.VERSION)
-        for profile in (GA_INSTALL_PROFILE, replace(historical, product_version="0.5.0")):
-            with self.subTest(profile=(profile.product_version, profile.build_number)):
-                with self.assertRaises(InstallError) as captured:
-                    validate_journal(document, profile)
-                self.assertEqual(captured.exception.code, "journal_invalid")
+        with patch.object(install, "SUPPORTED_PREDECESSORS", registry):
+            # A retained 0.4.0 journal is readable only with the profile bound
+            # to its own product version; the active GA profile does not read it.
+            validate_journal(document, historical)
+            self.assertEqual(GA_INSTALL_PROFILE.product_version, install.VERSION)
+            for profile in (GA_INSTALL_PROFILE, replace(historical, product_version="0.5.0")):
+                with self.subTest(profile=(profile.product_version, profile.build_number)):
+                    with self.assertRaises(InstallError) as captured:
+                        validate_journal(document, profile)
+                    self.assertEqual(captured.exception.code, "journal_invalid")
 
     def test_pre_environment_install_schema_is_rejected(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1367,7 +1266,7 @@ class DormantInstallValidationTests(unittest.TestCase):
             validate_journal(current, GA_INSTALL_PROFILE)
         self.assertEqual(captured.exception.code, "journal_invalid")
 
-    def test_retired_final_cli_and_wrapper_are_explicitly_rejected(self) -> None:
+    def test_unknown_cli_option_is_rejected_before_any_transaction(self) -> None:
         with (
             patch.object(
                 sys,
@@ -1380,24 +1279,8 @@ class DormantInstallValidationTests(unittest.TestCase):
         ):
             install.main()
         self.assertEqual(captured.exception.code, 2)
-        self.assertIn("--final is retired", stderr.getvalue())
+        self.assertIn("unrecognized arguments: --final", stderr.getvalue())
         transaction.assert_not_called()
-
-        repository = Path(__file__).resolve().parents[2]
-        completed = subprocess.run(
-            (
-                "/bin/bash",
-                str(repository / "scripts/run_dormant_app_install.sh"),
-                "--preflight",
-                "--final",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(completed.returncode, 2)
-        self.assertEqual(completed.stdout, "")
-        self.assertIn("--final is retired", completed.stderr)
 
     def test_terminal_install_pending_is_a_precise_guard_closure(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1781,188 +1664,6 @@ class DormantInstallValidationTests(unittest.TestCase):
 class InstallPredecessorTests(unittest.TestCase):
     """The install predecessor is observed, not pre-declared, and fails closed."""
 
-    def test_installed_40043_requires_its_exact_tree_and_a_newer_candidate(self) -> None:
-        historical = AppIdentity("0.4.0", "40043", INSTALLED_40043_PREDECESSOR.tree_sha256)
-        self.assertEqual(
-            INSTALLED_40043_PREDECESSOR.tree_sha256,
-            "429d40db9095775a9498a9445799025536c88ff4e900dde14f7a018d8723edf5",
-        )
-        predecessor = resolve_predecessor(historical, "50028")
-        self.assertEqual(predecessor, INSTALLED_40043_PREDECESSOR)
-        self.assertEqual(predecessor.prove_off_action, "prove-off")
-        self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
-        self.assertIsNone(predecessor.authority_recovery)
-        self.assertEqual(bind_journal_predecessor(historical), predecessor)
-        for resolve in (
-            lambda observed: resolve_predecessor(observed, "50028"),
-            bind_journal_predecessor,
-        ):
-            with self.assertRaises(InstallError) as rejected:
-                resolve(AppIdentity("0.4.0", "40043", INSTALLED_40041_PREDECESSOR.tree_sha256))
-            self.assertEqual(rejected.exception.code, "predecessor_identity_mismatch")
-        for candidate in ("40043", "40041"):
-            with self.subTest(candidate=candidate), self.assertRaises(InstallError) as rejected:
-                resolve_predecessor(historical, candidate)
-            self.assertEqual(rejected.exception.code, "candidate_not_newer")
-
-    def test_installed_40044_requires_its_exact_tree_and_a_newer_candidate(self) -> None:
-        historical = AppIdentity("0.4.0", "40044", INSTALLED_40044_PREDECESSOR.tree_sha256)
-        self.assertEqual(
-            INSTALLED_40044_PREDECESSOR.tree_sha256,
-            "41ae01c3903f8ab644d74c5ff185a282a5978e4b0a8376198518046408745248",
-        )
-        predecessor = resolve_predecessor(historical, "50028")
-        self.assertEqual(predecessor, INSTALLED_40044_PREDECESSOR)
-        self.assertEqual(predecessor.prove_off_action, "prove-off")
-        self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
-        self.assertIsNone(predecessor.authority_recovery)
-        self.assertEqual(bind_journal_predecessor(historical), predecessor)
-        for resolve in (
-            lambda observed: resolve_predecessor(observed, "50028"),
-            bind_journal_predecessor,
-        ):
-            with self.assertRaises(InstallError) as rejected:
-                resolve(AppIdentity("0.4.0", "40044", INSTALLED_40043_PREDECESSOR.tree_sha256))
-            self.assertEqual(rejected.exception.code, "predecessor_identity_mismatch")
-        for candidate in ("40044", "40043", "40041"):
-            with self.subTest(candidate=candidate), self.assertRaises(InstallError) as rejected:
-                resolve_predecessor(historical, candidate)
-            self.assertEqual(rejected.exception.code, "candidate_not_newer")
-
-    def test_recent_installs_require_their_exact_tree_and_a_newer_candidate(self) -> None:
-        cases = (
-            (INSTALLED_40045_PREDECESSOR, "c5bf15b493b90b846705d93456c7695c3522f72d465a6dab47f70a6bdbcc4baf"),
-            (INSTALLED_40046_PREDECESSOR, "49f6b28e70b5e3bde5d86179f0c47a8e2e2ce29bca69c04b7d160d852f448e22"),
-        )
-        for expected, digest in cases:
-            with self.subTest(build=expected.build_number):
-                observed = AppIdentity("0.4.0", expected.build_number, digest)
-                predecessor = resolve_predecessor(observed, "50028")
-                self.assertEqual(predecessor, expected)
-                self.assertEqual(predecessor.tree_sha256, digest)
-                self.assertEqual(predecessor.prove_off_action, "prove-off")
-                self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
-                self.assertIsNone(predecessor.authority_recovery)
-                self.assertEqual(bind_journal_predecessor(observed), predecessor)
-                for resolve in (
-                    lambda value: resolve_predecessor(value, "50028"),
-                    bind_journal_predecessor,
-                ):
-                    with self.assertRaises(InstallError) as rejected:
-                        resolve(AppIdentity("0.4.0", expected.build_number, INSTALLED_40044_PREDECESSOR.tree_sha256))
-                    self.assertEqual(rejected.exception.code, "predecessor_identity_mismatch")
-                for candidate in (expected.build_number, "40044", "40043", "40041"):
-                    with self.subTest(candidate=candidate), self.assertRaises(InstallError) as rejected:
-                        resolve_predecessor(observed, candidate)
-                    self.assertEqual(rejected.exception.code, "candidate_not_newer")
-
-    def test_current_schema_predecessor_selects_the_current_vocabulary(self) -> None:
-        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40073 install
-        # needs none of the 40019 compatibility actions.
-        predecessor = resolve_predecessor(
-            AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-            "50028",
-        )
-        self.assertEqual(predecessor, INSTALLED_40041_PREDECESSOR)
-        self.assertEqual(predecessor.off_proof_profile, "current_engine_v6_authority_v1_1")
-        self.assertEqual(predecessor.unregister_proxy_action, "unregister-proxy-agent")
-        self.assertEqual(
-            predecessor.unregister_authority_action, "unregister-global-authority"
-        )
-        self.assertFalse(predecessor.supports_authority_recovery_intent)
-
-    def test_legacy_predecessor_still_selects_the_compatibility_vocabulary(self) -> None:
-        predecessor = resolve_predecessor(
-            AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
-            "50028",
-        )
-        self.assertEqual(predecessor, INSTALLED_40019_PREDECESSOR)
-        self.assertEqual(
-            predecessor.off_proof_profile, "installed_40019_engine_v5_authority_v1_0"
-        )
-        self.assertEqual(
-            predecessor.unregister_authority_action,
-            "unregister-installed-40019-global-authority",
-        )
-        self.assertTrue(predecessor.supports_authority_recovery_intent)
-
-    def test_unrecognised_predecessor_is_rejected_rather_than_guessed(self) -> None:
-        # No admissible wire protocol exists for an unknown installed build.
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_unsupported")
-
-    def test_predecessor_build_number_alone_is_not_trusted(self) -> None:
-        # CFBundleVersion is an unauthenticated bundle string; the exact frozen
-        # tree identity must agree with it.
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-
-    def test_downgrade_and_reinstall_are_rejected(self) -> None:
-        observed = AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256)
-        for candidate in ("40041", "40019"):
-            with self.assertRaises(InstallError) as raised:
-                resolve_predecessor(observed, candidate)
-            self.assertEqual(raised.exception.code, "candidate_not_newer")
-
-    def test_installed_40067_requires_its_retained_exact_signed_tree(self) -> None:
-        identity = AppIdentity("0.4.0", "40067", "c9788097d4c64c5801b6f2d6af1a70451c1441e17a47baf0b036c82d2306b38e")
-        self.assertEqual(resolve_predecessor(identity, "50028"), install.INSTALLED_40067_PREDECESSOR)
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40067", "f" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-
-    def test_installed_40068_requires_its_retained_exact_signed_tree(self) -> None:
-        identity = AppIdentity(
-            "0.4.0", "40068",
-            "422197244ef7f336b529f03d51d012a52b25d555178014c70dd519c8ee3e216c",
-        )
-        self.assertEqual(resolve_predecessor(identity, "50028"), install.INSTALLED_40068_PREDECESSOR)
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40068", "f" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-
-    def test_installed_40069_requires_its_retained_exact_signed_tree(self) -> None:
-        identity = AppIdentity(
-            "0.4.0", "40069",
-            "edca78995aacfbb35247e76e7f6aefa451c974e1b4cce4376cf0e1adfb7a91d5",
-        )
-        self.assertEqual(resolve_predecessor(identity, "50028"), install.INSTALLED_40069_PREDECESSOR)
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40069", "f" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-
-    def test_installed_40070_requires_its_retained_exact_signed_tree(self) -> None:
-        identity = AppIdentity(
-            "0.4.0", "40070",
-            "9adab1e77ce478799253e7fa5fc9e0314e2ee2b9b5a8ec8830782fcbb1b9e03f",
-        )
-        self.assertEqual(resolve_predecessor(identity, "50028"), install.INSTALLED_40070_PREDECESSOR)
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40070", "f" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-
-    def test_installed_40071_requires_its_retained_exact_signed_tree(self) -> None:
-        identity = AppIdentity(
-            "0.4.0", "40071",
-            "78dce25dc8db98498f5637c47ad37e297451a81fe2f53f841c225d5486fd4754",
-        )
-        self.assertEqual(resolve_predecessor(identity, "50028"), install.INSTALLED_40071_PREDECESSOR)
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40071", "f" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-
-    def test_installed_40072_requires_its_retained_exact_signed_tree(self) -> None:
-        identity = AppIdentity(
-            "0.4.0", "40072",
-            "5951216697f671fc241605cb97b895e5ad8a668ca6601c92ab2efdaa5173beb1",
-        )
-        self.assertEqual(resolve_predecessor(identity, "50028"), install.INSTALLED_40072_PREDECESSOR)
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40072", "f" * 64), "50028")
-        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-
     def test_installed_50025_requires_its_retained_exact_signed_tree(self) -> None:
         # The installed and retained notarized 0.5.0 preview: the production
         # observation of the 50028 GA install, rehashed from the installed bundle.
@@ -1971,11 +1672,8 @@ class InstallPredecessorTests(unittest.TestCase):
             "d5a8a7f951fa3530ed0fa1982cc01ac7b9d6ec1b7f4579ec59883f99303302b9",
         )
         predecessor = resolve_predecessor(identity, "50028")
-        self.assertEqual(predecessor, install.INSTALLED_50025_PREDECESSOR)
+        self.assertEqual(predecessor, INSTALLED_50025_PREDECESSOR)
         self.assertEqual(predecessor.product_version, "0.5.0")
-        self.assertEqual(predecessor.prove_off_action, "prove-off")
-        self.assertEqual(predecessor.off_proof_profile, install.CURRENT_OFF_PROOF_PROFILE)
-        self.assertIsNone(predecessor.authority_recovery)
         self.assertEqual(bind_journal_predecessor(identity), predecessor)
         for resolve in (
             lambda observed: resolve_predecessor(observed, "50028"),
@@ -1989,38 +1687,48 @@ class InstallPredecessorTests(unittest.TestCase):
                 resolve_predecessor(identity, candidate)
             self.assertEqual(raised.exception.code, "candidate_not_newer")
 
+    def test_earlier_installs_are_no_longer_predecessors(self) -> None:
+        # Neither admission nor a recorded journal accepts the retired 0.4.0
+        # lineage; the next release reads only the 50025 -> 50028 journals.
+        for build in ("40019", "40041", "40072", "40073"):
+            for resolve in (
+                lambda observed: resolve_predecessor(observed, "50028"),
+                bind_journal_predecessor,
+            ):
+                with self.subTest(build=build), self.assertRaises(InstallError) as raised:
+                    resolve(AppIdentity("0.4.0", build, "a" * 64))
+                self.assertEqual(raised.exception.code, "predecessor_unsupported")
+
+    def test_unrecognised_predecessor_is_rejected_rather_than_guessed(self) -> None:
+        with self.assertRaises(InstallError) as raised:
+            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "50028")
+        self.assertEqual(raised.exception.code, "predecessor_unsupported")
+
+    def test_predecessor_build_number_alone_is_not_trusted(self) -> None:
+        # CFBundleVersion is an unauthenticated bundle string; the exact frozen
+        # tree identity must agree with it.
+        with self.assertRaises(InstallError) as raised:
+            resolve_predecessor(AppIdentity("0.5.0", "50025", "f" * 64), "50028")
+        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
+
+    def test_downgrade_and_reinstall_are_rejected(self) -> None:
+        for candidate in ("50025", "50024"):
+            with self.subTest(candidate=candidate), self.assertRaises(InstallError) as raised:
+                resolve_predecessor(OLD, candidate)
+            self.assertEqual(raised.exception.code, "candidate_not_newer")
+
     def test_lineage_entries_bind_their_exact_product_version(self) -> None:
         # A build number names one lineage entry; the recorded product version
         # must agree with it, whichever direction the mismatch takes.
-        for version, build, tree in (
-            ("0.5.0", "40072", install.INSTALLED_40072_PREDECESSOR.tree_sha256),
-            ("0.4.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256),
-            ("0.5.1", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256),
-        ):
-            observed = AppIdentity(version, build, tree)
+        for version in ("0.4.0", "0.5.1", "0.3.5"):
+            observed = AppIdentity(version, "50025", INSTALLED_50025_PREDECESSOR.tree_sha256)
             for resolve in (
                 lambda value: resolve_predecessor(value, "50028"),
                 bind_journal_predecessor,
             ):
-                with self.subTest(version=version, build=build), self.assertRaises(InstallError) as raised:
+                with self.subTest(version=version), self.assertRaises(InstallError) as raised:
                     resolve(observed)
                 self.assertEqual(raised.exception.code, "install_identity_mismatch")
-        self.assertEqual(
-            {entry.product_version for entry in SUPPORTED_PREDECESSORS.values()},
-            {"0.4.0", "0.5.0"},
-        )
-        self.assertEqual(
-            [entry.build_number for entry in SUPPORTED_PREDECESSORS.values() if entry.product_version == "0.5.0"],
-            ["50025"],
-        )
-
-    def test_foreign_product_version_is_rejected(self) -> None:
-        with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(
-                AppIdentity("0.3.5", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-                "50028",
-            )
-        self.assertEqual(raised.exception.code, "install_identity_mismatch")
 
     def test_absent_application_is_its_own_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2039,176 +1747,40 @@ class InstallPredecessorTests(unittest.TestCase):
                 require_target_application_present(link)
             self.assertEqual(raised.exception.code, "app_identity_invalid")
 
-    def test_an_old_journal_keeps_validating_against_its_own_vocabulary(self) -> None:
-        # The 40019 -> 40041 migration journal is immutable evidence. It is read
-        # with the vocabulary its own recorded predecessor implies.
-        predecessor = bind_journal_predecessor(
-            AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256)
-        )
-        self.assertEqual(
-            predecessor.unregister_proxy_action,
-            "unregister-installed-40019-proxy-agent",
-        )
-
     def test_the_supported_predecessor_table_is_an_exact_frozen_contract(self) -> None:
         self.assertEqual(
             dict(SUPPORTED_PREDECESSORS),
-            {
-                "40019": INSTALLED_40019_PREDECESSOR,
-                "40041": INSTALLED_40041_PREDECESSOR,
-                "40043": INSTALLED_40043_PREDECESSOR,
-                "40044": INSTALLED_40044_PREDECESSOR,
-                "40045": INSTALLED_40045_PREDECESSOR,
-                "40046": INSTALLED_40046_PREDECESSOR,
-                "40047": INSTALLED_40047_PREDECESSOR,
-                "40048": INSTALLED_40048_PREDECESSOR,
-                "40067": install.INSTALLED_40067_PREDECESSOR,
-                "40068": install.INSTALLED_40068_PREDECESSOR,
-                "40069": install.INSTALLED_40069_PREDECESSOR,
-                "40070": install.INSTALLED_40070_PREDECESSOR,
-                "40071": install.INSTALLED_40071_PREDECESSOR,
-                "40072": install.INSTALLED_40072_PREDECESSOR,
-                "40073": install.INSTALLED_40073_PREDECESSOR,
-                "50025": install.INSTALLED_50025_PREDECESSOR,
-            },
+            {"50025": INSTALLED_50025_PREDECESSOR},
         )
         with self.assertRaises(TypeError):
-            SUPPORTED_PREDECESSORS["50028"] = INSTALLED_40043_PREDECESSOR  # type: ignore[index]
+            SUPPORTED_PREDECESSORS["50028"] = INSTALLED_50025_PREDECESSOR  # type: ignore[index]
 
-    def test_current_predecessor_event_contract_never_admits_recovery(self) -> None:
-        # A current-schema predecessor speaks the plain vocabulary at every
-        # event and can never be asked to recover a 40019-era Authority.
-        for predecessor in (
-            INSTALLED_40041_PREDECESSOR,
-            INSTALLED_40043_PREDECESSOR,
-            INSTALLED_40044_PREDECESSOR,
-            INSTALLED_40045_PREDECESSOR,
-            INSTALLED_40046_PREDECESSOR,
-            INSTALLED_40047_PREDECESSOR,
-            INSTALLED_40048_PREDECESSOR,
-            install.INSTALLED_40067_PREDECESSOR,
-            install.INSTALLED_40068_PREDECESSOR,
-            install.INSTALLED_40069_PREDECESSOR,
-            install.INSTALLED_40070_PREDECESSOR,
-            install.INSTALLED_40071_PREDECESSOR,
-            install.INSTALLED_40072_PREDECESSOR,
-            install.INSTALLED_40073_PREDECESSOR,
-            install.INSTALLED_50025_PREDECESSOR,
-        ):
-            with self.subTest(previous=predecessor.build_number):
-                bound = install.BoundInstallProfile(GA_INSTALL_PROFILE, predecessor)
+    def test_service_event_contract_is_the_current_vocabulary_at_every_event(self) -> None:
+        for sequence, action in enumerate(install.SERVICE_ACTIONS):
+            with self.subTest(sequence=sequence):
                 self.assertEqual(
-                    bound.service_actions,
+                    install.service_event_contract(sequence),
                     (
-                        "prepare",
-                        "unregister-proxy-agent",
-                        "unregister-global-authority",
-                        "verify-dormant",
-                        "register-global-authority",
-                        "register-proxy-agent",
-                        "prove-off",
-                    ),
-                )
-                self.assertEqual(
-                    bound.service_event_proof_profiles,
-                    (
-                        install.CURRENT_OFF_PROOF_PROFILE,
-                        install.CURRENT_OFF_PROOF_PROFILE,
-                        install.CURRENT_OFF_PROOF_PROFILE,
-                        install.CURRENT_OFF_PROOF_PROFILE,
-                        None,
-                        install.CURRENT_OFF_PROOF_PROFILE,
-                        install.CURRENT_OFF_PROOF_PROFILE,
-                    ),
-                )
-                for sequence in range(len(bound.service_actions)):
-                    actions, profiles = bound.service_event_contract(
-                        sequence, authority_recovery_prepared=False
-                    )
-                    self.assertEqual(actions, frozenset({bound.service_actions[sequence]}))
-                    self.assertEqual(
-                        profiles,
+                        frozenset({action}),
                         frozenset({None if sequence == 4 else install.CURRENT_OFF_PROOF_PROFILE}),
-                    )
-                    with self.assertRaises(InstallError) as raised:
-                        bound.service_event_contract(sequence, authority_recovery_prepared=True)
-                    self.assertEqual(raised.exception.code, "service_journal_invalid")
-
-    def test_legacy_predecessor_event_contract_widens_only_the_authority_step(self) -> None:
-        bound = install.BoundInstallProfile(GA_INSTALL_PROFILE, INSTALLED_40019_PREDECESSOR)
-        authority = bound.service_actions.index(
-            "unregister-installed-40019-global-authority"
-        )
-        actions, profiles = bound.service_event_contract(
-            authority, authority_recovery_prepared=True
-        )
-        self.assertEqual(actions, frozenset({install.INSTALLED_40019_RECOVERY_ACTION}))
-        self.assertEqual(
-            profiles, frozenset({install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE})
-        )
-        actions, profiles = bound.service_event_contract(
-            authority, authority_recovery_prepared=False
-        )
-        self.assertEqual(
-            actions, frozenset({"unregister-installed-40019-global-authority"})
-        )
-        self.assertEqual(profiles, frozenset({install.INSTALLED_40019_OFF_PROOF_PROFILE}))
-        # The step after the Authority unregister only changes its proof
-        # profile; every other step is identical whether or not a recovery
-        # intent exists.
-        for sequence in range(len(bound.service_actions)):
-            if sequence == authority:
-                continue
-            plain = bound.service_event_contract(
-                sequence, authority_recovery_prepared=False
-            )
-            recovering = bound.service_event_contract(
-                sequence, authority_recovery_prepared=True
-            )
-            self.assertEqual(plain[0], recovering[0])
-            if sequence == authority + 1:
-                self.assertEqual(
-                    plain[1], frozenset({install.INSTALLED_40019_OFF_PROOF_PROFILE})
+                    ),
                 )
-                self.assertEqual(
-                    recovering[1],
-                    frozenset({install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE}),
-                )
-            else:
-                self.assertEqual(plain[1], recovering[1])
+        for sequence in (-1, len(install.SERVICE_ACTIONS)):
+            with self.subTest(sequence=sequence), self.assertRaises(InstallError) as raised:
+                install.service_event_contract(sequence)
+            self.assertEqual(raised.exception.code, "service_journal_invalid")
 
-    def test_a_binding_is_reached_only_through_observation_or_the_record(self) -> None:
-        observed = install.BoundInstallProfile.observed(
-            GA_INSTALL_PROFILE,
-            AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
-        )
-        recorded = install.BoundInstallProfile.recorded(
-            GA_INSTALL_PROFILE,
-            AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
-        )
-        self.assertEqual(observed, recorded)
-        self.assertEqual(observed.predecessor, INSTALLED_40019_PREDECESSOR)
-        self.assertEqual(observed.profile.build_number, GA_INSTALL_PROFILE.build_number)
-        # The installed 50025 is the production observation for this build.
-        self.assertEqual(
-            install.BoundInstallProfile.observed(GA_INSTALL_PROFILE, INSTALLED).predecessor,
-            install.INSTALLED_50025_PREDECESSOR,
-        )
+    def test_a_predecessor_is_reached_only_through_observation_or_the_record(self) -> None:
+        self.assertEqual(resolve_predecessor(OLD, GA_INSTALL_PROFILE.build_number), INSTALLED_50025_PREDECESSOR)
+        self.assertEqual(bind_journal_predecessor(OLD), INSTALLED_50025_PREDECESSOR)
         # Observation demands a supported predecessor strictly older than this
         # build; the GA build itself is neither.
         with self.assertRaises(InstallError) as raised:
-            install.BoundInstallProfile.observed(GA_INSTALL_PROFILE, NEW)
+            resolve_predecessor(NEW, GA_INSTALL_PROFILE.build_number)
         self.assertEqual(raised.exception.code, "predecessor_unsupported")
-        # The record carries the same identity proof, so it stays readable as
-        # evidence of any supported predecessor.
-        self.assertEqual(
-            install.BoundInstallProfile.recorded(GA_INSTALL_PROFILE, INSTALLED).predecessor,
-            install.INSTALLED_50025_PREDECESSOR,
-        )
+        # The record carries the same identity proof.
         with self.assertRaises(InstallError) as raised:
-            install.BoundInstallProfile.recorded(
-                GA_INSTALL_PROFILE, AppIdentity("0.4.0", "40041", "f" * 64)
-            )
+            bind_journal_predecessor(AppIdentity("0.5.0", "50025", "f" * 64))
         self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
 
@@ -3418,13 +2990,9 @@ class BoundedCommandRunnerTests(unittest.TestCase):
         for executable in executables:
             for action in (
                 "prove-off",
-                "prove-installed-40019-off",
                 "status",
                 "unregister-proxy-agent",
-                "unregister-installed-40019-proxy-agent",
                 "unregister-global-authority",
-                "unregister-installed-40019-global-authority",
-                install.INSTALLED_40019_RECOVERY_ACTION,
                 "register-global-authority",
                 "register-proxy-agent",
             ):
@@ -3436,6 +3004,11 @@ class BoundedCommandRunnerTests(unittest.TestCase):
             (executable, "--service-maintenance-v2", "unknown"),
             (executable, "--service-maintenance-v2", "status", "extra"),
             ("/tmp/clash-for-mac", "--service-maintenance-v2", "status"),
+            # The retired installed-40019 compatibility actions are not issued.
+            (executable, "--service-maintenance-v2", "prove-installed-40019-off"),
+            (executable, "--service-maintenance-v2", "unregister-installed-40019-proxy-agent"),
+            (executable, "--service-maintenance-v2", "unregister-installed-40019-global-authority"),
+            (executable, "--service-maintenance-v2", "recover-installed-40019-global-authority"),
         ):
             with self.subTest(command=command), self.assertRaises(InstallError):
                 _require_fixed_command(command)

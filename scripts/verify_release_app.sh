@@ -371,13 +371,7 @@ configure_release_verification_context() {
       signing_preflight_manifest="$repo_root/target/candidates/0.5.0/ga/50028/profiles/signing-preflight.json"
       pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/ga/50028/native-products"
       ;;
-    preview-signing-attempt-work|preview-signing-attempt-publish-ready|preview-canonical-native-content)
-      expected_version="0.5.0"
-      expected_build_number="50025"
-      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/preview-preflight/50025/profiles/signing-preflight.json"
-      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/preview-preflight/50025/native-products"
-      ;;
-    unsigned-host|preview-pre-sign)
+    unsigned-host)
       die "release application verification rejects unsigned or pre-sign context"
       ;;
     *)
@@ -385,7 +379,7 @@ configure_release_verification_context() {
       ;;
   esac
   case "$context" in
-    signing-attempt-work|signing-attempt-publish-ready|preview-signing-attempt-work|preview-signing-attempt-publish-ready)
+    signing-attempt-work|signing-attempt-publish-ready)
       [[ "$before_notarization" == "1" ]] ||
         die "private signing-attempt verification is allowed only before notarization"
       ;;
@@ -490,7 +484,7 @@ except ValueError:
 paths = candidate_bundle_verification_paths(
     Path(sys.argv[1]), sys.argv[2], sys.argv[3], context
 )
-if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.PREVIEW_PRE_SIGN}:
+if context is CandidateBundleContext.UNSIGNED_HOST:
     raise SystemExit("error: release application verification rejects unsigned or pre-sign context")
 print(paths.build_identity.build_version)
 PY
@@ -772,7 +766,7 @@ app_version="$(plist_value "$app_path/Contents/Info.plist" CFBundleShortVersionS
 verify_bundle_security "$app_path" host "$expected_app_id"
 verify_bundle_security "$extension_path" packet-tunnel "$expected_extension_id"
 verify_bundle_security "$agent_path" proxy-agent "$expected_agent_id"
-# Every 0.5.0 application, release or preview, carries the SwiftUI library.
+# Every signed 0.5.0 release application carries the SwiftUI library.
 verify_native_ui_security "$app_path/Contents/Frameworks/libCFMNativeDashboard.dylib"
 
 macho_count=0

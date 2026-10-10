@@ -22,7 +22,6 @@ if __package__:
         CandidateBundleContext,
         candidate_bundle_verification_paths,
         ga_frozen_native_products_root,
-        preview_native_products_root,
     )
     from .release_regular_file import (
         ReleaseRegularFileError,
@@ -39,7 +38,6 @@ else:
         CandidateBundleContext,
         candidate_bundle_verification_paths,
         ga_frozen_native_products_root,
-        preview_native_products_root,
     )
     from release_regular_file import (
         ReleaseRegularFileError,
@@ -64,16 +62,10 @@ RETIRED_MARKERS: Final = (
     b"core install",
     b"want_core",
 )
-SIGNED_PREVIEW_CONTEXTS: Final = frozenset({
-    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK,
-    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY,
-    CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT,
-})
 SIGNED_CONTEXTS: Final = frozenset({
     CandidateBundleContext.SIGNING_ATTEMPT_WORK,
     CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
     CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
-    *SIGNED_PREVIEW_CONTEXTS,
 })
 
 
@@ -223,15 +215,9 @@ def verify_legacy_tombstone_provenance(
         (signed_artifact, "signed legacy tombstone root"),
     ):
         _require_owned_directory(artifact_root, label=label)
-    preview = context in SIGNED_PREVIEW_CONTEXTS
-    expected_pre_sign_root = (
-        preview_native_products_root(repository)
-        if preview else ga_frozen_native_products_root(repository)
-    )
-    if unsigned_artifact.parent != expected_pre_sign_root:
+    if unsigned_artifact.parent != ga_frozen_native_products_root(repository):
         raise LegacyTombstoneProvenanceError(
-            "pre-sign native-products root is not the fixed "
-            + ("preview preflight root" if preview else "active GA root")
+            "pre-sign native-products root is not the fixed active GA root"
         )
     try:
         verification_paths = candidate_bundle_verification_paths(

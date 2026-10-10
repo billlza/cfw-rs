@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 
@@ -12,22 +13,36 @@ from scripts import dormant_app_install as install
 from scripts.tests import test_ga_acceptance_journal_export as fixture_module
 
 
+# Synthetic lineage entries: a completed upgrade under another product version
+# and build than the active GA, as every real retention archives.
+ARCHIVED_PREVIOUS = install.PredecessorProfile("0.4.0", "40998", "1" * 64)
+
+
 class InstallHistoryTests(unittest.TestCase):
     def setUp(self) -> None:
+        registry = patch.object(
+            install,
+            "SUPPORTED_PREDECESSORS",
+            MappingProxyType(
+                {**install.SUPPORTED_PREDECESSORS, ARCHIVED_PREVIOUS.build_number: ARCHIVED_PREVIOUS}
+            ),
+        )
+        registry.start()
+        self.addCleanup(registry.stop)
         # Construct a completed historical upgrade, then validate it through
         # today's operator whose active build is newer.
-        profile = replace(install.GA_INSTALL_PROFILE, product_version="0.4.0", build_number="40069")
-        self.expected = replace(fixture_module.CANDIDATE.app, version="0.4.0", build_number="40069")
+        profile = replace(install.GA_INSTALL_PROFILE, product_version="0.4.0", build_number="40999")
+        self.expected = replace(fixture_module.CANDIDATE.app, version="0.4.0", build_number="40999")
         candidate = replace(fixture_module.CANDIDATE, app=self.expected)
         previous = install.AppIdentity(
-            "0.4.0", "40067", install.INSTALLED_40067_PREDECESSOR.tree_sha256)
+            ARCHIVED_PREVIOUS.product_version, ARCHIVED_PREVIOUS.build_number, ARCHIVED_PREVIOUS.tree_sha256)
         with patch.object(install, "GA_INSTALL_PROFILE", profile), patch.object(
             fixture_module, "CANDIDATE", candidate
         ):
             self.fixture = fixture_module.JournalExportFixture(previous=previous)
         self.addCleanup(self.fixture.cleanup)
         self.paths = self.fixture.install_paths
-        self.destination = self.paths.target_parent / archive.HISTORY_NAME / "40069"
+        self.destination = self.paths.target_parent / archive.HISTORY_NAME / "40999"
         self.executor = {"repositoryCommit": "a" * 40, "releaseSourceSha256": "b" * 64}
         # The retained preview that replaced the archived build on this Mac.
         self.installed = install.AppIdentity(
@@ -143,7 +158,7 @@ class InstallHistoryTests(unittest.TestCase):
         self.assertFalse(self.paths.journal.exists())
         for name in (archive.INTENT_NAME, archive.COMPLETE_NAME):
             receipt = json.loads((destination / name).read_bytes())
-            self.assertEqual(receipt["candidate"]["build_number"], "40069")
+            self.assertEqual(receipt["candidate"]["build_number"], "40999")
             self.assertEqual(receipt["superseded_by_installed"], self.installed.document())
         # Repeating the retention requires the same declaration and the same
         # installed application; the archived build itself never satisfies it.
@@ -166,7 +181,7 @@ class InstallHistoryTests(unittest.TestCase):
 
     def test_superseded_retention_requires_a_newer_declared_build(self) -> None:
         older = install.AppIdentity(
-            "0.4.0", "40067", install.INSTALLED_40067_PREDECESSOR.tree_sha256)
+            ARCHIVED_PREVIOUS.product_version, ARCHIVED_PREVIOUS.build_number, ARCHIVED_PREVIOUS.tree_sha256)
         for declared in (older, self.expected):
             with self.subTest(declared=declared.build_number), self.assertRaisesRegex(
                 install.InstallError, "must be newer than the archived build"
@@ -177,28 +192,36 @@ class InstallHistoryTests(unittest.TestCase):
             self.assert_originals_present()
 
     def test_retention_plan_binds_each_lineage_entry_to_its_own_identity(self) -> None:
-        retained = install.INSTALLED_40073_PREDECESSOR
-        expected, installed, profile = archive._retention_plan("40073", None)
-        self.assertEqual(expected, install.AppIdentity("0.4.0", "40073", retained.tree_sha256))
-        self.assertEqual(installed, expected)
-        self.assertEqual((profile.product_version, profile.build_number), ("0.4.0", "40073"))
-        self.assertEqual(
-            replace(profile, product_version=install.VERSION, build_number=install.BUILD_NUMBER),
-            install.GA_INSTALL_PROFILE,
+        # A synthetic older-version entry proves the profile follows the
+        # archived entry's own identity rather than the active GA identity.
+        archived = install.PredecessorProfile("0.4.0", "40999", "1" * 64)
+        registry = MappingProxyType(
+            {**install.SUPPORTED_PREDECESSORS, archived.build_number: archived}
         )
-        expected, installed, _ = archive._retention_plan("40073", "50025")
-        self.assertEqual(expected.build_number, "40073")
-        self.assertEqual(installed, self.installed)
-        for previous, declared, message in (
-            ("50028", None, "not an explicitly supported predecessor"),
-            ("40073", "50028", "declared installed build is not an explicitly supported"),
-            ("40073", "40072", "must be newer than the archived build"),
-            ("40073", "40073", "must be newer than the archived build"),
-        ):
-            with self.subTest(previous=previous, declared=declared), self.assertRaisesRegex(
-                install.InstallError, message
+        retained_preview = install.AppIdentity(
+            "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256)
+        with patch.object(install, "SUPPORTED_PREDECESSORS", registry):
+            expected, installed, profile = archive._retention_plan("40999", None)
+            self.assertEqual(expected, install.AppIdentity("0.4.0", "40999", archived.tree_sha256))
+            self.assertEqual(installed, expected)
+            self.assertEqual((profile.product_version, profile.build_number), ("0.4.0", "40999"))
+            self.assertEqual(
+                replace(profile, product_version=install.VERSION, build_number=install.BUILD_NUMBER),
+                install.GA_INSTALL_PROFILE,
+            )
+            expected, installed, _ = archive._retention_plan("40999", "50025")
+            self.assertEqual(expected.build_number, "40999")
+            self.assertEqual(installed, retained_preview)
+            for previous, declared, message in (
+                ("50028", None, "not an explicitly supported predecessor"),
+                ("40999", "50028", "declared installed build is not an explicitly supported"),
+                ("50025", "40999", "must be newer than the archived build"),
+                ("40999", "40999", "must be newer than the archived build"),
             ):
-                archive._retention_plan(previous, declared)
+                with self.subTest(previous=previous, declared=declared), self.assertRaisesRegex(
+                    install.InstallError, message
+                ):
+                    archive._retention_plan(previous, declared)
 
 
 if __name__ == "__main__":

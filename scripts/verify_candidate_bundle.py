@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a release or explicitly scoped signed-preview bundle without launching it."""
+"""Validate a release or unsigned validation bundle without launching it."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import plistlib
 import re
 import stat
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +22,7 @@ if __package__:
         ACTIVE_RELEASE_IDENTITY,
         CandidateBundleContext,
         PRODUCT_VERSION,
-        SIGNED_PREVIEW_IDENTITY,
+        PREVIEW_PRODUCT_VERSION,
         UNSIGNED_PREVIEW_VALIDATION_BUILD,
         candidate_bundle_verification_paths,
     )
@@ -39,7 +38,7 @@ else:
         ACTIVE_RELEASE_IDENTITY,
         CandidateBundleContext,
         PRODUCT_VERSION,
-        SIGNED_PREVIEW_IDENTITY,
+        PREVIEW_PRODUCT_VERSION,
         UNSIGNED_PREVIEW_VALIDATION_BUILD,
         candidate_bundle_verification_paths,
     )
@@ -50,12 +49,6 @@ else:
 
 
 EXPECTED_VERSION = PRODUCT_VERSION
-PREVIEW_CONTEXTS = frozenset({
-    CandidateBundleContext.PREVIEW_PRE_SIGN,
-    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK,
-    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY,
-    CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT,
-})
 NATIVE_BRIDGE_INSTALL_NAME = "@rpath/CFWNativeBridge.framework/Versions/A/CFWNativeBridge"
 EXPECTED_APP_ID = "com.bill.clashformac"
 EXPECTED_AGENT_ID = "com.bill.clashformac.proxy-agent"
@@ -434,12 +427,8 @@ def verify_native_ui(
         signing = "unsigned-validation"
         build = UNSIGNED_PREVIEW_VALIDATION_BUILD
         ui_context = native_ui_artifact.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
-    elif context in PREVIEW_CONTEXTS:
-        signing = "pre-sign" if context is CandidateBundleContext.PREVIEW_PRE_SIGN else "developer-id"
-        build = SIGNED_PREVIEW_IDENTITY.build_number
-        ui_context = native_ui_artifact.NativeUiContext.SIGNED_PREVIEW
     else:
-        # The 0.5.0 release carries the same SwiftUI library as its previews.
+        # The 0.5.0 release carries the same SwiftUI library as its validation build.
         signing = "pre-sign" if context is CandidateBundleContext.UNSIGNED_HOST else "developer-id"
         build = ACTIVE_RELEASE_IDENTITY.ga_build
         ui_context = native_ui_artifact.NativeUiContext.RELEASE
@@ -478,7 +467,7 @@ def verify_native_ui_host_links(linked_libraries: str, load_commands: str) -> No
     ]
     for required in (NATIVE_BRIDGE_INSTALL_NAME, native_ui_artifact.INSTALL_NAME):
         if dependencies.count(required) != 1:
-            raise CandidateError(f"preview Host must link exactly once to {required}")
+            raise CandidateError(f"Host must link exactly once to {required}")
     for dependency in dependencies:
         if dependency in {NATIVE_BRIDGE_INSTALL_NAME, native_ui_artifact.INSTALL_NAME}:
             continue
@@ -487,14 +476,14 @@ def verify_native_ui_host_links(linked_libraries: str, load_commands: str) -> No
             or any(part in {".", ".."} for part in dependency.split("/"))
             or "//" in dependency
         ):
-            raise CandidateError(f"preview Host has an unexpected runtime dependency: {dependency}")
+            raise CandidateError(f"Host has an unexpected runtime dependency: {dependency}")
     paths = re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.+?) \(offset \d+\)", load_commands)
     if (
         paths.count("@executable_path/../Frameworks") != 1
         or len(paths) != len(set(paths))
         or any(path not in {"@executable_path/../Frameworks", "/usr/lib/swift"} for path in paths)
     ):
-        raise CandidateError("preview Host has missing, duplicate or unexpected runtime search paths")
+        raise CandidateError("Host has missing, duplicate or unexpected runtime search paths")
 
 
 def verify_candidate(
@@ -517,11 +506,10 @@ def verify_candidate(
     native_products = verification_paths.native_products
     build_identity = verification_paths.build_identity
     unsigned_preview = context is CandidateBundleContext.UNSIGNED_PREVIEW_HOST
-    preview = context in PREVIEW_CONTEXTS or unsigned_preview
-    expected_version = SIGNED_PREVIEW_IDENTITY.product_version if preview else EXPECTED_VERSION
-    # Every 0.5.0 application carries the SwiftUI library; only the retired
-    # 40000 unsigned validation lane of the 0.4.0 line does not.
-    native_ui = preview or build_identity.build_version == ACTIVE_RELEASE_IDENTITY.ga_build
+    expected_version = PREVIEW_PRODUCT_VERSION if unsigned_preview else EXPECTED_VERSION
+    # The GA and the 50000 unsigned preview validation build carry the SwiftUI
+    # library; only the 40000 unsigned skeleton does not.
+    native_ui = unsigned_preview or build_identity.build_version == ACTIVE_RELEASE_IDENTITY.ga_build
     native_metadata = current_native_build_metadata(repository)
     if unsigned_preview:
         native_metadata = {**native_metadata, "signingMode": "unsigned-validation"}
@@ -559,7 +547,7 @@ def verify_candidate(
         extension_binary,
     ):
         require_regular_file(file_path)
-    if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.UNSIGNED_PREVIEW_HOST, CandidateBundleContext.PREVIEW_PRE_SIGN}:
+    if context in {CandidateBundleContext.UNSIGNED_HOST, CandidateBundleContext.UNSIGNED_PREVIEW_HOST}:
         verify_unsigned_host_skeleton(app)
 
     system_extensions_root = contents / "Library/SystemExtensions"

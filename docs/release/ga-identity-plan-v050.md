@@ -12,6 +12,9 @@ v0.4.0 ledger is closed. The last signed preview, 50025, stays recorded as
 `SIGNED_PREVIEW_BUILD` only as the retained predecessor of the 50025 → 50026
 migration evidence; `verify_version_contract.py` checks the one release identity
 (its `--preview` selector and the preview build chain were removed on 2026-10-07).
+On 2026-10-10 `SIGNED_PREVIEW_BUILD` and the signed-preview verification
+contexts, which no builder still produced, were removed as well; 50025 remains
+only as the installed-predecessor profile in `scripts/dormant_app_install.py`.
 
 The first GA allocation below, 50026, was consumed on 2026-10-07 when its
 Developer ID signing attempt failed after signing started

@@ -75,10 +75,8 @@ from scripts.notarization_transaction import (
 )
 from scripts.release_build_identity import (
     ACTIVE_RELEASE_IDENTITY,
-    ReleaseWorkspaceError,
     bundle_build_identity,
     ga_root,
-    verify_ga_workspace_path_preconditions,
 )
 from scripts.release_executor_source import (
     ExecutorSource,
@@ -479,10 +477,6 @@ def _verified_prepackage_inputs(
     freeze_verifier: FreezeVerifier | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     repository = _canonical_repository(repository)
-    try:
-        verify_ga_workspace_path_preconditions(repository)
-    except ReleaseWorkspaceError as error:
-        raise PublicationError(str(error)) from error
     if (PRODUCT_VERSION, GA_BUILD) != ("0.5.0", "50028"):
         raise PublicationError("prepackage requires the fixed v0.5.0/50028 identity")
     selected_freeze_verifier = (

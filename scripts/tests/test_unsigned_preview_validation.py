@@ -41,9 +41,25 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                     continue
                 with self.subTest(context=context), self.assertRaises(identity.BuildIdentityError):
                     identity.candidate_bundle_verification_paths(repository, app, native, context)
-            for classifier in (identity.candidate_signing_output, identity.preview_signing_output):
-                with self.assertRaises(identity.BuildIdentityError):
-                    classifier(repository, native)
+            with self.assertRaises(identity.BuildIdentityError):
+                identity.candidate_signing_output(repository, native)
+
+    def test_validation_root_cannot_hold_an_app_verified_as_another_context(self):
+        # A GA-identity bundle placed inside the 50000 validation root would
+        # otherwise satisfy the unsigned-host checks, which constrain only its
+        # native-products root and build.
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            app, _native = self.pair(repository, build="50028")
+            ga_native = identity.ga_pre_sign_native_products_root(repository)
+            ga_native.mkdir(parents=True)
+            with self.assertRaisesRegex(
+                identity.BuildIdentityError,
+                "unsigned preview validation paths cannot be verified through another context",
+            ):
+                identity.candidate_bundle_verification_paths(
+                    repository, app, ga_native, identity.CandidateBundleContext.UNSIGNED_HOST
+                )
 
     def test_new_context_refuses_wrong_or_mixed_component_identity(self):
         for build, version in (("40000", "0.5.0"), ("50028", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
@@ -67,7 +83,6 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                 "40000": repository / "target/candidates/0.5.0/unsigned/native-products",
                 "50028": identity.ga_pre_sign_native_products_root(repository),
                 "50000": identity.unsigned_preview_native_products_root(repository),
-                "50025": identity.preview_native_products_root(repository),
             }
             for build, expected in roots.items():
                 for declared, root in roots.items():
@@ -80,15 +95,15 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
 
     def test_unsigned_and_production_modes_reject_cross_role_builds_before_tool_calls(self):
         for build, signing, context in (
-            ("50000", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
+            ("50000", "pre-sign", ui.NativeUiContext.RELEASE),
             ("50000", "developer-id", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50000", "pre-sign", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
-            ("50013", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
-            ("50014", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
-            ("50015", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
-            ("50017", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
-            ("50018", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
-            ("50028", "pre-sign", ui.NativeUiContext.SIGNED_PREVIEW),
+            ("50013", "pre-sign", ui.NativeUiContext.RELEASE),
+            ("50014", "pre-sign", ui.NativeUiContext.RELEASE),
+            ("50015", "pre-sign", ui.NativeUiContext.RELEASE),
+            ("50017", "pre-sign", ui.NativeUiContext.RELEASE),
+            ("50018", "pre-sign", ui.NativeUiContext.RELEASE),
+            ("50028", "unsigned-validation", ui.NativeUiContext.RELEASE),
             ("50013", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50014", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50015", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
@@ -102,8 +117,8 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                     ui.expected_metadata(Path("/never-read"), build, signing=signing, clean=False, context=context)
                 tool.assert_not_called()
         identity.require_native_product_build_mode("50000", "unsigned-validation")
-        identity.require_native_product_build_mode("50025", "pre-sign")
-        for build, mode in (("50000", "pre-sign"), ("50025", "unsigned-validation")):
+        identity.require_native_product_build_mode("50028", "pre-sign")
+        for build, mode in (("50000", "pre-sign"), ("50028", "developer-id")):
             with self.assertRaises(identity.BuildIdentityError):
                 identity.require_native_product_build_mode(build, mode)
 
@@ -127,7 +142,8 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                              {"CFW_UNSIGNED_VALIDATION_XCODE_VERSION": "27.0", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION": "27A266a"}):
                 with self.subTest(selector=selector), patch.dict(os.environ, selector, clear=True), patch.object(ui, "command") as tool:
                     with self.assertRaisesRegex(ui.NativeUiArtifactError, "refuses unsigned-validation"):
-                        ui.expected_metadata(repository, "50025", signing="pre-sign", clean=False)
+                        ui.expected_metadata(repository, "50028", signing="pre-sign", clean=False,
+                                             context=ui.NativeUiContext.RELEASE)
                     tool.assert_not_called()
 
     def test_unsigned_intermediate_directory_symlink_is_rejected_before_creation(self):

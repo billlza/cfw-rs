@@ -46,38 +46,44 @@ def linked(*dependencies: str) -> str:
 class CandidateFixture:
     """Real file/plist/manifests; only external Mach-O and source tools are mocked."""
 
-    def __init__(self, repository: Path, context: ids.CandidateBundleContext) -> None:
+    def __init__(
+        self, repository: Path, context: ids.CandidateBundleContext, *, ga_pre_sign: bool = False
+    ) -> None:
         self.repository = repository
         repository.mkdir()
         self.context = context
         self.unsigned_preview = context is ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST
-        self.preview = context in bundle.PREVIEW_CONTEXTS or self.unsigned_preview
         self.version = "0.5.0"
-        self.build = "50000" if self.unsigned_preview else "50025" if self.preview else "40000"
-        self.signing = "pre-sign"
+        self.build = "50028"
+        self.signing = "developer-id"
         private = []
         if self.unsigned_preview:
+            self.build = "50000"
             self.signing = "unsigned-validation"
             self.app = ids.unsigned_preview_root(repository) / "cargo/release/bundle/macos" / ids.SIGNED_APP_NAME
             self.native = ids.unsigned_preview_native_products_root(repository)
-        elif context is ids.CandidateBundleContext.PREVIEW_PRE_SIGN:
-            self.app = ids.preview_preflight_root(repository) / "pre-sign" / ids.SIGNED_APP_NAME
-            self.native = ids.preview_native_products_root(repository)
+        elif context is ids.CandidateBundleContext.UNSIGNED_HOST and ga_pre_sign:
+            self.signing = "pre-sign"
+            self.app = ids.ga_preflight_root(repository) / "cargo/release/bundle/macos" / ids.SIGNED_APP_NAME
+            self.native = ids.ga_pre_sign_native_products_root(repository)
         elif context is ids.CandidateBundleContext.UNSIGNED_HOST:
+            self.build = "40000"
+            self.signing = "pre-sign"
             self.app = repository / "unsigned" / ids.SIGNED_APP_NAME
             self.native = repository / "target/candidates/0.5.0/unsigned/native-products"
-        elif context is ids.CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT:
-            self.signing = "developer-id"
-            self.app = ids.preview_root(repository) / "signed" / ids.SIGNED_APP_NAME
-            self.native = ids.preview_signed_native_products_root(repository)
+        elif context is ids.CandidateBundleContext.CANONICAL_NATIVE_CONTENT:
+            self.app = ids.ga_signed_root(repository) / ids.SIGNED_APP_NAME
+            self.native = ids.ga_signed_native_products_root(repository)
             private = [self.native.parent, self.native]
         else:
-            self.signing = "developer-id"
-            output = ids.preview_signing_attempt_output_root(repository, "00000001", context)
+            output = ids.ga_signing_attempt_output_root(repository, "00000001", context)
             self.app = output / ids.SIGNED_APP_WITHIN_OUTPUT
             self.native = output / ids.SIGNED_NATIVE_PRODUCTS_NAME
-            attempts = ids.preview_signing_attempts_root(repository)
+            attempts = ids.ga_signing_attempts_root(repository)
             private = [attempts.parent, attempts, output.parent, output, self.app.parent, self.native]
+        # Every 0.5.0 GA application and the 50000 validation build carry the
+        # SwiftUI library; only the 40000 skeleton does not.
+        self.native_ui = self.build != "40000"
         self.native.mkdir(parents=True)
         self.native_metadata = {
             "libboxManifestSha256": "a" * 64, "libboxTreeSha256": "b" * 64,
@@ -161,7 +167,7 @@ class CandidateFixture:
             write_plist(repository / source / filename, value)
             write_plist(contents / embedded / filename, value)
         write(repository / "apps/cfw-tauri-shell/tauri.conf.json", json.dumps({"version": self.version}).encode())
-        if self.preview:
+        if self.native_ui:
             write(self.native / ui.LIBRARY, b"mach-o:ui", executable=True)
             resources = self.native / ui.RESOURCES
             write_plist(resources / "Contents/Info.plist", {
@@ -171,31 +177,34 @@ class CandidateFixture:
             })
             for locale in ui.LOCALES:
                 write(resources / f"Contents/Resources/{locale}.lproj/Localizable.strings", b'"key" = "value";\n')
+
+            def owner_only_manifest(path: Path, value: dict) -> None:
+                # Native UI manifests come from the shared durable writer,
+                # owner-only, whether pre-sign, promoted or unsigned.
+                write_new_manifest(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
             for name in (ui.LIBRARY, ui.RESOURCES):
-                if self.unsigned_preview:
-                    # native_ui_artifact.build_products writes through the
-                    # shared durable writer, owner-only.
-                    write_new_manifest(
-                        self.native / (name + ".manifest.json"),
-                        json.dumps(build_manifest(self.native / name, self.ui_metadata), indent=2, sort_keys=True)
-                        + "\n",
-                    )
-                else:
-                    # The retained signed preview trees recorded them 0644.
-                    self.manifest(self.native / name, self.ui_metadata)
-            if self.signing == "developer-id":
-                pre_sign = ids.preview_native_products_root(repository)
-                pre_sign.mkdir(parents=True)
-                for name in (ui.LIBRARY, ui.RESOURCES):
-                    source, destination = self.native / name, pre_sign / name
-                    shutil.copytree(source, destination) if source.is_dir() else shutil.copy2(source, destination)
-                    self.manifest(destination, {**self.ui_metadata, "signingMode": "pre-sign"})
-                    promoted = promote_manifest(destination, pre_sign / (name + ".manifest.json"), source)
-                    write(self.native / (name + ".manifest.json"), json.dumps(promoted).encode())
+                manifest = self.native / (name + ".manifest.json")
+                if self.signing != "developer-id":
+                    owner_only_manifest(manifest, build_manifest(self.native / name, self.ui_metadata))
+                    continue
+                # Signed products are promoted from the frozen pre-sign products.
+                pre_sign = ids.ga_frozen_native_products_root(repository)
+                pre_sign.mkdir(parents=True, exist_ok=True)
+                source, destination = self.native / name, pre_sign / name
+                shutil.copytree(source, destination) if source.is_dir() else shutil.copy2(source, destination)
+                owner_only_manifest(
+                    pre_sign / (name + ".manifest.json"),
+                    build_manifest(destination, {**self.ui_metadata, "signingMode": "pre-sign"}),
+                )
+                owner_only_manifest(
+                    manifest,
+                    promote_manifest(destination, pre_sign / (name + ".manifest.json"), source),
+                )
             shutil.copy2(self.native / ui.LIBRARY, contents / "Frameworks" / ui.LIBRARY)
             shutil.copytree(resources, contents / "Resources" / ui.RESOURCES)
         self.host_dependencies = [bundle.NATIVE_BRIDGE_INSTALL_NAME, "/usr/lib/libSystem.B.dylib"]
-        if self.preview:
+        if self.native_ui:
             self.host_dependencies.append(ui.INSTALL_NAME)
         self.ui_dependencies = [ui.INSTALL_NAME, "/usr/lib/libSystem.B.dylib"]
         self.host_rpaths = ["@executable_path/../Frameworks"]
@@ -236,15 +245,44 @@ class PreviewCandidateBundleTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.addCleanup(self.temporary.cleanup)
 
-    def fixture(self, context=ids.CandidateBundleContext.PREVIEW_PRE_SIGN) -> CandidateFixture:
-        return CandidateFixture(self.root / context.value, context)
+    def fixture(
+        self, context=ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST, *, ga_pre_sign: bool = False
+    ) -> CandidateFixture:
+        name = context.value + ("-ga" if ga_pre_sign else "")
+        return CandidateFixture(self.root / name, context, ga_pre_sign=ga_pre_sign)
+
+    def test_ga_contexts_retain_complete_bundle_checks(self) -> None:
+        for context, ga_pre_sign, unsigned_checks in (
+            (ids.CandidateBundleContext.UNSIGNED_HOST, True, 1),
+            (ids.CandidateBundleContext.SIGNING_ATTEMPT_WORK, False, 0),
+            (ids.CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY, False, 0),
+            (ids.CandidateBundleContext.CANONICAL_NATIVE_CONTENT, False, 0),
+        ):
+            with self.subTest(context=context):
+                fixture = self.fixture(context, ga_pre_sign=ga_pre_sign)
+                self.assertEqual(fixture.build, "50028")
+                self.assertEqual(self.verify(fixture), unsigned_checks)
+
+    def test_ga_pre_sign_cannot_skip_unsigned_host_check(self) -> None:
+        fixture = self.fixture(ids.CandidateBundleContext.UNSIGNED_HOST, ga_pre_sign=True)
+        with self.assertRaisesRegex(bundle.CandidateError, "unsigned Host rejected"):
+            self.verify(fixture, unsigned_failure=True)
+
+    def test_signed_ui_must_retain_exact_pre_sign_promotion(self) -> None:
+        fixture = self.fixture(ids.CandidateBundleContext.CANONICAL_NATIVE_CONTENT)
+        manifest = fixture.native / (ui.LIBRARY + ".manifest.json")
+        value = json.loads(manifest.read_bytes())
+        value["metadata"]["preSignManifestSha256"] = "f" * 64
+        manifest.write_bytes(json.dumps(value).encode())
+        with self.assertRaisesRegex(bundle.CandidateError, "exact pre-sign promotion"):
+            self.verify(fixture)
 
     def verify(self, fixture: CandidateFixture, *, context=None, unsigned_failure=False):
         with ExitStack() as stack:
             stack.enter_context(patch.object(bundle, "current_native_build_metadata", return_value=fixture.native_metadata))
             stack.enter_context(patch.object(
                 ui, "expected_metadata",
-                side_effect=lambda _repository, _build, *, signing, clean, context=ui.NativeUiContext.SIGNED_PREVIEW: {
+                side_effect=lambda _repository, _build, *, signing, clean, context: {
                     **fixture.ui_metadata, "signingMode": signing,
                 },
             ))
@@ -257,12 +295,6 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             stack.enter_context(patch("sys.stdout", new=io.StringIO()))
             bundle.verify_candidate(fixture.repository, fixture.app, fixture.native, context=context or fixture.context)
             return unsigned.call_count
-
-    def test_all_preview_contexts_retain_complete_bundle_checks(self) -> None:
-        for context in bundle.PREVIEW_CONTEXTS:
-            with self.subTest(context=context):
-                fixture = self.fixture(context)
-                self.assertEqual(self.verify(fixture), int(context is ids.CandidateBundleContext.PREVIEW_PRE_SIGN))
 
     def test_unsigned_preview_requires_real_component_composition_and_unsigned_host_state(self) -> None:
         fixture = self.fixture(ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
@@ -310,17 +342,13 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             with self.subTest(context=context), self.assertRaises(bundle.CandidateError):
                 self.verify(fixture, context=context)
 
-    def test_preview_pre_sign_cannot_skip_unsigned_host_check(self) -> None:
-        with self.assertRaisesRegex(bundle.CandidateError, "unsigned Host rejected"):
-            self.verify(self.fixture(), unsigned_failure=True)
-
     def test_each_native_component_build_still_must_match(self) -> None:
         for index, relative in enumerate((
             "Contents/Info.plist", "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/Resources/Info.plist",
             "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/Info.plist",
             f"Contents/Library/SystemExtensions/{bundle.EXPECTED_EXTENSION_WRAPPER}/Contents/Info.plist",
         )):
-            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.PREVIEW_PRE_SIGN)
+            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
             path = fixture.app / relative
             value = plistlib.loads(path.read_bytes())
             value["CFBundleVersion"] = "50028"
@@ -344,7 +372,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
 
     def test_missing_embedded_ui_library_or_resources_is_rejected(self) -> None:
         for index, relative in enumerate((f"Frameworks/{ui.LIBRARY}", f"Resources/{ui.RESOURCES}")):
-            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.PREVIEW_PRE_SIGN)
+            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
             path = fixture.contents / relative
             shutil.rmtree(path) if path.is_dir() else path.unlink()
             with self.subTest(relative=relative), self.assertRaises(bundle.CandidateError):
@@ -352,7 +380,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
 
     def test_embedded_ui_bytes_and_resources_must_match_inputs(self) -> None:
         for index, relative in enumerate((f"Frameworks/{ui.LIBRARY}", f"Resources/{ui.RESOURCES}/Contents/Resources/en.lproj/Localizable.strings")):
-            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.PREVIEW_PRE_SIGN)
+            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
             path = fixture.contents / relative
             path.write_bytes(path.read_bytes() + b"changed")
             with self.subTest(relative=relative), self.assertRaisesRegex(bundle.CandidateError, "differs|digest mismatch"):
@@ -360,22 +388,13 @@ class PreviewCandidateBundleTests(unittest.TestCase):
 
     def test_ui_manifest_source_toolchain_and_signing_stage_are_bound(self) -> None:
         for index, key in enumerate(("uiSourceSha256", "releaseSourceSha256", "xcodeVersion", "swiftVersion", "signingMode")):
-            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.PREVIEW_PRE_SIGN)
+            fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
             path = fixture.native / (ui.LIBRARY + ".manifest.json")
             value = json.loads(path.read_bytes())
             value["metadata"][key] = "different"
-            write(path, json.dumps(value).encode())
+            path.write_bytes(json.dumps(value).encode())
             with self.subTest(key=key), self.assertRaisesRegex(bundle.CandidateError, "not bound"):
                 self.verify(fixture)
-
-    def test_signed_ui_must_retain_exact_pre_sign_promotion(self) -> None:
-        fixture = self.fixture(ids.CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT)
-        manifest = fixture.native / (ui.LIBRARY + ".manifest.json")
-        value = json.loads(manifest.read_bytes())
-        value["metadata"]["preSignManifestSha256"] = "f" * 64
-        write(manifest, json.dumps(value).encode())
-        with self.assertRaisesRegex(bundle.CandidateError, "exact pre-sign promotion"):
-            self.verify(fixture)
 
     def test_ui_extra_dependency_and_build_rpath_are_rejected(self) -> None:
         fixture = self.fixture()

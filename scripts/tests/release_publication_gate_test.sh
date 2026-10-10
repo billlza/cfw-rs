@@ -149,30 +149,27 @@ if cfw_require_fixed_publication_app_path "$noncanonical_repository" "$ga_app" 2
   exit 1
 fi
 
-if cfw_run_release_python_script \
+python_status=0
+cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/production_release_evidence.py" seal \
-  >"$fixture_root/python.stdout" 2>"$fixture_root/python.stderr"; then
-  echo "error: Python boundary accepted retired seal command" >&2
+  >"$fixture_root/python.stdout" 2>"$fixture_root/python.stderr" || python_status=$?
+if [[ "$python_status" -ne 2 ]]; then
+  echo "error: Python boundary did not reject an unknown stage command with usage" >&2
   exit 1
 fi
-grep -Fq "seal is retired" "$fixture_root/python.stderr"
+[[ ! -s "$fixture_root/python.stdout" ]]
+grep -Fq "invalid choice" "$fixture_root/python.stderr"
 
-for retired in prepare-physical-candidate-manifest seal validation final; do
-  if /bin/bash -p "$repo_root/scripts/run_production_release_evidence.sh" "$retired" \
-    >"$fixture_root/wrapper.stdout" 2>"$fixture_root/wrapper.stderr"; then
-    echo "error: wrapper accepted retired command: $retired" >&2
+for unknown in --seal-assets --prepare-physical-candidate-manifest --validation --final; do
+  gate_status=0
+  /bin/bash -p "$gate_fixture/scripts/release_publication_gate.sh" "$unknown" \
+    >"$fixture_root/gate.stdout" 2>"$fixture_root/gate.stderr" || gate_status=$?
+  if [[ "$gate_status" -ne 2 ]]; then
+    echo "error: publication gate did not reject unknown command with usage: $unknown" >&2
     exit 1
   fi
-  grep -Fq "$retired is retired" "$fixture_root/wrapper.stderr"
-done
-
-for retired in --seal-assets --prepare-physical-candidate-manifest --validation --final; do
-  if /bin/bash -p "$repo_root/scripts/release_publication_gate.sh" "$retired" \
-    >"$fixture_root/gate.stdout" 2>"$fixture_root/gate.stderr"; then
-    echo "error: publication gate accepted retired command: $retired" >&2
-    exit 1
-  fi
-  grep -Fq "retired publication command" "$fixture_root/gate.stderr"
+  [[ ! -s "$fixture_root/gate.stdout" ]]
+  grep -Fq "error: choose one of --capture-hosted-ci" "$fixture_root/gate.stderr"
 done
 
 grep -Fq -- "--seal-prepackage" "$repo_root/scripts/release_publication_gate.sh"
@@ -194,4 +191,4 @@ if grep -Fq "release-build/" "$repo_root/scripts/release_publication_gate.sh"; t
   exit 1
 fi
 
-echo "single-GA publication path and retired-command fixture passed"
+echo "single-GA publication path and unknown-command fixture passed"

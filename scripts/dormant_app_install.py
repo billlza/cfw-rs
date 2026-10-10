@@ -191,287 +191,54 @@ RETIRED_SERVICE_TRANSACTION_NAMES: Final = (
     ".com.bill.clashformac.service-transaction-v2.pending",
     ".com.bill.clashformac.service-transaction-v2.lock",
 )
-INSTALLED_40019_OFF_PROOF_PROFILE: Final = (
-    "installed_40019_engine_v5_authority_v1_0"
-)
-INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE: Final = (
-    "installed_40019_recovery_current_authority_v1_1"
-)
-INSTALLED_40019_RECOVERY_ACTION: Final = (
-    "recover-installed-40019-global-authority"
-)
-AUTHORITY_RECOVERY_INTENT_DOCUMENT: Final = (
-    "cfw-current-service-authority-recovery-intent-v1"
-)
-AUTHORITY_RECOVERY_INTENT_NAME: Final = "authority-recovery-intent.json"
-AUTHORITY_RECOVERY_PENDING_INTENT_NAME: Final = (
-    ".authority-recovery-intent.json.pending"
-)
-AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION: Final = 1
-AUTHORITY_RECOVERY_OUTSIDE_CONTRACT: Final = (
-    "Authority recovery intent is outside the predecessor's service contract"
-)
 CURRENT_OFF_PROOF_PROFILE: Final = "current_engine_v6_authority_v1_1"
-
-
-@dataclass(frozen=True)
-class AuthorityRecovery:
-    """The Authority recovery capability a predecessor's signed Host implements.
-
-    A capability is always the pair: the recovery action and the distinct
-    off-proof profile its receipt carries. A predecessor has both or neither.
-    """
-
-    action: str
-    off_proof_profile: str
+# The one service vocabulary (engine v6 / Authority v1.1) the transaction
+# speaks through the candidate Host. Every supported predecessor implements it;
+# admission only proves that the observed predecessor is one of them.
+SERVICE_ACTIONS: Final = (
+    "prepare",
+    "unregister-proxy-agent",
+    "unregister-global-authority",
+    "verify-dormant",
+    "register-global-authority",
+    "register-proxy-agent",
+    "prove-off",
+)
+SERVICE_EVENT_PROOF_PROFILES: Final = (
+    CURRENT_OFF_PROOF_PROFILE,
+    CURRENT_OFF_PROOF_PROFILE,
+    CURRENT_OFF_PROOF_PROFILE,
+    CURRENT_OFF_PROOF_PROFILE,
+    None,  # Authority registration is not an engine Off proof.
+    CURRENT_OFF_PROOF_PROFILE,
+    CURRENT_OFF_PROOF_PROFILE,
+)
 
 
 @dataclass(frozen=True)
 class PredecessorProfile:
     """The installed application a GA install may legitimately replace.
 
-    The supported predecessors are the exact lineage of installs this tooling
-    performed: each is identified by its product version, build number and
-    retained tree digest. The service vocabulary is a wire protocol spoken to
-    the outgoing signed Host, so it is selected from the observed predecessor
-    rather than declared in advance. Both vocabularies below are already
-    implemented by the shipped application; nothing here invents an action name.
+    The supported predecessors are the exact installs the next transaction
+    replaces or whose recorded journals it reads: each is identified by its
+    product version, build number and retained tree digest.
     """
 
     product_version: str
     build_number: str
     tree_sha256: str
-    off_proof_profile: str
-    prove_off_action: str
-    unregister_proxy_action: str
-    unregister_authority_action: str
-    authority_recovery: AuthorityRecovery | None
-
-    @property
-    def supports_authority_recovery_intent(self) -> bool:
-        return self.authority_recovery is not None
 
 
-# Build 40019 speaks engine v5 / Authority v1.0. Its tree digest is the
-# `previous` identity recorded in the sealed 40019 -> 40041 install journal; it
-# cannot be re-observed because 40019 is no longer installed anywhere.
-INSTALLED_40019_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40019",
-    tree_sha256="527ac309a3047fb5aa1ec8eebacd759de3cba8fc71c5f2b1910d0827dcf4b225",
-    off_proof_profile=INSTALLED_40019_OFF_PROOF_PROFILE,
-    prove_off_action="prove-installed-40019-off",
-    unregister_proxy_action="unregister-installed-40019-proxy-agent",
-    unregister_authority_action="unregister-installed-40019-global-authority",
-    authority_recovery=AuthorityRecovery(
-        action=INSTALLED_40019_RECOVERY_ACTION,
-        off_proof_profile=INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE,
-    ),
-)
-# Build 40041 speaks the current engine v6 / Authority v1.1 vocabulary, so it
-# needs none of the 40019 compatibility actions. Its tree digest is the sealed
-# signed-application tree, independently recorded by the install journal's
-# `candidate` entry and by the DMG release seal.
-INSTALLED_40041_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40041",
-    tree_sha256="d7b12dc1659ab0d812a249219195697f946329dbdd3fcf6b5f07b43a4c04ca37",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Build 40043 uses the same current service vocabulary. Its exact notarized
-# tree is independently bound by the signed-app manifest and the completed
-# 40041 -> 40043 install journal; neither historical record is rewritten.
-INSTALLED_40043_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40043",
-    tree_sha256="429d40db9095775a9498a9445799025536c88ff4e900dde14f7a018d8723edf5",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Build 40044 completed installation with the current service vocabulary. Its
-# signed tree remains bound by the original app manifest, both package seals
-# and the closed 40043 -> 40044 install journal.
-INSTALLED_40044_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40044",
-    tree_sha256="41ae01c3903f8ab644d74c5ff185a282a5978e4b0a8376198518046408745248",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Build 40045 retains the current engine v6 / Authority v1.1 vocabulary. Its
-# exact notarized signed tree is preserved by the original application
-# manifest and the completed 40044 -> 40045 installation.
-INSTALLED_40045_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40045",
-    tree_sha256="c5bf15b493b90b846705d93456c7695c3522f72d465a6dab47f70a6bdbcc4baf",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Build 40046 retains the current service vocabulary. Its notarized tree is
-# bound by the original signed-app manifest and the closed 40045 -> 40046 install.
-INSTALLED_40046_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40046",
-    tree_sha256="49f6b28e70b5e3bde5d86179f0c47a8e2e2ce29bca69c04b7d160d852f448e22",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Build 40047 retains the current service vocabulary. Its notarized tree is
-# bound by the original signed-app manifest and the closed 40046 -> 40047 install.
-INSTALLED_40047_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40047",
-    tree_sha256="7195dd5922cbf6cf38284c2aba83619cb727c1638f52559add6d780fb853b593",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Build 40048 retains the current service vocabulary. Its notarized tree is
-# bound by the original signed-app manifest and the closed 40047 -> 40048 install.
-INSTALLED_40048_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40048",
-    tree_sha256="dad5b7aae1667c8448b0ecfe0dce6956bf8ca9fc1f1767a253d57723b088abe7",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# The installed 40067 tree was compared byte-for-byte with its retained
-# notarized application. It uses the current native maintenance vocabulary.
-INSTALLED_40067_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40067",
-    tree_sha256="c9788097d4c64c5801b6f2d6af1a70451c1441e17a47baf0b036c82d2306b38e",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# The installed 40068 and retained notarized app were independently hashed and
-# matched before allocating the ticket-startup correction.
-INSTALLED_40068_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40068",
-    tree_sha256="422197244ef7f336b529f03d51d012a52b25d555178014c70dd519c8ee3e216c",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Installed 40069 and its retained notarized app independently match this tree.
-# The IPv6 DNS switch changes product bytes while preserving this predecessor.
-INSTALLED_40069_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40069",
-    tree_sha256="edca78995aacfbb35247e76e7f6aefa451c974e1b4cce4376cf0e1adfb7a91d5",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Installed 40070 and its retained notarized app independently match this tree.
-# The bounded dashboard-startup correction changes product bytes while keeping
-# the current engine v6 / Authority v1.1 maintenance vocabulary.
-INSTALLED_40070_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40070",
-    tree_sha256="9adab1e77ce478799253e7fa5fc9e0314e2ee2b9b5a8ec8830782fcbb1b9e03f",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# The installed and retained notarized 40071 bundle was rehashed before this
-# successor was allocated. Its service vocabulary is unchanged.
-INSTALLED_40071_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40071",
-    tree_sha256="78dce25dc8db98498f5637c47ad37e297451a81fe2f53f841c225d5486fd4754",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Exact installed and retained notarized predecessor; service vocabulary unchanged.
-INSTALLED_40072_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40072",
-    tree_sha256="5951216697f671fc241605cb97b895e5ad8a668ca6601c92ab2efdaa5173beb1",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Installed through the 40072 -> 40073 GA transaction on 2026-09-20 and retired
-# unpublished when the product version moved to 0.5.0; the preview installer
-# later replaced it. Retained so its completed journals can be archived and
-# read with the vocabulary they were written in.
-INSTALLED_40073_PREDECESSOR: Final = PredecessorProfile(
-    product_version="0.4.0",
-    build_number="40073",
-    tree_sha256="9defff1b52c90ad2caf180fb016608eaedafe592532bd5df5e91e0de5f23f906",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
-)
-# Exact installed and retained notarized 0.5.0 preview predecessor; service
-# vocabulary unchanged.
+# Exact installed and retained notarized 0.5.0 preview predecessor. It is the
+# recorded `previous` of the completed 50025 -> 50028 install and service
+# journals, which the next release archives before reusing their namespace.
 INSTALLED_50025_PREDECESSOR: Final = PredecessorProfile(
     product_version="0.5.0",
     build_number="50025",
     tree_sha256="d5a8a7f951fa3530ed0fa1982cc01ac7b9d6ec1b7f4579ec59883f99303302b9",
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-    authority_recovery=None,
 )
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
-        INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
-        INSTALLED_40041_PREDECESSOR.build_number: INSTALLED_40041_PREDECESSOR,
-        INSTALLED_40043_PREDECESSOR.build_number: INSTALLED_40043_PREDECESSOR,
-        INSTALLED_40044_PREDECESSOR.build_number: INSTALLED_40044_PREDECESSOR,
-        INSTALLED_40045_PREDECESSOR.build_number: INSTALLED_40045_PREDECESSOR,
-        INSTALLED_40046_PREDECESSOR.build_number: INSTALLED_40046_PREDECESSOR,
-        INSTALLED_40047_PREDECESSOR.build_number: INSTALLED_40047_PREDECESSOR,
-        INSTALLED_40048_PREDECESSOR.build_number: INSTALLED_40048_PREDECESSOR,
-        INSTALLED_40067_PREDECESSOR.build_number: INSTALLED_40067_PREDECESSOR,
-        INSTALLED_40068_PREDECESSOR.build_number: INSTALLED_40068_PREDECESSOR,
-        INSTALLED_40069_PREDECESSOR.build_number: INSTALLED_40069_PREDECESSOR,
-        INSTALLED_40070_PREDECESSOR.build_number: INSTALLED_40070_PREDECESSOR,
-        INSTALLED_40071_PREDECESSOR.build_number: INSTALLED_40071_PREDECESSOR,
-        INSTALLED_40072_PREDECESSOR.build_number: INSTALLED_40072_PREDECESSOR,
-        INSTALLED_40073_PREDECESSOR.build_number: INSTALLED_40073_PREDECESSOR,
         INSTALLED_50025_PREDECESSOR.build_number: INSTALLED_50025_PREDECESSOR,
     }
 )
@@ -516,9 +283,9 @@ class InstallProfile:
     retained predecessor whose completed journals it reads.
 
     Deliberately says nothing about which build is being replaced: the
-    predecessor is observed on the machine and bound through
-    `BoundInstallProfile`, so an unbound profile cannot express a predecessor
-    claim at all.
+    predecessor is observed on the machine (`resolve_predecessor`) or read from
+    the journal that recorded it (`bind_journal_predecessor`), so a profile
+    cannot express a predecessor claim at all.
     """
 
     name: str
@@ -543,107 +310,20 @@ class InstallProfile:
         return f"{self.service_transaction_directory}.lock"
 
 
-@dataclass(frozen=True)
-class BoundInstallProfile:
-    """A GA install profile bound to the predecessor actually installed.
+def service_event_contract(
+    sequence: int,
+) -> tuple[frozenset[str], frozenset[str | None]]:
+    """The exact action and off-proof profile admissible at one event."""
 
-    Every predecessor-specific value (the service vocabulary, the off-proof
-    profile, the recovery capability) is read from the bound predecessor. A
-    binding comes from the application observed on the machine (admission) or
-    from the predecessor a journal or intent recorded (evidence); an unbound
-    profile cannot reach any of it.
-    """
-
-    profile: InstallProfile
-    predecessor: PredecessorProfile
-
-    @classmethod
-    def observed(
-        cls, profile: InstallProfile, observed: AppIdentity
-    ) -> "BoundInstallProfile":
-        """Bind to the application observed on the machine (live admission)."""
-
-        return cls(profile, resolve_predecessor(observed, profile.build_number))
-
-    @classmethod
-    def recorded(
-        cls, profile: InstallProfile, previous: AppIdentity
-    ) -> "BoundInstallProfile":
-        """Bind to the predecessor a journal or intent recorded (evidence)."""
-
-        return cls(profile, bind_journal_predecessor(previous))
-
-    @property
-    def service_actions(self) -> tuple[str, ...]:
-        return (
-            "prepare",
-            self.predecessor.unregister_proxy_action,
-            self.predecessor.unregister_authority_action,
-            "verify-dormant",
-            "register-global-authority",
-            "register-proxy-agent",
-            "prove-off",
+    if not 0 <= sequence < len(SERVICE_ACTIONS):
+        raise InstallError(
+            "service_journal_invalid",
+            "service event contract sequence is out of range",
         )
-
-    @property
-    def service_event_proof_profiles(self) -> tuple[str | None, ...]:
-        return (
-            self.predecessor.off_proof_profile,
-            self.predecessor.off_proof_profile,
-            self.predecessor.off_proof_profile,
-            self.predecessor.off_proof_profile,
-            None,  # Authority registration is not an engine Off proof.
-            CURRENT_OFF_PROOF_PROFILE,
-            CURRENT_OFF_PROOF_PROFILE,
-        )
-
-    def authority_recovery_contract(self) -> AuthorityRecovery:
-        """The bound predecessor's recovery capability, or the exact rejection.
-
-        This is the only place that turns "no capability" into an error, so
-        every reader that meets a recovery intent rejects it identically.
-        """
-
-        recovery = self.predecessor.authority_recovery
-        if recovery is None:
-            raise InstallError(
-                "service_journal_invalid", AUTHORITY_RECOVERY_OUTSIDE_CONTRACT
-            )
-        return recovery
-
-    def service_event_contract(
-        self,
-        sequence: int,
-        *,
-        authority_recovery_prepared: bool,
-    ) -> tuple[frozenset[str], frozenset[str | None]]:
-        """The exact action and off-proof profile admissible at one event.
-
-        Every step admits exactly one action and one profile. A prepared
-        Authority recovery intent changes two steps only: the Authority
-        unregister itself becomes the predecessor's recovery action, and the
-        dormant verification after it is proven under the recovery profile.
-        A predecessor without that capability never admits a recovery intent.
-        """
-
-        if not 0 <= sequence < len(self.service_actions):
-            raise InstallError(
-                "service_journal_invalid",
-                "service event contract sequence is out of range",
-            )
-        actions = frozenset({self.service_actions[sequence]})
-        proof_profiles = frozenset({self.service_event_proof_profiles[sequence]})
-        if not authority_recovery_prepared:
-            return actions, proof_profiles
-        recovery = self.authority_recovery_contract()
-        authority_sequence = self.service_actions.index(
-            self.predecessor.unregister_authority_action
-        )
-        if sequence == authority_sequence:
-            return frozenset({recovery.action}), frozenset({recovery.off_proof_profile})
-        if sequence == authority_sequence + 1:
-            return actions, frozenset({recovery.off_proof_profile})
-        return actions, proof_profiles
+    return (
+        frozenset({SERVICE_ACTIONS[sequence]}),
+        frozenset({SERVICE_EVENT_PROOF_PROFILES[sequence]}),
+    )
 
 
 GA_INSTALL_PROFILE: Final = InstallProfile(
@@ -922,12 +602,12 @@ def require_target_application_present(path: Path) -> None:
 
 
 def resolve_predecessor(observed: AppIdentity, candidate_build: str) -> PredecessorProfile:
-    """Select the service vocabulary from the observed installed application.
+    """Admit the observed installed application as a supported predecessor.
 
-    The vocabulary is a wire protocol spoken to the outgoing signed Host, so an
-    unrecognised predecessor has no admissible protocol and is rejected rather
-    than guessed at. The exact tree digest is required as well as the build
-    number: the build number alone is an unauthenticated bundle string.
+    Only an exact supported predecessor is known to implement the service
+    vocabulary, so an unrecognised installation is rejected rather than guessed
+    at. The exact tree digest is required as well as the build number: the
+    build number alone is an unauthenticated bundle string.
     """
 
     predecessor = SUPPORTED_PREDECESSORS.get(observed.build_number)
@@ -956,10 +636,10 @@ def resolve_predecessor(observed: AppIdentity, candidate_build: str) -> Predeces
 
 
 def bind_journal_predecessor(previous: AppIdentity) -> PredecessorProfile:
-    """Select the vocabulary a recorded journal was written with.
+    """Bind the exact supported predecessor a recorded journal names.
 
-    Keyed by the predecessor the journal itself recorded, so an older journal
-    written against build 40019 keeps validating against the 40019 vocabulary.
+    Unlike admission this has no newer-than check: it reads evidence that a
+    completed or interrupted transaction already recorded.
     """
 
     predecessor = SUPPORTED_PREDECESSORS.get(previous.build_number)
@@ -1079,13 +759,9 @@ def _require_fixed_command(arguments: tuple[str, ...]) -> None:
         and arguments[2]
         in {
             "prove-off",
-            "prove-installed-40019-off",
             "status",
             "unregister-proxy-agent",
-            "unregister-installed-40019-proxy-agent",
             "unregister-global-authority",
-            "unregister-installed-40019-global-authority",
-            INSTALLED_40019_RECOVERY_ACTION,
             "register-global-authority",
             "register-proxy-agent",
         }
@@ -2139,18 +1815,6 @@ def parse_service_maintenance_receipt(
         "unregister-global-authority": frozenset({CURRENT_OFF_PROOF_PROFILE}),
         "register-global-authority": frozenset({None}),
         "register-proxy-agent": frozenset({CURRENT_OFF_PROOF_PROFILE}),
-        "prove-installed-40019-off": frozenset(
-            {INSTALLED_40019_OFF_PROOF_PROFILE}
-        ),
-        "unregister-installed-40019-proxy-agent": frozenset(
-            {INSTALLED_40019_OFF_PROOF_PROFILE}
-        ),
-        "unregister-installed-40019-global-authority": frozenset(
-            {INSTALLED_40019_OFF_PROOF_PROFILE}
-        ),
-        INSTALLED_40019_RECOVERY_ACTION: frozenset(
-            {INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE}
-        ),
     }
     if expected_action not in proof_profiles:
         raise InstallError(
@@ -3112,8 +2776,8 @@ def require_decommissioned_service_transaction(
     """Verify the exact append-only service journal before any bundle swap."""
 
     # `previous` is the application observed at preflight; admission is
-    # re-proven by the binding rather than assumed from the caller.
-    bound = BoundInstallProfile.observed(paths.profile, previous)
+    # re-proven here rather than assumed from the caller.
+    resolve_predecessor(previous, paths.profile.build_number)
     parent_fd = _open_directory(paths.target_parent)
     directory_fd = -1
     directory_name = paths.profile.service_transaction_directory
@@ -3156,28 +2820,14 @@ def require_decommissioned_service_transaction(
             for sequence in range(len(SERVICE_DECOMMISSION_PHASES))
         ]
         inventory = set(os.listdir(directory_fd))
-        authority_recovery_prepared = AUTHORITY_RECOVERY_INTENT_NAME in inventory
-        if (
-            authority_recovery_prepared
-            and not bound.predecessor.supports_authority_recovery_intent
-        ):
-            raise InstallError(
-                "service_decommission_evidence_invalid",
-                AUTHORITY_RECOVERY_OUTSIDE_CONTRACT,
-            )
         expected_inventory = {
             SERVICE_ENVIRONMENT_NAME,
             "intent.json",
             *event_names,
         }
-        if authority_recovery_prepared:
-            expected_inventory.add(AUTHORITY_RECOVERY_INTENT_NAME)
         if SERVICE_DNS_CONTINUATION_NAME in inventory:
             expected_inventory.add(SERVICE_DNS_CONTINUATION_NAME)
-        if (
-            AUTHORITY_RECOVERY_PENDING_INTENT_NAME in inventory
-            or inventory != expected_inventory
-        ):
+        if inventory != expected_inventory:
             raise InstallError(
                 "service_decommission_evidence_invalid",
                 "service transaction is not exactly at the decommissioned phase",
@@ -3239,7 +2889,7 @@ def require_decommissioned_service_transaction(
             or intent["candidate"] != candidate.document()
             or intent["previous"] != previous.document()
             or intent["ga_environment_sha256"] != environment_sha256
-            or intent["off_proof_profile"] != bound.predecessor.off_proof_profile
+            or intent["off_proof_profile"] != CURRENT_OFF_PROOF_PROFILE
         ):
             raise InstallError(
                 "service_decommission_evidence_invalid",
@@ -3250,7 +2900,6 @@ def require_decommissioned_service_transaction(
         previous_event_sha256: str | None = None
         baseline_guard: dict[str, Any] | None = None
         validated_events: list[dict[str, Any]] = []
-        event_documents: list[bytes] = []
         for sequence, name in enumerate(event_names):
             event, event_bytes = _read_private_service_document(
                 directory_fd,
@@ -3275,10 +2924,7 @@ def require_decommissioned_service_transaction(
                 )
             before = _validate_guard(event["guard_before"])
             after = _validate_guard(event["guard_after"])
-            allowed_actions, allowed_profiles = bound.service_event_contract(
-                sequence,
-                authority_recovery_prepared=authority_recovery_prepared,
-            )
+            allowed_actions, allowed_profiles = service_event_contract(sequence)
             if (
                 not isinstance(event["action"], str)
                 or event["action"] not in allowed_actions
@@ -3305,51 +2951,6 @@ def require_decommissioned_service_transaction(
                 baseline_guard = after
             previous_event_sha256 = _sha256_bytes(event_bytes)
             validated_events.append(event)
-            event_documents.append(event_bytes)
-
-        if authority_recovery_prepared:
-            recovery, _recovery_data = _read_private_service_document(
-                directory_fd,
-                AUTHORITY_RECOVERY_INTENT_NAME,
-                "Authority recovery intent",
-            )
-            if set(recovery) != {
-                "action",
-                "document",
-                "guard",
-                "intent_sha256",
-                "off_proof_profile",
-                "previous_event_sha256",
-                "schema_version",
-                "sequence",
-                "transaction_id",
-            }:
-                raise InstallError(
-                    "service_decommission_evidence_invalid",
-                    "Authority recovery intent shape is invalid",
-                )
-            recovery_guard = _validate_guard(recovery["guard"])
-            recovery_contract = bound.authority_recovery_contract()
-            if (
-                len(validated_events) < 3
-                or recovery["action"] != recovery_contract.action
-                or recovery["document"] != AUTHORITY_RECOVERY_INTENT_DOCUMENT
-                or recovery["intent_sha256"] != intent_sha256
-                or recovery["off_proof_profile"] != recovery_contract.off_proof_profile
-                or recovery["previous_event_sha256"]
-                != _sha256_bytes(event_documents[1])
-                or type(recovery["schema_version"]) is not int
-                or recovery["schema_version"]
-                != AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION
-                or type(recovery["sequence"]) is not int
-                or recovery["sequence"] != 2
-                or recovery["transaction_id"] != intent["transaction_id"]
-                or recovery_guard != baseline_guard
-            ):
-                raise InstallError(
-                    "service_decommission_evidence_invalid",
-                    "Authority recovery intent lineage is invalid",
-                )
 
         continued_guard = service_dns_continuation_guard(directory_fd, intent, validated_events)
         visible_after = os.stat(
@@ -3480,9 +3081,9 @@ def validate_journal(
             "journal_invalid",
             "installation journal is not for the fixed GA identity",
         )
-    # The recorded predecessor must be one this tooling knows how to have
-    # replaced, with its exact tree identity; that is what makes the journal
-    # readable with the vocabulary it was written in.
+    # The recorded predecessor must be one exact supported installation with
+    # its retained tree identity; an unsupported or misidentified record is
+    # rejected rather than read.
     bind_journal_predecessor(AppIdentity.from_document(previous_app, "previous application"))
     if int(candidate_app["build_number"]) <= int(previous_app["build_number"]):
         raise InstallError("journal_invalid", "candidate build is not newer than previous build")
@@ -3991,7 +3592,7 @@ class DormantInstallTransaction:
             )
         # Admission of the observed application: version, supported
         # predecessor, exact tree identity and strict supersession. Later
-        # readers bind their vocabulary from the evidence they hold.
+        # readers re-prove the predecessor the evidence they hold recorded.
         resolve_predecessor(previous, self.paths.profile.build_number)
         service_environment = self.runtime.require_service_decommissioned(
             self.paths,
@@ -4330,10 +3931,6 @@ def main() -> None:
     mode.add_argument("--preflight", action="store_true")
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--recover", action="store_true")
-    if "--final" in sys.argv[1:]:
-        parser.error(
-            f"--final is retired; {VERSION} has exactly one GA build ({BUILD_NUMBER})"
-        )
     arguments = parser.parse_args()
     try:
         transaction = _transaction()

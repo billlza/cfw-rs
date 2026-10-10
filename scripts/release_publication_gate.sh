@@ -3,15 +3,6 @@
 set -euo pipefail
 unset CDPATH
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  case "${1:-}" in
-    --seal-assets | --prepare-physical-candidate-manifest | --validation | --final)
-      echo "error: retired publication command is forbidden: ${1}" >&2
-      exit 2
-      ;;
-  esac
-fi
-
 publication_repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$publication_repo_root/scripts/dependency_pins.env"

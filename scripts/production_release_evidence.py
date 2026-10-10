@@ -48,14 +48,6 @@ else:
 
 
 STAGES = ("prepackage", "ga-acceptance", "publication")
-RETIRED_COMMANDS = frozenset(
-    {
-        "prepare-physical-candidate-manifest",
-        "seal",
-        "validation",
-        "final",
-    }
-)
 
 
 def _repository() -> Path:
@@ -63,19 +55,14 @@ def _repository() -> Path:
 
 
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    arguments = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(description=__doc__)
-    if arguments and arguments[0] in RETIRED_COMMANDS:
-        parser.error(
-            f"{arguments[0]} is retired; use prepackage, ga-acceptance, or publication"
-        )
     commands = parser.add_subparsers(dest="command", required=True)
     for stage in STAGES:
         commands.add_parser(stage)
     verify = commands.add_parser("verify")
     verify.add_argument("stage", choices=STAGES)
     commands.add_parser("self-check")
-    return parser.parse_args(arguments)
+    return parser.parse_args(argv)
 
 
 def main() -> None:

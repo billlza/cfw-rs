@@ -245,7 +245,6 @@ _PINNED_INPUTS = (
     "scripts/release_capability_inventory.json",
     "scripts/release_capability_inventory.py",
     "scripts/sealed_evidence_manifest.py",
-    "scripts/validated_candidate_evidence.py",
     "scripts/verify_remote_release.py",
     "scripts/make_dmg.sh",
     "scripts/make_updater_manifest.sh",

@@ -205,7 +205,7 @@ This lane builds Release native UI components, embeds their library and localiza
 resources, and verifies their source, compiler, architecture, exports and portable
 load paths. Its exact output is `target/candidates/0.5.0/unsigned/50000`; retained
 attempts are never overwritten. It has no distribution signature and is not an
-input to the signed preview, installation or publication lanes. The signed preview
+input to the GA signing, installation or publication lanes. The GA release build
 keeps its independently allocated build and pinned production compiler.
 
 CI Rust tests and Clippy retain `--all-targets --all-features`. Each gets an explicit

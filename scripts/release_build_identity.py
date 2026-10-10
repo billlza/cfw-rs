@@ -31,23 +31,9 @@ MAX_BUILD_VERSION_TEXT = str(MAX_BUILD_VERSION)
 MAX_BUNDLE_IDENTITY_PLIST_BYTES = 1024 * 1024
 BUNDLE_IDENTITY_PLIST_MODE = 0o644
 
-RETIRED_GA_WORKSPACE_PATHS: Final = (
-    Path(f"target/candidates/{PRODUCT_VERSION}/validation"),
-    Path(f"target/candidates/{PRODUCT_VERSION}/signed"),
-    Path(f"target/candidates/{PRODUCT_VERSION}/release-build"),
-    Path(f"target/candidates/{PRODUCT_VERSION}/review/validated-candidate.json"),
-    Path(f"target/candidates/{PRODUCT_VERSION}/notary-attempts/release"),
-    Path(f"target/candidates/{PRODUCT_VERSION}/release"),
-    Path(f"target/candidates/{PRODUCT_VERSION}/release-transactions"),
-)
-
 
 class BuildIdentityError(ValueError):
     """A candidate bundle does not have one canonical product identity."""
-
-
-class ReleaseWorkspaceError(ValueError):
-    """The GA workspace cannot prove that retired release paths are absent."""
 
 
 @dataclass(frozen=True)
@@ -83,28 +69,6 @@ class ReleaseIdentity:
 
 ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "50028")
 PREVIEW_PRODUCT_VERSION: Final = "0.5.0"
-SIGNED_PREVIEW_BUILD: Final = "50025"
-
-
-@dataclass(frozen=True)
-class SignedPreviewIdentity:
-    """A fixed installable preview identity, never an active GA identity."""
-
-    product_version: str
-    build_number: str
-
-    def __post_init__(self) -> None:
-        if (
-            self.product_version != PREVIEW_PRODUCT_VERSION
-            or self.build_number != SIGNED_PREVIEW_BUILD
-        ):
-            raise BuildIdentityError("signed preview identity differs from fixed policy")
-        canonical_build_version(self.build_number, "signed preview build")
-
-
-SIGNED_PREVIEW_IDENTITY: Final = SignedPreviewIdentity(
-    PREVIEW_PRODUCT_VERSION, SIGNED_PREVIEW_BUILD
-)
 FROZEN_GA_REPOSITORY_RELATIVE = Path(
     f"target/release-worktrees/{ACTIVE_RELEASE_IDENTITY.ga_build}"
 )
@@ -126,10 +90,6 @@ class CandidateBundleContext(str, Enum):
     SIGNING_ATTEMPT_WORK = "signing-attempt-work"
     SIGNING_ATTEMPT_PUBLISH_READY = "signing-attempt-publish-ready"
     CANONICAL_NATIVE_CONTENT = "canonical-native-content"
-    PREVIEW_PRE_SIGN = "preview-pre-sign"
-    PREVIEW_SIGNING_ATTEMPT_WORK = "preview-signing-attempt-work"
-    PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY = "preview-signing-attempt-publish-ready"
-    PREVIEW_CANONICAL_NATIVE_CONTENT = "preview-canonical-native-content"
 
 
 _SIGNING_ATTEMPT_STAGE_BY_CONTEXT = {
@@ -139,20 +99,6 @@ _SIGNING_ATTEMPT_STAGE_BY_CONTEXT = {
 _SIGNING_ATTEMPT_CONTEXT_BY_STAGE = {
     stage: context for context, stage in _SIGNING_ATTEMPT_STAGE_BY_CONTEXT.items()
 }
-_PREVIEW_SIGNING_ATTEMPT_STAGE_BY_CONTEXT: Final = {
-    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_WORK: "work",
-    CandidateBundleContext.PREVIEW_SIGNING_ATTEMPT_PUBLISH_READY: "publish-ready",
-}
-_PREVIEW_SIGNING_ATTEMPT_CONTEXT_BY_STAGE: Final = {
-    stage: context for context, stage in _PREVIEW_SIGNING_ATTEMPT_STAGE_BY_CONTEXT.items()
-}
-_PREVIEW_CONTEXTS: Final = frozenset(
-    {
-        CandidateBundleContext.PREVIEW_PRE_SIGN,
-        CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT,
-        *_PREVIEW_SIGNING_ATTEMPT_STAGE_BY_CONTEXT,
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -229,30 +175,14 @@ def bundle_build_identity(
     return BundleBuildIdentity(expected_product_version, unique.pop())
 
 
-
-def _preview_namespaces(repository: Path) -> tuple[Path, Path, Path]:
-    """The candidate directories that only preview contexts may verify.
-
-    Preview and release identities share one product version, so the two
-    families are told apart by their fixed candidate subdirectories rather
-    than by version. The 40000 unsigned validation skeleton keeps its own
-    ``unsigned/native-products`` output beside the ``unsigned/50000`` preview
-    validation root and belongs to neither family.
-    """
-    base = repository / f"target/candidates/{PREVIEW_PRODUCT_VERSION}"
-    return (
-        base / "unsigned" / UNSIGNED_PREVIEW_VALIDATION_BUILD,
-        base / "preview-preflight",
-        base / "preview",
-    )
-
-
-def _ga_namespaces(repository: Path) -> tuple[Path, Path]:
-    """The candidate directories that only GA contexts may verify."""
-    base = repository / f"target/candidates/{PRODUCT_VERSION}"
-    return (base / "ga-preflight", base / "ga")
-
 def unsigned_preview_root(repository: Path) -> Path:
+    """The fixed unsigned preview validation (50000) candidate root.
+
+    It shares the product version with the GA and with the 40000 unsigned
+    skeleton, whose own ``unsigned/native-products`` output sits beside it, so
+    only this directory tells the family apart: no other context may verify a
+    path inside it.
+    """
     return repository / f"target/candidates/{PREVIEW_PRODUCT_VERSION}/unsigned/{UNSIGNED_PREVIEW_VALIDATION_BUILD}"
 
 
@@ -266,64 +196,6 @@ def require_native_product_build_mode(build_version: str, mode: str) -> None:
         raise BuildIdentityError("native product build mode is invalid")
     if build_version == UNSIGNED_PREVIEW_VALIDATION_BUILD and mode != "unsigned-validation":
         raise BuildIdentityError("unsigned preview validation cannot be built as pre-sign input")
-    if build_version == SIGNED_PREVIEW_BUILD and mode != "pre-sign":
-        raise BuildIdentityError("signed preview products cannot be built in an unsigned validation lane")
-
-
-def preview_preflight_root(repository: Path) -> Path:
-    return repository / (
-        f"target/candidates/{PREVIEW_PRODUCT_VERSION}/preview-preflight/{SIGNED_PREVIEW_BUILD}"
-    )
-
-
-def preview_root(repository: Path) -> Path:
-    return repository / (
-        f"target/candidates/{PREVIEW_PRODUCT_VERSION}/preview/{SIGNED_PREVIEW_BUILD}"
-    )
-
-
-def preview_native_products_root(repository: Path) -> Path:
-    return preview_preflight_root(repository) / "native-products"
-
-
-def preview_signed_root(repository: Path) -> Path:
-    return preview_root(repository) / "signed"
-
-
-def preview_signing_output_root(repository: Path) -> Path:
-    return preview_root(repository) / SIGNING_OUTPUT_RELATIVE
-
-
-def preview_signing_input_root(repository: Path) -> Path:
-    return preview_signing_output_root(repository) / SIGNING_INPUT_NAME
-
-
-def preview_signed_native_products_root(repository: Path) -> Path:
-    return preview_signing_output_root(repository) / SIGNED_NATIVE_PRODUCTS_NAME
-
-
-def preview_signing_attempts_root(repository: Path) -> Path:
-    return preview_root(repository) / "transactions/signing-attempts"
-
-
-def preview_signing_attempt_output_root(
-    repository: Path, attempt_id: str, context: CandidateBundleContext
-) -> Path:
-    if (
-        not isinstance(attempt_id, str)
-        or not SIGNING_ATTEMPT_ID_RE.fullmatch(attempt_id)
-        or attempt_id == "00000000"
-    ):
-        raise BuildIdentityError(
-            "signing attempt identifier must be one positive eight-digit ASCII decimal"
-        )
-    if not isinstance(context, CandidateBundleContext):
-        raise BuildIdentityError("preview signing-attempt context is invalid")
-    try:
-        stage = _PREVIEW_SIGNING_ATTEMPT_STAGE_BY_CONTEXT[context]
-    except KeyError as error:
-        raise BuildIdentityError("context is not a private preview signing-attempt stage") from error
-    return preview_signing_attempts_root(repository) / attempt_id / stage
 
 
 def ga_preflight_root(repository: Path) -> Path:
@@ -427,42 +299,6 @@ def _canonical_real_directory(value: str | Path, label: str) -> Path:
     return path
 
 
-def verify_ga_workspace_path_preconditions(repository: Path) -> None:
-    """Verify one canonical active-GA workspace excludes retired namespaces."""
-
-    try:
-        repository = _canonical_real_directory(repository, "GA workspace repository")
-    except BuildIdentityError as error:
-        raise ReleaseWorkspaceError(
-            "cannot verify one canonical GA workspace repository"
-        ) from error
-    for relative in RETIRED_GA_WORKSPACE_PATHS:
-        retired_path = repository.joinpath(*relative.parts)
-        current = repository
-        for index, component in enumerate(relative.parts):
-            current /= component
-            try:
-                metadata = current.lstat()
-            except FileNotFoundError:
-                break
-            except OSError as error:
-                raise ReleaseWorkspaceError(
-                    f"cannot verify that retired release path is absent: {retired_path}"
-                ) from error
-            if stat.S_ISLNK(metadata.st_mode):
-                raise ReleaseWorkspaceError(
-                    f"retired release path must not contain a symlink: {current}"
-                )
-            if index == len(relative.parts) - 1:
-                raise ReleaseWorkspaceError(
-                    f"retired validation/final release path is forbidden: {retired_path}"
-                )
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise ReleaseWorkspaceError(
-                    f"cannot verify that retired release path is absent: {retired_path}"
-                )
-
-
 def _require_private_directory(path: Path, label: str) -> None:
     try:
         metadata = path.lstat()
@@ -545,16 +381,13 @@ def candidate_bundle_verification_paths(
             or native_path != unsigned_preview_native_products_root(canonical_repository)):
             raise BuildIdentityError("unsigned preview app/native pair is not the fixed 0.5.0/50000 validation output")
         return CandidateBundleVerificationPaths(app_path, native_path, identity, context)
-    if context in _PREVIEW_CONTEXTS:
-        return _preview_bundle_verification_paths(
-            canonical_repository, app_path, native_path, context
-        )
     if any(
-        path.is_relative_to(namespace)
+        path.is_relative_to(unsigned_preview_root(canonical_repository))
         for path in (app_path, native_path)
-        for namespace in _preview_namespaces(canonical_repository)
     ):
-        raise BuildIdentityError("preview paths cannot be verified through a GA context")
+        raise BuildIdentityError(
+            "unsigned preview validation paths cannot be verified through another context"
+        )
     identity = bundle_build_identity(app_path)
 
     if context is CandidateBundleContext.UNSIGNED_HOST:
@@ -645,103 +478,6 @@ def candidate_bundle_verification_paths(
     )
 
 
-def preview_signing_output(
-    repository: Path, signing_output: str | Path
-) -> CandidateSigningOutput:
-    """Classify only the fixed preview's canonical or private signing output."""
-
-    repository = _canonical_real_directory(repository, "preview repository")
-    output = _canonical_real_directory(signing_output, "preview signing output")
-    if output == preview_signing_output_root(repository):
-        _require_private_directory(output, "canonical preview signing-output root")
-        return CandidateSigningOutput(
-            output, CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT
-        )
-    attempts = preview_signing_attempts_root(repository)
-    try:
-        relative = output.relative_to(attempts)
-    except ValueError as error:
-        raise BuildIdentityError("signing output is outside the fixed preview transaction root") from error
-    if len(relative.parts) != 2:
-        raise BuildIdentityError("private preview signing output layout is invalid")
-    attempt_id, stage = relative.parts
-    context = _PREVIEW_SIGNING_ATTEMPT_CONTEXT_BY_STAGE.get(stage)
-    if context is None:
-        raise BuildIdentityError("private preview signing output stage is invalid")
-    if output != preview_signing_attempt_output_root(repository, attempt_id, context):
-        raise BuildIdentityError("private preview signing output root is not exact")
-    for path, label in (
-        (attempts.parent, "preview signing transactions root"),
-        (attempts, "preview signing attempts root"),
-        (output.parent, "preview signing attempt root"),
-        (output, "preview signing attempt output"),
-    ):
-        _require_private_directory(path, label)
-    return CandidateSigningOutput(output, context)
-
-
-def _preview_bundle_verification_paths(
-    repository: Path,
-    app: Path,
-    native: Path,
-    context: CandidateBundleContext,
-) -> CandidateBundleVerificationPaths:
-    if any(
-        path.is_relative_to(namespace)
-        for path in (app, native)
-        for namespace in _ga_namespaces(repository)
-    ):
-        raise BuildIdentityError("GA paths cannot be verified through a preview context")
-    identity = bundle_build_identity(app, expected_product_version=PREVIEW_PRODUCT_VERSION)
-    if identity != BundleBuildIdentity(PREVIEW_PRODUCT_VERSION, SIGNED_PREVIEW_BUILD):
-        raise BuildIdentityError("candidate application is not the fixed signed preview identity")
-    if context is CandidateBundleContext.PREVIEW_PRE_SIGN:
-        preflight = preview_preflight_root(repository)
-        if native != preview_native_products_root(repository) or app not in {
-            preflight / "pre-sign" / SIGNED_APP_NAME,
-            preflight / "cargo/release/bundle/macos" / SIGNED_APP_NAME,
-        }:
-            raise BuildIdentityError("preview pre-sign app and native products are not exact preflight paths")
-    elif context is CandidateBundleContext.PREVIEW_CANONICAL_NATIVE_CONTENT:
-        if native != preview_signed_native_products_root(repository):
-            raise BuildIdentityError("signed native-products root is not the fixed preview root")
-        classified = preview_signing_output(repository, native.parent)
-        if classified.context is not context:
-            raise BuildIdentityError("preview canonical content has the wrong signing-output context")
-        _require_private_directory(native, "canonical preview signed native-products root")
-        if app.is_relative_to(repository / "target/candidates") and not app.is_relative_to(
-            preview_root(repository)
-        ):
-            raise BuildIdentityError("preview canonical app is in another candidate namespace")
-        if (
-            app.is_relative_to(preview_signing_attempts_root(repository))
-            or app.is_relative_to(preview_preflight_root(repository))
-        ):
-            raise BuildIdentityError("preview canonical content cannot use a preflight or private-attempt app")
-    else:
-        attempts = preview_signing_attempts_root(repository)
-        try:
-            app_relative = app.relative_to(attempts)
-            native_relative = native.relative_to(attempts)
-        except ValueError as error:
-            raise BuildIdentityError("private signing-attempt paths are outside the fixed preview root") from error
-        if len(app_relative.parts) != 4 or len(native_relative.parts) != 3:
-            raise BuildIdentityError("private preview app or native-products layout is invalid")
-        attempt_id = app_relative.parts[0]
-        output = preview_signing_attempt_output_root(repository, attempt_id, context)
-        if (
-            native_relative.parts[0] != attempt_id
-            or app != output / SIGNED_APP_WITHIN_OUTPUT
-            or native != output / SIGNED_NATIVE_PRODUCTS_NAME
-        ):
-            raise BuildIdentityError("preview app and native products do not share one exact attempt output")
-        if preview_signing_output(repository, output).context is not context:
-            raise BuildIdentityError("preview signing stage differs from its verification context")
-        _require_private_directory(output / SIGNING_INPUT_NAME, "preview signing input root")
-        _require_private_directory(native, "preview signed native-products root")
-    return CandidateBundleVerificationPaths(app, native, identity, context)
-
-
 def _candidate_directory_output(
     repository: Path,
     output: str,
@@ -803,8 +539,6 @@ def candidate_native_products_output(
         allowed = {candidate_base / "unsigned/native-products"}
     elif canonical_build == ACTIVE_RELEASE_IDENTITY.ga_build:
         allowed = {ga_pre_sign_native_products_root(repository)}
-    elif canonical_build == SIGNED_PREVIEW_BUILD:
-        allowed = {preview_native_products_root(repository)}
     elif canonical_build == UNSIGNED_PREVIEW_VALIDATION_BUILD:
         allowed = {unsigned_preview_native_products_root(repository)}
     else:

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import verify_version_contract as contract
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, SIGNED_PREVIEW_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 from scripts.verify_version_contract import (
     EXPECTED_BUILD,
     EXPECTED_VERSION,
@@ -103,9 +103,8 @@ class VersionContractTests(unittest.TestCase):
             (ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build),
             ("0.5.0", "50028"),
         )
-        # The retained signed preview shares the product version; a tree still
-        # carrying its build number is not the release.
-        self.assertEqual(SIGNED_PREVIEW_IDENTITY.build_number, "50025")
+        # The installed 50025 predecessor shares the product version; a tree
+        # still carrying its build number is not the release.
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
             self.make_repository(repository)

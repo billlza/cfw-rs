@@ -928,23 +928,16 @@ attempt creation, or receipt creator. Cleanup failure, fresh-session startup
 failure, semantic mismatch, or any subsequent operational failure terminates
 the attempt and cannot enter `verification_blocked`.
 
-The install and service transactions bind their service vocabulary to the
-application they observe on the release Mac, verified by build number and
-exact signed-tree identity: an installed 40041 speaks the current engine v6 /
-Authority v1.1 actions, an installed 40019 the compatibility path below.
-Nothing is declared in advance, and an unsupported or misidentified
-installation is rejected before any service mutation.
-
-The 40019 compatibility path is read-only and exact-version only. Each legacy
-unregister action reproves Off before mutation. If a completed Authority
-unregister lost its receipt, the transaction first atomically publishes and
-fsyncs a lineage-bound current-only recovery intent. It then proves both legacy
-processes absent, explicitly registers the current candidate Authority, proves
-v1.1 Off, unregisters it again, and records the distinct
-`installed_40019_recovery_current_authority_v1_1` profile in the append-only
-event. A retry after current registration follows that durable intent instead
-of guessing from service status, and it never labels recovery as a legacy v1.0
-wire proof.
+The install and service transactions admit only an application they observe
+on the release Mac as an exact supported predecessor, verified by product
+version, build number and signed-tree identity. Every supported predecessor
+speaks the current engine v6 / Authority v1.1 service vocabulary, which is the
+only vocabulary the transactions issue or accept in a journal. Nothing is
+declared in advance, and an unsupported or misidentified installation is
+rejected before any service mutation. The installed-40019 compatibility
+vocabulary and its Authority recovery intent were removed on 2026-10-10 with
+the 0.4.0 predecessor profiles; a journal or marker in that form is rejected,
+never adopted.
 
 1. run the required source gates and start the three jobs in the `CI` GitHub
    Actions workflow for the exact clean release commit. Hosted CI and the
@@ -1260,6 +1253,12 @@ wire proof.
    history receipts, and never describes 40073 as the current installation.
    Without the declaration the archiver still requires the archived build
    itself to be installed.
+
+   That 40073 retention completed before the 50028 installation. The 0.4.0
+   predecessor profiles it required were removed on 2026-10-10, so the command
+   above is not repeatable. The next allocation's history step retains the
+   completed 50025 → 50028 journals instead; reading them needs only the 50025
+   profile plus the profile that allocation adds for the installed 50028.
 
    Decommission and install each perform their own mandatory admission checks;
    separate `--preflight` calls remain available for diagnosis. The first

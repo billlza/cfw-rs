@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from contextlib import contextmanager
 import json
 import os
@@ -8,6 +7,7 @@ from pathlib import Path
 import shutil
 import stat
 import tempfile
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 
@@ -23,8 +23,8 @@ from scripts.publication.durable_file import (
 
 
 # The recorded predecessor is the installed 50025 with its real frozen tree
-# identity; the install journal is only readable against the exact predecessor
-# it names, and that predecessor selects the current service vocabulary.
+# identity; the install journal is only readable against the exact supported
+# predecessor it names.
 PREVIOUS = install.AppIdentity(
     "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
 )
@@ -128,16 +128,13 @@ class JournalExportFixture:
                     guard(),
                     ENVIRONMENT,
                 )
-                bound = install.BoundInstallProfile.recorded(
-                    install.GA_INSTALL_PROFILE, self.previous
-                )
                 for sequence in range(1, len(service.PHASES)):
                     events.append(
                         store.append(
                             events,
                             intent=intent,
                             phase=service.PHASES[sequence],
-                            action=bound.service_actions[sequence],
+                            action=install.SERVICE_ACTIONS[sequence],
                             guard=guard(),
                         )
                     )
@@ -240,38 +237,41 @@ class GAAcceptanceJournalExportTests(unittest.TestCase):
         self.assertNotIn(b"volume_group_uuid", corpus)
         self.assertNotIn(b"boot_session", corpus)
 
-    def test_historical_predecessors_cannot_authorize_the_current_ga_migration(self) -> None:
-        for predecessor in (
-            install.INSTALLED_40019_PREDECESSOR,
-            install.INSTALLED_40041_PREDECESSOR,
-        ):
-            with self.subTest(previous=predecessor.build_number):
-                fixture = JournalExportFixture(
-                    previous=install.AppIdentity(
-                        "0.4.0", predecessor.build_number, predecessor.tree_sha256
-                    )
+    def test_another_supported_predecessor_cannot_authorize_the_current_ga_migration(self) -> None:
+        # A second registry entry stands in for any other supported
+        # predecessor: its completed journals are readable, but they are not
+        # the fixed 50025 -> 50028 migration the export binds.
+        other = install.PredecessorProfile("0.5.0", "50024", "f" * 64)
+        registry = MappingProxyType(
+            {**install.SUPPORTED_PREDECESSORS, other.build_number: other}
+        )
+        with patch.object(install, "SUPPORTED_PREDECESSORS", registry):
+            fixture = JournalExportFixture(
+                previous=install.AppIdentity(
+                    other.product_version, other.build_number, other.tree_sha256
                 )
-                self.addCleanup(fixture.cleanup)
-                before = {
-                    path.relative_to(fixture.source_parent): path.read_bytes()
-                    for path in fixture.source_parent.rglob("*")
-                    if path.is_file()
-                }
-                with self.assertRaisesRegex(
-                    journal_export.GAAcceptanceJournalExportError,
-                    "different GA migrations",
-                ):
-                    fixture.export()
-                self.assertFalse(fixture.paths.external_intent.exists())
-                self.assertFalse(fixture.paths.migration_root.exists())
-                self.assertEqual(
-                    {
-                        path.relative_to(fixture.source_parent): path.read_bytes()
-                        for path in fixture.source_parent.rglob("*")
-                        if path.is_file()
-                    },
-                    before,
-                )
+            )
+            self.addCleanup(fixture.cleanup)
+            before = {
+                path.relative_to(fixture.source_parent): path.read_bytes()
+                for path in fixture.source_parent.rglob("*")
+                if path.is_file()
+            }
+            with self.assertRaisesRegex(
+                journal_export.GAAcceptanceJournalExportError,
+                "different GA migrations",
+            ):
+                fixture.export()
+        self.assertFalse(fixture.paths.external_intent.exists())
+        self.assertFalse(fixture.paths.migration_root.exists())
+        self.assertEqual(
+            {
+                path.relative_to(fixture.source_parent): path.read_bytes()
+                for path in fixture.source_parent.rglob("*")
+                if path.is_file()
+            },
+            before,
+        )
 
     def test_boolean_schema_aliases_are_rejected_end_to_end(self) -> None:
         self.fixture.export()

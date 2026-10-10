@@ -24,7 +24,6 @@ from scripts.publication.common import (
     sha256_bytes,
     sha256_file,
 )
-from scripts.release_build_identity import RETIRED_GA_WORKSPACE_PATHS
 from scripts.release_executor_source import (
     ExecutorSource,
     FrozenReleaseSources,
@@ -953,7 +952,6 @@ class AdapterContractTests(unittest.TestCase):
             signing_binding_error: PublicationError | None = None,
         ) -> tuple[PublicationError, dict[str, Mock]]:
             collaborators = {
-                "verify_ga_workspace_path_preconditions": Mock(),
                 "validate_hosted_ci_receipt_offline": Mock(
                     return_value={
                         "source": hosted_source,
@@ -1075,19 +1073,6 @@ class AdapterContractTests(unittest.TestCase):
                     _validate_signing_notarization_binding(
                         **{**arguments, "notarization_receipt": drifted}
                     )
-
-    def test_legacy_paths_are_rejected_even_when_the_ga_root_exists(self) -> None:
-        for relative in RETIRED_GA_WORKSPACE_PATHS:
-            with self.subTest(path=relative):
-                fixture = StageFixture()
-                try:
-                    path = fixture.repository.joinpath(*relative.parts)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(b"legacy\n")
-                    with self.assertRaisesRegex(PublicationError, "retired"):
-                        _verified_prepackage_inputs(fixture.repository)
-                finally:
-                    fixture.cleanup()
 
     def test_local_all_passed_summary_cannot_replace_a_real_runtime_verifier(self) -> None:
         runtime_path = self.fixture.repository.joinpath(*RUNTIME_ACCEPTANCE_INPUT.parts)
@@ -1541,7 +1526,7 @@ class MigrationJournalContractIntegrationTests(unittest.TestCase):
 
 
 class CommandBoundaryTests(unittest.TestCase):
-    def test_retired_commands_are_explicitly_rejected(self) -> None:
+    def test_unknown_commands_are_rejected_by_usage(self) -> None:
         for command in (
             "prepare-physical-candidate-manifest",
             "seal",
@@ -1553,7 +1538,7 @@ class CommandBoundaryTests(unittest.TestCase):
             ) as stderr, self.assertRaises(SystemExit) as captured:
                 production_release_evidence._arguments([command])
             self.assertEqual(captured.exception.code, 2)
-            self.assertIn("is retired", stderr.getvalue())
+            self.assertIn(f"invalid choice: '{command}'", stderr.getvalue())
 
     def test_only_three_stage_commands_and_explicit_verification_are_admitted(self) -> None:
         for stage in STAGES:

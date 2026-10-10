@@ -39,8 +39,6 @@ LOCALES = frozenset({"en", "ja", "zh-Hans", "zh-Hant"})
 # Every current native-product manifest, pre-sign or Developer ID signed, comes
 # from the shared durable writer, which creates it owner-only.
 MANIFEST_MODE = 0o600
-# The retained 50001-50025 signed preview trees recorded their manifests 0644.
-RETAINED_PREVIEW_MANIFEST_MODE = 0o644
 COMPONENT_EXPORTS = frozenset({
     "cfm_webview_window_number_v1",
     "cfm_profile_menu_present_v1", "cfm_profile_menu_update_v1",
@@ -129,20 +127,19 @@ def swift_compiler_version() -> str:
 
 class NativeUiContext(str, Enum):
     RELEASE = "release"
-    SIGNED_PREVIEW = "signed-preview"
     UNSIGNED_PREVIEW_VALIDATION = "unsigned-preview-validation"
 
 
 def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool,
-                      context: NativeUiContext = NativeUiContext.SIGNED_PREVIEW) -> dict[str, str]:
+                      context: NativeUiContext) -> dict[str, str]:
     if __package__:
         from .release_build_identity import (
-            ACTIVE_RELEASE_IDENTITY, SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD,
+            ACTIVE_RELEASE_IDENTITY, PREVIEW_PRODUCT_VERSION, UNSIGNED_PREVIEW_VALIDATION_BUILD,
         )
         from .apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
     else:
         from release_build_identity import (
-            ACTIVE_RELEASE_IDENTITY, SIGNED_PREVIEW_IDENTITY, UNSIGNED_PREVIEW_VALIDATION_BUILD,
+            ACTIVE_RELEASE_IDENTITY, PREVIEW_PRODUCT_VERSION, UNSIGNED_PREVIEW_VALIDATION_BUILD,
         )
         from apple_validation_policy import selected_apple_identity, unsigned_runtime_apple_identity
     if not isinstance(context, NativeUiContext):
@@ -150,22 +147,18 @@ def expected_metadata(repository: Path, build: str, *, signing: str, clean: bool
     if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
         if build != UNSIGNED_PREVIEW_VALIDATION_BUILD or signing != "unsigned-validation":
             raise NativeUiArtifactError("unsigned preview UI requires exact 50000 unsigned-validation identity")
-        product_version = SIGNED_PREVIEW_IDENTITY.product_version
-    elif context is NativeUiContext.RELEASE:
+        product_version = PREVIEW_PRODUCT_VERSION
+    else:
         if build != ACTIVE_RELEASE_IDENTITY.ga_build or signing not in {"pre-sign", "developer-id"}:
             raise NativeUiArtifactError("UI products require the exact release identity")
         product_version = ACTIVE_RELEASE_IDENTITY.product_version
-    elif build != SIGNED_PREVIEW_IDENTITY.build_number or signing not in {"pre-sign", "developer-id"}:
-        raise NativeUiArtifactError("UI products require the exact signed-preview identity")
-    else:
-        product_version = SIGNED_PREVIEW_IDENTITY.product_version
     pins = dict(re.findall(r"^(XCODE_VERSION|XCODE_BUILD_VERSION)=([^\n]+)$",
                            (repository / "scripts/dependency_pins.env").read_text(), re.M))
     if context is NativeUiContext.UNSIGNED_PREVIEW_VALIDATION:
         xcode_version, xcode_build = unsigned_runtime_apple_identity(pins, Path(sys.executable).resolve(strict=True))
     else:
         if any(key in os.environ for key in ("CFW_UNSIGNED_VALIDATION_PYTHON", "CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION")):
-            raise NativeUiArtifactError("signed preview UI refuses unsigned-validation toolchain selectors")
+            raise NativeUiArtifactError("release UI refuses unsigned-validation toolchain selectors")
         xcode_version, xcode_build = selected_apple_identity(pins, os.environ, role="production")
     expected_xcode = f"Xcode {xcode_version}\nBuild version {xcode_build}\n"
     if command(["/usr/bin/xcodebuild", "-version"]) != expected_xcode:
@@ -314,24 +307,20 @@ def verify_products(repository: Path, products: Path, *, build: str, signing: st
     pre_sign_products = None
     if signing == "developer-id":
         if __package__:
-            from .release_build_identity import ga_frozen_native_products_root, preview_native_products_root
+            from .release_build_identity import ga_frozen_native_products_root
             from .promote_signed_native_manifest import verify_promoted_manifest
         else:
-            from release_build_identity import ga_frozen_native_products_root, preview_native_products_root
+            from release_build_identity import ga_frozen_native_products_root
             from promote_signed_native_manifest import verify_promoted_manifest
-        # GA signing starts only after candidate freeze promoted the preflight.
-        pre_sign_products = (
-            ga_frozen_native_products_root(repository)
-            if context is NativeUiContext.RELEASE
-            else preview_native_products_root(repository)
-        )
+        # Only the release context admits Developer ID metadata, and GA signing
+        # starts only after candidate freeze promoted the preflight.
+        pre_sign_products = ga_frozen_native_products_root(repository)
         verify_products(repository, pre_sign_products, build=build, signing="pre-sign", context=context)
     verify_library(products / LIBRARY)
     verify_resources(products / RESOURCES)
-    manifest_mode = RETAINED_PREVIEW_MANIFEST_MODE if context is NativeUiContext.SIGNED_PREVIEW else MANIFEST_MODE
     for name in (LIBRARY, RESOURCES):
         path = products / (name + ".manifest.json")
-        regular(path, mode=manifest_mode)
+        regular(path, mode=MANIFEST_MODE)
         value = json.loads(path.read_text())
         artifact_metadata = expected
         if pre_sign_products is not None:
@@ -367,8 +356,6 @@ def build_products(repository: Path, products: Path, *, build: str, context: Nat
         expected_root = ga_pre_sign_native_products_root(repository)
         scratch_root = ga_preflight_root(repository)
         signing = "pre-sign"
-    elif context is NativeUiContext.SIGNED_PREVIEW:
-        raise NativeUiArtifactError("signed preview UI products are retired; their retained trees are only verified")
     else:
         raise NativeUiArtifactError("UI artifact context is invalid")
     if products != expected_root or not products.is_dir() or products.resolve(strict=True) != products:
@@ -413,7 +400,7 @@ def main() -> None:
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--products", type=Path, required=True)
     parser.add_argument("--build-number", required=True)
-    selection = parser.add_mutually_exclusive_group()
+    selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--unsigned-preview-validation", action="store_true")
     selection.add_argument("--release", action="store_true")
     arguments = parser.parse_args()
@@ -421,10 +408,8 @@ def main() -> None:
         repository = arguments.repository.resolve(strict=True)
         if arguments.unsigned_preview_validation:
             context = NativeUiContext.UNSIGNED_PREVIEW_VALIDATION
-        elif arguments.release:
-            context = NativeUiContext.RELEASE
         else:
-            context = NativeUiContext.SIGNED_PREVIEW
+            context = NativeUiContext.RELEASE
         signing = "unsigned-validation" if arguments.unsigned_preview_validation else "pre-sign"
         if arguments.operation == "build":
             build_products(repository, arguments.products, build=arguments.build_number, context=context)

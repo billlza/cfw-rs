@@ -176,7 +176,6 @@ class DNSContinuationTests(unittest.TestCase):
                 after = {**before, "dns_sha256": "a" * 64}
                 with service.ServiceEventStore(self.service_paths) as store, store.locked():
                     intent, events = store.create(CANDIDATE, self.previous, before, ENVIRONMENT)
-                    bound = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, self.previous)
                     for sequence in range(1, len(service.PHASES)):
                         if sequence == 4:
                             value = {
@@ -195,7 +194,7 @@ class DNSContinuationTests(unittest.TestCase):
                                 os.close(descriptor)
                         events.append(store.append(
                             events, intent=intent, phase=service.PHASES[sequence],
-                            action=bound.service_actions[sequence], guard=before if sequence < 4 else after,
+                            action=install.SERVICE_ACTIONS[sequence], guard=before if sequence < 4 else after,
                         ))
 
             def install_document(self):

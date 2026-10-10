@@ -88,17 +88,14 @@ readonly notarization_recovery_id
   die "signed candidates require Apple Silicon macOS"
 : "${CFW_BUILD_NUMBER:?set the explicit positive integer candidate build number}"
 PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
-  "$repo_root" "$CFW_BUILD_NUMBER" "$candidate_operation" <<'PY'
+  "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
 import sys
-from pathlib import Path
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
 from release_build_identity import (
     ACTIVE_RELEASE_IDENTITY,
     BuildIdentityError,
-    ReleaseWorkspaceError,
     canonical_build_version,
-    verify_ga_workspace_path_preconditions,
 )
 
 try:
@@ -108,9 +105,7 @@ try:
             "CFW_BUILD_NUMBER must be the single active GA build "
             + ACTIVE_RELEASE_IDENTITY.ga_build
         )
-    if sys.argv[3] == "build":
-        verify_ga_workspace_path_preconditions(Path(sys.argv[1]))
-except (BuildIdentityError, ReleaseWorkspaceError) as error:
+except BuildIdentityError as error:
     raise SystemExit(f"error: {error}") from None
 PY
 preflight_root="$candidate_base/ga-preflight/$CFW_BUILD_NUMBER"

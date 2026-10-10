@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,23 +16,16 @@ from scripts import dormant_app_install as install
 from scripts import ga_acceptance_environment as ga_environment
 
 
+# The installed 50025 with its real frozen tree identity: the one supported
+# predecessor of this build.
 PREVIOUS = install.AppIdentity(
-    "0.4.0", "40019", install.INSTALLED_40019_PREDECESSOR.tree_sha256
+    "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
 )
-# The profile bound to that recorded predecessor: this is what every reader of
-# a transaction retaining the 40019 predecessor resolves to, so the tests
-# speak the same vocabulary the production path selects.
-BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
     app=install.AppIdentity("0.5.0", "50028", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
-)
-# The installed 50025 with its real frozen tree identity: the production
-# predecessor of this build, which selects the current service vocabulary.
-INSTALLED_PREVIOUS = install.AppIdentity(
-    "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
 )
 GA_ENVIRONMENT = {
     "architecture": "arm64",
@@ -177,24 +169,7 @@ class ServiceEventStoreTests(unittest.TestCase):
         self.assertFalse(hasattr(paths.install_paths.profile, "previous_build_number"))
         self.assertEqual(
             dict(install.SUPPORTED_PREDECESSORS),
-            {
-                "40019": install.INSTALLED_40019_PREDECESSOR,
-                "40041": install.INSTALLED_40041_PREDECESSOR,
-                "40043": install.INSTALLED_40043_PREDECESSOR,
-                "40044": install.INSTALLED_40044_PREDECESSOR,
-                "40045": install.INSTALLED_40045_PREDECESSOR,
-                "40046": install.INSTALLED_40046_PREDECESSOR,
-                "40047": install.INSTALLED_40047_PREDECESSOR,
-                "40048": install.INSTALLED_40048_PREDECESSOR,
-                "40067": install.INSTALLED_40067_PREDECESSOR,
-                "40068": install.INSTALLED_40068_PREDECESSOR,
-                "40069": install.INSTALLED_40069_PREDECESSOR,
-                "40070": install.INSTALLED_40070_PREDECESSOR,
-                "40071": install.INSTALLED_40071_PREDECESSOR,
-                "40072": install.INSTALLED_40072_PREDECESSOR,
-                "40073": install.INSTALLED_40073_PREDECESSOR,
-                "50025": install.INSTALLED_50025_PREDECESSOR,
-            },
+            {"50025": install.INSTALLED_50025_PREDECESSOR},
         )
         self.assertEqual(
             paths.transaction_directory.name,
@@ -205,16 +180,24 @@ class ServiceEventStoreTests(unittest.TestCase):
             service.TRANSACTION_DIRECTORY,
         )
         self.assertEqual(
-            BOUND.service_actions[1:3],
+            install.SERVICE_ACTIONS,
             (
-                "unregister-installed-40019-proxy-agent",
-                "unregister-installed-40019-global-authority",
+                "prepare",
+                "unregister-proxy-agent",
+                "unregister-global-authority",
+                "verify-dormant",
+                "register-global-authority",
+                "register-proxy-agent",
+                "prove-off",
             ),
         )
+        current = install.CURRENT_OFF_PROOF_PROFILE
+        self.assertEqual(current, "current_engine_v6_authority_v1_1")
         self.assertEqual(
-            BOUND.predecessor.off_proof_profile,
-            install.INSTALLED_40019_OFF_PROOF_PROFILE,
+            install.SERVICE_EVENT_PROOF_PROFILES,
+            (current, current, current, current, None, current, current),
         )
+        self.assertEqual(len(install.SERVICE_ACTIONS), len(service.PHASES))
 
     def test_service_intent_binds_one_private_ga_environment(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
@@ -274,7 +257,7 @@ class ServiceEventStoreTests(unittest.TestCase):
         legacy = {
             "candidate": CANDIDATE.document(),
             "document": "cfw-current-service-transaction-v2",
-            "off_proof_profile": install.INSTALLED_40019_OFF_PROOF_PROFILE,
+            "off_proof_profile": install.CURRENT_OFF_PROOF_PROFILE,
             "previous": PREVIOUS.document(),
             "schema_version": 2,
             "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -289,7 +272,7 @@ class ServiceEventStoreTests(unittest.TestCase):
             "ga_environment_sha256": ga_environment.environment_sha256(
                 GA_ENVIRONMENT
             ),
-            "off_proof_profile": install.INSTALLED_40019_OFF_PROOF_PROFILE,
+            "off_proof_profile": install.CURRENT_OFF_PROOF_PROFILE,
             "previous": PREVIOUS.document(),
             "schema_version": True,
             "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -318,6 +301,29 @@ class ServiceEventStoreTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, "service_journal_invalid")
         self.assertIn("expected product version", str(captured.exception))
 
+    def test_intent_admits_only_the_current_off_proof_profile(self) -> None:
+        intent = {
+            "candidate": CANDIDATE.document(),
+            "document": service.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
+            "off_proof_profile": install.CURRENT_OFF_PROOF_PROFILE,
+            "previous": PREVIOUS.document(),
+            "schema_version": service.SCHEMA_VERSION,
+            "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }
+        for profile in ("installed_40019_engine_v5_authority_v1_0", None, 1):
+            with self.subTest(profile=profile), self.assertRaises(
+                install.InstallError
+            ) as captured:
+                service.validate_intent(
+                    {**intent, "off_proof_profile": profile},
+                    product_version=install.VERSION,
+                )
+            self.assertEqual(captured.exception.code, "service_journal_invalid")
+            self.assertIn("proof profile is invalid", str(captured.exception))
+
     def test_service_event_rejects_boolean_schema_and_sequence(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
@@ -331,7 +337,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                     events,
                     intent=intent,
                     phase=service.PHASES[1],
-                    action=BOUND.service_actions[1],
+                    action=install.SERVICE_ACTIONS[1],
                     guard=guard(),
                 )
         for field in ("schema_version", "sequence"):
@@ -487,7 +493,7 @@ class ServiceEventStoreTests(unittest.TestCase):
             ).exists()
         )
 
-    def test_retired_final_cli_and_wrapper_are_explicitly_rejected(self) -> None:
+    def test_unknown_cli_option_is_rejected_before_any_transaction(self) -> None:
         with (
             patch.object(
                 sys,
@@ -500,24 +506,8 @@ class ServiceEventStoreTests(unittest.TestCase):
         ):
             service.main()
         self.assertEqual(captured.exception.code, 2)
-        self.assertIn("--final is retired", stderr.getvalue())
+        self.assertIn("unrecognized arguments: --final", stderr.getvalue())
         transaction.assert_not_called()
-
-        repository = Path(__file__).resolve().parents[2]
-        completed = subprocess.run(
-            (
-                "/bin/bash",
-                str(repository / "scripts/run_current_service_transaction.sh"),
-                "--preflight",
-                "--final",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(completed.returncode, 2)
-        self.assertEqual(completed.stdout, "")
-        self.assertIn("--final is retired", completed.stderr)
 
     def test_no_current_profile_can_accept_retired_40030_as_previous(self) -> None:
         retired_previous = install.AppIdentity("0.4.0", "40030", "f" * 64)
@@ -525,8 +515,8 @@ class ServiceEventStoreTests(unittest.TestCase):
             with store.locked():
                 with self.assertRaises(install.InstallError) as captured:
                     store.create(CANDIDATE, retired_previous, guard(), GA_ENVIRONMENT)
-        # A retired build was never a supported predecessor, so no vocabulary
-        # exists to write the transaction in; that is the precise reason.
+        # A retired build was never a supported predecessor, so no transaction
+        # can be written for it; that is the precise reason.
         self.assertEqual(captured.exception.code, "predecessor_unsupported")
         self.assertFalse(self.fixture.paths.transaction_directory.exists())
         self.assertTrue(self.fixture.paths.pending_directory.exists())
@@ -536,7 +526,7 @@ class ServiceEventStoreTests(unittest.TestCase):
             with store.locked():
                 intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 for phase, action in zip(
-                    service.PHASES[1:], service.INSTALLED_40019_ACTIONS[1:], strict=True
+                    service.PHASES[1:], install.SERVICE_ACTIONS[1:], strict=True
                 ):
                     events.append(
                         store.append(
@@ -555,6 +545,38 @@ class ServiceEventStoreTests(unittest.TestCase):
             [event["phase"] for event in loaded_events], list(service.PHASES)
         )
 
+    def test_terminal_snapshot_rejects_a_retired_authority_recovery_marker(self) -> None:
+        with service.ServiceEventStore(self.fixture.paths) as store:
+            with store.locked():
+                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
+                for phase, action in zip(
+                    service.PHASES[1:], install.SERVICE_ACTIONS[1:], strict=True
+                ):
+                    events.append(
+                        store.append(
+                            events,
+                            intent=intent,
+                            phase=phase,
+                            action=action,
+                            guard=guard(),
+                        )
+                    )
+        files = {
+            path.name: path.read_bytes()
+            for path in self.fixture.paths.transaction_directory.iterdir()
+        }
+        _environment, snapshot_intent, snapshot_events = (
+            service.validate_terminal_snapshot_files(files)
+        )
+        self.assertEqual(snapshot_intent, intent)
+        self.assertEqual(list(snapshot_events), events)
+        with self.assertRaises(install.InstallError) as captured:
+            service.validate_terminal_snapshot_files(
+                {**files, "authority-recovery-intent.json": b"{}\n"}
+            )
+        self.assertEqual(captured.exception.code, "service_journal_invalid")
+        self.assertIn("inventory", str(captured.exception))
+
     def test_initial_pending_directory_is_recovered_atomically(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
@@ -566,191 +588,6 @@ class ServiceEventStoreTests(unittest.TestCase):
                 loaded = store.load()
                 self.assertEqual(loaded, (intent, events))
 
-    def test_authority_recovery_profile_is_preserved_as_exact_event_evidence(
-        self,
-    ) -> None:
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
-                events.append(
-                    store.append(
-                        events,
-                        intent=intent,
-                        phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
-                        guard=guard(),
-                    )
-                )
-                store.prepare_authority_recovery(intent, events, guard())
-                events.append(
-                    store.append(
-                        events,
-                        intent=intent,
-                        phase="authority_unregistered",
-                        action=install.INSTALLED_40019_RECOVERY_ACTION,
-                        guard=guard(),
-                        off_proof_profile=(
-                            install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-                        ),
-                    )
-                )
-                loaded = store.load()
-
-        self.assertEqual(loaded, (intent, events))
-        self.assertEqual(
-            events[-1]["off_proof_profile"],
-            install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE,
-        )
-        self.assertTrue(self.fixture.paths.transaction_directory.is_dir())
-        self.assertFalse(self.fixture.paths.pending_directory.exists())
-
-    def test_complete_pending_authority_recovery_intent_is_published_on_load(
-        self,
-    ) -> None:
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
-                events.append(
-                    store.append(
-                        events,
-                        intent=intent,
-                        phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
-                        guard=guard(),
-                    )
-                )
-                with patch.object(
-                    service.ServiceEventStore,
-                    "_publish_pending_event",
-                    side_effect=RuntimeError("simulated crash before marker rename"),
-                ):
-                    with self.assertRaisesRegex(RuntimeError, "marker rename"):
-                        store.prepare_authority_recovery(intent, events, guard())
-
-        pending = (
-            self.fixture.paths.transaction_directory
-            / install.AUTHORITY_RECOVERY_PENDING_INTENT_NAME
-        )
-        published = (
-            self.fixture.paths.transaction_directory
-            / install.AUTHORITY_RECOVERY_INTENT_NAME
-        )
-        self.assertTrue(pending.is_file())
-        self.assertFalse(published.exists())
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                self.assertEqual(store.load(), (intent, events))
-                self.assertTrue(
-                    store.authority_recovery_prepared(intent, events)
-                )
-        self.assertFalse(pending.exists())
-        self.assertTrue(published.is_file())
-
-    def test_incomplete_pending_authority_recovery_intent_is_discarded(
-        self,
-    ) -> None:
-        for payload in (b"", b"{"):
-            with self.subTest(payload=payload):
-                fixture = ServiceFixture()
-                try:
-                    with service.ServiceEventStore(fixture.paths) as store:
-                        with store.locked():
-                            intent, events = store.create(
-                                CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT
-                            )
-                            events.append(
-                                store.append(
-                                    events,
-                                    intent=intent,
-                                    phase="proxy_unregistered",
-                                    action=(
-                                        "unregister-installed-40019-proxy-agent"
-                                    ),
-                                    guard=guard(),
-                                )
-                            )
-                    pending = (
-                        fixture.paths.transaction_directory
-                        / install.AUTHORITY_RECOVERY_PENDING_INTENT_NAME
-                    )
-                    pending.write_bytes(payload)
-                    pending.chmod(0o600)
-                    with service.ServiceEventStore(fixture.paths) as store:
-                        with store.locked():
-                            self.assertEqual(store.load(), (intent, events))
-                            self.assertFalse(
-                                store.authority_recovery_prepared(intent, events)
-                            )
-                    self.assertFalse(pending.exists())
-                finally:
-                    fixture.cleanup()
-
-    def test_invalid_published_authority_recovery_intent_is_never_deleted(
-        self,
-    ) -> None:
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
-                events.append(
-                    store.append(
-                        events,
-                        intent=intent,
-                        phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
-                        guard=guard(),
-                    )
-                )
-                store.prepare_authority_recovery(intent, events, guard())
-        published = (
-            self.fixture.paths.transaction_directory
-            / install.AUTHORITY_RECOVERY_INTENT_NAME
-        )
-        published.write_bytes(b"{}\n")
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                with self.assertRaises(install.InstallError) as captured:
-                    store.load()
-        self.assertEqual(captured.exception.code, "service_journal_invalid")
-        self.assertEqual(published.read_bytes(), b"{}\n")
-
-    def test_recovery_marker_cannot_authorize_a_legacy_authority_event(self) -> None:
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
-                events.append(
-                    store.append(
-                        events,
-                        intent=intent,
-                        phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
-                        guard=guard(),
-                    )
-                )
-                store.prepare_authority_recovery(intent, events, guard())
-        contradictory = {
-            "action": "unregister-installed-40019-global-authority",
-            "document": service.DOCUMENT,
-            "guard_after": guard(),
-            "guard_before": guard(),
-            "intent_sha256": events[0]["intent_sha256"],
-            "off_proof_profile": install.INSTALLED_40019_OFF_PROOF_PROFILE,
-            "phase": "authority_unregistered",
-            "previous_event_sha256": service._sha256(
-                service._canonical_json(events[1])
-            ),
-            "schema_version": service.SCHEMA_VERSION,
-            "sequence": 2,
-        }
-        path = self.fixture.paths.transaction_directory / "event-00000002.json"
-        path.write_bytes(service._canonical_json(contradictory))
-        path.chmod(0o600)
-
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                with self.assertRaises(install.InstallError) as captured:
-                    store.load()
-        self.assertEqual(captured.exception.code, "service_journal_invalid")
-
     def test_non_scalar_event_proof_profile_is_a_stable_journal_error(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
@@ -760,10 +597,10 @@ class ServiceEventStoreTests(unittest.TestCase):
                         events,
                         intent=intent,
                         phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
+                        action="unregister-proxy-agent",
                         guard=guard(),
                         off_proof_profile=[
-                            install.INSTALLED_40019_OFF_PROOF_PROFILE
+                            install.CURRENT_OFF_PROOF_PROFILE
                         ],
                     )
         self.assertEqual(captured.exception.code, "service_journal_invalid")
@@ -782,7 +619,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                             events,
                             intent=intent,
                             phase="proxy_unregistered",
-                            action="unregister-installed-40019-proxy-agent",
+                            action="unregister-proxy-agent",
                             guard=guard(),
                         )
         with service.ServiceEventStore(self.fixture.paths) as store:
@@ -826,7 +663,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                             events,
                             intent=intent,
                             phase="proxy_unregistered",
-                            action="unregister-installed-40019-proxy-agent",
+                            action="unregister-proxy-agent",
                             guard=guard(),
                         )
         with service.ServiceEventStore(self.fixture.paths) as store:
@@ -907,7 +744,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                         events,
                         intent=foreign,
                         phase=service.PHASES[1],
-                        action=BOUND.service_actions[1],
+                        action=install.SERVICE_ACTIONS[1],
                         guard=guard(),
                     )
         self.assertEqual(raised.exception.code, "service_journal_invalid")
@@ -940,7 +777,7 @@ class ServiceEventStoreTests(unittest.TestCase):
             with store.locked():
                 intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 for phase, action in zip(
-                    service.PHASES[1:], service.INSTALLED_40019_ACTIONS[1:], strict=True
+                    service.PHASES[1:], install.SERVICE_ACTIONS[1:], strict=True
                 ):
                     events.append(
                         store.append(
@@ -965,7 +802,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                         events,
                         intent=intent,
                         phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
+                        action="unregister-proxy-agent",
                         guard=guard(),
                     )
                 )
@@ -987,7 +824,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                         events,
                         intent=intent,
                         phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
+                        action="unregister-proxy-agent",
                         guard=guard(proxy="9" * 64),
                     )
         self.assertEqual(captured.exception.code, "service_journal_invalid")
@@ -1012,20 +849,10 @@ class ServiceEventStoreTests(unittest.TestCase):
             with store.locked():
                 intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 for phase, action in (
-                    (
-                        "proxy_unregistered",
-                        "unregister-installed-40019-proxy-agent",
-                    ),
-                    (
-                        "authority_unregistered",
-                        install.INSTALLED_40019_RECOVERY_ACTION,
-                    ),
+                    ("proxy_unregistered", "unregister-proxy-agent"),
+                    ("authority_unregistered", "unregister-global-authority"),
                     ("decommissioned", "verify-dormant"),
                 ):
-                    if action == install.INSTALLED_40019_RECOVERY_ACTION:
-                        store.prepare_authority_recovery(
-                            intent, events, guard()
-                        )
                     events.append(
                         store.append(
                             events,
@@ -1033,11 +860,6 @@ class ServiceEventStoreTests(unittest.TestCase):
                             phase=phase,
                             action=action,
                             guard=guard(),
-                            off_proof_profile=(
-                                install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-                                if action == install.INSTALLED_40019_RECOVERY_ACTION
-                                else None
-                            ),
                         )
                     )
 
@@ -1049,6 +871,30 @@ class ServiceEventStoreTests(unittest.TestCase):
         )
 
         transaction_directory = self.fixture.paths.transaction_directory
+        # The retired Authority recovery markers never authorize an install.
+        for name in (
+            "authority-recovery-intent.json",
+            ".authority-recovery-intent.json.pending",
+        ):
+            marker = transaction_directory / name
+            marker.write_bytes(b"{}\n")
+            marker.chmod(0o600)
+            with self.subTest(marker=name), self.assertRaises(
+                install.InstallError
+            ) as marker_error:
+                install.require_decommissioned_service_transaction(
+                    self.fixture.paths.install_paths,
+                    CANDIDATE,
+                    PREVIOUS,
+                    guard(),
+                )
+            self.assertEqual(
+                marker_error.exception.code,
+                "service_decommission_evidence_invalid",
+            )
+            self.assertEqual(marker.read_bytes(), b"{}\n")
+            marker.unlink()
+
         before_inode = transaction_directory.stat().st_ino
         before_documents = {
             path.name: path.read_bytes()
@@ -1166,7 +1012,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
         with patch.object(install, "require_managed_tunnel_location"), patch.object(
             service, "_absolute_process_path", side_effect=lambda pid: paths[pid]
         ):
-            service._require_registered_services(runtime, parent_build="40019", uid=501)
+            service._require_registered_services(runtime, parent_build="50025", uid=501)
 
     @staticmethod
     def runtime(process_output: str) -> service.ServiceRuntime:
@@ -1181,7 +1027,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
                     registered_job(
                         proxy_domain,
                         program=service.PROXY_PROGRAM,
-                        build="40019",
+                        build="50025",
                         signing_identifier="com.bill.clashformac.proxy-agent",
                         pid=6805,
                     ),
@@ -1193,7 +1039,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
                     registered_job(
                         service.AUTHORITY_DOMAIN,
                         program=service.AUTHORITY_PROGRAM,
-                        build="40019",
+                        build="50025",
                         signing_identifier="com.bill.clashformac.global-authority",
                         pid=6806,
                     ),
@@ -1221,7 +1067,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
             service, "_absolute_process_path", side_effect=lambda pid: paths[pid]
         ):
             service._require_registered_services(
-                self.runtime(service_processes()), parent_build="40019", uid=501
+                self.runtime(service_processes()), parent_build="50025", uid=501
             )
 
     def test_wrong_absolute_helper_path_fails_closed(self) -> None:
@@ -1232,7 +1078,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
         ):
             with self.assertRaises(install.InstallError) as captured:
                 service._require_registered_services(
-                    self.runtime(service_processes()), parent_build="40019", uid=501
+                    self.runtime(service_processes()), parent_build="50025", uid=501
                 )
         self.assertEqual(captured.exception.code, "service_process_identity_invalid")
 
@@ -1244,7 +1090,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
         with self.assertRaises(install.InstallError) as session_error:
             service._require_registered_services(
                 self.runtime(service_processes(extra=(other_login,))),
-                parent_build="40019",
+                parent_build="50025",
                 uid=501,
             )
         self.assertEqual(session_error.exception.code, "service_multi_user_session")
@@ -1264,7 +1110,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
             with self.assertRaises(install.InstallError) as helper_error:
                 service._require_registered_services(
                     self.runtime(service_processes(extra=(extra_helper,))),
-                    parent_build="40019",
+                    parent_build="50025",
                     uid=501,
                 )
         self.assertEqual(helper_error.exception.code, "service_process_identity_invalid")
@@ -1279,28 +1125,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
 
     @staticmethod
     def receipt(action: str) -> dict[str, object]:
-        if action == "status":
-            return {
-                "action": "status",
-                "document": install.SERVICE_MAINTENANCE_DOCUMENT,
-                "engine_status": None,
-                "global_authority": "enabled",
-                "off_proof_profile": None,
-                "proxy_agent": "not_registered",
-            }
         pairs = {
-            "unregister-installed-40019-proxy-agent": (
-                "not_registered",
-                "enabled",
-            ),
-            "unregister-installed-40019-global-authority": (
-                "not_registered",
-                "not_registered",
-            ),
-            install.INSTALLED_40019_RECOVERY_ACTION: (
-                "not_registered",
-                "not_registered",
-            ),
             "unregister-proxy-agent": ("not_registered", "enabled"),
             "unregister-global-authority": ("not_registered", "not_registered"),
             "register-global-authority": ("not_registered", "enabled"),
@@ -1316,15 +1141,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             "off_proof_profile": (
                 None
                 if action == "register-global-authority"
-                else (
-                    install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-                    if action == install.INSTALLED_40019_RECOVERY_ACTION
-                    else (
-                        install.INSTALLED_40019_OFF_PROOF_PROFILE
-                        if "installed-40019" in action
-                        else install.CURRENT_OFF_PROOF_PROFILE
-                    )
-                )
+                else install.CURRENT_OFF_PROOF_PROFILE
             ),
             "proxy_agent": proxy,
         }
@@ -1356,9 +1173,8 @@ class CurrentServiceTransactionTests(unittest.TestCase):
         self.assertEqual(
             actions,
             [
-                "unregister-installed-40019-proxy-agent",
-                "status",
-                "unregister-installed-40019-global-authority",
+                "unregister-proxy-agent",
+                "unregister-global-authority",
             ],
         )
         self.assertEqual(result["event"]["phase"], "decommissioned")
@@ -1401,77 +1217,6 @@ class CurrentServiceTransactionTests(unittest.TestCase):
 
         self.assertEqual(result["event"]["phase"], "decommissioned")
         self.assertGreaterEqual(attempts, 3)
-
-    def test_recovery_intent_survives_current_authority_action_interruption(
-        self,
-    ) -> None:
-        with service.ServiceEventStore(self.fixture.paths) as store:
-            with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
-                events.append(
-                    store.append(
-                        events,
-                        intent=intent,
-                        phase="proxy_unregistered",
-                        action="unregister-installed-40019-proxy-agent",
-                        guard=guard(),
-                    )
-                )
-
-        actions: list[str] = []
-        recovery_attempts = 0
-
-        def run_action(_runtime, _executable, action):
-            nonlocal recovery_attempts
-            actions.append(action)
-            if action == "status":
-                receipt = self.receipt(action)
-                return {
-                    **receipt,
-                    "global_authority": (
-                        "not_registered"
-                        if recovery_attempts == 0
-                        else "enabled"
-                    ),
-                }
-            if action == install.INSTALLED_40019_RECOVERY_ACTION:
-                recovery_attempts += 1
-                if recovery_attempts == 1:
-                    raise RuntimeError("simulated interruption after current register")
-            return self.receipt(action)
-
-        with (
-            patch.object(
-                self.fixture.transaction,
-                "_identity_pair",
-                return_value=(CANDIDATE, PREVIOUS),
-            ),
-            patch.object(service, "_service_receipt", side_effect=run_action),
-            patch.object(service, "_wait_for_service_absence"),
-            patch.object(install, "require_cfm_dormant"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "current register"):
-                self.fixture.transaction.decommission()
-            marker = (
-                self.fixture.paths.transaction_directory
-                / install.AUTHORITY_RECOVERY_INTENT_NAME
-            )
-            self.assertTrue(marker.is_file())
-            with service.ServiceEventStore(self.fixture.paths) as store:
-                loaded = store.load()
-            self.assertEqual((loaded or ({}, [{}]))[1][-1]["phase"], "proxy_unregistered")
-            result = self.fixture.transaction.decommission()
-
-        self.assertEqual(result["event"]["phase"], "decommissioned")
-        self.assertEqual(
-            actions,
-            [
-                "status",
-                install.INSTALLED_40019_RECOVERY_ACTION,
-                "status",
-                install.INSTALLED_40019_RECOVERY_ACTION,
-            ],
-        )
 
     def test_cfw_guard_drift_blocks_event_publication_and_next_mutation(self) -> None:
         self.fixture.runtime.guards = [guard(), guard(), guard(proxy="9" * 64)]
@@ -1524,11 +1269,11 @@ class CurrentServiceTransactionTests(unittest.TestCase):
                 for phase, action in (
                     (
                         "proxy_unregistered",
-                        "unregister-installed-40019-proxy-agent",
+                        "unregister-proxy-agent",
                     ),
                     (
                         "authority_unregistered",
-                        "unregister-installed-40019-global-authority",
+                        "unregister-global-authority",
                     ),
                     ("decommissioned", "verify-dormant"),
                 ):
@@ -1572,13 +1317,12 @@ class CurrentServiceTransactionTests(unittest.TestCase):
         target = self.fixture.paths.install_paths.target_app
         rejected = (
             (CANDIDATE, install.AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
-            (CANDIDATE, install.AppIdentity("0.4.0", "40019", "f" * 64), "predecessor_identity_mismatch"),
+            # Earlier installs are no longer predecessors of any GA transaction.
+            (CANDIDATE, install.AppIdentity("0.4.0", "40073", "a" * 64), "predecessor_unsupported"),
             # The GA build itself is never a predecessor.
             (CANDIDATE, install.AppIdentity("0.5.0", "50028", "a" * 64), "predecessor_unsupported"),
-            (CANDIDATE, install.AppIdentity("0.4.0", "40043", "a" * 64), "predecessor_identity_mismatch"),
-            (CANDIDATE, install.AppIdentity("0.4.0", "40044", "a" * 64), "predecessor_identity_mismatch"),
-            (CANDIDATE, install.AppIdentity("0.4.0", "40045", "a" * 64), "predecessor_identity_mismatch"),
-            (CANDIDATE, install.AppIdentity("0.3.5", "40019", PREVIOUS.tree_sha256), "install_identity_mismatch"),
+            (CANDIDATE, install.AppIdentity("0.5.0", "50025", "f" * 64), "predecessor_identity_mismatch"),
+            (CANDIDATE, install.AppIdentity("0.4.0", "50025", PREVIOUS.tree_sha256), "install_identity_mismatch"),
             (
                 install.CandidateIdentity(
                     app=install.AppIdentity("0.4.0", "40040", "b" * 64),
@@ -1606,14 +1350,6 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             patch.object(install, "verify_dormant_bundle"),
         ):
             self.assertEqual(self.fixture.transaction._identity_pair(), (CANDIDATE, PREVIOUS))
-        with (
-            patch.object(self.fixture.transaction, "_candidate", return_value=CANDIDATE),
-            patch.object(install, "read_app_identity", return_value=INSTALLED_PREVIOUS),
-            patch.object(install, "verify_dormant_bundle"),
-        ):
-            self.assertEqual(
-                self.fixture.transaction._identity_pair(), (CANDIDATE, INSTALLED_PREVIOUS)
-            )
         # An absent or non-directory target is decided before any identity read.
         shutil.rmtree(target)
         for prepare, code in (
@@ -1631,58 +1367,34 @@ class CurrentServiceTransactionTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, code)
                 read_identity.assert_not_called()
 
-    def test_preflight_proves_off_in_the_observed_predecessors_vocabulary(self) -> None:
-        successor = ServiceFixture()
-        self.addCleanup(successor.cleanup)
-        historical = ServiceFixture()
-        self.addCleanup(historical.cleanup)
-        prior_installed = ServiceFixture()
-        self.addCleanup(prior_installed.cleanup)
-        cases = (
-            (self.fixture, CANDIDATE, PREVIOUS, "prove-installed-40019-off", install.INSTALLED_40019_OFF_PROOF_PROFILE),
-            (
-                historical,
-                CANDIDATE,
-                install.AppIdentity("0.4.0", "40041", install.INSTALLED_40041_PREDECESSOR.tree_sha256),
-                "prove-off",
-                install.CURRENT_OFF_PROOF_PROFILE,
-            ),
-            (
-                prior_installed,
-                CANDIDATE,
-                install.AppIdentity("0.4.0", "40043", install.INSTALLED_40043_PREDECESSOR.tree_sha256),
-                "prove-off",
-                install.CURRENT_OFF_PROOF_PROFILE,
-            ),
-            (successor, CANDIDATE, INSTALLED_PREVIOUS, "prove-off", install.CURRENT_OFF_PROOF_PROFILE),
-        )
-        for fixture, candidate, previous, prove_off, profile in cases:
-            with self.subTest(previous=previous.build_number, prove_off=prove_off):
-                actions: list[str] = []
+    def test_preflight_proves_off_in_the_current_vocabulary(self) -> None:
+        actions: list[str] = []
 
-                def run_action(_runtime, _executable, action, *, profile=profile):
-                    actions.append(action)
-                    return {
-                        "action": action.replace("-", "_"),
-                        "document": install.SERVICE_MAINTENANCE_DOCUMENT,
-                        "engine_status": None if action == "status" else "off",
-                        "global_authority": "enabled",
-                        "off_proof_profile": None if action == "status" else profile,
-                        "proxy_agent": "enabled",
-                    }
+        def run_action(_runtime, _executable, action):
+            actions.append(action)
+            return {
+                "action": action.replace("-", "_"),
+                "document": install.SERVICE_MAINTENANCE_DOCUMENT,
+                "engine_status": None if action == "status" else "off",
+                "global_authority": "enabled",
+                "off_proof_profile": (
+                    None if action == "status" else install.CURRENT_OFF_PROOF_PROFILE
+                ),
+                "proxy_agent": "enabled",
+            }
 
-                with (
-                    patch.object(fixture.transaction, "_identity_pair", return_value=(candidate, previous)),
-                    patch.object(service, "_service_receipt", side_effect=run_action),
-                    patch.object(service, "_require_registered_services"),
-                    patch.object(service, "_require_tombstone_and_inactive_system_extension"),
-                    patch.object(install, "require_single_interactive_local_user"),
-                ):
-                    result = fixture.transaction.preflight()
-                self.assertEqual(actions, ["status", prove_off])
-                self.assertEqual(result[:2], (candidate, previous))
+        with (
+            patch.object(self.fixture.transaction, "_identity_pair", return_value=(CANDIDATE, PREVIOUS)),
+            patch.object(service, "_service_receipt", side_effect=run_action),
+            patch.object(service, "_require_registered_services"),
+            patch.object(service, "_require_tombstone_and_inactive_system_extension"),
+            patch.object(install, "require_single_interactive_local_user"),
+        ):
+            result = self.fixture.transaction.preflight()
+        self.assertEqual(actions, ["status", "prove-off"])
+        self.assertEqual(result[:2], (CANDIDATE, PREVIOUS))
 
-    def test_current_predecessor_decommission_speaks_only_the_current_vocabulary(
+    def test_decommission_speaks_only_the_current_vocabulary(
         self,
     ) -> None:
         fixture = ServiceFixture()
@@ -1697,12 +1409,12 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             patch.object(
                 fixture.transaction,
                 "preflight",
-                return_value=(CANDIDATE, INSTALLED_PREVIOUS, guard()),
+                return_value=(CANDIDATE, PREVIOUS, guard()),
             ),
             patch.object(
                 fixture.transaction,
                 "_identity_pair",
-                return_value=(CANDIDATE, INSTALLED_PREVIOUS),
+                return_value=(CANDIDATE, PREVIOUS),
             ),
             patch.object(service, "_service_receipt", side_effect=run_action),
             patch.object(service, "_wait_for_service_absence"),
@@ -1710,14 +1422,13 @@ class CurrentServiceTransactionTests(unittest.TestCase):
         ):
             result = fixture.transaction.decommission()
 
-        # No 40019 action, no status probe, no recovery branch.
         self.assertEqual(actions, ["unregister-proxy-agent", "unregister-global-authority"])
         self.assertEqual(result["event"]["phase"], "decommissioned")
         with service.ServiceEventStore(fixture.paths) as store:
             loaded = store.load()
         self.assertIsNotNone(loaded)
         intent, events = loaded or ({}, [])
-        self.assertEqual(intent["previous"], INSTALLED_PREVIOUS.document())
+        self.assertEqual(intent["previous"], PREVIOUS.document())
         self.assertEqual(intent["off_proof_profile"], install.CURRENT_OFF_PROOF_PROFILE)
         self.assertEqual(
             [event["action"] for event in events],
@@ -1727,14 +1438,9 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             {event["off_proof_profile"] for event in events},
             {install.CURRENT_OFF_PROOF_PROFILE},
         )
-        # A recovery intent has no meaning for this predecessor: it cannot be
-        # prepared, and one placed by hand is rejected on load and left as is.
-        with service.ServiceEventStore(fixture.paths) as store:
-            with store.locked():
-                with self.assertRaises(install.InstallError) as prepared:
-                    store.prepare_authority_recovery(intent, events, guard())
-        self.assertEqual(prepared.exception.code, "service_journal_invalid")
-        marker = fixture.paths.transaction_directory / install.AUTHORITY_RECOVERY_INTENT_NAME
+        # The retired Authority recovery marker is not part of any current
+        # journal: one placed by hand is rejected on load and left as is.
+        marker = fixture.paths.transaction_directory / "authority-recovery-intent.json"
         marker.write_bytes(b"{}\n")
         marker.chmod(0o600)
         with service.ServiceEventStore(fixture.paths) as store:
@@ -1743,17 +1449,16 @@ class CurrentServiceTransactionTests(unittest.TestCase):
         self.assertEqual(loaded_error.exception.code, "service_journal_invalid")
         self.assertEqual(marker.read_bytes(), b"{}\n")
         # The same holds for an unpublished (pending) marker next to a journal
-        # that has only its prepare event: load must not treat it as this
-        # transaction's own interrupted recovery and discard it.
+        # that has only its prepare event: load must not discard it.
         marker.unlink()
         pending = ServiceFixture()
         self.addCleanup(pending.cleanup)
         with service.ServiceEventStore(pending.paths) as store:
             with store.locked():
-                store.create(CANDIDATE, INSTALLED_PREVIOUS, guard(), GA_ENVIRONMENT)
+                store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
         pending_marker = (
             pending.paths.transaction_directory
-            / install.AUTHORITY_RECOVERY_PENDING_INTENT_NAME
+            / ".authority-recovery-intent.json.pending"
         )
         pending_marker.write_bytes(b"{}\n")
         pending_marker.chmod(0o600)

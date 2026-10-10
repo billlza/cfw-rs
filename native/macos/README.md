@@ -218,20 +218,21 @@ Apple references:
 ## libbox composition and remaining evidence
 
 `Dependencies.lock.json` pins sing-box `v1.14.2` at commit
-`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`, Go `1.27.1`, and gomobile
+`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`, Go `1.27.2`, and gomobile
 `v0.1.13` at commit `9f03b8f25789099c5c8abef4a02085da783ba923`. The
 materialization step applies six digest-pinned patches in a
 fixed order:
 
 1. `sing-box-v1.14.2-security-dependencies.patch` updates the pinned Go module
    graph, including go-chi `v5.3.2`, `x/crypto v0.57.0`, `x/mod v0.41.0`,
-   `x/net v0.59.0`, `x/sync v0.23.0`, `x/sys v0.48.0`, `x/term v0.46.0`,
+   `x/net v0.60.0`, `x/sync v0.23.0`, `x/sys v0.48.0`, `x/term v0.46.0`,
    `x/text v0.42.0`, `x/tools v0.50.0`, gRPC `v1.83.2`, and their exact coupled
-   requirements, and sets the module's Go directive to `1.27.1`. The `x/mod`
+   requirements, and sets the module's Go directive to `1.27.2`. The `x/mod`
    refresh keeps the module-level `GO-2026-6179` and `GO-2026-6180` findings
    absent without an ignore. The `x/crypto` refresh fixes `GO-2026-6354` and
-   `GO-2026-6355`; `x/crypto v0.57.0` requires Go `1.26.0` or later, and the
-   release compiler is `1.27.1`.
+   `GO-2026-6355`; `x/crypto v0.57.0` requires Go `1.26.0` or later. Go
+   `1.27.2` and `x/net v0.60.0` fix the 2026-10-08 standard library and
+   `x/net` advisories, and the release compiler is `1.27.2`.
 2. `sing-box-v1.14.2-raw-packet-tun.patch` adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and

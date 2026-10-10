@@ -407,7 +407,7 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
             env_path = root / _PINS_ENV
             env_path.write_text(
                 env_path.read_text(encoding="utf-8").replace(
-                    "GO_VERSION=1.27.1", "GO_VERSION=1.26.4"
+                    "GO_VERSION=1.27.2", "GO_VERSION=1.26.4"
                 ),
                 encoding="utf-8",
             )

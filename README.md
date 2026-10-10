@@ -161,7 +161,7 @@ Release inputs are recorded in
 
 - Rust 1.98.1
 - Node.js 26.8.2
-- Go 1.27.1
+- Go 1.27.2
 - SagerNet gomobile v0.1.13
 - cargo-deny 0.20.2
 - sing-box/libbox v1.14.2 at

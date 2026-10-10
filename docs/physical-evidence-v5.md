@@ -90,19 +90,12 @@ TOCTOU-visible mutation fails the entire physical level.
 - `scripts/physical_capture/packet.py` contains the closed Unified Log reader,
   fixed route/interface/tcpdump/send specifications and bounded dedicated
   sender. The receive-only peer source, tests, service unit and reproducible
-  build instructions live in `tools/packet-evidence-endpoint/`; the pinned
-  Linux/amd64 artifact digest is
-  `c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c`
-  and the exact systemd unit digest is
-  `7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`.
-  The only supported Debian installation transaction is
-  `install-endpoint.sh`, digest
-  `14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8`;
-  its fixed GCE metadata resolver configuration has digest
-  `b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`.
-  The installed capture sudoers rule and local strict known-hosts bytes have
-  digests `a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411`
-  and `3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba`.
+  build instructions live in `tools/packet-evidence-endpoint/`. The only
+  supported Debian installation transaction is `install-endpoint.sh`, with a
+  fixed GCE metadata resolver configuration, capture sudoers rule and local
+  strict known-hosts file; the Linux/amd64 artifact, systemd unit and those
+  files' digests are the `packetEvidenceEndpoint` values in
+  `scripts/pinned_build_inputs.json`.
   `scripts/pinned_build_inputs.json` and its offline verifier bind those bytes,
   fixed TCP/UDP port 44333, UDP-only DNS port 53, CGO-disabled Linux/amd64
   build, source, tests, unit, resolver, installer, sudoers, endpoint identity

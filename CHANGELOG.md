@@ -101,6 +101,12 @@
   interoperable when only WireGuard had a live peer, and now carries a dated
   correction.
 
+### Security
+
+- Build the network engine with Go 1.27.2 and `golang.org/x/net` v0.60.0.
+  They fix the 2026-10-08 Go advisories in HTTP/2, HTTP/1, TLS ECH and
+  `html/template` handling that the engine's code can reach.
+
 ## 0.4.0 - Unreleased
 
 - Add Simplified Chinese, Traditional Chinese, English and Japanese with Settings → Appearance → Language, system-language matching, and localized native menus. Language changes preserve the active network session.

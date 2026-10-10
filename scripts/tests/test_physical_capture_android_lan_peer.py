@@ -412,10 +412,10 @@ class AndroidLanPeerAdmissionTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+            "3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
             source,
         )
-        self.assertIn("ARTIFACT_SIZE: Final = 2_359_422", source)
+        self.assertIn("ARTIFACT_SIZE: Final = 2_293_884", source)
 
     def test_private_adb_server_copies_explicit_fixture_credentials(self) -> None:
         runner = _FakeRunner(self.artifact_bytes)

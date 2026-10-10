@@ -31,7 +31,7 @@ CGO_ENABLED=0 \
 GOOS=linux \
 GOARCH=amd64 \
 GOCACHE="$PWD/target/toolchains/go-build-cache" \
-target/toolchains/go-1.27.1/bin/go \
+target/toolchains/go-1.27.2/bin/go \
   -C tools/packet-evidence-endpoint \
   build \
   -buildvcs=false \
@@ -42,7 +42,7 @@ target/toolchains/go-1.27.1/bin/go \
 ```
 
 The reviewed Linux/amd64 artifact from those exact inputs has SHA-256
-`ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0`.
+`f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb`.
 
 The reviewed endpoint policy must bind the resulting SHA-256, each GCE
 instance identity, the exact external IPv4/IPv6 addresses, the SSH host-key
@@ -62,17 +62,16 @@ upgrades and the unneeded telemetry manager, checks service health, and only
 then deletes its staging files. Run it only after separately verifying the five
 staged file digests.
 
-The final installer, service unit, resolver configuration, capture sudoers and
-strict known-hosts SHA-256 values are respectively
-`14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8`,
-`7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`,
-`b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`,
-`a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411`,
-and `3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba`.
-The source-pinned endpoint policy SHA-256 is
-`a487fc3ebc0698b4b5ee0eb40dfd388fc0c5ee0994bbd7ffc698e9f817a272dd`.
+The installer, service unit, resolver configuration, capture sudoers,
+strict known-hosts and endpoint policy SHA-256 values are the
+`packetEvidenceEndpoint` values in `scripts/pinned_build_inputs.json`; this
+README repeats only the binary digest its build recipe must state. A Go
+toolchain change rebinds the binary and therefore the installer and policy;
+the instances then run the earlier binary until the installation transaction
+is rerun, which physical assurance collection requires.
 All three endpoint installation transactions and both dedicated remote-capture
-allow/deny preflights succeeded before the instances were stopped. That is
+allow/deny preflights succeeded with an earlier binary before the instances
+were stopped. That is
 provisioning evidence only. The IAP grant is attached to each IAP TCP tunnel
 instance resource, not to Compute instance IAM or project IAM: the fixed client
 service account has `roles/iap.tunnelResourceAccessor` under condition

@@ -1,6 +1,6 @@
 module github.com/billziss-gh/cfw-rs/tools/physical-collector
 
-go 1.27.1
+go 1.27.2
 
 require (
 	cloud.google.com/go/firestore v1.25.0
@@ -30,7 +30,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.46.0 // indirect
 	go.opentelemetry.io/otel/trace v1.46.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect

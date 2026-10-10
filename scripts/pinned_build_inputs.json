@@ -14,14 +14,14 @@
     "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
     "XCODEGEN_PACKAGE_RESOLVED_SHA256": "c71eacb628f5fb50d8cd266b5fbc1bbe8df48b880fc91570ca79f5f6deaab961",
     "NODE_VERSION": "26.8.2",
-    "GO_VERSION": "1.27.1",
+    "GO_VERSION": "1.27.2",
     "GOMOBILE_VERSION": "v0.1.13",
     "GOVULNCHECK_VERSION": "v1.6.0",
     "TAURI_CLI_VERSION": "2.12.0",
     "SING_BOX_VERSION": "v1.14.2",
     "NPM_VERSION": "12.0.2",
     "NPM_ARCHIVE_SHA256": "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1",
-    "GO_RELEASE_TOOLS_GO_MOD_SHA256": "d3b33745ba03310f6064ef401a937ab29a1e34ec4829953cf8a454857e71da40",
+    "GO_RELEASE_TOOLS_GO_MOD_SHA256": "808284de3c00d0852b13577ac25b8c75d2b43e98337e1a0c4330ffffb8f0bbb1",
     "GO_RELEASE_TOOLS_GO_SUM_SHA256": "6c37e1d4a75699211d3a482cf561098b84427252f2c059244f7f29b0fb1d0906",
     "XCODE_VERSION": "27.0",
     "XCODE_BUILD_VERSION": "27A266a",
@@ -43,7 +43,7 @@
       "verificationPhase": "android-lan-peer-admission",
       "sourceBinding": {
         "path": "scripts/physical_capture/android_lan_peer.py",
-        "sha256": "bee7d226ea09a23bdf2cc806f36d045f4732fbb3e6a5546a5bf04be28d5c04a7",
+        "sha256": "978f015a7e71e962c0455c8f7866508be285c6a847e15ec2e04fe1d3b807cc75",
         "size": 137417,
         "mode": "0644",
         "pathConstant": "ADB",
@@ -54,11 +54,11 @@
   },
   "packetEvidenceEndpoint": {
     "goVersionKey": "GO_VERSION",
-    "goVersion": "1.27.1",
+    "goVersion": "1.27.2",
     "goos": "linux",
     "goarch": "amd64",
     "cgoEnabled": "0",
-    "binarySha256": "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0",
+    "binarySha256": "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb",
     "transportPort": 44333,
     "dnsPort": 53,
     "readmePath": "tools/packet-evidence-endpoint/README.md",
@@ -67,22 +67,22 @@
       "CGO_ENABLED=0",
       "GOOS=linux",
       "GOARCH=amd64",
-      "target/toolchains/go-1.27.1/bin/go",
+      "target/toolchains/go-1.27.2/bin/go",
       "-C tools/packet-evidence-endpoint",
       "-buildvcs=false",
       "-trimpath",
       "-ldflags='-s -w -buildid='",
       "-o ../../target/packet-evidence-endpoint-linux-amd64",
-      "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0"
+      "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb"
     ],
     "sourceFiles": [
       {
         "path": "tools/packet-evidence-endpoint/go.mod",
-        "sha256": "7dbf43cc50fc0a826f0923f309a00ddc1af3c47dba000d1e29e149be8b635c6d"
+        "sha256": "113b5f4cece6be5e745abd88d733077dce31350351d592050b3970e800693837"
       },
       {
         "path": "tools/packet-evidence-endpoint/install-endpoint.sh",
-        "sha256": "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3"
+        "sha256": "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a"
       },
       {
         "path": "tools/packet-evidence-endpoint/main.go",
@@ -106,11 +106,11 @@
       },
       {
         "path": "tools/packet-evidence-endpoint/README.md",
-        "sha256": "aa8daeea87e12a1898c11067990d08e5bf71e938e9c639a38261c2e4658984da"
+        "sha256": "eb06a8f017f019bf6716c9b2b43ecf51af6499e8681624051bab10e93d2d2e1d"
       },
       {
         "path": "scripts/physical_capture/packet_endpoints.json",
-        "sha256": "c1c6dd34a5b5ea1d36cd83430d2213b6cd613cc3dfad6ef2ca2f8e2b9184651d"
+        "sha256": "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a"
       },
       {
         "path": "scripts/physical_capture/packet_known_hosts",
@@ -122,7 +122,7 @@
     "schema": "cfw-packet-lan-peer-build-input-v1",
     "goToolchain": {
       "versionKey": "GO_VERSION",
-      "version": "1.27.1",
+      "version": "1.27.2",
       "goos": "linux",
       "goarch": "arm64",
       "cgoEnabled": "0"
@@ -130,7 +130,7 @@
     "source": {
       "root": "tools/packet-lan-peer",
       "treeAlgorithm": "sha256-tree-v2",
-      "treeSha256": "c40181aa8a78325877bf2b091a5be9a091f223be09f443297bcf8e052df7abb9",
+      "treeSha256": "f5d7c715fb96d43379d9e2c4fc72e15fbf17699ec6916e1dc438c9faf71807e2",
       "rootMode": "0755",
       "files": [
         {
@@ -141,7 +141,7 @@
         },
         {
           "path": "go.mod",
-          "sha256": "5dbd54a17b7a97a17e71fe82ea46d0b36f0325ba3b6043ca43d14a8836effcee",
+          "sha256": "a660db09d0dbee6c5aaad2f379bf0e9f8973d5be773a499bf75dd4919705e734",
           "size": 70,
           "mode": "0644"
         },
@@ -161,7 +161,7 @@
     },
     "artifact": {
       "path": "target/packet-lan-peer-linux-arm64",
-      "sha256": "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+      "sha256": "3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
       "size": 2293884,
       "fileType": "regular",
       "linkCount": 1,
@@ -214,7 +214,7 @@
     },
     "verifyScript": {
       "path": "scripts/verify_packet_lan_peer.sh",
-      "sha256": "d8bb6f9a057764a87949bedbd805ee662b89179085c0e88e54007e24c286a1b9",
+      "sha256": "4e56495dbf3815d562459da9f5f863f1c4e4f2aba87ea0cf42ebb3a21278e1a9",
       "size": 7357,
       "mode": "0755",
       "requiredFragments": [
@@ -223,7 +223,7 @@
         "cfw_verify_go_toolchain_tree \"$repo_root\" \"$toolchain_root\"",
         "source_root=\"$repo_root/tools/packet-lan-peer\"",
         "artifact=\"$repo_root/target/packet-lan-peer-linux-arm64\"",
-        "expected_artifact_sha256=d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+        "expected_artifact_sha256=3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
         "expected_artifact_size=2293884",
         "expected_artifact_mode=555",
         "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
@@ -250,11 +250,11 @@
   },
   "physicalCollectorModule": {
     "goVersionKey": "GO_VERSION",
-    "goVersion": "1.27.1",
+    "goVersion": "1.27.2",
     "goModPath": "tools/physical-collector/go.mod",
-    "goModSha256": "fd4dce001fb12c0ba2cd289bbdaa1f649fc085861362ad1300c56643f17c5a6f",
+    "goModSha256": "15a4a62864a708fe87dc6e4624036603ad27ca82a1bcdc3b5f06d678fdde24be",
     "goSumPath": "tools/physical-collector/go.sum",
-    "goSumSha256": "f5dc5ed58b07c6dc0dc772a33592361db55edf8010377ccf8d874f8bb5900e5c",
+    "goSumSha256": "ca8994a475ecb2b18b3debe1eb422925f3f3fcdd4366b7b1aa9f5ded14cd4e9a",
     "requiredModuleFragments": [
       "google.golang.org/grpc v1.83.2",
       "golang.org/x/text v0.42.0"
@@ -395,7 +395,7 @@
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "d2ddb176d0063a9cba1727c6dd76828ef47c7185a83363df5866f2c44b5603c3"
+      "sha256": "726b19209feb93ca17aae1c9df185c7f570ed40f8b6ef5fb9ab1e22bca2b89bb"
     },
     {
       "name": "sing-box raw packet tun patch",
@@ -429,14 +429,14 @@
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "a28b5932848144d04af3fe5eb0a390eec3c219cde8cdd2c793b5436094cd41cb",
+  "combinedDiffSha256": "7df19ccb32d1fa411c6142ba03e713285b1c04cc842ff8f33445f4fd5e6cecb0",
   "sourceContract": {
     "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
-    "patchedDiffSha256": "009b75e74077b754d5e9bcfae44df2d71ad463d9b48f055e21d4e8cddc97dec5",
+    "patchedDiffSha256": "2c78150feac03f4830a80532e71de38f2f67a2146bab25db743af68993cc820e",
     "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
-    "patchedGoModSha256": "3e606978fd1ec0f5f43cab7aa977fe6a58e39116061c294002a26197db71ca46",
+    "patchedGoModSha256": "fddb025d97126d97d81c61584d7d7139064e17a02bb8d1f8a1b9dde7b1bbe583",
     "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
-    "patchedGoSumSha256": "f5d1781f8ac66ad56e948ba7be11606327cf59e5d583b5fd62415fabb9d5f1a9"
+    "patchedGoSumSha256": "57130bbf9ac29f13665060e73dea74619cc1ead0214a3fadb658dedee6ac6e4d"
   },
   "libboxModuleCacheContract": {
     "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
@@ -2603,13 +2603,13 @@
     "scripts/physical_capture/packet.py": [
       "PACKET_ENDPOINT_TRANSPORT_PORT: Final = 44333",
       "PACKET_ENDPOINT_DNS_PORT: Final = 53",
-      "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0",
+      "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb",
       "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996",
-      "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3",
+      "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a",
       "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62",
       "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411",
       "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba",
-      "c1c6dd34a5b5ea1d36cd83430d2213b6cd613cc3dfad6ef2ca2f8e2b9184651d",
+      "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a",
       "endpoint_binary_sha256",
       "endpoint_service_unit_sha256",
       "endpoint_install_script_sha256",
@@ -3312,7 +3312,7 @@
       "exec"
     ],
     "tools/go-release-tools/go.mod": [
-      "go 1.27.1",
+      "go 1.27.2",
       "github.com/sagernet/gomobile v0.1.13",
       "golang.org/x/vuln v1.6.0"
     ],
@@ -3470,7 +3470,7 @@
     "scripts/publication/go_collector.py": "4b50df2bce8b509923491d6022f5ff55c64bc147f02dcea5861b90ded5bbbb6a",
     "scripts/publication/native_collector.py": "cf2d6e693c51f36825683b1c25071a41599fbe17ff4a886d549d2096c1e263db",
     "scripts/publication/graph_collectors.py": "41a9165dae362424a943aa326956239ba51b1ad1180e3bad706bc510bc26e79b",
-    "scripts/publication/preparer.py": "ec2903c89b05f7b4a499d6c448e77ced12a7a4104a20fbbbac7f3cfdc909de06",
+    "scripts/publication/preparer.py": "143fb0ac55dbc2d299e8fc9d9b1137ae4af348debe48ef9970eb3be7f53b4769",
     "scripts/publication/release_app_verifier.py": "9a3bfe85c25ab72b59316be896c4ad77e4d3d0f45475abf84bfa157724c5bdab",
     "scripts/publication/source_preparation.py": "f4f59ea1b99530fea8e127ae81caf3a5b071a6c31acf8ef519cadda8890cdd2d",
     "scripts/publication/artifact_preparation.py": "3b37d17cac93406a7b3a6437d94d4070854f88fa4141937eff64880cd699ffb4",
@@ -3521,10 +3521,10 @@
     "scripts/release_publication_path_contract.sh": "70a4d5c3fbaf6d24644c1f2cb7dedc8c31c23cce0c8c03230ec183f0ead0c5b2",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "f0ff202fdd8b206ad78a1d63ed662186e10e84a76d52f9c28861c1570f2a65b1",
-    "RELEASE.md": "566ba19ebb77767ec21a313a0cd48a6a9869773dd51c065f2d7c7acf2eb1689c",
+    "RELEASE.md": "7f4880df3c7d6035f6f2d487975003a43426b22a3301d9305d6abc15e766f8d5",
     "scripts/updater_signing_launcher.py": "31a3841dba08f49aa080773e1aad10b8eb814e9de477aa95325855dc4969fb07",
     "scripts/validate_updater_archive.py": "bee48aab736554ebeb0772687eaa44cea81426bcdc27d5581d399331b5814dca",
-    "CHANGELOG.md": "326eb0ee168134688414a931223b4fad1b890d474f6d737bd510b94f31ff2d8c",
+    "CHANGELOG.md": "196c9c24a5e5e6e1c651e2a50fff27629a215f6a95f92917507f685e8eebe939",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
     "scripts/validate_notary_archive.py": "099ff41742da304d34ec8b92dd3b3c4f96d064f21bde697b21f5c99c2393f283",
     "scripts/tauri_host_skeleton.sh": "d1ec92da07cd53af80df8a9c7aead0c52c87dfba8548aa4eb4e4e2ce5637928f",
@@ -3569,7 +3569,7 @@
     "scripts/publication/final_candidate.py": "2c54eec7a6ea2bc20fb354a69ec2c5c79291ffae8b2c372e138f115fbec1ae70",
     "scripts/validated_candidate_evidence.py": "2e59a9b3b5929ea3b388c0ae7264f934465a18666fefe948c22252840f1851c3",
     "scripts/sealed_evidence_manifest.py": "f024d80654bf27fc534fa17215d1fd00e134314182d9a28bdef77827873ec363",
-    "scripts/physical_capture/packet.py": "2cf1c0ccd2a61d8ff5fe6b15a026d0a3bcfd1ec8c8fc049906381b82c951bbca",
+    "scripts/physical_capture/packet.py": "f11ca64b0290735dcabe6e5ccad3041513dda48ff6b2a07560a3d7caf17b188f",
     "scripts/verify_release_app.sh": "d65d048b7f2d63e5191ebf49afdf51d4ff62149f38a4227b5f4436de9802c489",
     "scripts/candidate_freeze.py": "b18e18309394c765ce93c8dda6b8151d19935ef0a445f29c04966e9fed5fb11b",
     "scripts/release_signing_plan.py": "a32e4d1995f1c88753f1a73f8e322399e134a504414381341854dcc47e78c8ec",
@@ -3604,7 +3604,7 @@
     "scripts/physical_capture/packet_sender.py": "559e1b7cc9394b6871899759ae2b04bfff2fd9e4b480b102d0264faabd77488c",
     "scripts/physical_capture/packet_host.py": "86c76a6d0c3d1bc26f995f8f32d64db93acb5e50c8f0890ad5847cd2096a04fd",
     "scripts/harness/packet_capture.py": "0c6d851877c5585c4b35ac199836331f86ad7f85fe7e9acd6f9717f552c7c1a4",
-    "scripts/harness/packet_evidence.py": "722e48e3bb0b6e43b9693de4df4efb83f4f2865ce73e08a33818f4c304dae6bb",
+    "scripts/harness/packet_evidence.py": "861f21b2f65e310c78f586ef5ff047870c3e8fb1d5bec2f2dbcff999d7991aac",
     "scripts/publication/common.py": "a51c0c79e43b4bfe514f549da3d2c61e0261e613b2106af7a2036af5f64c58f2",
     "scripts/publication/draft.py": "b39da4999c38dd2b91e18bab5c8c215b410e4443e27d6d876274bfec65c2602d",
     "scripts/publication/finalize.py": "0481dfe7c169c93045e2706a7d880fe15da5bfb9724c7a06459458533a5ff161",
@@ -3619,7 +3619,7 @@
     "scripts/release_executor_source.py": "904947d837abfc5df40c08544c0584ab564665203b32d34aec77f81dd1894528",
     "scripts/signing_reconciliation.py": "da6c4b0e8789784dab808cc6fd2b4be258c797617d746fbfc110aae7c83f8979",
     "scripts/libbox_clang_linker.sh": "b232757885c1add728893b02683f3df7c5438a0b4608e83367a2780c85a91803",
-    "tools/go-release-tools/go.mod": "d3b33745ba03310f6064ef401a937ab29a1e34ec4829953cf8a454857e71da40",
+    "tools/go-release-tools/go.mod": "808284de3c00d0852b13577ac25b8c75d2b43e98337e1a0c4330ffffb8f0bbb1",
     "tools/go-release-tools/go.sum": "6c37e1d4a75699211d3a482cf561098b84427252f2c059244f7f29b0fb1d0906",
     "scripts/xcodegen-2.46.0-dependency-refresh.patch": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
     "scripts/aexml-4.7.0-supported-watchos.patch": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",

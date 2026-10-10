@@ -14,7 +14,7 @@ The machine-readable values live in
 |---|---|---|
 | Rust | `1.98.1` | `rust-toolchain.toml`, exact six-component `rustup-component-file-tree-v2` surface, and compiler/version identity |
 | Node.js | `26.8.2` | official darwin-arm64 archive SHA-256 |
-| Go | `1.27.1` | official darwin-arm64 archive SHA-256 |
+| Go | `1.27.2` | official darwin-arm64 archive SHA-256 |
 | XcodeGen | `2.46.0` (`8445e778451c7e44237b90281bde622d764b0084`) | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
 | Tauri CLI | `2.12.0` | official crate SHA-256, unchanged published lock digest, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
 | gomobile/gobind | `v0.1.13` (`9f03b8f25789099c5c8abef4a02085da783ba923`) | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
@@ -22,7 +22,7 @@ The machine-readable values live in
 | cargo-deny | `0.20.2` | Rust `1.98.1` locked source install, version identity, and target-aware policy run |
 | sing-box/libbox | `v1.14.2`, `af6e64c3b69e6132ebaee0e1a3d24e93903f6709` | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, endpoint-conflict, profile-probe and SOCKS-lifecycle patches, with individual and combined SHA-256 values |
 | iPhone Packet LAN peer (test-only) | signed thin-arm64 app tree `9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7` | source-tree identity, signed executable/profile/entitlements/certificate pins, dual-hash physical-device selection, CoreDevice receipt validation, and exact install/process/uninstall ownership |
-| Legacy Android packet peer (inactive) | Linux/arm64 artifact `268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c` | retained offline regression/build closure; it is not selected by the active Packet endpoint policy |
+| Legacy Android packet peer (inactive) | Linux/arm64 artifact pinned as `packetLanPeer` in `scripts/pinned_build_inputs.json` | retained offline regression/build closure; it is not selected by the active Packet endpoint policy |
 | Apple provider reference | `2b1763a80f2c1dee1ab3ac62d84dbda7dc5178f4` | Git commit identity; reference only |
 | deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
@@ -111,12 +111,11 @@ Network access is isolated to explicit preparation:
    modified checkout and invokes the pinned gomobile binder for `macos/arm64`
    only.
 8. `scripts/build_packet_lan_peer.sh` builds the retained legacy Android peer
-   twice in separate empty Go caches with the pinned Go `1.26.6` toolchain,
+   twice in separate empty Go caches with the pinned Go toolchain,
    `GOPROXY=off`, `GOTOOLCHAIN=local`, `CGO_ENABLED=0`, `GOOS=linux`, and
    `GOARCH=arm64`, then publishes only byte-identical output. The independent
-   `packetLanPeer` manifest section binds the four-file source tree
-   (`8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4`),
-   both release scripts, the 2,359,422-byte output, TCP port `44333`, the eight
+   `packetLanPeer` manifest section binds the four-file source tree,
+   both release scripts, the output's digest and size, TCP port `44333`, the eight
    connection/64-byte/five-second limits, and the exact shell-owned Android
    deployment path and modes. `scripts/verify_packet_lan_peer.sh` separately
    checks formatting, imports, absence of non-standard dependencies and cgo,

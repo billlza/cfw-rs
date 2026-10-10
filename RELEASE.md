@@ -234,8 +234,11 @@ downloaded core, and private packet-flow file-descriptor access are not
 fallbacks.
 
 The compatible dependency refresh pins `golang.org/x/mod v0.41.0` and
-`golang.org/x/crypto v0.57.0`; both the module's minimum Go version and the
-compiler are `1.27.1`. The SOCKS correction materializes a checksum-bound
+`golang.org/x/crypto v0.57.0`. The 2026-10-08 Go security releases moved the
+compiler and the module's minimum Go version to `1.27.2` and
+`golang.org/x/net` to `v0.60.0`; the scan had reported reachable standard
+library and `x/net` HTTP/2, HTTP/1, `crypto/tls` and `html/template` findings
+in `1.27.1` and `v0.59.0`. The SOCKS correction materializes a checksum-bound
 private build workspace containing the corrected `sing v0.9.4` source while
 preserving the original module cache. The release vulnerability scan checks
 both the original versioned dependency graph and the corrected workspace,
@@ -540,15 +543,16 @@ A connected VPN status or an existing `utun` interface is not data-plane
 evidence.
 
 The receive-only Packet peer under `tools/packet-evidence-endpoint/` is bound
-to the repository-pinned Go toolchain and reproducible Linux/amd64 digest
-`c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c`.
-Its sole Debian installation transaction is the pinned
-`install-endpoint.sh` digest
-`14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8`;
-the systemd unit, fixed GCE resolver, and exact capture sudoers bytes have
-digests `7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`,
-`b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`,
-and `a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411`.
+to the repository-pinned Go toolchain and a reproducible Linux/amd64 binary.
+Its binary, sole Debian installation transaction (`install-endpoint.sh`),
+systemd unit, fixed GCE resolver and exact capture sudoers digests are the
+`packetEvidenceEndpoint` values in `scripts/pinned_build_inputs.json`; this
+document does not repeat them. Each Go toolchain change rebinds the binary.
+GA runtime acceptance uses the endpoints only as DNS and TCP/UDP peers and
+does not depend on the deployed binary's identity, so a rebinding does not
+block GA. Physical assurance evidence binds the identity, and its collection
+requires the VMs to run the pinned binary first: rerun the installation
+transaction on each instance.
 Do not commit its generated target binary. The reviewed endpoint and
 known-hosts policies now bind the three concrete GCE instances, external
 addresses, image and service identities, separate primary/secondary DNS SSH

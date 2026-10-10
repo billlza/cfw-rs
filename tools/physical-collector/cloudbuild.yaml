@@ -1,6 +1,6 @@
 steps:
   - id: verify-source-closure
-    name: golang:1.27.1@sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
+    name: golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
     entrypoint: /bin/bash
     args:
       - -euo
@@ -20,7 +20,7 @@ steps:
         printf 'collector source closure verified: %s\n' "$actual"
 
   - id: test
-    name: golang:1.27.1@sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
+    name: golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
     entrypoint: go
     env:
       - CGO_ENABLED=0
@@ -29,7 +29,7 @@ steps:
       - ./...
 
   - id: vet
-    name: golang:1.27.1@sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
+    name: golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
     entrypoint: go
     env:
       - CGO_ENABLED=0

@@ -43,10 +43,11 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # This revision includes all six patches, the utun resolver, synchronized SOCKS
 # packet addresses, Go 1.27 debug-crash compatibility, and bounded DNS probe
 # shutdown lifecycle, with the probe's question captured before goroutine launch,
-# and the opt-in REALITY X25519MLKEM768 key share.
+# the opt-in REALITY X25519MLKEM768 key share, and golang.org/x/net v0.60.0 under
+# the Go 1.27.2 minimum.
 # Independently recomputed from the canonical materialized patched source.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "a28b5932848144d04af3fe5eb0a390eec3c219cde8cdd2c793b5436094cd41cb"
+    "7df19ccb32d1fa411c6142ba03e713285b1c04cc842ff8f33445f4fd5e6cecb0"
 )
 
 
@@ -151,7 +152,7 @@ class DeriveSupplyChainTests(unittest.TestCase):
     def test_binds_repository_toolchain_and_patched_source(self) -> None:
         supply_chain = derive_supply_chain(REPOSITORY)
         self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.98.1")
-        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.27.1")
+        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.27.2")
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
             "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",

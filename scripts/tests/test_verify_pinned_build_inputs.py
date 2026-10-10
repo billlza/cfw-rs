@@ -30,7 +30,7 @@ SHIPPED_ARTIFACT_SOURCE_SHA256 = SHIPPED_PINNED_MANIFEST[
     "artifactSourceSha256"
 ]
 PACKET_ENDPOINT_BINARY_SHA = (
-    "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0"
+    "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb"
 )
 PACKET_ENDPOINT_PATHS = (
     "tools/packet-evidence-endpoint/go.mod",
@@ -49,7 +49,7 @@ PACKET_ENDPOINT_BUILD_FRAGMENTS = [
     "CGO_ENABLED=0",
     "GOOS=linux",
     "GOARCH=amd64",
-    "target/toolchains/go-1.27.1/bin/go",
+    "target/toolchains/go-1.27.2/bin/go",
     "-C tools/packet-evidence-endpoint",
     "-buildvcs=false",
     "-trimpath",
@@ -58,7 +58,7 @@ PACKET_ENDPOINT_BUILD_FRAGMENTS = [
     PACKET_ENDPOINT_BINARY_SHA,
 ]
 PACKET_LAN_PEER_ARTIFACT_SHA = (
-    "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90"
+    "3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06"
 )
 ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
 ADB_RUNTIME_TOOL_VERSION = "37.0.0-14910828"
@@ -71,7 +71,7 @@ SYNTHETIC_ANDROID_ADMISSION_SOURCE = (
     REPO_ROOT / ANDROID_LAN_PEER_SOURCE_PATH
 ).read_bytes()
 PACKET_LAN_PEER_SOURCE_TREE_SHA = (
-    "c40181aa8a78325877bf2b091a5be9a091f223be09f443297bcf8e052df7abb9"
+    "f5d7c715fb96d43379d9e2c4fc72e15fbf17699ec6916e1dc438c9faf71807e2"
 )
 PACKET_LAN_PEER_SOURCE_ENTRIES = (
     (
@@ -81,7 +81,7 @@ PACKET_LAN_PEER_SOURCE_ENTRIES = (
     ),
     (
         "go.mod",
-        "5dbd54a17b7a97a17e71fe82ea46d0b36f0325ba3b6043ca43d14a8836effcee",
+        "a660db09d0dbee6c5aaad2f379bf0e9f8973d5be773a499bf75dd4919705e734",
         70,
     ),
     (
@@ -122,7 +122,7 @@ PACKET_LAN_PEER_VERIFY_FRAGMENTS = [
     'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
     'source_root="$repo_root/tools/packet-lan-peer"',
     'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+    "expected_artifact_sha256=3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
     "expected_artifact_size=2293884",
     "expected_artifact_mode=555",
     "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
@@ -553,7 +553,7 @@ class Fixture:
             "XCODEGEN_PATCH_SHA256": XCODEGEN_PATCH_SHA,
             "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": XCODEGEN_PATCHED_SETTINGS_SHA,
             "NODE_VERSION": "26.8.2",
-            "GO_VERSION": "1.27.1",
+            "GO_VERSION": "1.27.2",
             "TAURI_CLI_VERSION": "2.12.0",
             "TAURI_CLI_CRATE_SHA256": TAURI_CRATE_SHA,
             "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": TAURI_UPSTREAM_LOCK_SHA,
@@ -648,7 +648,7 @@ class Fixture:
                 "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
                 "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6",
                 "NODE_VERSION": "26.8.2",
-                "GO_VERSION": "1.27.1",
+                "GO_VERSION": "1.27.2",
                 "GOMOBILE_VERSION": "v0.1.13",
                 "GOVULNCHECK_VERSION": "v1.6.0",
                 "TAURI_CLI_VERSION": "2.12.0",
@@ -674,7 +674,7 @@ class Fixture:
             },
             "packetEvidenceEndpoint": {
                 "goVersionKey": "GO_VERSION",
-                "goVersion": "1.27.1",
+                "goVersion": "1.27.2",
                 "goos": "linux",
                 "goarch": "amd64",
                 "cgoEnabled": "0",
@@ -692,7 +692,7 @@ class Fixture:
                 "schema": "cfw-packet-lan-peer-build-input-v1",
                 "goToolchain": {
                     "versionKey": "GO_VERSION",
-                    "version": "1.27.1",
+                    "version": "1.27.2",
                     "goos": "linux",
                     "goarch": "arm64",
                     "cgoEnabled": "0",
@@ -753,7 +753,7 @@ class Fixture:
                 "verifyScript": {
                     "path": "scripts/verify_packet_lan_peer.sh",
                     "sha256": (
-                        "d8bb6f9a057764a87949bedbd805ee662b89179085c0e88e54007e24c286a1b9"
+                        "4e56495dbf3815d562459da9f5f863f1c4e4f2aba87ea0cf42ebb3a21278e1a9"
                     ),
                     "size": 7357,
                     "mode": "0755",
@@ -762,7 +762,7 @@ class Fixture:
             },
             "physicalCollectorModule": {
                 "goVersionKey": "GO_VERSION",
-                "goVersion": "1.27.1",
+                "goVersion": "1.27.2",
                 "goModPath": "tools/physical-collector/go.mod",
                 "goModSha256": _sha(
                     self.physical_collector_files["tools/physical-collector/go.mod"]
@@ -1017,7 +1017,7 @@ class Fixture:
             ),
         }
         self.lock = {
-            "go": "1.27.1",
+            "go": "1.27.2",
             "gomobile": "v0.1.13",
             "singBox": {
                 "commit": COMMIT,
@@ -2659,7 +2659,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             root = fixture.write(Path(temporary))
             lock = root / "native/macos/Dependencies.lock.json"
             body = lock.read_text(encoding="utf-8")
-            lock.write_text('{"go":"1.27.1",' + body[1:], encoding="utf-8")
+            lock.write_text('{"go":"1.27.2",' + body[1:], encoding="utf-8")
             with self.assertRaisesRegex(PinnedInputError, "duplicate JSON field 'go'"):
                 self._verify_written_fixture(fixture, root)
 

@@ -124,7 +124,7 @@ REMOTE_CAPTURE_KNOWN_HOSTS_SHA256 = (
     "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
 )
 TRANSPORT_ENDPOINT_IDENTITY_SHA256 = (
-    "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425"
+    "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b"
 )
 LAN_ENDPOINT_IDENTITY_SHA256 = (
     "c5e9e90cc7a4ec25bf27041373c3fd94e8a55096fb5227ad3a5156a8053dc2a6"
@@ -160,7 +160,7 @@ IOS_LAN_PROFILE_UUID = "B43F41C0-5487-47D8-9F39-FCDBDA8BA227"
 DNS_REMOTE_CAPTURE_POLICIES: dict[str, dict[str, str]] = {
     "primary": {
         "identity_sha256": (
-            "66dc1ae102ca3ec93a4e6052f44b67c54ebc27e5def3bbeba552f70b6e49910d"
+            "681a30fe7ece6f8df38aa049754da0c365c40c89127ccc0dd124afa6122b90a0"
         ),
         "project": "cfw-release-evidence-20260730",
         "zone": "asia-east1-c",
@@ -176,7 +176,7 @@ DNS_REMOTE_CAPTURE_POLICIES: dict[str, dict[str, str]] = {
     },
     "secondary": {
         "identity_sha256": (
-            "d30a22fa046378bb3cf7be957e4b37dcc475e60c7c9cbe8b4540f1cc1cb94e61"
+            "947885456465df9d5bc90a404e6239ee9eddd1cc2101cf8ee7ea5c61396717b9"
         ),
         "project": "cfw-release-evidence-20260730",
         "zone": "asia-northeast1-b",

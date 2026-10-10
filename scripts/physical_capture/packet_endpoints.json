@@ -3,7 +3,7 @@
   "document": "cfw-packet-endpoint-policy-v1",
   "identities": [
     {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "identity": {
         "schema_version": 1,
         "document": "cfw-packet-endpoint-instance-identity-v1",
@@ -20,9 +20,9 @@
         "external_ipv6_prefix": "2600:1900:4030:5afb::/96",
         "ssh_host_key_bytes_sha256": "d61541ee7ff93f271ee02a78dcba35334fdf32306f26d32016a35441f9b56f16",
         "shielded_vm_signing_identity_pem_sha256": "50371de6cf9083526ba68dd9d9e8222d8f5237746e010ffdffa44a8561859bfd",
-        "endpoint_binary_sha256": "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0",
+        "endpoint_binary_sha256": "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb",
         "endpoint_service_unit_sha256": "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996",
-        "endpoint_install_script_sha256": "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3",
+        "endpoint_install_script_sha256": "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a",
         "endpoint_resolver_config_sha256": "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62",
         "capture_sudoers_policy_sha256": "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411",
         "remote_capture_access": {
@@ -39,7 +39,7 @@
       }
     },
     {
-      "identity_sha256": "66dc1ae102ca3ec93a4e6052f44b67c54ebc27e5def3bbeba552f70b6e49910d",
+      "identity_sha256": "681a30fe7ece6f8df38aa049754da0c365c40c89127ccc0dd124afa6122b90a0",
       "identity": {
         "schema_version": 1,
         "document": "cfw-packet-endpoint-instance-identity-v1",
@@ -56,9 +56,9 @@
         "external_ipv6_prefix": "2600:1900:4030:5afb:0:1::/96",
         "ssh_host_key_bytes_sha256": "a60f99db534de08424cd01d0d7c82de5b9f45b5770f9ca982de2b474381020e5",
         "shielded_vm_signing_identity_pem_sha256": "e448a19c0eab7e6020ede1f04357e2b139fe40d5a72e1e9228a59642309f68d8",
-        "endpoint_binary_sha256": "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0",
+        "endpoint_binary_sha256": "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb",
         "endpoint_service_unit_sha256": "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996",
-        "endpoint_install_script_sha256": "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3",
+        "endpoint_install_script_sha256": "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a",
         "endpoint_resolver_config_sha256": "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62",
         "capture_sudoers_policy_sha256": "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411",
         "remote_capture_access": {
@@ -75,7 +75,7 @@
       }
     },
     {
-      "identity_sha256": "d30a22fa046378bb3cf7be957e4b37dcc475e60c7c9cbe8b4540f1cc1cb94e61",
+      "identity_sha256": "947885456465df9d5bc90a404e6239ee9eddd1cc2101cf8ee7ea5c61396717b9",
       "identity": {
         "schema_version": 1,
         "document": "cfw-packet-endpoint-instance-identity-v1",
@@ -92,9 +92,9 @@
         "external_ipv6_prefix": "2600:1900:4050:8de::/96",
         "ssh_host_key_bytes_sha256": "f4e28ed3f9d1fbeb71ddf4ec8894a521a0c84185f2728354e39316b3f9d29e06",
         "shielded_vm_signing_identity_pem_sha256": "c601ab95fb0992ac7e983ccc94793835b910be9e6f50869212a0d611d72be7d1",
-        "endpoint_binary_sha256": "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0",
+        "endpoint_binary_sha256": "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb",
         "endpoint_service_unit_sha256": "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996",
-        "endpoint_install_script_sha256": "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3",
+        "endpoint_install_script_sha256": "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a",
         "endpoint_resolver_config_sha256": "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62",
         "capture_sudoers_policy_sha256": "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411",
         "remote_capture_access": {
@@ -113,7 +113,7 @@
   ],
   "cases": {
     "tcp-ipv4": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "35.194.216.98",
       "runtime_endpoint_source": null,
       "remote_port": 44333,
@@ -123,7 +123,7 @@
       "remote_capture_host": null
     },
     "tcp-ipv6": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "2600:1900:4030:5afb::",
       "runtime_endpoint_source": null,
       "remote_port": 44333,
@@ -133,7 +133,7 @@
       "remote_capture_host": null
     },
     "udp": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "35.194.216.98",
       "runtime_endpoint_source": null,
       "remote_port": 44333,
@@ -143,7 +143,7 @@
       "remote_capture_host": null
     },
     "quic": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "35.194.216.98",
       "runtime_endpoint_source": null,
       "remote_port": 44333,
@@ -153,7 +153,7 @@
       "remote_capture_host": null
     },
     "dns-a-primary": {
-      "identity_sha256": "66dc1ae102ca3ec93a4e6052f44b67c54ebc27e5def3bbeba552f70b6e49910d",
+      "identity_sha256": "681a30fe7ece6f8df38aa049754da0c365c40c89127ccc0dd124afa6122b90a0",
       "remote_address": "34.80.107.183",
       "runtime_endpoint_source": null,
       "remote_port": 53,
@@ -163,7 +163,7 @@
       "remote_capture_host": "34.80.107.183"
     },
     "dns-a-secondary": {
-      "identity_sha256": "d30a22fa046378bb3cf7be957e4b37dcc475e60c7c9cbe8b4540f1cc1cb94e61",
+      "identity_sha256": "947885456465df9d5bc90a404e6239ee9eddd1cc2101cf8ee7ea5c61396717b9",
       "remote_address": "35.200.12.109",
       "runtime_endpoint_source": null,
       "remote_port": 53,
@@ -173,7 +173,7 @@
       "remote_capture_host": "35.200.12.109"
     },
     "dns-aaaa-primary": {
-      "identity_sha256": "66dc1ae102ca3ec93a4e6052f44b67c54ebc27e5def3bbeba552f70b6e49910d",
+      "identity_sha256": "681a30fe7ece6f8df38aa049754da0c365c40c89127ccc0dd124afa6122b90a0",
       "remote_address": "2600:1900:4030:5afb:0:1::",
       "runtime_endpoint_source": null,
       "remote_port": 53,
@@ -183,7 +183,7 @@
       "remote_capture_host": "34.80.107.183"
     },
     "dns-aaaa-secondary": {
-      "identity_sha256": "d30a22fa046378bb3cf7be957e4b37dcc475e60c7c9cbe8b4540f1cc1cb94e61",
+      "identity_sha256": "947885456465df9d5bc90a404e6239ee9eddd1cc2101cf8ee7ea5c61396717b9",
       "remote_address": "2600:1900:4050:8de::",
       "runtime_endpoint_source": null,
       "remote_port": 53,
@@ -203,7 +203,7 @@
       "remote_capture_host": null
     },
     "included-routes": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "35.194.216.98",
       "runtime_endpoint_source": null,
       "remote_port": 44333,
@@ -213,7 +213,7 @@
       "remote_capture_host": null
     },
     "excluded-routes": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "35.194.216.98",
       "runtime_endpoint_source": null,
       "remote_port": 44333,
@@ -223,7 +223,7 @@
       "remote_capture_host": null
     },
     "stop-cleanup": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "35.194.216.98",
       "runtime_endpoint_source": null,
       "remote_port": 44333,
@@ -233,7 +233,7 @@
       "remote_capture_host": null
     },
     "ipv6-disabled-absence": {
-      "identity_sha256": "4998a5cde4a3a041730f6937e371fe683f00137e14afdff5e68465f349109425",
+      "identity_sha256": "31a63eb38ca0aab909cd458540ef01dfd9977e9dfe5422af2a6ef8681715c74b",
       "remote_address": "2600:1900:4030:5afb::",
       "runtime_endpoint_source": null,
       "remote_port": 44333,

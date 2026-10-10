@@ -1,6 +1,6 @@
 module github.com/billlza/cfw-rs/tools/go-release-tools
 
-go 1.27.1
+go 1.27.2
 
 tool (
 	github.com/sagernet/gomobile/cmd/gobind

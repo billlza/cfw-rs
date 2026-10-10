@@ -109,7 +109,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "afdf41b08cfb034e8868c53c3b327f74d069d43c23e111e46f637ed9be1ef8dd"
+    "97b3400679a54adcb3633df1fafeaf1d9b5eda9fba3ba726442587df7dee950e"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -117,7 +117,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "e0c5f0262e0ba985bedd9422fd110135020122afdda53fd8b526b1c0bae3fb95"
+    "90fb909b5f3aad6ddb1173cb059b4c529ba3875e9504e000e81f7815abb7f851"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -164,7 +164,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "03f988204648f2c1a0ad64af4eac2f910c3933ddb28e2ce308103ea8d08da312"
+    "458cd84b9bd79af0eeae2cb466caddf758519d87d19665fa9e404163fd04c11b"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -337,13 +337,13 @@ _NETWORK_RECURSION_RE = re.compile(
     re.IGNORECASE,
 )
 _PACKET_ENDPOINT_BINARY_SHA256 = (
-    "ab481397f6863cef93101dbad2c1434d1e8863ddf26da2877593a86b9705d7a0"
+    "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb"
 )
 _PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256 = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
 )
 _PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256 = (
-    "0b5f26e2567afca3a2caf733abe0cce9cd08cb76c1f3463dec017041a83de9f3"
+    "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a"
 )
 _PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256 = (
     "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
@@ -355,7 +355,7 @@ _PACKET_ENDPOINT_KNOWN_HOSTS_SHA256 = (
     "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
 )
 _PACKET_ENDPOINT_POLICY_SHA256 = (
-    "c1c6dd34a5b5ea1d36cd83430d2213b6cd613cc3dfad6ef2ca2f8e2b9184651d"
+    "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a"
 )
 _PACKET_ENDPOINT_SOURCE_PATHS = frozenset(
     {
@@ -376,7 +376,7 @@ _PACKET_ENDPOINT_BUILD_FRAGMENTS = (
     "CGO_ENABLED=0",
     "GOOS=linux",
     "GOARCH=amd64",
-    "target/toolchains/go-1.27.1/bin/go",
+    "target/toolchains/go-1.27.2/bin/go",
     "-C tools/packet-evidence-endpoint",
     "-buildvcs=false",
     "-trimpath",
@@ -385,7 +385,7 @@ _PACKET_ENDPOINT_BUILD_FRAGMENTS = (
     _PACKET_ENDPOINT_BINARY_SHA256,
 )
 _PACKET_LAN_PEER_ARTIFACT_SHA256 = (
-    "d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90"
+    "3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06"
 )
 _PACKET_LAN_PEER_ARTIFACT_SIZE = 2293884
 _ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
@@ -395,17 +395,17 @@ _ADB_RUNTIME_TOOL_SHA256 = (
 )
 _ANDROID_LAN_PEER_SOURCE_PATH = "scripts/physical_capture/android_lan_peer.py"
 _ANDROID_LAN_PEER_SOURCE_SHA256 = (
-    "bee7d226ea09a23bdf2cc806f36d045f4732fbb3e6a5546a5bf04be28d5c04a7"
+    "978f015a7e71e962c0455c8f7866508be285c6a847e15ec2e04fe1d3b807cc75"
 )
 _ANDROID_LAN_PEER_SOURCE_SIZE = 137417
 _PACKET_LAN_PEER_SOURCE_TREE_SHA256 = (
-    "c40181aa8a78325877bf2b091a5be9a091f223be09f443297bcf8e052df7abb9"
+    "f5d7c715fb96d43379d9e2c4fc72e15fbf17699ec6916e1dc438c9faf71807e2"
 )
 _PACKET_LAN_PEER_BUILD_SCRIPT_SHA256 = (
     "c3fb49c83d98a710a15874afe83a3606b3f50f1f65b01c76dbb03edfcc9b43d8"
 )
 _PACKET_LAN_PEER_VERIFY_SCRIPT_SHA256 = (
-    "d8bb6f9a057764a87949bedbd805ee662b89179085c0e88e54007e24c286a1b9"
+    "4e56495dbf3815d562459da9f5f863f1c4e4f2aba87ea0cf42ebb3a21278e1a9"
 )
 _PACKET_LAN_PEER_SOURCE_FILES = (
     (
@@ -416,7 +416,7 @@ _PACKET_LAN_PEER_SOURCE_FILES = (
     ),
     (
         "go.mod",
-        "5dbd54a17b7a97a17e71fe82ea46d0b36f0325ba3b6043ca43d14a8836effcee",
+        "a660db09d0dbee6c5aaad2f379bf0e9f8973d5be773a499bf75dd4919705e734",
         70,
         "0644",
     ),
@@ -460,7 +460,7 @@ _PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
     'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
     'source_root="$repo_root/tools/packet-lan-peer"',
     'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=d92043b65456bb63e40663d98eb7081701ab02c78d964f9cf9ae4e170a974a90",
+    "expected_artifact_sha256=3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
     "expected_artifact_size=2293884",
     "expected_artifact_mode=555",
     "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
@@ -484,10 +484,10 @@ _PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
     '"$artifact_sha256" != "$expected_artifact_sha256"',
 )
 _PHYSICAL_COLLECTOR_GO_MOD_SHA256 = (
-    "fd4dce001fb12c0ba2cd289bbdaa1f649fc085861362ad1300c56643f17c5a6f"
+    "15a4a62864a708fe87dc6e4624036603ad27ca82a1bcdc3b5f06d678fdde24be"
 )
 _PHYSICAL_COLLECTOR_GO_SUM_SHA256 = (
-    "f5dc5ed58b07c6dc0dc772a33592361db55edf8010377ccf8d874f8bb5900e5c"
+    "ca8994a475ecb2b18b3debe1eb422925f3f3fcdd4366b7b1aa9f5ded14cd4e9a"
 )
 _PHYSICAL_COLLECTOR_MODULE_FRAGMENTS = (
     "google.golang.org/grpc v1.83.2",

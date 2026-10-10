@@ -645,12 +645,12 @@ index fc41f506de32910cc99ccb8d210d65baad6f7d57..913bc90907c97e6ed589d3a5fa0fb1fe
 -}
 -
 diff --git a/go.mod b/go.mod
-index b2ab87cab313e2ebac8a5f7daf2cd053580dc80e..88d86f8003853d9e12d9bcbd0971d8df13a609ef 100644
+index b2ab87cab313e2ebac8a5f7daf2cd053580dc80e..15d619e4a0a01ab935c0f6b6615a2f40caeb1d35 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -3 +3 @@ module github.com/sagernet/sing-box
 -go 1.25.5
-+go 1.27.1
++go 1.27.2
 @@ -6,4 +6,4 @@ require (
 -	filippo.io/age v1.3.1
 -	github.com/anthropics/anthropic-sdk-go v1.26.0
@@ -724,7 +724,7 @@ index b2ab87cab313e2ebac8a5f7daf2cd053580dc80e..88d86f8003853d9e12d9bcbd0971d8df
 +	golang.org/x/crypto v0.57.0
 +	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba
 +	golang.org/x/mod v0.41.0
-+	golang.org/x/net v0.59.0
++	golang.org/x/net v0.60.0
 +	golang.org/x/sync v0.23.0
 +	golang.org/x/sys v0.48.0
 +	golang.org/x/term v0.46.0
@@ -850,7 +850,7 @@ index b2ab87cab313e2ebac8a5f7daf2cd053580dc80e..88d86f8003853d9e12d9bcbd0971d8df
 -	lukechampine.com/blake3 v1.3.0 // indirect
 +	lukechampine.com/blake3 v1.4.1 // indirect
 diff --git a/go.sum b/go.sum
-index 3172be80a0688016c8aa88e50c6dec77b6399c80..21692db6e33ba8092ac4af740ce69062ebe0cf73 100644
+index 3172be80a0688016c8aa88e50c6dec77b6399c80..a3be9534eac10b50d26ae4ed07564e5de5ace3fb 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -2,0 +3 @@ c2sp.org/CCTV/age v0.0.0-20251208015420-e9274a7bdbfd/go.mod h1:SrHC2C7r5GkDk8R+N
@@ -1110,9 +1110,9 @@ index 3172be80a0688016c8aa88e50c6dec77b6399c80..21692db6e33ba8092ac4af740ce69062
 @@ -474 +637,0 @@ golang.org/x/net v0.0.0-20220722155237-a158d28d115b/go.mod h1:XRhObCWvk6IyKnWLug
 -golang.org/x/net v0.6.0/go.mod h1:2Tu9+aMcznHK/AK1HMvgo6xiTLG5rD5rZLDS+rp2Bjs=
 @@ -480,0 +644,3 @@ golang.org/x/net v0.57.0/go.mod h1:KpXc8iv+r3XplLAG/f7Jsf9RPszJzdR0f58q9vGOuEU=
-+golang.org/x/net v0.59.0 h1:5zfYln+w5XCxwrnMMJPufRgNoXEaGxl0wo5GqPXyues=
-+golang.org/x/net v0.59.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
 +golang.org/x/net v0.6.0/go.mod h1:2Tu9+aMcznHK/AK1HMvgo6xiTLG5rD5rZLDS+rp2Bjs=
++golang.org/x/net v0.60.0 h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=
++golang.org/x/net v0.60.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
 @@ -483,0 +650,2 @@ golang.org/x/oauth2 v0.36.0/go.mod h1:YDBUJMTkDnJS+A4BP4eZBjCqtokkg1hODuPjwiGPO7
 +golang.org/x/oauth2 v0.37.0 h1:JUlcxA8oAtauLfiH8FX2/FkAWHAdi0QtGCGc+hofE98=
 +golang.org/x/oauth2 v0.37.0/go.mod h1:IxwZNxUULJmpBFf9K/9NTMSIfZZuvuTy1gGxhigP/58=

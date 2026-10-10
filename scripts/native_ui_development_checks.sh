@@ -1,6 +1,8 @@
 #!/bin/bash -p
 # Source from the sealed CI dispatcher. Swift preparation is explicit and
 # finishes before Cargo; each check receives one new repository-owned target.
+# A passing check removes that target, which is plain build output; a failed
+# check keeps it so the compiler output can be inspected.
 cfw_run_native_ui_development_check() (
   set -euo pipefail
   if [[ $# -ne 2 || "$1" != /* || ( "$2" != clippy && "$2" != test ) ]]; then
@@ -35,4 +37,5 @@ cfw_run_native_ui_development_check() (
     cfw_run_with_release_cargo_runtime "$repository" "$CFW_RELEASE_CARGO_EXECUTABLE" test \
       --locked --workspace --all-targets --all-features
   fi
+  /bin/rm -rf -- "$target"
 )

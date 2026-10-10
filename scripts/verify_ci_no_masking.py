@@ -57,7 +57,7 @@ DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DEFAULT_PINS = REPO_ROOT / "scripts" / "dependency_pins.env"
 RELEASE_CI_GATE = REPO_ROOT / "scripts" / "run_release_ci_gate.sh"
 NATIVE_UI_DEVELOPMENT_CHECKS = REPO_ROOT / "scripts" / "native_ui_development_checks.sh"
-REQUIRED_NATIVE_UI_DEVELOPMENT_CHECKS_SHA256 = "c193d7c8d262a0703686c637e9fc87ec568c256269f22415bd21ef012e4d0d83"
+REQUIRED_NATIVE_UI_DEVELOPMENT_CHECKS_SHA256 = "472500cd394803a7a355e8f9137fee88041b8f6f0fea0828a35345c577a4d609"
 REQUIRED_RUN_SHELL = "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
 REQUIRED_CHECKOUT_ACTION = (
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"

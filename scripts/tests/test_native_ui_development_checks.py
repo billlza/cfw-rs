@@ -10,7 +10,7 @@ CONTRACT = Path(__file__).resolve().parents[1] / "native_ui_development_checks.s
 
 
 class NativeUiDevelopmentDispatchTests(unittest.TestCase):
-    def run_helper(self, repository: Path, *, operation="test", prepare_exit=0):
+    def run_helper(self, repository: Path, *, operation="test", prepare_exit=0, cargo_exit=0):
         # Real shell helper; only expensive compiler/runtime boundaries are
         # replaced by recorders. This does not claim a native UI build.
         script = '''
@@ -18,6 +18,7 @@ set -euo pipefail
 source "$1"
 export CFW_RELEASE_CARGO_EXECUTABLE=/fixture/cargo
 export PREPARE_EXIT="$4"
+export CARGO_EXIT="$5"
 export RECORD="$2/record"
 cfw_run_release_python_script() {
   printf 'prepare:%s\\n' "$*" >> "$RECORD"
@@ -26,13 +27,16 @@ cfw_run_release_python_script() {
 }
 cfw_run_with_release_cargo_runtime() {
   printf 'cargo:%s\\ntarget:%s\\nproducts:%s\\n' "$*" "$CARGO_TARGET_DIR" "$CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS" >> "$RECORD"
+  [[ -d "$CARGO_TARGET_DIR" ]] || return 90
+  return "$CARGO_EXIT"
 }
 cfw_run_native_ui_development_check "$2" "$3"
 '''
-        return subprocess.run(["/bin/bash", "-p", "-c", script, "ci-native-test", str(CONTRACT), str(repository), operation, str(prepare_exit)],
+        return subprocess.run(["/bin/bash", "-p", "-c", script, "ci-native-test", str(CONTRACT), str(repository), operation, str(prepare_exit),
+                               str(cargo_exit)],
                               env=dict(os.environ), capture_output=True, text=True, check=False)
 
-    def test_prepare_precedes_cargo_and_each_invocation_binds_a_distinct_fresh_target(self):
+    def test_prepare_precedes_cargo_and_each_passing_check_removes_its_fresh_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()
             paths = []
@@ -46,11 +50,22 @@ cfw_run_native_ui_development_check "$2" "$3"
                 self.assertIn("--locked --workspace --all-targets --all-features", records[start + 1])
                 path = Path(records[start + 2].removeprefix("target:"))
                 self.assertTrue(path.is_relative_to(repository / "target/development"))
-                self.assertTrue(path.is_dir())
+                self.assertFalse(path.exists())
                 self.assertEqual(records[start + 3], f"products:{path}/products")
                 paths.append(path)
             self.assertNotEqual(paths[0], paths[1])
             self.assertIn("-- -D warnings", records[5])
+            self.assertEqual(list((repository / "target/development").iterdir()), [])
+
+    def test_failed_cargo_check_keeps_its_target_for_diagnosis(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            result = self.run_helper(repository, cargo_exit=23)
+            self.assertEqual(result.returncode, 23)
+            records = (repository / "record").read_text().splitlines()
+            path = Path(records[2].removeprefix("target:"))
+            self.assertTrue(path.is_dir())
+            self.assertEqual(list((repository / "target/development").iterdir()), [path])
 
     def test_failed_preparation_prevents_cargo_without_deleting_failed_target(self):
         with tempfile.TemporaryDirectory() as temporary:

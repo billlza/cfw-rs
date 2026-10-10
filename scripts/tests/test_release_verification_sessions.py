@@ -138,6 +138,7 @@ class ReleaseVerificationSessionTests(unittest.TestCase):
             patch.object(contract, "verify_prepackage_authorization", side_effect=authorize),
             patch.object(runtime, "validate_ga_runtime_acceptance", side_effect=selected_operation),
             patch.object(runtime, "collect_ga_runtime_acceptance", side_effect=selected_operation),
+            patch.object(runtime, "resume_ga_runtime_seal", side_effect=selected_operation),
             patch.object(
                 runtime,
                 "recover_ga_runtime_collection",
@@ -254,12 +255,21 @@ class ReleaseVerificationSessionTests(unittest.TestCase):
             runtime_cli.main()
         self.assertIsInstance(rejected.exception.__cause__, candidate_freeze.CandidateFreezeError)
         self.assertEqual(rejected.exception.__cause__.code, "updater_verifier_unavailable")
+        self.assertEqual(
+            str(rejected.exception).splitlines(),
+            [
+                "error: GA runtime acceptance: frozen candidate verifier session is "
+                "operationally unavailable",
+                "caused by UpdaterKeyPossessionOperationalError: source-pinned embedded "
+                "updater-key verifier is operationally unavailable",
+            ],
+        )
         operation.assert_not_called()
         output.assert_not_called()
 
     def test_completed_runtime_mutations_with_cleanup_failure_are_unknown(self) -> None:
         self.close_error = possession.UpdaterKeyPossessionError("fixture close failed")
-        for command in ("collect", "recover"):
+        for command in ("collect", "recover", "resume-seal"):
             with self.subTest(command=command), self._runtime_command(command) as output, self.assertRaises(
                 SystemExit
             ) as rejected:
@@ -279,6 +289,13 @@ class ReleaseVerificationSessionTests(unittest.TestCase):
             runtime_cli.main()
         self.assertIs(rejected.exception.__cause__, primary)
         self.assertIs(primary.__cause__, original)
+        self.assertEqual(
+            str(rejected.exception).splitlines(),
+            [
+                "error: GA runtime acceptance: fixture runtime primary",
+                "caused by ValueError: fixture original cause",
+            ],
+        )
         self.assertEqual(self.events[-1], "close")
         output.assert_not_called()
 
@@ -324,6 +341,30 @@ class ReleaseVerificationSessionTests(unittest.TestCase):
         self.assertTrue(raw_root.is_dir())
         self.assertIn("fixture after raw publication", str(rejected.exception))
         self.assertIn("secondary frozen candidate verifier cleanup failure", str(rejected.exception))
+        output.assert_not_called()
+
+    def test_seal_retry_adapter_publication_before_body_and_cleanup_failures_is_unknown(
+        self,
+    ) -> None:
+        adapter, raw_root = runtime._fixed_paths(self.repository)
+        raw_root.mkdir(parents=True, mode=0o700)
+        primary = runtime.GARuntimeAcceptanceError("fixture after adapter publication")
+
+        def publish_then_fail(**_values):
+            adapter.write_bytes(b"{}\n")
+            raise primary
+
+        self.close_error = possession.UpdaterKeyPossessionError("fixture close failed")
+        with self._runtime_command("resume-seal", publish_then_fail) as output, self.assertRaises(
+            SystemExit
+        ) as rejected:
+            runtime_cli.main()
+        unknown = rejected.exception.__cause__
+        self.assertIsInstance(unknown, DurabilityOutcomeUnknown)
+        self.assertIs(unknown.__cause__.__cause__, primary)
+        self.assertIn("GA runtime resume-seal outcome is unknown", str(rejected.exception))
+        self.assertIn("fixture after adapter publication", str(rejected.exception))
+        self.assertTrue(adapter.is_file())
         output.assert_not_called()
 
     def test_existing_raw_evidence_does_not_turn_pre_mutation_failure_into_unknown(self) -> None:
@@ -470,6 +511,9 @@ class ReleaseVerificationSessionTests(unittest.TestCase):
         self.assertIs(rejected.exception.__cause__, primary)
         self.assertIs(primary.__cause__, original)
         self.assertTrue(any("cleanup failure" in note for note in primary.__notes__))
+        diagnostic = str(rejected.exception).splitlines()
+        self.assertEqual(diagnostic[0], "error: production release evidence: fixture stage primary")
+        self.assertEqual(diagnostic[-1], "caused by ValueError: fixture original cause")
         self.assertFalse((self.repository / contract.PREPACKAGE_OUTPUT).exists())
         output.assert_not_called()
 

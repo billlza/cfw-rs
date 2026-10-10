@@ -309,10 +309,16 @@ def pcap_bytes(
     vlan_tags: int = 0,
     include_tcp_fallback: bool = False,
     include_dns_responses: bool = True,
+    dns_query_flags: int = 0x0000,
+    dns_response_flags: int | None = None,
     extra_tokens: list[bytes] | None = None,
     start_epoch: int | None = None,
 ) -> bytes:
-    """Build a structurally valid transport capture for v3 packet fixtures."""
+    """Build a structurally valid transport capture for v3 packet fixtures.
+
+    DNS responses echo the query's RD bit, as the evidence endpoint does, unless
+    a test overrides the response flags to build a non-echoing answer.
+    """
 
     if family not in {"ipv4", "ipv6"}:
         raise ValueError("fixture packet family is invalid")
@@ -335,17 +341,22 @@ def pcap_bytes(
         for component in suffix:
             qname += bytes([len(component)]) + component
         qname += b"\x00"
-        return struct.pack("!HHHHHH", identifier, 0x0000, 1, 0, 0, 0) + qname + struct.pack(
-            "!HH", qtype, 1
-        )
+        return struct.pack(
+            "!HHHHHH", identifier, dns_query_flags, 1, 0, 0, 0
+        ) + qname + struct.pack("!HH", qtype, 1)
 
     def dns_response(label: bytes, identifier: int) -> bytes:
         query = dns_query(label, identifier)
         answer = ipaddress.ip_address(
             "192.0.2.1" if family == "ipv4" else "2001:db8::1"
         ).packed
+        response_flags = (
+            0x8400 | (dns_query_flags & 0x0100)
+            if dns_response_flags is None
+            else dns_response_flags
+        )
         return (
-            struct.pack("!HHHHHH", identifier, 0x8400, 1, 1, 0, 0)
+            struct.pack("!HHHHHH", identifier, response_flags, 1, 1, 0, 0)
             + query[12:]
             + b"\xc0\x0c"
             + struct.pack("!HHIH", 1 if family == "ipv4" else 28, 1, 0, len(answer))

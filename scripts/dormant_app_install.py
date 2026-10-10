@@ -1742,7 +1742,25 @@ def _require_exact_cfw_proxy(output: str) -> None:
         )
 
 
-def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
+@dataclass(frozen=True)
+class SystemExtensionRegistration:
+    """One `systemextensionsctl list` row.
+
+    macOS keeps each replaced version listed until reboot, so one team/bundle
+    identity may own several registrations that differ in version and state.
+    """
+
+    team_id: str
+    bundle_id: str
+    version: str
+    enabled: bool
+    active: bool
+    state: str
+
+
+def parse_system_extension_registrations(
+    output: str,
+) -> tuple[SystemExtensionRegistration, ...]:
     invalid = "system extension output has an unknown or inconsistent format"
     if not output or not output.endswith("\n") or "\r" in output or "\x00" in output:
         raise InstallError("cfm_system_extension_observation_invalid", invalid)
@@ -1756,9 +1774,9 @@ def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
     if expected_count == 0:
         if lines != ["0 extension(s)"]:
             raise InstallError("cfm_system_extension_observation_invalid", invalid)
-        return set()
+        return ()
 
-    identities: set[tuple[str, str]] = set()
+    rows: list[SystemExtensionRegistration] = []
     registrations: set[tuple[str, str, str]] = set()
     categories: set[str] = set()
     index = 1
@@ -1779,7 +1797,7 @@ def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
             fields = lines[index].split("\t")
             if len(fields) != 6 or fields[0] not in {"", "*"} or fields[1] not in {"", "*"}:
                 raise InstallError("cfm_system_extension_observation_invalid", invalid)
-            _, _, team_id, bundle_version, name, state = fields
+            enabled, active, team_id, bundle_version, name, state = fields
             bundle_match = re.fullmatch(
                 r"([A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?) \(([^()\t]{1,128})\)",
                 bundle_version,
@@ -1793,14 +1811,22 @@ def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
                 or re.fullmatch(r"\[[^\[\]\t\r\n]{1,256}\]", state) is None
             ):
                 raise InstallError("cfm_system_extension_observation_invalid", invalid)
-            identity = (team_id, bundle_match.group(1))
-            # macOS retains replaced versions until reboot. Count actual
-            # registrations while coalescing their team/bundle presence.
-            registration = (*identity, bundle_match.group(2))
+            # macOS retains replaced versions until reboot, so a team/bundle
+            # may repeat; only a repeated version is an inconsistent listing.
+            registration = (team_id, bundle_match.group(1), bundle_match.group(2))
             if registration in registrations:
                 raise InstallError("cfm_system_extension_observation_invalid", invalid)
             registrations.add(registration)
-            identities.add(identity)
+            rows.append(
+                SystemExtensionRegistration(
+                    team_id=team_id,
+                    bundle_id=bundle_match.group(1),
+                    version=bundle_match.group(2),
+                    enabled=enabled == "*",
+                    active=active == "*",
+                    state=state,
+                )
+            )
             section_count += 1
             index += 1
         if section_count == 0:
@@ -1808,7 +1834,16 @@ def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
 
     if len(registrations) != expected_count:
         raise InstallError("cfm_system_extension_observation_invalid", invalid)
-    return identities
+    return tuple(rows)
+
+
+def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
+    # Maintenance preconditions only ask which team owns each bundle, so the
+    # versions macOS retains until reboot coalesce into one identity.
+    return {
+        (registration.team_id, registration.bundle_id)
+        for registration in parse_system_extension_registrations(output)
+    }
 
 
 def require_inactive_managed_tunnel_processes(

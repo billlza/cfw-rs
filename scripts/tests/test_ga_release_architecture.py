@@ -107,6 +107,7 @@ class GAReleaseDependencyDirectionTests(unittest.TestCase):
         for function in (
             ga_runtime_acceptance.collect_ga_runtime_acceptance,
             ga_runtime_acceptance.recover_ga_runtime_collection,
+            ga_runtime_acceptance.resume_ga_runtime_seal,
         ):
             self.assertIs(
                 inspect.signature(function).parameters["expected"].default,
@@ -114,6 +115,7 @@ class GAReleaseDependencyDirectionTests(unittest.TestCase):
             )
         for function in (
             ga_runtime_acceptance.collect_ga_runtime_acceptance,
+            ga_runtime_acceptance.resume_ga_runtime_seal,
             ga_runtime_acceptance.seal_ga_runtime_acceptance,
             ga_runtime_acceptance.validate_ga_runtime_acceptance,
         ):
@@ -202,7 +204,7 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
         output.assert_called_once_with("source contract verified")
 
     def test_runtime_cli_production_commands_never_fallback_on_admission(self) -> None:
-        for command in ("collect", "recover", "verify"):
+        for command in ("collect", "recover", "resume-seal", "verify"):
             arguments = [str(Path(ga_runtime_acceptance_cli.__file__)), command]
             with self.subTest(command=command), patch.object(
                 sys, "argv", arguments

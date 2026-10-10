@@ -1325,12 +1325,76 @@ wire proof.
    release account after opening the device. Capture is bounded by the exact
    test filter, packet count and timeout. An operator restoring a live CFM
    session must complete this authorization before stopping that session.
+   Start `collect` from an interactive terminal: without a cached sudo ticket
+   it reads the authorization only from a real TTY, and it refuses piped,
+   background or automated input before changing app state. That refusal
+   comes after `collect` has published its collection intent, so it leaves
+   `runtime-collection` with an `aborted_before_mutation` event and a second
+   `collect` refuses it. Run `recover` to archive that attempt, then start a
+   fresh `collect` from a real terminal.
+
+   For 50028 the stages have different executors. The frozen candidate commit
+   `d686a85` sealed `prepackage`. Runtime collection, GA acceptance and
+   publication run from a newer clean operator commit that changes only
+   release tooling, checked out in place in the same operator directory, while
+   `target/release-worktrees/50028` stays at `d686a85`. Each new seal records
+   its own executor, and later verifiers still reopen `prepackage` under
+   `d686a85`. Runtime evidence binds the operator path and the release
+   Python, so do not move, re-clone or re-bootstrap the operator between
+   collection and the final upload allowlist.
+
+   The DNS check observes the product's tunnel leg on the Packet Tunnel
+   `utun`. The system resolver at the tunnel client `198.18.64.1` queries the
+   tunnel DNS peer `198.18.64.2`; libbox forwards each query outside the tunnel
+   to the evidence resolver and relays that resolver's authoritative
+   `192.0.2.1` answer, which echoes the client's RD bit. The capture filter
+   admits only IPv4 DNS between those two addresses whose first name label
+   has a token's length, stage prefix and first eight digest characters for
+   this collection, so other system DNS and another collection's tokens cannot
+   fill it. It does not check the query type or the rest of the name: a
+   non-A query or a retransmission for a token name still fills a capture
+   slot, and validation then fails closed, which needs `recover` and a fresh
+   `collect`. Before collection, the evidence VMs `packet-dns-primary-v040`
+   (DNS resolver) and `packet-transport-v040` (TCP/UDP endpoint) must be
+   running and reachable from this Mac's current public address.
+
+   When the collector waits for macOS approval and Tunnel mode, approve the
+   System Extension and select Tunnel mode with IPv6 enabled in the installed
+   50028 dashboard; the Packet Host baseline accepts only a ready Tunnel with
+   IPv6 enabled. The system-extension check requires exactly one
+   `com.bill.clashformac.packet-tunnel (0.5.0/50028)` row in
+   `[activated enabled]`. macOS keeps each replaced version listed until the
+   next reboot as `[terminated waiting to uninstall on reboot]`, with its
+   enabled and active columns empty. Every other row for that bundle must be
+   exactly such a row with a lower build than 50028; a row from another team,
+   with either column marked, in any other state, or with a malformed version
+   or a build of 50028 or later blocks this stage.
    Use the ordinary TUN controls without legacy Prepare or Confirm:
 
    ```bash
    scripts/run_ga_runtime_acceptance.sh collect
    scripts/release_publication_gate.sh --seal-ga-acceptance
    ```
+
+   Near the end, after the stop/restore case, `collect` prints one line asking
+   you to quit the installed 50028 Clash for Mac. Quit it with Quit Clash for
+   Mac (⌘Q) in its app menu or Quit in its menu bar menu. Never quit it from
+   the Dock, AppleScript or Activity Monitor, and never with the macOS Force
+   Quit window (Option-Command-Esc). The product's graceful shutdown, which
+   normally stops the runtime and proves it Off before the Host exits, runs from ⌘Q,
+   the menu bar Quit and the Settings page's own Quit and Force Quit buttons;
+   the collector sends the Host no quit request of its own. `collect` waits up
+   to 10 minutes for the Host to exit, then runs the single signed Off proof
+   without waiting or retrying. A Host still running after 10 minutes fails
+   the collection closed, which needs `recover`. The shutdown evidence
+   records the instruction that was issued, not the quit control that was
+   used: it proves that the Host exited and that a single independent signed
+   Off proof and the exact CFW guard restoration followed, but it does not
+   identify which quit control ended the Host. A quit from the Dock,
+   AppleScript or Activity Monitor, or a Host crash, ends the Host without
+   the graceful shutdown and leaves the Packet Tunnel connected until the next
+   launch. GA shutdown evidence covers only the graceful quit controls; how
+   that product gap is disclosed is the release owner's decision.
 
    A successful `collect` includes its own verification. For a separate read-only
    investigation, `scripts/run_ga_runtime_acceptance.sh verify` remains available;
@@ -1341,12 +1405,80 @@ wire proof.
    scripts/run_ga_runtime_acceptance.sh recover
    ```
 
-   Recovery performs fixed normal shutdown/Off/CFW checks, archives that failed
-   attempt, and requires a fresh `collect`. Never recover a successful
-   collection. Missing System Extension
-   approval, absent traffic, an installed-Host rejection that does not occur,
-   an incomplete journal, or any cleanup drift blocks this stage. Never replace
-   a failed check with a hand-written `passed` summary;
+   Recovery performs fixed shutdown/Off/CFW checks, archives that failed
+   attempt, and requires a fresh `collect`. If the installed Host is running,
+   it prints the same quit instruction and waits up to 10 minutes for the
+   Host to exit. If that wait ends without the exit, the error says what to
+   do: quit it with Quit Clash for Mac (⌘Q) and rerun `recover`. If it does
+   not exit after ⌘Q, stop and investigate instead of quitting it any other
+   way.
+   If the Host is already gone, recovery goes straight to the single signed
+   Off proof. When that Off proof fails, the Host probably exited without its
+   graceful shutdown and left its runtime on, and the error says what to do:
+   open Clash for Mac so its startup reconciliation stops the orphaned
+   runtime, confirm its dashboard shows TUN Mode and System Proxy off, quit it
+   with Quit Clash for Mac (⌘Q) and rerun `recover`. After reconciliation the
+   dashboard may show Off or a stopped failure state; do not retry either
+   mode. If the Off proof still fails after that, stop and investigate
+   instead of repeating these steps. Recovery never relaunches the app and
+   never retries the Off proof. It refuses before any runtime
+   command while `runtime-evidence`, `runtime-acceptance.json` or its pending
+   adapter exists, so it cannot orphan published evidence. `collect` refuses
+   on the same three outputs before any runtime command. Never recover a
+   successful collection.
+
+   `collect` publishes raw evidence only after shutdown, the signed Off proof,
+   the exact CFW restore and the post-restore environment check succeed. If it
+   then reports that raw evidence is published but sealing did not complete,
+   or reports an unknown durability outcome while `runtime-evidence` exists,
+   keep every tree and run:
+
+   ```bash
+   scripts/run_ga_runtime_acceptance.sh resume-seal
+   ```
+
+   `resume-seal` runs no runtime command and repeats every seal check. It
+   accepts only this collection with every fixed step event, writes a missing
+   `raw_published` marker only after durably reopening and revalidating the
+   raw tree, promotes only a byte-identical pending adapter, and only
+   reverifies an identical adapter. Repeating it is safe; a persistent failure
+   keeps this stage blocked. Never run `recover` after raw evidence is
+   published. Failures print their `caused by` chain, which names the
+   underlying error.
+
+   Two residual windows remain, both from files that are created under their
+   final name and only then written and synced. In the first, each collection
+   event, including the `raw_published` marker, can be left as a zero-length
+   or truncated `event-NNN.json` by a power loss, forced termination or
+   interrupt inside that write.
+   Before raw publication this needs nothing extra: `recover` appends after
+   the truncated event and archives it with the attempt. After raw
+   publication the raw tree is durable and the runtime was already proven
+   closed, but a truncated `event-038.json` makes `resume-seal` fail with
+   `GA runtime event-038.json is not strict UTF-8 JSON`, and `recover`
+   refuses because `runtime-evidence` exists. No command repairs that state.
+   Stop and keep every tree. Only with the release owner's explicit approval,
+   quarantine that one truncated marker by moving it out of
+   `runtime-collection` to a retained location outside `stage-inputs`, then
+   run `resume-seal`; it revalidates the raw tree before it writes a fresh
+   marker.
+
+   In the second, sealing creates the pending adapter
+   `.runtime-acceptance.json.pending` beside `runtime-acceptance.json` the
+   same way, after raw publication, and an interrupted write leaves it
+   zero-length or truncated. `resume-seal` then fails with `pending GA runtime
+   adapter binds different evidence`, while `recover` and `collect` refuse
+   because the pending adapter exists. No command repairs that state either.
+   Stop and keep every tree. Only with the release owner's explicit approval,
+   quarantine that one truncated pending adapter by moving it, never deleting
+   it, to a retained location outside `stage-inputs`, then run `resume-seal`;
+   it fully revalidates the raw tree and collection before it writes and
+   promotes a fresh adapter.
+
+   Missing System Extension approval, absent traffic, an installed-Host
+   rejection that does not occur, an incomplete journal, or any cleanup drift
+   blocks this stage. Never replace a failed check with a hand-written
+   `passed` summary;
 8. the two-clean-OS physical aggregate, three-hour soaks, full adversarial
    matrix, collector HSM receipts, and capability-report graph remain the
    separate assurance extension described in

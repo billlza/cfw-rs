@@ -12,6 +12,7 @@ from pathlib import Path
 from scripts.harness.packet_capture import (
     PacketCaptureError,
     StagedCaptureEndpoint,
+    dns_stage_endpoints,
     parse_packet_records,
     validate_capture_tokens,
     validate_staged_capture_tokens,
@@ -147,6 +148,109 @@ class PacketFixturePolicyIsolationTests(unittest.TestCase):
             packet_contract.LAN_ENDPOINT_IDENTITY_SHA256,
             FIXTURE_LAN_ENDPOINT_IDENTITY_SHA256,
         )
+
+
+class DnsRecursionDesiredContractTests(unittest.TestCase):
+    """A stub resolver chooses RD; the authoritative answer must echo it."""
+
+    START = b"rd-start-0123456789"
+    TARGET = b"rd-target-012345678"
+    END = b"rd-end-012345678901"
+    CLIENT = "198.18.64.1"
+    RESOLVER = "198.18.64.2"
+    PORTS = (53001, 53002, 53003)
+
+    def capture(self, **flags: int) -> bytes:
+        return pcap_bytes(
+            start_marker=self.START,
+            token=self.TARGET,
+            end_marker=self.END,
+            include_token=True,
+            protocol="dns",
+            family="ipv4",
+            local_address=self.CLIENT,
+            remote_address=self.RESOLVER,
+            stage_local_ports=self.PORTS,
+            link_type=0,
+            **flags,
+        )
+
+    def endpoints(self) -> tuple[StagedCaptureEndpoint, ...]:
+        return tuple(
+            StagedCaptureEndpoint(stage, self.CLIENT, port, self.RESOLVER, 53)
+            for stage, port in zip(("start", "target", "end"), self.PORTS, strict=True)
+        )
+
+    def prove(self, capture: bytes):
+        return validate_staged_capture_tokens(
+            capture,
+            "packet-pcap",
+            protocol="dns",
+            family="ipv4",
+            endpoints=self.endpoints(),
+            expected_link_type=0,
+            expected_interface_name="utun5",
+            expected_quic_version=None,
+            token=self.TARGET,
+            start_marker=self.START,
+            end_marker=self.END,
+            expect_token=True,
+            declared_observation_ms=5000,
+        )
+
+    def test_dns_recursion_desired_echo_is_an_exact_authoritative_transaction(
+        self,
+    ) -> None:
+        capture = self.capture(dns_query_flags=0x0100)
+        endpoints = dns_stage_endpoints(
+            capture,
+            "packet-pcap",
+            family="ipv4",
+            remote_address=self.RESOLVER,
+            tokens=(self.START, self.TARGET, self.END),
+        )
+        self.assertEqual(endpoints, self.endpoints())
+        proof = self.prove(capture)
+        self.assertEqual(
+            (
+                proof.dns_response_count,
+                proof.total_record_count,
+                proof.dns_answer_address,
+                proof.dns_ttl,
+            ),
+            (3, 6, "192.0.2.1", 0),
+        )
+
+    def test_dns_response_must_echo_the_query_recursion_bit(self) -> None:
+        for query_flags, response_flags in ((0x0100, 0x8400), (0x0000, 0x8500)):
+            with self.subTest(query=hex(query_flags), response=hex(response_flags)):
+                capture = self.capture(
+                    dns_query_flags=query_flags, dns_response_flags=response_flags
+                )
+                with self.assertRaisesRegex(PacketCaptureError, "not causal and exact"):
+                    self.prove(capture)
+
+    def test_dns_flags_other_than_rd_remain_rejected(self) -> None:
+        defects = (
+            {"dns_query_flags": 0x0120},  # AD
+            {"dns_query_flags": 0x0110},  # CD
+            {"dns_query_flags": 0x0180},  # RA set by a client
+            {"dns_query_flags": 0x0300},  # TC
+            {"dns_query_flags": 0x0900},  # opcode 1
+            {"dns_query_flags": 0x0100, "dns_response_flags": 0x8580},  # RA
+            {"dns_query_flags": 0x0100, "dns_response_flags": 0x8700},  # TC
+            {"dns_query_flags": 0x0100, "dns_response_flags": 0x8503},  # NXDOMAIN
+            {"dns_query_flags": 0x0100, "dns_response_flags": 0x8100},  # AA clear
+            {"dns_query_flags": 0x0100, "dns_response_flags": 0x8520},  # AD
+            {"dns_query_flags": 0x0100, "dns_response_flags": 0x8510},  # CD
+        )
+        for flags in defects:
+            with self.subTest(**{key: hex(value) for key, value in flags.items()}):
+                with self.assertRaisesRegex(
+                    PacketCaptureError,
+                    "not exact authoritative non-recursive data",
+                ):
+                    self.prove(self.capture(**flags))
 
 
 class PacketEvidenceHarnessTests(unittest.TestCase):

@@ -92,7 +92,7 @@ class RegisteredExtensionMaintenanceTests(TestCase):
             install._require_fixed_command(("/usr/sbin/scutil", "--nc", "status", "unbound-name"))
 
     def runner(self, *, state="Disconnected", status="Disconnected\n", after=None,
-               registered=True, list_error=False, signature_error=False):
+               registered=True, list_error=False, signature_error=False, extensions=None):
         calls = []
         listings = [vpn_list(state), vpn_list(state) if after is None else after]
 
@@ -102,7 +102,7 @@ class RegisteredExtensionMaintenanceTests(TestCase):
                 return install.CommandResult(1 if signature_error else 0, "", "")
             if command == ("/usr/bin/systemextensionsctl", "list"):
                 body = system_extensions_fixture(install.CFM_SYSTEM_EXTENSION_IDENTITY) if registered else "0 extension(s)\n"
-                return install.CommandResult(0, body, "")
+                return install.CommandResult(0, body if extensions is None else extensions, "")
             if command == ("/usr/sbin/scutil", "--nc", "list"):
                 if list_error:
                     return install.CommandResult(1, "", "permission denied\n")
@@ -144,6 +144,18 @@ class RegisteredExtensionMaintenanceTests(TestCase):
         self.assertEqual(calls.count(("/usr/sbin/scutil", "--nc", "list")), 2)
         self.assertTrue(all(command[0] in ("/usr/bin/systemextensionsctl", "/usr/sbin/scutil") for command in calls))
         self.assertNotIn("uninstall", " ".join(" ".join(command) for command in calls))
+
+    def test_retained_versions_pass_but_a_foreign_team_tunnel_is_rejected(self) -> None:
+        current = system_extensions_fixture(install.CFM_SYSTEM_EXTENSION_IDENTITY)
+        retained_row = current.splitlines()[-1].replace("1.2.3/123", "1.2.3/122").replace("*\t*\t", "\t\t", 1)
+        retained_row = retained_row.replace("[activated enabled]", "[terminated waiting to uninstall on reboot]")
+        retained = current.replace("1 extension(s)", "2 extension(s)", 1) + retained_row + "\n"
+        runner, _ = self.runner(extensions=retained)
+        install.require_cfm_system_extension_inactive(runner)
+        runner, _ = self.runner(extensions=retained.replace("\t\tYKUPL7Z869\t", "\t\tABCDE12345\t", 1))
+        with self.assertRaises(install.InstallError) as raised:
+            install.require_cfm_system_extension_inactive(runner)
+        self.assertEqual(raised.exception.code, "cfm_system_extension_identity_invalid")
 
     def test_active_transitioning_or_invalid_vpn_is_rejected_even_without_registration(self) -> None:
         for state in ("Connected", "Connecting", "Disconnecting", "Invalid"):

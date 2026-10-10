@@ -6,9 +6,11 @@ does not accept a list of boolean outcomes. Collection starts only after the
 existing dormant-install and current-service owners have closed their
 50025 -> 50028 journals. ``collect`` creates a durable CSPRNG challenge intent,
 owns every runtime command and packet byte, atomically publishes the exact
-raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore;
-it never duplicates either installation state machine. ``verify`` reopens
-every byte and journal.
+raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore
+of a collection without published raw evidence; it never duplicates either
+installation state machine. ``resume-seal`` runs no runtime command: it only
+completes sealing of the collection whose raw tree was published after the
+proven restore. ``verify`` reopens every byte and journal.
 
 The larger physical/research harness remains assurance-only.  GA acceptance
 reuses the signed Host's authenticated Packet control and the source-pinned
@@ -54,6 +56,7 @@ if __package__:
     )
     from .harness.packet_capture import (
         ALLOWED_LINK_TYPES,
+        DNS_A_ADDRESS,
         PacketCaptureError,
         StagedCaptureEndpoint,
         dns_stage_endpoints,
@@ -78,6 +81,7 @@ if __package__:
     from .publication.common import (
         PublicationError,
         canonical_json,
+        failure_diagnostic,
         read_regular,
         require_exact_keys,
         require_sha256,
@@ -93,12 +97,18 @@ if __package__:
         exclusive_rooted_directory_lock,
         publish_private_directory_locked,
         promote_private_pending,
+        read_private_directory_contents_locked,
         read_private_pending_locked,
         write_private_pending_locked,
     )
     from .publication.graph_model import load_pins
     from .publication.release_environment import release_tool_environment
-    from .release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
+    from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        BuildIdentityError,
+        canonical_build_version,
+        ga_root,
+    )
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from scripts import dormant_app_install
@@ -116,6 +126,7 @@ else:
     )
     from scripts.harness.packet_capture import (
         ALLOWED_LINK_TYPES,
+        DNS_A_ADDRESS,
         PacketCaptureError,
         StagedCaptureEndpoint,
         dns_stage_endpoints,
@@ -142,6 +153,7 @@ else:
     from scripts.publication.common import (
         PublicationError,
         canonical_json,
+        failure_diagnostic,
         read_regular,
         require_exact_keys,
         require_sha256,
@@ -160,6 +172,7 @@ else:
         exclusive_rooted_directory_lock,
         publish_private_directory_locked,
         promote_private_pending,
+        read_private_directory_contents_locked,
         read_private_pending_locked,
         write_private_pending_locked,
     )
@@ -167,6 +180,8 @@ else:
     from scripts.publication.release_environment import release_tool_environment
     from scripts.release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
+        BuildIdentityError,
+        canonical_build_version,
         ga_root,
     )
 
@@ -199,6 +214,17 @@ FROM_BUILD: Final = "50025"
 TEAM_ID: Final = "YKUPL7Z869"
 APP_BUNDLE_ID: Final = "com.bill.clashformac"
 PACKET_EXTENSION_BUNDLE_ID: Final = "com.bill.clashformac.packet-tunnel"
+# systemextensionsctl prints "(CFBundleShortVersionString/CFBundleVersion)".
+PACKET_EXTENSION_VERSION: Final = f"{PRODUCT_VERSION}/{TO_BUILD}"
+PACKET_EXTENSION_ACTIVE_STATE: Final = "[activated enabled]"
+# The only state in which macOS keeps a replaced Packet Tunnel listed: it no
+# longer runs and is removed at the next reboot.
+PACKET_EXTENSION_RETAINED_STATE: Final = "[terminated waiting to uninstall on reboot]"
+# A retained row's CFBundleShortVersionString; its CFBundleVersion must be an
+# earlier canonical build than the candidate's.
+PACKET_EXTENSION_SHORT_VERSION_RE: Final = re.compile(
+    r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}"
+)
 PROXY_LABEL: Final = "com.bill.clashformac.proxy-agent"
 AUTHORITY_LABEL: Final = "com.bill.clashformac.global-authority"
 INSTALLED_APP: Final = Path("/Applications/Clash for Mac.app")
@@ -271,12 +297,22 @@ MAX_RUNTIME_FILES: Final = 32
 ADAPTER_PENDING_NAME: Final = ".runtime-acceptance.json.pending"
 TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,63}$")
 INTERFACE_RE: Final = re.compile(r"^(?:utun[0-9]{1,3}|en[0-9]{1,2}|pktap,all)$")
+# contracts/tunnel-address-plan-v1.json ipv4DnsPeer. The Packet Tunnel makes it
+# the resolver for every domain, so the product DNS leg GA can observe on utun
+# ends here. The signed dns-a-primary case forwards it outside utun to the
+# evidence resolver. libbox returns that resolver's authoritative answer under
+# the client's query ID, re-packed without name compression.
+TUNNEL_DNS_PEER_IPV4: Final = "198.18.64.2"
+# _derive_capture_token's shape: a four-character stage prefix, "-" and 32
+# lowercase hex digest characters, one 37-byte QNAME label. The capture filter
+# loads fixed offsets of that label and the decoder lowercases names.
+DNS_EVIDENCE_LABEL_RE: Final = re.compile(r"^[a-z0-9]{4}-[0-9a-f]{32}$")
 
 TRAFFIC_POLICY: Final = {
     "dns_traffic": {
         "case_id": "dns-a-primary",
         "protocol": "dns",
-        "remote_address": "34.80.107.183",
+        "remote_address": TUNNEL_DNS_PEER_IPV4,
         "remote_port": 53,
         "expected_records": 6,
     },
@@ -309,11 +345,30 @@ PACKET_EVIDENCE_FLAG: Final = "--physical-packet-evidence-v5"
 SERVICE_MAINTENANCE_FLAG: Final = "--service-maintenance-v2"
 PACKET_HOST_DOCUMENT: Final = "cfw-packet-host-completed-v5"
 PACKET_HOST_SCHEMA_VERSION: Final = 5
-SHUTDOWN_APPLE_EVENT: Final = (
-    "/usr/bin/osascript",
-    "-e",
-    'tell application id "com.bill.clashformac" to quit',
+# The product's graceful shutdown, which normally stops the runtime and proves
+# Off before the Host exits, runs from Quit Clash for Mac (⌘Q) in the app menu,
+# Quit in the menu-bar menu and the Settings page's own Quit and Force Quit
+# buttons.
+# A quit from the Dock, AppleScript or Activity Monitor, or the macOS Force
+# Quit window, either sends the quit AppleEvent, which tao 0.37.1 turns
+# straight into applicationWillTerminate, or ends the process; the Packet
+# Tunnel then stays connected until the next launch. The collector therefore
+# sends the Host nothing and asks the operator for the ⌘Q quit. The evidence
+# keeps this request as the instruction that was issued: no quit control
+# leaves a receipt, so it cannot show which control ended the Host.
+OPERATOR_QUIT_INSTRUCTION: Final = (
+    "GA runtime collection is waiting for you to quit the installed 50028 Clash "
+    "for Mac with Quit Clash for Mac (⌘Q) in its app menu or Quit in its menu "
+    "bar menu; do not quit it from the Dock, AppleScript or Activity Monitor, "
+    "or with the macOS Force Quit window (Option-Command-Esc)"
 )
+OPERATOR_QUIT_REQUEST: Final = {
+    "instruction": OPERATOR_QUIT_INSTRUCTION,
+    "kind": "operator_quit_instruction",
+}
+# Bounds a person reading the instruction and choosing Quit. The Host's own
+# stop and Off proof before it exits fall inside the same wait.
+OPERATOR_QUIT_SECONDS: Final = 10 * 60
 OFF_PROOF_COMMAND: Final = (
     INSTALLED_EXECUTABLE.as_posix(),
     SERVICE_MAINTENANCE_FLAG,
@@ -412,6 +467,31 @@ def _fixed_paths(repository: Path) -> tuple[Path, Path]:
     return (
         repository.joinpath(*ACCEPTANCE_RELATIVE.parts),
         repository.joinpath(*RAW_ROOT_RELATIVE.parts),
+    )
+
+
+def _fixed_path_present(path: Path) -> bool:
+    """Observe one fixed output; an unreadable state is an error, not absence."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _published_runtime_outputs(repository: Path) -> tuple[str, ...]:
+    """Name each existing raw tree, adapter or pending adapter.
+
+    collect admission and recover share this one predicate, so neither starts
+    a runtime command while any published output exists.
+    """
+
+    acceptance_path, raw_root = _fixed_paths(repository)
+    return tuple(
+        path.name
+        for path in (raw_root, acceptance_path, acceptance_path.parent / ADAPTER_PENDING_NAME)
+        if _fixed_path_present(path)
     )
 
 
@@ -1289,6 +1369,17 @@ def _validate_service_registration(value: dict[str, Any]) -> None:
     )
 
 
+def _retained_packet_extension_build(version: str) -> int:
+    short_version, separator, build = version.partition("/")
+    malformed = "another Packet Tunnel registration has a malformed version"
+    if not separator or PACKET_EXTENSION_SHORT_VERSION_RE.fullmatch(short_version) is None:
+        raise _error(malformed)
+    try:
+        return int(canonical_build_version(build, "retained Packet Tunnel build"))
+    except BuildIdentityError as error:
+        raise _error(malformed) from error
+
+
 def _validate_system_extension(value: dict[str, Any]) -> None:
     document = _check_document(value, "system_extension", {"command"})
     receipt = _command(
@@ -1298,20 +1389,55 @@ def _validate_system_extension(value: dict[str, Any]) -> None:
         label="system extension observation",
     )
     try:
-        identities = dormant_app_install._parse_system_extension_identities(
+        registrations = dormant_app_install.parse_system_extension_registrations(
             receipt["stdout"]
         )
     except dormant_app_install.InstallError as error:
         raise _error("raw systemextensionsctl output is malformed") from error
-    if (TEAM_ID, PACKET_EXTENSION_BUNDLE_ID) not in identities:
-        raise _error("raw system extension output lacks the fixed 50028 extension")
-    matching = [
-        line
-        for line in receipt["stdout"].splitlines()
-        if TEAM_ID in line and PACKET_EXTENSION_BUNDLE_ID in line
+    packet_tunnels = [
+        registration
+        for registration in registrations
+        if registration.bundle_id == PACKET_EXTENSION_BUNDLE_ID
     ]
-    if len(matching) != 1 or not matching[0].endswith("[activated enabled]"):
+    if any(registration.team_id != TEAM_ID for registration in packet_tunnels):
+        raise _error("raw system extension output lists a foreign-team Packet Tunnel")
+    # The parser rejects a repeated team/bundle/version, so this fails only
+    # when no row carries the candidate version.
+    candidates = [
+        registration
+        for registration in packet_tunnels
+        if registration.version == PACKET_EXTENSION_VERSION
+    ]
+    if len(candidates) != 1:
+        raise _error("raw system extension output lacks the fixed 50028 extension")
+    candidate = candidates[0]
+    if not (
+        candidate.enabled
+        and candidate.active
+        and candidate.state == PACKET_EXTENSION_ACTIVE_STATE
+    ):
         raise _error("fixed system extension is not both activated and enabled")
+    retained = [
+        registration for registration in packet_tunnels if registration is not candidate
+    ]
+    # macOS leaves both flag columns empty on a retained row.
+    if any(
+        registration.enabled
+        or registration.active
+        or registration.state != PACKET_EXTENSION_RETAINED_STATE
+        for registration in retained
+    ):
+        raise _error(
+            "another Packet Tunnel registration is not terminated and waiting to "
+            "uninstall on reboot"
+        )
+    if any(
+        _retained_packet_extension_build(registration.version) >= int(TO_BUILD)
+        for registration in retained
+    ):
+        raise _error(
+            f"another Packet Tunnel registration is not an earlier build than {TO_BUILD}"
+        )
 
 
 def _validate_network_extension(
@@ -1405,7 +1531,7 @@ def _validate_shutdown_restore(value: dict[str, Any]) -> tuple[dict[str, Any], d
             "host_process_observation",
             "off_proof_command",
             "process_observation",
-            "shutdown_command",
+            "shutdown_request",
             "stop_restore_observation",
         },
     )
@@ -1424,14 +1550,19 @@ def _validate_shutdown_restore(value: dict[str, Any]) -> tuple[dict[str, Any], d
         "config_digest"
     ]:
         raise _error("candidate stop/restore did not return to its exact tunnel baseline")
-    command = _command(
-        document["shutdown_command"],
-        expected_argv=list(SHUTDOWN_APPLE_EVENT),
-        expected_exit=0,
-        label="candidate normal shutdown request",
+    # The request records the fixed instruction that was issued, not the quit
+    # control that was used: no quit leaves a receipt. What this evidence
+    # proves is that the Host exited, then one independent signed Off proof
+    # and the exact CFW guard restoration followed.
+    request = require_exact_keys(
+        document["shutdown_request"],
+        {"instruction", "kind"},
+        "candidate shutdown request",
     )
-    if command["stdout"] or command["stderr"]:
-        raise _error("candidate normal shutdown request emitted unexpected output")
+    if request != OPERATOR_QUIT_REQUEST:
+        raise _error(
+            "candidate shutdown request is not the fixed operator quit instruction"
+        )
     host_process = _command(
         document["host_process_observation"],
         expected_argv=list(PROCESS_OBSERVATION_COMMAND),
@@ -1451,8 +1582,7 @@ def _validate_shutdown_restore(value: dict[str, Any]) -> tuple[dict[str, Any], d
     )
     _host_absence_observation(document["process_observation"])
     if not (
-        timestamp_fraction(command["finished_at"])
-        <= timestamp_fraction(host_process["started_at"])
+        timestamp_fraction(host_process["started_at"])
         <= timestamp_fraction(host_process["finished_at"])
         <= timestamp_fraction(off_proof["started_at"])
         <= timestamp_fraction(off_proof["finished_at"])
@@ -1538,17 +1668,16 @@ def _endpoint(value: object, check_id: str) -> dict[str, Any]:
     )
     policy = TRAFFIC_POLICY[check_id]
     try:
-        local = ipaddress.ip_address(endpoint["local_address"])
-        remote = ipaddress.ip_address(endpoint["remote_address"])
+        ipaddress.ip_address(endpoint["local_address"])
+        ipaddress.ip_address(endpoint["remote_address"])
     except (TypeError, ValueError) as error:
         raise _error(f"{check_id} endpoint address is invalid") from error
+    # Collection records the tunnel client and the policy peer as these exact
+    # strings; another spelling of either address is not the captured tuple.
     if (
         endpoint["family"] != "ipv4"
-        or local.version != 4
-        or local.is_unspecified
-        or local.is_multicast
-        or remote.version != 4
-        or str(remote) != policy["remote_address"]
+        or endpoint["local_address"] != TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"]
+        or endpoint["remote_address"] != policy["remote_address"]
         or type(endpoint["remote_port"]) is not int
         or endpoint["remote_port"] != policy["remote_port"]
         or type(endpoint["link_type"]) is not int
@@ -1671,10 +1800,12 @@ def _packet_send_result(
             or dns["requested_type"] != "A"
             or query["name"] != f"{token}.evidence.test"
             or query["token_sha256"] != expected_digest
-            or not isinstance(query["addresses"], list)
-            or not query["addresses"]
         ):
             raise _error(f"{check_id} {stage} DNS result is incomplete")
+        if query["addresses"] != [DNS_A_ADDRESS]:
+            raise _error(
+                f"{check_id} {stage} getaddrinfo did not return the evidence answer"
+            )
     else:
         if (
             result["dns_result"] is not None
@@ -1698,6 +1829,51 @@ def _tokens(value: object, check_id: str) -> dict[str, str]:
     if len(set(tokens.values())) != 3:
         raise _error(f"{check_id} reuses a capture token")
     return tokens
+
+
+def _traffic_capture_filter_argv(
+    check_id: str, tokens: dict[str, str]
+) -> tuple[str, ...]:
+    """Return the one BPF expression used to collect and to re-verify a check."""
+
+    policy = TRAFFIC_POLICY[check_id]
+    ordered = tuple(tokens[stage] for stage in PACKET_STAGES)
+    if policy["protocol"] != "dns":
+        return packet_capture_filter_argv(case_id=policy["case_id"], tokens=ordered)
+    if any(DNS_EVIDENCE_LABEL_RE.fullmatch(token) is None for token in ordered):
+        raise _error(f"{check_id} tokens are not single DNS evidence labels")
+
+    def word(token: str, start: int) -> int:
+        return int.from_bytes(token.encode("ascii")[start : start + 4], "big")
+
+    # Label offsets 0 (stage prefix), 5 and 9 (first eight digest characters).
+    labels = tuple(
+        (len(token), word(token, 0), word(token, 5), word(token, 9))
+        for token in ordered
+    )
+    if len({prefix for _length, prefix, _head, _tail in labels}) != len(labels):
+        raise _error(f"{check_id} token BPF prefixes are not unique")
+    client = TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"]
+    resolver = policy["remote_address"]
+    port = policy["remote_port"]
+    # Every system lookup uses this resolver, so admit only DNS messages whose
+    # first QNAME label matches one of this collection's tokens in its length
+    # (udp[20], after the 8-byte UDP and 12-byte DNS headers), stage prefix
+    # (udp[21:4]) and first eight digest characters (udp[26:4] and udp[30:4];
+    # udp[25] is the "-"). The query type, the other 24 digest characters and
+    # the rest of the name are not filtered, so a non-A query or a
+    # retransmission for a token name also passes; validation then requires
+    # exactly one A query and one response per token and fails closed.
+    names = " or ".join(
+        f"(udp[20] = {length} and udp[21:4] = 0x{prefix:08x}"
+        f" and udp[26:4] = 0x{head:08x} and udp[30:4] = 0x{tail:08x})"
+        for length, prefix, head, tail in labels
+    )
+    return (
+        f"udp and ((src host {client} and dst host {resolver} and dst port {port})"
+        f" or (src host {resolver} and src port {port} and dst host {client}))"
+        f" and ({names})",
+    )
 
 
 def _validate_traffic(
@@ -1734,10 +1910,7 @@ def _validate_traffic(
     observation_ms = document["observation_ms"]
     if type(observation_ms) is not int or not 1000 <= observation_ms <= 30_000:
         raise _error(f"{check_id} observation window is outside 1s..30s")
-    filter_argv = packet_capture_filter_argv(
-        case_id=policy["case_id"],
-        tokens=(tokens["start"], tokens["target"], tokens["end"]),
-    )
+    filter_argv = _traffic_capture_filter_argv(check_id, tokens)
     capture_argv = _capture_command_argv(
         endpoint["interface_name"], policy["expected_records"], filter_argv
     )
@@ -1791,6 +1964,8 @@ def _validate_traffic(
             )
         except PacketCaptureError as error:
             raise _error(f"{check_id} DNS capture endpoints are invalid") from error
+        if any(item.local_address != endpoint["local_address"] for item in endpoints):
+            raise _error(f"{check_id} DNS queries did not come from the tunnel client")
     else:
         endpoints = tuple(
             StagedCaptureEndpoint(
@@ -2230,8 +2405,45 @@ COLLECTION_SUCCESS_STEPS: Final = (
     "shutdown-off-proof",
     "shutdown-process-observation",
 )
+COLLECTION_STEP_PAIRS: Final = tuple(
+    (phase, step)
+    for step in COLLECTION_SUCCESS_STEPS
+    for phase in ("started", "completed")
+)
+RAW_PUBLISHED_PAIR: Final = ("raw_published", "collection")
+COMPLETED_COLLECTION_PAIRS: Final = (*COLLECTION_STEP_PAIRS, RAW_PUBLISHED_PAIR)
+SEAL_RETRY_COMMAND: Final = "scripts/run_ga_runtime_acceptance.sh resume-seal"
+RECOVERY_COMMAND: Final = "scripts/run_ga_runtime_acceptance.sh recover"
+# A Host that ended without its graceful shutdown leaves its runtime on, and
+# only the Host's next launch reconciles it. recover never relaunches the app.
+# Reconciliation that stops a runtime it cannot adopt reports a stopped
+# failure rather than Off, and a launch whose status read fails exits on ⌘Q
+# without cleanup; a second failed Off proof therefore needs investigation.
+RECOVERY_OFF_PROOF_GUIDANCE: Final = (
+    "the installed Host may have exited without its graceful shutdown and left "
+    "its runtime on: open Clash for Mac so its startup reconciliation stops the "
+    "orphaned runtime, confirm its dashboard shows TUN Mode and System Proxy "
+    "off (it may show Off or a stopped failure state; do not retry them), quit "
+    "it with Quit Clash for Mac (⌘Q) in its app menu, then rerun "
+    f"{RECOVERY_COMMAND}; if the Off proof still fails after that, stop and "
+    "investigate instead of repeating these steps"
+)
+# A graceful shutdown that cannot stop the runtime normally keeps the Host open
+# and reports the failure; any other quit would leave that runtime on.
+RECOVERY_OPERATOR_QUIT_GUIDANCE: Final = (
+    "recovery did not observe the installed Host exit: if it is still running, "
+    "quit it with Quit Clash for Mac (⌘Q) in its app menu, then rerun "
+    f"{RECOVERY_COMMAND}; if it does not exit after ⌘Q, stop and investigate "
+    "instead of quitting it any other way"
+)
+
+
 class GACollectionRecoveryRequired(GARuntimeAcceptanceError):
     """A collection entered the mutation boundary and requires fixed recovery."""
+
+
+class GASealRetryRequired(GARuntimeAcceptanceError):
+    """Raw evidence is published after the proven restore; only sealing is retried."""
 
 
 def _utc_now() -> str:
@@ -2501,10 +2713,7 @@ class ProductionCollectorRuntime:
         policy = TRAFFIC_POLICY[check_id]
         interface = self._tunnel_interface()
         remaining_seconds()
-        filter_argv = packet_capture_filter_argv(
-            case_id=policy["case_id"],
-            tokens=(tokens["start"], tokens["target"], tokens["end"]),
-        )
+        filter_argv = _traffic_capture_filter_argv(check_id, tokens)
         capture_argv = _capture_command_argv(
             interface, policy["expected_records"], filter_argv
         )
@@ -2821,10 +3030,40 @@ class ProductionCollectorRuntime:
         return _packet_host_receipt_document(receipt)
 
     def await_host_absence(self, *, timeout: int) -> dict[str, Any]:
-        """Poll until the dashboard Host exits; registered services may still drain."""
+        """Observe, bounded, that the dashboard Host is absent.
+
+        Callers use it only once the Host should already be gone: after the
+        operator-quit wait saw it exit, or when recovery found no Host. It
+        sends the Host nothing.
+        """
 
         if type(timeout) is not int or not 1 <= timeout <= 120:
             raise _error("installed Host absence timeout is outside 1..120 seconds")
+        return self._poll_host_absence(
+            timeout,
+            expired=(
+                f"installed Host was still running when its {timeout}-second "
+                "absence observation ended"
+            ),
+        )
+
+    def await_operator_quit(self) -> dict[str, Any]:
+        """Ask the operator once for the graceful quit, then poll until the Host exits.
+
+        The operator bound is fixed here rather than chosen by a caller, so
+        every await_host_absence caller keeps its 1..120 second bound.
+        """
+
+        print(OPERATOR_QUIT_INSTRUCTION, file=sys.stderr, flush=True)
+        return self._poll_host_absence(
+            OPERATOR_QUIT_SECONDS,
+            expired=(
+                "installed Host did not exit within the "
+                f"{OPERATOR_QUIT_SECONDS // 60}-minute operator quit bound"
+            ),
+        )
+
+    def _poll_host_absence(self, timeout: int, *, expired: str) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         while True:
             receipt = _run_collector_command(
@@ -2843,7 +3082,7 @@ class ProductionCollectorRuntime:
             ):
                 return receipt
             if time.monotonic() >= deadline:
-                raise _error("installed Host did not exit after its normal shutdown request")
+                raise _error(expired)
             time.sleep(0.25)
 
 
@@ -2928,12 +3167,18 @@ def _append_collection_event(
     phase: str,
     step: str,
     command: list[str] | None = None,
+    expected_sequence: int | None = None,
 ) -> None:
     with exclusive_rooted_directory_lock(
         repository, collection_path, require_private=True
     ) as descriptor:
         names = os.listdir(descriptor)
         events = sorted(name for name in names if re.fullmatch(r"event-[0-9]{3}\.json", name))
+        if expected_sequence is not None and len(events) != expected_sequence:
+            raise _error(
+                f"GA runtime collection {phase} event requires sequence "
+                f"{expected_sequence}, but the collection holds {len(events)} events"
+            )
         name = f"event-{len(events):03d}.json"
         document = {
             "collection": collection,
@@ -2954,9 +3199,24 @@ def _append_collection_event(
         )
 
 
-def _validate_collection_receipt(
+def _append_raw_published_marker(
+    repository: Path, collection_path: Path, collection: dict[str, str]
+) -> None:
+    # collect and resume-seal both write this marker; the sequence guard lets
+    # only the first writer follow the fixed step events.
+    _append_collection_event(
+        repository,
+        collection_path,
+        collection,
+        phase=RAW_PUBLISHED_PAIR[0],
+        step=RAW_PUBLISHED_PAIR[1],
+        expected_sequence=len(COLLECTION_STEP_PAIRS),
+    )
+
+
+def _read_collection_events(
     repository: Path, collection: dict[str, str], expected_intent: bytes
-) -> dict[str, str]:
+) -> tuple[tuple[tuple[Any, Any], ...], list[dict[str, Any]]]:
     path = repository.joinpath(*COLLECTION_RELATIVE.parts)
     with exclusive_rooted_directory_lock(
         repository, path, require_private=True
@@ -3020,14 +3280,16 @@ def _validate_collection_receipt(
             if event["command_sha256"] is not None:
                 require_sha256(event["command_sha256"], "collection command digest")
             events.append(event)
-    expected_pairs = [
-        (phase, step)
-        for step in COLLECTION_SUCCESS_STEPS
-        for phase in ("started", "completed")
-    ]
-    expected_pairs.append(("raw_published", "collection"))
-    observed_pairs = [(event["phase"], event["step"]) for event in events]
-    if observed_pairs != expected_pairs:
+    return tuple((event["phase"], event["step"]) for event in events), entries
+
+
+def _validate_collection_receipt(
+    repository: Path, collection: dict[str, str], expected_intent: bytes
+) -> dict[str, str]:
+    observed_pairs, entries = _read_collection_events(
+        repository, collection, expected_intent
+    )
+    if observed_pairs != COMPLETED_COLLECTION_PAIRS:
         raise _error("GA runtime collection did not complete the fixed command registry")
     return {
         "path": COLLECTION_RELATIVE.as_posix(),
@@ -3160,6 +3422,30 @@ def _step_host_absence(
     return receipt
 
 
+def _step_operator_quit(
+    repository: Path,
+    collection_path: Path,
+    collection: dict[str, str],
+    runtime: ProductionCollectorRuntime,
+    *,
+    step: str,
+) -> dict[str, str]:
+    """After the durable started event, let the runtime ask once for the quit.
+
+    The wait is bounded and no command is sent to the Host; only the process
+    table is observed. The returned record is the instruction that was issued.
+    """
+
+    _append_collection_event(
+        repository, collection_path, collection, phase="started", step=step
+    )
+    _host_absence_observation(runtime.await_operator_quit())
+    _append_collection_event(
+        repository, collection_path, collection, phase="completed", step=step
+    )
+    return dict(OPERATOR_QUIT_REQUEST)
+
+
 def collect_ga_runtime_acceptance(
     *,
     repository: Path,
@@ -3174,13 +3460,19 @@ def collect_ga_runtime_acceptance(
     No raw input path or raw byte payload is accepted.  The fresh CFW baseline
     and challenge are durably published before any runtime mutation. Raw
     documents are held by this process and the exact 15-file tree is atomically
-    published only after the complete shutdown/restore boundary succeeds.
+    published only after the complete shutdown/restore boundary succeeds. A
+    later failure leaves the runtime closed, so it is never marked for
+    recovery; ``resume-seal`` completes the seal instead.
     """
 
     repository = _canonical_repository(repository)
-    acceptance_path, raw_root = _fixed_paths(repository)
-    if os.path.lexists(acceptance_path) or os.path.lexists(raw_root):
-        raise _error("GA runtime acceptance or raw evidence already exists")
+    _acceptance_path, raw_root = _fixed_paths(repository)
+    published = _published_runtime_outputs(repository)
+    if published:
+        raise _error(
+            "GA runtime acceptance or raw evidence already exists "
+            f"({', '.join(published)})"
+        )
     initial = _validate_expected(expected)
     selected_runtime = runtime or ProductionCollectorRuntime(repository)
     _require_current_environment(
@@ -3210,6 +3502,8 @@ def collect_ga_runtime_acceptance(
         repository, initial, collection, before_guard
     )
     mutation_started = False
+    raw_publication_started = False
+    raw_published = False
     try:
         selected_runtime.require_capture_authority()
         gatekeeper_argv = [
@@ -3468,14 +3762,12 @@ def collect_ga_runtime_acceptance(
             phase="completed",
             step="shutdown-stop-restore",
         )
-        shutdown = _step_command(
+        shutdown_request = _step_operator_quit(
             repository,
             collection_path,
             collection,
             selected_runtime,
             step="shutdown-request",
-            argv=list(SHUTDOWN_APPLE_EVENT),
-            timeout=60,
         )
         host_stopped = _step_host_absence(
             repository,
@@ -3522,7 +3814,7 @@ def collect_ga_runtime_acceptance(
             "off_proof_command": off_proof,
             "process_observation": process_stopped,
             "schema_version": SCHEMA_VERSION,
-            "shutdown_command": shutdown,
+            "shutdown_request": shutdown_request,
             "stop_restore_observation": stop_restore,
         }
         documents["legacy-cfw-preserved.json"] = {
@@ -3544,23 +3836,47 @@ def collect_ga_runtime_acceptance(
             final_expected,
             prepackage_stage_verifier,
         )
+        raw_publication_started = True
         _publish_collected_raw(repository, files)
-        _append_collection_event(
-            repository,
-            collection_path,
-            collection,
-            phase="raw_published",
-            step="collection",
-        )
+        # Shutdown, the Off proof, the exact CFW restore and the post-restore
+        # environment were proven above and the complete raw tree is durable.
+        # Nothing after this point needs runtime recovery; only sealing retries.
+        raw_published = True
+        _append_raw_published_marker(repository, collection_path, collection)
         result = seal_ga_runtime_acceptance(
             repository=repository,
             expected=final_expected,
             prepackage_stage_verifier=prepackage_stage_verifier,
         )
         return result
-    except (DurabilityOutcomeUnknown, RootedDirectoryChanged):
+    except (DurabilityOutcomeUnknown, RootedDirectoryChanged) as error:
+        error.add_note(
+            f"if runtime-evidence exists run {SEAL_RETRY_COMMAND}; otherwise run "
+            f"{RECOVERY_COMMAND}; each command refuses the other's state"
+        )
         raise
     except BaseException as error:
+        try:
+            # A publication that failed after its rename still left the tree.
+            published = raw_published or (
+                raw_publication_started and _fixed_path_present(raw_root)
+            )
+        except OSError as observation_error:
+            unknown = DurabilityOutcomeUnknown(
+                "GA runtime raw-evidence publication state is unobservable after a "
+                "collection failure; inspect it before any retry"
+            )
+            unknown.add_note(
+                "raw-evidence observation failed: "
+                f"{type(observation_error).__name__}: {observation_error}"
+            )
+            raise unknown from error
+        if published:
+            raise GASealRetryRequired(
+                "GA runtime raw evidence was published after the proven runtime "
+                f"restore, but sealing did not complete; run {SEAL_RETRY_COMMAND} "
+                "and never recover this collection"
+            ) from error
         try:
             _append_collection_event(
                 repository,
@@ -3646,6 +3962,16 @@ def _collection_guard_baseline(
     return _guard(intent["cfw_guard_baseline"], "collection intent baseline")
 
 
+def _require_no_published_runtime_outputs(repository: Path) -> None:
+    present = _published_runtime_outputs(repository)
+    if present:
+        raise _error(
+            "GA runtime recovery refuses a collection whose evidence is already "
+            f"published ({', '.join(present)}); recovery would orphan it, run "
+            f"{SEAL_RETRY_COMMAND}"
+        )
+
+
 def _archive_recovered_collection(
     repository: Path,
     collection_path: Path,
@@ -3657,6 +3983,8 @@ def _archive_recovered_collection(
         with exclusive_rooted_directory_lock(
             repository, parent, require_private=True
         ) as descriptor:
+            # Raw publication and adapter promotion take this same parent lock.
+            _require_no_published_runtime_outputs(repository)
             if os.path.lexists(destination):
                 raise _error("recovered collection archive already exists")
             os.rename(
@@ -3687,6 +4015,7 @@ def recover_ga_runtime_collection(
     """Run only the fixed runtime shutdown/CFW-restore recovery path."""
 
     repository = _canonical_repository(repository)
+    _require_no_published_runtime_outputs(repository)
     collection_path = repository.joinpath(*COLLECTION_RELATIVE.parts)
     if not os.path.lexists(collection_path):
         raise _error("there is no active GA runtime collection to recover")
@@ -3723,15 +4052,17 @@ def recover_ga_runtime_collection(
     if len(app_processes) > 1:
         raise _error("runtime recovery found an ambiguous installed Host process set")
     if app_processes:
-        _step_command(
-            repository,
-            collection_path,
-            collection,
-            selected_runtime,
-            step="runtime-recovery-shutdown-request",
-            argv=list(SHUTDOWN_APPLE_EVENT),
-            timeout=60,
-        )
+        try:
+            _step_operator_quit(
+                repository,
+                collection_path,
+                collection,
+                selected_runtime,
+                step="runtime-recovery-shutdown-request",
+            )
+        except GARuntimeAcceptanceError as error:
+            error.add_note(RECOVERY_OPERATOR_QUIT_GUIDANCE)
+            raise
     _step_host_absence(
         repository,
         collection_path,
@@ -3740,19 +4071,23 @@ def recover_ga_runtime_collection(
         step="runtime-recovery-host-process-observation",
         timeout=60,
     )
-    off_proof = _step_command(
-        repository,
-        collection_path,
-        collection,
-        selected_runtime,
-        step="runtime-recovery-off-proof",
-        argv=list(OFF_PROOF_COMMAND),
-        timeout=60,
-    )
-    _validate_off_proof_receipt(
-        off_proof,
-        label="runtime recovery signed Host Off proof",
-    )
+    try:
+        off_proof = _step_command(
+            repository,
+            collection_path,
+            collection,
+            selected_runtime,
+            step="runtime-recovery-off-proof",
+            argv=list(OFF_PROOF_COMMAND),
+            timeout=60,
+        )
+        _validate_off_proof_receipt(
+            off_proof,
+            label="runtime recovery signed Host Off proof",
+        )
+    except GARuntimeAcceptanceError as error:
+        error.add_note(RECOVERY_OFF_PROOF_GUIDANCE)
+        raise
     _step_host_absence(
         repository,
         collection_path,
@@ -3779,6 +4114,93 @@ def recover_ga_runtime_collection(
         step="runtime-cleanup",
     )
     return _archive_recovered_collection(repository, collection_path, collection)
+
+
+def _durably_reopen_published_raw(
+    repository: Path, raw_root: Path
+) -> dict[str, FileSnapshot]:
+    parent = raw_root.parent
+    try:
+        with exclusive_rooted_directory_lock(
+            repository, parent, require_private=True
+        ) as descriptor:
+            # Fsyncs every file, the tree and its parent before the bytes are
+            # trusted, because collect may have failed before its own barrier.
+            files = read_private_directory_contents_locked(
+                descriptor,
+                parent,
+                raw_root.name,
+                {
+                    name: MAX_PCAP_BYTES if name in PCAP_FILES else MAX_JSON_BYTES
+                    for name in sorted(RAW_FILE_NAMES)
+                },
+            )
+    except (DurabilityOutcomeUnknown, RootedDirectoryChanged):
+        raise
+    except PublicationError as error:
+        raise _error("published GA runtime raw evidence cannot be durably reopened") from error
+    if sum(len(data) for data in files.values()) > MAX_TOTAL_BYTES:
+        raise _error("GA runtime evidence exceeds its aggregate byte bound")
+    return _snapshots_from_collector_bytes(files)
+
+
+def resume_ga_runtime_seal(
+    *,
+    repository: Path,
+    expected: object,
+    prepackage_stage_verifier: PrepackageStageVerifier,
+) -> dict[str, dict[str, str]]:
+    """Seal the fixed collection whose raw evidence was published after restore.
+
+    No runtime command, capture or CFW observation runs here. A missing
+    raw_published marker is written only after the raw tree is durably
+    reopened and fully revalidated against the collection intent. Sealing is
+    the idempotent ``seal_ga_runtime_acceptance``.
+    """
+
+    repository = _canonical_repository(repository)
+    acceptance_path, raw_root = _fixed_paths(repository)
+    collection_path = repository.joinpath(*COLLECTION_RELATIVE.parts)
+    normalized_expected = _validate_expected(expected)
+    if not _fixed_path_present(raw_root):
+        raise _error(
+            "there is no published GA runtime raw evidence to seal; an unfinished "
+            f"collection needs {RECOVERY_COMMAND}"
+        )
+    if not _fixed_path_present(collection_path):
+        raise _error("published GA runtime raw evidence has no fixed collection receipt")
+    intent, collection = _load_collection_intent(repository, collection_path)
+    observed, _entries = _read_collection_events(
+        repository, collection, canonical_json(intent)
+    )
+    if observed == COLLECTION_STEP_PAIRS:
+        pending = acceptance_path.parent / ADAPTER_PENDING_NAME
+        if _fixed_path_present(acceptance_path) or _fixed_path_present(pending):
+            raise _error(
+                "GA runtime adapter exists before its raw_published marker; "
+                "refusing an inconsistent collection"
+            )
+        # The full raw validation also binds every document to this durable
+        # collection intent before the marker can claim publication.
+        _validate_raw_evidence(
+            repository,
+            _durably_reopen_published_raw(repository, raw_root),
+            normalized_expected,
+            prepackage_stage_verifier,
+        )
+        _append_raw_published_marker(repository, collection_path, collection)
+    elif observed != COMPLETED_COLLECTION_PAIRS:
+        last = "/".join(map(str, observed[-1])) if observed else "none"
+        raise _error(
+            "GA runtime collection is not a completed collection with published "
+            f"raw evidence (last event: {last}); retain runtime-collection and "
+            "runtime-evidence for review"
+        )
+    return seal_ga_runtime_acceptance(
+        repository=repository,
+        expected=normalized_expected,
+        prepackage_stage_verifier=prepackage_stage_verifier,
+    )
 
 
 def self_check() -> None:
@@ -3854,6 +4276,7 @@ def _arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("collect")
     subparsers.add_parser("recover")
+    subparsers.add_parser("resume-seal")
     subparsers.add_parser("verify")
     subparsers.add_parser("self-check")
     return parser.parse_args(list(argv) if argv is not None else None)
@@ -3888,6 +4311,16 @@ def main(
                 expected=expected,
             )
             return f"GA runtime collection recovered and archived: {path}"
+        if arguments.command == "resume-seal":
+            result = resume_ga_runtime_seal(
+                repository=repository,
+                expected=expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+            )
+            return (
+                "GA runtime collection sealed after seal retry: "
+                f"{result['adapter']['sha256']} ({len(CHECKS)} raw-derived checks)"
+            )
         acceptance, raw_root = _fixed_paths(repository)
         result = validate_ga_runtime_acceptance(
             repository=repository,
@@ -3897,7 +4330,9 @@ def main(
             prepackage_stage_verifier=prepackage_stage_verifier,
         )
     except (GARuntimeAcceptanceError, OSError, PublicationError, ValueError) as error:
-        raise SystemExit(f"error: GA runtime acceptance: {error}") from error
+        raise SystemExit(
+            failure_diagnostic(f"error: GA runtime acceptance: {error}", error)
+        ) from error
     return (
         "GA runtime acceptance verified: "
         f"{result['adapter']['sha256']} ({len(CHECKS)} raw-derived checks)"

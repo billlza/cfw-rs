@@ -117,7 +117,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "b7710954c3f645489b28af39000d59236cfe8b14df0f596d939b367dba0f1ce6"
+    "dbaf06f13a371b3824fe8e762492709999b46b56b012e5b73d64505463fb34c6"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -150,8 +150,8 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
 GA_RELEASE_CLI_FUNCTION_AST_SHA256 = {
     "scripts/ga_runtime_acceptance_cli.py": {
         "_existing_runtime_outputs": "d37a6c6a3011b0acfa634f7a9f6ff2aadb24eb0750b0f762a182f469d1e74063",
-        "_run_runtime_command": "84b2acfa2fd1f5858b14f688e78d928784ec82713b999dafb30fa7f0df21e3fc",
-        "main": "e5b7736ffa5a8d72160b18c08cb16678f50b78a4d5d1d718498aa27ee096fa68"
+        "_run_runtime_command": "e1fe064c3fe0fd48a28584128be8e5a19696088cd6a14c0c274fc6d8738fc4a2",
+        "main": "62813d84408747de2ad669bca9afc5c393443bc5938972e93f83a14f01ea551b"
     },
     "scripts/release_artifact_set_cli.py": {
         "_run_verification_command": "679c3827128d6ec7fbcbf3e2b3c1bd938a54470efe304a32540bc5cad64fa862",
@@ -164,7 +164,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "2fafd22dec80a6de5cc5ef5e8acfa85e7e62a372fe6d116fced261d446961d14"
+    "03f988204648f2c1a0ad64af4eac2f910c3933ddb28e2ce308103ea8d08da312"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}

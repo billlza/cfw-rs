@@ -45,7 +45,8 @@ def _run_runtime_command() -> str:
 
     repository = _repository()
     output_paths = _fixed_paths(repository)
-    before = _existing_runtime_outputs(output_paths) if command == "collect" else frozenset()
+    publishes_outputs = command in {"collect", "resume-seal"}
+    before = _existing_runtime_outputs(output_paths) if publishes_outputs else frozenset()
     message: str | None = None
     primary: BaseException | None = None
     try:
@@ -69,7 +70,7 @@ def _run_runtime_command() -> str:
             for note in getattr(cleanup, "__notes__", ()):
                 primary.add_note(note)
         publication_changed = False
-        if command == "collect":
+        if publishes_outputs:
             try:
                 publication_changed = bool(_existing_runtime_outputs(output_paths) - before)
             except OSError as observation_error:
@@ -86,7 +87,7 @@ def _run_runtime_command() -> str:
                     f"{type(observation_error).__name__}: {observation_error}"
                 )
                 raise unknown from failure
-        completed_mutation = message is not None and command in {"collect", "recover"}
+        completed_mutation = message is not None and (publishes_outputs or command == "recover")
         if completed_mutation or publication_changed:
             unknown = DurabilityOutcomeUnknown(
                 f"GA runtime {command} outcome is unknown after verifier session failure; "
@@ -122,7 +123,7 @@ def main() -> None:
             ) from error
 
     from scripts.candidate_freeze import CandidateFreezeError
-    from scripts.publication.common import PublicationError
+    from scripts.publication.common import PublicationError, failure_diagnostic
 
     try:
         message = _run_runtime_command()
@@ -132,11 +133,9 @@ def main() -> None:
             raise SystemExit(f"{error}\n" + "\n".join(notes)) from error
         raise
     except (CandidateFreezeError, OSError, PublicationError, ValueError) as error:
-        notes = getattr(error, "__notes__", ())
-        diagnostic = f"error: GA runtime acceptance: {error}"
-        if notes:
-            diagnostic += "\n" + "\n".join(notes)
-        raise SystemExit(diagnostic) from error
+        raise SystemExit(
+            failure_diagnostic(f"error: GA runtime acceptance: {error}", error)
+        ) from error
     print(message)
 
 

@@ -42,6 +42,12 @@ DNS_TTL = 0
 DNS_A_ADDRESS = "192.0.2.1"
 DNS_AAAA_ADDRESS = "2001:db8::1"
 DNS_RESPONSE_DIGEST_DOMAIN = b"cfw-packet-dns-responses-v1\0"
+# A stub resolver chooses RD and RFC 1035 copies it into the answer. The
+# evidence endpoint accepts no other query flag and answers QR|AA plus that
+# echo (tools/packet-evidence-endpoint/main.go authoritativeDNSResponse).
+DNS_FLAG_RECURSION_DESIRED = 0x0100
+DNS_QUERY_FLAGS = 0x0000
+DNS_AUTHORITATIVE_RESPONSE_FLAGS = 0x8400
 
 
 class PacketCaptureError(ValueError):
@@ -140,6 +146,7 @@ class DnsMessage:
     question_name: str
     question_type: int
     answer_address: str | None
+    recursion_desired: bool
 
 
 def _parse_options(
@@ -669,11 +676,16 @@ def _dns_message(data: bytes, family: str) -> DnsMessage:
         raise PacketCaptureError(
             "DNS message does not contain the required A/AAAA question"
         )
-    if flags == 0x0000 and (questions, answers, authority, additional) == (1, 0, 0, 0):
+    recursion_desired = bool(flags & DNS_FLAG_RECURSION_DESIRED)
+    fixed_flags = flags & ~DNS_FLAG_RECURSION_DESIRED
+    counts = (questions, answers, authority, additional)
+    if fixed_flags == DNS_QUERY_FLAGS and counts == (1, 0, 0, 0):
         if offset != len(data):
             raise PacketCaptureError("DNS query has trailing records or bytes")
-        return DnsMessage(identifier, False, question_name, question_type, None)
-    if flags != 0x8400 or (questions, answers, authority, additional) != (1, 1, 0, 0):
+        return DnsMessage(
+            identifier, False, question_name, question_type, None, recursion_desired
+        )
+    if fixed_flags != DNS_AUTHORITATIVE_RESPONSE_FLAGS or counts != (1, 1, 0, 0):
         raise PacketCaptureError("DNS response is not exact authoritative non-recursive data")
     answer_name, offset = _dns_name(data, offset)
     if offset + 10 > len(data):
@@ -697,7 +709,9 @@ def _dns_message(data: bytes, family: str) -> DnsMessage:
     expected_answer = DNS_A_ADDRESS if family == "ipv4" else DNS_AAAA_ADDRESS
     if answer_address != expected_answer:
         raise PacketCaptureError("DNS answer address differs from the fixed contract")
-    return DnsMessage(identifier, True, question_name, question_type, answer_address)
+    return DnsMessage(
+        identifier, True, question_name, question_type, answer_address, recursion_desired
+    )
 
 
 def _dns_response_for_token(
@@ -729,6 +743,7 @@ def _dns_response_for_token(
     if (
         query.identifier != response.identifier
         or query.question_type != response.question_type
+        or query.recursion_desired != response.recursion_desired
         or response.answer_address is None
         or response_packet.timestamp <= query_packet.timestamp
     ):
@@ -1188,7 +1203,11 @@ def dns_stage_endpoints(
     remote_address: str,
     tokens: tuple[bytes, bytes, bytes],
 ) -> tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint]:
-    """Derive exact client tuples from the independent remote DNS pcap."""
+    """Derive exact client tuples from a DNS pcap taken at the queried resolver.
+
+    remote_address is the independent evidence server for assurance captures,
+    or the Packet Tunnel DNS peer for GA captures on the tunnel interface.
+    """
 
     try:
         remote = str(ipaddress.ip_address(remote_address))

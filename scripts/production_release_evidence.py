@@ -13,7 +13,12 @@ if __package__:
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
     )
-    from .publication.common import PublicationError, canonical_json, sha256_bytes
+    from .publication.common import (
+        PublicationError,
+        canonical_json,
+        failure_diagnostic,
+        sha256_bytes,
+    )
     from .publication.durable_file import DurabilityOutcomeUnknown
     from .release_build_identity import frozen_ga_repository
     from .release_executor_source import (
@@ -27,7 +32,12 @@ else:
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
     )
-    from publication.common import PublicationError, canonical_json, sha256_bytes
+    from publication.common import (
+        PublicationError,
+        canonical_json,
+        failure_diagnostic,
+        sha256_bytes,
+    )
     from publication.durable_file import DurabilityOutcomeUnknown
     from release_build_identity import frozen_ga_repository
     from release_executor_source import (
@@ -144,8 +154,9 @@ def main() -> None:
                 "inspect the existing stage before retrying"
             ) from error
     except (OSError, PublicationError, ValueError) as error:
-        notes = "".join(f"\n{note}" for note in getattr(error, "__notes__", ()))
-        raise SystemExit(f"error: production release evidence: {error}{notes}") from error
+        raise SystemExit(
+            failure_diagnostic(f"error: production release evidence: {error}", error)
+        ) from error
     print(
         f"{manifest['stage']} GA seal verified: "
         f"{sha256_bytes(canonical_json(manifest))}"

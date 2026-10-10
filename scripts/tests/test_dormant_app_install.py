@@ -2268,6 +2268,175 @@ class SystemExtensionParserTests(unittest.TestCase):
                 captured.exception.code, "cfm_system_extension_observation_invalid"
             )
 
+    # Section lines and rows in the layout `systemextensionsctl list` prints on
+    # the GA Mac, where replaced Packet Tunnel versions remain until reboot.
+    NETWORK_SECTION = (
+        "--- com.apple.system_extension.network_extension (Go to 'System Settings > "
+        "General > Login Items & Extensions > Network Extensions' to modify these "
+        "system extension(s))"
+    )
+    DRIVER_SECTION = (
+        "--- com.apple.system_extension.driver_extension (Go to 'System Settings > "
+        "General > Login Items & Extensions > Driver Extensions' to modify these "
+        "system extension(s))"
+    )
+    HEADER = "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]"
+    RETAINED = "[terminated waiting to uninstall on reboot]"
+
+    @staticmethod
+    def _tunnel_row(
+        flags: str, version: str, state: str, team_id: str = "YKUPL7Z869"
+    ) -> str:
+        return (
+            f"{flags}\t{team_id}\tcom.bill.clashformac.packet-tunnel ({version})"
+            f"\tClash for Mac Packet Tunnel\t{state}"
+        )
+
+    def test_registrations_keep_each_retained_version_flag_and_state(self) -> None:
+        output = "\n".join(
+            (
+                "3 extension(s)",
+                self.NETWORK_SECTION,
+                self.HEADER,
+                self._tunnel_row("\t", "0.5.0/50025", self.RETAINED),
+                # Deliberately asymmetric flags pin each column to its field.
+                self._tunnel_row("*\t", "0.5.0/50027", "[activated waiting for user]"),
+                self._tunnel_row("*\t*", "0.5.0/50028", "[activated enabled]"),
+            )
+        ) + "\n"
+        registration = install.SystemExtensionRegistration
+        team_id, bundle_id = install.CFM_SYSTEM_EXTENSION_IDENTITY
+        self.assertEqual(
+            install.parse_system_extension_registrations(output),
+            (
+                registration(
+                    team_id=team_id,
+                    bundle_id=bundle_id,
+                    version="0.5.0/50025",
+                    enabled=False,
+                    active=False,
+                    state=self.RETAINED,
+                ),
+                registration(
+                    team_id=team_id,
+                    bundle_id=bundle_id,
+                    version="0.5.0/50027",
+                    enabled=True,
+                    active=False,
+                    state="[activated waiting for user]",
+                ),
+                registration(
+                    team_id=team_id,
+                    bundle_id=bundle_id,
+                    version="0.5.0/50028",
+                    enabled=True,
+                    active=True,
+                    state="[activated enabled]",
+                ),
+            ),
+        )
+        self.assertEqual(
+            _parse_system_extension_identities(output),
+            {install.CFM_SYSTEM_EXTENSION_IDENTITY},
+        )
+        self.assertEqual(
+            install.parse_system_extension_registrations("0 extension(s)\n"), ()
+        )
+
+    def test_identities_project_registrations_with_unchanged_errors(self) -> None:
+        # Dormant install and the current-service transaction read only the
+        # coalesced team/bundle identities; typed rows must not change them.
+        observed_rows = (
+            self._tunnel_row("\t", "0.5.0/50008", self.RETAINED),
+            self._tunnel_row("\t", "0.4.0/40073", self.RETAINED),
+            self._tunnel_row("*\t*", "0.5.0/50025", "[activated enabled]"),
+        )
+        driver_row = (
+            "*\t*\tEZ5B6482X4\tcom.devguru.DriverKit.SamsungMTP (2.3.4/2.3.4)"
+            "\tcom.devguru.DriverKit.SamsungMTP\t[activated enabled]"
+        )
+        observed = "\n".join(
+            (
+                "4 extension(s)",
+                self.NETWORK_SECTION,
+                self.HEADER,
+                *observed_rows,
+                self.DRIVER_SECTION,
+                self.HEADER,
+                driver_row,
+            )
+        ) + "\n"
+        foreign = observed.replace(
+            observed_rows[0],
+            self._tunnel_row("\t", "0.5.0/50008", self.RETAINED, team_id="ABCDE12345"),
+            1,
+        )
+        driver_identity = ("EZ5B6482X4", "com.devguru.DriverKit.SamsungMTP")
+        valid = {
+            "empty": ("0 extension(s)\n", set(), 0),
+            "observed retained versions": (
+                observed,
+                {install.CFM_SYSTEM_EXTENSION_IDENTITY, driver_identity},
+                4,
+            ),
+            "foreign-team predecessor": (
+                foreign,
+                {
+                    install.CFM_SYSTEM_EXTENSION_IDENTITY,
+                    ("ABCDE12345", "com.bill.clashformac.packet-tunnel"),
+                    driver_identity,
+                },
+                4,
+            ),
+        }
+        for label, (output, identities, row_count) in valid.items():
+            with self.subTest(label=label):
+                registrations = install.parse_system_extension_registrations(output)
+                self.assertEqual(len(registrations), row_count)
+                self.assertEqual(_parse_system_extension_identities(output), identities)
+                self.assertEqual(
+                    {(row.team_id, row.bundle_id) for row in registrations},
+                    identities,
+                )
+
+        malformed = {
+            "count": observed.replace("4 extension(s)", "5 extension(s)", 1),
+            "duplicate version": observed.replace("0.4.0/40073", "0.5.0/50008", 1),
+            # The summary counts distinct registrations here, so only the
+            # repeated version itself exposes the inconsistency.
+            "duplicate under a distinct-registration count": observed.replace(
+                observed_rows[1], f"{observed_rows[1]}\n{observed_rows[1]}", 1
+            ),
+            "flag": observed.replace("*\t*\tYKUPL7Z869", "+\t*\tYKUPL7Z869", 1),
+            "header": observed.replace(
+                self.HEADER, self.HEADER.replace("name", "label"), 1
+            ),
+            "repeated section": observed.replace(
+                self.DRIVER_SECTION, self.NETWORK_SECTION, 1
+            ),
+            "empty section": observed.replace(
+                "4 extension(s)", "3 extension(s)", 1
+            ).replace(f"\n{driver_row}", "", 1),
+            "unterminated": observed[:-1],
+            "carriage return": observed.replace("\n", "\r\n"),
+        }
+        for label, output in malformed.items():
+            for parser in (
+                install.parse_system_extension_registrations,
+                _parse_system_extension_identities,
+            ):
+                with self.subTest(label=label, parser=parser.__name__):
+                    with self.assertRaises(InstallError) as captured:
+                        parser(output)
+                    self.assertEqual(
+                        captured.exception.code,
+                        "cfm_system_extension_observation_invalid",
+                    )
+                    self.assertEqual(
+                        str(captured.exception),
+                        "system extension output has an unknown or inconsistent format",
+                    )
+
 
 class CfwProductionGuardTests(unittest.TestCase):
     PS = (

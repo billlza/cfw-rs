@@ -1344,19 +1344,36 @@ wire proof.
    collection and the final upload allowlist.
 
    The DNS check observes the product's tunnel leg on the Packet Tunnel
-   `utun`. The system resolver at the tunnel client `198.18.64.1` queries the
-   tunnel DNS peer `198.18.64.2`; libbox forwards each query outside the tunnel
-   to the evidence resolver and relays that resolver's authoritative
-   `192.0.2.1` answer, which echoes the client's RD bit. The capture filter
-   admits only IPv4 DNS between those two addresses whose first name label
-   has a token's length, stage prefix and first eight digest characters for
-   this collection, so other system DNS and another collection's tokens cannot
-   fill it. It does not check the query type or the rest of the name: a
-   non-A query or a retransmission for a token name still fills a capture
+   `utun`, which tcpdump opens as `link-type RAW (Raw IP)`. The Packet Tunnel
+   gives macOS two DNS peers, and macOS lists the IPv6 peer first: the system
+   resolver normally sends the sender's `getaddrinfo` A query from the tunnel
+   client `2001:2:0:64::1` to the tunnel DNS peer `2001:2:0:64::2`, and
+   otherwise from `198.18.64.1` to `198.18.64.2`. The evidence resolver
+   answers only evidence-token names under `evidence.test`, so other system
+   lookups go unanswered during the check and macOS may move a later lookup
+   to the other peer. Each stage's token transaction may therefore use either
+   tunnel leg, and different stages may use different legs; the evidence
+   records the leg family of each stage. A stage's query and its answer must
+   use the same leg with the reversed addresses and ports. On either leg each
+   token still needs exactly one A query and one authoritative answer: libbox
+   forwards the query outside the tunnel to the evidence resolver and relays
+   that resolver's `192.0.2.1` answer, which echoes the client's RD bit. The
+   capture filter admits only DNS between the two addresses of either leg
+   whose first name label has a token's length, stage prefix and first eight
+   digest characters for this collection, so other system DNS and another
+   collection's tokens cannot fill it. On the IPv6 leg it requires UDP as the
+   next header and reads that label at a fixed offset behind the 40-byte IPv6
+   header, so a query behind an IPv6 extension header is not captured; the
+   capture then times out and the collection fails closed. The filter does
+   not check the query type or the rest of the name: a non-A query or a
+   retransmission for a token name, on either leg, still fills a capture
    slot, and validation then fails closed, which needs `recover` and a fresh
-   `collect`. Before collection, the evidence VMs `packet-dns-primary-v040`
-   (DNS resolver) and `packet-transport-v040` (TCP/UDP endpoint) must be
-   running and reachable from this Mac's current public address.
+   `collect`. Every traffic capture runs with a 262144-byte snapshot length,
+   the most the evidence parser accepts; tcpdump's default on the utun is
+   larger.
+   Before collection, the evidence VMs `packet-dns-primary-v040` (DNS
+   resolver) and `packet-transport-v040` (TCP/UDP endpoint) must be running
+   and reachable from this Mac's current public address.
 
    When the collector waits for macOS approval and Tunnel mode, approve the
    System Extension and select Tunnel mode with IPv6 enabled in the installed

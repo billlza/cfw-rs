@@ -57,9 +57,11 @@ if __package__:
     from .harness.packet_capture import (
         ALLOWED_LINK_TYPES,
         DNS_A_ADDRESS,
+        DnsResolverLeg,
+        MAX_SNAPLEN,
         PacketCaptureError,
         StagedCaptureEndpoint,
-        dns_stage_endpoints,
+        dns_resolver_leg_stage_endpoints,
         parse_packet_capture,
         staged_marker_window,
         timestamp_fraction,
@@ -127,9 +129,11 @@ else:
     from scripts.harness.packet_capture import (
         ALLOWED_LINK_TYPES,
         DNS_A_ADDRESS,
+        DnsResolverLeg,
+        MAX_SNAPLEN,
         PacketCaptureError,
         StagedCaptureEndpoint,
-        dns_stage_endpoints,
+        dns_resolver_leg_stage_endpoints,
         parse_packet_capture,
         staged_marker_window,
         timestamp_fraction,
@@ -297,12 +301,24 @@ MAX_RUNTIME_FILES: Final = 32
 ADAPTER_PENDING_NAME: Final = ".runtime-acceptance.json.pending"
 TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,63}$")
 INTERFACE_RE: Final = re.compile(r"^(?:utun[0-9]{1,3}|en[0-9]{1,2}|pktap,all)$")
-# contracts/tunnel-address-plan-v1.json ipv4DnsPeer. The Packet Tunnel makes it
-# the resolver for every domain, so the product DNS leg GA can observe on utun
-# ends here. The signed dns-a-primary case forwards it outside utun to the
-# evidence resolver. libbox returns that resolver's authoritative answer under
-# the client's query ID, re-packed without name compression.
+# contracts/tunnel-address-plan-v1.json ipv4DnsPeer and ipv6DnsPeer. The
+# Packet Tunnel makes both the resolvers for every domain, so the product DNS
+# leg GA can observe on utun ends at one of them, queried from the tunnel
+# address of the same family. macOS lists the IPv6 peer first. The evidence
+# resolver answers only token queries, so other system lookups during the
+# case go unanswered and macOS may send a later stage's query to the other
+# peer. Either leg carries the same single A question from getaddrinfo. The
+# signed dns-a-primary case forwards each query outside utun to the evidence
+# resolver. libbox returns that resolver's authoritative answer under the
+# client's query ID, re-packed without name compression.
 TUNNEL_DNS_PEER_IPV4: Final = "198.18.64.2"
+TUNNEL_DNS_PEER_IPV6: Final = "2001:2:0:64::2"
+TUNNEL_DNS_LEGS: Final = (
+    DnsResolverLeg(TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"], TUNNEL_DNS_PEER_IPV4),
+    DnsResolverLeg(TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv6"], TUNNEL_DNS_PEER_IPV6),
+)
+# The question family of the dns-a-primary sender: getaddrinfo(AF_INET).
+TUNNEL_DNS_QUESTION_FAMILY: Final = "ipv4"
 # _derive_capture_token's shape: a four-character stage prefix, "-" and 32
 # lowercase hex digest characters, one 37-byte QNAME label. The capture filter
 # loads fixed offsets of that label and the decoder lowercases names.
@@ -312,7 +328,6 @@ TRAFFIC_POLICY: Final = {
     "dns_traffic": {
         "case_id": "dns-a-primary",
         "protocol": "dns",
-        "remote_address": TUNNEL_DNS_PEER_IPV4,
         "remote_port": 53,
         "expected_records": 6,
     },
@@ -1653,7 +1668,68 @@ def _traffic_descriptor(
     return descriptor
 
 
+def _dns_endpoint(value: object, check_id: str) -> dict[str, Any]:
+    """Return the tunnel DNS endpoint: its interface and each stage's leg.
+
+    A stage's query and answer may use either tunnel leg, so the endpoint
+    records the family each stage used instead of one family and address
+    pair; TUNNEL_DNS_LEGS fixes both legs' addresses. The check document keeps
+    its version: its exact key set rejects the former single-family endpoint.
+    """
+
+    endpoint = require_exact_keys(
+        value,
+        {"interface_name", "link_type", "remote_port", "stage_families"},
+        f"{check_id} endpoint",
+    )
+    stage_families = require_exact_keys(
+        endpoint["stage_families"], set(PACKET_STAGES), f"{check_id} stage families"
+    )
+    if (
+        any(family not in ("ipv4", "ipv6") for family in stage_families.values())
+        or type(endpoint["remote_port"]) is not int
+        or endpoint["remote_port"] != TRAFFIC_POLICY[check_id]["remote_port"]
+        or type(endpoint["link_type"]) is not int
+        or endpoint["link_type"] not in ALLOWED_LINK_TYPES
+        or not isinstance(endpoint["interface_name"], str)
+        or INTERFACE_RE.fullmatch(endpoint["interface_name"]) is None
+    ):
+        raise _error(f"{check_id} endpoint differs from the fixed capture policy")
+    return endpoint
+
+
+def _tunnel_dns_stage_endpoints(
+    capture: bytes, tokens: dict[str, str]
+) -> tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint]:
+    """Derive each stage's tunnel DNS tuple, on either leg, from the capture."""
+
+    return dns_resolver_leg_stage_endpoints(
+        capture,
+        "packet-pcap",
+        family=TUNNEL_DNS_QUESTION_FAMILY,
+        legs=TUNNEL_DNS_LEGS,
+        tokens=tuple(tokens[stage].encode("ascii") for stage in PACKET_STAGES),
+    )
+
+
+def _stage_families(
+    endpoints: tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint],
+) -> dict[str, str]:
+    """Name the IP family of the tunnel leg each stage's transaction used."""
+
+    return {
+        endpoint.stage: (
+            "ipv4"
+            if ipaddress.ip_address(endpoint.local_address).version == 4
+            else "ipv6"
+        )
+        for endpoint in endpoints
+    }
+
+
 def _endpoint(value: object, check_id: str) -> dict[str, Any]:
+    if TRAFFIC_POLICY[check_id]["protocol"] == "dns":
+        return _dns_endpoint(value, check_id)
     endpoint = require_exact_keys(
         value,
         {
@@ -1853,27 +1929,38 @@ def _traffic_capture_filter_argv(
     )
     if len({prefix for _length, prefix, _head, _tail in labels}) != len(labels):
         raise _error(f"{check_id} token BPF prefixes are not unique")
-    client = TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"]
-    resolver = policy["remote_address"]
     port = policy["remote_port"]
-    # Every system lookup uses this resolver, so admit only DNS messages whose
-    # first QNAME label matches one of this collection's tokens in its length
-    # (udp[20], after the 8-byte UDP and 12-byte DNS headers), stage prefix
-    # (udp[21:4]) and first eight digest characters (udp[26:4] and udp[30:4];
-    # udp[25] is the "-"). The query type, the other 24 digest characters and
-    # the rest of the name are not filtered, so a non-A query or a
-    # retransmission for a token name also passes; validation then requires
-    # exactly one A query and one response per token and fails closed.
-    names = " or ".join(
-        f"(udp[20] = {length} and udp[21:4] = 0x{prefix:08x}"
-        f" and udp[26:4] = 0x{head:08x} and udp[30:4] = 0x{tail:08x})"
-        for length, prefix, head, tail in labels
-    )
-    return (
-        f"udp and ((src host {client} and dst host {resolver} and dst port {port})"
-        f" or (src host {resolver} and src port {port} and dst host {client}))"
-        f" and ({names})",
-    )
+    # Every system lookup uses these resolvers, so admit only DNS messages
+    # whose first QNAME label matches one of this collection's tokens in its
+    # length (after the 8-byte UDP and 12-byte DNS headers), stage prefix
+    # (label + 1) and first eight digest characters (label + 6 and label + 10;
+    # label + 5 is the "-"). libpcap's udp[] indexes only IPv4, so the IPv6
+    # leg loads the label at ip6[60], behind the fixed 40-byte header, and
+    # requires UDP as its next header: a datagram behind an IPv6 extension
+    # header does not match. The query type, the other 24 digest characters
+    # and the rest of the name are not filtered, so a non-A query or a
+    # retransmission for a token name, on either leg, also passes; validation
+    # then requires exactly one A query and one response per token and fails
+    # closed.
+    ipv4_leg, ipv6_leg = TUNNEL_DNS_LEGS
+    clauses = []
+    for leg, selector, layer, label in (
+        (ipv4_leg, "udp", "udp", 20),
+        (ipv6_leg, "ip6 and ip6[6] = 17", "ip6", 60),
+    ):
+        client, resolver = leg.client_address, leg.resolver_address
+        names = " or ".join(
+            f"({layer}[{label}] = {length} and {layer}[{label + 1}:4] = 0x{prefix:08x}"
+            f" and {layer}[{label + 6}:4] = 0x{head:08x}"
+            f" and {layer}[{label + 10}:4] = 0x{tail:08x})"
+            for length, prefix, head, tail in labels
+        )
+        clauses.append(
+            f"({selector} and ((src host {client} and dst host {resolver}"
+            f" and dst port {port}) or (src host {resolver} and src port {port}"
+            f" and dst host {client})) and ({names}))"
+        )
+    return (" or ".join(clauses),)
 
 
 def _validate_traffic(
@@ -1934,7 +2021,7 @@ def _validate_traffic(
                 check_id=check_id,
                 stage=stage,
                 token=tokens[stage],
-                local_address=endpoint["local_address"],
+                local_address=TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"],
             ),
             expected_exit=0,
             label=f"{check_id} {stage} traffic send command",
@@ -1946,26 +2033,17 @@ def _validate_traffic(
                 check_id=check_id,
                 stage=stage,
                 token=tokens[stage],
-                local_address=endpoint["local_address"],
+                local_address=TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"],
             )
         )
-    if document["protocol"] == "dns":
+    dns = document["protocol"] == "dns"
+    if dns:
         try:
-            endpoints = dns_stage_endpoints(
-                pcap.data,
-                "packet-pcap",
-                family="ipv4",
-                remote_address=endpoint["remote_address"],
-                tokens=(
-                    tokens["start"].encode("ascii"),
-                    tokens["target"].encode("ascii"),
-                    tokens["end"].encode("ascii"),
-                ),
-            )
+            endpoints = _tunnel_dns_stage_endpoints(pcap.data, tokens)
         except PacketCaptureError as error:
             raise _error(f"{check_id} DNS capture endpoints are invalid") from error
-        if any(item.local_address != endpoint["local_address"] for item in endpoints):
-            raise _error(f"{check_id} DNS queries did not come from the tunnel client")
+        if _stage_families(endpoints) != endpoint["stage_families"]:
+            raise _error(f"{check_id} DNS stage families differ from the capture")
     else:
         endpoints = tuple(
             StagedCaptureEndpoint(
@@ -1982,7 +2060,7 @@ def _validate_traffic(
             pcap.data,
             "packet-pcap",
             protocol=document["protocol"],
-            family=endpoint["family"],
+            family=TUNNEL_DNS_QUESTION_FAMILY if dns else endpoint["family"],
             endpoints=endpoints,
             expected_link_type=endpoint["link_type"],
             expected_interface_name=endpoint["interface_name"],
@@ -1992,13 +2070,14 @@ def _validate_traffic(
             end_marker=tokens["end"].encode("ascii"),
             expect_token=True,
             declared_observation_ms=observation_ms,
+            dns_resolver_legs=TUNNEL_DNS_LEGS if dns else None,
         )
     except PacketCaptureError as error:
         raise _error(f"{check_id} packet bytes do not prove the required traffic") from error
     if (
         proof.total_record_count != policy["expected_records"]
         or proof.token_occurrences < 1
-        or (document["protocol"] == "dns" and proof.dns_response_count != 3)
+        or (dns and proof.dns_response_count != 3)
     ):
         raise _error(f"{check_id} packet proof is partial or has extra traffic")
     capture_started = timestamp_fraction(capture_command["started_at"])
@@ -2482,6 +2561,9 @@ def _capture_command_argv(
 
     macOS BPF devices are normally root-only. tcpdump's -Z drops its user and
     group before writing packet bytes; no device permissions are changed.
+    tcpdump writes its snapshot length into the pcap header, and its default
+    on the Packet Tunnel utun (524288) is above what parse_packet_capture
+    accepts, so -s fixes it at that bound.
     The same fixed argv is used for execution and receipt verification.
     """
     uid = os.getuid()
@@ -2496,7 +2578,7 @@ def _capture_command_argv(
     return [
         "/usr/bin/sudo", "-S", "-p", "CFM capture authorization: ", "--", "/usr/sbin/tcpdump",
         "-Z", account.pw_name,
-        "-U", "-n", "-i", interface,
+        "-U", "-n", "-s", str(MAX_SNAPLEN), "-i", interface,
         "-c", str(expected_records), "-w", "-", *filter_argv,
     ]
 
@@ -2824,14 +2906,6 @@ class ProductionCollectorRuntime:
                 "stderr": stderr,
                 "stdout": "",
             }
-            endpoint = {
-                "family": "ipv4",
-                "interface_name": interface,
-                "link_type": next(iter(link_types)),
-                "local_address": TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"],
-                "remote_address": policy["remote_address"],
-                "remote_port": policy["remote_port"],
-            }
             send_results = [
                 _packet_send_result(
                     _command(
@@ -2852,14 +2926,15 @@ class ProductionCollectorRuntime:
                 )
                 for stage, receipt in zip(PACKET_STAGES, send_commands, strict=True)
             ]
-            if policy["protocol"] == "dns":
-                staged_endpoints = dns_stage_endpoints(
-                    capture_bytes,
-                    "packet-pcap",
-                    family="ipv4",
-                    remote_address=policy["remote_address"],
-                    tokens=tuple(tokens[stage].encode("ascii") for stage in PACKET_STAGES),
-                )
+            dns = policy["protocol"] == "dns"
+            if dns:
+                staged_endpoints = _tunnel_dns_stage_endpoints(capture_bytes, tokens)
+                endpoint = {
+                    "interface_name": interface,
+                    "link_type": next(iter(link_types)),
+                    "remote_port": policy["remote_port"],
+                    "stage_families": _stage_families(staged_endpoints),
+                }
             else:
                 staged_endpoints = tuple(
                     StagedCaptureEndpoint(
@@ -2871,14 +2946,23 @@ class ProductionCollectorRuntime:
                     )
                     for stage, result in zip(PACKET_STAGES, send_results, strict=True)
                 )
+                endpoint = {
+                    "family": "ipv4",
+                    "interface_name": interface,
+                    "link_type": next(iter(link_types)),
+                    "local_address": TUNNEL_CAPTURE_LOCAL_ADDRESSES["ipv4"],
+                    "remote_address": policy["remote_address"],
+                    "remote_port": policy["remote_port"],
+                }
             window_start, window_end = staged_marker_window(
                 capture_bytes,
                 "packet-pcap",
                 protocol=policy["protocol"],
-                family="ipv4",
+                family=TUNNEL_DNS_QUESTION_FAMILY if dns else "ipv4",
                 endpoints=staged_endpoints,
                 start_marker=tokens["start"].encode("ascii"),
                 end_marker=tokens["end"].encode("ascii"),
+                dns_resolver_legs=TUNNEL_DNS_LEGS if dns else None,
             )
             duration = (window_end - window_start) * 1000
             observation_ms = duration.numerator // duration.denominator

@@ -10,10 +10,13 @@ import unittest
 from pathlib import Path
 
 from scripts.harness.packet_capture import (
+    DnsResolverLeg,
     PacketCaptureError,
     StagedCaptureEndpoint,
+    dns_resolver_leg_stage_endpoints,
     dns_stage_endpoints,
     parse_packet_records,
+    staged_marker_window,
     validate_capture_tokens,
     validate_staged_capture_tokens,
 )
@@ -251,6 +254,218 @@ class DnsRecursionDesiredContractTests(unittest.TestCase):
                     "not exact authoritative non-recursive data",
                 ):
                     self.prove(self.capture(**flags))
+
+
+class DnsResolverLegContractTests(unittest.TestCase):
+    """Per-stage resolver legs are an explicit, DNS-only decoder choice.
+
+    GA passes the two Packet Tunnel legs and keeps the A question; every
+    assurance caller omits them and keeps the question family's transport.
+    """
+
+    START = b"leg-start-012345678"
+    TARGET = b"leg-target-01234567"
+    END = b"leg-end-0123456789a"
+    TOKENS = (START, TARGET, END)
+    PORTS = (53001, 53002, 53003)
+    IPV4 = DnsResolverLeg("198.18.64.1", "198.18.64.2")
+    IPV6 = DnsResolverLeg("2001:2:0:64::1", "2001:2:0:64::2")
+    LEGS = (IPV4, IPV6)
+
+    def capture(self, client: str = "198.18.64.1") -> bytes:
+        return pcap_bytes(
+            start_marker=self.START,
+            token=self.TARGET,
+            end_marker=self.END,
+            include_token=True,
+            protocol="dns",
+            family="ipv4",
+            local_address=client,
+            remote_address=self.IPV4.resolver_address,
+            stage_local_ports=self.PORTS,
+            link_type=101,
+            dns_query_flags=0x0100,
+        )
+
+    def endpoints(self, **replacements: StagedCaptureEndpoint) -> tuple:
+        endpoints = {
+            stage: StagedCaptureEndpoint(
+                stage,
+                self.IPV4.client_address,
+                port,
+                self.IPV4.resolver_address,
+                53,
+            )
+            for stage, port in zip(("start", "target", "end"), self.PORTS, strict=True)
+        }
+        endpoints.update(replacements)
+        return tuple(endpoints.values())
+
+    def prove(self, capture: bytes, endpoints: tuple, **options):
+        return validate_staged_capture_tokens(
+            capture,
+            "packet-pcap",
+            protocol=options.pop("protocol", "dns"),
+            family=options.pop("family", "ipv4"),
+            endpoints=endpoints,
+            expected_link_type=101,
+            expected_interface_name="utun5",
+            expected_quic_version=None,
+            token=self.TARGET,
+            start_marker=self.START,
+            end_marker=self.END,
+            expect_token=True,
+            declared_observation_ms=5000,
+            **options,
+        )
+
+    def window(self, capture: bytes, endpoints: tuple, **options):
+        return staged_marker_window(
+            capture,
+            "packet-pcap",
+            protocol=options.pop("protocol", "dns"),
+            family="ipv4",
+            endpoints=endpoints,
+            start_marker=self.START,
+            end_marker=self.END,
+            **options,
+        )
+
+    def test_legs_prove_a_single_family_capture_like_the_default(self) -> None:
+        capture = self.capture()
+        derived = dns_resolver_leg_stage_endpoints(
+            capture, "packet-pcap", family="ipv4", legs=self.LEGS, tokens=self.TOKENS
+        )
+        self.assertEqual(derived, self.endpoints())
+        self.assertEqual(
+            derived,
+            dns_stage_endpoints(
+                capture,
+                "packet-pcap",
+                family="ipv4",
+                remote_address=self.IPV4.resolver_address,
+                tokens=self.TOKENS,
+            ),
+        )
+        self.assertEqual(
+            self.prove(capture, derived, dns_resolver_legs=self.LEGS),
+            self.prove(capture, derived),
+        )
+        self.assertEqual(
+            self.window(capture, derived, dns_resolver_legs=self.LEGS),
+            self.window(capture, derived),
+        )
+
+    def test_assurance_defaults_keep_the_question_family_transport(self) -> None:
+        capture = self.capture()
+        ipv6_target = StagedCaptureEndpoint(
+            "target", self.IPV6.client_address, 53002, self.IPV6.resolver_address, 53
+        )
+        with self.assertRaisesRegex(
+            PacketCaptureError, "staged capture endpoint family/port is invalid"
+        ):
+            self.prove(capture, self.endpoints(target=ipv6_target))
+        with self.assertRaisesRegex(
+            PacketCaptureError, "staged capture endpoint family/port is invalid"
+        ):
+            self.prove(capture, self.endpoints(), family="ipv6")
+        ipv6_start = StagedCaptureEndpoint(
+            "start", self.IPV6.client_address, 53001, self.IPV6.resolver_address, 53
+        )
+        with self.assertRaisesRegex(
+            PacketCaptureError, "exactly one query and one authoritative response"
+        ):
+            self.window(capture, self.endpoints(start=ipv6_start))
+        with self.assertRaisesRegex(PacketCaptureError, "remote DNS endpoint family differs"):
+            dns_stage_endpoints(
+                capture,
+                "packet-pcap",
+                family="ipv4",
+                remote_address=self.IPV6.resolver_address,
+                tokens=self.TOKENS,
+            )
+
+    def test_legs_are_one_canonical_pair_per_family(self) -> None:
+        capture = self.capture()
+        not_canonical = "DNS resolver legs are not one canonical address pair per family"
+        cases = (
+            ((), "DNS resolver legs are empty"),
+            ((self.IPV4, self.IPV4), not_canonical),
+            ((self.IPV6, DnsResolverLeg("2001:2:0:64::5", "2001:2:0:64::6")), not_canonical),
+            ((DnsResolverLeg("198.18.64.1", "2001:2:0:64::2"),), not_canonical),
+            ((DnsResolverLeg("2001:2:0:64:0:0:0:1", "2001:2:0:64::2"),), not_canonical),
+            ((DnsResolverLeg("198.18.64.1", "resolver"),), "DNS resolver leg address is invalid"),
+        )
+        for legs, message in cases:
+            with self.subTest(legs=legs):
+                with self.assertRaisesRegex(PacketCaptureError, message):
+                    dns_resolver_leg_stage_endpoints(
+                        capture, "packet-pcap", family="ipv4", legs=legs, tokens=self.TOKENS
+                    )
+                with self.assertRaisesRegex(PacketCaptureError, message):
+                    self.prove(capture, self.endpoints(), dns_resolver_legs=legs)
+                with self.assertRaisesRegex(PacketCaptureError, message):
+                    self.window(capture, self.endpoints(), dns_resolver_legs=legs)
+
+    def test_legs_admit_only_dns_endpoints_on_one_leg(self) -> None:
+        capture = self.capture()
+        with self.assertRaisesRegex(
+            PacketCaptureError, "only DNS evidence may use per-stage resolver legs"
+        ):
+            self.prove(capture, self.endpoints(), protocol="udp", dns_resolver_legs=self.LEGS)
+        with self.assertRaisesRegex(
+            PacketCaptureError, "only DNS evidence may use per-stage resolver legs"
+        ):
+            self.window(capture, self.endpoints(), protocol="udp", dns_resolver_legs=self.LEGS)
+        not_leg = "staged DNS endpoint is not one admitted resolver leg"
+        for label, target in (
+            (
+                "foreign client",
+                StagedCaptureEndpoint("target", "198.18.64.9", 53002, "198.18.64.2", 53),
+            ),
+            (
+                "foreign resolver",
+                StagedCaptureEndpoint("target", "198.18.64.1", 53002, "198.18.64.3", 53),
+            ),
+            (
+                "client of the other family's leg",
+                StagedCaptureEndpoint("target", "2001:2:0:64::1", 53002, "198.18.64.2", 53),
+            ),
+            (
+                "resolver port",
+                StagedCaptureEndpoint("target", "198.18.64.1", 53002, "198.18.64.2", 5353),
+            ),
+            (
+                "client port",
+                StagedCaptureEndpoint("target", "198.18.64.1", 0, "198.18.64.2", 53),
+            ),
+        ):
+            with self.subTest(label):
+                endpoints = self.endpoints(target=target)
+                with self.assertRaisesRegex(PacketCaptureError, not_leg):
+                    self.prove(capture, endpoints, dns_resolver_legs=self.LEGS)
+                with self.assertRaisesRegex(PacketCaptureError, not_leg):
+                    self.window(capture, endpoints, dns_resolver_legs=self.LEGS)
+
+    def test_leg_query_must_come_from_its_leg_client(self) -> None:
+        capture = self.capture(client="198.18.64.9")
+        with self.assertRaisesRegex(
+            PacketCaptureError, "start query did not come from its resolver leg's client"
+        ):
+            dns_resolver_leg_stage_endpoints(
+                capture, "packet-pcap", family="ipv4", legs=self.LEGS, tokens=self.TOKENS
+            )
+        # The assurance derivation binds only the queried resolver.
+        self.assertEqual(
+            dns_stage_endpoints(
+                capture,
+                "packet-pcap",
+                family="ipv4",
+                remote_address=self.IPV4.resolver_address,
+                tokens=self.TOKENS,
+            )[0].local_address,
+            "198.18.64.9",
+        )
 
 
 class PacketEvidenceHarnessTests(unittest.TestCase):

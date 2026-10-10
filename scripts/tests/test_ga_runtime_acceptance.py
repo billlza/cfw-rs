@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import struct
+import subprocess
 import tempfile
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -64,7 +65,7 @@ from scripts.ga_acceptance_environment import (
     SCHEMA_VERSION as GA_ENVIRONMENT_SCHEMA_VERSION,
     environment_sha256,
 )
-from scripts.harness.packet_capture import PacketCaptureError
+from scripts.harness.packet_capture import DnsResolverLeg, PacketCaptureError
 from scripts.harness.packet_evidence import (
     TUNNEL_CAPTURE_LOCAL_ADDRESSES,
     packet_capture_filter_argv,
@@ -150,11 +151,26 @@ LEGACY_APPLE_EVENT_QUIT = (
     'tell application id "com.bill.clashformac" to quit',
 )
 
-# The product DNS leg on the Packet Tunnel utun: the system resolver at the
-# tunnel client queries the tunnel DNS peer, and libbox relays the evidence
-# resolver's authoritative answer with the client's RD bit echoed.
+# The product DNS legs on the Packet Tunnel utun: the system resolver at a
+# tunnel client address queries the tunnel DNS peer of the same family, and
+# libbox relays the evidence resolver's authoritative answer with the client's
+# RD bit echoed. macOS orders the IPv6 peer first, so getaddrinfo's A query was
+# observed on the IPv6 leg; any stage may use either leg.
 TUNNEL_CLIENT = "198.18.64.1"
 TUNNEL_DNS_PEER = "198.18.64.2"
+TUNNEL_CLIENT_IPV6 = "2001:2:0:64::1"
+TUNNEL_DNS_PEER_IPV6 = "2001:2:0:64::2"
+IPV4_DNS_LEG = (TUNNEL_CLIENT, TUNNEL_DNS_PEER)
+IPV6_DNS_LEG = (TUNNEL_CLIENT_IPV6, TUNNEL_DNS_PEER_IPV6)
+DNS_LEGS = {"ipv4": IPV4_DNS_LEG, "ipv6": IPV6_DNS_LEG}
+# tcpdump on the release Mac's utun: "link-type RAW (Raw IP)".
+UTUN_LINK_TYPE = 101
+# tcpdump -w writes the snapshot length it captures with into the pcap
+# header. Without -s (or with -s 0) it captured the release Mac's Packet
+# Tunnel utun at "snapshot length 524288 bytes", above packet_capture's
+# MAX_SNAPLEN; the GA capture argv fixes it at 262144.
+UTUN_DEFAULT_SNAPLEN = 524288
+UTUN_CAPTURE_SNAPLEN = 262144
 UTUN_EPOCH = calendar.timegm((2026, 7, 27, 12, 0, 0))
 # Seconds after UTUN_EPOCH of each stage's query and response. Each pair sits
 # inside that stage's sender receipt in RuntimeFixture._traffic.
@@ -167,6 +183,7 @@ DNS_OBSERVATION_MS = 4960
 DNS_CLIENT_PORTS = {"start": 53001, "target": 53002, "end": 53003}
 DNS_QUERY_IDS = {"start": 0x5A01, "target": 0x5A02, "end": 0x5A03}
 DNS_STAGES = ("start", "target", "end")
+OBSERVED_DNS_FAMILIES = {stage: "ipv6" for stage in DNS_STAGES}
 UtunPacket = tuple[float, str, int, str, int, bytes]
 
 
@@ -177,11 +194,13 @@ def _dns_name_bytes(name: str) -> bytes:
     return labels + b"\0"
 
 
-def _tunnel_dns_query(identifier: int, name: str, *, flags: int = 0x0100) -> bytes:
+def _tunnel_dns_query(
+    identifier: int, name: str, *, flags: int = 0x0100, question_type: int = 1
+) -> bytes:
     return (
         struct.pack("!HHHHHH", identifier, flags, 1, 0, 0, 0)
         + _dns_name_bytes(name)
-        + struct.pack("!HH", 1, 1)
+        + struct.pack("!HH", question_type, 1)
     )
 
 
@@ -189,20 +208,23 @@ def _tunnel_dns_response(
     query: bytes,
     *,
     flags: int | None = None,
-    answer: str = "192.0.2.1",
+    answer: str | None = None,
     ttl: int = 0,
 ) -> bytes:
-    """Answer one A query as libbox re-packs it: RD echoed, owner uncompressed."""
+    """Answer one query as libbox re-packs it: RD echoed, owner uncompressed."""
 
     identifier, query_flags = struct.unpack_from("!HH", query, 0)
     question = query[12:]
+    question_type = struct.unpack_from("!H", question, len(question) - 4)[0]
+    if answer is None:
+        answer = "192.0.2.1" if question_type == 1 else "2001:db8::1"
     rdata = ipaddress.ip_address(answer).packed
     header_flags = (0x8400 | (query_flags & 0x0100)) if flags is None else flags
     return (
         struct.pack("!HHHHHH", identifier, header_flags, 1, 1, 0, 0)
         + question
         + question[:-4]
-        + struct.pack("!HHIH", 1, 1, ttl, len(rdata))
+        + struct.pack("!HHIH", question_type, 1, ttl, len(rdata))
         + rdata
     )
 
@@ -210,13 +232,24 @@ def _tunnel_dns_response(
 def _tunnel_dns_packets(
     tokens: dict[str, str],
     *,
-    client: str = TUNNEL_CLIENT,
-    resolver: str = TUNNEL_DNS_PEER,
+    families: dict[str, str] | None = None,
+    client: str | None = None,
+    resolver: str | None = None,
     target_query_flags: int = 0x0100,
     target_response: dict[str, Any] | None = None,
 ) -> list[UtunPacket]:
+    """Return each stage's query and answer on that stage's tunnel leg.
+
+    families picks each stage's leg (the observed IPv6 leg by default); client
+    or resolver replaces that address on every stage's leg.
+    """
+
+    stage_families = OBSERVED_DNS_FAMILIES if families is None else families
     packets: list[UtunPacket] = []
     for stage in DNS_STAGES:
+        leg_client, leg_resolver = DNS_LEGS[stage_families[stage]]
+        stage_client = leg_client if client is None else client
+        stage_resolver = leg_resolver if resolver is None else resolver
         query_at, response_at = DNS_TRANSACTION_TIMES[stage]
         port = DNS_CLIENT_PORTS[stage]
         query = _tunnel_dns_query(
@@ -227,35 +260,92 @@ def _tunnel_dns_packets(
         response = _tunnel_dns_response(
             query, **((target_response or {}) if stage == "target" else {})
         )
-        packets.append((query_at, client, port, resolver, 53, query))
-        packets.append((response_at, resolver, 53, client, port, response))
+        packets.append((query_at, stage_client, port, stage_resolver, 53, query))
+        packets.append((response_at, stage_resolver, 53, stage_client, port, response))
     return packets
 
 
-def _utun_udp_pcap(packets: list[UtunPacket]) -> bytes:
-    """Write IPv4/UDP frames as tcpdump does on a utun: DLT_NULL, AF_INET."""
+def _tunnel_dns_transaction(
+    token: str,
+    family: str,
+    *,
+    at: float,
+    port: int,
+    identifier: int,
+    question_type: int = 1,
+) -> list[UtunPacket]:
+    """Return one query for a token on a tunnel leg and its answer 0.1 s later."""
 
-    output = bytearray(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 0))
+    client, resolver = DNS_LEGS[family]
+    query = _tunnel_dns_query(
+        identifier, f"{token}.evidence.test", question_type=question_type
+    )
+    return [
+        (at, client, port, resolver, 53, query),
+        (at + 0.1, resolver, 53, client, port, _tunnel_dns_response(query)),
+    ]
+
+
+def _utun_udp_pcap(
+    packets: list[UtunPacket],
+    *,
+    link_type: int = UTUN_LINK_TYPE,
+    ipv6_hop_by_hop: bool = False,
+) -> bytes:
+    """Write UDP datagrams as tcpdump does on a utun.
+
+    RAW (101) frames start at the IP header; NULL (0) frames carry the host's
+    little-endian AF_INET (2) or AF_INET6 (30) first. Each datagram's family
+    follows its addresses. ipv6_hop_by_hop puts an 8-byte Hop-by-Hop Options
+    header (PadN only) between each IPv6 header and its UDP header.
+    """
+
+    if link_type not in {0, 101}:
+        raise ValueError("utun fixture link type is RAW or NULL")
+    output = bytearray(
+        struct.pack(
+            "<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, UTUN_CAPTURE_SNAPLEN, link_type
+        )
+    )
     ordered = sorted(packets, key=lambda packet: packet[0])
     for index, packet in enumerate(ordered):
         seconds, source, source_port, destination, destination_port, payload = packet
+        source_ip = ipaddress.ip_address(source)
+        destination_ip = ipaddress.ip_address(destination)
+        if source_ip.version != destination_ip.version:
+            raise ValueError("utun fixture datagram mixes address families")
         udp = struct.pack(
             "!HHHH", source_port, destination_port, 8 + len(payload), 0
         ) + payload
-        ip = struct.pack(
-            "!BBHHHBBH4s4s",
-            0x45,
-            0,
-            20 + len(udp),
-            index + 1,
-            0x4000,
-            64,
-            17,
-            0,
-            ipaddress.ip_address(source).packed,
-            ipaddress.ip_address(destination).packed,
-        ) + udp
-        frame = (2).to_bytes(4, "little") + ip
+        if source_ip.version == 4:
+            ip = struct.pack(
+                "!BBHHHBBH4s4s",
+                0x45,
+                0,
+                20 + len(udp),
+                index + 1,
+                0x4000,
+                64,
+                17,
+                0,
+                source_ip.packed,
+                destination_ip.packed,
+            ) + udp
+            address_family = 2
+        else:
+            # Next header 17, length 0 (8 bytes), one 4-byte PadN option.
+            extension = bytes((17, 0, 1, 4, 0, 0, 0, 0)) if ipv6_hop_by_hop else b""
+            ip = struct.pack(
+                "!IHBB16s16s",
+                6 << 28,
+                len(extension) + len(udp),
+                0 if ipv6_hop_by_hop else 17,
+                64,
+                source_ip.packed,
+                destination_ip.packed,
+            ) + extension + udp
+            address_family = 30
+        frame = ip if link_type == 101 else address_family.to_bytes(4, "little") + ip
         micros = round(seconds * 1_000_000)
         output += struct.pack(
             "<IIII",
@@ -268,35 +358,79 @@ def _utun_udp_pcap(packets: list[UtunPacket]) -> bytes:
     return bytes(output)
 
 
-def _utun_dns_flags(capture: bytes) -> list[int]:
-    """Return each record's DNS header flags (after AF, IPv4 and UDP headers)."""
+def _tcpdump_snapshot_length(argv: list[str]) -> int:
+    """Return the snapshot length tcpdump captures a utun with for argv."""
 
-    flags: list[int] = []
+    if "-s" not in argv:
+        return UTUN_DEFAULT_SNAPLEN
+    return int(argv[argv.index("-s") + 1]) or UTUN_DEFAULT_SNAPLEN
+
+
+def _utun_udp_datagrams(capture: bytes) -> list[tuple[str, int, str, int, bytes]]:
+    """Return each record's UDP addresses, ports and payload in capture order.
+
+    It reads the frames _utun_udp_pcap writes: no IP options or IPv6
+    extension headers.
+    """
+
+    link_type = struct.unpack_from("<I", capture, 20)[0]
+    datagrams: list[tuple[str, int, str, int, bytes]] = []
     offset = 24
     while offset < len(capture):
         _seconds, _micros, captured, _original = struct.unpack_from("<IIII", capture, offset)
         offset += 16
-        flags.append(struct.unpack_from("!H", capture, offset + 4 + 20 + 8 + 2)[0])
+        packet = capture[offset + (4 if link_type == 0 else 0) : offset + captured]
         offset += captured
-    return flags
+        if packet[0] >> 4 == 4:
+            source, destination, udp = packet[12:16], packet[16:20], packet[20:]
+        else:
+            source, destination, udp = packet[8:24], packet[24:40], packet[40:]
+        source_port, destination_port = struct.unpack_from("!HH", udp, 0)
+        datagrams.append(
+            (
+                str(ipaddress.ip_address(source)),
+                source_port,
+                str(ipaddress.ip_address(destination)),
+                destination_port,
+                udp[8:],
+            )
+        )
+    return datagrams
+
+
+def _utun_dns_headers(capture: bytes) -> list[tuple[int, int]]:
+    """Return each record's IP version and DNS header flags."""
+
+    return [
+        (ipaddress.ip_address(source).version, struct.unpack_from("!H", payload, 2)[0])
+        for source, _source_port, _destination, _destination_port, payload
+        in _utun_udp_datagrams(capture)
+    ]
 
 
 def _expected_tunnel_dns_filter(tokens: dict[str, str]) -> tuple[str]:
     """Independent oracle for the token-bound tunnel DNS capture filter."""
 
-    def clause(token: str) -> str:
+    def clause(token: str, layer: str, label: int) -> str:
         prefix, digest = token.split("-")
         return (
-            f"(udp[20] = {len(token)} and udp[21:4] = 0x{prefix.encode('ascii').hex()}"
-            f" and udp[26:4] = 0x{digest[:4].encode('ascii').hex()}"
-            f" and udp[30:4] = 0x{digest[4:8].encode('ascii').hex()})"
+            f"({layer}[{label}] = {len(token)}"
+            f" and {layer}[{label + 1}:4] = 0x{prefix.encode('ascii').hex()}"
+            f" and {layer}[{label + 6}:4] = 0x{digest[:4].encode('ascii').hex()}"
+            f" and {layer}[{label + 10}:4] = 0x{digest[4:8].encode('ascii').hex()})"
         )
 
-    names = " or ".join(clause(tokens[stage]) for stage in DNS_STAGES)
+    def leg(client: str, resolver: str) -> str:
+        return (
+            f"((src host {client} and dst host {resolver} and dst port 53)"
+            f" or (src host {resolver} and src port 53 and dst host {client}))"
+        )
+
+    ipv4_names = " or ".join(clause(tokens[stage], "udp", 20) for stage in DNS_STAGES)
+    ipv6_names = " or ".join(clause(tokens[stage], "ip6", 60) for stage in DNS_STAGES)
     return (
-        f"udp and ((src host {TUNNEL_CLIENT} and dst host {TUNNEL_DNS_PEER} "
-        f"and dst port 53) or (src host {TUNNEL_DNS_PEER} and src port 53 "
-        f"and dst host {TUNNEL_CLIENT})) and ({names})",
+        f"(udp and {leg(*IPV4_DNS_LEG)} and ({ipv4_names}))"
+        f" or (ip6 and ip6[6] = 17 and {leg(*IPV6_DNS_LEG)} and ({ipv6_names}))",
     )
 
 
@@ -681,8 +815,13 @@ class RuntimeFixture:
         if policy["protocol"] == "dns":
             capture = _utun_udp_pcap(_tunnel_dns_packets(tokens))
             capture_filter = _expected_tunnel_dns_filter(tokens)
-            interface_name, link_type = "utun5", 0
-            remote_address, observation_ms = TUNNEL_DNS_PEER, DNS_OBSERVATION_MS
+            interface_name, observation_ms = "utun5", DNS_OBSERVATION_MS
+            endpoint = {
+                "interface_name": interface_name,
+                "link_type": UTUN_LINK_TYPE,
+                "remote_port": 53,
+                "stage_families": dict(OBSERVED_DNS_FAMILIES),
+            }
         else:
             capture = pcap_bytes(
                 start_marker=tokens["start"].encode("ascii"),
@@ -701,8 +840,15 @@ class RuntimeFixture:
                 case_id=policy["case_id"],
                 tokens=(tokens["start"], tokens["target"], tokens["end"]),
             )
-            interface_name, link_type = "en0", 1
-            remote_address, observation_ms = policy["remote_address"], 5000
+            interface_name, observation_ms = "en0", 5000
+            endpoint = {
+                "family": "ipv4",
+                "interface_name": interface_name,
+                "link_type": 1,
+                "local_address": "198.18.64.1",
+                "remote_address": policy["remote_address"],
+                "remote_port": policy["remote_port"],
+            }
         self.pcaps[pcap_name] = capture
         sender_commands = []
         stage_times = {
@@ -715,18 +861,23 @@ class RuntimeFixture:
             sender_result = {
                 "bytes_submitted": len(token),
                 "case_id": policy["case_id"],
-                "dns_result": None,
                 "document": "cfw-packet-send-stage-result-v2",
-                "local_address": "198.18.64.1",
-                "local_port": 41000,
-                "remote_address": policy["remote_address"],
-                "remote_port": policy["remote_port"],
                 "schema_version": 2,
                 "stage": stage,
                 "token_sha256": hashlib.sha256(token.encode("ascii")).hexdigest(),
-                "transport": policy["protocol"],
             }
-            if policy["protocol"] == "dns":
+            if policy["protocol"] != "dns":
+                sender_result.update(
+                    {
+                        "dns_result": None,
+                        "local_address": "198.18.64.1",
+                        "local_port": 41000,
+                        "remote_address": policy["remote_address"],
+                        "remote_port": policy["remote_port"],
+                        "transport": policy["protocol"],
+                    }
+                )
+            else:
                 sender_result.update(
                     {
                         "dns_result": {
@@ -812,14 +963,7 @@ class RuntimeFixture:
                 ),
                 stderr=f"{policy['expected_records']} packets captured\n",
             ),
-            endpoint={
-                "family": "ipv4",
-                "interface_name": interface_name,
-                "link_type": link_type,
-                "local_address": "198.18.64.1",
-                "remote_address": remote_address,
-                "remote_port": policy["remote_port"],
-            },
+            endpoint=endpoint,
             host_observation=host_observation(policy["case_id"]),
             observation_ms=observation_ms,
             protocol=policy["protocol"],
@@ -1895,16 +2039,27 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     # The exact capture filter for the fixture challenge's dns_traffic tokens
     # (s000-/t000-/e000- plus 32 hex digits, so every first label is 37 bytes):
     # each clause binds the stage prefix and the first eight digest characters
-    # s000-96ed7030..., t000-d1f93f86... and e000-a801f52b....
+    # s000-96ed7030..., t000-d1f93f86... and e000-a801f52b.... The IPv4 leg
+    # loads the label from udp[20]; libpcap's udp[] indexes only IPv4, so the
+    # IPv6 leg loads it from ip6[60] behind a UDP next header.
     DNS_CAPTURE_FILTER = (
-        "udp and ((src host 198.18.64.1 and dst host 198.18.64.2 and dst port 53)"
+        "(udp and ((src host 198.18.64.1 and dst host 198.18.64.2 and dst port 53)"
         " or (src host 198.18.64.2 and src port 53 and dst host 198.18.64.1))"
         " and ((udp[20] = 37 and udp[21:4] = 0x73303030"
         " and udp[26:4] = 0x39366564 and udp[30:4] = 0x37303330)"
         " or (udp[20] = 37 and udp[21:4] = 0x74303030"
         " and udp[26:4] = 0x64316639 and udp[30:4] = 0x33663836)"
         " or (udp[20] = 37 and udp[21:4] = 0x65303030"
-        " and udp[26:4] = 0x61383031 and udp[30:4] = 0x66353262))"
+        " and udp[26:4] = 0x61383031 and udp[30:4] = 0x66353262)))"
+        " or (ip6 and ip6[6] = 17"
+        " and ((src host 2001:2:0:64::1 and dst host 2001:2:0:64::2 and dst port 53)"
+        " or (src host 2001:2:0:64::2 and src port 53 and dst host 2001:2:0:64::1))"
+        " and ((ip6[60] = 37 and ip6[61:4] = 0x73303030"
+        " and ip6[66:4] = 0x39366564 and ip6[70:4] = 0x37303330)"
+        " or (ip6[60] = 37 and ip6[61:4] = 0x74303030"
+        " and ip6[66:4] = 0x64316639 and ip6[70:4] = 0x33663836)"
+        " or (ip6[60] = 37 and ip6[61:4] = 0x65303030"
+        " and ip6[66:4] = 0x61383031 and ip6[70:4] = 0x66353262)))"
     )
 
     def _reset_fixture(self) -> RuntimeFixture:
@@ -1912,7 +2067,11 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.addCleanup(self.fixture.cleanup)
         return self.fixture
 
-    def _replace_dns_capture(self, capture: bytes) -> dict[str, Any]:
+    def _replace_dns_capture(
+        self, capture: bytes, families: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """Install a DNS capture and, when given, the stage legs it records."""
+
         document = self.fixture.documents["dns-traffic.json"]
         self.fixture.pcaps["dns-traffic.pcap"] = capture
         document["capture"] = {
@@ -1921,6 +2080,8 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
             "sha256": sha256_bytes(capture),
             "size": len(capture),
         }
+        if families is not None:
+            document["endpoint"]["stage_families"] = dict(families)
         return document
 
     def _assert_seal_rejects(self, message: str, cause: str | None = None) -> None:
@@ -1932,29 +2093,257 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
             self.assertRegex(str(raised.exception.__cause__), cause)
         self.assertFalse(self.fixture.acceptance.exists())
 
-    def test_dns_traffic_accepts_the_utun_tunnel_peer_leg(self) -> None:
+    def _assert_dns_capture_rejected(
+        self,
+        packets: list[UtunPacket],
+        message: str,
+        cause: str | None = None,
+        families: dict[str, str] | None = None,
+    ) -> None:
+        self._reset_fixture()
+        self._replace_dns_capture(_utun_udp_pcap(packets), families)
+        self._assert_seal_rejects(message, cause)
+
+    def test_dns_traffic_accepts_the_observed_ipv6_tunnel_leg(self) -> None:
         document = self.fixture.documents["dns-traffic.json"]
+        capture = self.fixture.pcaps["dns-traffic.pcap"]
+        self.assertEqual(struct.unpack_from("<I", capture, 20)[0], UTUN_LINK_TYPE)
         self.assertEqual(
-            _utun_dns_flags(self.fixture.pcaps["dns-traffic.pcap"]),
-            [0x0100, 0x8500] * 3,
+            _utun_dns_headers(capture), [(6, 0x0100), (6, 0x8500)] * 3
         )
         result = self.fixture.seal()
         self.assertEqual(result, self.fixture.validate())
         self.assertEqual(
             document["endpoint"],
             {
-                "family": "ipv4",
                 "interface_name": "utun5",
-                "link_type": 0,
-                "local_address": "198.18.64.1",
-                "remote_address": "198.18.64.2",
+                "link_type": 101,
                 "remote_port": 53,
+                "stage_families": {"end": "ipv6", "start": "ipv6", "target": "ipv6"},
             },
         )
         self.assertEqual(
             document["capture_command"]["argv"][-5:],
             ["-c", "6", "-w", "-", self.DNS_CAPTURE_FILTER],
         )
+
+    def test_dns_traffic_accepts_a_different_tunnel_leg_per_stage(self) -> None:
+        for legs in (
+            ("ipv6", "ipv4", "ipv6"),
+            ("ipv4", "ipv6", "ipv4"),
+            ("ipv4", "ipv4", "ipv6"),
+        ):
+            with self.subTest(legs=legs):
+                fixture = self._reset_fixture()
+                families = dict(zip(DNS_STAGES, legs, strict=True))
+                tokens = fixture.documents["dns-traffic.json"]["tokens"]
+                capture = _utun_udp_pcap(
+                    _tunnel_dns_packets(tokens, families=families)
+                )
+                self.assertEqual(
+                    [version for version, _flags in _utun_dns_headers(capture)],
+                    [4 if family == "ipv4" else 6 for family in legs for _ in "qr"],
+                )
+                self._replace_dns_capture(capture, families)
+                fixture.write_all()
+                self.assertEqual(fixture.seal(), fixture.validate())
+
+    def test_dns_traffic_still_accepts_the_ipv4_tunnel_leg(self) -> None:
+        families = dict.fromkeys(DNS_STAGES, "ipv4")
+        for link_type in (101, 0):
+            with self.subTest(link_type=link_type):
+                fixture = self._reset_fixture()
+                tokens = fixture.documents["dns-traffic.json"]["tokens"]
+                document = self._replace_dns_capture(
+                    _utun_udp_pcap(
+                        _tunnel_dns_packets(tokens, families=families),
+                        link_type=link_type,
+                    ),
+                    families,
+                )
+                document["endpoint"]["link_type"] = link_type
+                fixture.write_all()
+                self.assertEqual(fixture.seal(), fixture.validate())
+
+    def test_dns_traffic_rejects_a_token_answered_on_both_legs(self) -> None:
+        tokens = self.fixture.documents["dns-traffic.json"]["tokens"]
+        observed = _tunnel_dns_packets(tokens)
+        retransmitted = _tunnel_dns_transaction(
+            tokens["target"], "ipv4", at=1.10, port=53102, identifier=0x5A12
+        )
+        cases = (
+            ("answered on both legs", observed + retransmitted),
+            # mDNSResponder's failover shape: the IPv6 query goes unanswered
+            # and the same name is asked again of the IPv4 peer.
+            ("unanswered IPv6 query retried on IPv4", observed[:3] + observed[4:] + retransmitted),
+        )
+        for label, packets in cases:
+            with self.subTest(label):
+                self._assert_dns_capture_rejected(
+                    packets, "DNS capture endpoints are invalid", "exact target query"
+                )
+
+    def test_dns_traffic_rejects_a_transaction_split_across_legs(self) -> None:
+        tokens = self.fixture.documents["dns-traffic.json"]["tokens"]
+        for query_family, response_family in (("ipv6", "ipv4"), ("ipv4", "ipv6")):
+            with self.subTest(query=query_family, response=response_family):
+                families = {**OBSERVED_DNS_FAMILIES, "target": query_family}
+                packets = _tunnel_dns_packets(tokens, families=families)
+                at, _resolver, _port, _client, client_port, response = packets[3]
+                client, resolver = DNS_LEGS[response_family]
+                packets[3] = (at, resolver, 53, client, client_port, response)
+                self._assert_dns_capture_rejected(
+                    packets,
+                    "do not prove the required traffic",
+                    "exactly one query and one authoritative response",
+                    families,
+                )
+
+    def test_dns_traffic_rejects_foreign_ipv6_addresses_and_ports(self) -> None:
+        tokens = self.fixture.documents["dns-traffic.json"]["tokens"]
+
+        def target_ports(query_port: int, response_port: int) -> list[UtunPacket]:
+            packets = _tunnel_dns_packets(tokens)
+            at, client, client_port, resolver, _port, query = packets[2]
+            packets[2] = (at, client, client_port, resolver, query_port, query)
+            at, resolver, _port, client, client_port, response = packets[3]
+            packets[3] = (at, resolver, response_port, client, client_port, response)
+            return packets
+
+        cases = (
+            (
+                "foreign IPv6 client",
+                _tunnel_dns_packets(tokens, client="2001:2:0:64::9"),
+                "DNS capture endpoints are invalid",
+                "start query did not come from its resolver leg's client",
+            ),
+            (
+                "foreign IPv6 resolver",
+                _tunnel_dns_packets(tokens, resolver="2001:2:0:64::3"),
+                "DNS capture endpoints are invalid",
+                "exact start query",
+            ),
+            (
+                "IPv6 resolver port 5353",
+                target_ports(5353, 5353),
+                "DNS capture endpoints are invalid",
+                "exact target query",
+            ),
+            (
+                "IPv6 answer from port 5353",
+                target_ports(53, 5353),
+                "do not prove the required traffic",
+                "exactly one query and one authoritative response",
+            ),
+        )
+        for label, packets, message, cause in cases:
+            with self.subTest(label):
+                self._assert_dns_capture_rejected(packets, message, cause)
+
+    def test_dns_traffic_rejects_an_aaaa_query_for_a_token(self) -> None:
+        tokens = self.fixture.documents["dns-traffic.json"]["tokens"]
+        observed = _tunnel_dns_packets(tokens)
+        aaaa = _tunnel_dns_transaction(
+            tokens["target"],
+            "ipv6",
+            at=1.05,
+            port=DNS_CLIENT_PORTS["target"],
+            identifier=0x5A22,
+            question_type=28,
+        )
+        aaaa_elsewhere = _tunnel_dns_transaction(
+            tokens["target"],
+            "ipv6",
+            at=1.05,
+            port=53122,
+            identifier=0x5A22,
+            question_type=28,
+        )
+        cases = (
+            (
+                "AAAA instead of A",
+                observed[:2] + aaaa + observed[4:],
+                "DNS capture endpoints are invalid",
+                "exact target query",
+            ),
+            (
+                "AAAA beside A on one socket",
+                observed + aaaa[:1],
+                "do not prove the required traffic",
+                "required A/AAAA question",
+            ),
+            (
+                "AAAA beside A on another socket",
+                observed + aaaa_elsewhere,
+                "partial or has extra traffic",
+                None,
+            ),
+        )
+        for label, packets, message, cause in cases:
+            with self.subTest(label):
+                self._assert_dns_capture_rejected(packets, message, cause)
+
+    def test_dns_endpoint_records_each_stage_leg_from_the_capture(self) -> None:
+        fixed = "dns_traffic endpoint differs from the fixed capture policy"
+        cases = (
+            (
+                "one stage misrecorded",
+                {"stage_families": {"end": "ipv6", "start": "ipv6", "target": "ipv4"}},
+                GARuntimeAcceptanceError,
+                "dns_traffic DNS stage families differ from the capture",
+            ),
+            (
+                "dual family",
+                {"stage_families": {"end": "ipv6", "start": "ipv6", "target": "dual"}},
+                GARuntimeAcceptanceError,
+                fixed,
+            ),
+            (
+                "numeric family",
+                {"stage_families": {"end": "ipv6", "start": "ipv6", "target": 6}},
+                GARuntimeAcceptanceError,
+                fixed,
+            ),
+            (
+                "missing stage",
+                {"stage_families": {"start": "ipv6", "target": "ipv6"}},
+                PublicationError,
+                "dns_traffic stage families has an unexpected field set",
+            ),
+            (
+                "one family for every stage",
+                {"stage_families": "ipv6"},
+                PublicationError,
+                "dns_traffic stage families has an unexpected field set",
+            ),
+            (
+                "former single-family endpoint",
+                {
+                    "family": "ipv4",
+                    "local_address": TUNNEL_CLIENT,
+                    "remote_address": TUNNEL_DNS_PEER,
+                },
+                PublicationError,
+                "dns_traffic endpoint has an unexpected field set",
+            ),
+            ("resolver port", {"remote_port": 5353}, GARuntimeAcceptanceError, fixed),
+            ("resolver port text", {"remote_port": "53"}, GARuntimeAcceptanceError, fixed),
+            # 53.0 == 53, 101.0 == 101 and True == 1 (Ethernet): only the
+            # exact integer type rejects them.
+            ("resolver port float", {"remote_port": 53.0}, GARuntimeAcceptanceError, fixed),
+            ("link type", {"link_type": 102}, GARuntimeAcceptanceError, fixed),
+            ("link type float", {"link_type": 101.0}, GARuntimeAcceptanceError, fixed),
+            ("link type boolean", {"link_type": True}, GARuntimeAcceptanceError, fixed),
+            ("interface", {"interface_name": "lo0"}, GARuntimeAcceptanceError, fixed),
+        )
+        for label, fields, error, message in cases:
+            with self.subTest(label):
+                fixture = self._reset_fixture()
+                fixture.documents["dns-traffic.json"]["endpoint"].update(fields)
+                fixture.write_all()
+                with self.assertRaisesRegex(error, message):
+                    fixture.seal()
+                self.assertFalse(fixture.acceptance.exists())
 
     def test_dns_traffic_rejects_the_upstream_vantage_shape(self) -> None:
         upstream = "34.80.107.183"
@@ -1976,33 +2365,58 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
                     link_type=1,
                 )
             )
-            document["endpoint"].update(
-                interface_name="en0", link_type=1, remote_address=upstream
-            )
+            document["endpoint"] = {
+                "family": "ipv4",
+                "interface_name": "en0",
+                "link_type": 1,
+                "local_address": TUNNEL_CLIENT,
+                "remote_address": upstream,
+                "remote_port": 53,
+            }
             document["capture_command"]["argv"] = ga_runtime._capture_command_argv(
                 "en0", 6, ("udp", "and", "port", "53")
             )
             document["observation_ms"] = 5000
-            self._assert_seal_rejects("endpoint differs from the fixed capture policy")
-        with self.subTest(shape="upstream packets under the tunnel endpoint"):
+            self.fixture.write_all()
+            with self.assertRaisesRegex(
+                PublicationError, "dns_traffic endpoint has an unexpected field set"
+            ):
+                self.fixture.seal()
+            self.assertFalse(self.fixture.acceptance.exists())
+        with self.subTest(shape="upstream capture command on en0"):
             fixture = self._reset_fixture()
-            tokens = fixture.documents["dns-traffic.json"]["tokens"]
-            self._replace_dns_capture(
-                _utun_udp_pcap(_tunnel_dns_packets(tokens, resolver=upstream))
+            document = fixture.documents["dns-traffic.json"]
+            document["endpoint"].update(interface_name="en0", link_type=1)
+            document["capture_command"]["argv"] = ga_runtime._capture_command_argv(
+                "en0", 6, ("udp", "and", "port", "53")
             )
             self._assert_seal_rejects(
-                "DNS capture endpoints are invalid", "exact start query"
+                "dns_traffic packet capture command command identity"
+            )
+        with self.subTest(shape="upstream packets under the tunnel endpoint"):
+            families = dict.fromkeys(DNS_STAGES, "ipv4")
+            self._assert_dns_capture_rejected(
+                _tunnel_dns_packets(tokens, families=families, resolver=upstream),
+                "DNS capture endpoints are invalid",
+                "exact start query",
+                families,
             )
 
     def test_dns_traffic_rejects_interleaved_unrelated_resolver_traffic(self) -> None:
+        for family in ("ipv6", "ipv4"):
+            with self.subTest(unrelated_leg=family):
+                self._assert_unrelated_resolver_traffic_rejected(family)
+
+    def _assert_unrelated_resolver_traffic_rejected(self, family: str) -> None:
         query = _tunnel_dns_query(0x7B01, "www.apple.com")
+        client, resolver = DNS_LEGS[family]
         unrelated = [
-            (0.50, TUNNEL_CLIENT, 53100, TUNNEL_DNS_PEER, 53, query),
+            (0.50, client, 53100, resolver, 53, query),
             (
                 0.56,
-                TUNNEL_DNS_PEER,
+                resolver,
                 53,
-                TUNNEL_CLIENT,
+                client,
                 53100,
                 _tunnel_dns_response(
                     query, flags=0x8180, answer="17.253.144.10", ttl=60
@@ -2161,16 +2575,108 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         (expression,) = ga_runtime._traffic_capture_filter_argv("dns_traffic", tokens)
         (other_expression,) = ga_runtime._traffic_capture_filter_argv("dns_traffic", other)
         for own, foreign in zip(tokens.values(), other.values(), strict=True):
-            with self.subTest(token=own):
-                for offset, start in ((26, 5), (30, 9)):
-                    own_word = f"udp[{offset}:4] = 0x{own[start:start + 4].encode('ascii').hex()}"
-                    foreign_word = (
-                        f"udp[{offset}:4] = 0x{foreign[start:start + 4].encode('ascii').hex()}"
-                    )
-                    self.assertNotEqual(own_word, foreign_word)
-                    self.assertIn(own_word, expression)
-                    self.assertNotIn(foreign_word, expression)
-                    self.assertIn(foreign_word, other_expression)
+            # The IPv4 leg's label starts at udp[20], the IPv6 leg's at ip6[60].
+            for layer, label in (("udp", 20), ("ip6", 60)):
+                with self.subTest(token=own, layer=layer):
+                    for offset, start in ((label + 6, 5), (label + 10, 9)):
+                        own_word = (
+                            f"{layer}[{offset}:4] = "
+                            f"0x{own[start:start + 4].encode('ascii').hex()}"
+                        )
+                        foreign_word = (
+                            f"{layer}[{offset}:4] = "
+                            f"0x{foreign[start:start + 4].encode('ascii').hex()}"
+                        )
+                        self.assertNotEqual(own_word, foreign_word)
+                        self.assertIn(own_word, expression)
+                        self.assertNotIn(foreign_word, expression)
+                        self.assertIn(foreign_word, other_expression)
+
+    def test_tunnel_dns_capture_filter_selects_only_this_collections_dns(
+        self,
+    ) -> None:
+        # The string checks above share the filter's structure, so a valid
+        # expression that loads the wrong bytes passes them; the former
+        # udp[20] form matched no IPv6 datagram. This runs the exact
+        # expression through the system tcpdump, offline.
+        tokens = RuntimeFixture._traffic_tokens("dns_traffic")
+        other_challenge = base64.urlsafe_b64encode(b"D" * 32).decode("ascii").rstrip("=")
+        other = {
+            stage: _derive_capture_token(other_challenge, "dns_traffic", stage)
+            for stage in DNS_STAGES
+        }
+        (expression,) = ga_runtime._traffic_capture_filter_argv("dns_traffic", tokens)
+        admitted = _tunnel_dns_packets(
+            tokens, families={"start": "ipv6", "target": "ipv4", "end": "ipv6"}
+        )
+        foreign_hosts = {
+            "ipv4": ("198.18.64.9", "198.18.64.3"),
+            "ipv6": ("2001:2:0:64::9", "2001:2:0:64::3"),
+        }
+        rejected: list[UtunPacket] = []
+        for family, (client, resolver) in DNS_LEGS.items():
+            foreign_client, foreign_resolver = foreign_hosts[family]
+            for index, (source, source_port, destination, destination_port, name) in enumerate(
+                (
+                    (client, 54001, resolver, 5353, tokens["start"]),
+                    (client, 53, resolver, 54002, tokens["start"]),
+                    (foreign_client, 54003, resolver, 53, tokens["target"]),
+                    (client, 54004, foreign_resolver, 53, tokens["end"]),
+                    (client, 54005, resolver, 53, other["target"]),
+                    (client, 54006, resolver, 53, "www.apple.com"),
+                )
+            ):
+                if name != "www.apple.com":
+                    name = f"{name}.evidence.test"
+                query = _tunnel_dns_query(0x6B00 + index, name)
+                at = 0.5 + index / 10
+                rejected.append((at, source, source_port, destination, destination_port, query))
+                rejected.append(
+                    (at + 0.05, destination, destination_port, source, source_port,
+                     _tunnel_dns_response(query))
+                )
+        # The upstream leg libbox sends outside the tunnel.
+        upstream = _tunnel_dns_query(0x6C00, f"{tokens['target']}.evidence.test")
+        rejected.append((1.5, "192.168.1.10", 54010, "34.80.107.183", 53, upstream))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+
+        def tcpdump(name: str, capture: bytes, bpf: str) -> bytes:
+            # Apple's tcpdump refuses a pcap on a pipe as an unknown file
+            # format, so it reads a file.
+            capture_path = Path(temporary.name) / name
+            capture_path.write_bytes(capture)
+            completed = subprocess.run(
+                ["/usr/sbin/tcpdump", "-n", "-r", str(capture_path), "-w", "-", bpf],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout
+
+        for link_type in (UTUN_LINK_TYPE, 0):
+            with self.subTest(link_type=link_type):
+                capture = _utun_udp_pcap(admitted + rejected, link_type=link_type)
+                name = f"link-type-{link_type}.pcap"
+                # "udp" admits every datagram on both families, which shows the
+                # system tcpdump reads each fixture record.
+                every = _utun_udp_datagrams(tcpdump(name, capture, "udp"))
+                self.assertEqual(every, _utun_udp_datagrams(capture))
+                self.assertEqual(len(every), len(admitted) + len(rejected))
+                self.assertEqual(
+                    _utun_udp_datagrams(tcpdump(name, capture, expression)),
+                    _utun_udp_datagrams(_utun_udp_pcap(admitted, link_type=link_type)),
+                )
+        with self.subTest("IPv6 Hop-by-Hop header"):
+            # RELEASE.md: a token query behind an IPv6 extension header is not
+            # captured, so the live capture times out and fails closed.
+            capture = _utun_udp_pcap(_tunnel_dns_packets(tokens), ipv6_hop_by_hop=True)
+            # "ip6" reads all six records; the token filter writes only the
+            # pcap file header.
+            self.assertEqual(tcpdump("hop-by-hop.pcap", capture, "ip6"), capture)
+            self.assertEqual(tcpdump("hop-by-hop.pcap", capture, expression), capture[:24])
 
     def test_tunnel_addresses_match_the_cross_language_contract(self) -> None:
         plan = json.loads(
@@ -2182,27 +2688,42 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
             TUNNEL_CAPTURE_LOCAL_ADDRESSES,
             {"ipv4": plan["ipv4Address"], "ipv6": plan["ipv6Address"]},
         )
-        self.assertEqual(ga_runtime.TUNNEL_DNS_PEER_IPV4, plan["ipv4DnsPeer"])
         self.assertEqual(
-            TRAFFIC_POLICY["dns_traffic"]["remote_address"], plan["ipv4DnsPeer"]
+            (ga_runtime.TUNNEL_DNS_PEER_IPV4, ga_runtime.TUNNEL_DNS_PEER_IPV6),
+            (plan["ipv4DnsPeer"], plan["ipv6DnsPeer"]),
         )
         self.assertEqual(
-            (TUNNEL_CLIENT, TUNNEL_DNS_PEER),
-            (plan["ipv4Address"], plan["ipv4DnsPeer"]),
+            ga_runtime.TUNNEL_DNS_LEGS,
+            (
+                DnsResolverLeg(plan["ipv4Address"], plan["ipv4DnsPeer"]),
+                DnsResolverLeg(plan["ipv6Address"], plan["ipv6DnsPeer"]),
+            ),
+        )
+        # The DNS policy names no single resolver; its legs come from the plan.
+        self.assertNotIn("remote_address", TRAFFIC_POLICY["dns_traffic"])
+        self.assertEqual(
+            (IPV4_DNS_LEG, IPV6_DNS_LEG),
+            (
+                (plan["ipv4Address"], plan["ipv4DnsPeer"]),
+                (plan["ipv6Address"], plan["ipv6DnsPeer"]),
+            ),
         )
 
     def test_dns_queries_must_originate_from_the_tunnel_client(self) -> None:
-        with self.subTest("foreign DNS client"):
-            tokens = self.fixture.documents["dns-traffic.json"]["tokens"]
-            self._replace_dns_capture(
-                _utun_udp_pcap(_tunnel_dns_packets(tokens, client="198.18.64.9"))
-            )
-            self._assert_seal_rejects("DNS queries did not come from the tunnel client")
+        tokens = self.fixture.documents["dns-traffic.json"]["tokens"]
+        for family, client in (("ipv4", "198.18.64.9"), ("ipv6", "2001:2:0:64::9")):
+            with self.subTest("foreign DNS client", family=family):
+                families = dict.fromkeys(DNS_STAGES, family)
+                self._assert_dns_capture_rejected(
+                    _tunnel_dns_packets(tokens, families=families, client=client),
+                    "DNS capture endpoints are invalid",
+                    "start query did not come from its resolver leg's client",
+                    families,
+                )
         cases = (
             ("tcp_traffic", "local_address", "10.0.0.5"),
-            ("dns_traffic", "local_address", "10.0.0.5"),
-            ("dns_traffic", "local_address", int(ipaddress.ip_address(TUNNEL_CLIENT))),
-            ("dns_traffic", "remote_address", int(ipaddress.ip_address(TUNNEL_DNS_PEER))),
+            ("tcp_traffic", "local_address", int(ipaddress.ip_address(TUNNEL_CLIENT))),
+            ("dns_traffic", "remote_port", 5353),
         )
         for check_id, field, value in cases:
             with self.subTest(check_id=check_id, field=field, value=value):
@@ -3142,18 +3663,52 @@ class GARuntimeCollectorTests(unittest.TestCase):
 
     def test_dns_collection_captures_the_tunnel_leg(self) -> None:
         # The real decoder, endpoint derivation and marker window run on a
-        # utun capture; only the processes and the clock's sleeps are faked.
-        runtime = self._capture_runtime()
+        # RAW utun capture; only the processes and the clock's sleeps are
+        # faked. The observed collection used the IPv6 leg for every stage;
+        # the marker window reads the start and end stages, so the second
+        # shape moves the end marker to the IPv4 leg.
         tokens = RuntimeFixture._traffic_tokens("dns_traffic")
+        for families in (
+            OBSERVED_DNS_FAMILIES,
+            {"start": "ipv6", "target": "ipv4", "end": "ipv4"},
+        ):
+            with self.subTest(families=families):
+                capture = _utun_udp_pcap(_tunnel_dns_packets(tokens, families=families))
+                traffic, observed, expected_argv = self._collect_dns_capture(
+                    tokens, capture
+                )
+                self.assertEqual(traffic["capture_command"]["argv"], expected_argv)
+                self.assertEqual(observed, capture)
+                self.assertEqual(
+                    traffic["endpoint"],
+                    {
+                        "interface_name": "utun6",
+                        "link_type": 101,
+                        "remote_port": 53,
+                        "stage_families": families,
+                    },
+                )
+                self.assertEqual(traffic["observation_ms"], DNS_OBSERVATION_MS)
+
+    def _collect_dns_capture(
+        self, tokens: dict[str, str], capture: bytes
+    ) -> tuple[dict[str, Any], bytes, list[str]]:
+        runtime = self._capture_runtime()
         document = self.fixture.documents["dns-traffic.json"]
-        capture = self.fixture.pcaps["dns-traffic.pcap"]
         receipts = dict(zip(DNS_STAGES, document["send_commands"], strict=True))
         process = self._CaptureProcess(self._CapturePipe(21), self._CapturePipe(22))
         process.poll = lambda: None
+        spawned: list[list[str]] = []
+
+        def spawn_tcpdump(argv, **_options):
+            spawned.append(list(argv))
+            return process
 
         def communicate(timeout):
             process.returncode = 0
-            return capture, b"6 packets captured\n"
+            # tcpdump -w writes the snapshot length it captured with.
+            snaplen = struct.pack("<I", _tcpdump_snapshot_length(spawned[0]))
+            return capture[:16] + snaplen + capture[20:], b"6 packets captured\n"
 
         process.communicate = communicate
         selector = MagicMock()
@@ -3165,17 +3720,20 @@ class GARuntimeCollectorTests(unittest.TestCase):
             sent.append(stage)
             return copy.deepcopy(receipts[stage])
 
-        listening = (
-            b"tcpdump: listening on utun6, link-type NULL (BSD loopback), "
-            b"snapshot length 524288 bytes\n"
-        )
+        def listening(_descriptor, _size):
+            # tcpdump's readiness line on the release Mac's Packet Tunnel utun.
+            return (
+                b"tcpdump: listening on utun6, link-type RAW (Raw IP), "
+                b"snapshot length %d bytes\n" % _tcpdump_snapshot_length(spawned[0])
+            )
+
         with patch.object(runtime, "_tunnel_interface", return_value="utun6"), \
              patch.object(runtime, "run", side_effect=send), \
              patch.object(runtime, "_terminate_capture") as terminate, \
-             patch.object(ga_runtime.subprocess, "Popen", return_value=process) as spawn, \
+             patch.object(ga_runtime.subprocess, "Popen", side_effect=spawn_tcpdump) as spawn, \
              patch.object(ga_runtime.selectors, "DefaultSelector", return_value=selector), \
              patch.object(ga_runtime.os, "set_blocking"), \
-             patch.object(ga_runtime.os, "read", return_value=listening), \
+             patch.object(ga_runtime.os, "read", side_effect=listening), \
              patch.object(ga_runtime.time, "sleep"):
             traffic, observed = runtime._capture_traffic_bytes("dns_traffic", tokens)
         expected_argv = ga_runtime._capture_command_argv(
@@ -3184,22 +3742,9 @@ class GARuntimeCollectorTests(unittest.TestCase):
         terminate.assert_not_called()
         self.assertEqual(sent, list(DNS_STAGES))
         self.assertEqual(spawn.call_args.args[0], expected_argv)
-        self.assertEqual(traffic["capture_command"]["argv"], expected_argv)
-        self.assertEqual(observed, capture)
-        self.assertEqual(
-            traffic["endpoint"],
-            {
-                "family": "ipv4",
-                "interface_name": "utun6",
-                "link_type": 0,
-                "local_address": TUNNEL_CLIENT,
-                "remote_address": TUNNEL_DNS_PEER,
-                "remote_port": 53,
-            },
-        )
-        self.assertEqual(traffic["observation_ms"], DNS_OBSERVATION_MS)
         self.assertTrue(process.stdout.closed)
         self.assertTrue(process.stderr.closed)
+        return traffic, observed, expected_argv
 
     def test_interface_discovery_is_inside_complete_exercise_deadline(self) -> None:
         runtime = self._capture_runtime()

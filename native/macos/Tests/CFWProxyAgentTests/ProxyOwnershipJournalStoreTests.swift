@@ -74,6 +74,9 @@ private func journalDescriptor() throws -> ConfigurationDescriptor {
   return try ConfigurationDescriptor(
     slot: .systemProxy,
     tunnelOptions: nil,
+    credentialAudience: CredentialAudience(
+      profileID: installationID,
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: installationID,
     epoch: 1,
     generation: 7,

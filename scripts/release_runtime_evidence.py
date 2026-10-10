@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate physical-machine bounded recovery evidence for a 0.4.0 candidate."""
+"""Validate physical-machine bounded recovery evidence for a 0.5.0 candidate."""
 
 from __future__ import annotations
 
@@ -133,11 +133,11 @@ def validate_runtime_evidence(value: Any) -> dict[str, Any]:
         },
         "runtime evidence",
     )
-    if document["schema_version"] != 1:
+    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
         raise RuntimeEvidenceError("runtime evidence schema_version must be 1")
     product = _exact(document["product"], {"version", "build_number"}, "product")
-    if product["version"] != "0.4.0":
-        raise RuntimeEvidenceError("runtime evidence is not for version 0.4.0")
+    if product["version"] != "0.5.0":
+        raise RuntimeEvidenceError("runtime evidence is not for version 0.5.0")
     canonical_build_version(product["build_number"], "runtime evidence build_number")
     _sha256(document["app_manifest_sha256"], "app_manifest_sha256")
     _timestamp(document["captured_at"])
@@ -273,7 +273,7 @@ def main() -> None:
         raise SystemExit(f"error: runtime recovery evidence failed: {error}") from error
     print(
         "runtime recovery evidence verified: "
-        f"0.4.0 ({document['product']['build_number']}), {len(document['cases'])} cases"
+        f"0.5.0 ({document['product']['build_number']}), {len(document['cases'])} cases"
     )
 
 

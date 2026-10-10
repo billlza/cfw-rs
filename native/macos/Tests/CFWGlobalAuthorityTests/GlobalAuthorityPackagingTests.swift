@@ -1,4 +1,6 @@
+import CFWSharedProtocol
 import Foundation
+import Security
 import Testing
 
 @testable import CFWGlobalAuthority
@@ -22,14 +24,72 @@ private func plist(_ name: String) throws -> [String: Any] {
     GlobalAuthorityProductIdentity.signingIdentifier
       == "com.bill.clashformac.global-authority")
   #expect(
-    GlobalAuthorityProductIdentity.machServiceName
-      == "YKUPL7Z869.group.com.bill.clashformac.global-authority")
+    GlobalAuthorityProductIdentity.machServiceNames
+      == Dictionary(
+        uniqueKeysWithValues: AuthorityRole.allCases.map {
+          ($0, GlobalAuthorityConnectionContract.machServiceName(for: $0))
+        }))
   #expect(
     GlobalAuthorityProductIdentity.designatedRequirement
       == "anchor apple generic and identifier \"com.bill.clashformac.global-authority\" "
       + "and certificate 1[field.1.2.840.113635.100.6.2.6] exists "
       + "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists "
       + "and certificate leaf[subject.OU] = \"YKUPL7Z869\"")
+}
+
+@Test func everyRoleAndDaemonCodeRequirementParsesOnTheMinimumSupportedAPI() {
+  let roleRequirements = AuthorityRole.allCases.map {
+    GlobalAuthorityConnectionContract.peerRequirement(for: $0)
+  }
+  let requirements =
+    roleRequirements + [GlobalAuthorityConnectionContract.authorityDesignatedRequirement]
+  for text in requirements {
+    var requirement: SecRequirement?
+    #expect(
+      SecRequirementCreateWithString(
+        text as CFString, [], &requirement) == errSecSuccess)
+    #expect(requirement != nil)
+  }
+
+  for text in roleRequirements {
+    let clauses = text.components(separatedBy: " and ")
+    #expect(Set(clauses).count == clauses.count)
+  }
+}
+
+@Test func roleScopedRequirementsUseOnlyExactDeveloperIDAndAppleCapabilities() throws {
+  let requirements = Dictionary(
+    uniqueKeysWithValues: AuthorityRole.allCases.map {
+      ($0, GlobalAuthorityConnectionContract.peerRequirement(for: $0))
+    })
+  #expect(Set(GlobalAuthorityProductIdentity.machServiceNames.values).count == 3)
+
+  for role in AuthorityRole.allCases {
+    let requirement = try #require(requirements[role])
+    let signingIdentifier = GlobalAuthorityConnectionContract.signingIdentifier(for: role)
+    #expect(requirement.contains("identifier \"\(signingIdentifier)\""))
+    #expect(requirement.contains("certificate leaf[subject.OU] = \"YKUPL7Z869\""))
+    #expect(!requirement.contains("com.bill.clashformac.global-authority.client"))
+    #expect(!requirement.contains("com.bill.clashformac.global-authority.engine-owner"))
+
+    switch role {
+    case .host, .proxyAgent:
+      #expect(
+        requirement.contains(
+          "entitlement[\"com.apple.security.application-groups\"] = "
+            + "\"YKUPL7Z869.group.com.bill.clashformac\""))
+      #expect(!requirement.contains("com.apple.developer.networking.networkextension"))
+    case .provider:
+      #expect(
+        requirement.contains(
+          "entitlement[\"com.apple.developer.networking.networkextension\"] = "
+            + "\"packet-tunnel-provider-systemextension\""))
+      #expect(
+        requirement.contains(
+          "entitlement[\"com.apple.security.app-sandbox\"] exists"))
+      #expect(!requirement.contains("com.apple.security.application-groups"))
+    }
+  }
 }
 
 @Test func launchDaemonExportsOnlyTheFixedRootControlPlaneService() throws {
@@ -40,7 +100,12 @@ private func plist(_ name: String) throws -> [String: Any] {
     value["BundleProgram"] as? String
       == "Contents/Library/HelperTools/CFWGlobalAuthority")
   let services = try #require(value["MachServices"] as? [String: Bool])
-  #expect(services == [GlobalAuthorityProductIdentity.machServiceName: true])
+  #expect(
+    services
+      == Dictionary(
+        uniqueKeysWithValues: GlobalAuthorityProductIdentity.machServiceNames.values.map {
+          ($0, true)
+        }))
   for forbidden in ["ProgramArguments", "Sockets", "WatchPaths", "QueueDirectories"] {
     #expect(value[forbidden] == nil)
   }
@@ -71,7 +136,54 @@ private func plist(_ name: String) throws -> [String: Any] {
       repository.appending(path: "scripts/build_native_products.sh"), encoding: .utf8)
   #expect(buildScript.contains("build_scheme CFWGlobalAuthorityDaemon"))
   #expect(buildScript.contains("native-global-authority-v1"))
-  #expect(buildScript.contains("Global Authority designated requirement mismatch"))
+  #expect(!buildScript.contains("authority_designated_requirement"))
+  #expect(!buildScript.contains("/usr/bin/codesign"))
+  #expect(!buildScript.contains("/usr/bin/csreq"))
+
+  let signingScript = try String(
+    contentsOf:
+      repository.appending(path: "scripts/run_ga_signing_attempt.sh"), encoding: .utf8)
+  #expect(
+    signingScript.contains(
+      "readonly authority_designated_requirement='designated => anchor apple generic and identifier "
+        + "\"com.bill.clashformac.global-authority\" and certificate "
+        + "1[field.1.2.840.113635.100.6.2.6] exists and certificate "
+        + "leaf[field.1.2.840.113635.100.6.1.13] exists and certificate "
+        + "leaf[subject.OU] = \"YKUPL7Z869\"'"))
+  #expect(
+    signingScript.contains(
+      "/usr/bin/codesign -d -r \"$authority_requirement_text\" \"$authority\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_root=\"$attempt_work/authority-requirement\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_text=\"$authority_requirement_root/signed.txt\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_expected=\"$authority_requirement_root/expected.csreq\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_actual=\"$authority_requirement_root/actual.csreq\""))
+  #expect(
+    signingScript.contains(
+      "--identifier com.bill.clashformac.global-authority \\\n"
+        + "  -r=\"$authority_designated_requirement\" \\\n"
+        + "  --entitlements \"$authority_entitlements\""))
+  #expect(signingScript.contains("cannot extract the Global Authority designated requirement"))
+  #expect(
+    signingScript.contains(
+      "/usr/bin/csreq -r=\"$authority_designated_requirement\" \\\n"
+        + "  -b \"$authority_requirement_expected\""))
+  #expect(
+    signingScript.contains(
+      "/usr/bin/csreq -r \"$authority_requirement_text\" \\\n"
+        + "  -b \"$authority_requirement_actual\""))
+  #expect(signingScript.contains("/usr/bin/cmp -s --"))
+  #expect(signingScript.contains("Global Authority designated requirement mismatch"))
+  #expect(
+    signingScript.contains(
+      "cannot remove the Global Authority requirement verification files"))
 }
 
 @Test func tauriBundleEmbedsTheCompleteNativeProductGraph() throws {
@@ -91,7 +203,7 @@ private func plist(_ name: String) throws -> [String: Any] {
     "Library/HelperTools/CFWGlobalAuthority",
     "Library/LaunchDaemons/com.bill.clashformac.global-authority.plist",
     "Library/LoginItems/CFWProxyAgent.app",
-    "Library/SystemExtensions/CFWPacketTunnel.systemextension",
+    "Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension",
   ] {
     #expect(files[destination] != nil)
   }
@@ -114,7 +226,7 @@ private func plist(_ name: String) throws -> [String: Any] {
     "Contents/Frameworks/CFWNativeBridge.framework",
     "Contents/Library/HelperTools/CFWGlobalAuthority",
     "Contents/Library/LoginItems/CFWProxyAgent.app",
-    "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension",
+    "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension",
   ] {
     #expect(destinations.contains(destination))
   }
@@ -127,7 +239,11 @@ private func plist(_ name: String) throws -> [String: Any] {
   #expect(
     daemon["launchdPlist"] as? String
       == "Contents/Library/LaunchDaemons/com.bill.clashformac.global-authority.plist")
-  #expect(daemon["machService"] as? String == GlobalAuthorityProductIdentity.machServiceName)
+  #expect(
+    daemon["machServices"] as? [String]
+      == AuthorityRole.allCases.map {
+        GlobalAuthorityConnectionContract.machServiceName(for: $0)
+      })
 }
 
 @Test func daemonRuntimeSourceHasNoDataPlaneOrProcessLaunchSurface() throws {

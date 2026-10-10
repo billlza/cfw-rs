@@ -1,11 +1,44 @@
+import Foundation
+
+/// Each runtime owns only the interfaces registered by its embedded engine.
+/// Callers serialize this value with the same lock as the monitor's lifetime.
+struct LibboxInterfaceMonitorPolicy: Sendable {
+  private(set) var sessionID: UUID?
+  private var ownedInterfaces: Set<String> = []
+
+  mutating func startSession() -> UUID {
+    let sessionID = UUID()
+    self.sessionID = sessionID
+    return sessionID
+  }
+
+  mutating func stopSession() {
+    sessionID = nil
+  }
+
+  mutating func register(_ name: String) {
+    ownedInterfaces.insert(name)
+  }
+
+  func isCurrentSession(_ sessionID: UUID) -> Bool {
+    self.sessionID == sessionID
+  }
+
+  func eligibleInterfaces<Interface>(
+    _ interfaces: [Interface], named name: (Interface) -> String
+  ) -> [Interface] {
+    interfaces.filter { !ownedInterfaces.contains(name($0)) }
+  }
+}
+
 #if canImport(Libbox) && canImport(CFWLibboxObjC)
   import CFWLibboxObjC
   import CFWSharedProtocol
   import Darwin
-  import Foundation
   import Libbox
   import Network
   import OSLog
+  import Synchronization
 
   private final class OwnedPacketDescriptor: @unchecked Sendable {
     private let lock = NSLock()
@@ -82,6 +115,8 @@
     private let monitorLock = NSLock()
     private var monitor: NWPathMonitor?
     private var monitorQueue: DispatchQueue?
+    private var monitorListener: InterfaceListenerBox?
+    private var interfacePolicy = LibboxInterfaceMonitorPolicy()
 
     init(role: LibboxRuntimeRole, packetFileDescriptor: Int32?) throws {
       switch (role, packetFileDescriptor) {
@@ -128,22 +163,23 @@
         qos: .utility
       )
       let firstPath = DispatchSemaphore(value: 0)
-      let firstPathLock = NSLock()
-      var waitingForFirstPath = true
-      try monitorLock.withLock {
+      let waitingForFirstPath = Mutex(true)
+      let sessionID = try monitorLock.withLock {
         guard self.monitor == nil else {
           throw LibboxRuntimeError.networkMonitorAlreadyStarted
         }
         self.monitor = monitor
         monitorQueue = queue
+        monitorListener = listenerBox
+        return interfacePolicy.startSession()
       }
-      monitor.pathUpdateHandler = { path in
-        Self.publish(path, to: listenerBox.listener)
-        let shouldSignal = firstPathLock.withLock { () -> Bool in
-          guard waitingForFirstPath else {
+      monitor.pathUpdateHandler = { [weak self] path in
+        self?.publish(path, sessionID: sessionID)
+        let shouldSignal = waitingForFirstPath.withLock { waiting -> Bool in
+          guard waiting else {
             return false
           }
-          waitingForFirstPath = false
+          waiting = false
           return true
         }
         if shouldSignal {
@@ -167,14 +203,19 @@
       stopMonitor()
     }
 
-    func getInterfaces() throws -> (any LibboxNetworkInterfaceIteratorProtocol)? {
-      guard let path = monitorLock.withLock({ monitor?.currentPath }) else {
+    func getInterfaces() throws -> any LibboxNetworkInterfaceIteratorProtocol {
+      guard
+        let (path, policy) = monitorLock.withLock({
+          monitor.map { ($0.currentPath, interfacePolicy) }
+        })
+      else {
         throw LibboxRuntimeError.networkMonitorUnavailable
       }
       guard path.status != .unsatisfied else {
         return NetworkInterfaceIterator([])
       }
-      let interfaces = path.availableInterfaces.map { networkInterface in
+      let interfaces = policy.eligibleInterfaces(path.availableInterfaces, named: \.name).map {
+        networkInterface in
         let result = LibboxNetworkInterface()
         result.name = networkInterface.name
         result.index = Int32(networkInterface.index)
@@ -191,6 +232,24 @@
         return result
       }
       return NetworkInterfaceIterator(interfaces)
+    }
+
+    func registerMyInterface(_ name: String) {
+      let publication = monitorLock.withLock { () -> (DispatchQueue, UUID)? in
+        interfacePolicy.register(name)
+        guard let queue = monitorQueue, let sessionID = interfacePolicy.sessionID else {
+          return nil
+        }
+        return (queue, sessionID)
+      }
+      guard let (queue, sessionID) = publication else {
+        return
+      }
+      // OpenInterface calls this from Go. Re-entering its listener synchronously
+      // can deadlock its network locks; serialize the refresh with path updates.
+      queue.async { [weak self] in
+        self?.publishCurrentPath(sessionID: sessionID)
+      }
     }
 
     func clearDNSCache() {
@@ -211,17 +270,36 @@
         let monitor = self.monitor
         self.monitor = nil
         monitorQueue = nil
+        monitorListener = nil
+        interfacePolicy.stopSession()
         return monitor
       }
       monitor?.cancel()
     }
 
-    private static func publish(
-      _ path: NWPath,
-      to listener: any LibboxInterfaceUpdateListenerProtocol
-    ) {
+    private func publishCurrentPath(sessionID: UUID) {
+      guard
+        let path = monitorLock.withLock({
+          interfacePolicy.isCurrentSession(sessionID) ? monitor?.currentPath : nil
+        })
+      else {
+        return
+      }
+      publish(path, sessionID: sessionID)
+    }
+
+    private func publish(_ path: NWPath, sessionID: UUID) {
+      guard
+        let (listenerBox, policy) = monitorLock.withLock({
+          interfacePolicy.isCurrentSession(sessionID)
+            ? monitorListener.map { ($0, interfacePolicy) } : nil
+        })
+      else {
+        return
+      }
+      let listener = listenerBox.listener
       guard path.status != .unsatisfied,
-        let interface = path.availableInterfaces.first
+        let interface = policy.eligibleInterfaces(path.availableInterfaces, named: \.name).first
       else {
         listener.updateDefaultInterface(
           "",
@@ -245,7 +323,10 @@
     let adapter: CFWLibboxPlatformAdapter
     private let role: LibboxRuntimeRole
 
-    init(role: LibboxRuntimeRole, packetFileDescriptor: Int32?) throws {
+    init(
+      role: LibboxRuntimeRole, packetFileDescriptor: Int32?,
+      processPolicy: LibboxProcessLookupPolicy
+    ) throws {
       self.role = role
       core = try LibboxPlatformCore(
         role: role,
@@ -253,7 +334,9 @@
       )
       adapter = CFWLibboxPlatformAdapter(
         packetTunnel: role == .packetTunnel,
-        delegate: core
+        delegate: core,
+        processNames: processPolicy.names,
+        processPaths: processPolicy.paths
       )
     }
 
@@ -338,8 +421,13 @@
 
     public func start(configuration: Data, packetFileDescriptor: Int32?) throws {
       let configurationText: String
+      let expectedReceipt: LibboxRuntimeStartReceipt
       do {
         configurationText = try LibboxConfigurationDocument.text(from: configuration)
+        expectedReceipt = try LibboxRuntimeStartReceipt.parse(
+          configuration: configuration,
+          role: role
+        )
       } catch {
         if let packetFileDescriptor, packetFileDescriptor >= 0 {
           Darwin.close(packetFileDescriptor)
@@ -364,7 +452,8 @@
       do {
         platform = try LibboxPlatformContext(
           role: role,
-          packetFileDescriptor: packetFileDescriptor
+          packetFileDescriptor: packetFileDescriptor,
+          processPolicy: expectedReceipt.processPolicy
         )
       } catch {
         lock.withLock { state = .idle }
@@ -392,7 +481,28 @@
         let options = LibboxOverrideOptions()
         options.autoRedirect = false
         do {
-          try server.startOrReloadService(configurationText, options: options)
+          var reportedConflict: LibboxRuntimeStartConflict?
+          try CFWLibboxPlatformAdapter.startOrReloadService(
+            server,
+            configuration: configurationText,
+            options: options,
+            reportedConflict: &reportedConflict)
+          if let reportedConflict {
+            let conflict = try LibboxRuntimeEndpointConflict.validated(
+              kind: reportedConflict.kind,
+              port: reportedConflict.port,
+              mixedKind: LibboxRuntimeEndpointConflictMixed,
+              controllerKind: LibboxRuntimeEndpointConflictController,
+              receipt: expectedReceipt,
+              runtimeRole: role
+            )
+            throw LibboxRuntimeError.endpointConflict(
+              role: conflict.role,
+              port: conflict.port
+            )
+          }
+        } catch let error as LibboxRuntimeError {
+          throw error
         } catch {
           throw LibboxRuntimeError.serviceStartFailed(error.localizedDescription)
         }

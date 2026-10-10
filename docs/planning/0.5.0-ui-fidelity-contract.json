@@ -1,0 +1,153 @@
+{
+  "status": "required; faithful native replacement not implemented",
+  "user_correction_date": "2026-09-22",
+  "baseline": {
+    "version": "0.4.0",
+    "build": "40073",
+    "source_commit": "9e2f76cdd7ffb286614a7bc6fe55e75d3fc7a5b2",
+    "source_sha256": {
+      "apps/cfw-tauri-shell/ui/src/pages.json": "555267ce3ac2e309ed338fa5b5385ae1f71db88393f46d41f1e1f071f820fce1",
+      "apps/cfw-tauri-shell/ui/src/general.js": "356ca6c3069774c0e8745e0cd9b42f155f363951e76fd48a2be63d564e501aac",
+      "apps/cfw-tauri-shell/ui/src/app.js": "718a22725eaa879fd3e9aee695757c5ee74b14f45b9794263f7ea06cdf0363b3",
+      "apps/cfw-tauri-shell/ui/styles.css": "33261563ed9fbb95e8fe6076dd366226bdff5eae1ea367464ef587bbae9c4a9f",
+      "apps/cfw-tauri-shell/ui/index.html": "d956c242577e62891887e0c767a2308e8787e1f67004812473d875037ea69e8b",
+      "apps/cfw-tauri-shell/tauri.conf.json": "90eeba265b33c76ebaa38c6fb3e85b205dcc3ffde1c68238a77fa91d374a7c1a"
+    }
+  },
+  "contract": "Keep the 0.4 overall UI, details, functionality and interaction paths; apply native SwiftUI/Liquid Glass at existing component locations only.",
+  "navigation_order": [
+    "general",
+    "proxies",
+    "profiles",
+    "providers",
+    "logs",
+    "connections",
+    "rules",
+    "settings",
+    "feedback"
+  ],
+  "general_row_order": [
+    "Port",
+    "Allow LAN",
+    "Log Level",
+    "IPv6 DNS",
+    "Engine",
+    "TUN MTU",
+    "Home Directory",
+    "GeoIP Database",
+    "TUN Mode",
+    "Mixin",
+    "System Proxy",
+    "Start with macOS"
+  ],
+  "baseline_geometry_css_px": {
+    "minimum_window": [
+      850,
+      603
+    ],
+    "sidebar_width": 170,
+    "traffic_height": 80,
+    "navigation_height": 400,
+    "runtime_min_height": 82,
+    "general_header_height": 112,
+    "general_header_gap": 24,
+    "app_mark": [
+      94,
+      82
+    ],
+    "general_content_max_width": 555,
+    "general_content_width_rule": "min(70vw, 555px)",
+    "general_content_margin_top": 8,
+    "row_label_column": 190,
+    "row_min_height": 35,
+    "row_horizontal_padding": 4,
+    "row_action_gap": 10,
+    "general_icon_button": [
+      26,
+      26
+    ],
+    "inline_switch": [
+      34,
+      20
+    ]
+  },
+  "invariants": [
+    "Same pages, names, order and initial General page",
+    "Same traffic and uptime/sidebar placement",
+    "Same branding, information density, control order and action locations",
+    "Same control semantics: Engine Start/Stop remains a text button; TUN and System Proxy remain separate row switches",
+    "Same menus, dialogs, shortcuts, click counts, validation, pending/error/retry/cancel behavior",
+    "Same actual availability, including explicitly unavailable Mixin",
+    "Same persisted choices, profile/node selection and Rust/network/permission contracts"
+  ],
+  "permitted_visual_scope": [
+    "Native material, light/reflection and existing-control hover/press feedback",
+    "Accessible native focus and material fallbacks within existing layout",
+    "Glass applied only to suitable existing controls/navigation/menu surfaces, with dense content kept readable"
+  ],
+  "rejected_scope": [
+    "Single Overview replacing nine pages",
+    "Three large connection rows replacing the 12-row General page",
+    "New hero-led information hierarchy",
+    "Moving Engine Start/Stop into a new top toolbar",
+    "Combining Rules and Providers or reorganizing existing pages",
+    "Inventing favorites, inspector panes or extra workflows",
+    "Treating a disabled sample-data preview as 0.5 feature/interaction parity"
+  ],
+  "prior_overview_and_preview": "Retained as rejected-layout bridge experiments; not the 0.5 product design or an accepted UI milestone.",
+  "acceptance": {
+    "visual_and_interaction_parity_verified": false,
+    "complete_native_ui": false,
+    "requirements": [
+      "Side-by-side reference/candidate captures at equal state, locale, size and scale",
+      "Inventory every existing action and preserve its location and observable sequence",
+      "Real command/event/network checks in addition to rendering",
+      "Actual CPU/RSS/energy/hitch comparison before claiming a gain"
+    ]
+  },
+  "interaction_examples": {
+    "profile_menu_order": [
+      "select",
+      "edit",
+      "edit-external",
+      "update",
+      "reveal",
+      "outbounds",
+      "route",
+      "copy",
+      "qrcode",
+      "credentials",
+      "settings",
+      "delete"
+    ],
+    "profile_menu_conditions": [
+      "Selected profile omits Select",
+      "Remote-only actions retain unavailable reasons without a URL",
+      "Credentials requires engine Off",
+      "Delete retains confirmation"
+    ],
+    "runtime_settings_field_order": [
+      "port",
+      "logLevel",
+      "mtu",
+      "ipv6DNS",
+      "allow",
+      "lanAddress",
+      "lanPort",
+      "lanSources",
+      "Cancel",
+      "Apply"
+    ],
+    "runtime_settings_behavior": [
+      "Enabling LAN opens the existing settings dialog before exposure",
+      "Saving prevents dismissal",
+      "A failure retains the draft and error",
+      "Port and TUN MTU keep the same dialog entry"
+    ],
+    "proxy_modes_order": [
+      "Global",
+      "Rule",
+      "Direct"
+    ]
+  }
+}

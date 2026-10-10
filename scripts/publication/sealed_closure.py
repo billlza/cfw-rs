@@ -1,15 +1,16 @@
 """Sealed-release source, license, vulnerability, and SBOM closure (Task 12.1).
 
 This module extends the existing offline publication tooling (it reuses
-``publication.common`` and ``publication.sbom`` and the pinned-input verifier in
-``scripts/verify_pinned_build_inputs.py``) with a single content-addressed
-supply-chain closure that binds, in one canonical document, the exact:
+``publication.common`` and ``publication.sbom`` and the pinned source-contract
+verifier in ``scripts/verify_pinned_build_inputs.py``) with a single
+content-addressed supply-chain closure that binds, in one canonical document,
+the exact:
 
 * GPL complete corresponding source (CCS) archive and tree digests;
 * GPL modification notice and third-party notices;
 * reviewed license nodes and the merged SPDX and CycloneDX SBOMs;
 * pinned Go/vulnerability tool identities and the govulncheck reports;
-* the patched sing-box source (upstream commit + three patch digests + the
+* the patched sing-box source (upstream commit + four patch digests + the
   combined diff digest + verified Go module inputs);
 * the source-built ``Libbox.xcframework`` digest;
 * the signed application tree digest;
@@ -72,6 +73,7 @@ PHYSICAL_INPUTS = ("signed_app", "xcframework", "vulnerability_reports")
 # content-addressed inputs the sealed closure must bind, in addition to the
 # versions carried by the pinned-input manifest.
 TOOLCHAIN_DIGEST_KEYS = {
+    "rust_release_toolchain_surface_sha256": "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256",
     "node_darwin_arm64_sha256": "NODE_DARWIN_ARM64_SHA256",
     "go_darwin_arm64_sha256": "GO_DARWIN_ARM64_SHA256",
     "gomobile_module_sum": "GOMOBILE_MODULE_SUM",
@@ -117,20 +119,28 @@ def _require_module_sum(value: str, label: str) -> str:
 def derive_supply_chain(repository: Path) -> dict[str, Any]:
     """Derive the canonical, content-addressed toolchain and patched-source graph.
 
-    This first runs the fail-closed pinned-input verifier so a missing tool
-    input, a partial/legacy patch digest, or a combined diff that collapses to a
-    single patch digest is rejected before anything is bound. It then extracts
-    the exact pinned identities into a canonical structure.
+    This first runs the fail-closed static pinned source-contract verifier so a
+    missing tool input, a partial/legacy patch digest, or a combined diff that
+    collapses to a single patch digest is rejected before anything is bound.
+    Generated packet-peer output is proved by its independent CI lane and is
+    not an input to this source/toolchain derivation. The exact pinned
+    identities are then extracted into a canonical structure.
     """
     try:
-        pinned.verify(repository)
+        pinned.verify_source_contract(repository)
     except pinned.PinnedInputError as error:
         raise PublicationError(f"pinned supply-chain inputs failed: {error}") from error
 
     manifest = pinned._load_manifest(repository)
+    dependency_pins_relative = manifest.get(
+        "dependencyPinsPath", "scripts/dependency_pins.env"
+    )
+    if not isinstance(dependency_pins_relative, str):
+        raise PublicationError("dependency pins path is not a repository-relative string")
     env = pinned._parse_env(
         pinned._read_text(
-            repository / manifest.get("dependencyPinsPath", "scripts/dependency_pins.env"),
+            repository,
+            dependency_pins_relative,
             "dependency_pins.env",
         )
     )
@@ -457,7 +467,11 @@ def validate_sealed_closure(
         "vulnerability_reports",
     }
     parsed = require_exact_keys(document, fields | {"closure_sha256"}, "sealed closure")
-    if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != SCHEMA_VERSION
+        or parsed["document"] != DOCUMENT_KIND
+    ):
         raise PublicationError("sealed closure has an unsupported schema/document kind")
     if parsed["fixture"] is not bool(fixture):
         raise PublicationError("sealed closure fixture mode mismatch")

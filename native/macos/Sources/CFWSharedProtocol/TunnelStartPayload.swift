@@ -60,12 +60,12 @@ public struct TunnelStartPayload: Sendable {
 
 /// Canonical framing used as the single value in `startVPNTunnel(options:)`.
 /// The entire encoded value, including descriptor and credentials, is bounded
-/// to the same 1 MiB limit enforced by the native XPC protocols.
+/// to the same bounded frame capacity enforced by the native owner protocols.
 public enum TunnelStartPayloadCodec {
   private static let magic = Data("CFWTUN01".utf8)
   private static let schemaVersion: UInt16 = 1
   private static let headerBytes = 24
-  private static let maximumDescriptorBytes = 64 * 1_024
+  private static let maximumDescriptorBytes = 1_024 * 1_024
   private static let maximumJSONDepth = 64
   public static let maximumCredentialPayloadBytes = 512 * 1_024
 

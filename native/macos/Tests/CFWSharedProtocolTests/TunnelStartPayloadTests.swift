@@ -22,6 +22,7 @@ private func payloadDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true),
+    credentialAudience: try testCredentialAudience(),
     installationID: #require(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
     epoch: 1,
     generation: 1,
@@ -61,6 +62,34 @@ private func payloadCredentialSlot() throws -> CredentialSlot {
     #expect(decoded.configuration == configuration)
     decoded.erase()
   }
+}
+
+@Test func tunnelStartCarriesAFullLargeSubscriptionCredentialDescriptor() throws {
+  let outbounds = (0..<1_024).map { index in
+    ["type": "socks", "tag": "node-\(index)", "username": "", "password": ""]
+  }
+  let configuration = try JSONSerialization.data(
+    withJSONObject: ["outbounds": outbounds], options: [.sortedKeys])
+  var slots: [CredentialSlot] = []
+  for index in UInt16(0)..<1_024 {
+    slots.append(
+      try CredentialSlot(
+        reference: CredentialReference(id: UUID(), kind: .socks5Username), target: .socks5Username,
+        outboundIndex: index, jsonPointer: "/outbounds/\(index)/username"))
+    slots.append(
+      try CredentialSlot(
+        reference: CredentialReference(id: UUID(), kind: .socks5Password), target: .socks5Password,
+        outboundIndex: index, jsonPointer: "/outbounds/\(index)/password"))
+  }
+  let descriptor = try payloadDescriptor(configuration: configuration, credentialSlots: slots)
+  // Credential bytes are opaque to this framing layer. The vault and Authority
+  // suites separately check real secret material and exact audience binding.
+  let encoded = try TunnelStartPayloadCodec.encode(
+    descriptor: descriptor, configuration: configuration, credentialPayload: Data([1]))
+  var decoded = try TunnelStartPayloadCodec.decode(encoded)
+  #expect(decoded.descriptor.credentialSlots.count == 2_048)
+  #expect(decoded.configuration == configuration)
+  decoded.erase()
 }
 
 @Test func tunnelStartConfigurationRejectsMaximumPlusOneBeforeTransport() throws {

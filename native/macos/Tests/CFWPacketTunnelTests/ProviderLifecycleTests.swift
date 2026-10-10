@@ -269,15 +269,40 @@ private final class StartCompletionRecorder: @unchecked Sendable {
 }
 
 private final class StopCompletionRecorder: @unchecked Sendable {
+  private let lock = NSLock()
   private let completed = DispatchSemaphore(value: 0)
+  private var results: [PacketTunnelStopResult] = []
 
-  func record() {
+  func record(_ result: PacketTunnelStopResult) {
+    lock.withLock { results.append(result) }
     completed.signal()
   }
 
   func wait() -> Bool {
     completed.wait(timeout: .now() + 1) == .success
   }
+
+  var values: [PacketTunnelStopResult] {
+    lock.withLock { results }
+  }
+}
+
+private func successfulStopProof(
+  _ result: PacketTunnelStopResult?
+) -> PacketTunnelStopProof? {
+  guard let result else { return nil }
+  switch result {
+  case .success(let proof): return proof
+  case .failure: return nil
+  }
+}
+
+private func isEngineStopFailure(_ result: PacketTunnelStopResult?) -> Bool {
+  guard let result else { return false }
+  if case .failure(.localRuntime(.engineStop(_))) = result {
+    return true
+  }
+  return false
 }
 
 private final class CancelRecorder: @unchecked Sendable {
@@ -332,6 +357,9 @@ private func tunnelDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: CredentialAudience(
+      profileID: UUID(),
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: UUID(),
     epoch: 1,
     generation: 1,
@@ -502,8 +530,9 @@ struct ProviderLifecycleTests {
     #expect(fixture.settingsGate.waitUntilInstalled())
     #expect(fixture.engine.startCount == 0)
 
-    fixture.lifecycle.stop { stop.record() }
+    fixture.lifecycle.stop { stop.record($0) }
     #expect(stop.wait())
+    #expect(successfulStopProof(stop.values.first) != nil)
     #expect(start.wait())
     #expect(start.values == [.startupCancelled])
     #expect(fixture.lease.releaseCount == 1)
@@ -550,8 +579,9 @@ struct ProviderLifecycleTests {
     #expect(blockedStart.values == [.lifecycleConflict])
 
     let stop = StopCompletionRecorder()
-    fixture.lifecycle.stop { stop.record() }
+    fixture.lifecycle.stop { stop.record($0) }
     #expect(stop.wait())
+    #expect(successfulStopProof(stop.values.first) != nil)
     #expect(fixture.lease.releaseAttemptCount == 2)
     #expect(fixture.lease.releaseCount == 1)
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
@@ -577,8 +607,9 @@ struct ProviderLifecycleTests {
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .tunnelActive)
 
     let stop = StopCompletionRecorder()
-    fixture.lifecycle.stop { stop.record() }
+    fixture.lifecycle.stop { stop.record($0) }
     #expect(stop.wait())
+    #expect(successfulStopProof(stop.values.first) != nil)
   }
 
   @Test func repeatedStopIsIdempotentForAllOwnedResources() throws {
@@ -593,11 +624,14 @@ struct ProviderLifecycleTests {
     #expect(start.wait())
 
     let firstStop = StopCompletionRecorder()
-    fixture.lifecycle.stop { firstStop.record() }
+    fixture.lifecycle.stop { firstStop.record($0) }
     #expect(firstStop.wait())
     let secondStop = StopCompletionRecorder()
-    fixture.lifecycle.stop { secondStop.record() }
+    fixture.lifecycle.stop { secondStop.record($0) }
     #expect(secondStop.wait())
+
+    #expect(successfulStopProof(firstStop.values.first) != nil)
+    #expect(successfulStopProof(secondStop.values.first) != nil)
 
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 1)
@@ -620,8 +654,11 @@ struct ProviderLifecycleTests {
     fixture.engine.failNextStop()
 
     let failedStop = StopCompletionRecorder()
-    fixture.lifecycle.stop { failedStop.record() }
+    fixture.lifecycle.stop { failedStop.record($0) }
     #expect(failedStop.wait())
+
+    #expect(failedStop.values.count == 1)
+    #expect(isEngineStopFailure(failedStop.values.first))
 
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 0)
@@ -639,8 +676,11 @@ struct ProviderLifecycleTests {
     #expect(fixture.leaseAcquisitionCounter.count == 1)
 
     let secondFailedStop = StopCompletionRecorder()
-    fixture.lifecycle.stop { secondFailedStop.record() }
+    fixture.lifecycle.stop { secondFailedStop.record($0) }
     #expect(secondFailedStop.wait())
+
+    #expect(secondFailedStop.values.count == 1)
+    #expect(isEngineStopFailure(secondFailedStop.values.first))
 
     #expect(fixture.engine.stopCount == 2)
     #expect(fixture.lease.releaseCount == 0)
@@ -648,8 +688,10 @@ struct ProviderLifecycleTests {
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
 
     let successfulRetry = StopCompletionRecorder()
-    fixture.lifecycle.stop { successfulRetry.record() }
+    fixture.lifecycle.stop { successfulRetry.record($0) }
     #expect(successfulRetry.wait())
+
+    #expect(successfulStopProof(successfulRetry.values.first) != nil)
 
     #expect(fixture.engine.stopCount == 3)
     #expect(fixture.lease.releaseCount == 1)

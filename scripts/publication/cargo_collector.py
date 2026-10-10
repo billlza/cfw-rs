@@ -3,11 +3,29 @@ from __future__ import annotations
 import os
 from collections import deque
 from pathlib import Path
+import tempfile
 from typing import Any
 from urllib.parse import quote
 
 from .common import PublicationError
 from .graph_model import ComponentSeed, merge_seed, run_json, seed
+
+if __package__ and __package__.startswith("scripts."):
+    from scripts.release_cargo_inputs import (
+        CRATES_IO_SOURCE,
+        ReleaseCargoInputsError,
+        create_runtime_cargo_home,
+        verify_runtime_cargo_home,
+        verify_workspace_cargo_inputs,
+    )
+else:
+    from release_cargo_inputs import (
+        CRATES_IO_SOURCE,
+        ReleaseCargoInputsError,
+        create_runtime_cargo_home,
+        verify_runtime_cargo_home,
+        verify_workspace_cargo_inputs,
+    )
 
 
 CollectorResult = tuple[
@@ -45,24 +63,79 @@ def _cargo_seed(package: dict[str, Any], repository: Path, scope: str) -> Compon
     )
 
 
-def collect_cargo(repository: Path) -> CollectorResult:
-    environment = os.environ.copy()
+def collect_cargo(
+    repository: Path, release_environment: dict[str, str]
+) -> CollectorResult:
+    repository = repository.resolve(strict=True)
+    environment = dict(release_environment)
     environment["CARGO_NET_OFFLINE"] = "true"
-    metadata = run_json(
-        [
-            "cargo",
-            "metadata",
-            "--locked",
-            "--offline",
-            "--filter-platform",
-            "aarch64-apple-darwin",
-            "--format-version",
-            "1",
-        ],
-        repository,
-        environment,
-    )
-    packages = {str(package["id"]): package for package in metadata.get("packages", [])}
+    try:
+        cargo = Path(environment["CFW_RELEASE_CARGO_EXECUTABLE"])
+    except KeyError as error:
+        raise PublicationError("release environment omitted its Cargo executable") from error
+    if not cargo.exists() or not os.access(cargo, os.X_OK):
+        raise PublicationError("trusted Cargo executable is unavailable")
+    try:
+        workspace_inputs = verify_workspace_cargo_inputs(
+            repository,
+            Path(environment["CFW_RELEASE_CARGO_INPUT_ROOT"]),
+        )
+        with tempfile.TemporaryDirectory(prefix="cfw-cargo-collector.") as temporary:
+            cargo_home = Path(temporary) / "cargo-home"
+            cargo_home.mkdir(mode=0o700)
+            create_runtime_cargo_home(repository, workspace_inputs, cargo_home)
+            cargo_environment = dict(environment)
+            cargo_environment["CARGO_HOME"] = str(cargo_home)
+            cargo_environment["CARGO_NET_OFFLINE"] = "true"
+            metadata = run_json(
+                [
+                    str(cargo),
+                    "metadata",
+                    "--locked",
+                    "--offline",
+                    "--filter-platform",
+                    "aarch64-apple-darwin",
+                    "--format-version",
+                    "1",
+                ],
+                repository,
+                cargo_environment,
+            )
+            verify_runtime_cargo_home(repository, workspace_inputs, cargo_home)
+            ending_inputs = verify_workspace_cargo_inputs(
+                repository,
+                Path(environment["CFW_RELEASE_CARGO_INPUT_ROOT"]),
+            )
+        if ending_inputs != workspace_inputs:
+            raise PublicationError(
+                "verified Cargo workspace inputs changed during metadata collection"
+            )
+    except (KeyError, OSError, ReleaseCargoInputsError) as error:
+        raise PublicationError(
+            "Cargo metadata did not use the verified workspace input boundary"
+        ) from error
+    raw_packages = metadata.get("packages", [])
+    if not isinstance(raw_packages, list):
+        raise PublicationError("Cargo metadata package inventory is malformed")
+    for package in raw_packages:
+        if not isinstance(package, dict):
+            raise PublicationError("Cargo metadata contains a malformed package")
+        try:
+            manifest = Path(str(package["manifest_path"])).resolve(strict=True)
+        except (KeyError, OSError) as error:
+            raise PublicationError("Cargo metadata package manifest is unavailable") from error
+        source = package.get("source")
+        expected_root = repository if source is None else workspace_inputs.vendor
+        if source is not None and source != CRATES_IO_SOURCE:
+            raise PublicationError("Cargo metadata contains an unverified external source")
+        try:
+            manifest.relative_to(expected_root)
+        except ValueError as error:
+            label = "repository" if source is None else "verified vendor"
+            raise PublicationError(
+                f"Cargo metadata package escaped the {label} source root"
+            ) from error
+    packages = {str(package["id"]): package for package in raw_packages}
     resolve = metadata.get("resolve")
     if not isinstance(resolve, dict):
         raise PublicationError("Cargo metadata has no resolved graph")

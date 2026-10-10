@@ -62,11 +62,13 @@ Keychain access, together with [TN3134](https://developer.apple.com/documentatio
 
 ## Packaging requirement
 
-Developer ID distribution embeds the `.systemextension` in
-`Contents/Library/SystemExtensions`. The app and nested extension require
-matching Team ID, provisioning, App Group, and Network Extension entitlements.
-All nested objects are signed before their parent, followed by notarization,
-staple validation, and Gatekeeper validation.
+Developer ID distribution embeds
+`com.bill.clashformac.packet-tunnel.systemextension` in
+`Contents/Library/SystemExtensions`; the wrapper basename is the extension's
+bundle identifier and its declared executable is `CFWPacketTunnel`. The app and
+nested extension require matching Team ID, provisioning, App Group, and Network
+Extension entitlements. All nested objects are signed before their parent,
+followed by notarization, staple validation, and Gatekeeper validation.
 
 The Swift prototype in `native/macos` is intentionally fail-closed until a
 source-built libbox adapter is linked. Its existence does not establish a live

@@ -16,7 +16,7 @@ from .common import (
     write_new,
 )
 from .legal_review import legal_review
-from .release_contract import evidence_root, require_fixed_path
+from .release_contract import ensure_private_stage_inputs, evidence_root, require_fixed_path
 from .sbom import build_cyclonedx, build_spdx
 from .source_archive import write_source_archive
 
@@ -34,13 +34,17 @@ def finalize(
     review_path: Path,
     output: Path,
     fixture: bool,
+    *,
+    repository: Path | None = None,
 ) -> None:
-    prepared = prepared.resolve(strict=True)
-    app = app.resolve(strict=True)
     if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
-        require_fixed_path(output, evidence_root(repository), "publication evidence")
-    machine = build_machine_closure(prepared, app, fixture)
+        if repository is None:
+            raise PublicationError("production finalization requires an explicit artifact repository")
+        require_fixed_path(
+            output, evidence_root(repository), "publication evidence", repository=repository
+        )
+        ensure_private_stage_inputs(repository)
+    machine = build_machine_closure(prepared, app, fixture, repository=repository)
     machine_bytes = canonical_json(machine)
     closure_digest = sha256_bytes(machine_bytes)
     component_ids = [item["id"] for item in machine["components"]]

@@ -12,10 +12,53 @@ from typing import Any, Iterable
 MAX_JSON_BYTES = 64 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@/-]{0,511}$")
+MAX_FAILURE_CAUSE_LEVELS = 8
 
 
 class PublicationError(RuntimeError):
     pass
+
+
+def _failure_link(error: BaseException) -> tuple[str, BaseException] | None:
+    if error.__cause__ is not None:
+        return "caused by", error.__cause__
+    if error.__context__ is not None and not error.__suppress_context__:
+        return "while handling", error.__context__
+    return None
+
+
+def failure_diagnostic(headline: str, error: BaseException) -> str:
+    """Render one operator diagnostic with its notes and bounded cause chain.
+
+    An explicit cause wins; an unsuppressed implicit context is the failure
+    that was being handled. A nested SystemExit is an already rendered
+    diagnostic, so it is shown once and ends the walk. Only exception types,
+    messages and notes are rendered, never tracebacks or attributes.
+    """
+
+    lines = [headline, *getattr(error, "__notes__", ())]
+    seen = {id(error)}
+    link = _failure_link(error)
+    for _level in range(MAX_FAILURE_CAUSE_LEVELS):
+        if link is None:
+            return "\n".join(lines)
+        label, cause = link
+        name = type(cause).__name__
+        if id(cause) in seen:
+            lines.append(f"{label} {name} already shown above (cause cycle)")
+            return "\n".join(lines)
+        seen.add(id(cause))
+        message = str(cause)
+        if isinstance(cause, SystemExit):
+            if message not in "\n".join(lines):
+                lines.append(f"{label} {name}: {message}")
+            return "\n".join(lines)
+        lines.append(f"{label} {name}: {message}" if message else f"{label} {name}")
+        lines.extend(f"  {note}" for note in getattr(cause, "__notes__", ()))
+        link = _failure_link(cause)
+    if link is not None:
+        lines.append(f"cause chain truncated after {MAX_FAILURE_CAUSE_LEVELS} levels")
+    return "\n".join(lines)
 
 
 def safe_relative(value: str, label: str = "path") -> PurePosixPath:

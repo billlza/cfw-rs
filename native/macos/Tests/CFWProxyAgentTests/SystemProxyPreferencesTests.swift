@@ -1,5 +1,8 @@
+import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
+import Security
 import SystemConfiguration
 import Testing
 
@@ -41,6 +44,154 @@ private final class PreferencesOperationRecorder: @unchecked Sendable {
   }
 }
 
+private final class AuthorizationOperationRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var createCountValue = 0
+  private var createPreferencesCountValue = 0
+  private var freeFlagsValue: [AuthorizationFlags] = []
+  private var interactionFlagsValue: [Bool] = []
+
+  var interactionFlags: [Bool] { lock.withLock { interactionFlagsValue } }
+
+  func recordRights(interactionAllowed: Bool) {
+    lock.withLock { interactionFlagsValue.append(interactionAllowed) }
+  }
+
+  var createCount: Int {
+    lock.withLock { createCountValue }
+  }
+
+  var createPreferencesCount: Int {
+    lock.withLock { createPreferencesCountValue }
+  }
+
+  var freeFlags: [AuthorizationFlags] {
+    lock.withLock { freeFlagsValue }
+  }
+
+  func recordCreate() {
+    lock.withLock { createCountValue += 1 }
+  }
+
+  func recordCreatePreferences() {
+    lock.withLock { createPreferencesCountValue += 1 }
+  }
+
+  func recordFree(flags: AuthorizationFlags) {
+    lock.withLock { freeFlagsValue.append(flags) }
+  }
+}
+
+private struct AuthorizationOnlyOwner: ProxySystemProxyOwning {
+  func start(
+    configuration: SensitiveDataBuffer, descriptor: ConfigurationDescriptor,
+    authorization: ProxyOwnerAuthorization,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not start an engine")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  func stop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not stop an engine")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  func snapshot(completionHandler: @escaping @Sendable (EngineSnapshot) -> Void) {
+    Issue.record("Authorization must not query the engine queue")
+    completionHandler(.off)
+  }
+}
+
+private struct AuthorizationJournalStore: ProxyOwnershipJournalStoring {
+  let journal: ProxyOwnershipJournal?
+  func load() throws -> ProxyOwnershipJournal? { journal }
+  func save(_ journal: ProxyOwnershipJournal) throws {
+    throw ProxyOwnershipJournalError.invalidJournal
+  }
+  func remove() throws { throw ProxyOwnershipJournalError.invalidJournal }
+}
+
+@Test(arguments: [true, false], [true, false])
+func restorationAuthorizationRequiresAPendingJournalWithoutChangingRuntime(
+  restorationOnly: Bool, hasJournal: Bool
+) async throws {
+  let recorder = AuthorizationOperationRecorder()
+  let preferences = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder, rightsStatus: errAuthorizationDenied))
+  let journal = hasJournal ? try proxyJournal(originalProxyEnabled: false) : nil
+  let service = ProxyAgentService(
+    lifecycle: AuthorizationOnlyOwner(),
+    configurationChecker: SourceBuiltLibboxConfigurationChecker(),
+    preferences: preferences, journalStore: AuthorizationJournalStore(journal: journal))
+
+  let error = await withCheckedContinuation { continuation in
+    service.authorizeSystemProxy(restorationOnly: restorationOnly) {
+      continuation.resume(returning: $0)
+    }
+  }
+
+  if restorationOnly && !hasJournal {
+    #expect(error == nil)
+    #expect(recorder.interactionFlags.isEmpty)
+  } else {
+    #expect(error?.domain == SystemProxyAuthorizationFailure.domain)
+    #expect(error?.code == SystemProxyAuthorizationFailure.denied.rawValue)
+    #expect(recorder.interactionFlags == [true])
+  }
+  #expect(recorder.createPreferencesCount == 0)
+}
+
+private func testingAuthorizationOperations(
+  recorder: AuthorizationOperationRecorder,
+  creationStatus: OSStatus = errAuthorizationSuccess,
+  returnsReference: Bool = true,
+  createsPreferences: Bool = true,
+  releaseStatus: OSStatus = errAuthorizationSuccess,
+  rightsStatus: OSStatus = errAuthorizationSuccess
+) -> SCPreferencesAuthorizationOperations {
+  SCPreferencesAuthorizationOperations(
+    createAuthorization: {
+      recorder.recordCreate()
+      guard creationStatus == errAuthorizationSuccess else {
+        return (creationStatus, nil)
+      }
+      guard returnsReference else {
+        return (errAuthorizationSuccess, nil)
+      }
+      var reference: AuthorizationRef?
+      let status = AuthorizationCreate(nil, nil, [], &reference)
+      return (status, reference)
+    },
+    copyRights: { _, interactionAllowed in
+      recorder.recordRights(interactionAllowed: interactionAllowed)
+      return rightsStatus
+    },
+    createPreferences: { _ in
+      recorder.recordCreatePreferences()
+      guard createsPreferences else {
+        return nil
+      }
+      return SCPreferencesCreate(
+        nil,
+        "CFW authorization lifecycle test" as CFString,
+        nil
+      )
+    },
+    freeAuthorization: { reference, flags in
+      recorder.recordFree(flags: flags)
+      let actualStatus = AuthorizationFree(reference, flags)
+      guard actualStatus == errAuthorizationSuccess else {
+        return actualStatus
+      }
+      return releaseStatus
+    }
+  )
+}
+
 private func testingOperations(
   recorder: PreferencesOperationRecorder = PreferencesOperationRecorder(applyResults: []),
   effectiveProxies: [String: Any]? = [:],
@@ -56,13 +207,100 @@ private func testingOperations(
   )
 }
 
-private func proxyJournal(originalProxyEnabled: Bool) throws -> ProxyOwnershipJournal {
+private final class DelayedEffectivePreferences: @unchecked Sendable {
+  private let lock = NSLock()
+  private var observations: [[String: Any]?]
+  private var count = 0
+
+  init(_ observations: [[String: Any]?]) { self.observations = observations }
+
+  var readCount: Int { lock.withLock { count } }
+
+  func read() -> [String: Any]? {
+    lock.withLock {
+      count += 1
+      if observations.count > 1 { return observations.removeFirst() }
+      return observations[0]
+    }
+  }
+
+  var operations: SCPreferencesOperations {
+    SCPreferencesOperations(
+      commitChanges: { _ in
+        Issue.record("Observation must not commit preferences")
+        return false
+      },
+      applyChanges: { _ in
+        Issue.record("Observation must not reapply preferences")
+        return false
+      },
+      synchronize: { _ in }, errorCode: { 987 },
+      effectiveProxies: { self.read() }, primaryServiceID: { "service-1" })
+  }
+}
+
+@Test func effectiveActivationWaitsForCommittedSettingsToBecomeVisible() throws {
+  var previous = appliedEffectiveProxies()
+  previous["HTTPProxy"] = "localhost"
+  let observations = DelayedEffectivePreferences([
+    previous, previous, appliedEffectiveProxies(),
+  ])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+
+  try subject.verifyEffectiveAppliedValues(proxyJournal(originalProxyEnabled: true))
+
+  #expect(observations.readCount == 3)
+}
+
+@Test func effectiveRestorationWaitsForOriginalSettingsToBecomeVisible() throws {
+  let observations = DelayedEffectivePreferences([
+    appliedEffectiveProxies(), appliedEffectiveProxies(), [:],
+  ])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+
+  try subject.verifyEffectiveRestoredValues(proxyJournal(originalProxyEnabled: false))
+
+  #expect(observations.readCount == 3)
+}
+
+@Test func unavailableEffectiveProxyStateIsNotRetriedAsAValueMismatch() throws {
+  let observations = DelayedEffectivePreferences([nil, appliedEffectiveProxies()])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+  #expect(throws: SystemProxyPreferencesError.effectiveProxyStateUnavailable) {
+    try subject.verifyEffectiveAppliedValues(proxyJournal(originalProxyEnabled: false))
+  }
+  #expect(observations.readCount == 1)
+}
+
+@Test func malformedEffectiveProxyStateIsNotRetriedAsAValueMismatch() throws {
+  var malformed = appliedEffectiveProxies()
+  malformed["HTTPProxy"] = ["invalid-host"]
+  let observations = DelayedEffectivePreferences([malformed, appliedEffectiveProxies()])
+  let subject = SCPreferencesSystemProxyPreferences(operations: observations.operations)
+  #expect(
+    throws: SystemProxyPreferencesError.unsupportedValue(
+      serviceID: "effective-primary-service", field: .httpHost)
+  ) {
+    try subject.verifyEffectiveAppliedValues(proxyJournal(originalProxyEnabled: false))
+  }
+  #expect(observations.readCount == 1)
+}
+
+private func proxyJournal(
+  originalProxyEnabled: Bool,
+  originalValues: [SystemProxyField: ProxyPreferenceValue]? = nil,
+  appliedPort: Int = 7_890,
+  phase: ProxyOwnershipJournalPhase = .applied
+) throws -> ProxyOwnershipJournal {
   let installationID = try #require(
     UUID(uuidString: "33333333-3333-3333-3333-333333333333")
   )
   let configuration = try ConfigurationDescriptor(
     slot: .systemProxy,
     tunnelOptions: nil,
+    credentialAudience: CredentialAudience(
+      profileID: installationID,
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: installationID,
     epoch: 1,
     generation: 1,
@@ -72,17 +310,17 @@ private func proxyJournal(originalProxyEnabled: Bool) throws -> ProxyOwnershipJo
   let applied: [SystemProxyField: ProxyPreferenceValue] = [
     .httpEnabled: .integer(1),
     .httpHost: .string("127.0.0.1"),
-    .httpPort: .integer(7_890),
+    .httpPort: .integer(appliedPort),
     .httpsEnabled: .integer(1),
     .httpsHost: .string("127.0.0.1"),
-    .httpsPort: .integer(7_890),
+    .httpsPort: .integer(appliedPort),
     .socksEnabled: .integer(1),
     .socksHost: .string("127.0.0.1"),
-    .socksPort: .integer(7_890),
+    .socksPort: .integer(appliedPort),
     .proxyAutoConfigEnabled: .integer(0),
     .proxyAutoDiscoveryEnabled: .integer(0),
   ]
-  let original: [SystemProxyField: ProxyPreferenceValue] =
+  let defaultOriginal: [SystemProxyField: ProxyPreferenceValue] =
     if originalProxyEnabled {
       [
         .httpEnabled: .integer(1),
@@ -106,6 +344,7 @@ private func proxyJournal(originalProxyEnabled: Bool) throws -> ProxyOwnershipJo
         .proxyAutoDiscoveryEnabled: .integer(0),
       ]
     }
+  let original = originalValues ?? defaultOriginal
   let fields = try SystemProxyField.allCases.map { field in
     let appliedValue = try #require(applied[field])
     return OwnedSystemProxyField(
@@ -115,7 +354,7 @@ private func proxyJournal(originalProxyEnabled: Bool) throws -> ProxyOwnershipJo
     )
   }
   return try ProxyOwnershipJournal(
-    phase: .applied,
+    phase: phase,
     configuration: configuration,
     services: [try SystemProxyServiceOwnership(serviceID: "service-1", fields: fields)]
   )
@@ -137,20 +376,332 @@ private func appliedEffectiveProxies() -> [String: Any] {
   ]
 }
 
+@Test func authorizationIsRetainedAcrossTransactionsWithoutRevokingSharedRights() throws {
+  let recorder = AuthorizationOperationRecorder()
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(recorder: recorder)
+  )
+
+  try subject.authorizeForStart()
+  let value = try subject.withAuthorizedPreferences { _ in 42 }
+  let repeated = try subject.withAuthorizedPreferences { _ in 43 }
+
+  #expect(value == 42)
+  #expect(repeated == 43)
+  #expect(recorder.createCount == 1)
+  #expect(recorder.createPreferencesCount == 2)
+  #expect(recorder.interactionFlags == [true])
+  #expect(recorder.freeFlags.isEmpty)
+  try subject.releaseAuthorization()
+  #expect(recorder.freeFlags == [[]])
+}
+
+@Test func applyingProxyWithoutAuthorizationRejectsBeforeOpeningPreferencesOrLocking() throws {
+  let recorder = AuthorizationOperationRecorder()
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed)
+  )
+  let journal = try proxyJournal(originalProxyEnabled: false)
+
+  #expect(
+    throws: SystemProxyPreferencesError.authorizationDenied(errAuthorizationInteractionNotAllowed)
+  ) {
+    try subject.apply(journal)
+  }
+  #expect(recorder.interactionFlags == [false])
+  #expect(recorder.createPreferencesCount == 0)
+}
+
+private func inMemoryProxyPreferences(_ configuration: [String: Any]) throws -> SCPreferences {
+  let preferences = try #require(
+    SCPreferencesCreate(
+      nil, "Restored proxy observation" as CFString,
+      "cfm-restore-test-\(UUID().uuidString).plist" as CFString))
+  // An in-memory SCPreferences session: no commit, system mutation or live
+  // network interface is needed to exercise the real service enumeration.
+  #expect(
+    SCPreferencesSetValue(preferences, "CurrentSet" as CFString, "/Sets/test-set" as CFString))
+  #expect(
+    SCPreferencesSetValue(
+      preferences, "Sets" as CFString,
+      [
+        "test-set": [
+          "Network": ["Service": ["service-1": ["__LINK__": "/NetworkServices/service-1"]]]
+        ]
+      ] as CFDictionary))
+  #expect(
+    SCPreferencesSetValue(
+      preferences, "NetworkServices" as CFString,
+      [
+        "service-1": [
+          "Interface": ["Type": "Ethernet", "DeviceName": "en0", "Hardware": "Ethernet"],
+          "Proxies": configuration,
+        ]
+      ] as CFDictionary))
+  return preferences
+}
+
+@Test(arguments: [true, false])
+func restorationSkipsAuthorizationOnlyWhenStoredAndEffectiveValuesAreRestored(
+  effectiveRestored: Bool
+) throws {
+  let recorder = AuthorizationOperationRecorder()
+  let writes = PreferencesOperationRecorder(applyResults: [])
+  let preferences = try inMemoryProxyPreferences([
+    "HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0,
+    "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0,
+  ])
+  let base = testingAuthorizationOperations(
+    recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed)
+  let authorization = SCPreferencesAuthorizationOperations(
+    createAuthorization: base.createAuthorization,
+    copyRights: base.copyRights,
+    createPreferences: { _ in preferences },
+    freeAuthorization: base.freeAuthorization)
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(
+      recorder: writes, effectiveProxies: effectiveRestored ? [:] : appliedEffectiveProxies()),
+    authorizationOperations: authorization)
+
+  if effectiveRestored {
+    let result = try subject.restore(proxyJournal(originalProxyEnabled: false))
+    #expect(result.isComplete)
+    #expect(recorder.interactionFlags.isEmpty)
+  } else {
+    #expect(
+      throws: SystemProxyPreferencesError.authorizationDenied(errAuthorizationInteractionNotAllowed)
+    ) {
+      try subject.restore(proxyJournal(originalProxyEnabled: false))
+    }
+    #expect(recorder.interactionFlags == [false])
+  }
+  #expect(writes.commitCount == 0)
+  #expect(writes.applyCount == 0)
+}
+
+@Test(arguments: [true, false], [true, false])
+func externallyReplacedProxyReleasesOwnershipOnlyAfterEffectiveReadback(
+  enabled: Bool, effectiveMatches: Bool
+) throws {
+  var replacement = appliedEffectiveProxies()
+  for prefix in ["HTTP", "HTTPS", "SOCKS"] {
+    replacement[prefix + "Enable"] = enabled ? 1 : 0
+    replacement[prefix + "Port"] = enabled ? 19_090 : 7_890
+  }
+  let preferences = try inMemoryProxyPreferences(replacement)
+  let recorder = AuthorizationOperationRecorder()
+  let writes = PreferencesOperationRecorder(applyResults: [])
+  let base = testingAuthorizationOperations(
+    recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed)
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(
+      recorder: writes, effectiveProxies: effectiveMatches ? replacement : appliedEffectiveProxies()
+    ),
+    authorizationOperations: SCPreferencesAuthorizationOperations(
+      createAuthorization: base.createAuthorization, copyRights: base.copyRights,
+      createPreferences: { _ in preferences }, freeAuthorization: base.freeAuthorization))
+
+  if effectiveMatches {
+    let result = try subject.restore(proxyJournal(originalProxyEnabled: false))
+    #expect(result.isComplete)
+    #expect(result.conflicts.isEmpty)
+    let fields = Set(result.preservedExternalChanges.map(\.field))
+    #expect(
+      fields
+        == (enabled
+          ? [.httpPort, .httpsPort, .socksPort]
+          : [.httpEnabled, .httpsEnabled, .socksEnabled]))
+    #expect(result.preservedExternalChanges.count == 3)
+    #expect(recorder.interactionFlags.isEmpty)
+  } else {
+    #expect(
+      throws: SystemProxyPreferencesError.authorizationDenied(errAuthorizationInteractionNotAllowed)
+    ) {
+      try subject.restore(proxyJournal(originalProxyEnabled: false))
+    }
+    #expect(recorder.interactionFlags == [false])
+  }
+  #expect(writes.commitCount == 0)
+  #expect(writes.applyCount == 0)
+  let services = try #require(
+    SCPreferencesGetValue(preferences, "NetworkServices" as CFString) as? [String: [String: Any]])
+  let retained = try #require(services["service-1"]?["Proxies"] as? [String: Any])
+  #expect(NSDictionary(dictionary: retained).isEqual(to: replacement))
+}
+
+@Test(arguments: [7_890, 0, 65_536])
+func changedHostnameOrInvalidPortCannotReleaseAnEnabledProxy(port: Int) throws {
+  var unresolved = appliedEffectiveProxies()
+  for prefix in ["HTTP", "HTTPS", "SOCKS"] {
+    unresolved[prefix + "Proxy"] = "localhost"
+    unresolved[prefix + "Port"] = port
+  }
+  let preferences = try inMemoryProxyPreferences(unresolved)
+  let recorder = AuthorizationOperationRecorder()
+  let writes = PreferencesOperationRecorder(applyResults: [])
+  let base = testingAuthorizationOperations(
+    recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed)
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(recorder: writes, effectiveProxies: unresolved),
+    authorizationOperations: SCPreferencesAuthorizationOperations(
+      createAuthorization: base.createAuthorization, copyRights: base.copyRights,
+      createPreferences: { _ in preferences }, freeAuthorization: base.freeAuthorization))
+  #expect(
+    throws: SystemProxyPreferencesError.authorizationDenied(errAuthorizationInteractionNotAllowed)
+  ) {
+    try subject.restore(proxyJournal(originalProxyEnabled: false))
+  }
+  #expect(recorder.interactionFlags == [false])
+  #expect(writes.commitCount == 0)
+  #expect(writes.applyCount == 0)
+}
+
+@Test func operationFailureKeepsAuthorizationAvailableForCleanup() throws {
+  let recorder = AuthorizationOperationRecorder()
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(recorder: recorder)
+  )
+
+  #expect(throws: SystemProxyPreferencesError.applyFailed(611)) {
+    try subject.withAuthorizedPreferences { _ in
+      throw SystemProxyPreferencesError.applyFailed(611)
+    }
+  }
+  #expect(recorder.freeFlags.isEmpty)
+  try subject.releaseAuthorization()
+  #expect(recorder.freeFlags == [[]])
+}
+
+@Test func authorizationCreationFailuresAreTypedAndDoNotCreatePreferences() {
+  let denied: OSStatus = errAuthorizationDenied
+  let recorder = AuthorizationOperationRecorder()
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder,
+      creationStatus: denied
+    )
+  )
+
+  #expect(throws: SystemProxyPreferencesError.authorizationCreationFailed(denied)) {
+    try subject.withAuthorizedPreferences { _ in () }
+  }
+  #expect(recorder.createPreferencesCount == 0)
+  #expect(recorder.freeFlags.isEmpty)
+}
+
+@Test func missingAuthorizationReferenceFailsClosed() {
+  let recorder = AuthorizationOperationRecorder()
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder,
+      returnsReference: false
+    )
+  )
+
+  #expect(throws: SystemProxyPreferencesError.authorizationReferenceUnavailable) {
+    try subject.withAuthorizedPreferences { _ in () }
+  }
+  #expect(recorder.createPreferencesCount == 0)
+  #expect(recorder.freeFlags.isEmpty)
+}
+
+@Test func unavailablePreferencesKeepTheirOriginalErrorAndCanReleaseAuthorization() throws {
+  let recorder = AuthorizationOperationRecorder()
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder,
+      createsPreferences: false
+    )
+  )
+
+  #expect(throws: SystemProxyPreferencesError.preferencesUnavailable) {
+    try subject.withAuthorizedPreferences { _ in () }
+  }
+  try subject.releaseAuthorization()
+  #expect(recorder.freeFlags == [[]])
+}
+
+@Test func operationAndAuthorizationReleaseFailuresRemainDistinct() {
+  let recorder = AuthorizationOperationRecorder()
+  let releaseFailure: OSStatus = errAuthorizationInternal
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder,
+      releaseStatus: releaseFailure
+    )
+  )
+
+  #expect(throws: SystemProxyPreferencesError.applyFailed(612)) {
+    try subject.withAuthorizedPreferences { _ in
+      throw SystemProxyPreferencesError.applyFailed(612)
+    }
+  }
+  #expect(
+    throws: SystemProxyPreferencesError.authorizationReleaseFailed(
+      code: releaseFailure, originalError: nil)
+  ) {
+    try subject.releaseAuthorization()
+  }
+  #expect(recorder.freeFlags == [[]])
+}
+
+@Test func readOnlyPreferencesNeedNoGrantButWritesFailWithoutPrompting() throws {
+  let recorder = AuthorizationOperationRecorder()
+  let preferencesRecorder = PreferencesOperationRecorder(applyResults: [])
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(recorder: preferencesRecorder),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: recorder, rightsStatus: errAuthorizationInteractionNotAllowed))
+  #expect(
+    throws: SystemProxyPreferencesError.authorizationDenied(
+      errAuthorizationInteractionNotAllowed)
+  ) {
+    try subject.withAuthorizedPreferences { preferences in
+      _ = try subject.publishRestoration(preferences, changed: true, conflicts: [])
+    }
+  }
+  #expect(recorder.interactionFlags == [false])
+  #expect(recorder.createPreferencesCount == 1)
+  #expect(preferencesRecorder.commitCount == 0)
+  #expect(preferencesRecorder.applyCount == 0)
+  try subject.releaseAuthorization()
+}
+
 @Test func restoreRetriesApplyAfterCommitSucceededButApplyFailed() throws {
   let recorder = PreferencesOperationRecorder(applyResults: [false, true])
   let preferences = try #require(
     SCPreferencesCreate(nil, "CFW restore publication test" as CFString, nil)
   )
   let subject = SCPreferencesSystemProxyPreferences(
-    operations: testingOperations(recorder: recorder)
+    operations: testingOperations(recorder: recorder),
+    authorizationOperations: testingAuthorizationOperations(
+      recorder: AuthorizationOperationRecorder())
   )
+  let journal = try proxyJournal(originalProxyEnabled: false)
+  let service = try #require(journal.services.first)
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: appliedEffectiveProxies())
+  #expect(restoration.changed)
+  #expect(restoration.conflicts.isEmpty)
 
   #expect(throws: SystemProxyPreferencesError.applyFailed(987)) {
-    try subject.publishRestoration(preferences, changed: true, conflicts: [])
+    try subject.publishRestoration(
+      preferences, changed: restoration.changed, conflicts: restoration.conflicts)
   }
+  let retry = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: restoration.configuration)
+  #expect(!retry.changed)
+  #expect(retry.conflicts.isEmpty)
   #expect(
-    try subject.publishRestoration(preferences, changed: false, conflicts: [])
+    try subject.publishRestoration(preferences, changed: retry.changed, conflicts: retry.conflicts)
   )
   #expect(recorder.commitCount == 1)
   #expect(recorder.applyCount == 2)
@@ -222,4 +773,252 @@ private func appliedEffectiveProxies() -> [String: Any] {
   )
 
   try subject.verifyEffectiveRestoredValues(journal)
+}
+
+@Test(arguments: SystemProxyField.allCases.filter(\.isEnableFlag))
+func explicitProxyActivationCanTakeOverValidExistingSettings(field: SystemProxyField) throws {
+  for value: Any in [true, false, 0, 1] {
+    try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+      [field.rawValue: value], serviceID: "previous-proxy-service")
+  }
+}
+
+@Test func disabledProxyEndpointsDoNotBlockNewOwnership() throws {
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+    [
+      "HTTPEnable": 0,
+      "HTTPProxy": "127.0.0.1",
+      "HTTPPort": 7_890,
+      "HTTPSEnable": false,
+      "HTTPSProxy": "old-proxy.invalid",
+      "SOCKSEnable": 0,
+      "ProxyAutoConfigEnable": 0,
+      "ProxyAutoConfigURLString": "https://old-proxy.invalid/proxy.pac",
+      "ProxyAutoDiscoveryEnable": 0,
+    ],
+    serviceID: "inactive-service")
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+    [:], serviceID: "unconfigured-service")
+}
+
+@Test(arguments: [-1, 2, 255])
+func numericEnableFlagsKeepSystemConfigurationBooleanSemantics(value: Int) throws {
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+    ["HTTPEnable": value], serviceID: "previous-proxy-service")
+}
+
+@Test(arguments: ["1", "false", ""])
+func malformedProxyEnableFlagsAreNotTreatedAsInactive(value: String) {
+  #expect(
+    throws: SystemProxyPreferencesError.unsupportedValue(
+      serviceID: "malformed-service", field: .httpEnabled)
+  ) {
+    try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+      ["HTTPEnable": value], serviceID: "malformed-service")
+  }
+}
+
+@Test func preparedJournalDoesNotDisableProxyEnabledByAnotherApp() throws {
+  let journal = try proxyJournal(
+    originalProxyEnabled: false,
+    originalValues: [
+      .httpEnabled: .integer(0), .httpHost: .string("127.0.0.1"), .httpPort: .integer(7_890),
+      .httpsEnabled: .integer(0), .httpsHost: .string("127.0.0.1"), .httpsPort: .integer(7_890),
+      .socksEnabled: .integer(0), .socksHost: .string("127.0.0.1"), .socksPort: .integer(7_890),
+      .proxyAutoConfigEnabled: .integer(0), .proxyAutoDiscoveryEnabled: .integer(0),
+    ],
+    appliedPort: 17_890,
+    phase: .prepared)
+  let service = try #require(journal.services.first)
+  let foreignConfiguration = appliedEffectiveProxies()
+
+  try SCPreferencesSystemProxyPreferences.validateProxyEnableFlags(
+    foreignConfiguration, serviceID: service.serviceID)
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: foreignConfiguration)
+
+  #expect(!restoration.changed)
+  #expect(NSDictionary(dictionary: restoration.configuration).isEqual(to: foreignConfiguration))
+  #expect(Set(restoration.conflicts.map(\.field)) == [.httpPort, .httpsPort, .socksPort])
+  #expect(
+    Set(restoration.restoredFields.map(\.field))
+      == [.proxyAutoConfigEnabled, .proxyAutoDiscoveryEnabled])
+}
+
+@Test(arguments: [false, true])
+func fullyOwnedProxyGroupsRestoreOriginalEndpoints(originalProxyEnabled: Bool) throws {
+  let journal = try proxyJournal(originalProxyEnabled: originalProxyEnabled)
+  let service = try #require(journal.services.first)
+  var configuration = appliedEffectiveProxies()
+  configuration["ExceptionsList"] = ["localhost", "*.local"]
+  configuration["ProxyAutoConfigURLString"] = "https://retained.invalid/proxy.pac"
+
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: configuration)
+
+  #expect(restoration.changed)
+  #expect(restoration.conflicts.isEmpty)
+  #expect(Set(restoration.restoredFields.map(\.field)) == Set(SystemProxyField.allCases))
+  for prefix in ["HTTP", "HTTPS", "SOCKS"] {
+    #expect(restoration.configuration[prefix + "Enable"] as? Int == (originalProxyEnabled ? 1 : 0))
+    #expect(
+      restoration.configuration[prefix + "Proxy"] as? String
+        == (originalProxyEnabled ? "10.0.0.1" : nil))
+    #expect(
+      restoration.configuration[prefix + "Port"] as? Int
+        == (originalProxyEnabled ? 8_080 : nil))
+  }
+  #expect(restoration.configuration["ExceptionsList"] as? [String] == ["localhost", "*.local"])
+  #expect(
+    restoration.configuration["ProxyAutoConfigURLString"] as? String
+      == "https://retained.invalid/proxy.pac")
+
+  let repeated = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: restoration.configuration)
+  #expect(!repeated.changed)
+  #expect(repeated.conflicts.isEmpty)
+  #expect(
+    NSDictionary(dictionary: repeated.configuration).isEqual(to: restoration.configuration))
+}
+
+@Test func absentOriginalProxyFieldsAreRemovedTogether() throws {
+  let journal = try proxyJournal(originalProxyEnabled: false, originalValues: [:])
+  let service = try #require(journal.services.first)
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: appliedEffectiveProxies())
+
+  #expect(restoration.changed)
+  #expect(restoration.configuration.isEmpty)
+  #expect(restoration.conflicts.isEmpty)
+  #expect(restoration.restoredFields.count == SystemProxyField.allCases.count)
+  let repeated = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: restoration.configuration)
+  #expect(!repeated.changed)
+  #expect(repeated.conflicts.isEmpty)
+}
+
+@Test func originalBooleanEnableFlagsRemainValidDuringRecovery() throws {
+  let journal = try proxyJournal(
+    originalProxyEnabled: false,
+    originalValues: [
+      .httpEnabled: .boolean(false), .httpsEnabled: .boolean(false),
+      .socksEnabled: .boolean(false), .proxyAutoConfigEnabled: .boolean(false),
+      .proxyAutoDiscoveryEnabled: .boolean(false),
+    ])
+  let service = try #require(journal.services.first)
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: appliedEffectiveProxies())
+  #expect(restoration.changed)
+  #expect(restoration.conflicts.isEmpty)
+  #expect(restoration.configuration["HTTPEnable"] as? Bool == false)
+
+  let repeated = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: restoration.configuration)
+  #expect(!repeated.changed)
+  #expect(repeated.conflicts.isEmpty)
+  let subject = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(effectiveProxies: restoration.configuration))
+  try subject.verifyEffectiveRestoredValues(journal)
+}
+
+@Test(arguments: [SystemProxyField.httpPort, .httpsPort, .socksPort])
+func externalEndpointChangePreservesItsWholeProxyGroup(portField: SystemProxyField) throws {
+  let journal = try proxyJournal(originalProxyEnabled: false)
+  let service = try #require(journal.services.first)
+  var configuration = appliedEffectiveProxies()
+  configuration[portField.rawValue] = 19_090
+
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: configuration)
+  #expect(restoration.changed)
+  #expect(
+    restoration.conflicts == [
+      ProxyOwnershipConflict(
+        serviceID: service.serviceID, field: portField,
+        reason: .valueChanged(current: .integer(19_090)))
+    ])
+  let prefix = String(portField.rawValue.dropLast("Port".count))
+  #expect(restoration.configuration[prefix + "Enable"] as? Int == 1)
+  #expect(restoration.configuration[prefix + "Proxy"] as? String == "127.0.0.1")
+  #expect(restoration.configuration[portField.rawValue] as? Int == 19_090)
+  #expect(restoration.restoredFields.count == SystemProxyField.allCases.count - 3)
+  for otherPrefix in ["HTTP", "HTTPS", "SOCKS"] where otherPrefix != prefix {
+    #expect(restoration.configuration[otherPrefix + "Enable"] as? Int == 0)
+    #expect(restoration.configuration[otherPrefix + "Proxy"] == nil)
+    #expect(restoration.configuration[otherPrefix + "Port"] == nil)
+  }
+}
+
+@Test func partiallyAppliedProtocolsRecoverOnlyCompleteOwnershipGroups() throws {
+  let journal = try proxyJournal(originalProxyEnabled: false, phase: .prepared)
+  let service = try #require(journal.services.first)
+  let partialConfiguration: [String: Any] = [
+    "HTTPEnable": 1, "HTTPProxy": "127.0.0.1", "HTTPPort": 7_890,
+    "HTTPSEnable": 0, "SOCKSEnable": 0,
+    "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0,
+  ]
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: partialConfiguration)
+  #expect(restoration.changed)
+  #expect(restoration.conflicts.isEmpty)
+  #expect(restoration.restoredFields.count == SystemProxyField.allCases.count)
+  #expect(restoration.configuration["HTTPEnable"] as? Int == 0)
+  #expect(restoration.configuration["HTTPProxy"] == nil)
+  #expect(restoration.configuration["HTTPPort"] == nil)
+}
+
+@Test func mixedValuesWithinOneProtocolArePreservedAsAConflict() throws {
+  let journal = try proxyJournal(originalProxyEnabled: false, phase: .prepared)
+  let service = try #require(journal.services.first)
+  let mixedConfiguration: [String: Any] = [
+    "HTTPEnable": 1, "HTTPProxy": "127.0.0.1",
+    "HTTPSEnable": 0, "SOCKSEnable": 0,
+    "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0,
+  ]
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: mixedConfiguration)
+  #expect(!restoration.changed)
+  #expect(NSDictionary(dictionary: restoration.configuration).isEqual(to: mixedConfiguration))
+  #expect(
+    restoration.conflicts == [
+      ProxyOwnershipConflict(
+        serviceID: service.serviceID, field: .httpPort, reason: .valueChanged(current: nil))
+    ])
+}
+
+@Test func malformedRestorationValuesFailBeforeReturningChanges() throws {
+  let journal = try proxyJournal(originalProxyEnabled: false)
+  let service = try #require(journal.services.first)
+  let malformedValues: [(SystemProxyField, Any)] = [
+    (.httpEnabled, "1"), (.httpPort, "7890"), (.httpHost, 42),
+    (.socksPort, [1, 2]),
+  ]
+  for (field, value) in malformedValues {
+    var configuration = appliedEffectiveProxies()
+    configuration[field.rawValue] = value
+    #expect(
+      throws: SystemProxyPreferencesError.unsupportedValue(
+        serviceID: service.serviceID, field: field)
+    ) {
+      try SCPreferencesSystemProxyPreferences.restoration(
+        for: service, configuration: configuration)
+    }
+  }
+}
+
+@Test func externalAutomaticProxyFlagsAndURLArePreserved() throws {
+  let journal = try proxyJournal(originalProxyEnabled: false)
+  let service = try #require(journal.services.first)
+  let configuration: [String: Any] = [
+    "HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0,
+    "ProxyAutoConfigEnable": 1, "ProxyAutoDiscoveryEnable": 1,
+    "ProxyAutoConfigURLString": "https://external.invalid/proxy.pac",
+  ]
+  let restoration = try SCPreferencesSystemProxyPreferences.restoration(
+    for: service, configuration: configuration)
+  #expect(!restoration.changed)
+  #expect(NSDictionary(dictionary: restoration.configuration).isEqual(to: configuration))
+  #expect(
+    Set(restoration.conflicts.map(\.field))
+      == [.proxyAutoConfigEnabled, .proxyAutoDiscoveryEnabled])
 }

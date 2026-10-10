@@ -8,7 +8,11 @@
 	<string>Contents/Library/HelperTools/CFWGlobalAuthority</string>
 	<key>MachServices</key>
 	<dict>
-		<key>YKUPL7Z869.group.com.bill.clashformac.global-authority</key>
+		<key>YKUPL7Z869.group.com.bill.clashformac.global-authority.host</key>
+		<true/>
+		<key>YKUPL7Z869.group.com.bill.clashformac.global-authority.proxy-agent</key>
+		<true/>
+		<key>YKUPL7Z869.group.com.bill.clashformac.global-authority.provider</key>
 		<true/>
 	</dict>
 	<key>ProcessType</key>

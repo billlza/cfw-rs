@@ -50,7 +50,9 @@ private func makeFixture(secret: Data = Data("credential-marker".utf8)) throws -
     identitySHA256: identityDigest, ownerUID: 501, authorityRevision: 1)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(configurationData.count), configSHA256: configurationDigest,
-    identitySHA256: identityDigest, credentialSlots: [credentialSlot],
+    identitySHA256: identityDigest,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+    credentialSlots: [credentialSlot],
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: 1, configuration: descriptor)
@@ -106,14 +108,10 @@ private func providerTickets(
     configuration: fixture.configuration, secrets: fixture.secrets)
   let tickets = try providerTickets(from: issued, count: 2)
 
-  let redeemed = try lifecycle.redeem(
-    ticket: tickets[0], operation: fixture.request.operation,
-    leaseID: fixture.leaseID)
+  let redeemed = try lifecycle.redeem(ticket: tickets[0])
   #expect(!lifecycle.hasPendingMaterialForTesting)
   #expect(throws: AuthoritySecretLifecycleError.ticketAlreadyRedeemed) {
-    try lifecycle.redeem(
-      ticket: tickets[1], operation: fixture.request.operation,
-      leaseID: fixture.leaseID)
+    try lifecycle.redeem(ticket: tickets[1])
   }
 
   let observed = try redeemed.withMaterial { configuration, secrets in
@@ -149,9 +147,7 @@ private enum RequestedTransportFailure: Error { case requested }
   }
   #expect(issued.isErasedForTesting)
 
-  let redeemed = try lifecycle.redeem(
-    ticket: try #require(provider), operation: fixture.request.operation,
-    leaseID: fixture.leaseID)
+  let redeemed = try lifecycle.redeem(ticket: try #require(provider))
   #expect(throws: RequestedTransportFailure.requested) {
     try redeemed.withMaterial { _, _ in throw RequestedTransportFailure.requested }
   }
@@ -192,9 +188,7 @@ private enum RequestedTransportFailure: Error { case requested }
   clock.advance(by: 10_000)
 
   #expect(throws: AuthoritySecretLifecycleError.ticketExpired) {
-    try lifecycle.redeem(
-      ticket: ticket, operation: fixture.request.operation,
-      leaseID: fixture.leaseID)
+    try lifecycle.redeem(ticket: ticket)
   }
   #expect(fixture.configuration.isErased)
   #expect(fixture.slot.isErased)
@@ -282,28 +276,20 @@ private enum RequestedTransportFailure: Error { case requested }
   let issued = try lifecycle.prepare(
     request: fixture.request, leaseID: fixture.leaseID,
     configuration: fixture.configuration, secrets: fixture.secrets)
-  let rejectedTicket = try #require(providerTickets(from: issued, count: 1).first)
+  let issuedTicket = try #require(providerTickets(from: issued, count: 1).first)
+  var rejectedBytes = Data(repeating: 0x99, count: AuthorityV1Limits.ticketBytes)
+  let rejectedTicket = try StartTicket(copying: rejectedBytes)
+  rejectedBytes.resetBytes(in: rejectedBytes.startIndex..<rejectedBytes.endIndex)
 
   #expect(throws: AuthoritySecretLifecycleError.ticketInvalid) {
-    try lifecycle.redeem(
-      ticket: rejectedTicket, operation: fixture.request.operation,
-      leaseID: AuthorityIdentifier(UUID()))
+    try lifecycle.redeem(ticket: rejectedTicket)
   }
-  #expect(!lifecycle.hasPendingMaterialForTesting)
-  #expect(fixture.configuration.isErased)
-  #expect(fixture.slot.isErased)
+  #expect(lifecycle.hasPendingMaterialForTesting)
   #expect(throws: AuthorityV1ValidationError.secretUnavailable) {
     try rejectedTicket.withUnsafeBytes { _ in () }
   }
 
-  let acceptedFixture = try makeFixture()
-  let acceptedIssued = try lifecycle.prepare(
-    request: acceptedFixture.request, leaseID: acceptedFixture.leaseID,
-    configuration: acceptedFixture.configuration, secrets: acceptedFixture.secrets)
-  let acceptedTicket = try #require(providerTickets(from: acceptedIssued, count: 1).first)
-  let redeemed = try lifecycle.redeem(
-    ticket: acceptedTicket, operation: acceptedFixture.request.operation,
-    leaseID: acceptedFixture.leaseID)
+  let redeemed = try lifecycle.redeem(ticket: issuedTicket)
   try redeemed.withMaterial { _, _ in () }
 
   let collisionFixture = try makeFixture()

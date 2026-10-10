@@ -38,15 +38,46 @@ pub(super) fn prepare_root(root: &Path) -> Result<(), GenerationStoreError> {
 }
 
 pub(super) fn exclusive_lock(root: &Path) -> Result<FileLock, GenerationStoreError> {
+    const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+    const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
     let path = root.join(LOCK_FILE);
     let file = open_regular_file(&path, true)?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(GenerationStoreError::Io {
-            operation: "lock-lineage-cache",
-            source: std::io::Error::last_os_error(),
-        });
+    let deadline = std::time::Instant::now() + WAIT_LIMIT;
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(FileLock { _file: file });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            if std::time::Instant::now() >= deadline {
+                return Err(GenerationStoreError::Io {
+                    operation: "lock-lineage-cache",
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "engine lineage cache remained locked for 3 seconds",
+                    ),
+                });
+            }
+            continue;
+        }
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(GenerationStoreError::Io {
+                operation: "lock-lineage-cache",
+                source: error,
+            });
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(GenerationStoreError::Io {
+                operation: "lock-lineage-cache",
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "engine lineage cache remained locked for 3 seconds",
+                ),
+            });
+        }
+        std::thread::sleep(RETRY_INTERVAL.min(deadline.saturating_duration_since(now)));
     }
-    Ok(FileLock { _file: file })
 }
 
 pub(super) fn read(root: &Path) -> Result<Option<Vec<u8>>, GenerationStoreError> {

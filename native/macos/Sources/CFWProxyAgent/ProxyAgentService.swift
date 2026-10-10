@@ -1,3 +1,4 @@
+import CFWCredentialTransport
 import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
@@ -21,15 +22,120 @@ private final class ProxyXPCReply: @unchecked Sendable {
 }
 
 final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Sendable {
+  private static let authorizationLogger = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-authorization")
   private let lifecycle: any ProxySystemProxyOwning
   private let configurationChecker: any LibboxConfigurationChecking
+  private let profileProbe: any LibboxProfileProbing
+  private let profileProbeLock = NSLock()
+  private var profileProbePending = false
+  private let profileProbeQueue = DispatchQueue(
+    label: "com.bill.clashformac.profile-probe", qos: .utility)
+  private let preferences: SCPreferencesSystemProxyPreferences
+  private let journalStore: any ProxyOwnershipJournalStoring
+  private let authorizationQueue = DispatchQueue(
+    label: "com.bill.clashformac.proxy-authorization")
+  private let authorizationLock = NSLock()
+  private var authorizationPending = false
 
   init(
     lifecycle: any ProxySystemProxyOwning,
-    configurationChecker: any LibboxConfigurationChecking
+    configurationChecker: any LibboxConfigurationChecking,
+    preferences: SCPreferencesSystemProxyPreferences,
+    journalStore: any ProxyOwnershipJournalStoring,
+    profileProbe: any LibboxProfileProbing = SourceBuiltLibboxProfileProbe()
   ) {
+    self.profileProbe = profileProbe
     self.lifecycle = lifecycle
     self.configurationChecker = configurationChecker
+    self.preferences = preferences
+    self.journalStore = journalStore
+  }
+
+  func testProfileProxies(
+    _ configuration: Data, proxies: Data, timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let response = ProxyXPCReply(reply)
+    let names: [String]
+    do {
+      guard !configuration.isEmpty,
+        configuration.count <= Int(NativeProtocolConstants.maximumConfigurationBytes),
+        proxies.count <= 32768
+      else { throw NativeBridgeProtocolError.invalidConfiguration }
+      names = try JSONDecoder().decode([String].self, from: proxies)
+      try ProfileDelayTestRequest.validateTargets(names, timeoutMS: timeoutMS)
+      try ProfileDelayTestRequest.validateTargetURL(targetURL, expectedStatus: expectedStatus)
+    } catch {
+      response.finish(data: nil, error: ProfileProbeServiceFailure.invalidRequest.error)
+      return
+    }
+    let admitted = profileProbeLock.withLock {
+      guard !profileProbePending else { return false }
+      profileProbePending = true
+      return true
+    }
+    guard admitted else {
+      response.finish(data: nil, error: ProfileProbeServiceFailure.busy.error)
+      return
+    }
+    profileProbeQueue.async { [self] in
+      var bytes = configuration
+      defer {
+        bytes.resetBytes(in: bytes.startIndex..<bytes.endIndex)
+        profileProbeLock.withLock { profileProbePending = false }
+      }
+      do {
+        let result = try profileProbe.test(
+          configuration: bytes, proxies: names, timeoutMS: timeoutMS, targetURL: targetURL,
+          expectedStatus: expectedStatus)
+        response.finish(data: try JSONEncoder().encode(result), error: nil)
+      } catch {
+        response.finish(data: nil, error: ProfileProbeServiceFailure.executionFailed.error)
+      }
+    }
+  }
+
+  func authorizeSystemProxy(restorationOnly: Bool, withReply reply: @escaping (NSError?) -> Void) {
+    let response = ProxyXPCReply { _, error in reply(error) }
+    let admitted = authorizationLock.withLock {
+      guard !authorizationPending else { return false }
+      authorizationPending = true
+      return true
+    }
+    guard admitted else {
+      response.finish(
+        data: nil,
+        error: NSError(
+          domain: SystemProxyAuthorizationFailure.domain,
+          code: SystemProxyAuthorizationFailure.pending.rawValue))
+      return
+    }
+    authorizationQueue.async { [self] in
+      defer { authorizationLock.withLock { authorizationPending = false } }
+      do {
+        let needsAuthorization = try !restorationOnly || journalStore.load() != nil
+        if needsAuthorization {
+          try preferences.authorizeForStart()
+        }
+        response.finish(data: nil, error: nil)
+      } catch SystemProxyPreferencesError.authorizationDenied {
+        response.finish(
+          data: nil,
+          error: NSError(
+            domain: SystemProxyAuthorizationFailure.domain,
+            code: SystemProxyAuthorizationFailure.denied.rawValue))
+      } catch {
+        Self.authorizationLogger.error(
+          "Network authorization request failed: \(String(describing: error), privacy: .public)")
+        response.finish(
+          data: nil,
+          error: NSError(
+            domain: SystemProxyAuthorizationFailure.domain,
+            code: SystemProxyAuthorizationFailure.internalFailure.rawValue))
+      }
+    }
   }
 
   func execute(
@@ -56,36 +162,16 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
           reply: reply
         )
       }
-    case .startSystemProxy:
-      do {
-        try GlobalAuthorityReleaseGate.requireStartAuthorization()
-      } catch {
-        respond(
-          requestID: request.requestID,
-          failure: EngineFailure(
-            code: GlobalAuthorityGateError.stableCode,
-            message: GlobalAuthorityGateError.stableMessage,
-            isRetryable: false
-          ),
-          reply: reply
-        )
-        return
-      }
-      guard let configuration = request.command.configuration else {
-        respond(
-          requestID: request.requestID,
-          failure: EngineFailure(
-            code: "missing-start-configuration",
-            message: "System proxy start requires an exact configuration descriptor.",
-            isRetryable: false
-          ),
-          reply: reply
-        )
-        return
-      }
-      lifecycle.start(configuration: configuration) { [self] result in
-        respondToOperation(requestID: request.requestID, result: result, reply: reply)
-      }
+    case .startLocalProxy, .startSystemProxy:
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "authority-authorization-required",
+          message: "System proxy start requires a one-use Authority authorization.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
     case .stop:
       guard let configuration = request.command.configuration else {
         respond(
@@ -112,6 +198,98 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
         ),
         reply: reply
       )
+    }
+  }
+
+  func startSystemProxy(
+    _ capabilityData: Data,
+    context contextData: Data,
+    configuration configurationData: Data,
+    request requestData: Data,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let reply = ProxyXPCReply(reply)
+    let request: RequestEnvelope
+    let context: ProxyOwnerContext
+    var capabilityBytes = capabilityData
+    var configurationBytes = configurationData
+    defer {
+      capabilityBytes.resetBytes(
+        in: capabilityBytes.startIndex..<capabilityBytes.endIndex)
+      capabilityBytes.removeAll(keepingCapacity: false)
+      configurationBytes.resetBytes(
+        in: configurationBytes.startIndex..<configurationBytes.endIndex)
+      configurationBytes.removeAll(keepingCapacity: false)
+    }
+    do {
+      request = try ProtocolCodec.decodeRequest(requestData)
+      context = try AuthorityV1Codec.decodeCanonical(
+        ProxyOwnerContext.self, from: contextData)
+    } catch {
+      reply.finish(data: nil, error: protocolError())
+      return
+    }
+    guard request.command.kind == .startLocalProxy || request.command.kind == .startSystemProxy,
+      let descriptor = request.command.configuration,
+      descriptor.slot.isProxyAgent,
+      context.operation.mode == descriptor.slot.authorityMode,
+      capabilityBytes.count == AuthorityV1Limits.capabilityBytes,
+      context.operation.root.installationID.rawValue == descriptor.installationID,
+      context.operation.root.epoch == descriptor.epoch,
+      context.operation.root.generation == descriptor.generation,
+      context.operation.configSHA256 == descriptor.sha256,
+      context.operation.identitySHA256 == descriptor.identitySHA256
+    else {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "invalid-owner-authorization",
+          message: "System proxy owner authorization does not match the start request.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
+      return
+    }
+    do {
+      try descriptor.validateConfigurationBytes(configurationBytes)
+    } catch {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "invalid-runtime-configuration",
+          message: "System proxy runtime bytes do not match the authorized descriptor.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
+      return
+    }
+    let capability: OwnerCapability
+    do {
+      capability = try OwnerCapability(copying: capabilityBytes)
+    } catch {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "invalid-owner-authorization",
+          message: "System proxy owner authorization is malformed.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
+      return
+    }
+    let authorization = ProxyOwnerAuthorization(
+      context: context, capability: capability)
+    let runtimeConfiguration = SensitiveDataBuffer(copying: configurationBytes)
+    lifecycle.start(
+      configuration: runtimeConfiguration,
+      descriptor: descriptor,
+      authorization: authorization
+    ) { [self] result in
+      authorization.erase()
+      respondToOperation(requestID: request.requestID, result: result, reply: reply)
     }
   }
 

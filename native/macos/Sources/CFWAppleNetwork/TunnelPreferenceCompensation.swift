@@ -34,36 +34,116 @@ public enum ManagedTunnelConnectionStatus: Equatable, Sendable {
   }
 }
 
+/// Typed proof that a managed tunnel protocol contains only the descriptor-only
+/// fields authorized by this product. Presence bits avoid copying credentials or
+/// identity material into the Host-only WAL while still making every inherited
+/// `NEVPNProtocol` field part of compare-and-restore equality.
+public struct ManagedTunnelProtocolSettings: Codable, Equatable, Sendable {
+  public let usernamePresent: Bool
+  public let passwordReferencePresent: Bool
+  public let identityReferencePresent: Bool
+  public let identityDataPresent: Bool
+  public let identityDataPasswordPresent: Bool
+  public let proxySettingsPresent: Bool
+  public let disconnectOnSleep: Bool
+  public let includeAllNetworks: Bool
+  public let excludeLocalNetworks: Bool
+  public let excludeCellularServices: Bool
+  public let excludeAPNs: Bool
+  public let excludeDeviceCommunication: Bool
+  public let enforceRoutes: Bool
+
+  public init(
+    usernamePresent: Bool = false,
+    passwordReferencePresent: Bool = false,
+    identityReferencePresent: Bool = false,
+    identityDataPresent: Bool = false,
+    identityDataPasswordPresent: Bool = false,
+    proxySettingsPresent: Bool = false,
+    disconnectOnSleep: Bool = false,
+    includeAllNetworks: Bool = false,
+    excludeLocalNetworks: Bool = false,
+    excludeCellularServices: Bool = false,
+    excludeAPNs: Bool = false,
+    excludeDeviceCommunication: Bool = false,
+    enforceRoutes: Bool = false
+  ) {
+    self.usernamePresent = usernamePresent
+    self.passwordReferencePresent = passwordReferencePresent
+    self.identityReferencePresent = identityReferencePresent
+    self.identityDataPresent = identityDataPresent
+    self.identityDataPasswordPresent = identityDataPasswordPresent
+    self.proxySettingsPresent = proxySettingsPresent
+    self.disconnectOnSleep = disconnectOnSleep
+    self.includeAllNetworks = includeAllNetworks
+    self.excludeLocalNetworks = excludeLocalNetworks
+    self.excludeCellularServices = excludeCellularServices
+    self.excludeAPNs = excludeAPNs
+    self.excludeDeviceCommunication = excludeDeviceCommunication
+    self.enforceRoutes = enforceRoutes
+  }
+
+  public static let descriptorOnly = Self()
+
+  public var isDescriptorOnly: Bool { self == .descriptorOnly }
+}
+
 /// Bounded, non-secret snapshot of the exact `NETunnelProviderManager` preference
 /// values one operation may write or restore. Only the descriptor-only provider
-/// configuration identity, the enabled flag, and the localized description are
-/// captured; configuration and credential bytes are never present. `Equatable` so
-/// compensation can prove current values still equal this operation's written
-/// values before restoring, and never overwrite an external/administrator change.
-public struct ManagedTunnelPreferenceValues: Equatable, Sendable {
+/// configuration identity, manager enablement, disabled/empty on-demand state,
+/// and localized description are captured; configuration, credential, and
+/// on-demand rule contents are never present. Any enabled or non-empty on-demand
+/// state is rejected before mutation because it cannot be restored from this
+/// non-secret WAL. `Equatable` lets compensation prove current values still equal
+/// this operation's written values before restoring, and never overwrite an
+/// external/administrator change.
+public struct ManagedTunnelPreferenceValues: Codable, Equatable, Sendable {
   public let descriptor: ConfigurationDescriptor
+  public let providerBundleIdentifier: String
+  public let serverAddress: String?
   public let isEnabled: Bool
+  public let isOnDemandEnabled: Bool
+  public let hasOnDemandRules: Bool
   public let localizedDescription: String?
+  public let protocolSettings: ManagedTunnelProtocolSettings
 
   public init(
     descriptor: ConfigurationDescriptor,
+    providerBundleIdentifier: String = "com.bill.clashformac.packet-tunnel",
+    serverAddress: String? = "Clash for Mac",
     isEnabled: Bool,
-    localizedDescription: String?
+    isOnDemandEnabled: Bool = false,
+    hasOnDemandRules: Bool = false,
+    localizedDescription: String?,
+    protocolSettings: ManagedTunnelProtocolSettings = .descriptorOnly
   ) {
     self.descriptor = descriptor
+    self.providerBundleIdentifier = providerBundleIdentifier
+    self.serverAddress = serverAddress
     self.isEnabled = isEnabled
+    self.isOnDemandEnabled = isOnDemandEnabled
+    self.hasOnDemandRules = hasOnDemandRules
     self.localizedDescription = localizedDescription
+    self.protocolSettings = protocolSettings
+  }
+
+  public var isDescriptorOnly: Bool {
+    protocolSettings.isDescriptorOnly
+      && !isOnDemandEnabled
+      && !hasOnDemandRules
   }
 }
 
-/// The in-memory record the Host stages BEFORE mutating `NETunnelProviderManager`.
+/// The durable write-ahead record the Host stages BEFORE mutating
+/// `NETunnelProviderManager`.
 ///
 /// It records whether this operation created the manager, the prior bounded values
 /// (absent when the operation created the manager), and the exact values written.
-/// It holds no secret or configuration bytes and is never serialized. Compensation
-/// uses it to compare-and-restore: only when the current values still equal
-/// `writtenValues` does it restore `priorValues` or remove a created manager.
-public struct PreferenceMutationReceipt: Equatable, Sendable {
+/// It holds no secret or configuration bytes and is serialized canonically into
+/// one Host-only Keychain item. Compensation uses it to compare-and-restore: only
+/// when the current values still equal `writtenValues` does it restore
+/// `priorValues` or remove a created manager.
+public struct TunnelPreferenceMutationReceipt: Codable, Equatable, Sendable {
   public let operationID: UUID
   public let createdManager: Bool
   public let priorValues: ManagedTunnelPreferenceValues?
@@ -82,7 +162,7 @@ public struct PreferenceMutationReceipt: Equatable, Sendable {
   }
 
   /// The identity digest of the exact descriptor this operation wrote, per the
-  /// design's `PreferenceMutationReceipt { ... writtenDescriptorSHA256 }` model.
+  /// design's `TunnelPreferenceMutationReceipt { ... writtenDescriptorSHA256 }` model.
   public var writtenDescriptorSHA256: SHA256Digest { writtenValues.descriptor.identitySHA256 }
 
   /// The bounded values compensation expects to observe after a successful
@@ -90,6 +170,16 @@ public struct PreferenceMutationReceipt: Equatable, Sendable {
   /// otherwise the prior values.
   public var expectedRestoredValues: ManagedTunnelPreferenceValues? {
     createdManager ? nil : priorValues
+  }
+
+  var isStructurallyValid: Bool {
+    createdManager == (priorValues == nil)
+      && writtenValues.descriptor.slot == .tunnel
+      && priorValues?.descriptor.slot != .systemProxy
+      && !writtenValues.providerBundleIdentifier.isEmpty
+      && priorValues?.providerBundleIdentifier.isEmpty != true
+      && writtenValues.isDescriptorOnly
+      && priorValues?.isDescriptorOnly != false
   }
 }
 
@@ -128,8 +218,8 @@ public protocol AuthorityPreparationRevoking: Sendable {
 /// Provider rejection, readiness timeout, Authority revocation} runs the design's
 /// ordered compensation:
 ///
-///  1. Authority atomically revokes the ticket/lease and zeroizes retained secret
-///     buffers.
+///  1. Authority atomically cancels an unredeemed preparation or orders the exact
+///     owner-controlled lease to stop, and zeroizes retained secret buffers.
 ///  2. Stop the connection if it may be connecting/connected and wait boundedly
 ///     for `disconnected`/`invalid`.
 ///  3. Reload preferences and compare-and-restore: only when the current values
@@ -163,7 +253,7 @@ public enum TunnelPreferenceCompensation {
   }
 
   public static func run(
-    receipt: PreferenceMutationReceipt,
+    receipt: TunnelPreferenceMutationReceipt,
     authority: any AuthorityPreparationRevoking,
     preferences: any ManagedTunnelPreferences,
     secretEraser: @escaping @Sendable () -> Void = {},
@@ -173,51 +263,74 @@ public enum TunnelPreferenceCompensation {
     // Terminal secret erasure on EVERY path: success, conflict, timeout, or a
     // thrown error all run the eraser exactly once.
     defer { eraser.erase() }
+    guard receipt.isStructurallyValid else {
+      throw AppleNetworkError.cleanupUnproven(
+        "Tunnel preference compensation receipt is structurally invalid."
+      )
+    }
 
-    // (1) Authority atomically revokes the ticket/lease and zeroizes retained
-    // secret buffers. Host-owned buffers are erased immediately afterward.
+    // (1) Authority atomically cancels the unredeemed preparation or orders the
+    // exact owner-controlled lease to stop. Host-owned buffers are erased
+    // immediately afterward.
     try await authority.revokePreparation()
     eraser.erase()
 
-    // (2) Stop a possibly connecting/connected Tunnel and wait boundedly for the
-    // OS to prove disconnected/invalid. A cleanup timeout leaves Quarantined.
-    let status = try await preferences.connectionStatus()
-    if status.mayBeActive {
-      try await preferences.stop()
-      var polls = 0
-      while true {
-        if try await preferences.connectionStatus().isStopped { break }
-        polls += 1
-        guard polls < stopWait.maximumPolls else {
-          throw AppleNetworkError.cleanupUnproven(
-            "Managed tunnel did not reach a disconnected state within the bounded stop wait."
-          )
-        }
-        try await stopWait.sleep()
-      }
-    }
-
-    // (3) Reload and compare-and-restore ONLY when the current values still equal
-    // this operation's written values. Any external/administrator change is a
-    // conflict and is never overwritten.
-    let current = try await preferences.loadCurrentValues()
-    guard current == receipt.writtenValues else {
+    // (2) Classify the fresh durable state before touching the connection. A
+    // previously restored value is an idempotent retry only while already Off;
+    // it must never stop an externally activated prior configuration.
+    let initial = try await preferences.loadCurrentValues()
+    let alreadyRestored = initial == receipt.expectedRestoredValues
+    guard initial == receipt.writtenValues || alreadyRestored else {
       throw AppleNetworkError.compensationConflict(
         "Managed tunnel preferences changed externally; compensation refuses to overwrite them."
       )
     }
-    if receipt.createdManager {
-      try await preferences.removeManager()
-    } else {
-      guard let prior = receipt.priorValues else {
-        throw AppleNetworkError.compensationConflict(
-          "Compensation receipt is missing the prior values required to restore the manager."
+
+    let status = try await preferences.connectionStatus()
+    if alreadyRestored {
+      guard status.isStopped else {
+        throw AppleNetworkError.cleanupUnproven(
+          "The restored managed tunnel state is active and cannot be attributed to this mutation."
         )
       }
-      try await preferences.apply(prior)
+    } else {
+      // (3) Stop a possibly connecting/connected Tunnel and wait boundedly for
+      // disconnected/invalid before restoring. A cleanup timeout is unproven.
+      if status.mayBeActive {
+        try await preferences.stop()
+        var polls = 0
+        while true {
+          if try await preferences.connectionStatus().isStopped { break }
+          polls += 1
+          guard polls < stopWait.maximumPolls else {
+            throw AppleNetworkError.cleanupUnproven(
+              "Managed tunnel did not reach a disconnected state within the bounded stop wait."
+            )
+          }
+          try await stopWait.sleep()
+        }
+      }
+
+      // Re-read after the stop boundary. An administrator edit during the stop
+      // window is never overwritten.
+      guard try await preferences.loadCurrentValues() == receipt.writtenValues else {
+        throw AppleNetworkError.compensationConflict(
+          "Managed tunnel preferences changed during compensation."
+        )
+      }
+      if receipt.createdManager {
+        try await preferences.removeManager()
+      } else {
+        guard let prior = receipt.priorValues else {
+          throw AppleNetworkError.compensationConflict(
+            "Compensation receipt is missing the prior values required to restore the manager."
+          )
+        }
+        try await preferences.apply(prior)
+      }
     }
 
-    // (4) Save, reload, and verify the compensation result matches the expected
+    // (4) Reload and verify the compensation result matches the expected
     // restored state exactly. An unverifiable result leaves Quarantined.
     let restored = try await preferences.loadCurrentValues()
     guard restored == receipt.expectedRestoredValues else {

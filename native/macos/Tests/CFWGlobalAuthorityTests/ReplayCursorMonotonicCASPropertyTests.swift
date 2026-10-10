@@ -159,7 +159,10 @@ private struct ReplayCursorMonotonicCASProperty {
       revision: expectedRevision, index: index)
     let descriptor = try AuthorityConfigurationDescriptor(
       byteCount: 3, configSHA256: cursorConfigDigest,
-      identitySHA256: cursorIdentityDigest, credentialSlots: [],
+      identitySHA256: cursorIdentityDigest,
+      credentialAudience: CredentialAudience(
+        profileID: UUID(), profileDigest: cursorIdentityDigest),
+      credentialSlots: [],
       tunnelOptions: mode == .tunnel ? TunnelNetworkOptions(ipv6Enabled: true) : nil)
     let request = try PrepareStartRequest(
       operation: operation, expectedRevision: expectedRevision, configuration: descriptor)

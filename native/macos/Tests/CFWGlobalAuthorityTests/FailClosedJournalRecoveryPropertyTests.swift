@@ -548,7 +548,7 @@ private struct FailClosedJournalRecoveryProperty {
   private func frameRecord(
     payload: Data, sequence: UInt64, previous: SHA256Digest
   ) throws -> (frame: Data, digest: SHA256Digest) {
-    var prefix = Data("CFWAJR01".utf8)
+    var prefix = Data("CFWAJR02".utf8)
     prefix.appendBigEndianInteger(UInt32(payload.count))
     prefix.appendBigEndianInteger(sequence)
     prefix.append(try digestBytes(previous))

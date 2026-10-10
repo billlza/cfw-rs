@@ -90,7 +90,11 @@ extension NativeBridgeCoordinator {
         "Global Authority reported Active without a bound lease."
       )
     }
-    let expectedMode: AuthorityMode = mode == .systemProxy ? .systemProxy : .tunnel
+    guard descriptor.slot.engineMode == mode else {
+      throw NativeBridgeExecutionError.failure(
+        .identityRejected, "Native mode differs from its descriptor.")
+    }
+    let expectedMode = descriptor.slot.authorityMode
     guard lease.leaseState == .active,
       lease.mode == expectedMode,
       lease.installationID == descriptor.installationID,

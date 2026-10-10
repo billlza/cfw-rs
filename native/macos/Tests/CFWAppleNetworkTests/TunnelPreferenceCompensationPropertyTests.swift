@@ -26,6 +26,8 @@ import Testing
 //
 // It further proves the invariants of Requirement 3.4 / Property 9:
 //   * external changes are NEVER overwritten (they force conflict/quarantine),
+//     except that an already-absent manager created by this operation is the
+//     exact expected restored state and is accepted only with independent Off proof,
 //   * managers this operation created are removed on the verified-Off path,
 //   * secrets are erased on EVERY terminal path (success, conflict, timeout,
 //     thrown error).
@@ -262,6 +264,7 @@ private func makeValues(
   let descriptor = try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: ipv6, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
     epoch: 1,
     generation: UInt64(gen),
@@ -280,10 +283,17 @@ private enum Expected { case verifiedOff, conflict, cleanupUnproven }
 /// safe outcome each scenario must produce.
 private func classify(_ scenario: Scenario) -> Expected {
   let active = scenario.status.mayBeActive
-  // Step 2: a possibly-active tunnel that never reaches disconnected times out.
-  if active && !scenario.stopReaches { return .cleanupUnproven }
-  // Step 3: any external/administrator edit (or removal) is a refused conflict.
+  // A manager created by this operation may already have been removed by a
+  // previous compensation attempt. That is the exact expected restored state,
+  // but it is idempotent only while the OS independently proves Off.
+  if scenario.createdManager && scenario.externalKind == .removed {
+    return active ? .cleanupUnproven : .verifiedOff
+  }
+  // Fresh comparison precedes any stop. A mismatching administrator value is
+  // never touched even when its connection status might be active.
   if scenario.externalKind != .none { return .conflict }
+  // The exact written manager must reach disconnected before restore/remove.
+  if active && !scenario.stopReaches { return .cleanupUnproven }
   // Step 3/4: the compare matched, so restore/remove runs and must verify.
   let restoreEffective = scenario.createdManager ? scenario.removeMutates : scenario.applyMutates
   return restoreEffective ? .verifiedOff : .cleanupUnproven
@@ -310,7 +320,7 @@ private func check(_ scenario: Scenario) async -> String? {
     case .removed: storedValue = nil
     }
 
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(),
       createdManager: scenario.createdManager,
       priorValues: scenario.createdManager ? nil : prior,
@@ -356,8 +366,9 @@ private func check(_ scenario: Scenario) async -> String? {
           return "created manager must be removed, still present: "
             + String(describing: store.currentValues)
         }
-        if store.removes != 1 || store.applies != 0 {
-          return "created path must remove once and never apply \(counts)"
+        let expectedRemoves = scenario.externalKind == .removed ? 0 : 1
+        if store.removes != expectedRemoves || store.applies != 0 {
+          return "created path must remove only when still written and never apply \(counts)"
         }
       } else {
         if store.currentValues != prior {
@@ -391,6 +402,11 @@ private func check(_ scenario: Scenario) async -> String? {
       if scenario.status.mayBeActive && !scenario.stopReaches {
         if store.applies != 0 || store.removes != 0 {
           return "stop timeout must precede any restore/remove \(counts)"
+        }
+      }
+      if scenario.createdManager && scenario.externalKind == .removed {
+        if store.applies != 0 || store.removes != 0 || store.stops != 0 {
+          return "an already-restored active state must not be mutated \(counts)"
         }
       }
     }

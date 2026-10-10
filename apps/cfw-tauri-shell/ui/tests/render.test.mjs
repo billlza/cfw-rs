@@ -1,0 +1,4998 @@
+// Renders the restored dashboard against a minimal DOM and a canned IPC surface.
+//
+// The dashboard is a single self-bootstrapping module, exactly as in 0.3.5, so
+// this file stubs what a WebView provides, drives the real bootstrap, and then
+// renders every page, every dialog, and the engine states that change what the
+// General page is allowed to claim. A render-time crash or a missing reason
+// therefore fails in CI instead of in the app.
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { t, getLocale, setLocale } from "../src/i18n.js";
+
+const listeners = new Map();
+const callbacks = new Map();
+const querySelectorElements = new Map();
+const querySelectorAllElements = new Map();
+const documentListeners = new Map();
+const intervalCallbacks = [];
+let nextCallbackId = 1;
+let updateListenerWasReady = false;
+let updateOutcomeQueries = 0;
+
+function element(tag = "div", id = "") {
+  return {
+    tagName: tag.toUpperCase(),
+    id,
+    dataset: {},
+    style: { setProperty() {}, width: "" },
+    classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+    children: [],
+    hidden: false,
+    value: "",
+    checked: false,
+    disabled: false,
+    textContent: "",
+    innerHTML: "",
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    files: [],
+    addEventListener() {},
+    removeEventListener() {},
+    getBoundingClientRect: () => ({ top: 0, bottom: 100, left: 0, right: 100, width: 100, height: 100 }),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    getAttribute: () => null,
+    setAttribute() {},
+    appendChild() {},
+    insertBefore() {},
+    insertAdjacentHTML() {},
+    remove() {},
+    closest: () => null,
+    focus() {},
+    blur() {},
+    setSelectionRange() {},
+    click() {},
+    scrollIntoView() {},
+    firstElementChild: null,
+  };
+}
+
+const page = element("section", "page");
+const nav = element("nav", "nav");
+page.querySelector = (selector) => (
+  selector === ".cfw-migration-banner" && page.innerHTML.includes("cfw-migration-banner")
+    ? element("div")
+    : null
+);
+const glassRoot = element("div", "glass-menu-root");
+const reloadButton = element("button", "reload-button");
+const reloadButtonListeners = new Map();
+reloadButton.addEventListener = (type, listener) => reloadButtonListeners.set(type, listener);
+reloadButton.click = async () => reloadButtonListeners.get("click")?.();
+const statusBarNodes = new Map(["upload-rate", "download-rate", "runtime-value", "traffic-progress"]
+  .map((id) => [id, element("div", id)]));
+const documentStub = {
+  documentElement: element("html"),
+  body: element("body"),
+  title: "",
+  hidden: false,
+  getElementById: (id) => {
+    if (id === "page") return page;
+    if (id === "nav") return nav;
+    if (id === "glass-menu-root") return glassRoot;
+    if (id === "reload-button") return reloadButton;
+    if (statusBarNodes.has(id)) return statusBarNodes.get(id);
+    return element("div", id);
+  },
+  querySelector: (selector) => querySelectorElements.get(selector) ?? null,
+  querySelectorAll: (selector) => querySelectorAllElements.get(selector) ?? [],
+  createElement: (tag) => element(tag),
+  createDocumentFragment: () => ({ childNodes: [], appendChild() {} }),
+  addEventListener(type, listener) {
+    const handlers = documentListeners.get(type) ?? [];
+    handlers.push(listener);
+    documentListeners.set(type, handlers);
+  },
+};
+
+globalThis.document = documentStub;
+const windowListeners = new Map();
+globalThis.window = {
+  document: documentStub,
+  innerWidth: 900,
+  innerHeight: 700,
+  addEventListener: (type, handler) => { windowListeners.set(type, handler); },
+  // As in a browser, the callback runs only after requestAnimationFrame has
+  // returned its handle. Running it first would leave every frame handle the
+  // dashboard stores set forever, and its schedulers dead after one use.
+  requestAnimationFrame: (callback) => {
+    setImmediate(callback);
+    return 1;
+  },
+  setTimeout: (callback, delay) => setTimeout(callback, delay),
+  setInterval: (callback, delay) => {
+    intervalCallbacks.push({ callback, delay });
+    return intervalCallbacks.length;
+  },
+  matchMedia: () => ({ matches: false }),
+};
+globalThis.requestAnimationFrame = globalThis.window.requestAnimationFrame;
+Object.defineProperty(globalThis, "navigator", {
+  value: { hardwareConcurrency: 8, clipboard: { writeText: async () => {}, readText: async () => "" } },
+  configurable: true,
+});
+globalThis.HTMLTextAreaElement = class {};
+globalThis.HTMLInputElement = class {};
+globalThis.HTMLSelectElement = class {};
+globalThis.CSS = { escape: (value) => value };
+
+const PROFILE_ID = "34db18b6-9903-4e9f-8854-15648e19e4f3";
+const PROJECTION = JSON.stringify({
+  log: { level: "info" },
+  experimental: { clash_api: { external_controller: "127.0.0.1:9090", secret: "[REDACTED]" } },
+  inbounds: [{ type: "mixed", tag: "cfw-system-proxy", listen: "127.0.0.1", listen_port: 7890 }],
+  outbounds: [{ type: "direct", tag: "direct" }],
+});
+
+const RUNNING_ENGINE = {
+  snapshot: {
+    desired_mode: "system_proxy",
+    generation: 3,
+    config_digest: "digest",
+    state: {
+      state: "proxy_active",
+      runtime: {
+        owner: "proxy_agent",
+        context: { installation_id: "i", config_epoch: 1, generation: 3 },
+        config_digest: "digest",
+        ready: true,
+      },
+    },
+  },
+  capabilities: { system_proxy: true, tunnel: true, provider_management: false },
+  cutover_ready: true,
+  cutover_unavailable_reason: null,
+  unavailable_reason: null,
+};
+
+const OFF_ENGINE = {
+  snapshot: { desired_mode: "off", generation: 0, config_digest: null, state: { state: "off" } },
+  capabilities: { system_proxy: true, tunnel: true, provider_management: false },
+  unavailable_reason: null,
+};
+
+let nextStreamId = 1;
+const activeStreamBindings = new Map();
+const latestStreamBindingsByIdentity = new Map();
+
+function streamIdentityKey(stream, runtimeIdentity) {
+  return `${stream}:${JSON.stringify(runtimeIdentity)}`;
+}
+
+function sameStreamBinding(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function startStreamFixture(stream, envelope = responses.engine_snapshot) {
+  const runtimeIdentity = envelope?.snapshot?.state?.runtime;
+  assert.ok(runtimeIdentity, `${stream} requires an active runtime fixture`);
+  const active = activeStreamBindings.get(stream);
+  if (active && sameStreamBinding(active.runtime, runtimeIdentity)) {
+    return structuredClone(active);
+  }
+  const binding = {
+    stream,
+    stream_id: nextStreamId,
+    runtime: structuredClone(runtimeIdentity),
+  };
+  nextStreamId += 1;
+  activeStreamBindings.set(stream, binding);
+  latestStreamBindingsByIdentity.set(streamIdentityKey(stream, runtimeIdentity), binding);
+  return structuredClone(binding);
+}
+
+function stopStreamFixture({ expected }) {
+  const active = activeStreamBindings.get(expected?.stream);
+  if (active && sameStreamBinding(active, expected)) {
+    activeStreamBindings.delete(expected.stream);
+  }
+  return null;
+}
+
+function streamBindingFor(stream, envelope = responses.engine_snapshot) {
+  const runtimeIdentity = envelope?.snapshot?.state?.runtime;
+  assert.ok(runtimeIdentity, `${stream} requires an active runtime fixture`);
+  const binding = latestStreamBindingsByIdentity.get(streamIdentityKey(stream, runtimeIdentity));
+  assert.ok(binding, `${stream} fixture has not been started for this runtime`);
+  return structuredClone(binding);
+}
+
+function streamEvent(stream, payload, envelope = responses.engine_snapshot) {
+  return {
+    provenance: streamBindingFor(stream, envelope),
+    payload,
+  };
+}
+
+const DIAGNOSTICS = {
+  default_route_interface: null,
+  service_order: ["Wi-Fi"],
+  services: [{
+    service_id: "S1",
+    display_name: "Wi-Fi",
+    order: 0,
+    web: { enabled: true, server: "127.0.0.1", port: 7890 },
+    secure_web: { enabled: false, server: null, port: null },
+    socks: { enabled: false, server: null, port: null },
+    pac_enabled: false,
+    wpad_enabled: false,
+  }],
+  recommended_clash_proxy_services: [],
+  proxied_services: ["Wi-Fi"],
+  unavailable: ["default_route_interface", "hardware_port", "bsd_device", "recommended_clash_proxy_services"],
+};
+
+const responses = {
+  boot_payload: {
+    native_ui: { profile_menu: false, runtime_settings: false, general_switches: false, prompt_dialog: false, window_glass: false },
+    product: {
+      name: "Clash for Mac",
+      version: "0.4.0",
+      license: "GPL-3.0-or-later",
+      minimum_macos: "15.0",
+      architecture: "arm64",
+    },
+    migration_handoff: false,
+    migration_handoff_status: { state: "idle" },
+    migration_handoff_renderer_ready: null,
+  },
+  legacy_retirement_status: { state: "cleared" },
+  read_runtime_settings_snapshot: {
+    settings: { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null },
+    revision: null,
+    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null },
+  },
+  read_settings_snapshot: {
+      resolved_locale: "en",
+    persisted: true,
+    settings: {
+      theme: "system",
+      font_family: "", language: "system",
+      retain_window_bounds: true,
+      launch_at_login: false,
+      silent_start: false,
+      check_for_updates: true,
+    },
+    launch_at_login: {
+      persisted_intent: false,
+      live_status: "not_registered",
+      matches_persisted_intent: true,
+    },
+  },
+  current_platform_design: {
+    target: "macos-arm64",
+    system_proxy_strategy: "signed ProxyAgent under Global Authority",
+    helper_strategy: "no privileged helper; the 0.3.x root helper is retired",
+    launchd_strategy: "SMAppService Login Item only",
+    tun_strategy: "NetworkExtension Packet Tunnel System Extension",
+    intel_supported: false,
+    minimum_macos: "15.0",
+  },
+  engine_snapshot: RUNNING_ENGINE,
+  geoip_database_status: {
+    present: false,
+    file_name: "geoip.metadb",
+    path: "/tmp/geoip.metadb",
+    mtime_ms: null,
+    size_bytes: null,
+  },
+  controller_version: { version: "sing-box 1.13.0", meta: true },
+  read_runtime_config_text: PROJECTION,
+  network_diagnostics: DIAGNOSTICS,
+  profiles_snapshot: {
+    profiles: [{
+      id: PROFILE_ID,
+      name: "Work",
+      active: true,
+      bytes: 2048,
+      updated_epoch_secs: Math.floor(Date.now() / 1000) - 300,
+      source_kind: "local",
+    }],
+    invalid_profiles: [],
+  },
+  controller_snapshot: {
+    config: { "mixed-port": 7890, "allow-lan": false, mode: "rule", "log-level": "info", ipv6: true },
+    proxies: {
+      groups: [{ name: "Proxy", kind: "Selector", now: "HK", options: ["HK", "JP"], history: [] }],
+      proxies: [
+        { name: "HK", kind: "Trojan", udp: true, history: [{ time: "t", delay: 42 }] },
+        { name: "JP", kind: "Vmess", udp: false, history: [] },
+      ],
+    },
+    connections: {
+      upload: 2048,
+      download: 4096,
+      connections: [{
+        id: "c1",
+        upload: 10,
+        download: 20,
+        start: "2026-01-01T00:00:00Z",
+        chains: ["HK", "Proxy"],
+        rule: "Match",
+        rulePayload: "",
+        metadata: {
+          network: "tcp",
+          type: "HTTP",
+          sourceIP: "127.0.0.1",
+          destinationIP: "1.1.1.1",
+          sourcePort: "1",
+          destinationPort: "443",
+          host: "example.test",
+          dnsMode: "normal",
+          processPath: "/usr/bin/curl",
+        },
+      }],
+    },
+  },
+  rules_snapshot: {
+    rules: [{ index: null, type: "DOMAIN", payload: "example.test", proxy: "Proxy", size: null, hits: null, provider: null, extra: {} }],
+  },
+  start_connections_stream: () => startStreamFixture("connections"),
+  start_log_stream: () => startStreamFixture("request-logs"),
+  stop_connections_stream: stopStreamFixture,
+  stop_log_stream: stopStreamFixture,
+  refresh_tray_menu: null,
+  open_page: null,
+  begin_migration_handoff: null,
+  check_for_updates: { available: false, current: "0.4.0" },
+  resolve_update_install: { outcome: { state: "none" }, pending: null },
+};
+const BASE_CONTROLLER_SNAPSHOT = structuredClone(responses.controller_snapshot);
+
+function controllerSnapshotWith({ mode = "rule", selected = "HK", extraOptions = [] } = {}) {
+  const snapshot = structuredClone(BASE_CONTROLLER_SNAPSHOT);
+  snapshot.config.mode = mode;
+  const group = snapshot.proxies.groups.find((item) => item.name === "Proxy");
+  group.now = selected;
+  for (const name of [selected, ...extraOptions]) {
+    if (!group.options.includes(name)) group.options.push(name);
+    if (!snapshot.proxies.proxies.some((item) => item.name === name)) {
+      snapshot.proxies.proxies.push({ name, kind: "Vmess", udp: true, history: [] });
+    }
+  }
+  return snapshot;
+}
+
+const invoked = [];
+const invocationDetails = [];
+const initialLiveSettings = responses.read_settings_snapshot;
+const slowLoginItemQuery = deferred();
+let initialLiveQueryPending = true;
+let bootstrapReady = false;
+let bootstrapFailed = false;
+const bootstrapOutcome = deferred();
+globalThis.window.__CFM_STARTUP__ = {
+  ready() { bootstrapReady = true; bootstrapOutcome.resolve(); },
+  fail() { bootstrapFailed = true; bootstrapOutcome.resolve(); },
+};
+responses.read_settings_snapshot = (args) => {
+  if (args?.includeLoginItemStatus === false) {
+    return {
+      ...initialLiveSettings,
+      launch_at_login: {
+        persisted_intent: initialLiveSettings.settings.launch_at_login,
+        live_status: "checking",
+        matches_persisted_intent: false,
+      },
+    };
+  }
+  if (initialLiveQueryPending) {
+    initialLiveQueryPending = false;
+    return slowLoginItemQuery.promise;
+  }
+  return initialLiveSettings;
+};
+const rejected = {
+  providers_snapshot: "controller capability `provider management` is unsupported by the pinned sing-box engine",
+};
+globalThis.window.__TAURI_INTERNALS__ = {
+  transformCallback(callback) {
+    const id = nextCallbackId;
+    nextCallbackId += 1;
+    callbacks.set(id, callback);
+    return id;
+  },
+  async invoke(command, args) {
+    if (command === "plugin:event|listen") {
+      if (args.event === "cfw://engine-event" && startupRaceCase === "listen-refused") {
+        throw new Error("engine listener registration refused");
+      }
+      listeners.set(args.event, callbacks.get(args.handler));
+      if (args.event === "cfw://engine-event" && startupRaceCase === "after-subscribe") {
+        await completeInitialNativeReconciliation();
+      }
+      return nextCallbackId;
+    }
+    if (command === "plugin:event|unlisten") return null;
+    if (command === "check_for_updates") {
+      updateListenerWasReady = listeners.has("cfw://update-available");
+    }
+    if (command === "resolve_update_install") updateOutcomeQueries += 1;
+    invoked.push(command);
+    invocationDetails.push({ command, args });
+    if (command in rejected) throw new Error(rejected[command]);
+    if (!(command in responses)) throw new Error(`no canned response for ${command}`);
+    const response = responses[command];
+    return typeof response === "function" ? response(args) : response;
+  },
+};
+
+// Execute the real bootstrap under deterministic native/event timing. The
+// matrix test runs this harness in fresh Node processes for the other cases.
+const startupRaceCase = process.env.CFM_TEST_STARTUP_RACE ?? "running";
+assert.ok(["running", "off", "failed", "listen-refused", "after-subscribe", "stale-read"].includes(startupRaceCase));
+const initialProfilesSnapshot = responses.profiles_snapshot;
+let nativeCompletionBeforeListener = false;
+let initialCompletionDelivered = false;
+const pendingEngine = {
+  ...OFF_ENGINE,
+  snapshot: { desired_mode: "off", generation: 1, config_digest: null,
+    state: { state: "failed", generation: 1, target: "off",
+      error: "native startup reconciliation is pending" } },
+};
+const failedReconciliation = {
+  ...pendingEngine,
+  startup_recovery_available: true,
+  snapshot: { ...pendingEngine.snapshot,
+    state: { ...pendingEngine.snapshot.state, error: "native service status unavailable" } },
+};
+responses.engine_snapshot = pendingEngine;
+async function completeInitialNativeReconciliation() {
+  if (initialCompletionDelivered) return;
+  initialCompletionDelivered = true;
+  responses.profiles_snapshot = initialProfilesSnapshot;
+  responses.engine_snapshot = startupRaceCase === "off" ? OFF_ENGINE
+    : startupRaceCase === "failed" ? failedReconciliation : RUNNING_ENGINE;
+  const listener = listeners.get("cfw://engine-event");
+  nativeCompletionBeforeListener = !listener;
+  if (startupRaceCase === "stale-read") {
+    responses.engine_snapshot = () => {
+      const delayed = deferred();
+      responses.engine_snapshot = RUNNING_ENGINE;
+      queueMicrotask(async () => {
+        try {
+          await listeners.get("cfw://engine-event")({ event: "cfw://engine-event", payload: { type: "snapshot_changed" } });
+          delayed.resolve(OFF_ENGINE);
+        } catch (error) { delayed.reject(error); }
+      });
+      return delayed.promise;
+    };
+  }
+  if (listener) await listener({ event: "cfw://engine-event", payload: { type: "snapshot_changed" } });
+}
+responses.profiles_snapshot = async () => {
+  if (startupRaceCase !== "after-subscribe") await completeInitialNativeReconciliation();
+  return initialProfilesSnapshot;
+};
+
+const appModule = await import("../src/app.js");
+const { PAGES, state, runtime } = await import("../src/state.js");
+// The dashboard's own startup recovery attempts are timed; the tests below
+// that exercise them set their own delays, every other test runs without.
+runtime.startupRecovery.delays = [];
+let bootstrapDeadline;
+try {
+  await Promise.race([
+    bootstrapOutcome.promise,
+    new Promise((_, reject) => { bootstrapDeadline = setTimeout(() => reject(new Error("bootstrap did not settle")), 2000); }),
+  ]);
+} finally { clearTimeout(bootstrapDeadline); }
+const startupObservedEngine = structuredClone(state.engine);
+const startupInvocationCommands = invoked.slice();
+const responsiveBeforeLoginItemReply = bootstrapReady && listeners.has("cfw://page");
+const loginItemWasPending = state.launchAtLogin.liveStatus === "checking";
+// The remainder of this file exercises app.js's standalone fatal boundary;
+// startup.test.mjs separately executes the real independent startup guard.
+delete globalThis.window.__CFM_STARTUP__;
+slowLoginItemQuery.resolve(initialLiveSettings);
+responses.read_settings_snapshot = initialLiveSettings;
+await new Promise((resolve) => setTimeout(resolve, 20));
+const startupUpdateReport = {
+  queries: updateOutcomeQueries,
+  errors: state.logs.filter((entry) => entry.source === "updater" && entry.level === "error"),
+  dialog: state.glassDialog,
+  install: state.updateInstall,
+};
+
+const emit = async (event, payload) => {
+  const result = listeners.get(event)?.({ event, payload });
+  if (result && typeof result.then === "function") await result;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+};
+const renderPage = async (id) => {
+  page.innerHTML = "";
+  await emit("cfw://page", id);
+  return page.innerHTML;
+};
+const setEngine = async (envelope) => {
+  responses.engine_snapshot = envelope;
+  await emit("cfw://settings-changed", responses.read_settings_snapshot);
+};
+
+test("status bar clock preserves changing values without rewriting unchanged DOM", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalNodes = new Map(statusBarNodes);
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  function countedNode(id) {
+    const node = element("div", id);
+    let text = "", width = "";
+    node.writes = { text: 0, width: 0 };
+    Object.defineProperty(node, "textContent", {
+      get: () => text,
+      set: (value) => { text = value; node.writes.text += 1; },
+    });
+    Object.defineProperty(node.style, "width", {
+      get: () => width,
+      set: (value) => { width = value; node.writes.width += 1; },
+    });
+    return node;
+  }
+  const writes = () => [...statusBarNodes.values()].map((node) => ({ ...node.writes }));
+  const resetWrites = () => {
+    for (const node of statusBarNodes.values()) node.writes = { text: 0, width: 0 };
+  };
+  const noWrites = Array.from({ length: 4 }, () => ({ text: 0, width: 0 }));
+  try {
+    Date.now = () => now;
+    for (const id of statusBarNodes.keys()) statusBarNodes.set(id, countedNode(id));
+    const clocks = intervalCallbacks.filter(({ delay }) => delay === 1000);
+    assert.equal(clocks.length, 1, "real bootstrap retains exactly one one-second clock");
+    const tick = clocks[0].callback;
+    await setEngine(OFF_ENGINE);
+    await renderPage("general");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 00");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "0%");
+    resetWrites();
+    let ipcBefore = invoked.length;
+    for (let second = 0; second < 60; second++) { now += 1000; tick(); }
+    assert.equal(invoked.length, ipcBefore, "Off clock ticks issue no IPC");
+    assert.deepEqual(writes(), noWrites, "60 stable Off ticks must preserve existing DOM values");
+
+    await setEngine(RUNNING_ENGINE);
+    resetWrites(); ipcBefore = invoked.length;
+    now += 1000; tick();
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 01");
+    now += 1000; tick();
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 02");
+    assert.deepEqual(writes(), [{ text: 0, width: 0 }, { text: 0, width: 0 },
+      { text: 2, width: 0 }, { text: 0, width: 0 }]);
+    assert.equal(invoked.length, ipcBefore, "running clock ticks issue no IPC");
+
+    // The same registered callback must publish changes in the displayed rates.
+    resetWrites();
+    state.traffic.upload = 0.5; state.traffic.download = 2;
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "2.0 MB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "10%");
+    assert.deepEqual(writes(), [{ text: 1, width: 0 }, { text: 1, width: 0 },
+      { text: 0, width: 0 }, { text: 0, width: 1 }]);
+    state.traffic.upload = 1; state.traffic.download = 0.5;
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "6%");
+    resetWrites(); tick();
+    assert.deepEqual(writes(), noWrites);
+    assert.equal(invoked.length, ipcBefore, "rate display changes issue no IPC");
+
+    // A replacement node must receive current values even when state is unchanged.
+    const detachedNodes = [...statusBarNodes.values()];
+    for (const id of statusBarNodes.keys()) statusBarNodes.set(id, countedNode(id));
+    tick();
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "512 KB/s");
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 02");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "6%");
+    assert.deepEqual(writes(), [{ text: 1, width: 0 }, { text: 1, width: 0 },
+      { text: 1, width: 0 }, { text: 0, width: 1 }]);
+    assert.deepEqual(detachedNodes.map((node) => node.writes), noWrites);
+    assert.equal(invoked.length, ipcBefore, "replacing DOM nodes introduces no IPC");
+
+    await setEngine(OFF_ENGINE);
+    assert.equal(statusBarNodes.get("runtime-value").textContent, "00 : 00 : 00");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "0.00 KB/s");
+    assert.equal(statusBarNodes.get("traffic-progress").style.width, "0%");
+    resetWrites(); ipcBefore = invoked.length;
+    now += 1000; tick();
+    assert.deepEqual(writes(), noWrites, "returning Off clears old values once");
+    assert.equal(invoked.length, ipcBefore);
+  } finally {
+    Date.now = originalNow;
+    for (const [id, node] of originalNodes) statusBarNodes.set(id, node);
+    await setEngine(originalEngine);
+  }
+});
+
+test("live connection snapshots refresh the General status bar without replacing the page", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalPaused = state.connectionPaused;
+  const originalStream = state.connectionStream;
+  const originalConnections = state.connections;
+  const originalTraffic = { ...state.traffic };
+  const originalNow = Date.now;
+  let now = 2_000_000;
+  // General renders no connection data. Replacing its DOM on every snapshot
+  // detaches the controls a pointer or an assistive client is about to use.
+  function countedMarkup(node) {
+    let markup = node.innerHTML, writes = 0;
+    Object.defineProperty(node, "innerHTML", {
+      configurable: true, enumerable: true,
+      get: () => markup,
+      set: (value) => { markup = value; writes += 1; },
+    });
+    return {
+      writes: () => writes,
+      restore: () => Object.defineProperty(node, "innerHTML", {
+        configurable: true, enumerable: true, writable: true, value: markup,
+      }),
+    };
+  }
+  const megabyte = 1024 * 1024;
+  const snapshot = (second) => streamEvent("connections", {
+    upload: second * megabyte,
+    download: second * 2 * megabyte,
+    connections: [{
+      id: `general-live-${second}`, upload: second, download: second,
+      start: "2026-01-01T00:00:00Z", chains: ["PROXY"], rule: "MATCH",
+      metadata: { host: "general.example" },
+    }],
+  }, RUNNING_ENGINE);
+  const counted = [];
+  try {
+    Date.now = () => now;
+    state.connectionPaused = false;
+    state.connectionStream = { at: 0, uploadTotal: 0, downloadTotal: 0, rows: new Map() };
+    responses.engine_snapshot = RUNNING_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    assert.ok(runtime.connectionsLiveStream.binding, "the running engine has a live connection stream");
+    const rendered = await renderPage("general");
+    assert.ok(rendered.includes('class="cfw-general-view'), "the General page is rendered");
+    counted.push(countedMarkup(page), countedMarkup(nav), countedMarkup(glassRoot));
+    for (let second = 1; second <= 5; second++) {
+      now += 1000;
+      await emit("cfw://connections-snapshot", snapshot(second));
+    }
+    assert.deepEqual(state.connections.map(({ id }) => id), ["general-live-5"],
+      "each snapshot is still applied to the shared connection state");
+    assert.equal(statusBarNodes.get("upload-rate").textContent, "1.0 MB/s");
+    assert.equal(statusBarNodes.get("download-rate").textContent, "2.0 MB/s");
+    assert.deepEqual(counted.map((node) => node.writes()), [0, 0, 0],
+      "snapshots must not replace the General page, navigation or overlay DOM");
+    assert.equal(page.innerHTML, rendered);
+  } finally {
+    for (const node of counted) node.restore();
+    Date.now = originalNow;
+    state.connectionPaused = originalPaused;
+    state.connectionStream = originalStream;
+    state.connections = originalConnections;
+    Object.assign(state.traffic, originalTraffic);
+    await setEngine(originalEngine);
+  }
+});
+
+function savedToolbarPolicy() {
+  return { profileId: "toolbar-profile", name: "Saved", groups: [
+    { name: "GLOBAL", type: "Selector", now: "DIRECT", options: [{ name: "DIRECT", delay: null }] },
+    { name: "PROXY", type: "Selector", now: "Node B", options: [
+      { name: "Node A", delay: null }, { name: "Node B", delay: null },
+    ] },
+  ] };
+}
+
+test("overlay-only General dialogs hide native switches and restore fresh geometry on close", async () => {
+  const keys = ["allowLan", "ipv6DNS", "tunMode", "mixin", "systemProxy", "startAtLogin"];
+  const prior = { resize: globalThis.ResizeObserver, style: globalThis.getComputedStyle,
+    frame: globalThis.requestAnimationFrame, events: window.addEventListener,
+    enabled: state.payload.native_ui.general_switches,
+    presentationError: state.nativeGeneralPresentationError,
+    automation: responses.read_automation_settings };
+  let top = 80;
+  const rows = keys.map((key, index) => {
+    const label = element("label"), input = element("input");
+    const classes = new Set(), attributes = new Map();
+    label.classList = { add: (name) => classes.add(name), remove: (name) => classes.delete(name) };
+    label.setAttribute = (name, value) => attributes.set(name, value);
+    label.removeAttribute = (name) => attributes.delete(name);
+    label.getAttribute = (name) => attributes.get(name) ?? null;
+    label.querySelector = () => ({ textContent: key });
+    label.getBoundingClientRect = () => ({ x: 790, y: top + index * 40, width: 34, height: 20 });
+    input.dataset.toggle = key;
+    input.disabled = index === 5;
+    input.checked = index === 1;
+    input.closest = () => label;
+    input.removeAttribute = (name) => { if (name === "data-native-general-key") delete input.dataset.nativeGeneralKey; };
+    return input;
+  });
+  const general = element();
+  general.parentElement = null;
+  querySelectorElements.set(".cfw-general-view", general);
+  querySelectorAllElements.set(".cfw-general-view .inline-switch input[data-toggle]", rows);
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  globalThis.getComputedStyle = () => ({ overflowX: "visible", overflowY: "visible" });
+  globalThis.requestAnimationFrame = (callback) => setImmediate(callback);
+  window.addEventListener = () => {};
+  responses.sync_native_general_switches = true;
+  responses.focus_native_general_switch = true;
+  responses.dismiss_native_general_switches = true;
+  responses.read_automation_settings = {
+    settings: { shortcuts: [], network_enabled: false, network_rules: [] },
+    revision: "modal-lifecycle", network: null,
+  };
+  const frames = () => invocationDetails.filter(({ command }) => command === "sync_native_general_switches").map(({ args }) => args.request);
+  let submission = 0;
+  const flush = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  const close = async () => {
+    for (const listener of documentListeners.get("keydown") ?? []) {
+      listener({ key: "Escape", preventDefault() {} });
+    }
+    await flush();
+  };
+  try {
+    state.payload.native_ui.general_switches = true;
+    state.glassDialog = null;
+    await renderPage("general"); await flush();
+    assert.equal(frames().at(-1)?.items.length, 6);
+    for (const action of ["show-network-interfaces", "allow-lan-info", "dns-query", "mixin-info",
+      "open-runtime-settings", "open-automation-settings", "show-network-interfaces"]) {
+      const before = frames().length;
+      const previous = frames().at(-1);
+      const businessState = rows.map(({ disabled, checked }) => ({ disabled, checked }));
+      await appModule.handleAction(action);
+      assert.ok(rows.every((input) => input.closest().inert === true), "DOM mirrors become inert during overlay-only rendering");
+      const completion = invocationDetails.find(({ command }) => command === "sync_native_general_switches").args.completion;
+      const callsBeforeInput = invoked.length;
+      // A native input may already be in IPC when its DOM modal opens.
+      completion.onmessage({ kind: "input", requestId: previous.requestId, sequence: previous.sequence,
+        submission: ++submission, key: 3, action: 1, value: true });
+      completion.onmessage({ kind: "input", requestId: previous.requestId, sequence: previous.sequence,
+        submission: 0, key: 3, action: 2, value: false });
+      await flush();
+      assert.match(glassRoot.innerHTML, /glass-dialog-backdrop/u);
+      assert.ok(frames().length > before, "Overlay-only rendering must publish native occlusion");
+      assert.deepEqual(frames().at(-1).items, []);
+      assert.ok(rows.every((input) => input.closest().inert === true && input.closest().getAttribute("aria-hidden") === "true"));
+      assert.deepEqual(rows.map(({ disabled, checked }) => ({ disabled, checked })), businessState);
+      assert.equal(frames().at(-1).acknowledgedSubmission, submission);
+      assert.deepEqual(invoked.slice(callsBeforeInput).filter((command) => !command.startsWith("sync_native_general_switches")), [],
+        "Occluded native input cannot traverse, regain focus, or invoke a business command");
+      top += 7;
+      await close();
+      assert.equal(glassRoot.innerHTML, "");
+      assert.equal(frames().at(-1).items.length, 6);
+      assert.equal(frames().at(-1).items[0].rect.y, top, "Reopening measures current DOM geometry");
+      assert.ok(rows.every((input) => input.closest().inert === false));
+      assert.deepEqual(rows.map(({ disabled, checked }) => ({ disabled, checked })), businessState,
+        "Closing a modal restores presentation without changing original disabled/checked state");
+    }
+    responses.sync_native_general_switches = () => { throw new Error("modal layout rejected"); };
+    await appModule.handleAction("show-network-interfaces"); await flush();
+    assert.match(state.nativeGeneralPresentationError, /modal layout rejected/u);
+    assert.ok(invoked.includes("dismiss_native_general_switches"));
+    assert.ok(rows.every((input) => input.closest().inert === true), "A reported native failure must not expose occluded DOM mirrors");
+    await close();
+    assert.ok(rows.every((input) => input.closest().inert === false), "The original DOM control remains available after a reported presentation failure");
+  } finally {
+    state.glassDialog = null;
+    await renderPage("feedback"); await flush();
+    state.payload.native_ui.general_switches = prior.enabled;
+    state.nativeGeneralPresentationError = prior.presentationError;
+    if (prior.automation === undefined) delete responses.read_automation_settings;
+    else responses.read_automation_settings = prior.automation;
+    querySelectorElements.delete(".cfw-general-view");
+    querySelectorAllElements.delete(".cfw-general-view .inline-switch input[data-toggle]");
+    globalThis.ResizeObserver = prior.resize;
+    globalThis.getComputedStyle = prior.style;
+    globalThis.requestAnimationFrame = prior.frame;
+    window.addEventListener = prior.events;
+    responses.sync_native_general_switches = true;
+    // The page adapter is a lifetime singleton; its empty presentation remains
+    // available for later disabled-feature page renders in this shared harness.
+  }
+});
+
+test("General exposes IPv6 as a direct switch rather than a settings-dialog button", async () => {
+  const html = await renderPage("general");
+  const row = html.match(/<div class="cfw-row-left">IPv6 DNS<\/div>([\s\S]*?)<div class="cfw-row">/u)?.[1];
+  assert.ok(row);
+  assert.match(row, /data-toggle="ipv6DNS"/u);
+  assert.doesNotMatch(row, /data-action="open-runtime-settings"/u);
+});
+
+test("a refreshed projection updates the inherited IPv6 switch", async () => {
+  const original = responses.read_runtime_settings_snapshot;
+  try {
+    responses.read_runtime_settings_snapshot = {
+      ...original,
+      effective: { ...original.effective, ipv6_dns_enabled:false },
+    };
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
+    assert.equal(state.toggles.ipv6DNS, false);
+    assert.equal(state.runtimeSettings.effective.ipv6_dns_enabled, false);
+    const html = await renderPage("general");
+    assert.doesNotMatch(html, /data-toggle="ipv6DNS"[^>]*checked/u);
+  } finally {
+    responses.read_runtime_settings_snapshot = original;
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
+  }
+});
+
+test("offline locator reveals the saved selection even when filter and list hide it", async () => {
+  const original = responses.engine_snapshot;
+  try {
+    await setEngine(OFF_ENGINE);
+    state.savedProfilePolicy = savedToolbarPolicy();
+    state.activeProxyGroup = null;
+    state.proxyFilter = "does not match";
+    state.toggles.showProxiesList = false;
+    state.proxyGroupHideTimeouts.set("PROXY", true);
+    state.savedProfilePolicy.groups[1].options[1].delayFailure = "timeout";
+    let scrolled = false;
+    querySelectorElements.set('[data-proxy-node="Node B"]', { scrollIntoView() { scrolled = true; } });
+    await renderPage("proxies");
+    await appModule.handleAction("scroll-to-selected-proxy");
+    assert.equal(scrolled, false, "the card is scrolled to in the frame after it was rendered");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(scrolled, true);
+    assert.equal(state.proxyFilter, "");
+    assert.match(page.innerHTML, /cfw-node-card selected blink/u);
+    assert.match(page.innerHTML, /<h2>PROXY<\/h2>/u);
+    assert.doesNotMatch(page.innerHTML, /proxy-shield|◇/u);
+  } finally {
+    querySelectorElements.clear();
+    state.proxyBlinkNode = null;
+    state.proxyGroupHideTimeouts.clear();
+    await setEngine(original);
+  }
+});
+
+test("offline latency tests the displayed group and never enables network integration", async () => {
+  const original = responses.engine_snapshot;
+  const originalDelays = responses.test_proxy_delays;
+  try {
+    await setEngine(OFF_ENGINE);
+    state.savedProfilePolicy = savedToolbarPolicy();
+    state.activeProxyGroup = null;
+    state.proxyFilter = "";
+    responses.test_proxy_delays = [
+      { name: "Node A", delay: 31, error_kind: null },
+      { name: "Node B", delay: null, error_kind: "timeout" },
+    ];
+    await renderPage("proxies");
+    invocationDetails.length = 0;
+    await appModule.handleAction("delay-test");
+    const calls = invocationDetails.filter(({ command }) => command === "test_proxy_delays");
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args.proxies, ["Node A", "Node B"]);
+    assert.equal(calls[0].args.profileId, "toolbar-profile");
+    assert.equal(invocationDetails.some(({ command }) => /start_system_proxy|start_tunnel|set_engine_mode/u.test(command)), false);
+    assert.match(page.innerHTML, /31 ms/u);
+    assert.match(page.innerHTML, /1 passed, 1 failed/u);
+    await appModule.handleAction("toggle-hide-timed-out");
+    assert.doesNotMatch(page.innerHTML, /data-proxy-node="Node B"/u);
+    assert.match(page.innerHTML, /data-proxy-node="Node A"/u);
+    assert.equal(state.proxyGroupHideTimeouts.has("GLOBAL"), false);
+    await appModule.handleAction("toggle-hide-timed-out");
+    assert.match(page.innerHTML, /data-proxy-node="Node B"/u);
+  } finally {
+    if (originalDelays === undefined) delete responses.test_proxy_delays;
+    else responses.test_proxy_delays = originalDelays;
+    state.proxyGroupHideTimeouts.clear();
+    await setEngine(original);
+  }
+});
+
+test("offline latency cancellation discards the in-flight reply and releases the toolbar", async () => {
+  const original = responses.engine_snapshot;
+  const originalDelays = responses.test_proxy_delays;
+  const reply = deferred();
+  let operation;
+  try {
+    await setEngine(OFF_ENGINE);
+    state.savedProfilePolicy = savedToolbarPolicy();
+    state.activeProxyGroup = "PROXY";
+    responses.test_proxy_delays = reply.promise;
+    await renderPage("proxies");
+    operation = appModule.handleAction("delay-test");
+    assert.equal(state.toggles.testingDelays, true);
+    assert.doesNotMatch(page.innerHTML, /data-action="delay-test"[^>]*disabled/u);
+    await appModule.handleAction("delay-test");
+    assert.match(page.innerHTML, /Stopping latency test/u);
+    reply.resolve([{ name: "Node A", delay: 99, error_kind: null }]);
+    await operation;
+    assert.equal(runtime.delayBatchInFlight, false);
+    assert.equal(state.savedProfilePolicy.groups[1].options[0].delay, null);
+    assert.doesNotMatch(page.innerHTML, /99 ms|data-action="delay-test"[^>]*disabled/u);
+  } finally {
+    reply.resolve([]);
+    if (operation) await operation;
+    if (originalDelays === undefined) delete responses.test_proxy_delays;
+    else responses.test_proxy_delays = originalDelays;
+    await setEngine(original);
+  }
+});
+
+test("refreshing the same saved profile terminates the visible latency progress", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProfiles = responses.profiles_snapshot;
+  const originalText = responses.read_profile_text;
+  const originalDelays = responses.test_proxy_delays;
+  const reply = deferred();
+  let operation;
+  try {
+    responses.profiles_snapshot = { profiles: [{ id: "toolbar-profile", name: "Saved", active: true, bytes: 200, source_kind: "local", updated_epoch_secs: 1 }], invalid_profiles: [] };
+    responses.read_profile_text = { id: "toolbar-profile", name: "Saved", body: JSON.stringify({ outbounds: [
+      { type: "socks5", tag: "Node A" }, { type: "socks5", tag: "Node B" },
+      { type: "selector", tag: "PROXY", outbounds: ["Node A", "Node B"] },
+    ] }) };
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    state.activeProxyGroup = "PROXY";
+    responses.test_proxy_delays = reply.promise;
+    await renderPage("proxies");
+    operation = appModule.handleAction("delay-test");
+    assert.equal(state.toggles.testingDelays, true);
+    await reloadButton.click();
+    reply.resolve([{ name: "Node A", delay: 99, error_kind: null }]);
+    await operation;
+    assert.equal(state.toggles.testingDelays, false);
+    assert.doesNotMatch(page.innerHTML, /Testing latency…|Stopping latency test/u);
+    assert.doesNotMatch(page.innerHTML, /99 ms/u);
+  } finally {
+    reply.resolve([]);
+    if (operation) await operation;
+    responses.profiles_snapshot = originalProfiles;
+    responses.read_profile_text = originalText;
+    if (originalDelays === undefined) delete responses.test_proxy_delays;
+    else responses.test_proxy_delays = originalDelays;
+    await setEngine(originalEngine);
+  }
+});
+
+const dispatchDocumentEvent = async (type, event = {}) => {
+  for (const listener of documentListeners.get(type) ?? []) {
+    const result = listener({
+      target: {},
+      preventDefault() {},
+      stopPropagation() {},
+      ...event,
+    });
+    if (result && typeof result.then === "function") await result;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+};
+
+test("log filter accessibility state follows delegated clicks without replacing the page or issuing IPC", async () => {
+  const oldElement = globalThis.Element;
+  const saved = { activePage: state.activePage, logFilter: state.logFilter, logSearch: state.logSearch, logs: state.logs, logsPaused: state.logsPaused };
+  const selector = "[data-log-filter]";
+  const oldButtons = querySelectorAllElements.get(selector);
+  const oldStream = querySelectorElements.get(".log-stream");
+  const oldHeading = querySelectorElements.get(".logs-layout .toolbar-panel h3");
+  const stream = element("section");
+  const heading = element("h3");
+  class FilterElement {}
+  const levels = ["all", "info", "debug", "warning", "error"];
+  const buttons = levels.map((level) => {
+    const attributes = new Map();
+    const classes = new Set();
+    return Object.assign(new FilterElement(), element("button"), {
+      dataset: { logFilter: level },
+      closest: (query) => query === selector ? buttons.find((button) => button.dataset.logFilter === level) : null,
+      getAttribute: (name) => attributes.get(name) ?? null,
+      setAttribute: (name, value) => attributes.set(name, String(value)),
+      classList: {
+        toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
+        contains: (name) => classes.has(name),
+      },
+    });
+  });
+  function renderedFilters(html) {
+    return [...html.matchAll(/<button\b[^>]*data-log-filter="([^"]+)"[^>]*>/gu)]
+      .map(([tag, level]) => ({ level, pressed: tag.match(/aria-pressed="(true|false)"/u)?.[1] }));
+  }
+  try {
+    globalThis.Element = FilterElement;
+    Object.assign(state, { logFilter: "all", logSearch: "", logsPaused: false, logs: [
+      { time: "10:00", level: "info", source: "test", message: "info evidence" },
+      { time: "10:01", level: "error", source: "test", message: "error evidence" },
+    ] });
+    querySelectorAllElements.set(selector, buttons);
+    querySelectorElements.set(".log-stream", stream);
+    querySelectorElements.set(".logs-layout .toolbar-panel h3", heading);
+    const html = await renderPage("logs");
+    assert.deepEqual(renderedFilters(html), levels.map((level) => ({ level, pressed: String(level === "all") })));
+    for (const { level, pressed } of renderedFilters(html)) {
+      const button = buttons.find((value) => value.dataset.logFilter === level);
+      button.setAttribute("aria-pressed", pressed);
+      button.classList.toggle("selected", pressed === "true");
+    }
+    const ipcBefore = invoked.length;
+    for (const level of ["warning", "error", "info", "debug", "all", "all", "info"]) {
+      await dispatchDocumentEvent("click", { target: buttons.find((button) => button.dataset.logFilter === level) });
+      assert.equal(state.logFilter, level);
+      assert.deepEqual(buttons.map((button) => button.getAttribute("aria-pressed")), levels.map((value) => String(value === level)));
+      assert.deepEqual(buttons.map((button) => button.classList.contains("selected")), levels.map((value) => value === level));
+      assert.equal(page.innerHTML, html, "filtering must keep the existing page and its focusable controls");
+      const visible = level === "all" ? 2 : ["info", "error"].includes(level) ? 1 : 0;
+      assert.equal(heading.textContent, t("Log entries: {visible} / {total}", { visible, total: 2 }));
+      for (const entry of ["info", "error"]) assert.equal(stream.innerHTML.includes(`${entry} evidence`), level === "all" || level === entry);
+    }
+    assert.equal(invoked.length, ipcBefore, "filter changes are local view state");
+    await renderPage("general");
+    assert.deepEqual(renderedFilters(await renderPage("logs")), levels.map((level) => ({ level, pressed: String(level === "info") })));
+  } finally {
+    Object.assign(state, saved);
+    if (oldElement === undefined) delete globalThis.Element;
+    else globalThis.Element = oldElement;
+    for (const [map, key, value] of [
+      [querySelectorAllElements, selector, oldButtons],
+      [querySelectorElements, ".log-stream", oldStream],
+      [querySelectorElements, ".logs-layout .toolbar-panel h3", oldHeading],
+    ]) {
+      if (value === undefined) map.delete(key);
+      else map.set(key, value);
+    }
+    await renderPage(saved.activePage);
+  }
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForInvocation(command, previousCount = 0) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const count = invocationDetails.filter((entry) => entry.command === command).length;
+    if (count > previousCount) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`${command} was not invoked`);
+}
+
+function interactiveElement(tag = "button") {
+  const node = element(tag);
+  const handlers = new Map();
+  node.addEventListener = (type, listener) => handlers.set(type, listener);
+  node.trigger = async (type, event = {}) => handlers.get(type)?.({
+    currentTarget: node,
+    target: node,
+    preventDefault() {},
+    stopPropagation() {},
+    ...event,
+  });
+  return node;
+}
+
+test("startup engine snapshot handshake retains authoritative state", () => {
+  assert.equal(nativeCompletionBeforeListener, startupRaceCase !== "after-subscribe");
+  assert.equal(bootstrapReady, startupRaceCase !== "listen-refused");
+  assert.equal(bootstrapFailed, startupRaceCase === "listen-refused");
+  const expectedActive = ["running", "after-subscribe", "stale-read"].includes(startupRaceCase);
+  assert.equal(startupObservedEngine.active, expectedActive);
+  if (startupRaceCase === "failed") {
+    assert.equal(startupObservedEngine.availabilityReason, "native service status unavailable");
+  } else if (startupRaceCase === "listen-refused") {
+    assert.equal(startupObservedEngine.availabilityReason, "native startup reconciliation is pending");
+  } else {
+    assert.equal(startupObservedEngine.availabilityReason, null);
+  }
+  for (const command of ["apply_active_profile", "reconcile_startup_services", "set_core_enabled", "set_system_proxy_enabled", "set_tun_enabled", "set_proxy_mode", "select_profile", "select_proxy", "write_runtime_settings_snapshot", "write_automation_settings"]) {
+    assert.equal(startupInvocationCommands.includes(command), false, `startup observation must not invoke ${command}`);
+  }
+});
+
+test("bootstrap reaches the dashboard instead of the fatal handler", () => {
+  assert.equal(documentStub.body.innerHTML.includes("fatal"), false);
+  assert.ok(listeners.has("cfw://page"), "the page event is subscribed during bootstrap");
+  assert.ok(invoked.includes("boot_payload"));
+  assert.ok(invoked.includes("engine_snapshot"));
+  assert.equal(
+    invoked.includes("acknowledge_migration_handoff_renderer_ready"),
+    false,
+    "the ordinary dashboard never acknowledges handoff renderer readiness",
+  );
+  assert.equal(updateListenerWasReady, true, "automatic update check must start after its listener");
+});
+
+test("a stalled macOS Login Item query does not prevent dashboard readiness", () => {
+  assert.equal(responsiveBeforeLoginItemReply, true);
+  assert.equal(loginItemWasPending, true, "pending status must not look like an observed OS state");
+});
+
+test("global Reload refreshes the active projection and controller rules", async () => {
+  const originalProjection = responses.read_runtime_config_text;
+  const originalRules = responses.rules_snapshot;
+  responses.read_runtime_config_text = JSON.stringify({
+    log: { level: "debug" },
+    experimental: { clash_api: { external_controller: "127.0.0.1:9091" } },
+    inbounds: [{ type: "mixed", tag: "cfw-system-proxy", listen: "127.0.0.1", listen_port: 7891 }],
+    outbounds: [{ type: "direct", tag: "direct" }],
+  });
+  responses.rules_snapshot = {
+    rules: [{ index: 7, type: "DOMAIN", payload: "fresh.example", proxy: "Proxy", size: 1, hits: 2, provider: null, extra: {} }],
+  };
+
+  try {
+    await renderPage("rules");
+    await reloadButton.click();
+    assert.equal(state.projection.mixedPort, 7891);
+    assert.equal(state.projection.controller, "127.0.0.1:9091");
+    assert.equal(state.projection.logLevel, "debug");
+    assert.equal(state.rules.length, 1);
+    assert.equal(state.rules[0].payload, "fresh.example");
+    assert.match(page.innerHTML, /fresh\.example/u);
+  } finally {
+    responses.read_runtime_config_text = originalProjection;
+    responses.rules_snapshot = originalRules;
+  }
+});
+
+test("Engine Off reload never schedules controller-backed IPC or keeps a stale projection", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalRetirement = responses.legacy_retirement_status;
+  const originalProfiles = responses.profiles_snapshot;
+  const originalProjectionRejection = rejected.read_runtime_config_text;
+  const originalPage = state.activePage;
+  const originalLogsPaused = state.logsPaused;
+  const originalConnectionPaused = state.connectionPaused;
+
+  try {
+    responses.engine_snapshot = OFF_ENGINE;
+    responses.legacy_retirement_status = { state: "awaiting_confirmation" };
+    responses.profiles_snapshot = { profiles: [], invalid_profiles: [] };
+    rejected.read_runtime_config_text = "no active profile is selected";
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
+    await renderPage("rules");
+
+    invoked.length = 0;
+    invocationDetails.length = 0;
+    const failureCount = state.logs.filter(({ level, source }) => (
+      (level === "warning" || level === "error")
+      && (source === "controller" || source === "provider" || source === "rules")
+    )).length;
+
+    await reloadButton.click();
+
+    state.logsPaused = true;
+    state.connectionPaused = true;
+    state.profilesUnavailableReason = "profile repository unavailable";
+    for (const action of [
+      "update-all-providers",
+      "health-check-all",
+      "reload-rules",
+      "flush-fake-ip-cache",
+      "break-proxy-connections",
+      "close-all",
+      "toggle-log-stream",
+      "toggle-connection-stream",
+      "migrate-legacy-profiles",
+    ]) {
+      await appModule.handleAction(action);
+    }
+
+    for (const command of [
+      "controller_snapshot",
+      "providers_snapshot",
+      "rules_snapshot",
+      "start_connections_stream",
+      "start_log_stream",
+      "update_all_proxy_providers",
+      "update_all_rule_providers",
+      "health_check_all_proxy_providers",
+      "flush_fake_ip_cache",
+      "close_all_connections",
+      "preview_legacy_cfw_profile_migration",
+    ]) {
+      assert.equal(invoked.includes(command), false, `${command} must not run while the engine is Off`);
+    }
+    assert.equal(state.controllerStatus, "engine off");
+    assert.deepEqual(state.projection, {
+      mixedPort: null,
+      listenAddress: null,
+      controller: null,
+      logLevel: null,
+      error: "no active profile is selected",
+    });
+    assert.equal(
+      state.logs.filter(({ level, source }) => (
+        (level === "warning" || level === "error")
+        && (source === "controller" || source === "provider" || source === "rules")
+      )).length,
+      failureCount,
+      "an expected Off state must not be logged as a controller failure",
+    );
+
+    const general = await renderPage("general");
+    assert.match(general, /Automatic port/u);
+    assert.match(general, /127\.0\.0\.1:7890/u, "configured port is readable without an active profile");
+    assert.equal(state.projection.mixedPort, null, "configured preferences do not masquerade as a live profile projection");
+  } finally {
+    responses.engine_snapshot = originalEngine;
+    responses.legacy_retirement_status = originalRetirement;
+    responses.profiles_snapshot = originalProfiles;
+    state.logsPaused = originalLogsPaused;
+    state.connectionPaused = originalConnectionPaused;
+    if (originalProjectionRejection === undefined) {
+      delete rejected.read_runtime_config_text;
+    } else {
+      rejected.read_runtime_config_text = originalProjectionRejection;
+    }
+    await reloadButton.click();
+    await renderPage(originalPage);
+  }
+});
+
+test("Engine Off click handlers never invoke individual controller operations", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalDialog = state.glassDialog;
+  const mode = interactiveElement();
+  mode.dataset.mode = "Rule";
+  const proxy = interactiveElement();
+  proxy.dataset.group = "Proxy";
+  proxy.dataset.node = "JP";
+  const proxyProvider = interactiveElement();
+  proxyProvider.dataset.providerUpdate = "proxy-provider";
+  const ruleProvider = interactiveElement();
+  ruleProvider.dataset.ruleProviderUpdate = "rule-provider";
+  const health = interactiveElement();
+  health.dataset.providerHealth = "proxy-provider";
+  const close = interactiveElement();
+  close.dataset.closeConnection = "c1";
+  const dns = interactiveElement();
+  const dnsName = element("input");
+  dnsName.value = "example.com";
+  const dnsType = element("input");
+  dnsType.value = "A";
+
+  try {
+    await setEngine(OFF_ENGINE);
+    state.proxyGroups = [{ name: "Proxy", now: "HK", options: [] }];
+    state.connections = [{ id: "c1" }];
+    state.glassDialog = { kind: "dns-query", payload: { name: "example.com", type: "A", result: "" } };
+    querySelectorAllElements.set("[data-mode]", [mode]);
+    querySelectorAllElements.set("[data-group][data-node]", [proxy]);
+    querySelectorAllElements.set("[data-provider-update], [data-rule-provider-update]", [proxyProvider, ruleProvider]);
+    querySelectorAllElements.set("[data-provider-health]", [health]);
+    querySelectorAllElements.set("[data-close-connection]", [close]);
+    querySelectorAllElements.set("[data-glass-dns-confirm]", [dns]);
+    querySelectorElements.set("[data-glass-dns-name]", dnsName);
+    querySelectorElements.set("[data-glass-dns-type]", dnsType);
+    await renderPage("providers");
+    invoked.length = 0;
+
+    for (const button of [mode, proxy, proxyProvider, ruleProvider, health, close, dns]) {
+      await button.trigger("click");
+    }
+
+    for (const command of [
+      "set_proxy_mode",
+      "select_proxy",
+      "update_proxy_provider",
+      "update_rule_provider",
+      "health_check_proxy_provider",
+      "close_connection",
+      "dns_query",
+    ]) {
+      assert.equal(invoked.includes(command), false, `${command} must not run from an Off-state click`);
+    }
+  } finally {
+    querySelectorElements.clear();
+    querySelectorAllElements.clear();
+    state.glassDialog = originalDialog;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("a failed legacy commit discards the consumed preview and stale retry button", async () => {
+  const preview = {
+    status: "ready",
+    preview_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    name: "Migrated profile",
+    source_host: "subscription.example",
+    legacy_bytes: 494575,
+    active: true,
+  };
+  const confirm = interactiveElement();
+  confirm.dataset.previewId = preview.preview_id;
+  rejected.commit_legacy_cfw_profile_migration = "credential vault access was denied";
+  state.legacyProfileMigrationPreview = preview;
+  state.glassDialog = { kind: "legacy-profile-migration", payload: preview, busy: false, error: null };
+  querySelectorAllElements.set("[data-glass-legacy-migration-confirm]", [confirm]);
+
+  try {
+    await renderPage("profiles");
+    await confirm.trigger("click");
+    assert.equal(state.legacyProfileMigrationPreview, null);
+    assert.equal(state.glassDialog?.kind, "info");
+    assert.match(state.glassDialog?.payload?.body ?? "", /preview the legacy profile again/u);
+  } finally {
+    delete rejected.commit_legacy_cfw_profile_migration;
+    querySelectorAllElements.clear();
+    state.glassDialog = null;
+    state.legacyProfileMigrationPreview = null;
+  }
+});
+
+test("legacy migration describes a local cached snapshot and makes no download claim", async () => {
+  const originalDialog = state.glassDialog;
+  state.glassDialog = {
+    kind: "legacy-profile-migration",
+    payload: {
+      status: "ready",
+      preview_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      name: "Cached subscription",
+      source_host: "subscription.example",
+      legacy_bytes: 4096,
+      active: true,
+    },
+    busy: false,
+    error: null,
+  };
+
+  try {
+    glassRoot.innerHTML = "";
+    await renderPage("profiles");
+    assert.match(glassRoot.innerHTML, /legacy YAML snapshot saved on this Mac/u);
+    assert.match(glassRoot.innerHTML, /Migration does not download a newer subscription/u);
+    assert.match(glassRoot.innerHTML, /retained only as the HTTPS update source/u);
+    assert.match(glassRoot.innerHTML, /cached YAML is never executed/u);
+    assert.doesNotMatch(glassRoot.innerHTML, /using the current HTTPS subscription/u);
+  } finally {
+    state.glassDialog = originalDialog;
+    glassRoot.innerHTML = "";
+  }
+});
+
+test("runtime configuration preview is offline and depends only on repository-backed selection", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProfiles = structuredClone(state.profiles);
+  const originalProfilesUnavailableReason = state.profilesUnavailableReason;
+  const originalDialog = state.glassDialog;
+
+  try {
+    state.profiles = [{
+      id: PROFILE_ID,
+      name: "Work",
+      active: true,
+      bytes: 2048,
+      updatedEpochSecs: null,
+      updated: "now",
+      sourceKind: "local",
+    }];
+    state.profilesUnavailableReason = null;
+    await setEngine(OFF_ENGINE);
+    state.glassDialog = null;
+    invoked.length = 0;
+    invocationDetails.length = 0;
+
+    await appModule.handleAction("preview-runtime-config");
+
+    assert.equal(invoked.filter((command) => command === "read_runtime_config_text").length, 1);
+    assert.equal(state.glassDialog?.kind, "preview-config");
+    assert.equal(state.glassDialog?.payload, PROJECTION);
+
+    state.glassDialog = null;
+    state.profilesUnavailableReason = "profile repository unavailable";
+    await appModule.handleAction("preview-runtime-config");
+    assert.equal(invoked.filter((command) => command === "read_runtime_config_text").length, 1);
+    assert.equal(state.glassDialog, null);
+
+    state.profilesUnavailableReason = null;
+    state.profiles = [];
+    await appModule.handleAction("preview-runtime-config");
+    assert.equal(invoked.filter((command) => command === "read_runtime_config_text").length, 1);
+    assert.equal(state.glassDialog, null);
+  } finally {
+    state.profiles = originalProfiles;
+    state.profilesUnavailableReason = originalProfilesUnavailableReason;
+    state.glassDialog = originalDialog;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("unavailable network capabilities block every enable path but never trap an enabled request", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalSystemProxyResponse = responses.set_system_proxy_enabled;
+  const originalTunResponse = responses.set_tun_enabled;
+  const hadSystemProxyResponse = Object.hasOwn(responses, "set_system_proxy_enabled");
+  const hadTunResponse = Object.hasOwn(responses, "set_tun_enabled");
+  const unavailableReason = "replacement networking capability is unavailable";
+  const cases = [
+    {
+      key: "systemProxy",
+      command: "set_system_proxy_enabled",
+      shortcut: "p",
+      retry: "retry-system-proxy",
+      cancel: "cancel-system-proxy",
+      desiredMode: "system_proxy",
+    },
+    {
+      key: "tunMode",
+      command: "set_tun_enabled",
+      shortcut: "t",
+      retry: "retry-tun-mode",
+      cancel: "cancel-tun-mode",
+      desiredMode: "tunnel",
+    },
+  ];
+
+  try {
+    for (const [index, scenario] of cases.entries()) {
+      const unavailableOff = {
+        snapshot: {
+          desired_mode: "off",
+          generation: 20 + index * 2,
+          config_digest: null,
+          state: { state: "off" },
+        },
+        capabilities: { system_proxy: false, tunnel: false },
+        unavailable_reason: unavailableReason,
+      };
+      const unavailableRequested = {
+        snapshot: {
+          desired_mode: scenario.desiredMode,
+          generation: 21 + index * 2,
+          config_digest: null,
+          state: { state: "failed", error: unavailableReason },
+        },
+        capabilities: { system_proxy: false, tunnel: false },
+        unavailable_reason: unavailableReason,
+      };
+      const input = interactiveElement("input");
+      input.dataset.toggle = scenario.key;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+
+      await setEngine(unavailableOff);
+      const unavailableHtml = await renderPage("general");
+      const unavailableInput = unavailableHtml.match(new RegExp(`<input type="checkbox" data-toggle="${scenario.key}"([^>]*)>`, "u"));
+      assert.ok(unavailableInput, `${scenario.key} input must render`);
+      assert.match(unavailableInput[1], /disabled/u);
+
+      invoked.length = 0;
+      invocationDetails.length = 0;
+      input.checked = true;
+      await input.trigger("change");
+      assert.equal(invoked.includes(scenario.command), false, `${scenario.key} DOM enable must issue zero IPC`);
+
+      await dispatchDocumentEvent("keydown", { key: scenario.shortcut, metaKey: true, ctrlKey: false, altKey: false });
+      assert.equal(invoked.includes(scenario.command), false, `${scenario.key} shortcut enable must issue zero IPC`);
+
+      await appModule.handleAction(scenario.retry);
+      assert.equal(invoked.includes(scenario.command), false, `${scenario.key} retry enable must issue zero IPC`);
+
+      if (scenario.key === "tunMode") {
+        await setEngine({
+          snapshot: {
+            desired_mode: "tunnel",
+            generation: 40,
+            config_digest: null,
+            state: { state: "awaiting_approval" },
+          },
+          capabilities: { system_proxy: false, tunnel: false },
+          unavailable_reason: unavailableReason,
+        });
+        invoked.length = 0;
+        invocationDetails.length = 0;
+        await appModule.handleAction(scenario.retry);
+        assert.equal(invoked.length, 0, "an unavailable approval retry must issue zero IPC of any kind");
+      }
+
+      await setEngine(unavailableRequested);
+      responses[scenario.command] = OFF_ENGINE;
+      const requestedHtml = await renderPage("general");
+      const requestedInput = requestedHtml.match(new RegExp(`<input type="checkbox" data-toggle="${scenario.key}"([^>]*)>`, "u"));
+      assert.ok(requestedInput, `${scenario.key} requested input must render`);
+      assert.doesNotMatch(requestedInput[1], /checked/u, "a failed request is never displayed as active");
+      assert.match(requestedInput[1], /disabled/u);
+      assert.match(requestedHtml, new RegExp(`data-action="${scenario.cancel}">Cancel request`, "u"));
+
+      invoked.length = 0;
+      invocationDetails.length = 0;
+      await appModule.handleAction(scenario.cancel);
+      const disable = invocationDetails.find((entry) => entry.command === scenario.command);
+      assert.ok(disable, `${scenario.key} disable must reach native admission`);
+      assert.equal(disable.args.enabled, false);
+    }
+  } finally {
+    querySelectorAllElements.clear();
+    if (hadSystemProxyResponse) responses.set_system_proxy_enabled = originalSystemProxyResponse;
+    else delete responses.set_system_proxy_enabled;
+    if (hadTunResponse) responses.set_tun_enabled = originalTunResponse;
+    else delete responses.set_tun_enabled;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("normal mode switches call the existing backend without preparing or cleaning legacy data", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  const originalError = state.engineMutationError;
+  const originalCutover = structuredClone(state.cutover);
+  const commands = ["set_system_proxy_enabled", "set_tun_enabled"];
+  const originalResponses = new Map(commands.map((command) => [command, responses[command]]));
+  const presentResponses = new Set(commands.filter((command) => Object.hasOwn(responses, command)));
+  try {
+    state.retirement = { state: "awaiting_confirmation" };
+    state.migrationHandoff = false;
+    state.legacyMaintenanceOpen = false;
+    for (const [key, command, desired, status] of [
+      ["systemProxy", "set_system_proxy_enabled", "system_proxy", "proxy_starting"],
+      ["tunMode", "set_tun_enabled", "tunnel", "awaiting_approval"],
+    ]) {
+      await setEngine(OFF_ENGINE);
+      const input = interactiveElement("input");
+      input.dataset.toggle = key;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+      const html = await renderPage("general");
+      const rendered = html.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));
+      assert.ok(rendered);
+      assert.doesNotMatch(rendered[1], /disabled/u);
+      assert.doesNotMatch(html, /cfw-migration-banner|Start Migration|Prepare cutover|Finish setup/u);
+      responses[command] = {
+        snapshot: { desired_mode: desired, generation: 1, config_digest: null, state: { state: status, generation: 1 } },
+        capabilities: { system_proxy: true, tunnel: true },
+        unavailable_reason: null,
+      };
+      invocationDetails.length = 0;
+      input.checked = true;
+      await input.trigger("change");
+      assert.deepEqual(invocationDetails.filter((entry) => entry.command === command), [
+        { command, args: { enabled: true } },
+      ]);
+      for (const forbidden of [
+        "begin_migration_handoff", "prepare_legacy_cutover", "disable_service_mode",
+        "recover_legacy_cutover", "reconcile_startup_services", "write_settings_snapshot", "reset_settings_snapshot",
+      ]) {
+        assert.equal(invocationDetails.some((entry) => entry.command === forbidden), false, forbidden);
+      }
+      assert.deepEqual(state.retirement, { state: "awaiting_confirmation" });
+      assert.deepEqual(state.cutover, originalCutover);
+      assert.equal(state.engine.active, false, "an accepted request is not proof of active networking");
+    }
+  } finally {
+    querySelectorAllElements.clear();
+    for (const command of commands) {
+      if (presentResponses.has(command)) responses[command] = originalResponses.get(command);
+      else delete responses[command];
+    }
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
+    state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("a backend mode refusal remains visible while Off and is cleared by the next request", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  const originalError = state.engineMutationError;
+  const commands = ["set_system_proxy_enabled", "set_tun_enabled"];
+  const originalResponses = new Map(commands.map((command) => [command, responses[command]]));
+  const presentResponses = new Set(commands.filter((command) => Object.hasOwn(responses, command)));
+  try {
+    state.retirement = { state: "awaiting_confirmation" };
+    state.migrationHandoff = false;
+    state.legacyMaintenanceOpen = false;
+    for (const [key, command, reason] of [
+      ["systemProxy", "set_system_proxy_enabled", "A system proxy is already enabled; password=private-value"],
+      ["tunMode", "set_tun_enabled", "The selected profile credential is missing"],
+    ]) {
+      await setEngine(OFF_ENGINE);
+      const input = interactiveElement("input");
+      input.dataset.toggle = key;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+      await renderPage("general");
+      rejected[command] = reason;
+      input.checked = true;
+      await input.trigger("change");
+      assert.equal(state.engine.state, "Off");
+      assert.equal(state.engine.active, false);
+      assert.ok(page.innerHTML.includes(reason.split(";")[0]));
+      assert.doesNotMatch(page.innerHTML, /private-value|Start Migration|Prepare cutover/u);
+      assert.ok(state.engineMutationError.length <= 512);
+      delete rejected[command];
+      responses[command] = OFF_ENGINE;
+      await renderPage("general");
+      input.checked = true;
+      await input.trigger("change");
+      assert.equal(state.engineMutationError, null);
+      assert.equal(page.innerHTML.includes(reason.split(";")[0]), false);
+    }
+  } finally {
+    querySelectorAllElements.clear();
+    for (const command of commands) {
+      delete rejected[command];
+      if (presentResponses.has(command)) responses[command] = originalResponses.get(command);
+      else delete responses[command];
+    }
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
+    state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("handoff windows keep ordinary mode mutations outside their command authority", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  try {
+    state.migrationHandoff = true;
+    state.retirement = { state: "awaiting_confirmation" };
+    await setEngine(OFF_ENGINE);
+    for (const key of ["systemProxy", "tunMode"]) {
+      const input = interactiveElement("input");
+      input.dataset.toggle = key;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+      const html = await renderPage("general");
+      const rendered = html.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));
+      assert.match(rendered[1], /disabled/u);
+      invocationDetails.length = 0;
+      for (const checked of [true, false]) {
+        input.checked = checked;
+        await input.trigger("change");
+      }
+      assert.deepEqual(invocationDetails, []);
+    }
+  } finally {
+    querySelectorAllElements.clear();
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    await setEngine(originalEngine);
+  }
+});
+
+test("proxy modes stay discoverable while Off and emit no controller mutation", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const modeMutationsBefore = invocationDetails.filter(
+    (entry) => entry.command === "set_proxy_mode",
+  ).length;
+  const directMode = interactiveElement();
+  directMode.dataset.mode = "Direct";
+  try {
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    querySelectorAllElements.set("[data-mode]", [directMode]);
+    const html = await renderPage("proxies");
+    for (const mode of ["Global", "Rule", "Direct"]) {
+      const button = html.match(new RegExp(`<button class="[^"]*" data-mode="${mode}"([^>]*)>`, "u"));
+      assert.ok(button, `${mode} must remain discoverable while the engine is Off`);
+      assert.match(button[1], /disabled/u);
+    }
+    assert.doesNotMatch(html, /class="selected" data-mode=/u);
+    await directMode.trigger("click");
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "set_proxy_mode").length,
+      modeMutationsBefore,
+    );
+  } finally {
+    querySelectorAllElements.clear();
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("a fresh zero-group snapshot still exposes the active Direct mode", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  try {
+    const direct = controllerSnapshotWith({ mode: "direct" });
+    direct.proxies = { groups: [], proxies: [] };
+    responses.controller_snapshot = direct;
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+
+    const html = await renderPage("proxies");
+    const button = html.match(/<button class="selected" data-mode="Direct"([^>]*)>/u);
+    assert.ok(button, "Direct must remain visible for a valid profile with zero proxy groups");
+    assert.doesNotMatch(button[1], /disabled/u);
+    assert.match(html, /Active profile has no proxy groups/u);
+  } finally {
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("controller loss clears Direct state until the same engine publishes a fresh snapshot", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const directMode = interactiveElement();
+  directMode.dataset.mode = "Direct";
+  try {
+    const direct = controllerSnapshotWith({ mode: "direct" });
+    responses.controller_snapshot = direct;
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+
+    responses.controller_snapshot = null;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    assert.equal(state.controllerStatus, "controller offline");
+    assert.equal(state.mode, null);
+    assert.deepEqual(state.proxyGroups, []);
+
+    querySelectorAllElements.set("[data-mode]", [directMode]);
+    const offlineHtml = await renderPage("proxies");
+    assert.match(offlineHtml, /data-mode="Direct"[^>]*disabled/u);
+    const mutationsBefore = invocationDetails.filter(
+      (entry) => entry.command === "set_proxy_mode",
+    ).length;
+    await directMode.trigger("click");
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "set_proxy_mode").length,
+      mutationsBefore,
+    );
+
+    responses.controller_snapshot = direct;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    assert.equal(state.controllerStatus, "controller live");
+    assert.equal(state.mode, "Direct");
+    const recoveredHtml = await renderPage("proxies");
+    const recovered = recoveredHtml.match(/<button class="selected" data-mode="Direct"([^>]*)>/u);
+    assert.ok(recovered, "Direct must return only after a fresh controller readback");
+    assert.doesNotMatch(recovered[1], /disabled/u);
+  } finally {
+    querySelectorAllElements.clear();
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("Direct fallback state is rendered read-only and cannot select a proxy", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const selection = interactiveElement();
+  selection.dataset.group = "GLOBAL";
+  selection.dataset.node = "direct";
+  try {
+    const direct = controllerSnapshotWith({ mode: "direct" });
+    direct.proxies = {
+      groups: [{ name: "GLOBAL", kind: "Fallback", now: "direct", options: [], history: [] }],
+      proxies: [{ name: "direct", kind: "Direct", udp: true, history: [] }],
+    };
+    responses.controller_snapshot = direct;
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+    querySelectorAllElements.set("[data-group][data-node]", [selection]);
+
+    const html = await renderPage("proxies");
+    assert.match(html, /data-proxy-node="direct"[^>]*disabled/u);
+    assert.match(html, /• direct/u);
+    const before = invocationDetails.filter((entry) => entry.command === "select_proxy").length;
+    await selection.trigger("click");
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "select_proxy").length,
+      before,
+      "a read-only Direct observation must never become select_proxy IPC",
+    );
+  } finally {
+    querySelectorAllElements.clear();
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("proxy mode mutations are single-flight and an old failure cannot roll back the latest success", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const originalMutation = responses.set_proxy_mode;
+  const hadMutation = Object.hasOwn(responses, "set_proxy_mode");
+  const originalBreakOnChange = state.toggles.breakOnProxyChange;
+  const first = deferred();
+  const second = deferred();
+  const actions = [];
+  let mutationCall = 0;
+
+  try {
+    responses.controller_snapshot = controllerSnapshotWith({ mode: "rule" });
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+    state.toggles.breakOnProxyChange = false;
+
+    const globalMode = interactiveElement();
+    globalMode.dataset.mode = "Global";
+    const directMode = interactiveElement();
+    directMode.dataset.mode = "Direct";
+    querySelectorAllElements.set("[data-mode]", [globalMode, directMode]);
+    await renderPage("proxies");
+
+    responses.set_proxy_mode = () => {
+      const result = [first.promise, second.promise][mutationCall];
+      mutationCall += 1;
+      assert.ok(result, "only the two requested mode mutations may reach native IPC");
+      return result;
+    };
+    responses.controller_snapshot = controllerSnapshotWith({ mode: "direct" });
+    const mutationCalls = invocationDetails.filter((entry) => entry.command === "set_proxy_mode").length;
+    const snapshotCalls = invocationDetails.filter((entry) => entry.command === "controller_snapshot").length;
+
+    actions.push(globalMode.trigger("click"));
+    await waitForInvocation("set_proxy_mode", mutationCalls);
+    actions.push(directMode.trigger("click"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "set_proxy_mode").length,
+      mutationCalls + 1,
+      "the second mode intent must wait for the first native mutation",
+    );
+    assert.equal(state.mode, "Direct", "the latest intent is rendered while its native write is queued");
+
+    first.reject(new Error("old-mode-failure-marker"));
+    await waitForInvocation("set_proxy_mode", mutationCalls + 1);
+    second.resolve(null);
+    await Promise.all(actions);
+
+    const calls = invocationDetails
+      .filter((entry) => entry.command === "set_proxy_mode")
+      .slice(mutationCalls);
+    assert.deepEqual(calls.map((entry) => entry.args.mode), ["Global", "Direct"]);
+    assert.equal(state.mode, "Direct");
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "controller_snapshot").length,
+      snapshotCalls + 1,
+      "only the latest mode intent publishes one authoritative controller readback",
+    );
+    assert.equal(state.logs.some((entry) => entry.message.includes("old-mode-failure-marker")), false);
+    assert.ok(state.logs.some((entry) => entry.message === "Proxy mode switched to Direct"));
+  } finally {
+    first.resolve(null);
+    second.resolve(null);
+    await Promise.allSettled(actions);
+    querySelectorAllElements.clear();
+    state.toggles.breakOnProxyChange = originalBreakOnChange;
+    if (hadMutation) responses.set_proxy_mode = originalMutation;
+    else delete responses.set_proxy_mode;
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("mode and selector mutations share one lane without readback rollback", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const originalModeMutation = responses.set_proxy_mode;
+  const originalSelectorMutation = responses.select_proxy;
+  const hadModeMutation = Object.hasOwn(responses, "set_proxy_mode");
+  const hadSelectorMutation = Object.hasOwn(responses, "select_proxy");
+  const originalBreakOnChange = state.toggles.breakOnProxyChange;
+  const originalLogs = [...state.logs];
+  const modePending = deferred();
+  const selectorPending = deferred();
+  const actions = [];
+  let readbackCall = 0;
+
+  try {
+    responses.controller_snapshot = controllerSnapshotWith({ mode: "rule", selected: "HK" });
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+    state.toggles.breakOnProxyChange = false;
+
+    const globalMode = interactiveElement();
+    globalMode.dataset.mode = "Global";
+    const jp = interactiveElement();
+    jp.dataset.group = "Proxy";
+    jp.dataset.node = "JP";
+    querySelectorAllElements.set("[data-mode]", [globalMode]);
+    querySelectorAllElements.set("[data-group][data-node]", [jp]);
+    await renderPage("proxies");
+
+    responses.set_proxy_mode = modePending.promise;
+    responses.select_proxy = selectorPending.promise;
+    const modeReadback = controllerSnapshotWith({ mode: "global", selected: "HK" });
+    const selectorReadback = controllerSnapshotWith({ mode: "global", selected: "JP" });
+    responses.controller_snapshot = () => {
+      const snapshot = [modeReadback, selectorReadback][readbackCall];
+      readbackCall += 1;
+      assert.ok(snapshot, "the mixed mutation lane performs exactly two readbacks");
+      return structuredClone(snapshot);
+    };
+    const modeCalls = invocationDetails.filter(({ command }) => command === "set_proxy_mode").length;
+    const selectorCalls = invocationDetails.filter(({ command }) => command === "select_proxy").length;
+
+    actions.push(globalMode.trigger("click"));
+    await waitForInvocation("set_proxy_mode", modeCalls);
+    actions.push(jp.trigger("click"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(state.mode, "Global");
+    assert.equal(state.proxyGroups.find(({ name }) => name === "Proxy")?.now, "JP");
+    assert.equal(
+      invocationDetails.filter(({ command }) => command === "select_proxy").length,
+      selectorCalls,
+      "selector IPC must wait while the earlier mode mutation is pending",
+    );
+
+    modePending.resolve(null);
+    await waitForInvocation("select_proxy", selectorCalls);
+    assert.equal(state.mode, "Global");
+    assert.equal(
+      state.proxyGroups.find(({ name }) => name === "Proxy")?.now,
+      "JP",
+      "mode readback must reapply the queued selector intent",
+    );
+
+    selectorPending.resolve(null);
+    await Promise.all(actions);
+    assert.equal(readbackCall, 2);
+    assert.equal(state.mode, "Global");
+    assert.equal(state.proxyGroups.find(({ name }) => name === "Proxy")?.now, "JP");
+  } finally {
+    modePending.resolve(null);
+    selectorPending.resolve(null);
+    await Promise.allSettled(actions);
+    querySelectorAllElements.clear();
+    state.toggles.breakOnProxyChange = originalBreakOnChange;
+    if (hadModeMutation) responses.set_proxy_mode = originalModeMutation;
+    else delete responses.set_proxy_mode;
+    if (hadSelectorMutation) responses.select_proxy = originalSelectorMutation;
+    else delete responses.select_proxy;
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+    state.logs = originalLogs;
+  }
+});
+
+test("a controller mutation response from an older engine generation performs zero UI writeback", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const originalMutation = responses.set_proxy_mode;
+  const hadMutation = Object.hasOwn(responses, "set_proxy_mode");
+  const originalBreakOnChange = state.toggles.breakOnProxyChange;
+  const pending = deferred();
+  let action = null;
+  const nextEngine = {
+    ...RUNNING_ENGINE,
+    snapshot: {
+      ...RUNNING_ENGINE.snapshot,
+      generation: 4,
+      config_digest: "digest-4",
+      state: {
+        state: "proxy_active",
+        runtime: {
+          ...RUNNING_ENGINE.snapshot.state.runtime,
+          context: {
+            ...RUNNING_ENGINE.snapshot.state.runtime.context,
+            generation: 4,
+          },
+          config_digest: "digest-4",
+        },
+      },
+    },
+  };
+
+  try {
+    responses.controller_snapshot = controllerSnapshotWith({ mode: "rule" });
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+    state.toggles.breakOnProxyChange = false;
+
+    const globalMode = interactiveElement();
+    globalMode.dataset.mode = "Global";
+    querySelectorAllElements.set("[data-mode]", [globalMode]);
+    await renderPage("proxies");
+    responses.set_proxy_mode = pending.promise;
+    const mutationCalls = invocationDetails.filter((entry) => entry.command === "set_proxy_mode").length;
+    const snapshotCalls = invocationDetails.filter((entry) => entry.command === "controller_snapshot").length;
+
+    action = globalMode.trigger("click");
+    await waitForInvocation("set_proxy_mode", mutationCalls);
+    assert.equal(state.mode, "Global");
+
+    await setEngine(nextEngine);
+    assert.equal(state.mode, null, "a new engine identity immediately discards the old optimistic mode");
+    pending.resolve(null);
+    await action;
+
+    assert.equal(state.mode, null);
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "controller_snapshot").length,
+      snapshotCalls,
+      "the stale mutation response must not schedule controller readback on the new generation",
+    );
+    assert.equal(state.logs.some((entry) => entry.message === "Proxy mode switched to Global"), false);
+  } finally {
+    pending.resolve(null);
+    if (action) await action.catch(() => {});
+    querySelectorAllElements.clear();
+    state.toggles.breakOnProxyChange = originalBreakOnChange;
+    if (hadMutation) responses.set_proxy_mode = originalMutation;
+    else delete responses.set_proxy_mode;
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("same-runtime stop and restart rotates provenance and rejects every old envelope", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalConnectionPaused = state.connectionPaused;
+  const originalLogsPaused = state.logsPaused;
+  const originalLogs = [...state.logs];
+
+  try {
+    state.connectionPaused = false;
+    state.logsPaused = false;
+    responses.engine_snapshot = RUNNING_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    const oldConnections = structuredClone(runtime.connectionsLiveStream.binding);
+    const oldLogs = structuredClone(runtime.logLiveStream.binding);
+    assert.ok(oldConnections);
+    assert.ok(oldLogs);
+
+    await appModule.handleAction("toggle-connection-stream");
+    await appModule.handleAction("toggle-log-stream");
+    assert.equal(state.connectionPaused, true);
+    assert.equal(state.logsPaused, true);
+    assert.equal(runtime.connectionsLiveStream.binding, null);
+    assert.equal(runtime.logLiveStream.binding, null);
+
+    await appModule.handleAction("toggle-connection-stream");
+    await appModule.handleAction("toggle-log-stream");
+    const newConnections = structuredClone(runtime.connectionsLiveStream.binding);
+    const newLogs = structuredClone(runtime.logLiveStream.binding);
+    assert.ok(newConnections.stream_id > oldConnections.stream_id);
+    assert.ok(newLogs.stream_id > oldLogs.stream_id);
+    assert.deepEqual(newConnections.runtime, oldConnections.runtime);
+    assert.deepEqual(newLogs.runtime, oldLogs.runtime);
+
+    state.connections = [];
+    await emit("cfw://connections-snapshot", {
+      provenance: oldConnections,
+      payload: {
+        upload: 1,
+        download: 1,
+        connections: [{
+          id: "old-same-runtime-connection",
+          upload: 1,
+          download: 1,
+          start: "2026-01-01T00:00:00Z",
+          chains: ["OLD"],
+          rule: "MATCH",
+          metadata: { host: "old.example" },
+        }],
+      },
+    });
+    await emit("cfw://log-lines", {
+      provenance: oldLogs,
+      payload: [{
+        time: "12:00:00",
+        level: "info",
+        source: "old-stream",
+        message: "old same-runtime log",
+        fields: [],
+      }],
+    });
+    await emit("cfw://stream-error", {
+      provenance: oldConnections,
+      payload: {
+        stream: "connections",
+        message: "old same-runtime stream error",
+        level: "warning",
+      },
+    });
+    assert.equal(state.connections.some(({ id }) => id === "old-same-runtime-connection"), false);
+    assert.equal(state.logs.some(({ message }) => message === "old same-runtime log"), false);
+    assert.equal(state.logs.some(({ message }) => message === "old same-runtime stream error"), false);
+
+    await emit("cfw://connections-snapshot", {
+      provenance: newConnections,
+      payload: {
+        upload: 2,
+        download: 2,
+        connections: [{
+          id: "new-same-runtime-connection",
+          upload: 2,
+          download: 2,
+          start: "2026-01-01T00:00:01Z",
+          chains: ["NEW"],
+          rule: "MATCH",
+          metadata: { host: "new.example" },
+        }],
+      },
+    });
+    await emit("cfw://log-lines", {
+      provenance: newLogs,
+      payload: [{
+        time: "12:00:01",
+        level: "info",
+        source: "new-stream",
+        message: "new same-runtime log",
+        fields: [],
+      }],
+    });
+    assert.deepEqual(state.connections.map(({ id }) => id), ["new-same-runtime-connection"]);
+    assert.equal(state.logs.some(({ message }) => message === "new same-runtime log"), true);
+  } finally {
+    state.connectionPaused = originalConnectionPaused;
+    state.logsPaused = originalLogsPaused;
+    state.logs = originalLogs;
+    responses.engine_snapshot = originalEngine;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+  }
+});
+
+test("a start response superseded by pause cannot republish a running binding", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalStart = responses.start_connections_stream;
+  const originalConnectionPaused = state.connectionPaused;
+  const originalLogs = [...state.logs];
+  const delayedStart = deferred();
+  let resumeAction = null;
+  let pauseAction = null;
+
+  try {
+    state.connectionPaused = false;
+    responses.engine_snapshot = RUNNING_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    await appModule.handleAction("toggle-connection-stream");
+    assert.equal(state.connectionPaused, true);
+    assert.equal(runtime.connectionsLiveStream.binding, null);
+
+    const delayedBinding = startStreamFixture("connections", RUNNING_ENGINE);
+    responses.start_connections_stream = delayedStart.promise;
+    const startCalls = invocationDetails.filter(({ command }) => (
+      command === "start_connections_stream"
+    )).length;
+
+    resumeAction = appModule.handleAction("toggle-connection-stream");
+    await waitForInvocation("start_connections_stream", startCalls);
+    assert.equal(state.connectionPaused, false);
+    pauseAction = appModule.handleAction("toggle-connection-stream");
+    assert.equal(state.connectionPaused, true, "pause supersedes the in-flight start immediately");
+
+    delayedStart.resolve(delayedBinding);
+    await Promise.all([resumeAction, pauseAction]);
+    assert.equal(runtime.connectionsLiveStream.binding, null);
+    assert.equal(activeStreamBindings.has("connections"), false);
+
+    state.connections = [];
+    await emit("cfw://connections-snapshot", {
+      provenance: delayedBinding,
+      payload: {
+        upload: 1,
+        download: 1,
+        connections: [{
+          id: "superseded-start-connection",
+          upload: 1,
+          download: 1,
+          start: "2026-01-01T00:00:00Z",
+          chains: ["STALE"],
+          rule: "MATCH",
+          metadata: { host: "stale-start.example" },
+        }],
+      },
+    });
+    assert.deepEqual(state.connections, []);
+
+    responses.start_connections_stream = originalStart;
+    await appModule.handleAction("toggle-connection-stream");
+    const resumedBinding = runtime.connectionsLiveStream.binding;
+    assert.ok(resumedBinding.stream_id > delayedBinding.stream_id);
+    assert.equal(state.connectionPaused, false);
+  } finally {
+    delayedStart.resolve(startStreamFixture("connections", RUNNING_ENGINE));
+    if (resumeAction) await resumeAction.catch(() => {});
+    if (pauseAction) await pauseAction.catch(() => {});
+    responses.start_connections_stream = originalStart;
+    state.connectionPaused = originalConnectionPaused;
+    state.logs = originalLogs;
+    responses.engine_snapshot = originalEngine;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+  }
+});
+
+test("runtime A buffered stream events cannot be accepted after runtime B is bound", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalConnectionPaused = state.connectionPaused;
+  const originalLogsPaused = state.logsPaused;
+  const runtimeB = {
+    ...RUNNING_ENGINE,
+    snapshot: {
+      ...RUNNING_ENGINE.snapshot,
+      generation: 4,
+      config_digest: "digest-b",
+      state: {
+        state: "proxy_active",
+        runtime: {
+          ...RUNNING_ENGINE.snapshot.state.runtime,
+          context: {
+            ...RUNNING_ENGINE.snapshot.state.runtime.context,
+            config_epoch: 2,
+            generation: 4,
+          },
+          config_digest: "digest-b",
+        },
+      },
+    },
+  };
+  const delayedConnection = {
+    upload: 1,
+    download: 2,
+    connections: [{
+      id: "runtime-a-delayed",
+      upload: 1,
+      download: 2,
+      start: "2026-01-01T00:00:00Z",
+      chains: ["A"],
+      rule: "MATCH",
+      metadata: { host: "a-delayed.example" },
+    }],
+  };
+  const liveConnection = {
+    upload: 3,
+    download: 4,
+    connections: [{
+      id: "runtime-b-live",
+      upload: 3,
+      download: 4,
+      start: "2026-01-01T00:00:01Z",
+      chains: ["B"],
+      rule: "MATCH",
+      metadata: { host: "b-live.example" },
+    }],
+  };
+
+  try {
+    state.connectionPaused = false;
+    state.logsPaused = false;
+    responses.engine_snapshot = RUNNING_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    const bindingA = streamBindingFor("connections", RUNNING_ENGINE);
+
+    responses.engine_snapshot = runtimeB;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    const bindingB = streamBindingFor("connections", runtimeB);
+    assert.notDeepEqual(bindingA, bindingB);
+    state.connections = [];
+
+    await emit("cfw://connections-snapshot", {
+      provenance: bindingA,
+      payload: delayedConnection,
+    });
+    await emit("cfw://log-lines", streamEvent("request-logs", [{
+      time: "12:00:00",
+      level: "info",
+      source: "runtime-a",
+      message: "runtime A delayed log",
+      fields: [],
+    }], RUNNING_ENGINE));
+    await emit("cfw://stream-error", streamEvent("connections", {
+      stream: "connections",
+      message: "runtime A delayed error",
+      level: "warning",
+    }, RUNNING_ENGINE));
+
+    assert.equal(state.connections.some(({ id }) => id === "runtime-a-delayed"), false);
+    assert.equal(state.logs.some(({ message }) => message === "runtime A delayed log"), false);
+    assert.equal(state.logs.some(({ message }) => message === "runtime A delayed error"), false);
+
+    await emit("cfw://connections-snapshot", {
+      provenance: bindingB,
+      payload: liveConnection,
+    });
+    await emit("cfw://log-lines", streamEvent("request-logs", [{
+      time: "12:00:01",
+      level: "info",
+      source: "runtime-b",
+      message: "runtime B live log",
+      fields: [],
+    }], runtimeB));
+
+    assert.deepEqual(state.connections.map(({ id }) => id), ["runtime-b-live"]);
+    assert.equal(state.logs.some(({ message }) => message === "runtime B live log"), true);
+  } finally {
+    state.connectionPaused = originalConnectionPaused;
+    state.logsPaused = originalLogsPaused;
+    responses.engine_snapshot = originalEngine;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+  }
+});
+
+test("a delayed runtime A pause stays serialized across same-runtime refresh and runtime B", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalStop = responses.stop_connections_stream;
+  const originalConnectionPaused = state.connectionPaused;
+  const delayedStop = deferred();
+  let pauseAction = null;
+  let sameRuntimeRefresh = null;
+  let runtimeTransition = null;
+  let resumeAction = null;
+  const runtimeB = {
+    ...RUNNING_ENGINE,
+    snapshot: {
+      ...RUNNING_ENGINE.snapshot,
+      generation: 5,
+      config_digest: "digest-pause-b",
+      state: {
+        state: "proxy_active",
+        runtime: {
+          ...RUNNING_ENGINE.snapshot.state.runtime,
+          context: {
+            ...RUNNING_ENGINE.snapshot.state.runtime.context,
+            config_epoch: 3,
+            generation: 5,
+          },
+          config_digest: "digest-pause-b",
+        },
+      },
+    },
+  };
+
+  try {
+    state.connectionPaused = false;
+    responses.engine_snapshot = RUNNING_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    const bindingA = streamBindingFor("connections", RUNNING_ENGINE);
+    const stopCalls = invocationDetails.filter(({ command }) => (
+      command === "stop_connections_stream"
+    )).length;
+    const startCalls = invocationDetails.filter(({ command }) => (
+      command === "start_connections_stream"
+    )).length;
+    responses.stop_connections_stream = delayedStop.promise;
+
+    pauseAction = appModule.handleAction("toggle-connection-stream");
+    await waitForInvocation("stop_connections_stream", stopCalls);
+    assert.equal(state.connectionPaused, true, "pause intent must publish before native completion");
+    assert.deepEqual(
+      invocationDetails.filter(({ command }) => command === "stop_connections_stream").at(-1)?.args,
+      { expected: bindingA },
+    );
+
+    const engineCalls = invocationDetails.filter(({ command }) => command === "engine_snapshot").length;
+    sameRuntimeRefresh = listeners.get("cfw://engine-event")?.({
+      event: "cfw://engine-event",
+      payload: { type: "snapshot_changed" },
+    });
+    await waitForInvocation("engine_snapshot", engineCalls);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      invocationDetails.filter(({ command }) => command === "start_connections_stream").length,
+      startCalls,
+      "a same-runtime refresh must respect the already-published pause intent",
+    );
+
+    responses.engine_snapshot = runtimeB;
+    runtimeTransition = listeners.get("cfw://engine-event")?.({
+      event: "cfw://engine-event",
+      payload: { type: "snapshot_changed" },
+    });
+    await waitForInvocation("engine_snapshot", engineCalls + 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      invocationDetails.filter(({ command }) => command === "start_connections_stream").length,
+      startCalls,
+      "the pause intent must remain in force when runtime B becomes active",
+    );
+
+    delayedStop.resolve(null);
+    await Promise.all([pauseAction, sameRuntimeRefresh, runtimeTransition]);
+    assert.equal(state.connectionPaused, true);
+
+    resumeAction = appModule.handleAction("toggle-connection-stream");
+    await resumeAction;
+    assert.equal(state.connectionPaused, false);
+    assert.equal(
+      invocationDetails.filter(({ command }) => command === "start_connections_stream").length,
+      startCalls + 1,
+      "resuming must start exactly one stream bound to runtime B",
+    );
+
+    state.connections = [];
+    await emit("cfw://connections-snapshot", {
+      provenance: bindingA,
+      payload: { upload: 1, download: 1, connections: [] },
+    });
+    await emit("cfw://connections-snapshot", streamEvent("connections", {
+      upload: 2,
+      download: 2,
+      connections: [{
+        id: "runtime-b-after-stale-stop",
+        upload: 2,
+        download: 2,
+        start: "2026-01-01T00:00:02Z",
+        chains: ["B"],
+        rule: "MATCH",
+        metadata: { host: "runtime-b.example" },
+      }],
+    }, runtimeB));
+    assert.deepEqual(state.connections.map(({ id }) => id), ["runtime-b-after-stale-stop"]);
+  } finally {
+    delayedStop.resolve(null);
+    if (pauseAction) await pauseAction.catch(() => {});
+    if (sameRuntimeRefresh) await sameRuntimeRefresh.catch(() => {});
+    if (runtimeTransition) await runtimeTransition.catch(() => {});
+    if (resumeAction) await resumeAction.catch(() => {});
+    responses.stop_connections_stream = originalStop;
+    state.connectionPaused = originalConnectionPaused;
+    responses.engine_snapshot = originalEngine;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+  }
+});
+
+test("proxy selector mutations are single-flight and a failed latest intent publishes controller readback", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const originalMutation = responses.select_proxy;
+  const hadMutation = Object.hasOwn(responses, "select_proxy");
+  const originalBreakOnChange = state.toggles.breakOnProxyChange;
+  const first = deferred();
+  const second = deferred();
+  const actions = [];
+  let mutationCall = 0;
+
+  try {
+    responses.controller_snapshot = controllerSnapshotWith({ selected: "HK", extraOptions: ["SG"] });
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+    state.toggles.breakOnProxyChange = false;
+
+    const jp = interactiveElement();
+    jp.dataset.group = "Proxy";
+    jp.dataset.node = "JP";
+    const sg = interactiveElement();
+    sg.dataset.group = "Proxy";
+    sg.dataset.node = "SG";
+    querySelectorAllElements.set("[data-group][data-node]", [jp, sg]);
+    await renderPage("proxies");
+
+    responses.select_proxy = () => {
+      const result = [first.promise, second.promise][mutationCall];
+      mutationCall += 1;
+      assert.ok(result, "only the two requested selector mutations may reach native IPC");
+      return result;
+    };
+    responses.controller_snapshot = controllerSnapshotWith({ selected: "JP" });
+    const mutationCalls = invocationDetails.filter((entry) => entry.command === "select_proxy").length;
+    const snapshotCalls = invocationDetails.filter((entry) => entry.command === "controller_snapshot").length;
+
+    actions.push(jp.trigger("click"));
+    await waitForInvocation("select_proxy", mutationCalls);
+    actions.push(sg.trigger("click"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "select_proxy").length,
+      mutationCalls + 1,
+      "the second selector intent must wait for the first native mutation",
+    );
+    assert.equal(state.proxyGroups.find((group) => group.name === "Proxy")?.now, "SG");
+
+    first.resolve(null);
+    await waitForInvocation("select_proxy", mutationCalls + 1);
+    second.reject(new Error("latest-selector-failure-marker"));
+    await Promise.all(actions);
+
+    const calls = invocationDetails
+      .filter((entry) => entry.command === "select_proxy")
+      .slice(mutationCalls);
+    assert.deepEqual(calls.map((entry) => entry.args.proxy), ["JP", "SG"]);
+    assert.equal(
+      state.proxyGroups.find((group) => group.name === "Proxy")?.now,
+      "JP",
+      "a failed latest selector intent must show authoritative controller state",
+    );
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "controller_snapshot").length,
+      snapshotCalls + 1,
+    );
+    assert.ok(state.logs.some((entry) => (
+      entry.message.includes("latest-selector-failure-marker")
+      && entry.message.includes("controller readback reports JP")
+    )));
+    assert.equal(state.logs.some((entry) => entry.message === "Proxy group Proxy switched to JP"), false);
+  } finally {
+    first.resolve(null);
+    second.resolve(null);
+    await Promise.allSettled(actions);
+    querySelectorAllElements.clear();
+    state.toggles.breakOnProxyChange = originalBreakOnChange;
+    if (hadMutation) responses.select_proxy = originalMutation;
+    else delete responses.select_proxy;
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("Engine Off invalidates a pending controller snapshot and live connection/log events", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const pendingController = deferred();
+  let reloadPromise = null;
+
+  try {
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+    const previousCalls = invocationDetails.filter((entry) => entry.command === "controller_snapshot").length;
+    responses.controller_snapshot = pendingController.promise;
+    reloadPromise = reloadButton.click();
+    await waitForInvocation("controller_snapshot", previousCalls);
+
+    responses.engine_snapshot = OFF_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+
+    assert.equal(state.controllerStatus, "engine off");
+    assert.deepEqual(state.proxyGroups, []);
+    assert.deepEqual(state.connections, []);
+    assert.deepEqual(state.rules, []);
+    assert.deepEqual(state.providers, []);
+    assert.deepEqual(state.ruleProviders, []);
+    assert.equal(state.connectionStream.uploadTotal, 0);
+    assert.equal(state.connectionStream.downloadTotal, 0);
+    assert.equal(state.traffic.upload, 0);
+    assert.equal(state.traffic.download, 0);
+
+    await emit(
+      "cfw://connections-snapshot",
+      streamEvent("connections", originalController.connections, RUNNING_ENGINE),
+    );
+    await emit("cfw://log-lines", streamEvent("request-logs", [{
+        time: "12:00:01",
+        level: "info",
+        source: "stale-engine",
+        message: "stale engine log must be ignored",
+        fields: [],
+      }], RUNNING_ENGINE));
+    assert.deepEqual(state.connections, []);
+    assert.equal(state.logs.some((entry) => entry.message === "stale engine log must be ignored"), false);
+
+    pendingController.resolve({
+      ...structuredClone(originalController),
+      proxies: {
+        groups: [{ name: "STALE", kind: "Selector", now: "STALE", options: ["STALE"], history: [] }],
+        proxies: [],
+      },
+    });
+    await reloadPromise;
+
+    assert.deepEqual(state.proxyGroups, []);
+    assert.deepEqual(state.connections, []);
+    assert.deepEqual(state.rules, []);
+    assert.equal(state.controllerStatus, "engine off");
+  } finally {
+    pendingController.resolve(originalController);
+    if (reloadPromise) await reloadPromise.catch(() => {});
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("Provider metadata survives core Stop while live rule snapshots remain generation-bound", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProviders = responses.providers_snapshot;
+  const originalProviderRejection = rejected.providers_snapshot;
+  const originalRules = responses.rules_snapshot;
+  const hadProvidersResponse = Object.hasOwn(responses, "providers_snapshot");
+  const hadProviderRejection = Object.hasOwn(rejected, "providers_snapshot");
+  const pendingProviders = deferred();
+  const pendingRules = deferred();
+  let providerReload = null;
+  let rulesReload = null;
+
+  try {
+    await setEngine({
+      ...RUNNING_ENGINE,
+      capabilities: { ...RUNNING_ENGINE.capabilities, provider_management: true },
+    });
+    delete rejected.providers_snapshot;
+    responses.providers_snapshot = pendingProviders.promise;
+    const providerCalls = invocationDetails.filter((entry) => entry.command === "providers_snapshot").length;
+    providerReload = reloadButton.click();
+    await waitForInvocation("providers_snapshot", providerCalls);
+
+    responses.engine_snapshot = { ...OFF_ENGINE, capabilities: { ...OFF_ENGINE.capabilities, provider_management: true } };
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    pendingProviders.resolve({
+      proxy_providers: [{ name: "SAVED-PROVIDER", kind: "Proxy", vehicle_type: "HTTP", proxies: [] }],
+      rule_providers: [{ name: "SAVED-RULE-PROVIDER", kind: "Rule", vehicle_type: "HTTP", rules: [] }],
+    });
+    await providerReload;
+
+    assert.deepEqual(state.providers.map(({ name }) => name), ["SAVED-PROVIDER"]);
+    assert.deepEqual(state.ruleProviders.map(({ name }) => name), ["SAVED-RULE-PROVIDER"]);
+    assert.equal(state.providerCapabilityError, null);
+
+    if (hadProviderRejection) rejected.providers_snapshot = originalProviderRejection;
+    else delete rejected.providers_snapshot;
+    if (hadProvidersResponse) responses.providers_snapshot = originalProviders;
+    else delete responses.providers_snapshot;
+    await setEngine(RUNNING_ENGINE);
+    await renderPage("rules");
+
+    responses.rules_snapshot = pendingRules.promise;
+    const ruleCalls = invocationDetails.filter((entry) => entry.command === "rules_snapshot").length;
+    rulesReload = reloadButton.click();
+    await waitForInvocation("rules_snapshot", ruleCalls);
+
+    responses.engine_snapshot = OFF_ENGINE;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    pendingRules.resolve({
+      rules: [{ index: 999, type: "DOMAIN", payload: "stale.example", proxy: "STALE" }],
+    });
+    await rulesReload;
+
+    assert.deepEqual(state.rules, []);
+    assert.equal(state.controllerStatus, "engine off");
+  } finally {
+    pendingProviders.resolve({ proxy_providers: [], rule_providers: [] });
+    pendingRules.resolve({ rules: [] });
+    if (providerReload) await providerReload.catch(() => {});
+    if (rulesReload) await rulesReload.catch(() => {});
+    if (hadProvidersResponse) responses.providers_snapshot = originalProviders;
+    else delete responses.providers_snapshot;
+    if (hadProviderRejection) rejected.providers_snapshot = originalProviderRejection;
+    else delete rejected.providers_snapshot;
+    responses.rules_snapshot = originalRules;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("every page renders", async () => {
+  for (const { id } of PAGES) {
+    const html = await renderPage(id);
+    assert.ok(html.length > 200, `page ${id} rendered ${html.length} characters`);
+  }
+});
+
+test("Start at Login reflects typed live macOS status without rewriting persisted intent", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const cases = [
+    {
+      persistedIntent: false,
+      liveStatus: "enabled",
+      matches: false,
+      checked: true,
+      message: "macOS currently enables this Login Item, while the saved preference says Off",
+    },
+    {
+      persistedIntent: true,
+      liveStatus: "not_registered",
+      matches: false,
+      checked: false,
+      message: "The saved preference says On, but macOS reports it is not registered",
+    },
+    {
+      persistedIntent: false,
+      liveStatus: "requires_approval",
+      matches: false,
+      checked: true,
+      message: "macOS requires approval in System Settings",
+    },
+    {
+      persistedIntent: false,
+      liveStatus: "unknown",
+      matches: false,
+      checked: false,
+      message: "Start at Login is unavailable because macOS returned an unknown Login Item state",
+    },
+  ];
+
+  try {
+    for (const scenario of cases) {
+      responses.read_settings_snapshot = {
+        ...original,
+        settings: {
+          ...original.settings,
+          launch_at_login: scenario.persistedIntent,
+        },
+        launch_at_login: {
+          persisted_intent: scenario.persistedIntent,
+          live_status: scenario.liveStatus,
+          matches_persisted_intent: scenario.matches,
+        },
+      };
+      await emit("cfw://settings-changed", responses.read_settings_snapshot);
+      const settings = await renderPage("settings");
+      assert.equal(state.toggles.startAtLogin, scenario.checked);
+      assert.ok(settings.includes(scenario.message), scenario.liveStatus);
+      if (scenario.liveStatus === "unknown") {
+        assert.match(settings, /data-toggle="startAtLogin"[^>]*disabled/u);
+      }
+    }
+  } finally {
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
+test("invalid settings events recover from native state or disable persistence", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const invalid = structuredClone(original);
+  invalid.settings.theme = "dark";
+  invalid.settings.launch_at_login = "false";
+  invalid.unexpected = true;
+
+  try {
+    await emit("cfw://settings-changed", invalid);
+    assert.deepEqual(state.settingsSnapshot, original);
+    assert.equal(state.settingsUnavailableReason, null);
+    assert.ok(state.logs.some((entry) => (
+      entry.source === "settings"
+      && entry.message.includes("recovered from the native store")
+    )));
+
+    responses.read_settings_snapshot = invalid;
+    await emit("cfw://settings-changed", invalid);
+    const settings = await renderPage("settings");
+
+    assert.equal(state.settingsSnapshot.persisted, false);
+    assert.deepEqual(state.settingsSnapshot.settings, {
+      theme: "system",
+      font_family: "", language: "system",
+      retain_window_bounds: true,
+      launch_at_login: false,
+      silent_start: false,
+      check_for_updates: false,
+    });
+    assert.deepEqual(state.launchAtLogin, {
+      persistedIntent: false,
+      liveStatus: "unknown",
+      matchesPersistedIntent: false,
+    });
+    assert.equal(state.toggles.startAtLogin, false);
+    assert.equal(state.toggles.silentStart, false);
+    assert.equal(state.toggles.checkForUpdates, false);
+    assert.equal(state.toggles.retainWindowBounds, true);
+    assert.equal(documentStub.documentElement.dataset.theme, "light");
+    assert.match(settings, /Preferences are unavailable because the native settings snapshot could not be verified/u);
+    assert.match(settings, /data-toggle="startAtLogin"[^>]*disabled/u);
+    assert.match(settings, /data-toggle="silentStart"[^>]*disabled/u);
+    assert.match(settings, /data-theme-setting disabled/u);
+    assert.match(settings, /data-action="save-settings" disabled/u);
+    assert.ok(state.logs.some((entry) => (
+      entry.level === "error"
+      && entry.source === "settings"
+      && entry.message.includes("Rejected an invalid settings update")
+    )));
+  } finally {
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
+test("malformed Login Item state and fatal startup never echo attacker text", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const secret = "<img src=x onerror=fatal-secret>";
+  const malformed = {
+    ...structuredClone(original),
+    launch_at_login: {
+      persisted_intent: false,
+      live_status: secret,
+      matches_persisted_intent: false,
+    },
+  };
+  const originalBody = documentStub.body.innerHTML;
+
+  try {
+    responses.read_settings_snapshot = malformed;
+    await emit("cfw://settings-changed", malformed);
+    assert.equal(state.settingsUnavailableReason !== null, true);
+    assert.equal(state.logs.some((entry) => entry.message.includes(secret)), false);
+
+    appModule.renderFatalBootstrap(new Error(`token=fatal-secret ${secret}`));
+    assert.match(documentStub.body.innerHTML, /startup_state_unverifiable/u);
+    assert.equal(documentStub.body.innerHTML.includes("fatal-secret"), false);
+    assert.equal(documentStub.body.innerHTML.includes("<img"), false);
+    assert.ok(documentStub.body.innerHTML.length < 512);
+  } finally {
+    documentStub.body.innerHTML = originalBody;
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
+test("missing rule metadata and unsupported providers render as unavailable", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const providerCalls = invocationDetails.filter((entry) => entry.command === "providers_snapshot").length;
+  await reloadButton.click();
+  assert.equal(
+    invocationDetails.filter((entry) => entry.command === "providers_snapshot").length,
+    providerCalls,
+    "a typed false capability must prevent provider probing",
+  );
+  state.rules = [{
+    index: "unavailable",
+    type: "Default",
+    payload: "final",
+    proxy: "route(proxy)",
+    hits: "unavailable",
+    size: "unavailable",
+  }];
+  const rules = await renderPage("rules");
+  assert.equal((rules.match(/unavailable/gu) ?? []).length >= 2, true);
+
+  const providers = await renderPage("providers");
+  assert.ok(providers.includes("Proxy provider management unavailable"));
+  assert.ok(providers.includes("Rule provider management unavailable"));
+  assert.ok(providers.includes("unavailable in this application"));
+});
+
+test("the General page exposes runtime controls and explains unsupported features", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const html = await renderPage("general");
+  assert.match(html, /127\.0\.0\.1:7890/u);
+  assert.match(html, /sing-box 1\.13\.0/u, "the engine names itself in its version string");
+  assert.doesNotMatch(html, /sing-box · sing-box/u);
+  for (const needle of [
+    "trusted private source networks",
+    "validated runtime replacement",
+    "Mixin is unavailable",
+    "Country rules use sing-box rule sets",
+  ]) {
+    assert.ok(html.includes(needle), `General page is missing the reason: ${needle}`);
+  }
+  assert.match(html, /data-runtime-log-level aria-label="Engine log level">/u);
+  assert.match(html, /data-action="open-runtime-settings">127/u);
+  assert.doesNotMatch(html, /data-toggle="allowLan"[^>]*disabled/u);
+  assert.match(html, /data-toggle="mixin"[^>]*disabled/u);
+});
+
+test("live stream events do not crash the renderer", async () => {
+  await setEngine(RUNNING_ENGINE);
+  state.logsPaused = true;
+  state.connectionPaused = true;
+  await appModule.handleAction("toggle-log-stream");
+  await appModule.handleAction("toggle-connection-stream");
+  await renderPage("logs");
+  await emit("cfw://log-lines", streamEvent("request-logs", [
+    { time: "12:00:00", level: "info", source: "engine", message: "hello", fields: [{ key: "k", value: "v" }] },
+  ]));
+  await emit(
+    "cfw://connections-snapshot",
+    streamEvent("connections", responses.controller_snapshot.connections),
+  );
+  await emit("cfw://stream-error", streamEvent("connections", {
+    stream: "connections",
+    message: "socket closed",
+    level: "warning",
+  }));
+  await emit("cfw://engine-event", { type: "boundary_failure", code: "x", message: "boom" });
+  await emit("cfw://update-available", { available: true, version: "0.4.1", current: "0.4.0" });
+  assert.equal(state.logs.some((entry) => entry.message === "hello"), true);
+  assert.equal(state.logs.some((entry) => entry.message.includes("boom")), true);
+});
+
+test("every glass dialog renders", async () => {
+  const cases = [
+    ["copy", { kind: "copy", id: PROFILE_ID }, "Copy profile"],
+    ["settings", { kind: "settings", id: PROFILE_ID }, "Edit profile information"],
+    ["delete", { kind: "delete", id: PROFILE_ID }, "Delete profile"],
+    ["reset-settings", { kind: "reset-settings" }, "Reset all settings"],
+    ["preview-config", { kind: "preview-config", payload: PROJECTION }, "Projected configuration"],
+    ["network-services", { kind: "network-services", payload: DIAGNOSTICS.services, unavailable: DIAGNOSTICS.unavailable }, "Network services"],
+    ["dns-query", { kind: "dns-query", payload: { name: "a.test", type: "A", result: "" } }, "Resolve through the running engine"],
+    ["info", { kind: "info", payload: { title: "System DNS", body: "never written" } }, "System DNS"],
+    ["product-about", { kind: "product-about", payload: { phase: "idle", update: { available: true, version: "0.4.1" } } }, "Open Download"],
+    ["credentials", { kind: "credentials", id: PROFILE_ID }, "Reading credential requirements"],
+    ["credential-cleanup", { kind: "credential-cleanup" }, "Unused credentials"],
+  ];
+  for (const [name, dialog, needle] of cases) {
+    state.glassDialog = dialog;
+    state.credentialSetup = null;
+    state.credentialGcPreview = name === "credential-cleanup"
+      ? { previewId: "8f14e45f-ceea-4670-a91e-2f0f1d5e6a7b", orphanCount: 1, orphanReferences: [{ id: PROFILE_ID, kind: "trojan_password" }] }
+      : null;
+    glassRoot.innerHTML = "";
+    await renderPage("general");
+    assert.ok(glassRoot.innerHTML.includes(needle), `dialog ${name} did not render "${needle}"`);
+  }
+  state.glassDialog = null;
+  state.credentialGcPreview = null;
+});
+
+const IDLE_INSTALL = Object.freeze({
+  phase: "idle", version: null, downloaded: 0, total: null, failure: null, ended: null,
+});
+
+test("startup asks once what the previous update installation left behind", () => {
+  assert.equal(startupUpdateReport.queries, 1);
+  assert.deepEqual(
+    startupUpdateReport.errors, [],
+    "an absent installation record is not reported as a failure",
+  );
+  assert.equal(startupUpdateReport.dialog, null, "and nothing is shown for it");
+  assert.deepEqual(startupUpdateReport.install, IDLE_INSTALL, "nor is any installation re-attached");
+});
+
+test("the About dialog offers in-app installation only where the host supports it", async () => {
+  const about = (install, version = "0.4.1") => ({
+    kind: "product-about",
+    payload: { phase: "idle", update: { available: true, version, install } },
+  });
+  const original = { dialog: state.glassDialog, install: state.updateInstall };
+  const render = async () => {
+    glassRoot.innerHTML = "";
+    await renderPage("general");
+    return glassRoot.innerHTML;
+  };
+  try {
+    state.updateInstall = { ...IDLE_INSTALL };
+    state.glassDialog = about({ supported: true });
+    let html = await render();
+    assert.ok(html.includes("data-glass-update-install>Install Update v0.4.1<"));
+    assert.ok(html.includes('class="glass-btn ghost" data-glass-open-update'),
+      "the download page stays available as the secondary action");
+    assert.ok(html.includes('<div class="product-about-status">Update available: v0.4.1</div>'),
+      "without an installation the dialog keeps its own status line");
+
+    for (const install of [{ supported: false, code: "not_in_applications" }, undefined]) {
+      state.glassDialog = about(install);
+      html = await render();
+      assert.equal(html.includes("data-glass-update-"), false);
+      assert.ok(html.includes('class="glass-btn" data-glass-open-update'),
+        "without in-app installation the dialog is exactly the release-page dialog");
+    }
+
+    const nothingPresented = {
+      kind: "product-about",
+      payload: { phase: "idle", update: { available: false, current: "0.4.0", error: "offline" } },
+    };
+    for (const presented of [about({ supported: true }), about({ supported: true }, "0.4.2"), nothingPresented]) {
+      const context = JSON.stringify(presented.payload.update);
+      state.glassDialog = presented;
+      state.updateInstall = { ...IDLE_INSTALL, phase: "downloading", version: "0.4.1", downloaded: 30, total: 120 };
+      html = await render();
+      assert.ok(html.includes("Downloading update… 25%"), context);
+      assert.ok(html.includes("data-glass-update-cancel"), context);
+      assert.equal(html.includes("data-glass-open-update"), false, context);
+      assert.equal(html.includes("data-glass-update-install"), false, context);
+      assert.ok(html.includes("data-glass-check-update disabled"), context);
+      assert.ok(html.includes("data-glass-dismiss disabled"), context);
+
+      state.updateInstall = { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" };
+      html = await render();
+      assert.ok(html.includes("data-glass-update-commit>Install and Relaunch<"), context);
+      assert.ok(html.includes("data-glass-update-cancel"), context);
+      assert.ok(
+        html.includes("v0.4.1 is ready to install. Clash for Mac will stop the core, quit, and reopen."),
+        `the staged release is named whatever is presented: ${context}`,
+      );
+      assert.equal(html.includes("data-glass-open-update"), false, context);
+      assert.equal(html.includes("data-glass-update-install"), false, context);
+      assert.equal(html.includes("data-glass-check-update disabled"), false, context);
+    }
+
+    state.glassDialog = about({ supported: true });
+    state.updateInstall = {
+      ...IDLE_INSTALL, version: "0.4.1", failure: { code: "signature_mismatch", category: "authenticity" },
+    };
+    html = await render();
+    assert.ok(html.includes("(signature_mismatch)"));
+    assert.equal(html.includes("data-glass-open-update"), false,
+      "a download that failed its signature is not answered with another download");
+    assert.equal(html.includes("data-glass-update-install"), false);
+
+    state.glassDialog = about({ supported: false, code: "release_failed_authentication" });
+    state.updateInstall = { ...IDLE_INSTALL };
+    html = await render();
+    assert.ok(
+      html.includes("The downloaded update is not the signed release and was discarded. Do not install it from another source. (release_failed_authentication)"),
+      "the host's verdict is shown by a page that has no record of the failure",
+    );
+    assert.equal(html.includes("data-glass-open-update"), false);
+    assert.equal(html.includes("data-glass-update-"), false);
+
+    state.glassDialog = about({ supported: true });
+    for (const [ended, reason] of [
+      [{ failure: { code: "network", category: "network" } }, "The download did not complete. Check the connection and try again. (network)"],
+      [{ ended: "cancelled" }, "Update download cancelled"],
+      [{ ended: "unreported" }, "The update installation is no longer in progress. Check for updates again."],
+    ]) {
+      state.updateInstall = { ...IDLE_INSTALL, version: "0.4.1", ...ended };
+      html = await render();
+      assert.ok(html.includes(`<div class="product-about-status">${reason}</div>`), reason);
+      assert.equal(html.includes("data-glass-update-"), false, `${reason}: the consumed release is not offered for installation`);
+      assert.equal(html.includes("data-glass-open-update"), false, `${reason}: nor for download`);
+      assert.ok(html.includes("data-glass-check-update >Check for Update<"), `${reason}: a fresh check stays available`);
+      assert.equal(html.includes("data-glass-dismiss disabled"), false, `${reason}: and so does Close`);
+    }
+
+    state.glassDialog = { kind: "product-about", payload: { phase: "checking", update: { available: true, version: "0.4.1", install: { supported: true } } } };
+    state.updateInstall = { ...IDLE_INSTALL };
+    html = await render();
+    assert.equal(html.includes("data-glass-update-install"), false, "nothing is offered while a check is running");
+  } finally {
+    state.glassDialog = original.dialog;
+    state.updateInstall = original.install;
+  }
+});
+
+test("the About dialog buttons drive preparation, installation and cancellation through the host", async () => {
+  const original = { dialog: state.glassDialog, install: state.updateInstall, info: state.updateInfo };
+  const buttons = { install: interactiveElement(), commit: interactiveElement(), cancel: interactiveElement() };
+  querySelectorAllElements.set("[data-glass-update-install]", [buttons.install]);
+  querySelectorAllElements.set("[data-glass-update-commit]", [buttons.commit]);
+  querySelectorAllElements.set("[data-glass-update-cancel]", [buttons.cancel]);
+  const issued = (command) => invocationDetails.filter((entry) => entry.command === command);
+  try {
+    await emit("cfw://update-available", {
+      available: true, version: "0.4.1", current: "0.4.0", install: { supported: true },
+    });
+    assert.deepEqual(state.updateInfo.install, { supported: true });
+    state.glassDialog = { kind: "product-about", payload: { phase: "idle", update: state.updateInfo } };
+    state.updateInstall = { ...IDLE_INSTALL };
+    await renderPage("general");
+
+    responses.prepare_update_install = { version: "0.4.1" };
+    const prepared = issued("prepare_update_install").length;
+    await buttons.install.trigger("click");
+    assert.deepEqual(issued("prepare_update_install").slice(prepared).map(({ args }) => args),
+      [{ expectedVersion: "0.4.1" }]);
+    assert.equal(state.updateInstall.phase, "ready");
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-commit"),
+      "the dialog re-renders when the host stages the release");
+
+    await emit("cfw://update-progress", { phase: "downloading", version: "0.4.1", downloaded: 1, total: 2 });
+    assert.equal(state.updateInstall.phase, "ready", "late progress never unstages a release");
+
+    responses.commit_update_install = () => {
+      throw { code: "engine_stop_failed", category: "engine" };
+    };
+    await buttons.commit.trigger("click");
+    assert.equal(state.updateInstall.phase, "ready");
+    assert.ok(glassRoot.innerHTML.includes("The core could not be stopped. Stop the core and try again. (engine_stop_failed)"));
+
+    responses.cancel_update_install = { cancelled: "staged" };
+    const cancellations = issued("cancel_update_install").length;
+    await buttons.cancel.trigger("click");
+    assert.equal(issued("cancel_update_install").length, cancellations + 1);
+    assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "cancelled" });
+
+    state.updateInstall = { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" };
+    responses.commit_update_install = { version: "0.4.1" };
+    await buttons.commit.trigger("click");
+    assert.deepEqual(issued("commit_update_install").at(-1).args, { expectedVersion: "0.4.1" });
+    assert.equal(state.updateInstall.phase, "installing");
+    assert.ok(glassRoot.innerHTML.includes("Clash for Mac will reopen automatically"));
+  } finally {
+    for (const command of ["prepare_update_install", "commit_update_install", "cancel_update_install"]) {
+      delete responses[command];
+    }
+    querySelectorAllElements.clear();
+    state.glassDialog = original.dialog;
+    state.updateInstall = original.install;
+    state.updateInfo = original.info;
+  }
+});
+
+const RELEASE = Object.freeze({
+  available: true, version: "0.4.1", current: "0.4.0", install: { supported: true },
+});
+const OVERLAY_SLOTS = ["glassDialog", "profileContextMenu", "runtimeSettingsDialog", "automationDialog"];
+const UPDATE_COMMANDS = [
+  "prepare_update_install", "commit_update_install", "cancel_update_install", "open_available_update",
+];
+
+const issuedCount = (command) => invocationDetails.filter((entry) => entry.command === command).length;
+const updateOffers = () => ({
+  install: glassRoot.innerHTML.includes("data-glass-update-install"),
+  download: glassRoot.innerHTML.includes("data-glass-open-update"),
+});
+const NEITHER_OFFER = Object.freeze({ install: false, download: false });
+const BOTH_OFFERS = Object.freeze({ install: true, download: true });
+
+/// Runs `body` with the About dialog's buttons bound, no overlay open and no
+/// installation followed, then restores every fixture an update test scripts.
+async function withUpdateDialog(body) {
+  const original = {
+    overlays: OVERLAY_SLOTS.map((slot) => state[slot]),
+    install: state.updateInstall,
+    info: state.updateInfo,
+    check: responses.check_for_updates,
+    resolve: responses.resolve_update_install,
+  };
+  const buttons = {
+    install: interactiveElement(), commit: interactiveElement(), cancel: interactiveElement(),
+    open: interactiveElement(), check: interactiveElement(),
+  };
+  querySelectorAllElements.set("[data-glass-update-install]", [buttons.install]);
+  querySelectorAllElements.set("[data-glass-update-commit]", [buttons.commit]);
+  querySelectorAllElements.set("[data-glass-update-cancel]", [buttons.cancel]);
+  querySelectorAllElements.set("[data-glass-open-update]", [buttons.open]);
+  querySelectorAllElements.set("[data-glass-check-update]", [buttons.check]);
+  try {
+    for (const slot of OVERLAY_SLOTS) state[slot] = null;
+    state.updateInstall = { ...IDLE_INSTALL };
+    await body(buttons);
+  } finally {
+    for (const command of UPDATE_COMMANDS) delete responses[command];
+    delete rejected.check_for_updates;
+    responses.check_for_updates = original.check;
+    responses.resolve_update_install = original.resolve;
+    querySelectorAllElements.clear();
+    OVERLAY_SLOTS.forEach((slot, index) => { state[slot] = original.overlays[index]; });
+    state.updateInstall = original.install;
+    state.updateInfo = original.info;
+  }
+}
+
+test("after an installation attempt ended the About dialog offers nothing the host would reject", async () => {
+  await withUpdateDialog(async (buttons) => {
+    // Like the host, every preparation and every opened download page
+    // consumes the presented release, and only a check presents it again.
+    const host = { presented: false, staging: "succeeds" };
+    responses.check_for_updates = () => {
+      host.presented = true;
+      return RELEASE;
+    };
+    responses.prepare_update_install = () => {
+      if (!host.presented) throw { code: "missing_authorization", category: "state" };
+      host.presented = false;
+      if (host.staging === "fails") throw { code: "network", category: "network" };
+      return { version: "0.4.1" };
+    };
+    responses.open_available_update = () => {
+      if (!host.presented) throw new Error("no validated update check authorizes this release page");
+      host.presented = false;
+      return { opened: true, installed: false, version: "0.4.1" };
+    };
+    responses.cancel_update_install = { cancelled: "staged" };
+    const earlier = new Set(state.logs);
+    const rejectedByHost = () => state.logs.filter((entry) => !earlier.has(entry) && entry.source === "updater"
+      && (entry.message.includes("(missing_authorization)") || entry.message.startsWith("Could not open update")));
+    const checkAndCloseRemain = (context) => {
+      assert.ok(glassRoot.innerHTML.includes("data-glass-check-update >Check for Update<"), context);
+      assert.equal(glassRoot.innerHTML.includes("data-glass-dismiss disabled"), false, context);
+    };
+
+    await appModule.handleAction("check-for-updates");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS);
+
+    await buttons.install.trigger("click");
+    assert.equal(state.updateInstall.phase, "ready");
+    await buttons.cancel.trigger("click");
+    assert.deepEqual(updateOffers(), NEITHER_OFFER, "a cancelled attempt consumed the presented release");
+    assert.ok(glassRoot.innerHTML.includes('<div class="product-about-status">Update download cancelled</div>'));
+    checkAndCloseRemain("after a cancelled attempt");
+    const prepared = issuedCount("prepare_update_install");
+    await buttons.install.trigger("click");
+    assert.equal(issuedCount("prepare_update_install"), prepared, "the withdrawn installation issues no command");
+
+    await buttons.check.trigger("click");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS, "a fresh check presents the release again");
+
+    host.staging = "fails";
+    await buttons.install.trigger("click");
+    assert.deepEqual(updateOffers(), NEITHER_OFFER, "a failed attempt consumed the presented release");
+    assert.ok(glassRoot.innerHTML.includes("The download did not complete. Check the connection and try again. (network)"));
+    checkAndCloseRemain("after a failed attempt");
+
+    host.staging = "succeeds";
+    await buttons.check.trigger("click");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS, "a fresh check presents the release again");
+    await buttons.install.trigger("click");
+    assert.equal(state.updateInstall.phase, "ready", "the offered installation is one the host accepts");
+    await buttons.cancel.trigger("click");
+
+    await buttons.check.trigger("click");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS);
+    const opened = issuedCount("open_available_update");
+    await buttons.open.trigger("click");
+    assert.equal(issuedCount("open_available_update"), opened + 1);
+    assert.equal(state.glassDialog, null, "the offered download page is one the host opens");
+    assert.deepEqual(rejectedByHost(), [], "the host rejected nothing the dialog offered");
+  });
+});
+
+test("a staged installation stays in the About dialog whatever a later check presents", async () => {
+  await withUpdateDialog(async (buttons) => {
+    responses.check_for_updates = RELEASE;
+    responses.prepare_update_install = { version: "0.4.1" };
+    await appModule.handleAction("check-for-updates");
+    await buttons.install.trigger("click");
+
+    const stagedIsShown = (context) => {
+      const html = glassRoot.innerHTML;
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" }, context);
+      assert.ok(html.includes("v0.4.1 is ready to install."), context);
+      assert.ok(html.includes("data-glass-update-commit>Install and Relaunch<"), context);
+      assert.ok(html.includes("data-glass-update-cancel"), context);
+      assert.deepEqual(updateOffers(), NEITHER_OFFER, context);
+    };
+    stagedIsShown("the staged release is the presented one");
+
+    responses.check_for_updates = { ...RELEASE, version: "0.4.2" };
+    await buttons.check.trigger("click");
+    assert.equal(state.updateInfo.version, "0.4.2");
+    stagedIsShown("another release is presented");
+
+    rejected.check_for_updates = "update server unreachable";
+    await buttons.check.trigger("click");
+    delete rejected.check_for_updates;
+    assert.equal(state.updateInfo.available, false);
+    assert.equal(state.updateInfo.error, "update server unreachable");
+    stagedIsShown("the check failed");
+
+    await emit("cfw://update-available", { available: false, current: "0.4.0" });
+    assert.equal(state.updateInfo.error, null);
+    stagedIsShown("no release is presented");
+
+    responses.commit_update_install = () => {
+      throw { code: "engine_stop_failed", category: "engine" };
+    };
+    const committed = issuedCount("commit_update_install");
+    await buttons.commit.trigger("click");
+    assert.equal(issuedCount("commit_update_install"), committed + 1);
+    assert.deepEqual(
+      invocationDetails.findLast((entry) => entry.command === "commit_update_install").args,
+      { expectedVersion: "0.4.1" },
+      "Install and Relaunch acts on the staged release",
+    );
+    assert.equal(state.updateInstall.phase, "ready");
+    assert.ok(glassRoot.innerHTML.includes("(engine_stop_failed)"));
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-commit>Install and Relaunch<"));
+
+    responses.cancel_update_install = { cancelled: "staged" };
+    const cancellations = issuedCount("cancel_update_install");
+    await buttons.cancel.trigger("click");
+    assert.equal(issuedCount("cancel_update_install"), cancellations + 1, "Cancel discards the staged release");
+    assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "cancelled" });
+    assert.deepEqual(updateOffers(), NEITHER_OFFER);
+    assert.equal(glassRoot.innerHTML.includes("data-glass-update-"), false);
+  });
+});
+
+test("a release that failed authentication stays withdrawn through every later check", async () => {
+  await withUpdateDialog(async (buttons) => {
+    const verdict = { ...RELEASE, install: { supported: false, code: "release_failed_authentication" } };
+    const withdrawnWith = (code, context) => {
+      assert.deepEqual(updateOffers(), NEITHER_OFFER, context);
+      assert.ok(
+        glassRoot.innerHTML.includes(`The downloaded update is not the signed release and was discarded. Do not install it from another source. (${code})`),
+        context,
+      );
+    };
+    responses.check_for_updates = RELEASE;
+    responses.prepare_update_install = () => {
+      throw { code: "signature_mismatch", category: "authenticity" };
+    };
+    await appModule.handleAction("check-for-updates");
+    assert.deepEqual(updateOffers(), BOTH_OFFERS);
+    await buttons.install.trigger("click");
+    withdrawnWith("signature_mismatch", "right after the failure");
+
+    responses.check_for_updates = verdict;
+    await buttons.check.trigger("click");
+    withdrawnWith("signature_mismatch", "a check that carries the host's verdict");
+
+    responses.check_for_updates = RELEASE;
+    await buttons.check.trigger("click");
+    withdrawnWith("signature_mismatch", "a check from the dialog");
+    await emit("cfw://update-available", RELEASE);
+    withdrawnWith("signature_mismatch", "the availability event");
+    await appModule.handleAction("check-for-updates");
+    withdrawnWith("signature_mismatch", "a check from the menu");
+    const prepared = issuedCount("prepare_update_install");
+    await buttons.install.trigger("click");
+    assert.equal(issuedCount("prepare_update_install"), prepared, "the withdrawn installation issues no command");
+
+    await emit("cfw://update-available", { ...RELEASE, version: "0.4.2" });
+    assert.deepEqual(updateOffers(), BOTH_OFFERS, "another release is offered as usual");
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-install>Install Update v0.4.2<"));
+
+    await emit("cfw://update-available", verdict);
+    assert.deepEqual(state.updateInstall, IDLE_INSTALL);
+    withdrawnWith("release_failed_authentication", "the host's verdict alone, as after a reload");
+  });
+});
+
+test("what the previous installation attempt left behind is logged and shown", async () => {
+  await withUpdateDialog(async () => {
+    const report = async (reply) => {
+      responses.resolve_update_install = reply;
+      await appModule.reportPreviousUpdateInstall();
+      return state.logs.find((entry) => entry.source === "updater");
+    };
+    const interrupted = (code) => ({ outcome: { state: "failed", version: "0.4.1", code }, pending: null });
+
+    let entry = await report(interrupted("installer_interrupted"));
+    const notice = {
+      title: "Update v0.4.1 was not installed",
+      body: "The previous version is still installed. Reason code: installer_interrupted",
+    };
+    assert.deepEqual(state.glassDialog, { kind: "info", payload: notice });
+    assert.ok(glassRoot.innerHTML.includes(`<h3>${notice.title}</h3>`));
+    assert.ok(glassRoot.innerHTML.includes(notice.body));
+    assert.deepEqual([entry.level, entry.message], ["error", `${notice.title}: ${notice.body}`]);
+
+    for (const [rejection, reason] of [
+      [
+        { code: "journal_failed", category: "storage" },
+        "The update could not be stored on this Mac. Free some disk space and try again. (journal_failed)",
+      ],
+      [
+        "journal task ended",
+        "The update could not be installed because of an internal error. (unexpected_error: journal task ended)",
+      ],
+    ]) {
+      state.glassDialog = null;
+      entry = await report(() => {
+        throw rejection;
+      });
+      const body = `The previous update attempt could not be reviewed: ${reason}`;
+      assert.deepEqual([entry.level, entry.message], ["error", body]);
+      assert.deepEqual(state.glassDialog, { kind: "info", payload: { title: "Updates", body } });
+      assert.ok(glassRoot.innerHTML.includes(body), "the reason is shown, not only logged");
+    }
+
+    state.glassDialog = null;
+    entry = await report({ outcome: { state: "installed", version: "0.4.1" }, pending: null });
+    assert.deepEqual([entry.level, entry.message], ["info", "Updated to v0.4.1"]);
+    assert.equal(state.glassDialog, null, "a completed installation is logged only");
+
+    const openOverlay = {
+      glassDialog: () => {
+        state.glassDialog = { kind: "dns-query", payload: { name: "a.test", type: "A", result: "" } };
+      },
+      profileContextMenu: () => {
+        state.profileContextMenu = { id: PROFILE_ID, x: 10, y: 10 };
+      },
+      runtimeSettingsDialog: () => appModule.handleAction("open-runtime-settings"),
+      automationDialog: () => appModule.handleAction("open-automation-settings"),
+    };
+    responses.read_automation_settings = {
+      settings: { shortcuts: [], network_enabled: false, network_rules: [] },
+      revision: "automation-v1", network: { kind: "wifi", interface: "en0", ssid: null },
+    };
+    try {
+      for (const slot of OVERLAY_SLOTS) {
+        for (const other of OVERLAY_SLOTS) state[other] = null;
+        await openOverlay[slot]();
+        const overlay = state[slot];
+        assert.ok(overlay, `${slot} is open`);
+        const code = `interrupted_with_${slot.toLowerCase()}_open`;
+        entry = await report(interrupted(code));
+        assert.deepEqual(
+          [entry.level, entry.message.endsWith(`Reason code: ${code}`)], ["error", true],
+          `${slot}: the failure is logged`,
+        );
+        assert.equal(state[slot], overlay, `${slot}: the open overlay is not replaced`);
+        if (slot !== "glassDialog") assert.equal(state.glassDialog, null, `${slot}: no dialog is put over it`);
+      }
+    } finally {
+      delete responses.read_automation_settings;
+      for (const slot of OVERLAY_SLOTS) state[slot] = null;
+    }
+
+    await report({ outcome: { state: "none" }, pending: { phase: "staged", version: "0.4.1" } });
+    assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" });
+    assert.equal(state.glassDialog, null, "re-attaching opens nothing by itself");
+    responses.check_for_updates = { available: false, current: "0.4.0" };
+    await appModule.handleAction("check-for-updates");
+    assert.ok(glassRoot.innerHTML.includes("v0.4.1 is ready to install."));
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-commit>Install and Relaunch<"));
+    assert.ok(glassRoot.innerHTML.includes("data-glass-update-cancel"));
+  });
+});
+
+/// Holds back every timer the dashboard starts, so a test decides when the
+/// wait between two questions about a re-attached installation elapses and no
+/// real timer outlives the test.
+function holdFollowWaits() {
+  const setTimeoutOfWindow = globalThis.window.setTimeout;
+  const waits = [];
+  globalThis.window.setTimeout = (callback, delay) => waits.push({ callback, delay });
+  return {
+    waits,
+    async elapse() {
+      assert.deepEqual(waits.map(({ delay }) => delay), [1000], "exactly one wait of a second is pending");
+      waits.shift().callback();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
+    release() {
+      globalThis.window.setTimeout = setTimeoutOfWindow;
+    },
+  };
+}
+
+test("a re-attached installation follows the host to its end", async () => {
+  await withUpdateDialog(async (buttons) => {
+    const follower = holdFollowWaits();
+    const holding = (phase, outcome = { state: "none" }) => ({
+      outcome, pending: phase === null ? null : { phase, version: "0.4.1" },
+    });
+    const reattach = async (phase) => {
+      responses.resolve_update_install = holding(phase);
+      await appModule.reportPreviousUpdateInstall();
+    };
+    try {
+      responses.check_for_updates = RELEASE;
+      await reattach("preparing");
+      await appModule.handleAction("check-for-updates");
+      assert.ok(glassRoot.innerHTML.includes('<div class="product-about-status">Downloading update…</div>'));
+      assert.ok(glassRoot.innerHTML.includes("data-glass-update-cancel"));
+
+      await follower.elapse();
+      assert.deepEqual(
+        state.updateInstall, { ...IDLE_INSTALL, phase: "downloading", version: "0.4.1" },
+        "a preparation the host still runs is waited for",
+      );
+
+      responses.resolve_update_install = holding("staged");
+      await follower.elapse();
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, phase: "ready", version: "0.4.1" });
+      assert.ok(
+        glassRoot.innerHTML.includes("data-glass-update-commit>Install and Relaunch<"),
+        "the open dialog offers the staged release as soon as the host reports it",
+      );
+      assert.deepEqual(follower.waits, [], "a staged release is not asked about");
+
+      responses.cancel_update_install = { cancelled: "staged" };
+      await buttons.cancel.trigger("click");
+      await reattach("committing");
+      assert.ok(glassRoot.innerHTML.includes("Installing update… Clash for Mac will reopen automatically."));
+      responses.resolve_update_install = holding(null);
+      await follower.elapse();
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "unreported" });
+      assert.ok(glassRoot.innerHTML.includes(
+        '<div class="product-about-status">The update installation is no longer in progress. Check for updates again.</div>',
+      ));
+      assert.deepEqual(updateOffers(), NEITHER_OFFER, "the release the lost installation consumed is not offered");
+      assert.ok(glassRoot.innerHTML.includes("data-glass-check-update >Check for Update<"));
+      assert.deepEqual(follower.waits, [], "nothing is asked once the host holds nothing");
+
+      state.glassDialog = null;
+      await reattach("preparing");
+      const interrupted = { state: "failed", version: "0.4.0", code: "installer_start_failed" };
+      responses.resolve_update_install = holding("preparing", interrupted);
+      await follower.elapse();
+      assert.deepEqual(state.glassDialog, {
+        kind: "info",
+        payload: {
+          title: "Update v0.4.0 was not installed",
+          body: "The previous version is still installed. Reason code: installer_start_failed",
+        },
+      }, "an outcome the host reports while it is followed is shown as at startup");
+      assert.equal(state.updateInstall.phase, "downloading");
+
+      state.glassDialog = null;
+      responses.resolve_update_install = holding("preparing");
+      await appModule.handleAction("check-for-updates");
+      responses.cancel_update_install = { cancelled: "preparation" };
+      await buttons.cancel.trigger("click");
+      assert.deepEqual(state.updateInstall, { ...IDLE_INSTALL, version: "0.4.1", ended: "cancelled" });
+      const asked = issuedCount("resolve_update_install");
+      await follower.elapse();
+      assert.equal(issuedCount("resolve_update_install"), asked, "nothing is asked after the user cancelled");
+      assert.deepEqual(follower.waits, []);
+    } finally {
+      follower.release();
+    }
+  });
+});
+
+test("the credential dialog asks for missing values only while the engine is Off", async () => {
+  const setup = {
+    profileId: PROFILE_ID,
+    profileName: "Work",
+    requiredCount: 2,
+    presentCount: 1,
+    missing: [{ id: PROFILE_ID, kind: "trojan_password" }],
+    vaultAvailable: true,
+    error: null,
+  };
+
+  await setEngine(RUNNING_ENGINE);
+  state.glassDialog = { kind: "credentials", id: PROFILE_ID };
+  state.credentialSetup = setup;
+  glassRoot.innerHTML = "";
+  await renderPage("general");
+  assert.equal(glassRoot.innerHTML.includes("Store credentials"), false);
+  assert.ok(glassRoot.innerHTML.includes("Stop the core before credential maintenance"));
+
+  await setEngine(OFF_ENGINE);
+  state.glassDialog = { kind: "credentials", id: PROFILE_ID };
+  state.credentialSetup = setup;
+  glassRoot.innerHTML = "";
+  await renderPage("general");
+  for (const needle of ["Store credentials", "Trojan Password", "1 of 2"]) {
+    assert.ok(glassRoot.innerHTML.includes(needle), `credential dialog is missing "${needle}"`);
+  }
+
+  state.credentialSetup = {
+    profileId: PROFILE_ID,
+    profileName: "Work",
+    requiredCount: null,
+    presentCount: null,
+    missing: [],
+    vaultAvailable: false,
+    error: "vault unavailable",
+  };
+  glassRoot.innerHTML = "";
+  await renderPage("general");
+  assert.ok(
+    glassRoot.innerHTML.includes("nothing is assumed missing"),
+    "the credential dialog must fail closed when the vault cannot answer",
+  );
+  state.glassDialog = null;
+  state.credentialSetup = null;
+});
+
+const PROMPT_DIALOGS = {
+  delete: {
+    dialog: () => ({ kind: "delete", id: PROFILE_ID }),
+    title: "Delete profile",
+    message: "Delete “Work”? This removes the managed profile from the repository.",
+    web: `
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Delete profile">
+          <h3>Delete profile</h3>
+          <p class="glass-dialog-copy">Delete “Work”? This removes the managed profile from the repository.</p>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
+            <button type="button" class="glass-btn danger" data-glass-delete-confirm="${PROFILE_ID}">Yes</button>
+          </div>
+        </div>
+      `,
+  },
+  reset: {
+    dialog: () => ({ kind: "reset-settings" }),
+    title: "Reset all settings",
+    message: "Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept.",
+    web: `
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Reset settings">
+          <h3>Reset all settings</h3>
+          <p class="glass-dialog-copy">Reset appearance, silent start and update preferences to their defaults? Imported profiles, the selected profile and the Start with macOS registration are all kept.</p>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
+            <button type="button" class="glass-btn danger" data-glass-reset-confirm>Yes</button>
+          </div>
+        </div>
+      `,
+  },
+  info: {
+    dialog: () => ({ kind: "info", payload: { title: "System DNS", body: "never <written>" } }),
+    title: "System DNS",
+    message: "never <written>",
+    web: `
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Info">
+          <h3>System DNS</h3>
+          <p class="glass-dialog-copy">never &lt;written&gt;</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+        </div>
+      `,
+  },
+};
+
+test("prompt dialogs keep their exact web markup when the host has no native prompt", async () => {
+  assert.equal(state.payload.native_ui.prompt_dialog, false);
+  const before = invoked.length;
+  try {
+    for (const [name, { dialog, web }] of Object.entries(PROMPT_DIALOGS)) {
+      state.glassDialog = dialog();
+      glassRoot.innerHTML = "";
+      await renderPage("feedback");
+      assert.equal(glassRoot.innerHTML, web, `the ${name} dialog changed its web markup`);
+    }
+    state.glassDialog = { kind: "info" };
+    await renderPage("feedback");
+    assert.match(glassRoot.innerHTML, /<h3>Info<\/h3>\s*<p class="glass-dialog-copy"><\/p>/u,
+      "an information dialog without a payload keeps its default title and empty body");
+    assert.deepEqual(invoked.slice(before).filter((command) => command.endsWith("_native_prompt_dialog")), [],
+      "a host without the native prompt never invokes its presentation commands");
+  } finally {
+    state.glassDialog = null;
+    await renderPage("feedback");
+  }
+});
+
+test("web confirmations run their business command once and keep a refused dialog open", async () => {
+  const confirmDelete = interactiveElement();
+  confirmDelete.dataset.glassDeleteConfirm = PROFILE_ID;
+  const confirmReset = interactiveElement();
+  const logged = (message) => state.logs.filter((entry) => entry.message === message).length;
+  const count = (command) => invoked.filter((name) => name === command).length;
+  try {
+    querySelectorAllElements.set("[data-glass-delete-confirm]", [confirmDelete]);
+    querySelectorAllElements.set("[data-glass-reset-confirm]", [confirmReset]);
+    await renderPage("profiles");
+
+    const refusedDelete = PROMPT_DIALOGS.delete.dialog();
+    state.glassDialog = refusedDelete;
+    rejected.delete_profile = "repository is locked";
+    invoked.length = 0;
+    await confirmDelete.trigger("click");
+    assert.equal(count("delete_profile"), 1);
+    assert.equal(state.glassDialog, refusedDelete, "a refused deletion keeps its dialog");
+    assert.equal(glassRoot.innerHTML, PROMPT_DIALOGS.delete.web);
+    assert.equal(logged("Delete failed: repository is locked"), 1);
+
+    delete rejected.delete_profile;
+    responses.delete_profile = true;
+    invoked.length = 0;
+    await confirmDelete.trigger("click");
+    assert.equal(count("delete_profile"), 1);
+    assert.deepEqual(invocationDetails.findLast(({ command }) => command === "delete_profile").args, { id: PROFILE_ID });
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(logged("Profile deleted: Work"), 1);
+
+    const refusedReset = PROMPT_DIALOGS.reset.dialog();
+    state.glassDialog = refusedReset;
+    rejected.reset_settings_snapshot = "settings store is read-only";
+    invoked.length = 0;
+    await confirmReset.trigger("click");
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, refusedReset, "a refused reset keeps its dialog");
+    assert.equal(glassRoot.innerHTML, PROMPT_DIALOGS.reset.web);
+    assert.equal(logged("Reset failed: settings store is read-only"), 1);
+
+    delete rejected.reset_settings_snapshot;
+    responses.reset_settings_snapshot = structuredClone(initialLiveSettings);
+    const resets = logged("Preferences reset to defaults");
+    invoked.length = 0;
+    await confirmReset.trigger("click");
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, null);
+    assert.equal(logged("Preferences reset to defaults"), resets + 1);
+  } finally {
+    delete rejected.delete_profile;
+    delete rejected.reset_settings_snapshot;
+    delete responses.delete_profile;
+    delete responses.reset_settings_snapshot;
+    querySelectorAllElements.clear();
+    state.glassDialog = null;
+    await renderPage("feedback");
+  }
+});
+
+test("a confirmation that finishes late closes only the dialog that started it", async () => {
+  const confirmDelete = interactiveElement();
+  confirmDelete.dataset.glassDeleteConfirm = PROFILE_ID;
+  const confirmReset = interactiveElement();
+  const logged = (message) => state.logs.filter((entry) => entry.message === message).length;
+  const removal = deferred();
+  const reset = deferred();
+  try {
+    querySelectorAllElements.set("[data-glass-delete-confirm]", [confirmDelete]);
+    querySelectorAllElements.set("[data-glass-reset-confirm]", [confirmReset]);
+    responses.delete_profile = () => removal.promise;
+    responses.reset_settings_snapshot = () => reset.promise;
+    for (const [confirm, question, answer, report] of [
+      [confirmDelete, PROMPT_DIALOGS.delete.dialog(), () => removal.resolve(true), "Profile deleted: Work"],
+      [confirmReset, PROMPT_DIALOGS.reset.dialog(), () => reset.resolve(structuredClone(initialLiveSettings)), "Preferences reset to defaults"],
+    ]) {
+      state.glassDialog = question;
+      await renderPage("profiles");
+      const running = confirm.trigger("click");
+      // The user dismisses the question and opens a notice while the request
+      // is still running. The late success must not close that notice.
+      const notice = PROMPT_DIALOGS.info.dialog();
+      state.glassDialog = notice;
+      await renderPage("profiles");
+      const reports = logged(report);
+      answer();
+      await running;
+      assert.equal(logged(report), reports + 1);
+      assert.equal(state.glassDialog, notice, `${question.kind}: the notice opened meanwhile stays open`);
+      assert.equal(glassRoot.innerHTML, PROMPT_DIALOGS.info.web);
+    }
+  } finally {
+    delete responses.delete_profile;
+    delete responses.reset_settings_snapshot;
+    querySelectorAllElements.clear();
+    state.glassDialog = null;
+    await renderPage("feedback");
+  }
+});
+
+const PROMPT_BACKDROP = '<div class="glass-dialog-backdrop" data-glass-dismiss></div>';
+const PROMPT_CONFIRMATION = [{ id: "cancel", title: "No", role: "cancel" }, { id: "confirm", title: "Yes", role: "destructive" }];
+
+/// Runs `body` against a host whose boot payload admits the native prompt. The
+/// page keeps one presentation adapter, so every case leaves no dialog behind.
+async function withNativePrompt(body) {
+  const prior = { enabled: state.payload.native_ui.prompt_dialog, handoff: state.migrationHandoff,
+    handoffStatus: state.migrationHandoffStatus, theme: document.documentElement.dataset.theme, locale: getLocale() };
+  const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  const native = (kind) => invocationDetails.filter(({ command }) => command === `${kind}_native_prompt_dialog`).map(({ args }) => args);
+  const backdrop = interactiveElement("div");
+  const deleteFromMenu = interactiveElement();
+  deleteFromMenu.dataset.profileMenu = "delete";
+  deleteFromMenu.dataset.profileId = PROFILE_ID;
+  responses.present_native_prompt_dialog = null;
+  responses.update_native_prompt_dialog = true;
+  responses.dismiss_native_prompt_dialog = true;
+  try {
+    state.payload.native_ui.prompt_dialog = true;
+    state.glassDialog = null;
+    querySelectorAllElements.set("[data-glass-dismiss]", [backdrop]);
+    querySelectorAllElements.set("[data-profile-menu]", [deleteFromMenu]);
+    await renderPage("profiles"); await flush();
+    await body({ flush, native, backdrop, deleteFromMenu,
+      logged: (message) => state.logs.filter((entry) => entry.message === message).length,
+      count: (command) => invoked.filter((name) => name === command).length,
+      escape: async () => {
+        for (const listener of documentListeners.get("keydown") ?? []) listener({ key: "Escape", preventDefault() {} });
+        await flush();
+      } });
+  } finally {
+    for (const command of ["present_native_prompt_dialog", "delete_profile", "reset_settings_snapshot"]) delete rejected[command];
+    state.migrationHandoff = prior.handoff;
+    state.migrationHandoffStatus = prior.handoffStatus;
+    document.documentElement.dataset.theme = prior.theme;
+    setLocale(prior.locale);
+    state.glassDialog = null;
+    await renderPage("feedback"); await flush();
+    state.payload.native_ui.prompt_dialog = prior.enabled;
+    querySelectorAllElements.clear();
+    for (const command of ["present_native_prompt_dialog", "update_native_prompt_dialog", "dismiss_native_prompt_dialog",
+      "delete_profile", "reset_settings_snapshot"]) delete responses[command];
+  }
+}
+
+test("a native prompt host presents each dialog over the page backdrop and opening issues no business IPC", async () => {
+  await withNativePrompt(async ({ flush, native, backdrop, deleteFromMenu, count, escape }) => {
+    invoked.length = 0;
+    const opened = async (open) => {
+      const before = invoked.length;
+      await open(); await flush();
+      assert.deepEqual(invoked.slice(before), ["present_native_prompt_dialog"], "opening a prompt only presents it");
+      assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP, "the page keeps only its backdrop under the native panel");
+      return native("present").at(-1);
+    };
+
+    const removal = await opened(() => deleteFromMenu.trigger("click"));
+    assert.deepEqual(removal.request, {
+      requestId: removal.request.requestId, sequence: 1, acknowledgedSubmission: 0,
+      locale: "en", appearance: document.documentElement.dataset.theme,
+      title: PROMPT_DIALOGS.delete.title, message: PROMPT_DIALOGS.delete.message, buttons: PROMPT_CONFIRMATION,
+      transportFailure: "The native dialog could not deliver this action. Close it and try again.",
+    });
+    assert.match(removal.request.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    assert.ok(["light", "dark"].includes(removal.request.appearance));
+    const stable = { presents: native("present").length, updates: native("update").length };
+    await renderPage("profiles"); await flush();
+    assert.deepEqual({ presents: native("present").length, updates: native("update").length }, stable,
+      "re-rendering an unchanged prompt sends nothing");
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+
+    // The dimmed page under the panel still dismisses, as it does for the web dialog.
+    await backdrop.trigger("click"); await flush();
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(native("dismiss").at(-1).requestId, removal.request.requestId);
+    removal.completion.onmessage({ kind: "activate", requestId: removal.request.requestId, submissionId: 1, buttonId: "confirm" });
+    await flush();
+    assert.equal(count("delete_profile"), 0, "a dismissed prompt can no longer confirm");
+
+    const reset = await opened(() => appModule.handleAction("reset-settings"));
+    assert.equal(reset.request.title, PROMPT_DIALOGS.reset.title);
+    assert.equal(reset.request.message, PROMPT_DIALOGS.reset.message);
+    assert.deepEqual(reset.request.buttons, PROMPT_CONFIRMATION);
+    setLocale("ja");
+    await renderPage("profiles"); await flush();
+    const translated = native("update").at(-1).request;
+    assert.equal(translated.requestId, reset.request.requestId);
+    assert.deepEqual([translated.sequence, translated.acknowledgedSubmission, translated.locale], [2, 0, "ja"]);
+    assert.equal(translated.title, "すべての設定をリセット");
+    assert.deepEqual(translated.buttons.map(({ id, title }) => [id, title]), [["cancel", "いいえ"], ["confirm", "はい"]]);
+    setLocale("en");
+    await escape();
+    assert.equal(state.glassDialog, null);
+    assert.equal(native("dismiss").at(-1).requestId, reset.request.requestId);
+    assert.equal(count("reset_settings_snapshot"), 0);
+
+    const notice = await opened(() => appModule.handleAction("allow-lan-info"));
+    assert.equal(notice.request.title, "Allow LAN");
+    assert.equal(notice.request.message, t("LAN sharing uses a separate listener restricted to explicitly trusted private source networks."));
+    assert.deepEqual(notice.request.buttons, [{ id: "cancel", title: "Close", role: "cancel" }]);
+    const dismissals = native("dismiss").length;
+    notice.completion.onmessage({ kind: "closed", requestId: notice.request.requestId });
+    await flush();
+    assert.equal(state.glassDialog, null, "the native Close button closes the dashboard's dialog");
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(native("dismiss").length, dismissals, "a panel that closed itself is not dismissed again");
+  });
+});
+
+test("native confirmations run the web confirm path once and a refusal keeps the prompt usable", async () => {
+  await withNativePrompt(async ({ flush, native, deleteFromMenu, logged, count }) => {
+    await appModule.handleAction("reset-settings"); await flush();
+    const resetDialog = state.glassDialog;
+    const reset = native("present").at(-1);
+    const activate = (prompt, submissionId) => {
+      prompt.completion.onmessage({ kind: "activate", requestId: prompt.request.requestId, submissionId, buttonId: "confirm" });
+      return flush();
+    };
+    const dismissed = (prompt) => native("dismiss").filter(({ requestId }) => requestId === prompt.request.requestId).length;
+
+    rejected.reset_settings_snapshot = "settings store is read-only";
+    let refusals = logged("Reset failed: settings store is read-only");
+    invoked.length = 0;
+    await activate(reset, 1);
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, resetDialog, "a refused reset keeps its prompt");
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+    assert.equal(logged("Reset failed: settings store is read-only"), refusals + 1);
+    assert.equal(dismissed(reset), 0);
+    const released = native("update").at(-1).request;
+    assert.deepEqual([released.requestId, released.sequence, released.acknowledgedSubmission],
+      [reset.request.requestId, 2, 1], "the refused action is acknowledged, so the native buttons work again");
+
+    delete rejected.reset_settings_snapshot;
+    responses.reset_settings_snapshot = structuredClone(initialLiveSettings);
+    const resets = logged("Preferences reset to defaults");
+    invoked.length = 0;
+    await activate(reset, 2);
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+    assert.equal(logged("Preferences reset to defaults"), resets + 1);
+    assert.equal(dismissed(reset), 1, "the dashboard dismisses the prompt after its action succeeded");
+
+    await deleteFromMenu.trigger("click"); await flush();
+    const removalDialog = state.glassDialog;
+    const removal = native("present").at(-1);
+    rejected.delete_profile = "repository is locked";
+    refusals = logged("Delete failed: repository is locked");
+    invoked.length = 0;
+    await activate(removal, 1);
+    assert.equal(count("delete_profile"), 1);
+    assert.equal(state.glassDialog, removalDialog, "a refused deletion keeps its prompt");
+    assert.equal(logged("Delete failed: repository is locked"), refusals + 1);
+    assert.equal(native("update").at(-1).request.acknowledgedSubmission, 1);
+    assert.equal(native("update").at(-1).request.requestId, removal.request.requestId);
+
+    delete rejected.delete_profile;
+    responses.delete_profile = true;
+    const deletions = logged("Profile deleted: Work");
+    invoked.length = 0;
+    await activate(removal, 2);
+    assert.equal(count("delete_profile"), 1);
+    assert.deepEqual(invocationDetails.findLast(({ command }) => command === "delete_profile").args, { id: PROFILE_ID });
+    assert.equal(state.glassDialog, null);
+    assert.equal(logged("Profile deleted: Work"), deletions + 1);
+    assert.equal(dismissed(removal), 1);
+  });
+});
+
+test("the native prompt can be cancelled while its action runs, as the page dialog can", async () => {
+  await withNativePrompt(async ({ flush, native, logged, count }) => {
+    const reset = deferred();
+    responses.reset_settings_snapshot = () => reset.promise;
+    await appModule.handleAction("reset-settings"); await flush();
+    const prompt = native("present").at(-1);
+    invoked.length = 0;
+    prompt.completion.onmessage({ kind: "activate", requestId: prompt.request.requestId, submissionId: 1, buttonId: "confirm" });
+    await flush();
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+    // No or Escape in the panel while the request is still running.
+    prompt.completion.onmessage({ kind: "closed", requestId: prompt.request.requestId });
+    await flush();
+    assert.equal(state.glassDialog, null, "the running action does not hold the dialog open");
+    assert.equal(glassRoot.innerHTML, "");
+    const resets = logged("Preferences reset to defaults");
+    reset.resolve(structuredClone(initialLiveSettings));
+    await flush();
+    assert.equal(logged("Preferences reset to defaults"), resets + 1, "the action still completes and reports");
+    assert.equal(count("reset_settings_snapshot"), 1);
+    assert.equal(state.glassDialog, null);
+    assert.deepEqual(invoked.filter((command) => command.endsWith("_native_prompt_dialog")), [],
+      "a panel that closed itself needs no update or dismissal");
+  });
+});
+
+test("a refused native prompt keeps its text and states the failure without a confirmation", async () => {
+  await withNativePrompt(async ({ flush, logged, count, escape }) => {
+    // The alert and the log line pass through the diagnostic redaction.
+    rejected.present_native_prompt_dialog = "native prompt dialog presentation rejected (status 0) token=hunter2";
+    const refusal = "native prompt dialog presentation rejected (status 0) token=[redacted]";
+    const report = `Native presentation of “Reset all settings” failed: ${refusal}`;
+    let reported = logged(report);
+    invoked.length = 0;
+    await appModule.handleAction("reset-settings"); await flush();
+    assert.equal(glassRoot.innerHTML, `${PROMPT_BACKDROP}
+        <div class="glass-dialog" role="dialog" aria-label="Reset all settings">
+          <h3>Reset all settings</h3>
+          <p class="glass-dialog-copy">${PROMPT_DIALOGS.reset.message}</p>
+          <p class="glass-dialog-copy warning" role="alert">${refusal}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>No</button></div>
+        </div>`, "the question and the failure are stated and only dismissal is offered");
+    assert.equal(logged(report), reported + 1);
+    assert.equal(state.logs.some((entry) => entry.message.includes("hunter2")), false);
+    assert.equal(count("reset_settings_snapshot"), 0);
+    await escape();
+    assert.equal(state.glassDialog, null);
+    assert.equal(glassRoot.innerHTML, "");
+
+    // A notice raised while its window is hidden is refused by the host. Its
+    // text must still be shown, or the user never learns what happened.
+    const hidden = "native prompt dialog parent is unavailable (status 2)";
+    rejected.present_native_prompt_dialog = hidden;
+    const notice = t("LAN sharing uses a separate listener restricted to explicitly trusted private source networks.");
+    reported = logged(`Native presentation of “Allow LAN” failed: ${hidden}`);
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.equal(glassRoot.innerHTML, `${PROMPT_BACKDROP}
+        <div class="glass-dialog" role="dialog" aria-label="Allow LAN">
+          <h3>Allow LAN</h3>
+          <p class="glass-dialog-copy">${notice}</p>
+          <p class="glass-dialog-copy warning" role="alert">${hidden}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+        </div>`);
+    assert.equal(logged(`Native presentation of “Allow LAN” failed: ${hidden}`), reported + 1);
+    await escape();
+    assert.equal(glassRoot.innerHTML, "");
+  });
+});
+
+test("dialogs the host or the native frame cannot take stay in the page", async () => {
+  await withNativePrompt(async ({ flush, native, escape }) => {
+    const presents = native("present").length;
+    const pageNotice = /<div class="glass-dialog" role="dialog" aria-label="Info">\s*<h3>Allow LAN<\/h3>/u;
+    // A migration handoff window, and a host with a handoff in progress,
+    // refuse every presentation command.
+    state.migrationHandoff = true;
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.match(glassRoot.innerHTML, pageNotice);
+    state.migrationHandoff = false;
+    await escape();
+    const idle = state.migrationHandoffStatus;
+    state.migrationHandoffStatus = { state: "in_progress" };
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.match(glassRoot.innerHTML, pageNotice);
+    state.migrationHandoffStatus = idle;
+    await escape();
+    // Until the page theme is resolved there is no appearance to give the panel.
+    const theme = document.documentElement.dataset.theme;
+    delete document.documentElement.dataset.theme;
+    await appModule.handleAction("allow-lan-info"); await flush();
+    assert.match(glassRoot.innerHTML, pageNotice);
+    document.documentElement.dataset.theme = theme;
+    await escape();
+
+    // Text beyond the bounded native frame keeps the page dialog, uncut.
+    const long = "x".repeat(4097);
+    state.glassDialog = { kind: "info", payload: { title: "Legacy migration failed", body: long } };
+    await renderPage("profiles"); await flush();
+    assert.ok(glassRoot.innerHTML.includes(`<p class="glass-dialog-copy">${long}</p>`));
+    state.glassDialog = { kind: "copy", id: PROFILE_ID };
+    await renderPage("profiles"); await flush();
+    assert.match(glassRoot.innerHTML, /data-glass-copy-confirm/u);
+    assert.equal(native("present").length, presents, "none of these is presented natively");
+
+    // Replacing a native prompt with a page dialog releases the panel.
+    await appModule.handleAction("allow-lan-info"); await flush();
+    const notice = native("present").at(-1);
+    assert.equal(glassRoot.innerHTML, PROMPT_BACKDROP);
+    await appModule.handleAction("dns-query"); await flush();
+    assert.match(glassRoot.innerHTML, /Resolve through the running engine/u);
+    assert.equal(native("dismiss").at(-1).requestId, notice.request.requestId);
+  });
+});
+
+test("profile cards show source type on first load without fetching URLs or inventing quota", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  try {
+    responses.profiles_snapshot = { profiles: [
+      { ...originalProfiles.profiles[0], name: "本地-示例-09.18", source_kind: "local" },
+      { ...originalProfiles.profiles[0], id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Remote", source_kind: "subscription", active: false },
+    ], invalid_profiles: [] };
+    state.profiles = [];
+    const before = invocationDetails.length;
+    await reloadButton.click();
+    const html = await renderPage("profiles");
+    assert.match(html, /本地-示例-09\.18/u);
+    assert.match(html, /local file \(/u);
+    assert.match(html, /subscription \(/u);
+    assert.match(html, /aria-current="true"/u);
+    assert.match(html, /Clash YAML imports nodes, groups, supported routing rules, DNS, and hosts/u);
+    assert.match(html, /Unsupported policies are reported before saving/u);
+    assert.doesNotMatch(html, /source not listed|quota not reported|profile-usage|2 KB/u);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => command === "profile_text"), false);
+    state.profiles[0].sourceUrl = "https://private.example/?token=private-test-value";
+    const afterDetails = await renderPage("profiles");
+    assert.match(afterDetails, /local file \(/u, "cached URL metadata does not determine the card's source type");
+    assert.doesNotMatch(afterDetails, /private\.example|private-test-value/u);
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    state.profiles = [];
+    await reloadButton.click();
+  }
+});
+
+test("missing or unknown profile source metadata is surfaced as a repository error", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  try {
+    for (const sourceKind of [undefined, "unsupported"]) {
+      responses.profiles_snapshot = { profiles: [{ ...originalProfiles.profiles[0], source_kind: sourceKind }], invalid_profiles: [] };
+      await reloadButton.click();
+      const html = await renderPage("profiles");
+      assert.match(html, /profile snapshot has an invalid source kind/u);
+      assert.doesNotMatch(html, /data-profile-card=/u);
+    }
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    await reloadButton.click();
+  }
+});
+
+const INVALID_PROFILE_ID = "3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d";
+const INVALID_PROFILE_REASON = "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS";
+const INVALID_PROFILE_URL = "https://subscription.example/profile?token=private-test-value";
+const invalidProfileRecord = (selected) => ({
+  id: INVALID_PROFILE_ID,
+  name: "Reality node",
+  selected,
+  updated_epoch_secs: 1,
+  source_kind: "subscription",
+  error: INVALID_PROFILE_REASON,
+});
+const loggedCount = (message) => state.logs.filter((entry) => entry.message === message).length;
+
+test("an invalid stored profile is listed with its reason and offers only deletion and its subscription URL", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  const originalWrite = navigator.clipboard.writeText;
+  const copied = [];
+  const show = interactiveElement();
+  show.dataset.invalidProfileAction = "show-source-url";
+  show.dataset.profileId = INVALID_PROFILE_ID;
+  const remove = interactiveElement();
+  remove.dataset.invalidProfileAction = "delete";
+  remove.dataset.profileId = INVALID_PROFILE_ID;
+  const unknown = interactiveElement();
+  unknown.dataset.invalidProfileAction = "edit";
+  unknown.dataset.profileId = INVALID_PROFILE_ID;
+  const copy = interactiveElement();
+  const confirmDelete = interactiveElement();
+  confirmDelete.dataset.glassDeleteConfirm = INVALID_PROFILE_ID;
+  try {
+    navigator.clipboard.writeText = async (value) => { copied.push(value); };
+    responses.profiles_snapshot = {
+      profiles: [{ ...originalProfiles.profiles[0], active: false }],
+      invalid_profiles: [invalidProfileRecord(true)],
+    };
+    responses.read_profile_source_url = INVALID_PROFILE_URL;
+    await reloadButton.click();
+    const html = await renderPage("profiles");
+    assert.ok(html.includes(`data-invalid-profile-card="${INVALID_PROFILE_ID}" aria-current="true"`), "the selected invalid profile is marked selected");
+    assert.ok(html.includes(`Selected, but invalid: ${INVALID_PROFILE_REASON}`));
+    assert.ok(!html.includes(`data-profile-card="${INVALID_PROFILE_ID}"`), "an invalid profile is never a selectable card");
+    assert.match(html, /data-invalid-profile-action="show-source-url"/u);
+    assert.match(html, /data-invalid-profile-action="delete"/u);
+    assert.doesNotMatch(html, /subscription\.example|private-test-value/u);
+    assert.equal(state.profiles.some((profile) => profile.active), false, "no valid profile stands in for the invalid selection");
+
+    querySelectorAllElements.set("[data-invalid-profile-action]", [show, remove, unknown]);
+    querySelectorAllElements.set("[data-glass-delete-confirm]", [confirmDelete]);
+    querySelectorAllElements.set("[data-glass-copy-text]", [copy]);
+    await renderPage("profiles");
+    invocationDetails.length = 0;
+    await unknown.trigger("click");
+    assert.deepEqual(invocationDetails, [], "an unknown card action reads nothing");
+    assert.equal(loggedCount("unknown profile menu action: edit"), 1);
+
+    await show.trigger("click");
+    assert.deepEqual(invocationDetails.map(({ command }) => command), ["read_profile_source_url"]);
+    assert.deepEqual(invocationDetails[0].args, { id: INVALID_PROFILE_ID });
+    assert.deepEqual(state.glassDialog, { kind: "invalid-profile-source", id: INVALID_PROFILE_ID, payload: INVALID_PROFILE_URL });
+    assert.ok(glassRoot.innerHTML.includes(INVALID_PROFILE_URL));
+    assert.match(glassRoot.innerHTML, /Import this URL again to replace “Reality node”, then delete the invalid profile\./u);
+    assert.deepEqual(copied, [], "nothing reaches the clipboard before the user copies");
+    await copy.trigger("click");
+    assert.deepEqual(copied, [INVALID_PROFILE_URL]);
+    assert.equal(state.logs.some((entry) => entry.message.includes("private-test-value")), false);
+
+    state.glassDialog = null;
+    responses.read_profile_source_url = null;
+    await show.trigger("click");
+    assert.equal(state.glassDialog, null);
+    assert.equal(loggedCount("Could not read the subscription URL of Reality node: Reality node has no subscription URL"), 1);
+
+    await remove.trigger("click");
+    assert.deepEqual(state.glassDialog, { kind: "delete-invalid", id: INVALID_PROFILE_ID });
+    assert.match(glassRoot.innerHTML, /Delete “Reality node”\? It is selected but fails validation; afterwards no profile is selected\./u);
+    rejected.delete_profile = `the selected profile "Reality node" (${INVALID_PROFILE_ID}) is invalid; stop the core, or select another profile, before deleting it`;
+    invocationDetails.length = 0;
+    await confirmDelete.trigger("click");
+    assert.deepEqual(state.glassDialog, { kind: "delete-invalid", id: INVALID_PROFILE_ID }, "a refused deletion keeps its dialog");
+    assert.equal(loggedCount(`Delete failed: ${rejected.delete_profile}`), 1);
+    assert.ok(invocationDetails.some(({ command }) => command === "profiles_snapshot"), "a failed deletion re-reads the list");
+
+    delete rejected.delete_profile;
+    responses.delete_profile = true;
+    responses.profiles_snapshot = { profiles: [{ ...originalProfiles.profiles[0], active: false }], invalid_profiles: [] };
+    invocationDetails.length = 0;
+    await confirmDelete.trigger("click");
+    assert.deepEqual(invocationDetails.find(({ command }) => command === "delete_profile").args, { id: INVALID_PROFILE_ID });
+    assert.equal(invocationDetails.some(({ command }) => command === "select_profile"), false, "deleting selects nothing else");
+    assert.equal(state.glassDialog, null);
+    assert.deepEqual(state.invalidProfiles, []);
+    assert.equal(loggedCount("Profile deleted: Reality node"), 1);
+  } finally {
+    navigator.clipboard.writeText = originalWrite;
+    delete rejected.delete_profile;
+    delete responses.delete_profile;
+    delete responses.read_profile_source_url;
+    responses.profiles_snapshot = originalProfiles;
+    querySelectorAllElements.clear();
+    state.glassDialog = null;
+    await reloadButton.click();
+  }
+});
+
+test("an unselected invalid local profile shows its reason and has no subscription URL", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  try {
+    responses.profiles_snapshot = {
+      profiles: [],
+      invalid_profiles: [{ ...invalidProfileRecord(false), source_kind: "local" }],
+    };
+    await reloadButton.click();
+    const html = await renderPage("profiles");
+    assert.ok(html.includes(`Invalid: ${INVALID_PROFILE_REASON}`));
+    assert.doesNotMatch(html, /data-invalid-profile-action="show-source-url"/u);
+    assert.match(html, /data-invalid-profile-action="delete"/u);
+    assert.doesNotMatch(html, /No profiles found in the managed profiles directory/u, "an invalid profile is not an empty repository");
+    assert.doesNotMatch(html, /aria-current="true"/u);
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    await reloadButton.click();
+  }
+});
+
+test("the invalid profile dialogs render for the web page", async () => {
+  const originalInvalid = state.invalidProfiles;
+  try {
+    state.invalidProfiles = [{ id: INVALID_PROFILE_ID, name: "Reality node", selected: false, updated: "now", sourceKind: "subscription", error: INVALID_PROFILE_REASON }];
+    for (const [dialog, needle] of [
+      [{ kind: "delete-invalid", id: INVALID_PROFILE_ID }, "Delete “Reality node”? It fails validation and cannot be used."],
+      [{ kind: "invalid-profile-source", id: INVALID_PROFILE_ID, payload: INVALID_PROFILE_URL }, INVALID_PROFILE_URL],
+      // A valid-profile dialog never opens for an invalid entry.
+      [{ kind: "settings", id: INVALID_PROFILE_ID }, null],
+    ]) {
+      state.glassDialog = dialog;
+      glassRoot.innerHTML = "";
+      await renderPage("profiles");
+      if (needle) assert.ok(glassRoot.innerHTML.includes(needle), `${dialog.kind}: ${glassRoot.innerHTML}`);
+      else assert.doesNotMatch(glassRoot.innerHTML, /Edit profile information/u);
+    }
+  } finally {
+    state.invalidProfiles = originalInvalid;
+    state.glassDialog = null;
+  }
+});
+
+test("a malformed profile snapshot or invalid entry is surfaced as a repository error", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  try {
+    for (const [snapshot, message] of [
+      [originalProfiles.profiles, "profile snapshot is malformed"],
+      [{ profiles: originalProfiles.profiles }, "profile snapshot is malformed"],
+      [{ ...originalProfiles, invalid_profiles: [{ ...invalidProfileRecord(false), error: "" }] }, "an invalid profile in the snapshot has no validation error"],
+      [{ ...originalProfiles, invalid_profiles: [{ ...invalidProfileRecord(false), selected: undefined }] }, "an invalid profile in the snapshot has no validation error"],
+      [{ ...originalProfiles, invalid_profiles: [{ ...invalidProfileRecord(false), source_kind: "unsupported" }] }, "profile snapshot has an invalid source kind"],
+    ]) {
+      responses.profiles_snapshot = { ...originalProfiles, invalid_profiles: [invalidProfileRecord(false)] };
+      await reloadButton.click();
+      assert.equal(state.invalidProfiles.length, 1);
+      responses.profiles_snapshot = snapshot;
+      await reloadButton.click();
+      const html = await renderPage("profiles");
+      assert.ok(html.includes(message), message);
+      assert.doesNotMatch(html, /data-profile-card=|data-invalid-profile-card=/u);
+      assert.deepEqual(state.invalidProfiles, []);
+    }
+  } finally {
+    responses.profiles_snapshot = originalProfiles;
+    await reloadButton.click();
+  }
+});
+
+test("Update All never reads or updates an invalid profile", async () => {
+  const originalProfiles = responses.profiles_snapshot;
+  const remoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  try {
+    responses.profiles_snapshot = {
+      profiles: [{ ...originalProfiles.profiles[0], id: remoteId, name: "Remote", source_kind: "subscription", active: true }],
+      invalid_profiles: [invalidProfileRecord(false)],
+    };
+    responses.read_profile_text = (args) => {
+      if (args.id !== remoteId) throw new Error(`unexpected read of ${args.id}`);
+      return { source_url: "https://subscription.example/remote" };
+    };
+    responses.update_profile = { name: "Remote", credential_cleanup_pending: false };
+    state.profiles = [];
+    await reloadButton.click();
+    invocationDetails.length = 0;
+    await appModule.handleAction("update-all-profiles");
+    assert.equal(invocationDetails.some(({ args }) => args?.id === INVALID_PROFILE_ID), false);
+    assert.deepEqual(invocationDetails.filter(({ command }) => command === "update_profile").map(({ args }) => args), [{ id: remoteId }]);
+    assert.equal(loggedCount("Update All completed: 1 updated"), 1);
+  } finally {
+    delete responses.read_profile_text;
+    delete responses.update_profile;
+    responses.profiles_snapshot = originalProfiles;
+    state.profiles = [];
+    await reloadButton.click();
+  }
+});
+
+test("a credential cleanup refusal is shown where cleanup was asked for", async () => {
+  const refusal = `credential cleanup needs every stored profile to pass validation; delete the invalid profiles first: "Reality node" (${INVALID_PROFILE_ID})`;
+  try {
+    rejected.preview_credential_gc = refusal;
+    await appModule.handleAction("preview-credential-gc");
+    assert.equal(state.glassDialog?.kind, "info");
+    assert.equal(state.credentialGcPreview, null);
+    await renderPage("settings");
+    assert.ok(glassRoot.innerHTML.includes(`Credential cleanup is unavailable: ${refusal}`.replaceAll('"', "&quot;")), glassRoot.innerHTML);
+    assert.equal(loggedCount(refusal), 1);
+  } finally {
+    delete rejected.preview_credential_gc;
+    state.glassDialog = null;
+  }
+});
+
+test("a selected invalid profile blocks the configuration preview with its reason", async () => {
+  const originalProfiles = structuredClone(state.profiles);
+  const originalInvalid = structuredClone(state.invalidProfiles);
+  try {
+    state.profiles = [{ id: PROFILE_ID, name: "Work", active: false, bytes: 2048, updatedEpochSecs: null, updated: "now", sourceKind: "local" }];
+    state.invalidProfiles = [{ id: INVALID_PROFILE_ID, name: "Reality node", selected: true, updated: "now", sourceKind: "subscription", error: INVALID_PROFILE_REASON }];
+    state.profilesUnavailableReason = null;
+    state.glassDialog = null;
+    invoked.length = 0;
+    await appModule.handleAction("preview-runtime-config");
+    assert.equal(invoked.includes("read_runtime_config_text"), false);
+    assert.equal(state.glassDialog, null);
+    const message = `Configuration preview is unavailable: the selected profile “Reality node” is invalid: ${INVALID_PROFILE_REASON}`;
+    assert.equal(loggedCount(message), 1);
+  } finally {
+    state.profiles = originalProfiles;
+    state.invalidProfiles = originalInvalid;
+  }
+});
+
+test("ordinary profile operations remain available while the core is running", async () => {
+  await setEngine(OFF_ENGINE);
+  const off = await renderPage("profiles");
+  assert.equal(off.includes("require the engine to be Off"), false);
+
+  await setEngine(RUNNING_ENGINE);
+  const running = await renderPage("profiles");
+  for (const action of ["import-profile", "update-all-profiles", "import-profile-file"]) {
+    assert.match(running, new RegExp(`data-action="${action}"`));
+    assert.doesNotMatch(running, new RegExp(`data-action="${action}"[^>]*disabled`));
+  }
+});
+
+test("SOCKS5 links, local YAML, and dropped text use native conversion and never log source credentials", async () => {
+  const overrideKeys = ["profiles_snapshot", "import_profile_text", "import_profile_file", "select_profile", "apply_active_profile", "profile_credential_requirements", "profile_credential_presence"];
+  const originalResponses = new Map(overrideKeys.map((key) => [key, { present: Object.hasOwn(responses, key), value: responses[key] }]));
+  const originalEngine = responses.engine_snapshot;
+  const originalLogs = [...state.logs];
+  const originalSetup = state.credentialSetup;
+  const originalDialog = state.glassDialog;
+  const link = "socks://synthetic-user:synthetic-secret@proxy.example.com:29177";
+  const importedRecord = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "SOCKS5", bytes: 400, active: false, updated_epoch_secs: 1, source_kind: "local" };
+  const references = [
+    { id: "11111111-1111-4111-8111-111111111111", kind: "socks5_username" },
+    { id: "22222222-2222-4222-8222-222222222222", kind: "socks5_password" },
+  ];
+  const input = element("input");
+  querySelectorElements.set("[data-profile-url]", input);
+  responses.import_profile_text = () => {
+    responses.profiles_snapshot = { profiles: [{ ...importedRecord, active: false }], invalid_profiles: [] };
+    return importedRecord;
+  };
+  responses.import_profile_file = () => {
+    responses.profiles_snapshot = { profiles: [{ ...importedRecord, active: true }], invalid_profiles: [] };
+    return importedRecord;
+  };
+  responses.select_profile = () => {
+    responses.profiles_snapshot = { profiles: [{ ...importedRecord, active: true }], invalid_profiles: [] };
+    return importedRecord;
+  };
+  responses.apply_active_profile = { ...importedRecord, applied: false };
+  responses.profile_credential_requirements = references;
+  responses.profile_credential_presence = references.map((reference) => ({ reference, present: true }));
+  try {
+    await setEngine(OFF_ENGINE);
+    const html = await renderPage("profiles");
+    assert.match(html, /HTTPS subscription or node link/u);
+    assert.match(html, /accept="\.json,\.yaml,\.yml,\.conf,\.txt,/u);
+    // A single-line input strips pasted line breaks; the box must keep them.
+    assert.match(html, /<textarea data-profile-url rows="1"/u);
+    assert.doesNotMatch(html, /<input data-profile-url/u);
+    input.value = link;
+    let before = invocationDetails.length;
+    await appModule.handleAction("import-profile");
+    let calls = invocationDetails.slice(before);
+    assert.deepEqual(calls.find(({ command }) => command === "import_profile_text")?.args, { name: null, body: link });
+    assert.equal(calls.some(({ command }) => command === "import_profile_url"), false);
+    assert.equal(input.value, "", "remove the credential-bearing link after successful import");
+    assert.equal(state.credentialSetup.presentCount, 2);
+    assert.deepEqual(state.credentialSetup.missing, []);
+
+    const fileInput = element("input");
+    const yaml = "proxies:\n  - {type: socks5, name: SOCKS5, server: proxy.example.com, port: 1080, username: synthetic-user, password: synthetic-secret}";
+    fileInput.files = [new File([yaml], "nodes.yaml")];
+    fileInput.value = "nodes.yaml";
+    querySelectorElements.set("[data-profile-file]", fileInput);
+    before = invocationDetails.length;
+    await appModule.handleAction("import-profile-file");
+    calls = invocationDetails.slice(before);
+    assert.deepEqual(calls.find(({ command }) => command === "import_profile_text")?.args, { name: "nodes.yaml", body: yaml });
+    assert.equal(fileInput.value, "");
+
+    before = invocationDetails.length;
+    await emit("tauri://drag-drop", { paths: ["/private/synthetic/nodes.yaml", "/private/synthetic/nodes.txt"] });
+    calls = invocationDetails.slice(before).filter(({ command }) => command === "import_profile_file");
+    assert.deepEqual(calls.map(({ args }) => args.path), ["/private/synthetic/nodes.yaml", "/private/synthetic/nodes.txt"]);
+    assert.ok(calls.every(({ args }) => args.activate === true));
+    assert.equal(JSON.stringify(state.logs).includes("synthetic-secret"), false);
+    assert.equal(JSON.stringify(state.logs).includes("synthetic-user"), false);
+
+    await setEngine(RUNNING_ENGINE);
+    input.value = link;
+    before = invocationDetails.length;
+    await appModule.handleAction("import-profile");
+    const onlineCalls = invocationDetails.slice(before);
+    assert.equal(onlineCalls.filter(({ command }) => command === "import_profile_text").length, 1);
+    assert.equal(onlineCalls.filter(({ command }) => command === "select_profile").length, 1);
+    assert.equal(onlineCalls.some(({ command }) => command === "apply_active_profile"), false, "online import must not dispatch a second renderer restart");
+
+    const links = `${link}\nsocks://second-user:second-secret@proxy.example.com:29178`;
+    input.value = links;
+    before = invocationDetails.length;
+    await appModule.handleAction("import-profile");
+    const pastedCalls = invocationDetails.slice(before);
+    assert.deepEqual(pastedCalls.find(({ command }) => command === "import_profile_text")?.args, { name: null, body: links }, "every pasted line reaches the importer");
+  } finally {
+    querySelectorElements.delete("[data-profile-url]");
+    querySelectorElements.delete("[data-profile-file]");
+    for (const [key, original] of originalResponses) {
+      if (original.present) responses[key] = original.value;
+      else delete responses[key];
+    }
+    state.credentialSetup = originalSetup;
+    state.glassDialog = originalDialog;
+    state.logs = originalLogs;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("the single-row import box shows its first line whole and no part of the next", async () => {
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const body = styles.match(/^\.cfw-url-box textarea\s*\{(?<body>[^}]*)\}/mu)?.groups.body;
+  assert.ok(body, "the import box rule exists");
+  const rule = Object.fromEntries(
+    body.split(";").map((declaration) => declaration.split(":").map((part) => part.trim())).filter(([property]) => property),
+  );
+  // Overflow clips at the padding box: vertical padding would show the top of a
+  // pasted second line, so one line fills the box inside its 1px borders.
+  assert.equal(rule.overflow, "hidden");
+  assert.equal(rule["box-sizing"], undefined, "the box inherits the global border-box sizing");
+  assert.match(styles, /^\*\s*\{[^}]*box-sizing:\s*border-box/mu);
+  assert.equal(rule.height, "45px");
+  assert.match(rule.border, /^1px solid /u);
+  assert.equal(rule.padding, "0 48px 0 12px");
+  assert.equal(rule["line-height"], "43px");
+});
+
+test("network switches remain off while startup is pending or fails and cancellation remains available", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalProxyResponse = responses.set_system_proxy_enabled;
+  const originalTunnelResponse = responses.set_tun_enabled;
+  try {
+    for (const [key, mode, command, retry, cancel] of [
+      ["systemProxy", "system_proxy", "set_system_proxy_enabled", "retry-system-proxy", "cancel-system-proxy"],
+      ["tunMode", "tunnel", "set_tun_enabled", "retry-tun-mode", "cancel-tun-mode"],
+    ]) {
+      await setEngine(OFF_ENGINE);
+      const pending = deferred();
+      responses[command] = () => pending.promise;
+      const before = invocationDetails.filter((entry) => entry.command === command).length;
+      const operation = appModule.handleAction(retry);
+      await waitForInvocation(command, before);
+      const starting = await renderPage("general");
+      assert.doesNotMatch(starting, new RegExp(`data-toggle="${key}" checked`, "u"));
+      assert.match(starting, new RegExp(`data-toggle="${key}"\\s+disabled`, "u"));
+      pending.resolve({
+        snapshot: { desired_mode: mode, generation: 200, config_digest: null, state: { state: "failed", target: mode, error: "native startup failed" } },
+        capabilities: { system_proxy: true, tunnel: true },
+      });
+      await operation;
+      const failed = await renderPage("general");
+      assert.doesNotMatch(failed, new RegExp(`data-toggle="${key}" checked`, "u"));
+      assert.match(failed, /native startup failed/u);
+      assert.match(failed, new RegExp(`data-action="${cancel}">Cancel request`, "u"));
+      responses[command] = OFF_ENGINE;
+      await appModule.handleAction(cancel);
+      assert.equal(invocationDetails.filter((entry) => entry.command === command).at(-1).args.enabled, false);
+      assert.equal(state.engine.desiredMode, "off");
+    }
+    await setEngine(RUNNING_ENGINE);
+    assert.match(await renderPage("general"), /data-toggle="systemProxy" checked/u);
+  } finally {
+    if (originalProxyResponse === undefined) delete responses.set_system_proxy_enabled;
+    else responses.set_system_proxy_enabled = originalProxyResponse;
+    if (originalTunnelResponse === undefined) delete responses.set_tun_enabled;
+    else responses.set_tun_enabled = originalTunnelResponse;
+    await setEngine(originalEngine);
+  }
+});
+
+test("engine status events do not discard a pending switch failure", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalResponse = responses.set_system_proxy_enabled;
+  const originalError = state.engineMutationError;
+  const failure = {
+    snapshot: { desired_mode: "system_proxy", generation: 201, config_digest: null, state: { state: "failed", target: "system_proxy", error: "Earlier startup failed" } },
+    capabilities: { system_proxy: true, tunnel: true },
+  };
+  try {
+    await setEngine(OFF_ENGINE);
+    const pending = deferred();
+    responses.set_system_proxy_enabled = () => pending.promise;
+    const before = invocationDetails.filter(({ command }) => command === "set_system_proxy_enabled").length;
+    const operation = appModule.handleAction("retry-system-proxy");
+    const rejection = assert.rejects(operation, /Current startup failure/u);
+    await waitForInvocation("set_system_proxy_enabled", before);
+    responses.engine_snapshot = failure;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    pending.reject(new Error("Current startup failure"));
+    await rejection;
+    assert.equal(state.engineMutationBusy, false);
+    assert.match(await renderPage("general"), /Current startup failure/u);
+    assert.doesNotMatch(await renderPage("general"), /Earlier startup failed/u);
+  } finally {
+    if (originalResponse === undefined) delete responses.set_system_proxy_enabled;
+    else responses.set_system_proxy_enabled = originalResponse;
+    state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("startup service recovery is explicit, bounded to one request and stays Off", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalError = state.engineMutationError;
+  const originalHandoff = state.migrationHandoff;
+  const failure = {
+    ...OFF_ENGINE,
+    snapshot: { desired_mode: "off", generation: 0, config_digest: null,
+      state: { state: "failed", target: "off", generation: 0, error: "Background service update failed" } },
+    startup_recovery_available: true,
+  };
+  try {
+    await setEngine(failure);
+    const before = invocationDetails.length;
+    const html = await renderPage("general");
+    assert.match(html, /data-action="reconcile-startup-services"/u);
+    assert.doesNotMatch(html, /data-action="toggle-core"/u);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => command === "reconcile_startup_services"), false);
+    const pending = deferred();
+    responses.reconcile_startup_services = () => pending.promise;
+    const operation = appModule.handleAction("reconcile-startup-services");
+    await waitForInvocation("reconcile_startup_services");
+    assert.equal(state.engineMutationBusy, true);
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /in progress/u);
+    assert.equal(invocationDetails.slice(before).filter(({ command }) => command === "reconcile_startup_services").length, 1);
+    pending.resolve(OFF_ENGINE);
+    await operation;
+    assert.equal(state.engine.state, "Off");
+    assert.equal(state.engineMutationBusy, false);
+    assert.equal(invocationDetails.slice(before).some(({ command }) => /^(set_core_enabled|set_system_proxy_enabled|set_tun_enabled)$/u.test(command)), false);
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+
+    await setEngine(failure);
+    responses.reconcile_startup_services = () => { throw new Error("Service recovery remains unproven"); };
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /remains unproven/u);
+    assert.equal(state.engine.state, "Failed");
+    assert.equal(state.engineMutationBusy, false);
+    assert.match(await renderPage("general"), /Service recovery remains unproven/u);
+    assert.match(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    responses.reconcile_startup_services = () => RUNNING_ENGINE;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /did not prove/u);
+    assert.equal(state.engine.state, "Failed");
+    assert.equal(state.engine.active, false);
+    await setEngine({ ...failure, startup_recovery_available: false });
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    const calls = invocationDetails.length;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /not available/u);
+    assert.equal(invocationDetails.length, calls);
+    await setEngine(failure);
+    state.migrationHandoff = true;
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+    const handoffCalls = invocationDetails.length;
+    await assert.rejects(appModule.handleAction("reconcile-startup-services"), /not available/u);
+    assert.equal(invocationDetails.length, handoffCalls);
+  } finally {
+    delete responses.reconcile_startup_services;
+    state.engineMutationError = originalError;
+    state.migrationHandoff = originalHandoff;
+    await setEngine(originalEngine);
+  }
+});
+
+test("startup recovery is asked for by the dashboard itself after an installation and then explained", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalError = state.engineMutationError;
+  const failure = {
+    ...OFF_ENGINE,
+    snapshot: { desired_mode: "off", generation: 0, config_digest: null,
+      state: { state: "failed", target: "off", generation: 0, error: "CleanupUnproven: Global cleanup could not be proven." } },
+    startup_recovery_available: true,
+  };
+  const settle = async (predicate, label) => {
+    for (let waited = 0; waited < 2000; waited += 10) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  };
+  try {
+    runtime.startupRecovery.delays = [80, 80];
+    runtime.startupRecovery.attempts = 0;
+    runtime.startupRecovery.exhausted = false;
+    let calls = 0;
+    responses.reconcile_startup_services = () => {
+      calls += 1;
+      if (calls === 1) throw new Error("services still restarting");
+      return OFF_ENGINE;
+    };
+    await setEngine(failure);
+    const waiting = await renderPage("general");
+    assert.match(waiting, /Background services are restarting/u);
+    assert.match(waiting, /Global cleanup could not be proven/u, "the host's reason stays as technical detail");
+    assert.doesNotMatch(waiting, /Background services need your help/u);
+    await settle(() => calls === 2 && state.engine.state === "Off", "the second automatic attempt");
+    assert.equal(runtime.startupRecovery.attempts, 0, "a recovered engine ends and forgets the attempts");
+    assert.equal(runtime.startupRecovery.exhausted, false);
+    assert.doesNotMatch(await renderPage("general"), /data-action="reconcile-startup-services"/u);
+
+    // The host keeps refusing: after the last automatic attempt the page
+    // tells the user what to do, with the recovery button still there.
+    calls = 0;
+    responses.reconcile_startup_services = () => { calls += 1; throw new Error("services never came back"); };
+    await setEngine(failure);
+    assert.equal(runtime.startupRecovery.attempts, 1, "a fresh failure schedules the first attempt again");
+    assert.match(await renderPage("general"), /Background services are restarting/u);
+    await settle(() => runtime.startupRecovery.exhausted, "the attempts to be exhausted");
+    assert.equal(calls, 2);
+    const explained = await renderPage("general");
+    assert.match(explained, /Background services need your help/u);
+    assert.match(explained, /Login Items/u);
+    assert.match(explained, /data-action="reconcile-startup-services"/u);
+    assert.match(explained, /services never came back/u);
+
+    // A recovery the user asks for while the attempts are exhausted still works.
+    responses.reconcile_startup_services = () => OFF_ENGINE;
+    await appModule.handleAction("reconcile-startup-services");
+    assert.equal(state.engine.state, "Off");
+    assert.equal(runtime.startupRecovery.exhausted, false);
+    assert.equal(runtime.startupRecovery.attempts, 0);
+  } finally {
+    runtime.startupRecovery.delays = [];
+    runtime.startupRecovery.attempts = 0;
+    runtime.startupRecovery.exhausted = false;
+    delete responses.reconcile_startup_services;
+    state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("the General page surfaces approval and capability reasons", async () => {
+  await setEngine({
+    snapshot: { desired_mode: "tunnel", generation: 1, config_digest: null, state: { state: "awaiting_approval", generation: 1 } },
+    capabilities: { system_proxy: true, tunnel: true },
+  });
+  const awaitingApproval = await renderPage("general");
+  assert.ok(awaitingApproval.includes("Needs approval"));
+  assert.match(awaitingApproval, /data-action="retry-tun-mode">Approve/u);
+  assert.doesNotMatch(awaitingApproval, /data-toggle="tunMode" checked/u);
+  assert.match(awaitingApproval, /data-action="cancel-tun-mode">Cancel request/u);
+
+  state.engineMutationBusy = true;
+  const mutationBusy = await renderPage("general");
+  assert.match(mutationBusy, /data-action="retry-tun-mode" disabled>Approve/u);
+  assert.match(mutationBusy, /data-toggle="tunMode"\s+disabled/u);
+  assert.match(mutationBusy, /data-action="cancel-tun-mode" disabled/u);
+  state.engineMutationBusy = false;
+
+  await setEngine({
+    snapshot: {
+      desired_mode: "system_proxy",
+      generation: 2,
+      config_digest: "digest",
+      state: { state: "failed", generation: 2, target: "system_proxy", error: "approval required" },
+    },
+    capabilities: { system_proxy: true, tunnel: true },
+  });
+  const failedProxy = await renderPage("general");
+  assert.match(failedProxy, /data-action="retry-system-proxy">Retry/u);
+  assert.doesNotMatch(failedProxy, /data-toggle="systemProxy" checked/u);
+  assert.match(failedProxy, /data-action="cancel-system-proxy">Cancel request/u);
+
+  await setEngine({
+    snapshot: { desired_mode: "off", generation: 0, config_digest: null, state: { state: "off" } },
+    capabilities: { system_proxy: false, tunnel: false },
+    unavailable_reason: "native runtime unavailable",
+  });
+  assert.ok((await renderPage("general")).includes("native runtime unavailable"));
+});
+
+test("General routes recovery, post-cutover cleanup and unreadable state without changing pages", async () => {
+  state.migrationHandoff = true;
+  state.retirement = { state: "recovery_start_required", target: "tunnel", message: "durable journal remains" };
+  let html = await renderPage("general");
+  assert.ok(html.includes("Recover Replacement"));
+  assert.equal(html.includes("Prepare cutover"), false);
+
+  state.retirement = { state: "post_cutover_cleanup_required", message: "old data remains" };
+  html = await renderPage("general");
+  assert.ok(html.includes("Recover Replacement"));
+
+  state.retirement = { state: "unverifiable", message: "journal unreadable" };
+  html = await renderPage("general");
+  assert.ok(html.includes("Legacy CFM maintenance state cannot be verified"));
+  assert.equal(html.includes("Prepare cutover"), false);
+
+  state.retirement = { state: "awaiting_confirmation" };
+  state.cutover = {
+    ...state.cutover,
+    target: "system_proxy",
+    receiptId: null,
+  };
+  html = await renderPage("general");
+  assert.ok(html.includes("data-cutover-target"));
+  assert.ok(html.includes("System Proxy"));
+  assert.ok(html.includes("TUN"));
+
+  state.migrationHandoff = false;
+  state.retirement = { state: "cleared" };
+});
+
+test("legacy maintenance is an explicit Settings action and keeps its profile precondition", async () => {
+  const originalProfiles = state.profiles;
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  const originalRetirementResponse = responses.legacy_retirement_status;
+
+  try {
+    state.profiles = [];
+    state.retirement = { state: "awaiting_confirmation" };
+    state.migrationHandoff = false;
+    state.legacyMaintenanceOpen = false;
+    responses.legacy_retirement_status = state.retirement;
+    assert.doesNotMatch(await renderPage("general"), /cfw-content-migration|Start Migration|Finish setup/u);
+    assert.match(await renderPage("settings"), /data-action="open-legacy-maintenance"/u);
+    invocationDetails.length = 0;
+    await appModule.handleAction("open-legacy-maintenance");
+    assert.deepEqual(invocationDetails, [
+      { command: "legacy_retirement_status", args: {} },
+      { command: "open_page", args: { page: "general" } },
+    ]);
+    const html = page.innerHTML;
+    assert.match(html, /cfw-content-migration/u);
+    assert.match(html, /Optional legacy CFM maintenance/u);
+    assert.match(html, /Import and select a replacement profile/u);
+    assert.match(html, /data-action="open-migration-profiles"/u);
+    assert.doesNotMatch(html, /data-action="begin-migration-handoff"/u);
+
+    await appModule.handleAction("open-migration-profiles");
+    assert.equal(state.activePage, "profiles");
+    assert.deepEqual(invocationDetails.at(-1), {
+      command: "open_page",
+      args: { page: "profiles" },
+    });
+    await appModule.handleAction("close-legacy-maintenance");
+    assert.equal(state.legacyMaintenanceOpen, false);
+    assert.doesNotMatch(await renderPage("general"), /cfw-migration-banner/u);
+  } finally {
+    state.profiles = originalProfiles;
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
+    responses.legacy_retirement_status = originalRetirementResponse;
+  }
+});
+
+test("an unfinished legacy transaction exposes recovery even when maintenance was not opened", async () => {
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  try {
+    state.retirement = { state: "recovery_start_required", target: "tunnel", message: "durable journal remains" };
+    state.migrationHandoff = false;
+    state.legacyMaintenanceOpen = false;
+    const html = await renderPage("general");
+    assert.match(html, /durable journal remains/u);
+    assert.match(html, /data-action="begin-migration-handoff"[^>]*>Open Recovery/u);
+    assert.doesNotMatch(html, /Prepare cutover|Finish setup/u);
+    await appModule.handleAction("close-legacy-maintenance");
+    assert.match(page.innerHTML, /Open Recovery/u);
+  } finally {
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
+  }
+});
+
+test("renderer refresh recovers app-owned handoff progress and terminal failure", async () => {
+  state.migrationHandoff = false;
+  state.retirement = { state: "awaiting_confirmation" };
+  responses.boot_payload.migration_handoff_status = { state: "in_progress" };
+  await emit("cfw://engine-event", {
+    type: "boundary_failure",
+    code: "migration_handoff_failed",
+    message: "refresh",
+  });
+  let html = await renderPage("general");
+  assert.equal(state.migrationHandoffStatus.state, "in_progress");
+  assert.match(html, /Legacy CFM maintenance session is starting/u);
+  assert.match(html, /data-action="begin-migration-handoff" disabled>Starting…/u);
+
+  responses.boot_payload.migration_handoff_status = {
+    state: "failed",
+    code: "migration_handoff_failed",
+    message: "The migration session did not complete. No legacy cutover was authorized; review the migration log and retry.",
+  };
+  await emit("cfw://engine-event", {
+    type: "boundary_failure",
+    code: "migration_handoff_failed",
+    message: "refresh",
+  });
+  html = await renderPage("general");
+  assert.equal(state.migrationHandoffStatus.state, "failed");
+  assert.match(html, /No legacy cutover was authorized/u);
+  assert.match(html, /Retry Maintenance…/u);
+  assert.doesNotMatch(html, /begin-migration-handoff" disabled/u);
+
+  rejected.begin_migration_handoff = "injected readiness failure";
+  await appModule.handleAction("begin-migration-handoff");
+  assert.equal(state.migrationHandoffStatus.state, "failed");
+  assert.equal(invocationDetails.at(-2).command, "begin_migration_handoff");
+  assert.equal(invocationDetails.at(-1).command, "boot_payload");
+  delete rejected.begin_migration_handoff;
+
+  responses.boot_payload.migration_handoff_status = { state: "idle" };
+  state.migrationHandoffStatus = { state: "idle" };
+  state.retirement = { state: "cleared" };
+  state.legacyMaintenanceOpen = false;
+});
+
+test("migration actions invoke exact target, receipt and confirmation arguments", async () => {
+  state.migrationHandoff = true;
+  state.retirement = { state: "awaiting_confirmation" };
+  state.cutover = {
+    ...state.cutover,
+    target: "tunnel",
+    receiptId: null,
+  };
+  responses.prepare_legacy_cutover = { status: "awaiting_approval", target: "tunnel" };
+  await appModule.handleAction("prepare-cutover");
+  assert.deepEqual(invocationDetails.at(-1), {
+    command: "prepare_legacy_cutover",
+    args: { target: "tunnel" },
+  });
+  assert.equal(state.cutover.awaitingApproval, true);
+  assert.equal(state.cutover.receiptId, null);
+
+  responses.prepare_legacy_cutover = {
+    status: "ready",
+    receipt_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    target: "tunnel",
+    profile_id: PROFILE_ID,
+    valid_for_millis: 60_000,
+  };
+  await appModule.handleAction("prepare-cutover");
+  state.cutover.confirmedReceiptId = state.cutover.receiptId;
+  state.cutover.dnsReviewedReceiptId = state.cutover.receiptId;
+  responses.disable_service_mode = null;
+  responses.legacy_retirement_status = { state: "cleared" };
+  await appModule.handleAction("confirm-cutover");
+  const disable = invocationDetails.findLast((entry) => entry.command === "disable_service_mode");
+  assert.deepEqual(disable, {
+    command: "disable_service_mode",
+    args: {
+      receiptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      cutoverConfirmed: true,
+      dnsReviewConfirmed: true,
+    },
+  });
+
+  state.migrationHandoff = false;
+  state.retirement = { state: "cleared" };
+});
+
+test("the Settings page reports the diagnostics fields the backend calls unavailable", async () => {
+  const html = await renderPage("settings");
+  assert.ok(html.includes("default_route_interface"));
+  assert.ok(html.includes("hardware_port"));
+  assert.ok(html.includes("Wi-Fi"));
+  assert.ok(html.includes("NetworkExtension Packet Tunnel System Extension"));
+});
+
+test("background controls render through the dashboard and Escape dismisses the dialog", async () => {
+  responses.read_automation_settings = {
+    settings: { shortcuts: [], network_enabled: false, network_rules: [] },
+    revision: "automation-v1", network: { kind: "wifi", interface: "en0", ssid: null },
+  };
+  try {
+    await renderPage("settings");
+    await appModule.handleAction("open-automation-settings");
+    assert.match(glassRoot.innerHTML, /aria-labelledby="automation-title"/u);
+    assert.match(glassRoot.innerHTML, /data-shortcut-action="show_dashboard"/u);
+    assert.match(glassRoot.innerHTML, /data-network-add/u);
+    let prevented = false;
+    for (const handler of documentListeners.get("keydown") ?? []) {
+      handler({ key: "Escape", preventDefault() { prevented = true; } });
+    }
+    assert.equal(prevented, true);
+    assert.equal(state.automationDialog, null);
+    assert.doesNotMatch(glassRoot.innerHTML, /automation-title/u);
+  } finally {
+    state.automationDialog = null;
+    delete responses.read_automation_settings;
+    await renderPage("settings");
+  }
+});
+
+test("all dashboard pages render in each language without changing network identity or modes", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const forbidden = new Set(["apply_active_profile", "select_proxy", "select_profile", "set_proxy_mode", "set_core_enabled", "set_system_proxy_enabled", "set_tun_enabled", "write_runtime_settings_snapshot", "write_automation_settings"]);
+  try {
+    await setEngine(RUNNING_ENGINE);
+    const identity = structuredClone(state.engine.runtimeIdentity);
+    const before = invoked.length;
+    for (const language of ["zh-Hans", "zh-Hant", "ja", "en"]) {
+      responses.read_settings_snapshot = { ...original, settings: { ...original.settings, language }, resolved_locale: language };
+      await emit("cfw://settings-changed", responses.read_settings_snapshot);
+      assert.equal(documentStub.documentElement.lang, language);
+      for (const entry of PAGES) {
+        const html = await renderPage(entry.id);
+        assert.ok(html.trim(), `${language}: ${entry.id}`);
+        assert.doesNotMatch(html, /\{(?:count|name|error|number|title|mode)\}/u);
+        const navButtons = [...nav.innerHTML.matchAll(/<button\b([^>]*)>/gu)].map((match) => match[1]);
+        assert.deepEqual(navButtons.map((attributes) => attributes.match(/data-page="([^"]+)"/u)?.[1]), PAGES.map(({ id }) => id));
+        const currentPages = navButtons.filter((attributes) => /aria-current="page"/u.test(attributes));
+        const activePages = navButtons.filter((attributes) => /class="[^"]*\bactive\b/u.test(attributes));
+        assert.equal(currentPages.length, 1, `${language}: exactly one current navigation page`);
+        assert.ok(currentPages[0].includes(`data-page="${entry.id}"`), `${language}: ${entry.id}`);
+        assert.deepEqual(currentPages, activePages, `${language}: visible and accessible page state must agree`);
+      }
+      const general = await renderPage("general");
+      assert.ok(general.includes(t("System Proxy")), language);
+      assert.ok(general.includes(t("Home Directory")), language);
+      const settings = await renderPage("settings");
+      assert.ok(settings.includes(t("Language")), language);
+      assert.match(settings, new RegExp(`value="${language}" selected`, "u"));
+      assert.deepEqual(state.engine.runtimeIdentity, identity);
+      assert.equal(state.engine.desiredMode, "system-proxy");
+    }
+    assert.deepEqual(invoked.slice(before).filter((command) => forbidden.has(command)), []);
+  } finally {
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
+test("language selection saves only UI preferences and a refused save restores the verified language", async () => {
+  const original = structuredClone(responses.read_settings_snapshot);
+  const originalWriter = responses.write_settings_snapshot;
+  const handlers = new Map();
+  const selector = "[data-theme-setting], [data-font-family], [data-language-setting]";
+  const input = element("select");
+  input.value = "ja";
+  input.addEventListener = (type, handler) => handlers.set(type, handler);
+  querySelectorElements.set("[data-language-setting]", input);
+  querySelectorAllElements.set(selector, [input]);
+  responses.write_settings_snapshot = ({ settings }) => {
+    const snapshot = { ...original, settings: structuredClone(settings), resolved_locale: settings.language };
+    responses.read_settings_snapshot = snapshot;
+    return snapshot;
+  };
+  try {
+    await renderPage("settings");
+    const before = invocationDetails.length;
+    await handlers.get("change")();
+    assert.equal(getLocale(), "ja");
+    assert.equal(state.settingsSnapshot.settings.language, "ja");
+    const writes = invocationDetails.slice(before).filter(({ command }) => command.startsWith("write_") || command.startsWith("set_") || command === "apply_active_profile");
+    assert.deepEqual(writes.map(({ command }) => command), ["write_settings_snapshot"]);
+    assert.deepEqual(writes[0].args.settings, { ...original.settings, language: "ja" });
+    rejected.write_settings_snapshot = "disk busy";
+    input.value = "zh-Hant";
+    await handlers.get("change")();
+    assert.equal(getLocale(), "ja");
+    assert.equal(state.settingsSnapshot.settings.language, "ja");
+    assert.ok(state.logs.some(({ message }) => message.includes("disk busy")));
+    assert.match(page.innerHTML, /value="ja" selected/u);
+  } finally {
+    delete rejected.write_settings_snapshot;
+    if (originalWriter === undefined) delete responses.write_settings_snapshot;
+    else responses.write_settings_snapshot = originalWriter;
+    querySelectorElements.delete("[data-language-setting]");
+    querySelectorAllElements.delete(selector);
+    responses.read_settings_snapshot = original;
+    await emit("cfw://settings-changed", original);
+  }
+});
+
+test("a missed observation of a leased core is explained as a recheck instead of a failure", async () => {
+  const reason = "native operation query_status failed: Timeout: query_status exceeded 2s";
+  const failure = (recheckPending) => ({
+    ...OFF_ENGINE,
+    snapshot: { desired_mode: "local_proxy", generation: 7, config_digest: null,
+      state: { state: "failed", target: "local_proxy", generation: 7, error: reason, recheck_pending: recheckPending } },
+  });
+  try {
+    await setEngine(failure(true));
+    assert.equal(state.engine.observationRecheckPending, true);
+    const rechecking = await renderPage("general");
+    assert.match(rechecking, /Confirming the core/u);
+    assert.match(rechecking, /left as they are/u);
+    assert.match(rechecking, /query_status exceeded 2s/u, "the host's reason stays as technical detail");
+    assert.match(rechecking, /sing-box · Reconfirming…/u);
+    assert.doesNotMatch(rechecking, /Background services/u);
+    assert.doesNotMatch(rechecking, /sing-box · Failed/u);
+
+    await setEngine(failure(false));
+    assert.equal(state.engine.observationRecheckPending, false);
+    const failed = await renderPage("general");
+    assert.doesNotMatch(failed, /Confirming the core/u);
+    assert.match(failed, /query_status exceeded 2s/u);
+    assert.match(failed, /sing-box · Failed/u);
+  } finally {
+    await setEngine(OFF_ENGINE);
+  }
+});

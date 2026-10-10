@@ -128,6 +128,34 @@ private final class PumpStopOwner: @unchecked Sendable {
   #expect(failures.values.isEmpty)
 }
 
+@Test func concurrentStopsPreserveTransferredEngineDescriptorCopies() throws {
+  let flow = TestPacketFlow()
+  let failures = PumpFailureRecorder()
+  let pump = try PacketPump(packetFlow: flow) { failures.record($0) }
+  let engineFileDescriptor = try pump.takeEngineFileDescriptor()
+  defer {
+    pump.stop()
+    Darwin.close(engineFileDescriptor)
+  }
+  let engineCopy = Darwin.dup(engineFileDescriptor)
+  try #require(engineCopy >= 0)
+  defer { Darwin.close(engineCopy) }
+  try pump.start()
+
+  DispatchQueue.concurrentPerform(iterations: 16) { _ in
+    pump.stop()
+  }
+
+  // Cancellation closes the flow side after its dispatch sources release it.
+  // Both transferred descriptors continue to belong to the engine's caller.
+  #expect(Darwin.fcntl(engineFileDescriptor, F_GETFD) >= 0)
+  #expect(Darwin.fcntl(engineCopy, F_GETFD) >= 0)
+  #expect(throws: PacketPumpError.engineFileDescriptorAlreadyTransferred) {
+    try pump.takeEngineFileDescriptor()
+  }
+  #expect(failures.values.isEmpty)
+}
+
 @Test func packetPumpIgnoresLateFlowCallbackAfterStop() async throws {
   let flow = TestPacketFlow()
   let failures = PumpFailureRecorder()

@@ -15,16 +15,6 @@ import Testing
   try GlobalAuthorityReleaseGate.validate(.proven)
 }
 
-@Test func buildConfigurationEnforcesTheReleaseAuthorityGate() throws {
-  #if CFW_GLOBAL_AUTHORITY_REQUIRED
-    #expect(throws: GlobalAuthorityGateError.proofMissing(.availabilityUnproven)) {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
-    }
-  #else
-    try GlobalAuthorityReleaseGate.requireStartAuthorization()
-  #endif
-}
-
 @Test func authorityFailureCodeHasStableWireRepresentation() throws {
   let failure = NativeBridgeFailure(
     code: .globalAuthorityUnavailable,

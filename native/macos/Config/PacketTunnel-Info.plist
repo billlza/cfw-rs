@@ -27,7 +27,7 @@
 	<key>NetworkExtension</key>
 	<dict>
 		<key>NEMachServiceName</key>
-		<string>$(TeamIdentifierPrefix)com.bill.clashformac.packet-tunnel</string>
+		<string>$(TeamIdentifierPrefix)group.com.bill.clashformac.packet-tunnel</string>
 		<key>NEProviderClasses</key>
 		<dict>
 			<key>com.apple.networkextension.packet-tunnel</key>

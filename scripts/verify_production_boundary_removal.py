@@ -10,6 +10,8 @@ Extension migration removed:
 * provider-local acceptance/lease authority in production
   (``SandboxConfigurationAcceptanceStore`` / ``CrossProcessEngineLeaseStore``
   constructed outside explicitly named test fixtures);
+* durable App Group storage of secret-bearing runtime configuration in a
+  production owner path (``AppGroupConfigurationStore(...)``);
 * root data-plane behavior or retired privileged-helper startup
   (``SMJobBless`` / ``AuthorizationExecuteWithPrivileges``);
 * alternate or downloaded cores and executable-launch fallbacks
@@ -19,7 +21,14 @@ Extension migration removed:
   ``socket.fileDescriptor`` and other undocumented symbols);
 * insecure Authority overrides
   (``CFW_ALLOW_INSECURE_*``, ``CFW_GLOBAL_AUTHORITY_REQUIRED=0``,
-  ``allowInsecureAuthority``, ``globalAuthorityFallback`` and similar).
+  ``allowInsecureAuthority``, ``globalAuthorityFallback`` and similar);
+* fail-closed placeholders composed into a shipped start path instead of a
+  concrete ProxyAgent/Provider Authority owner and effective-state observer;
+* permanently unproven Authority release gates or an opt-in signed-channel
+  boolean whose production default is false; and
+* private ``NSXPCConnection.auditToken`` selector access, including protocol
+  ``unsafeBitCast`` dispatch.  Peer identity must come from a documented XPC
+  transport API rather than a selector that is absent from the public SDK.
 
 Cleanup/tombstone references are permitted only where they cannot start or
 authorize a data plane.  This is enforced two ways: comments and string
@@ -100,14 +109,18 @@ class Finding:
         return f"{self.relative_path}:{self.line}: {self.category}: {self.detail}"
 
 
-def strip_comments_and_strings(text: str, language: str) -> str:
-    """Blank out line comments, (nested) block comments, and string literals,
-    preserving newlines and length so line numbers stay accurate.
+def strip_comments_and_strings(
+    text: str, language: str, *, strip_strings: bool = True
+) -> str:
+    """Blank out comments and, by default, string literals while preserving
+    newlines and length so line numbers stay accurate.
 
     Handles Swift/Rust ``//`` and nested ``/* */`` comments, normal
     double-quoted strings with escapes, Swift multiline ``\"\"\"`` strings,
     Swift raw strings (``#"..."#``), and Rust raw strings (``r"..."`` /
-    ``r#"..."#``).
+    ``r#"..."#``).  With ``strip_strings=False`` it still skips over strings
+    while scanning, so comment markers inside a literal remain data, but leaves
+    the string bytes intact for the exact audit-token selector rule.
     """
     out = list(text)
     n = len(text)
@@ -159,7 +172,8 @@ def strip_comments_and_strings(text: str, language: str) -> str:
                 closing = '"' + "#" * hashes
                 end = text.find(closing, k + 1)
                 end = n if end < 0 else end + len(closing)
-                blank(i, end)
+                if strip_strings:
+                    blank(i, end)
                 i = end
                 continue
 
@@ -176,7 +190,8 @@ def strip_comments_and_strings(text: str, language: str) -> str:
                 closing = open_quote + "#" * hashes
                 end = text.find(closing, k + len(open_quote))
                 end = n if end < 0 else end + len(closing)
-                blank(i, end)
+                if strip_strings:
+                    blank(i, end)
                 i = end
                 continue
 
@@ -184,7 +199,8 @@ def strip_comments_and_strings(text: str, language: str) -> str:
         if language in {"swift", "objc"} and text.startswith('"""', i):
             end = text.find('"""', i + 3)
             end = n if end < 0 else end + 3
-            blank(i, end)
+            if strip_strings:
+                blank(i, end)
             i = end
             continue
 
@@ -198,7 +214,8 @@ def strip_comments_and_strings(text: str, language: str) -> str:
                 j += 1
             if j < n and text[j] == '"':
                 j += 1
-            blank(i, j)
+            if strip_strings:
+                blank(i, j)
             i = j
             continue
 
@@ -210,6 +227,49 @@ def strip_comments_and_strings(text: str, language: str) -> str:
 # Structural rules run over comment/string-stripped code.  Each rule is a
 # (category, compiled pattern, languages, allow-line pattern) tuple.
 _STRUCTURAL_RULES: tuple[tuple[str, re.Pattern[str], frozenset[str], re.Pattern[str] | None], ...] = (
+    (
+        "fail-closed production composition",
+        re.compile(
+            r"\b(?:FailClosedProxyOwnerAuthorityClient|"
+            r"FailClosedProxyOwnerCapabilitySource|"
+            r"FailClosedEffectiveSystemProxyObserver|"
+            r"FailClosedEngineOwnerAuthorityClient)\s*(?:\.init\s*)?\("
+        ),
+        frozenset({"swift", "objc"}),
+        None,
+    ),
+    (
+        "unproven signed Authority channel",
+        re.compile(
+            r"\bsignedChannelProven\s*(?:"
+            r":\s*false\b|"
+            r":\s*Bool\s*=\s*false\b|"
+            r"=\s*false\b)"
+        ),
+        frozenset({"swift", "objc"}),
+        None,
+    ),
+    (
+        "permanently unavailable Authority release gate",
+        re.compile(r"\bvalidate\s*\(\s*\.availabilityUnproven\s*\)"),
+        frozenset({"swift", "objc"}),
+        None,
+    ),
+    (
+        "private NSXPCConnection audit-token access",
+        re.compile(
+            r"\bunsafeBitCast\s*\([^,\n]+,\s*to\s*:\s*"
+            r"CFWXPCAuditTokenProviding\.self\s*\)"
+        ),
+        frozenset({"swift", "objc"}),
+        None,
+    ),
+    (
+        "private NSXPCConnection audit-token access",
+        re.compile(r"\.\s*auditToken\b"),
+        frozenset({"swift", "objc"}),
+        None,
+    ),
     (
         "direct Tunnel payload transport",
         re.compile(r"\bTunnelStartPayloadCodec\s*\."),
@@ -231,6 +291,12 @@ _STRUCTURAL_RULES: tuple[tuple[str, re.Pattern[str], frozenset[str], re.Pattern[
     (
         "provider-local lease authority",
         re.compile(r"\bCrossProcessEngineLeaseStore\s*(?:\.init\s*)?\("),
+        frozenset({"swift", "objc"}),
+        None,
+    ),
+    (
+        "durable runtime configuration fallback",
+        re.compile(r"\bAppGroupConfigurationStore\s*(?:\.init\s*)?\("),
         frozenset({"swift", "objc"}),
         None,
     ),
@@ -279,6 +345,14 @@ _INSECURE_OVERRIDE = re.compile(
     re.IGNORECASE,
 )
 
+# The selector name is a string literal and therefore intentionally scanned in
+# raw text.  Limit the rule to the exact private NSXPCConnection audit-token
+# accessor so ordinary documented selector use elsewhere is not conflated with
+# this release-blocking identity boundary.
+_PRIVATE_XPC_AUDIT_TOKEN_SELECTOR = re.compile(
+    r"\bNSSelectorFromString\s*\(\s*(?:#+)?[\"']auditToken[\"'](?:#+)?\s*\)"
+)
+
 
 def scan_source(relative_path: str, text: str) -> list[Finding]:
     """Return every production-boundary violation in a single source file.
@@ -293,6 +367,9 @@ def scan_source(relative_path: str, text: str) -> list[Finding]:
     findings: list[Finding] = []
     raw_lines = text.splitlines()
     stripped_lines = strip_comments_and_strings(text, language).splitlines()
+    selector_lines = strip_comments_and_strings(
+        text, language, strip_strings=False
+    ).splitlines()
 
     for line_number, stripped in enumerate(stripped_lines, start=1):
         for category, pattern, languages, allow in _STRUCTURAL_RULES:
@@ -307,7 +384,9 @@ def scan_source(relative_path: str, text: str) -> list[Finding]:
                 Finding(relative_path, line_number, category, match.group(0).strip())
             )
 
-    for line_number, raw in enumerate(raw_lines, start=1):
+    for line_number, (raw, selector_source) in enumerate(
+        zip(raw_lines, selector_lines, strict=True), start=1
+    ):
         match = _INSECURE_OVERRIDE.search(raw)
         if match:
             findings.append(
@@ -316,6 +395,16 @@ def scan_source(relative_path: str, text: str) -> list[Finding]:
                     line_number,
                     "insecure Authority override",
                     match.group(0).strip(),
+                )
+            )
+        private_selector = _PRIVATE_XPC_AUDIT_TOKEN_SELECTOR.search(selector_source)
+        if private_selector:
+            findings.append(
+                Finding(
+                    relative_path,
+                    line_number,
+                    "private NSXPCConnection audit-token access",
+                    private_selector.group(0).strip(),
                 )
             )
 

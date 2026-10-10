@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "document": "cfm-ios-packet-lan-peer-source-identity-v1",
+  "identity_sha256": "c5e9e90cc7a4ec25bf27041373c3fd94e8a55096fb5227ad3a5156a8053dc2a6",
+  "identity": {
+    "schema_version": 1,
+    "document": "cfm-ios-packet-lan-peer-identity-v1",
+    "role": "packet-lan-peer",
+    "platform": "iOS",
+    "device": {
+      "core_device_identifier_sha256": "a992e87636750487576c10f2ae66a9eb8e9a1b533ca720fd3dae047ef5f15ec0",
+      "provisioning_udid_sha256": "983e5e676afaca0eeb42cc86a9898270020a6e1b9db062226033b8c415851d76",
+      "product_type": "iPhone17,1",
+      "os_version": "26.5",
+      "os_build": "23F77",
+      "device_family": 1
+    },
+    "control": {
+      "devicectl_version": "642.9.1",
+      "json_version": 5,
+      "transport": "localNetwork",
+      "authentication": "manualPairing",
+      "tunnel_transport": "tcp"
+    },
+    "artifact": {
+      "relative_path": "target/ios-packet-lan-peer/CFMPhysicalTransportPeer.app",
+      "bundle_identifier": "com.bill.cfm.physical-transport-peer",
+      "app_tree_sha256": "9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7",
+      "executable_sha256": "01d04a497d5a45a342db9986626055428929ff72a28dfcc9882eb8a9da19d1fe",
+      "source_tree_sha256": "9dc014d685b1484d1a3bd31a9c58620d5fbb01e6efccf932024b1f30e57d5a60",
+      "team_identifier": "YKUPL7Z869",
+      "signing_identity_sha1": "F05D629A68B79DA893855BE83F5B782F05D873B2",
+      "signing_identity_label": "Apple Development: Zi ang Li (8PKXBGACNV)",
+      "signing_certificate_sha256": "80ce3788e305d8d9321d6d8ec1dd9fdde12158de9203795f992706ae61d83a2b",
+      "profile_uuid": "B43F41C0-5487-47D8-9F39-FCDBDA8BA227",
+      "profile_relative_path": "target/ios-packet-lan-peer/profile.mobileprovision",
+      "profile_sha256": "deed517ef2a944c19c1dae2207117fe520b8d48b4a3efd31af329682b626bc47",
+      "entitlements_relative_path": "target/ios-packet-lan-peer/signing-entitlements.plist",
+      "entitlements_sha256": "5ebda5445335b4bef0ff695cf4646a8377bc2e07b1e873ce4cdb6c8744dc1bbf",
+      "keychain_path": "/Users/bill/Library/Keychains/login.keychain-db",
+      "architecture": "arm64",
+      "minimum_os": "17.0",
+      "device_family": 1
+    },
+    "network": {
+      "interface_name": "en0",
+      "address_source": "cfm-ios-packet-lan-peer-ready-v1",
+      "address_scope": "rfc1918-ipv4",
+      "listener_port": 44333,
+      "transport": "tcp4"
+    },
+    "session": {
+      "document": "cfm-ios-packet-lan-peer-session-v1",
+      "ready_document": "cfm-ios-packet-lan-peer-ready-v1",
+      "result_document": "cfm-ios-packet-lan-peer-result-v1",
+      "stage_count": 3,
+      "token_bytes": 20,
+      "claim_eligible": false
+    }
+  }
+}

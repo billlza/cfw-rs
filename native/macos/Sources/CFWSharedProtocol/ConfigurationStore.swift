@@ -84,6 +84,7 @@ public struct AppGroupConfigurationStore: Sendable {
     _ configuration: Data,
     slot: ConfigurationSlot,
     tunnelOptions: TunnelNetworkOptions?,
+    credentialAudience: CredentialAudience,
     installationID: UUID,
     epoch: UInt64,
     generation: UInt64
@@ -91,6 +92,7 @@ public struct AppGroupConfigurationStore: Sendable {
     let descriptor = try ConfigurationDescriptor(
       slot: slot,
       tunnelOptions: tunnelOptions,
+      credentialAudience: credentialAudience,
       installationID: installationID,
       epoch: epoch,
       generation: generation,
@@ -101,9 +103,10 @@ public struct AppGroupConfigurationStore: Sendable {
     return descriptor
   }
 
-  /// Persists a host-validated, secret-free template for the user-context
-  /// ProxyAgent. The exact descriptor is checked before the atomic rename so
-  /// identity and credential-slot bindings cannot drift from the bytes.
+  /// Persists a host-validated configuration for non-production callers that
+  /// explicitly require durable storage. The Release System Proxy path sends
+  /// secret-bearing runtime bytes over authenticated XPC and never calls this
+  /// method.
   ///
   /// This storage is deliberately not used by the root-owned Packet Tunnel
   /// system extension because macOS does not guarantee that both execution
@@ -278,29 +281,24 @@ public struct AppGroupConfigurationStore: Sendable {
     _ configuration: Data,
     descriptor: ConfigurationDescriptor
   ) throws {
-    guard !configuration.isEmpty,
-      UInt64(configuration.count) <= NativeProtocolConstants.maximumConfigurationBytes
-    else {
-      throw ConfigurationStoreError.fileTooLarge(
-        actual: UInt64(configuration.count),
-        maximum: NativeProtocolConstants.maximumConfigurationBytes
-      )
+    do {
+      try descriptor.validateConfigurationBytes(configuration)
+    } catch let error as ConfigurationBytesValidationError {
+      switch error {
+      case .empty:
+        throw ConfigurationStoreError.fileTooLarge(
+          actual: 0,
+          maximum: NativeProtocolConstants.maximumConfigurationBytes)
+      case .tooLarge(let actual, let maximum):
+        throw ConfigurationStoreError.fileTooLarge(actual: actual, maximum: maximum)
+      case .byteCountMismatch(let expected, let actual):
+        throw ConfigurationStoreError.byteCountMismatch(expected: expected, actual: actual)
+      case .digestMismatch(let expected, let actual):
+        throw ConfigurationStoreError.digestMismatch(expected: expected, actual: actual)
+      case .invalidJSON:
+        throw ConfigurationStoreError.invalidJSON
+      }
     }
-    let byteCount = UInt64(configuration.count)
-    guard descriptor.byteCount == byteCount else {
-      throw ConfigurationStoreError.byteCountMismatch(
-        expected: descriptor.byteCount,
-        actual: byteCount
-      )
-    }
-    let actualDigest = digest(configuration)
-    guard descriptor.sha256 == actualDigest else {
-      throw ConfigurationStoreError.digestMismatch(
-        expected: descriptor.sha256.hex,
-        actual: actualDigest.hex
-      )
-    }
-    try validateJSONObject(configuration)
   }
 
   private func validateJSONObject(_ data: Data) throws {

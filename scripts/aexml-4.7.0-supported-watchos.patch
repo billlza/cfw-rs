@@ -1,0 +1,12 @@
+diff --git a/Package.swift b/Package.swift
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,7 +8,7 @@
+         .iOS(.v12),
+         .macOS(.v10_13),
+         .tvOS(.v12),
+-        .watchOS(.v4)
++        .watchOS(.v9)
+     ],
+     products: [
+         .library(

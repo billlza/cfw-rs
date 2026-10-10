@@ -5,6 +5,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../verify_release_app.sh
 source "$repo_root/scripts/verify_release_app.sh"
+entitlement_test_python="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+[[ -x "$entitlement_test_python" ]] || {
+  echo "error: entitlement fixture requires closed Python" >&2
+  exit 1
+}
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-entitlement-test.XXXXXX")"
 trap '/bin/rm -rf "$temporary_root"' EXIT
@@ -13,7 +18,8 @@ write_fixture() {
   local path="$1"
   local kind="$2"
   local keychain_mode="$3"
-  python3 - "$path" "$kind" "$keychain_mode" "$expected_team_id" \
+  PYTHONDONTWRITEBYTECODE=1 "$entitlement_test_python" -I -S -B -W error - \
+    "$path" "$kind" "$keychain_mode" "$expected_team_id" \
     "$expected_app_group" "$expected_agent_keychain_access_group" \
     "$expected_extension_keychain_access_group" <<'PY'
 import plistlib
@@ -52,11 +58,11 @@ elif kind == "packet-tunnel":
         {
             "com.apple.developer.networking.networkextension": packet_tunnel,
             "com.apple.security.app-sandbox": True,
+            "com.apple.security.application-groups": [app_group],
             "com.apple.security.network.client": True,
             "com.apple.security.network.server": True,
         }
     )
-
 if keychain_mode == "exact":
     host_group = agent_keychain_group.removesuffix(".proxy-agent")
     credential_group = f"{host_group}.credentials"
@@ -66,10 +72,10 @@ if keychain_mode == "exact":
         "proxy-agent": [agent_keychain_group, credential_group],
     }[kind]
     entitlements["keychain-access-groups"] = expected_groups
-    if kind == "packet-tunnel":
-        entitlements["com.apple.security.application-groups"] = [app_group]
 elif keychain_mode == "app-group":
     entitlements["com.apple.security.application-groups"] = [app_group]
+elif keychain_mode == "wrong-app-group":
+    entitlements["com.apple.security.application-groups"] = ["unexpected.group"]
 elif keychain_mode == "wildcard":
     entitlements["keychain-access-groups"] = [f"{team_id}.*"]
 elif keychain_mode == "wildcard-extra":
@@ -112,7 +118,8 @@ printf '%s' 'profile-placeholder' >"$bundle_fixture/Contents/embedded.provisionp
 
 write_profile_fixture() {
   local entitlements_path="$1"
-  python3 - "$profile_fixture" "$entitlements_path" "$certificate_fixture" \
+  PYTHONDONTWRITEBYTECODE=1 "$entitlement_test_python" -I -S -B -W error - \
+    "$profile_fixture" "$entitlements_path" "$certificate_fixture" \
     "$expected_team_id" <<'PY'
 from datetime import datetime, timedelta, timezone
 import plistlib
@@ -121,6 +128,18 @@ import sys
 profile_path, entitlements_path, certificate_path, team_id = sys.argv[1:]
 with open(entitlements_path, "rb") as handle:
     entitlements = plistlib.load(handle)
+profile_keys = {
+    "application-identifier",
+    "com.apple.application-identifier",
+    "com.apple.developer.networking.networkextension",
+    "com.apple.developer.system-extension.install",
+    "com.apple.developer.team-identifier",
+    "com.apple.security.application-groups",
+    "keychain-access-groups",
+}
+entitlements = {
+    key: value for key, value in entitlements.items() if key in profile_keys
+}
 with open(certificate_path, "rb") as handle:
     certificate = handle.read()
 now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -140,6 +159,46 @@ with open(profile_path, "wb") as handle:
 PY
 }
 
+write_portal_profile_fixture() {
+  local signed_entitlements_path="$1"
+  local kind="$2"
+  write_profile_fixture "$signed_entitlements_path"
+  PYTHONDONTWRITEBYTECODE=1 "$entitlement_test_python" -I -S -B -W error - \
+    "$profile_fixture" "$kind" "$expected_team_id" <<'PY'
+import plistlib
+import sys
+
+path, kind, team_id = sys.argv[1:]
+with open(path, "rb") as handle:
+    profile = plistlib.load(handle)
+entitlements = profile["Entitlements"]
+entitlements["com.apple.security.application-groups"] = [
+    "group.com.bill.clashformac",
+    f"{team_id}.*",
+]
+entitlements["keychain-access-groups"] = [f"{team_id}.*"]
+if kind in {"host", "packet-tunnel"}:
+    entitlements["com.apple.developer.networking.networkextension"] = [
+        "packet-tunnel-provider-systemextension",
+        "app-proxy-provider-systemextension",
+        "content-filter-provider-systemextension",
+        "dns-proxy-systemextension",
+        "dns-settings",
+        "relay",
+        "url-filter-provider",
+        "hotspot-provider",
+    ]
+if kind == "host":
+    entitlements["com.apple.developer.system-extension.install"] = True
+else:
+    entitlements.pop("com.apple.developer.system-extension.install", None)
+if kind == "proxy-agent":
+    entitlements.pop("com.apple.developer.networking.networkextension", None)
+with open(path, "wb") as handle:
+    plistlib.dump(profile, handle, sort_keys=True)
+PY
+}
+
 security() {
   [[ "$1" == "cms" && "$2" == "-D" && "$3" == "-i" ]] || return 1
   plutil -convert xml1 -o - "$profile_fixture"
@@ -147,6 +206,19 @@ security() {
 
 codesign() {
   local argument
+  if [[ "$1" == "--verify" ]]; then
+    return 0
+  fi
+  if [[ "$1" == "-d" && "$2" == "--verbose=4" ]]; then
+    cat <<EOF
+Identifier=$expected_agent_id
+Authority=Developer ID Application: Release Fixture ($expected_team_id)
+TeamIdentifier=$expected_team_id
+flags=0x10000(runtime)
+Timestamp=Aug 25, 2026 at 12:00:00
+EOF
+    return 0
+  fi
   for argument in "$@"; do
     case "$argument" in
       --extract-certificates=*)
@@ -157,6 +229,23 @@ codesign() {
   done
   return 1
 }
+
+expected_signing_certificate_sha256="$({
+  /usr/bin/shasum -a 256 "$certificate_fixture" |
+    /usr/bin/awk '{print toupper($1)}'
+})"
+certificate_capture_sequence=0
+assert_developer_id_signature "$bundle_fixture" "$expected_agent_id"
+expected_signing_certificate_sha256="$(printf 'F%.0s' {1..64})"
+if (assert_developer_id_signature \
+  "$bundle_fixture" "$expected_agent_id") >/dev/null 2>&1; then
+  echo "error: expected mismatched frozen signing certificate to be rejected" >&2
+  exit 1
+fi
+expected_signing_certificate_sha256="$({
+  /usr/bin/shasum -a 256 "$certificate_fixture" |
+    /usr/bin/awk '{print toupper($1)}'
+})"
 
 expect_profile_rejected() {
   local kind="$1"
@@ -175,6 +264,12 @@ expect_profile_rejected() {
 write_fixture "$temporary_root/proxy-valid.plist" proxy-agent exact
 verify_entitlements "$temporary_root/proxy-valid.plist" proxy-agent "$expected_agent_id"
 write_profile_fixture "$temporary_root/proxy-valid.plist"
+verify_provisioning_profile \
+  "$bundle_fixture" \
+  proxy-agent \
+  "$expected_agent_id" \
+  "$temporary_root/proxy-valid.plist"
+write_portal_profile_fixture "$temporary_root/proxy-valid.plist" proxy-agent
 verify_provisioning_profile \
   "$bundle_fixture" \
   proxy-agent \
@@ -235,10 +330,22 @@ verify_provisioning_profile \
   host \
   "$expected_app_id" \
   "$temporary_root/host-valid.plist"
+write_portal_profile_fixture "$temporary_root/host-valid.plist" host
+verify_provisioning_profile \
+  "$bundle_fixture" \
+  host \
+  "$expected_app_id" \
+  "$temporary_root/host-valid.plist"
 
 write_fixture "$temporary_root/tunnel-valid.plist" packet-tunnel absent
 verify_entitlements "$temporary_root/tunnel-valid.plist" packet-tunnel "$expected_extension_id"
 write_profile_fixture "$temporary_root/tunnel-valid.plist"
+verify_provisioning_profile \
+  "$bundle_fixture" \
+  packet-tunnel \
+  "$expected_extension_id" \
+  "$temporary_root/tunnel-valid.plist"
+write_portal_profile_fixture "$temporary_root/tunnel-valid.plist" packet-tunnel
 verify_provisioning_profile \
   "$bundle_fixture" \
   packet-tunnel \
@@ -249,7 +356,7 @@ expect_rejected \
   "$temporary_root/tunnel-overprivileged.plist" \
   packet-tunnel \
   "$expected_extension_id"
-write_fixture "$temporary_root/tunnel-app-group.plist" packet-tunnel app-group
+write_fixture "$temporary_root/tunnel-app-group.plist" packet-tunnel wrong-app-group
 expect_rejected \
   "$temporary_root/tunnel-app-group.plist" \
   packet-tunnel \

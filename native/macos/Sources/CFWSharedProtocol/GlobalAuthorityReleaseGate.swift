@@ -22,12 +22,6 @@ extension GlobalAuthorityGateError: LocalizedError {
 }
 
 public enum GlobalAuthorityReleaseGate {
-  public static func requireStartAuthorization() throws {
-    #if CFW_GLOBAL_AUTHORITY_REQUIRED
-      try validate(.availabilityUnproven)
-    #endif
-  }
-
   static func validate(_ status: GlobalAuthorityProofStatus) throws {
     guard status == .proven else {
       throw GlobalAuthorityGateError.proofMissing(status)

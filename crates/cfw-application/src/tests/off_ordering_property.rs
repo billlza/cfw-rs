@@ -84,6 +84,7 @@ fn quiet_coordinator(backend: Arc<FakeBackend>) -> EngineModeCoordinator {
         test_session(),
         CoordinatorOptions {
             operation_timeout: Duration::from_millis(100),
+            authorization_timeout: Duration::from_millis(100),
             status_query_timeout: Duration::from_millis(100),
             status_reconciliation_interval: Duration::from_secs(30),
             initial_generation: 0,
@@ -102,7 +103,9 @@ enum ActiveMode {
 fn active_mode(state: &EngineState) -> ActiveMode {
     match state {
         EngineState::ProxyActive { .. } => ActiveMode::Proxy,
-        EngineState::TunnelActive { .. } => ActiveMode::Tunnel,
+        EngineState::TunnelActive { .. } | EngineState::TunnelSystemProxyActive { .. } => {
+            ActiveMode::Tunnel
+        }
         EngineState::Off => ActiveMode::Off,
         other => panic!("unexpected non-terminal state on the happy path: {other:?}"),
     }
@@ -111,8 +114,10 @@ fn active_mode(state: &EngineState) -> ActiveMode {
 /// Backend operations emitted when starting a given mode from Off.
 fn start_ops(mode: EngineMode) -> Vec<&'static str> {
     match mode {
-        EngineMode::SystemProxy => vec!["start_proxy"],
-        EngineMode::Tunnel => vec!["install_tunnel", "start_tunnel"],
+        EngineMode::LocalProxy | EngineMode::SystemProxy => vec!["start_proxy"],
+        EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
+            vec!["install_tunnel", "start_tunnel"]
+        }
         EngineMode::Off => unreachable!("Off is not a start target"),
     }
 }
@@ -170,7 +175,12 @@ async fn property_off_precedes_every_cross_mode_start() {
             let generation_before = coordinator.snapshot().generation;
 
             let snapshot = coordinator
-                .set_mode(target, direct(), EngineSettings::default())
+                .set_mode(
+                    target,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                    direct(),
+                    EngineSettings::default(),
+                )
                 .await
                 .unwrap_or_else(|error| {
                     panic!(
@@ -280,8 +290,8 @@ async fn property_off_precedes_every_cross_mode_start() {
                 // Idempotent re-request of the current mode (or Off while Off):
                 // no owner is stopped and no new owner is started.
                 let expected_current_mode = match target {
-                    EngineMode::SystemProxy => ActiveMode::Proxy,
-                    EngineMode::Tunnel => ActiveMode::Tunnel,
+                    EngineMode::LocalProxy | EngineMode::SystemProxy => ActiveMode::Proxy,
+                    EngineMode::Tunnel | EngineMode::TunnelSystemProxy => ActiveMode::Tunnel,
                     EngineMode::Off => ActiveMode::Off,
                 };
                 assert_eq!(
@@ -346,7 +356,12 @@ async fn property_unproven_off_never_starts_other_mode() {
         let use_owner_present = rng.below(2) == 0;
 
         coordinator
-            .set_mode(initial_mode, direct(), EngineSettings::default())
+            .set_mode(
+                initial_mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .unwrap_or_else(|error| {
                 panic!("case {case} (seed {seed:#x}): initial start must succeed, got {error:?}")
@@ -368,7 +383,12 @@ async fn property_unproven_off_never_starts_other_mode() {
         }
 
         let error = coordinator
-            .set_mode(target_mode, direct(), EngineSettings::default())
+            .set_mode(
+                target_mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .expect_err("an unproven Off barrier must block the target mode");
 
@@ -377,10 +397,13 @@ async fn property_unproven_off_never_starts_other_mode() {
             match &error {
                 EngineCoordinatorError::GlobalOffUnproven { observed } => {
                     let expected_owner_status = match initial_mode {
+                        EngineMode::LocalProxy => {
+                            matches!(**observed, NativeEngineStatus::LocalProxy { .. })
+                        }
                         EngineMode::SystemProxy => {
                             matches!(**observed, NativeEngineStatus::SystemProxy { .. })
                         }
-                        EngineMode::Tunnel => {
+                        EngineMode::Tunnel | EngineMode::TunnelSystemProxy => {
                             matches!(**observed, NativeEngineStatus::Tunnel { .. })
                         }
                         EngineMode::Off => unreachable!(),
@@ -429,7 +452,12 @@ async fn property_unproven_off_never_starts_other_mode() {
         // A newer operation is blocked by the sticky quarantine and touches the
         // native backend for no new start.
         let blocked = coordinator
-            .set_mode(target_mode, direct(), EngineSettings::default())
+            .set_mode(
+                target_mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .expect_err("quarantine blocks a newer operation");
         assert_eq!(

@@ -1,7 +1,8 @@
 use serde_json::Value;
 
 use crate::{
-    ConfigError, CredentialSecret, MAX_PROFILE_BYTES, MAX_PROFILE_NODES, ValidatedSingBoxProfile,
+    ConfigError, CredentialKind, CredentialSecret, MAX_OUTBOUNDS, MAX_PROFILE_BYTES,
+    MAX_PROFILE_NODES, ProfileParseError, ValidatedSingBoxProfile,
 };
 
 const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -10,6 +11,9 @@ const VLESS_ID: &str = "33333333-3333-4333-8333-333333333333";
 const TROJAN_ID: &str = "44444444-4444-4444-8444-444444444444";
 const HYSTERIA_ID: &str = "55555555-5555-4555-8555-555555555555";
 const HYSTERIA_OBFS_ID: &str = "66666666-6666-4666-8666-666666666666";
+const ANYTLS_ID: &str = "88888888-8888-4888-8888-888888888888";
+const TUIC_UUID_ID: &str = "99999999-9999-4999-8999-999999999999";
+const TUIC_PASSWORD_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab";
 
 #[test]
 fn canonical_digest_does_not_depend_on_object_order() {
@@ -77,13 +81,164 @@ fn engine_managed_remote_resources_are_rejected() {
     ));
 
     let health_check = ValidatedSingBoxProfile::parse(
-        r#"{"outbounds":[{"type":"urltest","tag":"automatic","url":"https://example.com"}]}"#,
+        r#"{"outbounds":[{"type":"selector","tag":"automatic","url":"https://example.com"}]}"#,
     )
-    .expect_err("profiles must not schedule URL-based probes");
+    .expect_err("URL probes are admitted only in the typed automatic group");
     assert!(matches!(
         health_check,
         ConfigError::ForbiddenKey { key, .. } if key == "url"
     ));
+}
+
+#[test]
+fn classified_parse_separates_unrecognized_input_from_invalid_profiles() {
+    let oversized = " ".repeat(MAX_PROFILE_BYTES + 1);
+    let too_wide = format!(
+        r#"{{"outbounds":[{}]}}"#,
+        std::iter::repeat_n("0", MAX_PROFILE_NODES)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    // `None` marks serde's own message: malformed syntax, then a schema shape.
+    for (label, input, expected) in [
+        (
+            "oversized",
+            oversized.as_str(),
+            Some(ConfigError::TooLarge {
+                actual: MAX_PROFILE_BYTES + 1,
+                maximum: MAX_PROFILE_BYTES,
+            }),
+        ),
+        (
+            "too many JSON nodes",
+            too_wide.as_str(),
+            Some(ConfigError::TooComplex {
+                maximum: MAX_PROFILE_NODES,
+            }),
+        ),
+        ("malformed JSON", "{", None),
+        ("array root", "[]", Some(ConfigError::RootMustBeObject)),
+        (
+            "application-owned key",
+            r#"{"inbounds":[]}"#,
+            Some(ConfigError::UnsupportedTopLevelKey("inbounds".into())),
+        ),
+        (
+            "forbidden key",
+            r#"{"route":{"rules":[{"process_name":["Safari"]}]}}"#,
+            Some(ConfigError::ForbiddenKey {
+                path: "$.route.rules[0]".into(),
+                key: "process_name".into(),
+            }),
+        ),
+        (
+            "remote resource",
+            r#"{"route":{"rule_set":[{"type":"remote","tag":"remote"}]}}"#,
+            Some(ConfigError::RemoteResource {
+                path: "$.route.rule_set[0]".into(),
+            }),
+        ),
+        (
+            "inline secret",
+            r#"{"outbounds":[{"type":"shadowsocks","tag":"s","server":"s.example","server_port":8388,"method":"aes-256-gcm","password":"secret"}]}"#,
+            Some(ConfigError::CredentialRequiresKeychain {
+                path: "$.outbounds[0]".into(),
+                key: "password".into(),
+            }),
+        ),
+        ("schema shape", r#"{"outbounds":[{"type":"direct"}]}"#, None),
+        (
+            "noncanonical credential id",
+            r#"{"outbounds":[{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{"id":"33333333333343338333333333333333","kind":"vless_uuid"}}]}"#,
+            None,
+        ),
+    ] {
+        let error = ValidatedSingBoxProfile::parse(input).expect_err(label);
+        match expected {
+            Some(expected) => assert_eq!(error, expected, "{label}"),
+            None => assert!(matches!(error, ConfigError::InvalidJson(_)), "{label}"),
+        }
+        assert_eq!(
+            ValidatedSingBoxProfile::parse_classified(input).expect_err(label),
+            ProfileParseError::Unrecognized(error),
+            "{label}"
+        );
+    }
+
+    let reality_without_utls = format!(
+        r#"{{"outbounds":[{{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"tls":{{"enabled":true,"server_name":"www.example.com","reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}}}}]}}"#
+    );
+    let wrong_kind = format!(
+        r#"{{"outbounds":[{{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vmess_uuid"}}}}]}}"#
+    );
+    let crossed_kinds = format!(
+        r#"{{"outbounds":[{{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}}}},{{"type":"vmess","tag":"vmess","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vmess_uuid"}}}}]}}"#
+    );
+    let policy_shape = |path: &str, reason: &str| ConfigError::UnsupportedPolicyShape {
+        path: path.into(),
+        reason: reason.into(),
+    };
+    for (label, input, expected) in [
+        (
+            "Reality without uTLS",
+            reality_without_utls.as_str(),
+            policy_shape("$.outbounds[0].tls.utls", "Reality requires uTLS"),
+        ),
+        (
+            "duplicate tags",
+            r#"{"outbounds":[{"type":"direct","tag":"d"},{"type":"block","tag":"d"}]}"#,
+            policy_shape("$.outbounds[1].tag", "outbound tags must be unique"),
+        ),
+        (
+            "dangling final route",
+            r#"{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"missing"}}"#,
+            policy_shape(
+                "$.route.final",
+                "final must reference a declared outbound tag",
+            ),
+        ),
+        (
+            "credential kind of another protocol",
+            wrong_kind.as_str(),
+            ConfigError::CredentialKindMismatch {
+                path: "$.outbounds[0].credential_ref".into(),
+                expected: CredentialKind::VlessUuid,
+                actual: CredentialKind::VmessUuid,
+            },
+        ),
+        (
+            "one credential id with two kinds",
+            crossed_kinds.as_str(),
+            ConfigError::ConflictingCredentialReference {
+                id: VLESS_ID.into(),
+            },
+        ),
+        (
+            "no outbounds",
+            r#"{"outbounds":[]}"#,
+            policy_shape(
+                "$.outbounds",
+                &format!("outbound count is outside the accepted 1..={MAX_OUTBOUNDS} range"),
+            ),
+        ),
+    ] {
+        assert_eq!(
+            ValidatedSingBoxProfile::parse_classified(input).expect_err(label),
+            ProfileParseError::Invalid(expected.clone()),
+            "{label}"
+        );
+        assert_eq!(
+            ValidatedSingBoxProfile::parse(input).expect_err(label),
+            expected,
+            "{label}"
+        );
+    }
+
+    let direct = r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#;
+    assert_eq!(
+        ValidatedSingBoxProfile::parse_classified(direct).expect("classified profile"),
+        ValidatedSingBoxProfile::parse(direct).expect("profile")
+    );
 }
 
 #[test]
@@ -108,7 +263,9 @@ fn typed_remote_outbounds_persist_only_canonical_credential_references() {
             {{"type":"vmess","tag":"vmess","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"security":"auto","tls":{{"enabled":true,"server_name":"vmess.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}}}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"vmess.example.com"}}}}}},
             {{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}}}},
             {{"type":"trojan","tag":"trojan","server":"trojan.example.com","server_port":443,"credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"trojan.example.com"}},"transport":{{"type":"grpc","service_name":"tunnel"}}}},
-            {{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}},"up_mbps":100,"down_mbps":200,"obfs":{{"type":"salamander","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}}}}}
+            {{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}},"up_mbps":100,"down_mbps":200,"obfs":{{"type":"salamander","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}}}}},
+            {{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}},"tls":{{"enabled":true,"server_name":"anytls.example.com"}}}},
+            {{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com","alpn":["h3"]}},"congestion_control":"bbr","udp_relay_mode":"quic"}}
           ],
           "route": {{"final":"ss"}}
         }}"#
@@ -119,6 +276,287 @@ fn typed_remote_outbounds_persist_only_canonical_credential_references() {
     assert_eq!(value["outbounds"][0]["credential_ref"]["id"], SS_ID);
     assert!(!contains_key(&value, "password"));
     assert!(!contains_key(&value, "uuid"));
+}
+
+#[test]
+fn hysteria2_sing_box_1_14_options_follow_the_runtime_bounds() {
+    let hysteria2 = |fields: &str| {
+        format!(
+            r#"{{"outbounds":[{{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,{fields}"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}}}}]}}"#
+        )
+    };
+    let obfs = |kind: &str, sizes: &str| {
+        format!(
+            r#""obfs":{{"type":"{kind}","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}{sizes}}},"#
+        )
+    };
+
+    let full = format!(
+        r#""server_ports":["5000:5100"],"hop_interval_seconds":10,"hop_interval_max_seconds":60,"bbr_profile":"conservative","down_mbps":200,{}"#,
+        obfs("gecko", r#","min_packet_size":400,"max_packet_size":1400"#)
+    );
+    let profile = ValidatedSingBoxProfile::parse(&hysteria2(&full)).expect("1.14 options");
+    let value: Value = serde_json::from_str(profile.as_json()).expect("canonical profile JSON");
+    let outbound = &value["outbounds"][0];
+    assert_eq!(outbound["hop_interval_max_seconds"], 60);
+    assert_eq!(outbound["bbr_profile"], "conservative");
+    assert_eq!(outbound["obfs"]["type"], "gecko");
+    assert_eq!(outbound["obfs"]["min_packet_size"], 400);
+    assert_eq!(outbound["obfs"]["max_packet_size"], 1400);
+    for accepted in [
+        obfs("gecko", ""),
+        obfs("gecko", r#","min_packet_size":1200"#),
+        obfs("gecko", r#","max_packet_size":512"#),
+        obfs("gecko", r#","min_packet_size":1,"max_packet_size":2048"#),
+        r#""server_ports":["5000:5100"],"hop_interval_seconds":5,"#.to_owned(),
+        r#""server_ports":["5000:5100"],"hop_interval_seconds":3600,"hop_interval_max_seconds":3600,"#.to_owned(),
+        r#""bbr_profile":"aggressive","down_mbps":100,"#.to_owned(),
+    ] {
+        ValidatedSingBoxProfile::parse(&hysteria2(&accepted))
+            .unwrap_or_else(|error| panic!("{accepted}: {error}"));
+    }
+
+    for (label, fields, expected_path) in [
+        (
+            "hop below the runtime minimum",
+            r#""server_ports":["5000:5100"],"hop_interval_seconds":4,"#.to_owned(),
+            "$.outbounds[0].hop_interval_seconds",
+        ),
+        (
+            "range without ports",
+            r#""hop_interval_seconds":10,"hop_interval_max_seconds":60,"#.to_owned(),
+            "$.outbounds[0].hop_interval_seconds",
+        ),
+        (
+            "range without minimum",
+            r#""server_ports":["5000:5100"],"hop_interval_max_seconds":60,"#.to_owned(),
+            "$.outbounds[0].hop_interval_max_seconds",
+        ),
+        (
+            "range below minimum",
+            r#""server_ports":["5000:5100"],"hop_interval_seconds":60,"hop_interval_max_seconds":30,"#.to_owned(),
+            "$.outbounds[0].hop_interval_max_seconds",
+        ),
+        (
+            "range above bound",
+            r#""server_ports":["5000:5100"],"hop_interval_seconds":60,"hop_interval_max_seconds":3601,"#.to_owned(),
+            "$.outbounds[0].hop_interval_max_seconds",
+        ),
+        (
+            "bbr profile beside Brutal upload",
+            r#""bbr_profile":"standard","up_mbps":100,"#.to_owned(),
+            "$.outbounds[0].bbr_profile",
+        ),
+        (
+            "salamander packet size",
+            obfs("salamander", r#","min_packet_size":512"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko minimum above maximum",
+            obfs("gecko", r#","min_packet_size":1300,"max_packet_size":1200"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko minimum above default maximum",
+            obfs("gecko", r#","min_packet_size":1300"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko maximum below default minimum",
+            obfs("gecko", r#","max_packet_size":511"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko maximum above the wire limit",
+            obfs("gecko", r#","max_packet_size":2049"#),
+            "$.outbounds[0].obfs",
+        ),
+        (
+            "gecko zero minimum",
+            obfs("gecko", r#","min_packet_size":0"#),
+            "$.outbounds[0].obfs",
+        ),
+    ] {
+        let error = ValidatedSingBoxProfile::parse(&hysteria2(&fields)).expect_err(label);
+        assert!(
+            matches!(error, ConfigError::UnsupportedPolicyShape { ref path, .. } if path == expected_path),
+            "{label}: {error:?}"
+        );
+    }
+    for (label, fields) in [
+        ("unknown bbr profile", r#""bbr_profile":"fast","#),
+        ("chrome parrot switch", r#""disable_chrome_parrot":true,"#),
+    ] {
+        let error = ValidatedSingBoxProfile::parse(&hysteria2(fields)).expect_err(label);
+        assert!(
+            matches!(error, ConfigError::InvalidJson(_)),
+            "{label}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn hysteria2_port_hopping_is_canonical_bounded_and_non_overlapping() {
+    let valid = format!(
+        r#"{{"outbounds":[{{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"server_ports":["443","5000:5002"],"hop_interval_seconds":30,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}}}}]}}"#
+    );
+    let profile = ValidatedSingBoxProfile::parse(&valid).expect("canonical port hopping");
+    let value: Value = serde_json::from_str(profile.as_json()).expect("canonical profile JSON");
+    assert_eq!(
+        value["outbounds"][0]["server_ports"],
+        serde_json::json!(["443", "5000:5002"])
+    );
+    assert_eq!(value["outbounds"][0]["hop_interval_seconds"], 30);
+
+    for (label, fields, expected_path) in [
+        (
+            "overlap",
+            r#""server_ports":["443","440:450"],"#,
+            "$.outbounds[0].server_ports[1]",
+        ),
+        (
+            "noncanonical range",
+            r#""server_ports":["0500:0600"],"#,
+            "$.outbounds[0].server_ports[0]",
+        ),
+        (
+            "hop without ports",
+            r#""hop_interval_seconds":30,"#,
+            "$.outbounds[0].hop_interval_seconds",
+        ),
+        (
+            "hop outside bound",
+            r#""server_ports":["5000:5002"],"hop_interval_seconds":3601,"#,
+            "$.outbounds[0].hop_interval_seconds",
+        ),
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,{fields}"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}}}}]}}"#
+        );
+        let error = ValidatedSingBoxProfile::parse(&input).expect_err(label);
+        assert!(
+            matches!(error, ConfigError::UnsupportedPolicyShape { ref path, .. } if path == expected_path),
+            "{label}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn anytls_and_tuic_require_exact_credential_shapes_and_closed_tuic_options() {
+    let wrong_uuid_kind = format!(
+        r#"{{"outbounds":[{{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_password"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com"}}}}]}}"#
+    );
+    assert!(matches!(
+        ValidatedSingBoxProfile::parse(&wrong_uuid_kind),
+        Err(ConfigError::CredentialKindMismatch { path, .. })
+            if path == "$.outbounds[0].uuid_credential_ref"
+    ));
+
+    let wrong_password_kind = format!(
+        r#"{{"outbounds":[{{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"anytls.example.com"}}}}]}}"#
+    );
+    assert!(matches!(
+        ValidatedSingBoxProfile::parse(&wrong_password_kind),
+        Err(ConfigError::CredentialKindMismatch { path, .. })
+            if path == "$.outbounds[0].credential_ref"
+    ));
+
+    for invalid in [
+        format!(
+            r#"{{"outbounds":[{{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}}}}]}}"#
+        ),
+        format!(
+            r#"{{"outbounds":[{{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com"}}}}]}}"#
+        ),
+        format!(
+            r#"{{"outbounds":[{{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com"}},"congestion_control":"reno"}}]}}"#
+        ),
+        format!(
+            r#"{{"outbounds":[{{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com"}},"udp_relay_mode":"stream"}}]}}"#
+        ),
+    ] {
+        assert!(ValidatedSingBoxProfile::parse(&invalid).is_err());
+    }
+}
+
+#[test]
+fn profile_tls_cannot_lower_the_product_version_policy() {
+    for field in [r#""min_version":"1.1""#, r#""max_version":"1.2""#] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}},"tls":{{"enabled":true,"server_name":"anytls.example.com",{field}}}}}]}}"#
+        );
+        assert!(
+            ValidatedSingBoxProfile::parse(&input).is_err(),
+            "profile input overrode TLS policy with {field}"
+        );
+    }
+}
+
+#[test]
+fn quic_protocols_reject_utls_and_reality_while_anytls_accepts_them() {
+    let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
+    let utls = r#""utls":{"enabled":true,"fingerprint":"chrome"}"#;
+
+    let anytls = format!(
+        r#"{{"outbounds":[{{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}},"tls":{{"enabled":true,"server_name":"anytls.example.com",{utls},{reality}}}}}]}}"#
+    );
+    ValidatedSingBoxProfile::parse(&anytls).expect("AnyTLS supports standard TLS extensions");
+
+    for (protocol, extension, expected_path) in [
+        ("hysteria2", utls, "$.outbounds[0].tls.utls"),
+        ("hysteria2", reality, "$.outbounds[0].tls.reality"),
+        ("tuic", utls, "$.outbounds[0].tls.utls"),
+        ("tuic", reality, "$.outbounds[0].tls.reality"),
+    ] {
+        let outbound = if protocol == "hysteria2" {
+            format!(
+                r#"{{"type":"hysteria2","tag":"quic","server":"quic.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"quic.example.com",{extension}}}}}"#
+            )
+        } else {
+            format!(
+                r#"{{"type":"tuic","tag":"quic","server":"quic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"quic.example.com",{extension}}}}}"#
+            )
+        };
+        let error = ValidatedSingBoxProfile::parse(&format!(r#"{{"outbounds":[{outbound}]}}"#))
+            .expect_err("QUIC TLS must reject unsupported TLS adapters");
+        assert!(matches!(
+            error,
+            ConfigError::UnsupportedPolicyShape { path, .. } if path == expected_path
+        ));
+    }
+}
+
+#[test]
+fn vmess_alter_id_is_closed_to_the_pinned_zero_or_one_contract() {
+    let profile_with_default = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"alter_id":0}}]}}"#
+    ))
+    .expect("AEAD VMess profile");
+    let profile_without_default = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}}}}]}}"#
+    ))
+    .expect("default AEAD VMess profile");
+    assert_eq!(profile_with_default, profile_without_default);
+    assert!(!profile_with_default.as_json().contains("alter_id"));
+
+    let legacy = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"alter_id":1}}]}}"#
+    ))
+    .expect("legacy-protocol VMess profile");
+    let value: Value = serde_json::from_str(legacy.as_json()).expect("canonical VMess JSON");
+    assert_eq!(value["outbounds"][0]["alter_id"], 1);
+    assert_ne!(legacy.digest(), profile_without_default.digest());
+
+    for invalid in ["-1", "2", "256", "1.5", r#""1""#] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"alter_id":{invalid}}}]}}"#
+        );
+        assert!(
+            ValidatedSingBoxProfile::parse(&input).is_err(),
+            "accepted invalid alter_id {invalid}"
+        );
+    }
 }
 
 #[test]
@@ -177,6 +615,405 @@ fn reality_requires_enabled_canonical_x25519_public_material() {
 }
 
 #[test]
+fn reality_requires_enabled_utls_on_every_tls_stream_protocol() {
+    let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
+    for (protocol, credential) in [
+        ("http", String::new()),
+        (
+            "vmess",
+            format!(r#","credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}}"#),
+        ),
+        (
+            "vless",
+            format!(r#","credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}}"#),
+        ),
+        (
+            "trojan",
+            format!(r#","credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}}"#),
+        ),
+        (
+            "anytls",
+            format!(r#","credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}}"#),
+        ),
+    ] {
+        let profile = |tls_extensions: &str| {
+            format!(
+                r#"{{"outbounds":[{{"type":"{protocol}","tag":"proxy","server":"proxy.example.com","server_port":443{credential},"tls":{{"enabled":true,"server_name":"www.example.com",{tls_extensions}}}}}]}}"#
+            )
+        };
+
+        let error = ValidatedSingBoxProfile::parse(&profile(reality))
+            .expect_err("sing-box refuses a Reality client without uTLS");
+        assert_eq!(
+            error,
+            ConfigError::UnsupportedPolicyShape {
+                path: "$.outbounds[0].tls.utls".into(),
+                reason: "Reality requires uTLS".into(),
+            },
+            "{protocol}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "unsupported credential-free policy shape at $.outbounds[0].tls.utls: Reality requires uTLS",
+            "{protocol}"
+        );
+
+        let disabled = ValidatedSingBoxProfile::parse(&profile(&format!(
+            r#""utls":{{"enabled":false,"fingerprint":"chrome"}},{reality}"#
+        )))
+        .expect_err("disabled uTLS cannot satisfy Reality");
+        assert!(
+            matches!(
+                &disabled,
+                ConfigError::UnsupportedPolicyShape { path, .. }
+                    if path == "$.outbounds[0].tls.utls.enabled"
+            ),
+            "{protocol}: {disabled}"
+        );
+
+        ValidatedSingBoxProfile::parse(&profile(&format!(
+            r#""utls":{{"enabled":true,"fingerprint":"chrome"}},{reality}"#
+        )))
+        .unwrap_or_else(|error| panic!("{protocol} Reality with uTLS: {error}"));
+    }
+}
+
+#[test]
+fn reality_x25519mlkem768_key_share_requires_the_chrome_fingerprint() {
+    let profile = |fingerprint: &str, hybrid: &str| {
+        format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"{fingerprint}"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"{hybrid}}}}}}}]}}"#
+        )
+    };
+    let hybrid = r#","support_x25519mlkem768":true"#;
+    ValidatedSingBoxProfile::parse(&profile("chrome", hybrid))
+        .expect("the chrome hello carries the X25519MLKEM768 key share");
+    for fingerprint in [
+        "firefox",
+        "edge",
+        "safari",
+        "360",
+        "qq",
+        "ios",
+        "android",
+        "random",
+        "randomized",
+    ] {
+        let error = ValidatedSingBoxProfile::parse(&profile(fingerprint, hybrid))
+            .expect_err("only the chrome hello carries the hybrid key share");
+        assert_eq!(
+            error,
+            ConfigError::UnsupportedPolicyShape {
+                path: "$.outbounds[0].tls.utls.fingerprint".into(),
+                reason: "Reality X25519MLKEM768 requires the chrome uTLS fingerprint".into(),
+            },
+            "{fingerprint}"
+        );
+        for disabled in ["", r#","support_x25519mlkem768":false"#] {
+            ValidatedSingBoxProfile::parse(&profile(fingerprint, disabled))
+                .unwrap_or_else(|error| panic!("{fingerprint} without the key share: {error}"));
+        }
+    }
+    let error =
+        ValidatedSingBoxProfile::parse(&profile("chrome", r#","support_x25519mlkem768":"true""#))
+            .expect_err("the key share flag is a JSON boolean");
+    assert!(
+        matches!(&error, ConfigError::InvalidJson(_))
+            && error.to_string().contains("expected a boolean"),
+        "{error}"
+    );
+}
+
+#[test]
+fn reality_without_utls_reports_a_more_specific_defect_first() {
+    let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
+    let disabled_reality = reality.replacen(r#""enabled":true"#, r#""enabled":false"#, 1);
+    let tls = |extensions: &str| {
+        format!(r#""tls":{{"enabled":true,"server_name":"www.example.com",{extensions}}}"#)
+    };
+    let vless = |tls: String, transport: &str| {
+        format!(
+            r#"{{"type":"vless","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},{tls}{transport}}}"#
+        )
+    };
+    let quic_transport = r#","transport":{"type":"quic"}"#;
+    let quic_unavailable = (
+        "$.outbounds[0].tls.reality",
+        "Reality is unavailable for QUIC-based protocols",
+    );
+    let outbound_shape = |reason: &'static str| ("$.outbounds[0]", reason);
+
+    for (label, outbound, (expected_path, expected_reason)) in [
+        (
+            "disabled Reality",
+            vless(tls(&disabled_reality), ""),
+            (
+                "$.outbounds[0].tls.reality",
+                "Reality public_key or short_id is invalid",
+            ),
+        ),
+        (
+            "certificate pin",
+            vless(
+                tls(&format!(
+                    r#""certificate_sha256":["q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="],{reality}"#
+                )),
+                "",
+            ),
+            outbound_shape("certificate pinning requires TLS, one pin kind, and no Reality"),
+        ),
+        (
+            "explicit curves",
+            vless(
+                tls(&format!(r#""curve_preferences":["X25519"],{reality}"#)),
+                "",
+            ),
+            outbound_shape(
+                "explicit key-exchange curves require standard TLS; this runtime's uTLS and Reality adapters do not apply them",
+            ),
+        ),
+        (
+            "ECH",
+            vless(
+                tls(&format!(
+                    r#""min_version":"1.3","ech":{{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----"]}},{reality}"#
+                )),
+                "",
+            ),
+            outbound_shape("ECH must be enabled with TLS 1.3 and cannot be combined with Reality"),
+        ),
+        (
+            "VMess V2Ray QUIC",
+            format!(
+                r#"{{"type":"vmess","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},{}{quic_transport}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+        (
+            "VLESS V2Ray QUIC",
+            vless(tls(reality), quic_transport),
+            quic_unavailable,
+        ),
+        (
+            "Trojan V2Ray QUIC",
+            format!(
+                r#"{{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}},{}{quic_transport}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+        (
+            "Hysteria2",
+            format!(
+                r#"{{"type":"hysteria2","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},{}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+        (
+            "TUIC",
+            format!(
+                r#"{{"type":"tuic","tag":"proxy","server":"proxy.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},{}}}"#,
+                tls(reality)
+            ),
+            quic_unavailable,
+        ),
+    ] {
+        assert_eq!(
+            ValidatedSingBoxProfile::parse(&format!(r#"{{"outbounds":[{outbound}]}}"#)),
+            Err(ConfigError::UnsupportedPolicyShape {
+                path: expected_path.into(),
+                reason: expected_reason.into(),
+            }),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn disabled_tls_refuses_reality_on_every_tls_stream_protocol() {
+    let reality = r#""reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#;
+    let utls_reality = format!(r#""utls":{{"enabled":true,"fingerprint":"chrome"}},{reality}"#);
+    for (protocol, credential) in [
+        ("http", String::new()),
+        (
+            "vmess",
+            format!(r#","credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}}"#),
+        ),
+        (
+            "vless",
+            format!(r#","credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}}"#),
+        ),
+        (
+            "trojan",
+            format!(r#","credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}}"#),
+        ),
+        (
+            "anytls",
+            format!(r#","credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}}"#),
+        ),
+    ] {
+        // With uTLS present, no later TLS check catches disabled TLS, so the
+        // enabled-TLS requirement alone has to refuse the node.
+        for extensions in [reality, utls_reality.as_str()] {
+            let input = format!(
+                r#"{{"outbounds":[{{"type":"{protocol}","tag":"proxy","server":"proxy.example.com","server_port":443{credential},"tls":{{"enabled":false,"server_name":"www.example.com",{extensions}}}}}]}}"#
+            );
+            assert_eq!(
+                ValidatedSingBoxProfile::parse(&input),
+                Err(ConfigError::UnsupportedPolicyShape {
+                    path: "$.outbounds[0].tls.enabled".into(),
+                    reason: "TLS options require enabled TLS".into(),
+                }),
+                "{protocol} with {extensions}"
+            );
+        }
+    }
+}
+
+#[test]
+fn vless_vision_and_active_tls_options_require_enabled_tls() {
+    for tls in [
+        "",
+        r#","tls":{"enabled":false,"server_name":"example.com"}"#,
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision"{tls}}}]}}"#
+        );
+        assert!(matches!(
+            ValidatedSingBoxProfile::parse(&input),
+            Err(ConfigError::UnsupportedPolicyShape { path, .. })
+                if path == "$.outbounds[0].tls.enabled"
+        ));
+    }
+
+    let disabled_alpn = format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"tls":{{"enabled":false,"server_name":"example.com","alpn":["h2"]}}}}]}}"#
+    );
+    assert!(matches!(
+        ValidatedSingBoxProfile::parse(&disabled_alpn),
+        Err(ConfigError::UnsupportedPolicyShape { path, .. })
+            if path == "$.outbounds[0].tls.enabled"
+    ));
+}
+
+#[test]
+fn v2ray_quic_requires_standard_enabled_tls() {
+    for (protocol, credential_id, credential_kind) in [
+        ("vmess", VMESS_ID, "vmess_uuid"),
+        ("vless", VLESS_ID, "vless_uuid"),
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"{protocol}","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{credential_id}","kind":"{credential_kind}"}},"transport":{{"type":"quic"}}}}]}}"#
+        );
+        assert!(matches!(
+            ValidatedSingBoxProfile::parse(&input),
+            Err(ConfigError::UnsupportedPolicyShape { path, .. })
+                if path == "$.outbounds[0].tls.enabled"
+        ));
+    }
+
+    for (extension, expected_path) in [
+        (
+            r#","utls":{"enabled":true,"fingerprint":"chrome"}"#,
+            "$.outbounds[0].tls.utls",
+        ),
+        (
+            r#","reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}"#,
+            "$.outbounds[0].tls.reality",
+        ),
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"tls":{{"enabled":true,"server_name":"example.com"{extension}}},"transport":{{"type":"quic"}}}}]}}"#
+        );
+        assert!(matches!(
+            ValidatedSingBoxProfile::parse(&input),
+            Err(ConfigError::UnsupportedPolicyShape { path, .. }) if path == expected_path
+        ));
+    }
+
+    for input in [
+        format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"tls":{{"enabled":true,"server_name":"example.com"}},"transport":{{"type":"quic"}}}}]}}"#
+        ),
+        format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"tls":{{"enabled":true,"server_name":"example.com"}},"transport":{{"type":"quic"}}}}]}}"#
+        ),
+        format!(
+            r#"{{"outbounds":[{{"type":"trojan","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"example.com"}},"transport":{{"type":"quic"}}}}]}}"#
+        ),
+    ] {
+        ValidatedSingBoxProfile::parse(&input).expect("standard TLS V2Ray QUIC profile");
+    }
+}
+
+#[test]
+fn vless_vision_rejects_transport_streams_and_non_xudp_packet_encodings() {
+    for transport in [
+        r#"{"type":"http","path":"/"}"#,
+        r#"{"type":"ws","path":"/"}"#,
+        r#"{"type":"grpc","service_name":"vision"}"#,
+        r#"{"type":"quic"}"#,
+        r#"{"type":"http_upgrade","path":"/"}"#,
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"example.com"}},"transport":{transport}}}]}}"#
+        );
+        assert!(matches!(
+            ValidatedSingBoxProfile::parse(&input),
+            Err(ConfigError::UnsupportedPolicyShape { path, .. })
+                if path == "$.outbounds[0].transport"
+        ));
+    }
+
+    for packet_encoding in ["raw", "packet_addr"] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision","packet_encoding":"{packet_encoding}","tls":{{"enabled":true,"server_name":"example.com"}}}}]}}"#
+        );
+        assert!(matches!(
+            ValidatedSingBoxProfile::parse(&input),
+            Err(ConfigError::UnsupportedPolicyShape { path, .. })
+                if path == "$.outbounds[0].packet_encoding"
+        ));
+    }
+
+    for packet_encoding in [None, Some("xudp")] {
+        let packet_encoding = packet_encoding
+            .map(|value| format!(r#","packet_encoding":"{value}""#))
+            .unwrap_or_default();
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision"{packet_encoding},"tls":{{"enabled":true,"server_name":"example.com"}}}}]}}"#
+        );
+        ValidatedSingBoxProfile::parse(&input)
+            .expect("Vision accepts omitted or explicit XUDP packet encoding");
+    }
+}
+
+#[test]
+fn websocket_host_accepts_modern_authorities_but_rejects_non_authorities() {
+    for host in ["cdn.example.com:8443", "[2606:4700:4700::1111]:8443"] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"{host}"}}}}}}]}}"#
+        );
+        ValidatedSingBoxProfile::parse(&input).expect("valid WebSocket Host authority");
+    }
+
+    for host in [
+        "cdn.example.com:0",
+        "cdn.example.com:65536",
+        "user@cdn.example.com:443",
+        "cdn.example.com/path",
+        "[2606:4700:4700::1111",
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"{host}"}}}}}}]}}"#
+        );
+        assert!(ValidatedSingBoxProfile::parse(&input).is_err(), "{host}");
+    }
+}
+
+#[test]
 fn one_credential_id_cannot_cross_protocol_kinds() {
     let input = format!(
         r#"{{"outbounds":[
@@ -195,6 +1032,39 @@ fn borrowed_secret_debug_is_redacted_and_not_serializable() {
     let secret = CredentialSecret::new("never-log-this-secret").expect("bounded secret");
     assert_eq!(format!("{secret:?}"), "CredentialSecret([REDACTED])");
     assert_eq!(secret.expose_to_vault(), "never-log-this-secret");
+}
+
+#[test]
+fn uuid_credentials_require_canonical_hyphenated_values() {
+    let canonical =
+        CredentialSecret::new("11111111-1111-4111-8111-111111111111").expect("bounded UUID secret");
+    for kind in [
+        CredentialKind::VmessUuid,
+        CredentialKind::VlessUuid,
+        CredentialKind::TuicUuid,
+    ] {
+        canonical
+            .validate_for_kind(kind)
+            .expect("canonical UUID credential");
+    }
+
+    for value in [
+        "not-a-uuid",
+        "11111111111141118111111111111111",
+        "11111111-1111-4111-8111-11111111111A",
+    ] {
+        let invalid = CredentialSecret::new(value).expect("bounded invalid UUID secret");
+        for kind in [
+            CredentialKind::VmessUuid,
+            CredentialKind::VlessUuid,
+            CredentialKind::TuicUuid,
+        ] {
+            assert!(
+                invalid.validate_for_kind(kind).is_err(),
+                "{kind:?}: {value}"
+            );
+        }
+    }
 }
 
 #[test]

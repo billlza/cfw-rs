@@ -1,0 +1,47 @@
+[
+  {
+    "id": "general",
+    "title": "General",
+    "summary": "Overview, runtime status, mode, system proxy and TUN switches."
+  },
+  {
+    "id": "proxies",
+    "title": "Proxies",
+    "summary": "Proxy groups, selections, delay indicators and quick switching."
+  },
+  {
+    "id": "profiles",
+    "title": "Profiles",
+    "summary": "Subscription import, update, validation and profile lifecycle."
+  },
+  {
+    "id": "providers",
+    "title": "Providers",
+    "summary": "Proxy providers, rule providers, health checks and update actions."
+  },
+  {
+    "id": "logs",
+    "title": "Logs",
+    "summary": "Engine logs and filtered runtime diagnostics."
+  },
+  {
+    "id": "connections",
+    "title": "Connections",
+    "summary": "Live connection list, close-all action and traffic visibility."
+  },
+  {
+    "id": "rules",
+    "title": "Rules",
+    "summary": "Rule matching visibility and router/provider diagnostics."
+  },
+  {
+    "id": "settings",
+    "title": "Settings",
+    "summary": "Shell settings, startup, credentials and diagnostics."
+  },
+  {
+    "id": "feedback",
+    "title": "Feedback",
+    "summary": "About, updates and build references."
+  }
+]

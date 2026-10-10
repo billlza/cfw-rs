@@ -1,1 +1,1 @@
-{"command":{"kind":"handshake","payload":{"version":{"feature_bits":0,"major":1,"max_message_bytes":1048576,"minimum_minor":0,"minor":0}}},"major":1,"minor":0,"request_id":"44444444-4444-4444-4444-444444444444","required_feature_bits":0}
+{"command":{"kind":"handshake","payload":{"version":{"feature_bits":0,"major":1,"max_message_bytes":1048576,"minimum_minor":1,"minor":1}}},"major":1,"minor":1,"request_id":"44444444-4444-4444-4444-444444444444","required_feature_bits":0}

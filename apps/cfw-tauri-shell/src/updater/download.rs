@@ -1,108 +1,55 @@
+use std::fs::{self, File};
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use futures_util::StreamExt as _;
+use futures_util::{Stream, StreamExt as _};
 use minisign_verify::{PublicKey, Signature};
+use reqwest::Url;
 use reqwest::header::ACCEPT;
 use reqwest::redirect::Policy;
-use reqwest::{Client, Url};
 
 use super::contract::UpdateAuthorization;
 use super::error::{DownloadFailureStage, NetworkFailureCategory, Result, UpdateError};
+use super::metadata::{
+    CONNECT_TIMEOUT, USER_AGENT, sanitized_network_error, validate_release_asset_url,
+};
 use super::state::DownloadCancellation;
+use crate::transport_security::external_https_client_builder;
 
 // Keep this release/runtime contract aligned with scripts/make_updater_manifest.sh.
 pub(super) const MAX_UPDATE_ARCHIVE_BYTES: u64 = 192 * 1024 * 1024;
 const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const UPDATE_USER_AGENT: &str = concat!("cfw-rs/", env!("CARGO_PKG_VERSION"));
+/// A transfer that delivers nothing for this long has stalled; the whole
+/// request is bounded separately.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const EMBEDDED_TAURI_CONFIG: &str = include_str!("../../tauri.conf.json");
-const RELEASE_ASSET_HOST: &str = "release-assets.githubusercontent.com";
-const RELEASE_ASSET_PATH_PREFIX: &str = "/github-production-release-asset/";
 const MAX_TRUSTED_COMMENT_BYTES: usize = 1024;
 const MAX_ARCHIVE_NAME_BYTES: usize = 255;
 
-pub(super) async fn download_verified_update<F>(
+/// Downloads the authorized archive into `destination` and returns its size.
+///
+/// The file exists afterwards only if every byte was received within bounds
+/// and the complete stream matches the release signature for exactly this
+/// archive name. Nothing parses the archive before that.
+pub(super) async fn download_verified_archive<F>(
     authorization: &UpdateAuthorization,
+    destination: &Path,
     cancellation: &DownloadCancellation,
-    mut on_progress: F,
-) -> Result<Vec<u8>>
+    on_progress: F,
+) -> Result<u64>
 where
-    F: FnMut(u64, Option<u64>, Option<u64>) -> Result<()>,
+    F: FnMut(u64, Option<u64>) -> Result<()>,
 {
-    // Admit every response chunk against the project-owned bound before it
-    // enters memory. The archive parser and installer run only after this
-    // streaming signature verifier has authenticated the complete byte stream.
     let public_key = embedded_public_key()?;
-    let signature = decode_signature(&authorization.signature)?;
-    // Reject an obviously replayed archive before network I/O. The same check
-    // is repeated after finalize(), when the trusted comment is authenticated.
-    validate_signature_archive(&signature, &authorization.archive_name)?;
-    let mut verifier = public_key
-        .verify_stream(&signature)
-        .map_err(|_| UpdateError::InvalidSignature)?;
-    let client = build_client(&authorization.download_url)?;
-    let url = Url::parse(&authorization.download_url).map_err(|_| UpdateError::Network {
-        stage: DownloadFailureStage::Request,
-        category: NetworkFailureCategory::Request,
-        status_code: None,
-    })?;
-
-    let request = client
-        .get(url)
-        .header(ACCEPT, "application/octet-stream")
-        .send();
-    tokio::pin!(request);
-    let response = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(UpdateError::DownloadCancelled),
-        response = &mut request => response.map_err(|error| {
-            sanitized_network_error(DownloadFailureStage::Request, &error)
-        })?,
-    };
-    validate_response_url(&authorization.download_url, response.url())?;
-    if !response.status().is_success() {
-        return Err(UpdateError::HttpStatus(response.status()));
-    }
-
-    let declared_length = response.content_length();
-    let mut archive = BoundedArchive::new(declared_length, MAX_UPDATE_ARCHIVE_BYTES)?;
-    let mut stream = response.bytes_stream();
-    loop {
-        let next = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(UpdateError::DownloadCancelled),
-            next = stream.next() => next,
-        };
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = chunk
-            .map_err(|error| sanitized_network_error(DownloadFailureStage::ResponseBody, &error))?;
-        archive.push(&chunk)?;
-        verifier.update(&chunk);
-        let downloaded = archive.len();
-        let percent = declared_length
-            .filter(|total| *total > 0)
-            .map(|total| downloaded.saturating_mul(100) / total);
-        on_progress(downloaded, declared_length, percent)?;
-    }
-
-    let bytes = archive.finish()?;
-    verifier
-        .finalize()
-        .map_err(|_| UpdateError::SignatureVerification)?;
-    validate_signature_archive(&signature, &authorization.archive_name)?;
-    Ok(bytes)
-}
-
-fn build_client(expected_url: &str) -> Result<Client> {
-    ensure_tls_crypto_provider()?;
-    let expected_url = expected_url.to_owned();
-    Client::builder()
-        .user_agent(UPDATE_USER_AGENT)
-        .connect_timeout(UPDATE_CONNECT_TIMEOUT)
+    let expected_url = authorization.download_url.clone();
+    let client = external_https_client_builder()
+        .map_err(|_| UpdateError::TlsProviderUnavailable)?
+        .user_agent(USER_AGENT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .timeout(UPDATE_REQUEST_TIMEOUT)
         .redirect(Policy::custom(move |attempt| {
             match validate_redirect(&expected_url, attempt.previous(), attempt.url()) {
@@ -111,44 +58,188 @@ fn build_client(expected_url: &str) -> Result<Client> {
             }
         }))
         .build()
-        .map_err(|error| sanitized_network_error(DownloadFailureStage::ClientBuild, &error))
-}
+        .map_err(|error| sanitized_network_error(DownloadFailureStage::ClientBuild, &error))?;
 
-pub(super) fn ensure_tls_crypto_provider() -> Result<()> {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        // A concurrent initializer may win this one-time process-global race.
-        // Re-read below instead of interpreting that benign race as failure.
-        let _already_installed = rustls::crypto::ring::default_provider().install_default();
-    }
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        return Err(UpdateError::TlsProviderUnavailable);
-    }
-    Ok(())
-}
-
-pub(super) fn sanitized_network_error(
-    stage: DownloadFailureStage,
-    error: &reqwest::Error,
-) -> UpdateError {
-    let category = if error.is_timeout() {
-        NetworkFailureCategory::Timeout
-    } else if error.is_connect() {
-        NetworkFailureCategory::Connect
-    } else if error.is_status() {
-        NetworkFailureCategory::Status
-    } else if error.is_body() {
-        NetworkFailureCategory::Body
-    } else if error.is_decode() {
-        NetworkFailureCategory::Decode
-    } else if error.is_request() {
-        NetworkFailureCategory::Request
-    } else {
-        NetworkFailureCategory::Other
+    let request = client
+        .get(&authorization.download_url)
+        .header(ACCEPT, "application/octet-stream")
+        .send();
+    tokio::pin!(request);
+    let response = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(UpdateError::DownloadCancelled),
+        response = &mut request => response.map_err(|error| {
+            sanitized_network_error(DownloadFailureStage::ArchiveRequest, &error)
+        })?,
     };
-    UpdateError::Network {
+    if response.url().as_str() != authorization.download_url {
+        validate_release_asset_url(response.url()).map_err(UpdateError::Redirect)?;
+    }
+    if !response.status().is_success() {
+        return Err(UpdateError::HttpStatus(response.status()));
+    }
+    let declared_length = response.content_length();
+    let chunks = response.bytes_stream().map(|chunk| {
+        chunk.map_err(|error| sanitized_network_error(DownloadFailureStage::ArchiveBody, &error))
+    });
+    receive_verified_archive(
+        &public_key,
+        authorization,
+        ArchiveBounds {
+            declared_length,
+            maximum: MAX_UPDATE_ARCHIVE_BYTES,
+            stall_timeout: STALL_TIMEOUT,
+        },
+        chunks,
+        destination,
+        cancellation,
+        on_progress,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ArchiveBounds {
+    declared_length: Option<u64>,
+    maximum: u64,
+    stall_timeout: Duration,
+}
+
+async fn receive_verified_archive<S, B, F>(
+    public_key: &PublicKey,
+    authorization: &UpdateAuthorization,
+    bounds: ArchiveBounds,
+    chunks: S,
+    destination: &Path,
+    cancellation: &DownloadCancellation,
+    mut on_progress: F,
+) -> Result<u64>
+where
+    S: Stream<Item = Result<B>>,
+    B: AsRef<[u8]>,
+    F: FnMut(u64, Option<u64>) -> Result<()>,
+{
+    let signature = decode_signature(&authorization.signature)?;
+    // Reject an obviously replayed signature before any transfer. The same
+    // check is repeated after finalize(), when the comment is authenticated.
+    validate_signature_archive(&signature, &authorization.archive_name)?;
+    let mut verifier = public_key
+        .verify_stream(&signature)
+        .map_err(|_| UpdateError::SignatureVerification)?;
+    if let Some(declared) = bounds.declared_length
+        && declared > bounds.maximum
+    {
+        return Err(UpdateError::DeclaredArchiveTooLarge {
+            declared,
+            maximum: bounds.maximum,
+        });
+    }
+
+    let mut partial = PartialArchive::create(destination)?;
+    let mut received = 0_u64;
+    tokio::pin!(chunks);
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(UpdateError::DownloadCancelled),
+            next = tokio::time::timeout(bounds.stall_timeout, chunks.next()) => {
+                next.map_err(|_| UpdateError::Network {
+                    stage: DownloadFailureStage::ArchiveBody,
+                    category: NetworkFailureCategory::Timeout,
+                    status_code: None,
+                })?
+            }
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = chunk?;
+        let chunk = chunk.as_ref();
+        received = received
+            .checked_add(chunk.len() as u64)
+            .filter(|total| *total <= bounds.maximum)
+            .ok_or(UpdateError::ArchiveTooLarge {
+                maximum: bounds.maximum,
+            })?;
+        partial.write(chunk)?;
+        verifier.update(chunk);
+        on_progress(received, bounds.declared_length)?;
+    }
+    if received == 0 {
+        return Err(UpdateError::EmptyArchive);
+    }
+    if let Some(declared) = bounds.declared_length
+        && declared != received
+    {
+        return Err(UpdateError::ArchiveLengthMismatch {
+            declared,
+            actual: received,
+        });
+    }
+    verifier
+        .finalize()
+        .map_err(|_| UpdateError::SignatureVerification)?;
+    validate_signature_archive(&signature, &authorization.archive_name)?;
+    partial.commit()?;
+    Ok(received)
+}
+
+/// The archive file while it is still unauthenticated. Dropping it without
+/// `commit` removes the file, so no failed transfer leaves bytes behind.
+struct PartialArchive {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl PartialArchive {
+    fn create(path: &Path) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(staging_error("create-archive"))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file: Some(file),
+        })
+    }
+
+    fn write(&mut self, chunk: &[u8]) -> Result<()> {
+        self.file
+            .as_mut()
+            .expect("an uncommitted archive keeps its file")
+            .write_all(chunk)
+            .map_err(staging_error("write-archive"))
+    }
+
+    fn commit(mut self) -> Result<()> {
+        let file = self
+            .file
+            .take()
+            .expect("an uncommitted archive keeps its file");
+        if let Err(error) = file.sync_all() {
+            self.file = Some(file);
+            return Err(staging_error("sync-archive")(error));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PartialArchive {
+    fn drop(&mut self) {
+        if self.file.take().is_some()
+            && let Err(error) = fs::remove_file(&self.path)
+        {
+            eprintln!("failed to remove an unauthenticated update archive: {error}");
+        }
+    }
+}
+
+fn staging_error(stage: &'static str) -> impl Fn(std::io::Error) -> UpdateError {
+    move |error| UpdateError::Staging {
         stage,
-        category,
-        status_code: error.status().map(|status| status.as_u16()),
+        kind: error.kind(),
     }
 }
 
@@ -163,42 +254,6 @@ fn validate_redirect(
     validate_release_asset_url(target)
 }
 
-fn validate_response_url(expected_url: &str, response_url: &Url) -> Result<()> {
-    if response_url.as_str() == expected_url {
-        return Ok(());
-    }
-    validate_release_asset_url(response_url).map_err(UpdateError::Redirect)
-}
-
-pub(super) fn validate_release_asset_url(url: &Url) -> std::result::Result<(), String> {
-    if url.scheme() != "https"
-        || url.host_str() != Some(RELEASE_ASSET_HOST)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.fragment().is_some()
-    {
-        return Err("redirect origin or authority is not allowed".into());
-    }
-    let path_tail = url
-        .path()
-        .strip_prefix(RELEASE_ASSET_PATH_PREFIX)
-        .ok_or_else(|| "redirect path is not a GitHub release-asset path".to_string())?;
-    let segments = path_tail.split('/').collect::<Vec<_>>();
-    if segments.len() != 2
-        || segments
-            .iter()
-            .any(|segment| segment.is_empty() || segment.contains('%'))
-        || !segments[0].bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err("redirect path has an unexpected release-asset identifier".into());
-    }
-    if url.query().is_none_or(str::is_empty) {
-        return Err("redirect is missing GitHub's signed asset query".into());
-    }
-    Ok(())
-}
-
 fn embedded_public_key() -> Result<PublicKey> {
     let config: serde_json::Value =
         serde_json::from_str(EMBEDDED_TAURI_CONFIG).map_err(|_| UpdateError::InvalidPublicKey)?;
@@ -207,23 +262,26 @@ fn embedded_public_key() -> Result<PublicKey> {
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or(UpdateError::InvalidPublicKey)?;
-    let envelope = decode_base64_utf8(encoded).map_err(|()| UpdateError::InvalidPublicKey)?;
+    let envelope = decode_base64_utf8(encoded).ok_or(UpdateError::InvalidPublicKey)?;
     PublicKey::decode(&envelope).map_err(|_| UpdateError::InvalidPublicKey)
 }
 
 fn decode_signature(encoded: &str) -> Result<Signature> {
-    let envelope = decode_base64_utf8(encoded).map_err(|()| UpdateError::InvalidSignature)?;
+    let envelope = decode_base64_utf8(encoded).ok_or(UpdateError::InvalidSignature)?;
     Signature::decode(envelope.trim()).map_err(|_| UpdateError::InvalidSignature)
 }
 
 fn validate_signature_archive(signature: &Signature, expected_archive: &str) -> Result<()> {
-    let actual_archive = parse_trusted_comment(signature.trusted_comment())?;
-    if actual_archive != expected_archive {
+    if parse_trusted_comment(signature.trusted_comment())? != expected_archive {
         return Err(UpdateError::SignatureArchiveMismatch);
     }
     Ok(())
 }
 
+// Keep this grammar identical to the release verifier in
+// crates/cfw-release-verifier/src/main.rs, which is built in isolation and
+// cannot share code with the application. Minisign authenticates this trusted
+// comment only when stream finalization succeeds.
 fn parse_trusted_comment(comment: &str) -> Result<&str> {
     if comment.len() > MAX_TRUSTED_COMMENT_BYTES
         || comment
@@ -238,13 +296,11 @@ fn parse_trusted_comment(comment: &str) -> Result<&str> {
         .and_then(|field| field.strip_prefix("timestamp:"))
         .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
         .ok_or(UpdateError::InvalidSignatureComment)?;
-    if timestamp.len() > 20 {
-        return Err(UpdateError::InvalidSignatureComment);
-    }
-    let parsed_timestamp = timestamp
-        .parse::<u64>()
-        .map_err(|_| UpdateError::InvalidSignatureComment)?;
-    if parsed_timestamp.to_string() != timestamp {
+    if timestamp.len() > 20
+        || timestamp
+            .parse::<u64>()
+            .map_or(true, |parsed| parsed.to_string() != timestamp)
+    {
         return Err(UpdateError::InvalidSignatureComment);
     }
     let archive = fields
@@ -264,100 +320,33 @@ fn parse_trusted_comment(comment: &str) -> Result<&str> {
     Ok(archive)
 }
 
-fn decode_base64_utf8(encoded: &str) -> std::result::Result<String, ()> {
-    let bytes = STANDARD.decode(encoded).map_err(|_| ())?;
-    String::from_utf8(bytes).map_err(|_| ())
-}
-
-struct BoundedArchive {
-    bytes: Vec<u8>,
-    declared_length: Option<u64>,
-    maximum: u64,
-    maximum_capacity: usize,
-}
-
-impl BoundedArchive {
-    fn new(declared_length: Option<u64>, maximum: u64) -> Result<Self> {
-        if let Some(declared) = declared_length
-            && declared > maximum
-        {
-            return Err(UpdateError::DeclaredArchiveTooLarge { declared, maximum });
-        }
-        let maximum_capacity =
-            usize::try_from(maximum).map_err(|_| UpdateError::ArchiveTooLarge { maximum })?;
-        Ok(Self {
-            bytes: Vec::new(),
-            declared_length,
-            maximum,
-            maximum_capacity,
-        })
-    }
-
-    fn push(&mut self, chunk: &[u8]) -> Result<()> {
-        let chunk_length =
-            u64::try_from(chunk.len()).map_err(|_| UpdateError::ArchiveTooLarge {
-                maximum: self.maximum,
-            })?;
-        let next_length =
-            self.len()
-                .checked_add(chunk_length)
-                .ok_or(UpdateError::ArchiveTooLarge {
-                    maximum: self.maximum,
-                })?;
-        if next_length > self.maximum {
-            return Err(UpdateError::ArchiveTooLarge {
-                maximum: self.maximum,
-            });
-        }
-        let required_capacity =
-            usize::try_from(next_length).map_err(|_| UpdateError::ArchiveTooLarge {
-                maximum: self.maximum,
-            })?;
-        self.reserve_bounded(required_capacity)?;
-        self.bytes.extend_from_slice(chunk);
-        Ok(())
-    }
-
-    fn reserve_bounded(&mut self, required_capacity: usize) -> Result<()> {
-        if required_capacity <= self.bytes.capacity() {
-            return Ok(());
-        }
-        let growth_target = if self.bytes.capacity() == 0 {
-            64 * 1024
-        } else {
-            self.bytes.capacity().saturating_mul(2)
-        };
-        let target_capacity = growth_target
-            .max(required_capacity)
-            .min(self.maximum_capacity);
-        let additional = target_capacity.saturating_sub(self.bytes.len());
-        self.bytes
-            .try_reserve_exact(additional)
-            .map_err(|_| UpdateError::ArchiveAllocation)
-    }
-
-    fn len(&self) -> u64 {
-        self.bytes.len() as u64
-    }
-
-    fn finish(self) -> Result<Vec<u8>> {
-        let actual = self.len();
-        if actual == 0 {
-            return Err(UpdateError::EmptyArchive);
-        }
-        if let Some(declared) = self.declared_length
-            && declared != actual
-        {
-            return Err(UpdateError::ContentLengthMismatch { declared, actual });
-        }
-        Ok(self.bytes)
-    }
+fn decode_base64_utf8(encoded: &str) -> Option<String> {
+    String::from_utf8(STANDARD.decode(encoded).ok()?).ok()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use futures_util::stream;
+
     use super::*;
 
+    // The published minisign pre-hashed test vector, also used by
+    // scripts/tests/test_release_verifier_reproducibility.py. It signs the
+    // four bytes "test" and names the archive "test".
+    const TEST_PUBLIC_KEY: &str = concat!(
+        "untrusted comment: minisign public key E7620F1842B4E81F\n",
+        "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3",
+    );
+    const TEST_SIGNATURE: &str = concat!(
+        "untrusted comment: signature from minisign secret key\n",
+        "RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/",
+        "z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n",
+        "trusted comment: timestamp:1556193335\tfile:test\n",
+        "y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1",
+        "FkZZSNCisQbuQY+bHwhEBg==",
+    );
     const V035_SIGNATURE: &str = concat!(
         "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkK",
         "UlVUZElOVklSNGhuUVgrL3NFZk9VN0NkckJxbmxiVmFUcXl2QnQyUU9NYTVidm5MZjBD",
@@ -368,48 +357,320 @@ mod tests {
         "Y1U5UFVGMHJNMXRZQnc9PQo="
     );
 
-    #[test]
-    fn bounded_archive_accepts_the_exact_limit() {
-        let mut archive = BoundedArchive::new(Some(4), 4).expect("bounded archive");
-        archive.push(&[1, 2]).expect("first chunk");
-        archive.push(&[3, 4]).expect("second chunk");
-        assert_eq!(archive.finish().expect("complete archive"), [1, 2, 3, 4]);
+    fn test_key() -> PublicKey {
+        PublicKey::decode(TEST_PUBLIC_KEY).expect("test public key")
     }
 
-    #[test]
-    fn bounded_archive_rejects_declared_and_streamed_overflow_before_copying() {
+    fn authorization(archive_name: &str) -> UpdateAuthorization {
+        UpdateAuthorization {
+            version: "9.9.9".into(),
+            archive_name: archive_name.into(),
+            download_url: "https://github.com/billlza/cfw-rs/releases/download/v9.9.9/test".into(),
+            signature: STANDARD.encode(TEST_SIGNATURE),
+        }
+    }
+
+    fn bounds(declared_length: Option<u64>) -> ArchiveBounds {
+        ArchiveBounds {
+            declared_length,
+            maximum: 1024,
+            stall_timeout: Duration::from_secs(30),
+        }
+    }
+
+    fn chunks(parts: &[&[u8]]) -> impl Stream<Item = Result<Vec<u8>>> {
+        stream::iter(
+            parts
+                .iter()
+                .map(|part| Ok(part.to_vec()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    async fn receive(
+        key: &PublicKey,
+        authorization: &UpdateAuthorization,
+        bounds: ArchiveBounds,
+        parts: &[&[u8]],
+        destination: &Path,
+    ) -> Result<u64> {
+        receive_verified_archive(
+            key,
+            authorization,
+            bounds,
+            chunks(parts),
+            destination,
+            &DownloadCancellation::new(),
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_archive_matching_its_signature_is_kept_privately() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let destination = scratch.path().join("archive.tar.gz");
+        let mut progress = Vec::new();
+        let received = receive_verified_archive(
+            &test_key(),
+            &authorization("test"),
+            bounds(Some(4)),
+            chunks(&[b"te", b"st"]),
+            &destination,
+            &DownloadCancellation::new(),
+            |downloaded, total| {
+                progress.push((downloaded, total));
+                Ok(())
+            },
+        )
+        .await
+        .expect("verified archive");
+        assert_eq!(received, 4);
+        assert_eq!(progress, [(2, Some(4)), (4, Some(4))]);
+        assert_eq!(fs::read(&destination).expect("archive"), b"test");
+        let mode = fs::metadata(&destination)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn altered_truncated_or_extended_bytes_fail_verification_and_leave_no_file() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let key = test_key();
+        let cases: [&[&[u8]]; 4] = [&[b"tesT"], &[b"tes"], &[b"test", b"!"], &[b"TEST"]];
+        for (index, parts) in cases.into_iter().enumerate() {
+            let destination = scratch.path().join(format!("archive-{index}"));
+            let outcome = receive(
+                &key,
+                &authorization("test"),
+                bounds(None),
+                parts,
+                &destination,
+            )
+            .await;
+            assert!(
+                matches!(outcome, Err(UpdateError::SignatureVerification)),
+                "{parts:?}: {outcome:?}"
+            );
+            assert!(
+                !destination.exists(),
+                "{parts:?} left an unauthenticated file"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signature_for_another_archive_name_is_refused_before_any_byte_is_stored() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let destination = scratch.path().join("archive");
+        let outcome = receive(
+            &test_key(),
+            &authorization("Clash.for.Mac_9.9.9_aarch64.app.tar.gz"),
+            bounds(None),
+            &[b"test"],
+            &destination,
+        )
+        .await;
         assert!(matches!(
-            BoundedArchive::new(Some(5), 4),
+            outcome,
+            Err(UpdateError::SignatureArchiveMismatch)
+        ));
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn a_signature_from_another_key_is_refused() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let destination = scratch.path().join("archive");
+        let release_key = embedded_public_key().expect("release key");
+        let outcome = receive(
+            &release_key,
+            &authorization("test"),
+            bounds(None),
+            &[b"test"],
+            &destination,
+        )
+        .await;
+        assert!(matches!(outcome, Err(UpdateError::SignatureVerification)));
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn size_bounds_are_enforced_before_and_during_the_transfer() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let key = test_key();
+        let destination = scratch.path().join("archive");
+        let tight = ArchiveBounds {
+            maximum: 3,
+            ..bounds(None)
+        };
+        assert!(matches!(
+            receive(
+                &key,
+                &authorization("test"),
+                tight,
+                &[b"test"],
+                &destination
+            )
+            .await,
+            Err(UpdateError::ArchiveTooLarge { maximum: 3 })
+        ));
+        assert!(!destination.exists());
+
+        let declared = bounds(Some(2048));
+        assert!(matches!(
+            receive(
+                &key,
+                &authorization("test"),
+                declared,
+                &[b"test"],
+                &destination
+            )
+            .await,
             Err(UpdateError::DeclaredArchiveTooLarge {
-                declared: 5,
-                maximum: 4
+                declared: 2048,
+                maximum: 1024,
             })
         ));
+        assert!(!destination.exists());
 
-        let mut archive = BoundedArchive::new(None, 4).expect("bounded archive");
-        archive.push(&[1, 2, 3, 4]).expect("limit-sized chunk");
         assert!(matches!(
-            archive.push(&[5]),
-            Err(UpdateError::ArchiveTooLarge { maximum: 4 })
+            receive(
+                &key,
+                &authorization("test"),
+                bounds(Some(5)),
+                &[b"test"],
+                &destination
+            )
+            .await,
+            Err(UpdateError::ArchiveLengthMismatch {
+                declared: 5,
+                actual: 4,
+            })
         ));
-        assert_eq!(archive.len(), 4, "rejected bytes must not enter the buffer");
-    }
+        assert!(!destination.exists());
 
-    #[test]
-    fn bounded_archive_rejects_empty_and_truncated_responses() {
         assert!(matches!(
-            BoundedArchive::new(None, 4).expect("archive").finish(),
+            receive(
+                &key,
+                &authorization("test"),
+                bounds(None),
+                &[],
+                &destination
+            )
+            .await,
             Err(UpdateError::EmptyArchive)
         ));
-        let mut archive = BoundedArchive::new(Some(4), 4).expect("archive");
-        archive.push(&[1, 2, 3]).expect("partial body");
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_and_transfer_errors_remove_the_partial_file() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let destination = scratch.path().join("archive");
+        let cancellation = DownloadCancellation::new();
+        cancellation.cancel();
+        let cancelled = receive_verified_archive(
+            &test_key(),
+            &authorization("test"),
+            bounds(None),
+            chunks(&[b"test"]),
+            &destination,
+            &cancellation,
+            |_, _| Ok(()),
+        )
+        .await;
+        assert!(matches!(cancelled, Err(UpdateError::DownloadCancelled)));
+        assert!(!destination.exists());
+
+        let failing = stream::iter(vec![
+            Ok(b"te".to_vec()),
+            Err(UpdateError::HttpStatus(reqwest::StatusCode::BAD_GATEWAY)),
+        ]);
+        let failed = receive_verified_archive(
+            &test_key(),
+            &authorization("test"),
+            bounds(None),
+            failing,
+            &destination,
+            &DownloadCancellation::new(),
+            |_, _| Ok(()),
+        )
+        .await;
+        assert!(matches!(failed, Err(UpdateError::HttpStatus(_))));
+        assert!(!destination.exists());
+
+        let progress_failure = receive_verified_archive(
+            &test_key(),
+            &authorization("test"),
+            bounds(None),
+            chunks(&[b"test"]),
+            &destination,
+            &DownloadCancellation::new(),
+            |_, _| Err(UpdateError::ProgressEvent),
+        )
+        .await;
+        assert!(matches!(progress_failure, Err(UpdateError::ProgressEvent)));
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn a_transfer_that_stops_delivering_bytes_is_a_timeout_and_leaves_nothing() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let destination = scratch.path().join("archive");
+        let stalled = stream::iter(vec![Ok(b"te".to_vec())]).chain(stream::pending());
+        let started = std::time::Instant::now();
+        let outcome = receive_verified_archive(
+            &test_key(),
+            &authorization("test"),
+            ArchiveBounds {
+                stall_timeout: Duration::from_millis(80),
+                ..bounds(None)
+            },
+            stalled,
+            &destination,
+            &DownloadCancellation::new(),
+            |_, _| Ok(()),
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(UpdateError::Network {
+                    stage: DownloadFailureStage::ArchiveBody,
+                    category: NetworkFailureCategory::Timeout,
+                    status_code: None,
+                })
+            ),
+            "{outcome:?}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn an_existing_destination_is_never_overwritten() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let destination = scratch.path().join("archive");
+        fs::write(&destination, b"earlier").expect("existing file");
+        let outcome = receive(
+            &test_key(),
+            &authorization("test"),
+            bounds(None),
+            &[b"test"],
+            &destination,
+        )
+        .await;
         assert!(matches!(
-            archive.finish(),
-            Err(UpdateError::ContentLengthMismatch {
-                declared: 4,
-                actual: 3
+            outcome,
+            Err(UpdateError::Staging {
+                stage: "create-archive",
+                kind: std::io::ErrorKind::AlreadyExists,
             })
         ));
+        assert_eq!(fs::read(&destination).expect("untouched"), b"earlier");
     }
 
     #[test]
@@ -428,41 +689,31 @@ mod tests {
             Url::parse("https://example.com/github-production-release-asset/12345/abcdef?sig=test")
                 .expect("wrong origin URL");
         assert!(validate_redirect(expected, &previous, &wrong_origin).is_err());
+        let other_start = [Url::parse("https://github.com/other/asset.tar.gz").expect("URL")];
+        assert!(validate_redirect(expected, &other_start, &allowed).is_err());
     }
 
     #[test]
-    fn redirect_policy_rejects_authority_path_and_query_variants() {
-        let cases = [
-            "http://release-assets.githubusercontent.com/github-production-release-asset/123/abc?sig=x",
-            "https://user@release-assets.githubusercontent.com/github-production-release-asset/123/abc?sig=x",
-            "https://release-assets.githubusercontent.com:8443/github-production-release-asset/123/abc?sig=x",
-            "https://release-assets.githubusercontent.com/not-release-assets/123/abc?sig=x",
-            "https://release-assets.githubusercontent.com/github-production-release-asset/not-a-number/abc?sig=x",
-            "https://release-assets.githubusercontent.com/github-production-release-asset/123/abc",
-            "https://release-assets.githubusercontent.com/github-production-release-asset/123/abc?sig=x#fragment",
-        ];
-        for value in cases {
-            let url = Url::parse(value).expect("edge-case URL must parse");
-            assert!(
-                validate_release_asset_url(&url).is_err(),
-                "redirect URL was accepted: {value}"
-            );
-        }
+    fn embedded_release_public_key_decodes() {
+        embedded_public_key().expect("the release public key must decode");
     }
 
     #[test]
-    fn embedded_updater_public_key_is_valid() {
-        embedded_public_key().expect("Tauri updater public key must decode");
-    }
-
-    #[test]
-    fn signed_archive_filename_must_match_the_authorized_version() {
+    fn signed_archive_name_must_match_the_authorized_release() {
         let signature = decode_signature(V035_SIGNATURE).expect("historical signature");
         validate_signature_archive(&signature, "Clash.for.Mac_0.3.5_aarch64.app.tar.gz")
-            .expect("matching signed filename");
+            .expect("matching signed archive name");
         assert!(matches!(
             validate_signature_archive(&signature, "Clash.for.Mac_0.4.0_aarch64.app.tar.gz"),
             Err(UpdateError::SignatureArchiveMismatch)
+        ));
+        assert!(matches!(
+            decode_signature("%%%"),
+            Err(UpdateError::InvalidSignature)
+        ));
+        assert!(matches!(
+            decode_signature(&STANDARD.encode("not a signature envelope")),
+            Err(UpdateError::InvalidSignature)
         ));
     }
 
@@ -482,16 +733,21 @@ mod tests {
             "timestamp:1784639874\tfile:../archive.tar.gz",
             "timestamp:1784639874\tfile:archive.tar.gz\tfile:second.tar.gz",
             "timestamp:1784639874\tfile:archive.tar.gz\nfile:second.tar.gz",
+            "timestamp:1784639874",
+            "",
         ] {
             assert!(
-                parse_trusted_comment(comment).is_err(),
+                matches!(
+                    parse_trusted_comment(comment),
+                    Err(UpdateError::InvalidSignatureComment)
+                ),
                 "malformed trusted comment was accepted: {comment:?}"
             );
         }
     }
 
     #[test]
-    fn trusted_comment_failures_do_not_echo_untrusted_content() {
+    fn signature_failures_do_not_echo_untrusted_content() {
         let secret = "must-not-reach-diagnostics";
         let oversized = format!("timestamp:1784639874\tfile:{secret}{}", "a".repeat(1024));
         for comment in [
@@ -503,34 +759,11 @@ mod tests {
                 .expect_err("untrusted comment must be rejected")
                 .to_string();
             assert!(!diagnostic.contains(secret));
-            assert_eq!(diagnostic, "update signature trusted comment is invalid");
         }
-
-        let mismatch = UpdateError::SignatureArchiveMismatch.to_string();
-        assert!(!mismatch.contains(secret));
-        assert_eq!(mismatch, "update signature is bound to a different archive");
-    }
-
-    #[tokio::test]
-    async fn reqwest_errors_never_expose_the_request_url_or_query() {
-        let secret = "must-not-reach-diagnostics";
-        ensure_tls_crypto_provider().expect("test TLS provider");
-        let client = Client::builder()
-            .timeout(Duration::from_secs(1))
-            .build()
-            .expect("test client");
-        let error = client
-            .get(format!(
-                "http://127.0.0.1:0/archive?X-Amz-Signature={secret}&sig={secret}"
-            ))
-            .send()
-            .await
-            .expect_err("port zero must reject the request");
-        let diagnostic = sanitized_network_error(DownloadFailureStage::Request, &error).to_string();
-        assert!(!diagnostic.contains(secret));
-        assert!(!diagnostic.contains("127.0.0.1"));
-        assert!(!diagnostic.contains("X-Amz"));
-        assert!(diagnostic.contains("during request"));
-        assert!(diagnostic.contains("category:"));
+        assert!(
+            !UpdateError::SignatureArchiveMismatch
+                .to_string()
+                .contains(secret)
+        );
     }
 }

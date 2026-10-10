@@ -1,12 +1,12 @@
 [package]
 name = "cfw-profiles"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
 cfw-singbox-config = { path = "../cfw-singbox-config" }
-libc = "0.2"
+libc = "0.2.189"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

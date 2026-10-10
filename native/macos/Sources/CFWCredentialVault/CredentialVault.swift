@@ -15,16 +15,10 @@ public struct CredentialVault: Sendable {
   }
 
   public func provision(
-    profileID: String,
+    audience: CredentialAudience,
     requiredReferences: [CredentialReference],
     material: CredentialMaterial
   ) throws -> CredentialVaultReceipt {
-    guard profileID == profileID.lowercased(),
-      let profileUUID = UUID(uuidString: profileID),
-      profileUUID.uuidString.lowercased() == profileID
-    else {
-      throw CredentialVaultError.invalidProfileIdentifier
-    }
     guard requiredReferences.count <= NativeBridgeProtocolConstants.maximumCredentialSlots else {
       throw CredentialVaultError.capacityExceeded
     }
@@ -47,10 +41,14 @@ public struct CredentialVault: Sendable {
       defer { stored?.erase() }
       var document = try decode(stored)
       defer { erase(&document) }
-      var byID = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.reference.id, $0) })
+      var byBinding = Dictionary(
+        uniqueKeysWithValues: document.entries.map {
+          (CredentialBinding(audience: $0.audience, reference: $0.reference), $0)
+        })
       let suppliedIDs = Set(material.entries.map(\.reference.id))
       for required in requiredReferences {
-        if let existing = byID[required.id] {
+        let binding = CredentialBinding(audience: audience, reference: required)
+        if let existing = byBinding[binding] {
           guard existing.reference.kind == required.kind else {
             throw CredentialVaultError.kindMismatch(required.id)
           }
@@ -59,31 +57,32 @@ public struct CredentialVault: Sendable {
         }
       }
       for requested in material.entries {
-        if let existing = byID[requested.reference.id] {
-          let requestedSecret = requested.withSecretBytes { $0 }
-          guard existing.reference.kind == requested.reference.kind,
-            Self.timingSafeEqual(existing.secret, requestedSecret)
-          else {
+        let requestedSecret = requested.withSecretBytes { $0 }
+        for existing in document.entries where existing.reference.id == requested.reference.id {
+          guard existing.reference.kind == requested.reference.kind else {
+            throw CredentialVaultError.kindMismatch(requested.reference.id)
+          }
+          guard Self.timingSafeEqual(existing.secret, requestedSecret) else {
             throw CredentialVaultError.immutableConflict(requested.reference.id)
           }
-        } else {
-          let requestedSecret = requested.withSecretBytes { $0 }
-          byID[requested.reference.id] = CredentialVaultEntry(
+        }
+        let binding = CredentialBinding(audience: audience, reference: requested.reference)
+        if byBinding[binding] == nil {
+          byBinding[binding] = CredentialVaultEntry(
+            audience: audience,
             reference: requested.reference,
             secret: requestedSecret
           )
         }
       }
-      guard byID.count <= CredentialVaultConstants.maximumEntries else {
+      guard byBinding.count <= CredentialVaultConstants.maximumEntries else {
         throw CredentialVaultError.capacityExceeded
       }
       let newRevision = UUID()
       document = CredentialVaultDocument(
         schemaVersion: CredentialVaultConstants.schemaVersion,
         revision: newRevision,
-        entries: byID.values.sorted {
-          $0.reference.id.uuidString < $1.reference.id.uuidString
-        }
+        entries: byBinding.values.sorted(by: Self.entryPrecedes)
       )
       var encoded = try encode(document)
       defer {
@@ -96,7 +95,7 @@ public struct CredentialVault: Sendable {
           newRevision: newRevision,
           data: encoded
         )
-        return CredentialVaultReceipt(profileID: profileUUID)
+        return CredentialVaultReceipt(audience: audience)
       } catch CredentialVaultError.compareAndSwapConflict {
         continue
       }
@@ -104,7 +103,10 @@ public struct CredentialVault: Sendable {
     throw CredentialVaultError.compareAndSwapConflict
   }
 
-  public func presence(of references: [CredentialReference]) throws -> [CredentialPresence] {
+  public func presence(
+    audience: CredentialAudience,
+    of references: [CredentialReference]
+  ) throws -> [CredentialPresence] {
     guard references.count <= NativeBridgeProtocolConstants.maximumCredentialSlots else {
       throw CredentialVaultError.capacityExceeded
     }
@@ -116,9 +118,13 @@ public struct CredentialVault: Sendable {
     defer { stored?.erase() }
     var document = try decode(stored)
     defer { erase(&document) }
-    let byID = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.reference.id, $0) })
+    let byBinding = Dictionary(
+      uniqueKeysWithValues: document.entries.map {
+        (CredentialBinding(audience: $0.audience, reference: $0.reference), $0)
+      })
     return try references.map { reference in
-      guard let existing = byID[reference.id] else {
+      let binding = CredentialBinding(audience: audience, reference: reference)
+      guard let existing = byBinding[binding] else {
         return CredentialPresence(reference: reference, present: false)
       }
       guard existing.reference.kind == reference.kind else {
@@ -128,7 +134,10 @@ public struct CredentialVault: Sendable {
     }
   }
 
-  public func resolve(slots: [CredentialSlot]) throws -> CredentialMaterial {
+  public func resolve(
+    audience: CredentialAudience,
+    slots: [CredentialSlot]
+  ) throws -> CredentialMaterial {
     guard slots.count <= NativeBridgeProtocolConstants.maximumCredentialSlots else {
       throw CredentialVaultError.capacityExceeded
     }
@@ -143,11 +152,15 @@ public struct CredentialVault: Sendable {
     defer { stored?.erase() }
     var document = try decode(stored)
     defer { erase(&document) }
-    let byID = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.reference.id, $0) })
+    let byBinding = Dictionary(
+      uniqueKeysWithValues: document.entries.map {
+        (CredentialBinding(audience: $0.audience, reference: $0.reference), $0)
+      })
     let entries = try required.values.sorted {
       $0.id.uuidString < $1.id.uuidString
     }.map { reference -> CredentialMaterialEntry in
-      guard let stored = byID[reference.id] else {
+      let binding = CredentialBinding(audience: audience, reference: reference)
+      guard let stored = byBinding[binding] else {
         throw CredentialVaultError.missingCredential(reference.id)
       }
       guard stored.reference.kind == reference.kind else {
@@ -172,12 +185,12 @@ public struct CredentialVault: Sendable {
     defer { erase(&document) }
     let orphans = try orphanReferences(
       in: document,
-      preserving: request.liveReferences
+      preserving: request.bindings
     )
     return try CredentialGarbageCollectionPreview(
       snapshotDigest: request.snapshotDigest,
       vaultRevision: stored.revision,
-      orphanReferences: orphans
+      orphanBindings: orphans
     )
   }
 
@@ -199,9 +212,13 @@ public struct CredentialVault: Sendable {
     defer { erase(&document) }
     let actualOrphans = try orphanReferences(
       in: document,
-      preserving: request.liveReferences
+      preserving: request.catalog.flatMap { entry in
+        entry.references.map {
+          CredentialBinding(audience: entry.audience, reference: $0)
+        }
+      }
     )
-    guard actualOrphans == request.expectedOrphanReferences else {
+    guard actualOrphans == request.expectedOrphanBindings else {
       throw CredentialVaultError.garbageCollectionConfirmationExpired
     }
     guard !actualOrphans.isEmpty else {
@@ -210,11 +227,15 @@ public struct CredentialVault: Sendable {
         deletedCount: 0
       )
     }
-    let orphanIDs = Set(actualOrphans.map(\.id))
+    let orphanBindings = Set(actualOrphans)
     var retained: [CredentialVaultEntry] = []
     retained.reserveCapacity(document.entries.count - actualOrphans.count)
     for index in document.entries.indices {
-      if orphanIDs.contains(document.entries[index].reference.id) {
+      let binding = CredentialBinding(
+        audience: document.entries[index].audience,
+        reference: document.entries[index].reference
+      )
+      if orphanBindings.contains(binding) {
         // Scrub the document-owned buffer before removing the entry. Erasing
         // only a loop copy would not reliably clear this storage under Data's
         // copy-on-write semantics.
@@ -255,32 +276,28 @@ public struct CredentialVault: Sendable {
 
   private func orphanReferences(
     in document: CredentialVaultDocument,
-    preserving liveReferences: [CredentialReference]
-  ) throws -> [CredentialReference] {
-    let byID = Dictionary(
+    preserving liveBindings: [CredentialBinding]
+  ) throws -> [CredentialBinding] {
+    let storedBindings = Dictionary(
       uniqueKeysWithValues: document.entries.map {
-        ($0.reference.id, $0.reference)
+        (
+          CredentialBinding(audience: $0.audience, reference: $0.reference),
+          $0.reference
+        )
       })
-    for live in liveReferences {
-      guard let existing = byID[live.id] else {
-        throw CredentialVaultError.missingCredential(live.id)
+    for live in liveBindings {
+      guard let existing = storedBindings[live] else {
+        throw CredentialVaultError.missingCredential(live.reference.id)
       }
-      guard existing.kind == live.kind else {
-        throw CredentialVaultError.kindMismatch(live.id)
+      guard existing.kind == live.reference.kind else {
+        throw CredentialVaultError.kindMismatch(live.reference.id)
       }
     }
-    let liveIDs = Set(liveReferences.map(\.id))
+    let live = Set(liveBindings)
     return document.entries.lazy
-      .map(\.reference)
-      .filter { !liveIDs.contains($0.id) }
-      .sorted {
-        let leftID = $0.id.uuidString.lowercased()
-        let rightID = $1.id.uuidString.lowercased()
-        if leftID != rightID {
-          return leftID < rightID
-        }
-        return $0.kind.rawValue < $1.kind.rawValue
-      }
+      .map { CredentialBinding(audience: $0.audience, reference: $0.reference) }
+      .filter { !live.contains($0) }
+      .sorted(by: CredentialBinding.canonicalPrecedes)
   }
 
   private func decode(_ stored: StoredCredentialVaultBlob?) throws -> CredentialVaultDocument {
@@ -297,7 +314,10 @@ public struct CredentialVault: Sendable {
     else {
       throw CredentialVaultError.corrupt
     }
-    try validateWireShape(stored.data)
+    let storedSchemaVersion = try validateWireShape(stored.data)
+    guard storedSchemaVersion == CredentialVaultConstants.schemaVersion else {
+      throw CredentialVaultError.unsupportedSchemaVersion(storedSchemaVersion)
+    }
     let document: CredentialVaultDocument
     do {
       document = try JSONDecoder().decode(CredentialVaultDocument.self, from: stored.data)
@@ -311,13 +331,15 @@ public struct CredentialVault: Sendable {
     else {
       throw CredentialVaultError.corrupt
     }
-    var seen = Set<UUID>()
+    var seen = Set<CredentialBinding>()
     var total = 0
     for entry in document.entries {
-      guard seen.insert(entry.reference.id).inserted,
+      let binding = CredentialBinding(audience: entry.audience, reference: entry.reference)
+      guard seen.insert(binding).inserted,
         !entry.secret.isEmpty,
         entry.secret.count <= CredentialMaterialConstants.maximumSecretBytes,
         let secretText = String(data: entry.secret, encoding: .utf8),
+        entry.reference.kind.admitsSecretSyntax(secretText),
         secretText.unicodeScalars.contains(where: {
           CharacterSet.controlCharacters.contains($0)
         }) == false
@@ -330,8 +352,7 @@ public struct CredentialVault: Sendable {
       }
     }
     guard
-      document.entries.map(\.reference.id.uuidString)
-        == document.entries.map(\.reference.id.uuidString).sorted()
+      document.entries.sorted(by: Self.entryPrecedes) == document.entries
     else {
       throw CredentialVaultError.corrupt
     }
@@ -348,7 +369,7 @@ public struct CredentialVault: Sendable {
     return data
   }
 
-  private func validateWireShape(_ data: Data) throws {
+  private func validateWireShape(_ data: Data) throws -> UInt16 {
     let value: Any
     do {
       value = try JSONSerialization.jsonObject(with: data)
@@ -357,15 +378,27 @@ public struct CredentialVault: Sendable {
     }
     guard let root = value as? [String: Any],
       Set(root.keys) == ["schemaVersion", "revision", "entries"],
-      root["schemaVersion"] is NSNumber,
+      let schemaVersion = root["schemaVersion"] as? NSNumber,
       root["revision"] is String,
       let entries = root["entries"] as? [Any]
     else {
       throw CredentialVaultError.corrupt
     }
+    guard CFGetTypeID(schemaVersion) != CFBooleanGetTypeID(),
+      let decodedVersion = UInt16(exactly: schemaVersion.uint64Value)
+    else {
+      throw CredentialVaultError.corrupt
+    }
+    if decodedVersion != CredentialVaultConstants.schemaVersion {
+      return decodedVersion
+    }
     for value in entries {
-      guard let entry = value as? [String: Any], Set(entry.keys) == ["reference", "secret"],
+      guard let entry = value as? [String: Any],
+        Set(entry.keys) == ["audience", "reference", "secret"],
         entry["secret"] is String,
+        let audience = entry["audience"] as? [String: Any],
+        Set(audience.keys) == ["profile_id", "profile_digest"],
+        audience["profile_id"] is String, audience["profile_digest"] is String,
         let reference = entry["reference"] as? [String: Any],
         Set(reference.keys) == ["id", "kind"],
         reference["id"] is String, reference["kind"] is String
@@ -373,6 +406,7 @@ public struct CredentialVault: Sendable {
         throw CredentialVaultError.corrupt
       }
     }
+    return decodedVersion
   }
 
   private func erase(_ document: inout CredentialVaultDocument) {
@@ -391,6 +425,16 @@ public struct CredentialVault: Sendable {
       difference |= Int(left ^ right)
     }
     return difference == 0
+  }
+
+  private static func entryPrecedes(
+    _ left: CredentialVaultEntry,
+    _ right: CredentialVaultEntry
+  ) -> Bool {
+    CredentialBinding.canonicalPrecedes(
+      CredentialBinding(audience: left.audience, reference: left.reference),
+      CredentialBinding(audience: right.audience, reference: right.reference)
+    )
   }
 }
 

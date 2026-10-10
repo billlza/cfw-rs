@@ -9,6 +9,7 @@ use crate::settings_storage::{FilePolicy, SecureDirectory};
 
 pub const APP_HOME_DIR_NAME: &str = PRODUCT_NAME;
 pub const PREFERENCES_FILE_NAME: &str = "cfw-preferences.json";
+pub const WINDOW_STATE_FILE_NAME: &str = "cfw-window-state.json";
 pub const LEGACY_SETTINGS_FILE_NAME: &str = "cfw-settings.yaml";
 pub const LEGACY_CONFIG_FILE_NAME: &str = "config.yaml";
 /// 0.4 native profiles live outside the historical Clash-managed directory so
@@ -19,15 +20,25 @@ pub const LOGS_DIR_NAME: &str = "logs";
 pub const LEGACY_CORES_DIR_NAME: &str = "cores";
 pub const LEGACY_HELPERS_DIR_NAME: &str = "helpers";
 
-const PREFERENCES_SCHEMA_VERSION: u16 = 1;
+const PREFERENCES_SCHEMA_VERSION: u16 = 2;
 const MAX_PREFERENCES_BYTES: usize = 16 * 1024;
+const WINDOW_STATE_SCHEMA_VERSION: u16 = 1;
+const MAX_WINDOW_STATE_BYTES: usize = 1024;
+const MAX_WINDOW_DIMENSION: u32 = 65_535;
+const MAX_WINDOW_COORDINATE_MAGNITUDE: i32 = 1_000_000;
 const RETIREMENT_MARKER_FILE_NAME: &str = ".legacy-network-retired-v1.json";
 const RETIREMENT_MARKER_BYTES: &[u8] = b"{\"schema_version\":1,\"completed\":true}";
 
 #[derive(Debug, Error)]
 pub enum SettingsStoreError {
+    #[error("runtime settings changed while the update was prepared")]
+    RuntimeSettingsChanged,
     #[error("HOME is not available; cannot resolve Clash for Mac data directory")]
     MissingHome,
+    #[error(
+        "settings store remained busy for 3 seconds; another process still owns its transaction lock"
+    )]
+    StoreBusy,
     #[error("settings I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("settings JSON is invalid: {0}")]
@@ -54,6 +65,8 @@ pub enum SettingsStoreError {
     InvalidLegacySettings { line: usize, message: String },
     #[error("legacy settings contain duplicate or aliased values for {key}")]
     AmbiguousLegacySetting { key: String },
+    #[error("window bounds are invalid: {0}")]
+    InvalidWindowBounds(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -81,6 +94,7 @@ pub enum FontFamily {
 pub struct UiPreferences {
     pub theme: AppearanceTheme,
     pub font_family: FontFamily,
+    pub language: UiLanguage,
     pub retain_window_bounds: bool,
     pub launch_at_login: bool,
     pub silent_start: bool,
@@ -92,10 +106,117 @@ impl Default for UiPreferences {
         Self {
             theme: AppearanceTheme::System,
             font_family: FontFamily::System,
+            language: UiLanguage::System,
             retain_window_bounds: true,
             launch_at_login: false,
             silent_start: false,
             check_for_updates: false,
+        }
+    }
+}
+
+/// Closed language preferences. System selection is resolved at presentation
+/// time, so changing the macOS preferred languages does not rewrite settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UiLanguage {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-Hans")]
+    SimplifiedChinese,
+    #[serde(rename = "zh-Hant")]
+    TraditionalChinese,
+    #[serde(rename = "ja")]
+    Japanese,
+}
+
+impl UiLanguage {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::English => "en",
+            Self::SimplifiedChinese => "zh-Hans",
+            Self::TraditionalChinese => "zh-Hant",
+            Self::Japanese => "ja",
+        }
+    }
+
+    pub fn resolve(self, preferred: &[String]) -> Self {
+        if self != Self::System {
+            return self;
+        }
+        for language in preferred {
+            let normalized = language.replace('_', "-").to_ascii_lowercase();
+            let parts: Vec<_> = normalized.split('-').collect();
+            match parts.first().copied() {
+                Some("en") => return Self::English,
+                Some("ja") => return Self::Japanese,
+                Some("zh") => {
+                    return if parts.contains(&"hans") {
+                        Self::SimplifiedChinese
+                    } else if parts.contains(&"hant")
+                        || parts.iter().any(|part| matches!(*part, "tw" | "hk" | "mo"))
+                    {
+                        Self::TraditionalChinese
+                    } else {
+                        Self::SimplifiedChinese
+                    };
+                }
+                _ => {}
+            }
+        }
+        Self::English
+    }
+}
+
+/// The exact v1 shape is retained only for lossless, read-only migration.
+/// Canonical bytes and unknown fields are checked before adding the new field.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyUiPreferences {
+    theme: AppearanceTheme,
+    font_family: FontFamily,
+    retain_window_bounds: bool,
+    launch_at_login: bool,
+    silent_start: bool,
+    check_for_updates: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyAppPreferences {
+    schema_version: u16,
+    preferences: LegacyUiPreferences,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredPreferences {
+    Current(AppPreferences),
+    Legacy(LegacyAppPreferences),
+}
+
+impl StoredPreferences {
+    fn into_preferences(self) -> Result<UiPreferences, SettingsStoreError> {
+        match self {
+            Self::Current(value) => Ok(value.validate()?.preferences),
+            Self::Legacy(value) => {
+                if value.schema_version != 1 {
+                    return Err(SettingsStoreError::UnsupportedSchema(value.schema_version));
+                }
+                let old = value.preferences;
+                Ok(UiPreferences {
+                    theme: old.theme,
+                    font_family: old.font_family,
+                    language: UiLanguage::System,
+                    retain_window_bounds: old.retain_window_bounds,
+                    launch_at_login: old.launch_at_login,
+                    silent_start: old.silent_start,
+                    check_for_updates: old.check_for_updates,
+                })
+            }
         }
     }
 }
@@ -127,6 +248,7 @@ impl AppPreferences {
 pub struct MacOsAppPaths {
     pub app_home: PathBuf,
     pub preferences_file: PathBuf,
+    pub window_state_file: PathBuf,
     pub legacy_settings_file: PathBuf,
     pub legacy_config_file: PathBuf,
     pub legacy_profiles_dir: PathBuf,
@@ -155,6 +277,7 @@ impl MacOsAppPaths {
         let app_home = app_home.into();
         Self {
             preferences_file: app_home.join(PREFERENCES_FILE_NAME),
+            window_state_file: app_home.join(WINDOW_STATE_FILE_NAME),
             legacy_settings_file: app_home.join(LEGACY_SETTINGS_FILE_NAME),
             legacy_config_file: app_home.join(LEGACY_CONFIG_FILE_NAME),
             legacy_profiles_dir: app_home.join(LEGACY_PROFILES_DIR_NAME),
@@ -168,6 +291,77 @@ impl MacOsAppPaths {
 
     pub fn managed_dirs(&self) -> [&Path; 3] {
         [&self.app_home, &self.profiles_dir, &self.logs_dir]
+    }
+}
+
+/// Physical window position and inner content size persisted by the native shell.
+///
+/// The renderer never reads or writes this type. Coordinates and dimensions are
+/// bounded here before a later shell-level monitor clamp, so corrupted state
+/// cannot reach a platform window API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowBounds {
+    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, SettingsStoreError> {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+        .validate()
+    }
+
+    fn validate(self) -> Result<Self, SettingsStoreError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(SettingsStoreError::InvalidWindowBounds(
+                "width and height must be non-zero",
+            ));
+        }
+        if self.width > MAX_WINDOW_DIMENSION || self.height > MAX_WINDOW_DIMENSION {
+            return Err(SettingsStoreError::InvalidWindowBounds(
+                "width or height exceeds the fixed bound",
+            ));
+        }
+        if self.x.unsigned_abs() > MAX_WINDOW_COORDINATE_MAGNITUDE as u32
+            || self.y.unsigned_abs() > MAX_WINDOW_COORDINATE_MAGNITUDE as u32
+        {
+            return Err(SettingsStoreError::InvalidWindowBounds(
+                "position exceeds the fixed bound",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredWindowState {
+    schema_version: u16,
+    bounds: WindowBounds,
+}
+
+impl StoredWindowState {
+    fn new(bounds: WindowBounds) -> Result<Self, SettingsStoreError> {
+        Ok(Self {
+            schema_version: WINDOW_STATE_SCHEMA_VERSION,
+            bounds: bounds.validate()?,
+        })
+    }
+
+    fn validate(self) -> Result<Self, SettingsStoreError> {
+        if self.schema_version != WINDOW_STATE_SCHEMA_VERSION {
+            return Err(SettingsStoreError::UnsupportedSchema(self.schema_version));
+        }
+        self.bounds.validate()?;
+        Ok(self)
     }
 }
 
@@ -225,6 +419,33 @@ impl SettingsStore {
         )
     }
 
+    pub fn window_bounds(&self) -> Result<Option<WindowBounds>, SettingsStoreError> {
+        let directory = SecureDirectory::open_or_create(&self.paths.app_home)?;
+        let Some(stored) = directory.read_optional(
+            WINDOW_STATE_FILE_NAME,
+            MAX_WINDOW_STATE_BYTES,
+            FilePolicy::Private,
+        )?
+        else {
+            return Ok(None);
+        };
+        let state = serde_json::from_slice::<StoredWindowState>(&stored.bytes)?.validate()?;
+        if serde_json::to_vec(&state)? != stored.bytes {
+            return Err(SettingsStoreError::NonCanonicalJson);
+        }
+        Ok(Some(state.bounds))
+    }
+
+    pub fn write_window_bounds(&self, bounds: WindowBounds) -> Result<(), SettingsStoreError> {
+        self.ensure_layout()?;
+        let bytes = serde_json::to_vec(&StoredWindowState::new(bounds)?)?;
+        SecureDirectory::open_or_create(&self.paths.app_home)?.write_atomic(
+            WINDOW_STATE_FILE_NAME,
+            &bytes,
+            MAX_WINDOW_STATE_BYTES,
+        )
+    }
+
     pub fn legacy_retirement_completed(&self) -> Result<bool, SettingsStoreError> {
         let directory = SecureDirectory::open_or_create(&self.paths.app_home)?;
         let Some(stored) = directory.read_optional(
@@ -259,11 +480,11 @@ impl SettingsStore {
         else {
             return Ok((None, false));
         };
-        let application = serde_json::from_slice::<AppPreferences>(&stored.bytes)?.validate()?;
+        let application = serde_json::from_slice::<StoredPreferences>(&stored.bytes)?;
         if serde_json::to_vec(&application)? != stored.bytes {
             return Err(SettingsStoreError::NonCanonicalJson);
         }
-        Ok((Some(application.preferences), true))
+        Ok((Some(application.into_preferences()?), true))
     }
 }
 

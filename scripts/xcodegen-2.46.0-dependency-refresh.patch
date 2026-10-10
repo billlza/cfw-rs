@@ -1,0 +1,195 @@
+diff --git a/Package.swift b/Package.swift
+--- a/Package.swift
++++ b/Package.swift
+@@ -4,7 +4,7 @@
+ 
+ let package = Package(
+     name: "XcodeGen",
+-    platforms: [.macOS(.v11)],
++    platforms: [.macOS("15.0")],
+     products: [
+         .executable(name: "xcodegen", targets: ["XcodeGen"]),
+         .library(name: "XcodeGenKit", targets: ["XcodeGenKit"]),
+@@ -12,13 +12,13 @@
+     ],
+     dependencies: [
+         .package(url: "https://github.com/kylef/PathKit.git", from: "1.0.1"),
+-        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
++        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
+         .package(url: "https://github.com/yonaskolb/JSONUtilities.git", from: "4.2.0"),
+         .package(url: "https://github.com/kylef/Spectre.git", from: "0.9.2"),
+-        .package(url: "https://github.com/onevcat/Rainbow.git", from: "4.0.0"),
+-        .package(url: "https://github.com/tuist/XcodeProj.git", exact: "9.14.0"),
++        .package(url: "https://github.com/onevcat/Rainbow.git", from: "4.2.1"),
++        .package(url: "https://github.com/tuist/XcodeProj.git", exact: "9.16.0"),
+         .package(url: "https://github.com/jakeheis/SwiftCLI.git", from: "6.0.3"),
+-        .package(url: "https://github.com/mxcl/Version", from: "2.0.0"),
++        .package(url: "https://github.com/mxcl/Version", from: "2.2.1"),
+         .package(url: "https://github.com/freddi-kit/ArtifactBundleGen", exact: "0.0.8")
+     ],
+     targets: [
+diff --git a/Package.resolved b/Package.resolved
+--- a/Package.resolved
++++ b/Package.resolved
+@@ -41,8 +41,8 @@
+       "kind" : "remoteSourceControl",
+       "location" : "https://github.com/onevcat/Rainbow.git",
+       "state" : {
+-        "revision" : "e0dada9cd44e3fa7ec3b867e49a8ddbf543e3df3",
+-        "version" : "4.0.1"
++        "revision" : "cdf146ae671b2624917648b61c908d1244b98ca1",
++        "version" : "4.2.1"
+       }
+     },
+     {
+@@ -68,8 +68,8 @@
+       "kind" : "remoteSourceControl",
+       "location" : "https://github.com/mxcl/Version",
+       "state" : {
+-        "revision" : "a94b48f36763c05629fc102837398505032dead9",
+-        "version" : "2.0.0"
++        "revision" : "3043fcd2a50375db76d89ff206a612471833d1c2",
++        "version" : "2.2.1"
+       }
+     },
+     {
+@@ -77,8 +77,8 @@
+       "kind" : "remoteSourceControl",
+       "location" : "https://github.com/tuist/XcodeProj.git",
+       "state" : {
+-        "revision" : "eb001108f64467b0cc7e8cbf90b3b4aaa1822cbb",
+-        "version" : "9.14.0"
++        "revision" : "cfc3234fa2a60babbd26712ac0dec0d44734c019",
++        "version" : "9.16.0"
+       }
+     },
+     {
+@@ -86,8 +86,8 @@
+       "kind" : "remoteSourceControl",
+       "location" : "https://github.com/jpsim/Yams.git",
+       "state" : {
+-        "revision" : "01835dc202670b5bb90d07f3eae41867e9ed29f6",
+-        "version" : "5.0.1"
++        "revision" : "a27b21e0c81c5bf42049b897a62aaf387e80f279",
++        "version" : "6.2.2"
+       }
+     }
+   ],
+diff --git a/Sources/ProjectSpec/Linkage.swift b/Sources/ProjectSpec/Linkage.swift
+--- a/Sources/ProjectSpec/Linkage.swift
++++ b/Sources/ProjectSpec/Linkage.swift
+@@ -16,6 +16,7 @@
+              .application,
+              .bundle,
+              .commandLineTool,
++             .hostBuildTool,
+              .instrumentsPackage,
+              .intentsServiceExtension,
+              .messagesApplication,
+diff --git a/Sources/ProjectSpec/XCProjExtensions.swift b/Sources/ProjectSpec/XCProjExtensions.swift
+--- a/Sources/ProjectSpec/XCProjExtensions.swift
++++ b/Sources/ProjectSpec/XCProjExtensions.swift
+@@ -39,7 +39,7 @@
+     }
+ 
+     public var isExecutable: Bool {
+-        isApp || isExtension || isSystemExtension || isTest || self == .commandLineTool
++        isApp || isExtension || isSystemExtension || isTest || self == .commandLineTool || self == .hostBuildTool
+     }
+ 
+     public var name: String {
+@@ -94,7 +94,7 @@
+ extension ProjectTarget {
+     public var shouldExecuteOnLaunch: Bool {
+         // This is different from `type.isExecutable`, because we don't want to "run" a test
+-        type.isApp || type.isExtension || type.isSystemExtension || type == .commandLineTool
++        type.isApp || type.isExtension || type.isSystemExtension || type == .commandLineTool || type == .hostBuildTool
+     }
+ }
+ 
+@@ -133,4 +133,3 @@
+         }
+     }
+ }
+-
+diff --git a/Tests/Fixtures/settings_test.yml b/Tests/Fixtures/settings_test.yml
+--- a/Tests/Fixtures/settings_test.yml
++++ b/Tests/Fixtures/settings_test.yml
+@@ -1,16 +1,3 @@
+-settings:
+-  BUILD_SETTING_1: value
+-  BUILD_SETTING_2: value 2
+-
+-settings:
+-  base:
+-    BUILD_SETTING_1: value 1
+-  configs:
+-    my_config:
+-      BUILD_SETTING_2: value 2
+-  groups:
+-    - my_settings
+-
+ name: SettingsTest
+ settingGroups:
+   preset1:
+diff --git a/Tests/ProjectSpecTests/SpecLoadingTests.swift b/Tests/ProjectSpecTests/SpecLoadingTests.swift
+--- a/Tests/ProjectSpecTests/SpecLoadingTests.swift
++++ b/Tests/ProjectSpecTests/SpecLoadingTests.swift
+@@ -9,6 +9,21 @@
+ import Version
+ 
+ class SpecLoadingTests: XCTestCase {
++
++    func testDuplicateYAMLKeysAreRejected() {
++        let contents = """
++        settings:
++          VALUE: first
++        settings:
++          VALUE: second
++        """
++        XCTAssertThrowsError(try loadYamlDictionary(contents: contents)) { error in
++            guard case let YamlError.duplicatedKeysInMapping(duplicates, _) = error else {
++                return XCTFail("Expected duplicate-key rejection, received \(error)")
++            }
++            XCTAssertEqual(duplicates, ["settings"])
++        }
++    }
+ 
+     func testSpecLoaderDuplicateImports() {
+         describe {
+diff --git a/Tests/XcodeGenKitTests/DependencyCompatibilityTests.swift b/Tests/XcodeGenKitTests/DependencyCompatibilityTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/XcodeGenKitTests/DependencyCompatibilityTests.swift
+@@ -0,0 +1,31 @@
++import ProjectSpec
++import XcodeGenKit
++import XcodeProj
++import XCTest
++
++final class DependencyCompatibilityTests: XCTestCase {
++
++    func testHostBuildToolLinksStaticDependenciesAndGeneratesRunnableScheme() throws {
++        let library = Target(name: "ToolSupport", type: .staticLibrary, platform: .macOS)
++        let tool = Target(
++            name: "HostTool",
++            type: .hostBuildTool,
++            platform: .macOS,
++            dependencies: [Dependency(type: .target, reference: library.name)],
++            scheme: TargetScheme()
++        )
++        let project = Project(name: "HostToolProject", targets: [library, tool])
++        let generated = try project.generateXcodeProject()
++        let target = try XCTUnwrap(generated.pbxproj.nativeTargets.first { $0.name == tool.name })
++        let frameworks = try XCTUnwrap(target.frameworksBuildPhase())
++        let scheme = try XCTUnwrap(generated.sharedData?.schemes.first { $0.name == tool.name })
++        let runnable = try XCTUnwrap(scheme.launchAction?.runnable?.buildableReference)
++
++        XCTAssertTrue(tool.defaultLinkage == .none)
++        XCTAssertEqual(tool.filename, "HostTool")
++        XCTAssertEqual(target.productType, .hostBuildTool)
++        XCTAssertEqual(frameworks.files?.compactMap { $0.file?.nameOrPath }, ["libToolSupport.a"])
++        XCTAssertEqual(runnable.blueprintName, tool.name)
++        XCTAssertEqual(runnable.buildableName, "HostTool")
++    }
++}

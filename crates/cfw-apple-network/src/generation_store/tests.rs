@@ -124,6 +124,23 @@ fn store(root: &TestRoot, authority: Arc<MemoryAuthority>) -> KeychainEngineGene
 }
 
 #[test]
+fn startup_lineage_lock_contention_is_bounded_and_does_not_touch_keychain() {
+    let root = TestRoot::new("startup-lock-contention");
+    let authority = Arc::new(MemoryAuthority::default());
+    let generation_store = store(&root, authority.clone());
+    let guard = cache::exclusive_lock(&root.0).unwrap();
+    let (reply, result) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        reply.send(generation_store.load()).unwrap();
+    });
+    let observed = result.recv_timeout(std::time::Duration::from_secs(5));
+    drop(guard);
+    reader.join().unwrap();
+    assert!(observed.unwrap().unwrap_err().contains("remained locked"));
+    assert!(authority.record().is_none());
+}
+
+#[test]
 fn keychain_generation_survives_store_restart() {
     let root = TestRoot::new("restart");
     let authority = Arc::new(MemoryAuthority::default());

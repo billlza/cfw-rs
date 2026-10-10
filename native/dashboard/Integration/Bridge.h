@@ -1,0 +1,5 @@
+#include "../include/cfm_profile_menu.h"
+#include "../include/cfm_runtime_settings.h"
+#include "../include/cfm_general_switches.h"
+#include "../include/cfm_prompt_dialog.h"
+#include "../include/cfm_window_glass.h"

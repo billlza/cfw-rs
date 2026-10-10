@@ -2931,7 +2931,10 @@ class PackagingEntrypointContractTests(unittest.TestCase):
         for relative in ("make_dmg.sh", "make_updater_manifest.sh"):
             source = (repository / "scripts" / relative).read_text(encoding="utf-8")
             with self.subTest(script=relative):
-                self.assertIn(f"target/candidates/0.5.0/ga/{GA_BUILD}", source)
+                # The GA root is derived from the identity file; the allocation
+                # audit proves no packager names the build itself.
+                self.assertIn('source "$repo_root/scripts/release_identity.env"', source)
+                self.assertIn("target/candidates/0.5.0/ga/$CFW_GA_BUILD", source)
                 self.assertNotIn("target/candidates/0.5.0/ga/40037", source)
                 self.assertNotIn("target/candidates/0.5.0/ga/40038", source)
                 self.assertIn("verify_release_prepackage_evidence", source)

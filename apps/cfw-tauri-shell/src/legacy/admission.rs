@@ -9,7 +9,18 @@ use cfw_platform::{
 };
 
 const RELEASE_VERSION: &str = "0.5.0";
-const RELEASE_BUILD: &str = "50028";
+/// The bundle build this executable was compiled as. build.rs sets it only for
+/// a release-profile build, after binding `CFW_BUILD_NUMBER` to the candidate's
+/// native product root and every native manifest; a development build has none
+/// and can never perform the migration handoff.
+const COMPILED_BUNDLE_BUILD: Option<&str> = option_env!("CFW_RELEASE_BUNDLE_BUILD");
+// Every release-profile build runs build.rs's native artifact validation,
+// which supplies the bundle build; a release binary without it cannot exist.
+#[cfg(not(debug_assertions))]
+const _: () = assert!(
+    COMPILED_BUNDLE_BUILD.is_some(),
+    "a release build must compile in its bundle build"
+);
 const RELEASE_TEAM_ID: &str = "YKUPL7Z869";
 const MAX_BUNDLE_ENTRIES: usize = 4096;
 const GLOBAL_AUTHORITY_IDENTIFIER: &str = "com.bill.clashformac.global-authority";
@@ -53,6 +64,9 @@ enum SymlinkTargetKind {
 /// or retire any part of the old network. This intentionally fails for local,
 /// unsigned, ad-hoc, relocated, writable, or partially installed builds.
 pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
+    let compiled_build = COMPILED_BUNDLE_BUILD.ok_or_else(|| {
+        "migration handoff requires an executable built as a release bundle".to_owned()
+    })?;
     let executable = std::env::current_exe()
         .map_err(|error| format!("cannot resolve the running executable: {error}"))?;
     let canonical_executable = ReleaseSignedComponent::MainExecutable.path();
@@ -80,6 +94,7 @@ pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
         .as_dictionary()
         .ok_or_else(|| "installed Info.plist is not a dictionary".to_owned())?;
     if !installed_product_identity_is_current(
+        compiled_build,
         dictionary
             .get("CFBundleShortVersionString")
             .and_then(plist::Value::as_string),
@@ -92,7 +107,7 @@ pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
         != Some("com.bill.clashformac")
     {
         return Err(format!(
-            "installed bundle identity is not the {RELEASE_VERSION}/{RELEASE_BUILD} preview contract"
+            "installed bundle identity is not the {RELEASE_VERSION}/{compiled_build} release this executable was built as"
         ));
     }
 
@@ -111,13 +126,18 @@ pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
     Ok(())
 }
 
-fn installed_product_identity_is_current(version: Option<&str>, build: Option<&str>) -> bool {
-    // A preview has the same canonical install, signature, notarization and
-    // permission requirements. Accept only the reviewed preview identity;
+fn installed_product_identity_is_current(
+    compiled_build: &str,
+    version: Option<&str>,
+    build: Option<&str>,
+) -> bool {
+    // The bundle at the canonical path must be the exact release this
+    // executable was built as: a running process whose bundle was replaced by
+    // another build of the same version must not hand off or cut over, and
     // changing the marketing version cannot admit an arbitrary local build.
     cfw_core::PRODUCT_VERSION == RELEASE_VERSION
         && version == Some(RELEASE_VERSION)
-        && build == Some(RELEASE_BUILD)
+        && build == Some(compiled_build)
 }
 
 fn require_secure_regular(path: &Path, label: &str) -> Result<(), String> {
@@ -604,41 +624,26 @@ mod tests {
     }
 
     #[test]
-    fn handoff_identity_requires_exact_current_release_not_just_a_positive_build() {
+    fn handoff_identity_requires_the_exact_compiled_release_build() {
+        const COMPILED: &str = "70001";
         assert!(installed_product_identity_is_current(
-            Some("0.5.0"),
-            Some("50028")
+            COMPILED,
+            Some(RELEASE_VERSION),
+            Some(COMPILED)
         ));
         for (version, build) in [
-            (Some("0.4.0"), Some("40073")),
-            (Some("0.4.0"), Some("50025")),
-            (Some("0.5.0"), Some("40073")),
-            (Some("0.5.0"), Some("50001")),
-            (Some("0.5.0"), Some("50002")),
-            (Some("0.5.0"), Some("50003")),
-            (Some("0.5.0"), Some("50007")),
-            (Some("0.5.0"), Some("50008")),
-            (Some("0.5.0"), Some("50009")),
-            (Some("0.5.0"), Some("50012")),
-            (Some("0.5.0"), Some("50013")),
-            (Some("0.5.0"), Some("50014")),
-            (Some("0.5.0"), Some("50015")),
-            (Some("0.5.0"), Some("50016")),
-            (Some("0.5.0"), Some("50017")),
-            (Some("0.5.0"), Some("50018")),
-            (Some("0.5.0"), Some("50019")),
-            (Some("0.5.0"), Some("50025")),
-            (Some("0.5.0"), Some("50026")),
-            (Some("0.5.0"), Some("50027")),
-            (Some("0.5.0"), Some("50029")),
-            (Some("0.5.0"), Some("050028")),
-            (Some("0.5.0"), Some("0")),
-            (Some("0.5.0-preview"), Some("50025")),
-            (None, Some("50025")),
-            (Some("0.5.0"), None),
+            (Some(RELEASE_VERSION), Some("70000")),
+            (Some(RELEASE_VERSION), Some("70002")),
+            (Some(RELEASE_VERSION), Some("070001")),
+            (Some(RELEASE_VERSION), Some("70001 ")),
+            (Some(RELEASE_VERSION), Some("0")),
+            (Some(RELEASE_VERSION), None),
+            (Some("0.4.0"), Some(COMPILED)),
+            (Some("0.5.0-preview"), Some(COMPILED)),
+            (None, Some(COMPILED)),
         ] {
             assert!(
-                !installed_product_identity_is_current(version, build),
+                !installed_product_identity_is_current(COMPILED, version, build),
                 "{version:?}/{build:?}"
             );
         }

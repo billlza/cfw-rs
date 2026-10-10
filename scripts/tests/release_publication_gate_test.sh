@@ -3,6 +3,10 @@ set -euo pipefail
 unset CDPATH
 
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/../.." && /bin/pwd -P)"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
+# A build the identity file does not name: the active GA plus one.
+other_ga_build="$((CFW_GA_BUILD + 1))"
 # shellcheck source=scripts/release_publication_path_contract.sh
 source "$repo_root/scripts/release_publication_path_contract.sh"
 # shellcheck source=scripts/release_python_launcher.sh
@@ -15,9 +19,31 @@ cleanup() {
 trap cleanup EXIT
 fixture_root="$(cd "$fixture_root" && /bin/pwd -P)"
 
-ga_app="$fixture_root/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
+ga_app="$fixture_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app"
 mkdir -p "$ga_app"
-cfw_require_fixed_publication_app_path "$fixture_root" "$ga_app"
+cfw_require_fixed_publication_app_path "$fixture_root" "$CFW_GA_BUILD" "$ga_app"
+
+# The contract is relational: it admits exactly the app of the build it is given.
+other_app="$fixture_root/target/candidates/0.5.0/ga/$other_ga_build/signed/Clash for Mac.app"
+mkdir -p "$other_app"
+cfw_require_fixed_publication_app_path "$fixture_root" "$other_ga_build" "$other_app"
+for mismatched in "$other_ga_build:$ga_app" "$CFW_GA_BUILD:$other_app"; do
+  if cfw_require_fixed_publication_app_path "$fixture_root" "${mismatched%%:*}" "${mismatched#*:}" \
+    2>"$fixture_root/mismatched-build.stderr"; then
+    echo "error: path contract accepted an app of another build: $mismatched" >&2
+    exit 1
+  fi
+  grep -Fq "only the fixed 0.5.0/${mismatched%%:*} GA app" "$fixture_root/mismatched-build.stderr"
+done
+for malformed_build in "" "0$CFW_GA_BUILD" "+$CFW_GA_BUILD" "$CFW_GA_BUILD/../$CFW_GA_BUILD" "../ga/$CFW_GA_BUILD"; do
+  if cfw_require_fixed_publication_app_path "$fixture_root" "$malformed_build" "$ga_app" \
+    2>"$fixture_root/malformed-build.stderr"; then
+    echo "error: path contract accepted a malformed build: $malformed_build" >&2
+    exit 1
+  fi
+  grep -Fq "publication build is not one canonical positive integer" \
+    "$fixture_root/malformed-build.stderr"
+done
 
 (
   readonly repository="caller-owned-repository"
@@ -25,23 +51,28 @@ cfw_require_fixed_publication_app_path "$fixture_root" "$ga_app"
   readonly canonical_repository="caller-owned-canonical-repository"
   readonly canonical_app="caller-owned-canonical-app"
   readonly expected_app="caller-owned-expected-app"
-  cfw_require_fixed_publication_app_path "$fixture_root" "$app_path"
+  readonly build="caller-owned-build"
+  cfw_require_fixed_publication_app_path "$fixture_root" "$CFW_GA_BUILD" "$app_path"
   [[ "$repository" == "caller-owned-repository" ]]
   [[ "$canonical_repository" == "caller-owned-canonical-repository" ]]
   [[ "$canonical_app" == "caller-owned-canonical-app" ]]
   [[ "$expected_app" == "caller-owned-expected-app" ]]
+  [[ "$build" == "caller-owned-build" ]]
 )
 
 gate_fixture="$fixture_root/gate-repository"
-gate_artifact="$gate_fixture/target/release-worktrees/50028"
-gate_ga_root="$gate_artifact/target/candidates/0.5.0/ga/50028"
+gate_artifact="$gate_fixture/target/release-worktrees/$CFW_GA_BUILD"
+gate_ga_root="$gate_artifact/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
 mkdir -p "$gate_fixture/scripts" "$gate_artifact/scripts" \
   "$gate_ga_root/signed/Clash for Mac.app" \
   "$gate_ga_root/signing-output/signed-native-products"
 /bin/cp "$repo_root/scripts/release_publication_gate.sh" \
-  "$repo_root/scripts/release_publication_path_contract.sh" "$gate_fixture/scripts/"
+  "$repo_root/scripts/release_publication_path_contract.sh" \
+  "$repo_root/scripts/release_identity.env" "$gate_fixture/scripts/"
 : >"$gate_fixture/scripts/dependency_pins.env"
-cat >"$gate_fixture/scripts/release_tool_environment.sh" <<'SH'
+{
+  printf 'fixture_ga_build=%q\n' "$CFW_GA_BUILD"
+  cat <<'SH'
 cfw_seal_release_tool_environment() {
   [[ "$#" -eq 1 && "$1" == "production" ]]
 }
@@ -52,7 +83,7 @@ cfw_run_release_python_script() {
   case "$2" in
     "$1/scripts/release_executor_source.py")
       [[ "$#" -eq 3 && "$3" == "--print-frozen-artifact-repository" ]] || return 1
-      printf '%s\n' "$1/target/release-worktrees/50028"
+      printf '%s\n' "$1/target/release-worktrees/$fixture_ga_build"
       ;;
     "$1/scripts/production_release_evidence.py")
       [[ "$#" -eq 4 && "$3" == "verify" && "$4" == "prepackage" ]] || return 1
@@ -60,7 +91,7 @@ cfw_run_release_python_script() {
       printf '%s\n' "fixed prepackage stage reopened"
       ;;
     "$1/scripts/github_hosted_ci_receipt.py")
-      [[ "$1" != */target/release-worktrees/50028 ]] || return 1
+      [[ "$1" != */target/release-worktrees/"$fixture_ga_build" ]] || return 1
       if [[ "$3" == "capture" ]]; then
         [[ "$#" -eq 5 && "$4" == "--run-id" && "$5" == "90012345678" ]] || return 1
       else
@@ -72,18 +103,23 @@ cfw_run_release_python_script() {
   esac
 }
 SH
-cat >"$gate_artifact/scripts/verify_release_app.sh" <<'SH'
-#!/bin/bash -p
-set -euo pipefail
+} >"$gate_fixture/scripts/release_tool_environment.sh"
+{
+  printf '%s\n' '#!/bin/bash -p' 'set -euo pipefail'
+  printf 'fixture_ga_build=%q\n' "$CFW_GA_BUILD"
+  cat <<'SH'
 fixture_artifact_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
-fixture_ga_root="$fixture_artifact_root/target/candidates/0.5.0/ga/50028"
+fixture_ga_root="$fixture_artifact_root/target/candidates/0.5.0/ga/$fixture_ga_build"
 [[ "$#" -eq 4 ]]
 [[ "$1" == "$fixture_ga_root/signed/Clash for Mac.app" ]]
 [[ "$2" == "$fixture_ga_root/signing-output/signed-native-products" ]]
 [[ "$3" == "--context" && "$4" == "canonical-native-content" ]]
 printf '%s\n' "fixed application verifier invoked"
 SH
+} >"$gate_artifact/scripts/verify_release_app.sh"
 (
+  # The gate must load the identity itself, not inherit this test's value.
+  unset CFW_GA_BUILD
   # shellcheck source=scripts/release_publication_gate.sh
   source "$gate_fixture/scripts/release_publication_gate.sh"
   readonly app_path="$gate_ga_root/signed/Clash for Mac.app"
@@ -107,6 +143,8 @@ done
 
 touch "$gate_fixture/scripts/fail-prepackage"
 if (
+  # The gate must load the identity itself, not inherit this test's value.
+  unset CFW_GA_BUILD
   # shellcheck source=scripts/release_publication_gate.sh
   source "$gate_fixture/scripts/release_publication_gate.sh"
   readonly app_path="$gate_ga_root/signed/Clash for Mac.app"
@@ -119,32 +157,32 @@ fi
 
 old_signed="$fixture_root/target/candidates/0.5.0/signed/Clash for Mac.app"
 mkdir -p "$old_signed"
-if cfw_require_fixed_publication_app_path "$fixture_root" "$old_signed" 2>"$fixture_root/old-path.stderr"; then
+if cfw_require_fixed_publication_app_path "$fixture_root" "$CFW_GA_BUILD" "$old_signed" 2>"$fixture_root/old-path.stderr"; then
   echo "error: path contract accepted retired candidate-level signed path" >&2
   exit 1
 fi
-grep -Fq "only the fixed 0.5.0/50028 GA app" "$fixture_root/old-path.stderr"
+grep -Fq "only the fixed 0.5.0/$CFW_GA_BUILD GA app" "$fixture_root/old-path.stderr"
 
 for retired_build_number in 40030 40031 40032 40033 40034 40035 40036 40037 40038 40039 40040 40041 40042 40043 40044 40045; do
   retired_build="$fixture_root/target/candidates/0.5.0/ga/$retired_build_number/signed/Clash for Mac.app"
   mkdir -p "$retired_build"
-  if cfw_require_fixed_publication_app_path "$fixture_root" "$retired_build" 2>"$fixture_root/retired-build-$retired_build_number.stderr"; then
+  if cfw_require_fixed_publication_app_path "$fixture_root" "$CFW_GA_BUILD" "$retired_build" 2>"$fixture_root/retired-build-$retired_build_number.stderr"; then
     echo "error: path contract accepted retired build $retired_build_number" >&2
     exit 1
   fi
-  grep -Fq "only the fixed 0.5.0/50028 GA app" "$fixture_root/retired-build-$retired_build_number.stderr"
+  grep -Fq "only the fixed 0.5.0/$CFW_GA_BUILD GA app" "$fixture_root/retired-build-$retired_build_number.stderr"
 done
 
 linked_app="$fixture_root/linked.app"
 ln -s "$ga_app" "$linked_app"
-if cfw_require_fixed_publication_app_path "$fixture_root" "$linked_app" 2>"$fixture_root/symlink.stderr"; then
+if cfw_require_fixed_publication_app_path "$fixture_root" "$CFW_GA_BUILD" "$linked_app" 2>"$fixture_root/symlink.stderr"; then
   echo "error: path contract accepted a symlinked GA app" >&2
   exit 1
 fi
 grep -Fq "available absolute signed app" "$fixture_root/symlink.stderr"
 
 noncanonical_repository="$fixture_root/target/../..$(printf '/%s' "$(basename "$fixture_root")")"
-if cfw_require_fixed_publication_app_path "$noncanonical_repository" "$ga_app" 2>"$fixture_root/repository.stderr"; then
+if cfw_require_fixed_publication_app_path "$noncanonical_repository" "$CFW_GA_BUILD" "$ga_app" 2>"$fixture_root/repository.stderr"; then
   echo "error: path contract accepted a noncanonical repository" >&2
   exit 1
 fi

@@ -5,19 +5,24 @@ set -euo pipefail
 umask 077
 unset CDPATH
 
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
+# The builder that started the transaction derived and exported this build.
+[[ "${CFW_BUILD_NUMBER:-}" == "$CFW_GA_BUILD" ]] ||
+  die "inherited CFW_BUILD_NUMBER is not the active GA build $CFW_GA_BUILD"
 # shellcheck source=scripts/release_tool_environment.sh
 source "$repo_root/scripts/release_tool_environment.sh"
 # shellcheck source=scripts/release_bundle_codesign.sh
 source "$repo_root/scripts/release_bundle_codesign.sh"
 cfw_seal_release_tool_environment production
-
-die() {
-  echo "error: $*" >&2
-  exit 1
-}
 
 [[ $# -eq 1 && "$1" == "--transaction-owned" ]] ||
   die "this helper is owned by signing_attempt_transaction.py"
@@ -29,7 +34,7 @@ die() {
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.5.0/ga/50028"
+readonly frozen_root="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
 [[ -d "$attempt_work" && ! -L "$attempt_work" ]] ||
   die "transaction work root is not a real directory"
@@ -152,7 +157,7 @@ for product in \
     "$repo_root/scripts/verify_artifact_manifest.py" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json" \
-    --metadata "buildNumber=50028" \
+    --metadata "buildNumber=$CFW_GA_BUILD" \
     --metadata "signingMode=developer-id"
 done
 

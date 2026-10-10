@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
 trusted_python="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
 [[ -x "$trusted_python" ]] || {
   echo "error: updater-secret fixture requires closed Python" >&2
@@ -174,13 +176,14 @@ fi
 }
 
 fixture_repo="$temporary_root/repository"
-fixture_artifact_repository="$fixture_repo/target/release-worktrees/50028"
-ga_root="$fixture_artifact_repository/target/candidates/0.5.0/ga/50028"
+fixture_artifact_repository="$fixture_repo/target/release-worktrees/$CFW_GA_BUILD"
+ga_root="$fixture_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
 app_path="$ga_root/signed/Clash for Mac.app"
 native_products="$ga_root/signing-output/signed-native-products"
 mkdir -p "$fixture_repo/scripts" "$fixture_artifact_repository/scripts" "$native_products" \
   "$app_path/Contents"
-/bin/cp "$repo_root/scripts/make_updater_manifest.sh" "$fixture_repo/scripts/"
+/bin/cp "$repo_root/scripts/make_updater_manifest.sh" \
+  "$repo_root/scripts/release_identity.env" "$fixture_repo/scripts/"
 
 cat >"$fixture_repo/scripts/dependency_pins.env" <<'SH'
 TAURI_CLI_VERSION=2.11.4
@@ -212,27 +215,29 @@ cfw_run_release_python_script() {
 }
 
 release_native_products_root_for_app() {
-  [[ "\$1" == "\$publication_artifact_repository/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app" ]]
-  printf '%s\n' "\$publication_artifact_repository/target/candidates/0.5.0/ga/50028/signing-output/signed-native-products"
+  [[ "\$1" == "\$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]]
+  printf '%s\n' "\$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signing-output/signed-native-products"
 }
 
 verify_release_prepackage_evidence() {
-  [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app" ]]
+  [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]]
   [[ "\$(declare -p LANG)" == 'declare -rx LANG="C"' ]]
   [[ "\$(declare -p LC_ALL)" == 'declare -rx LC_ALL="C"' ]]
 }
 SH
 
-cat >"$fixture_artifact_repository/scripts/verify_release_app.sh" <<'SH'
-#!/bin/bash
-set -euo pipefail
+{
+  printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
+  printf 'fixture_ga_build=%q\n' "$CFW_GA_BUILD"
+  cat <<'SH'
 repo_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
 [[ "$#" -eq 4 ]]
-[[ "$1" == "$repo_root/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app" ]]
-[[ "$2" == "$repo_root/target/candidates/0.5.0/ga/50028/signing-output/signed-native-products" ]]
+[[ "$1" == "$repo_root/target/candidates/0.5.0/ga/$fixture_ga_build/signed/Clash for Mac.app" ]]
+[[ "$2" == "$repo_root/target/candidates/0.5.0/ga/$fixture_ga_build/signing-output/signed-native-products" ]]
 [[ "$3" == "--context" ]]
 [[ "$4" == "canonical-native-content" ]]
 SH
+} >"$fixture_artifact_repository/scripts/verify_release_app.sh"
 chmod 755 "$fixture_artifact_repository/scripts/verify_release_app.sh"
 
 cat >"$fixture_repo/scripts/validate_updater_archive.py" <<'PY'
@@ -282,8 +287,10 @@ archive.with_name(f"{archive.name}.sig").write_text(
 )
 PY
 
-cat >"$fixture_repo/scripts/release_artifact_set_cli.py" <<'PY'
-from __future__ import annotations
+{
+  printf '%s\n' 'from __future__ import annotations' ''
+  printf 'FIXTURE_GA_BUILD = "%s"\n' "$CFW_GA_BUILD"
+  cat <<'PY'
 
 import os
 from pathlib import Path
@@ -304,14 +311,17 @@ if not arguments or arguments[0] != "seal-updater":
 staging = Path(arguments[arguments.index("--staging") + 1])
 destination = Path(arguments[arguments.index("--destination") + 1])
 repository = Path(arguments[arguments.index("--repository") + 1])
-expected_repository = Path(__file__).resolve().parents[1] / "target/release-worktrees/50028"
+expected_repository = (
+    Path(__file__).resolve().parents[1] / "target/release-worktrees" / FIXTURE_GA_BUILD
+)
 if repository != expected_repository:
     raise SystemExit("release-set sealer received executor source instead of artifact source")
 shutil.copytree(staging, destination)
 (destination / "updater-set.seal.json").write_text("{}\n", encoding="utf-8")
 PY
+} >"$fixture_repo/scripts/release_artifact_set_cli.py"
 
-cat >"$app_path/Contents/Info.plist" <<'PLIST'
+cat >"$app_path/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -319,7 +329,7 @@ cat >"$app_path/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key>
   <string>0.5.0</string>
   <key>CFBundleVersion</key>
-  <string>50028</string>
+  <string>$CFW_GA_BUILD</string>
 </dict>
 </plist>
 PLIST

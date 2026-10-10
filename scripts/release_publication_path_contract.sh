@@ -1,14 +1,20 @@
 #!/bin/bash -p
 # Pure path admission shared by the production publication gate and its fixture.
 # This file performs no environment sealing and has no release side effects.
+# The caller passes the GA build it has proven; nothing here names a build.
 
 cfw_require_fixed_publication_app_path() {
-  if [[ $# -ne 2 ]]; then
-    echo "error: fixed publication app admission requires repository and app" >&2
+  if [[ $# -ne 3 ]]; then
+    echo "error: fixed publication app admission requires repository, build and app" >&2
     return 1
   fi
   local publication_contract_repository="$1"
-  local publication_contract_app="$2"
+  local publication_contract_build="$2"
+  local publication_contract_app="$3"
+  if [[ ! "$publication_contract_build" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: publication build is not one canonical positive integer: $publication_contract_build" >&2
+    return 1
+  fi
   if [[ "$publication_contract_repository" != /* || \
     ! -d "$publication_contract_repository" || -L "$publication_contract_repository" || \
     "$publication_contract_app" != /* || \
@@ -24,9 +30,9 @@ cfw_require_fixed_publication_app_path() {
     return 1
   fi
   publication_contract_canonical_app="$(cd "$publication_contract_app" && /bin/pwd -P)" || return 1
-  publication_contract_expected_app="$publication_contract_repository/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
+  publication_contract_expected_app="$publication_contract_repository/target/candidates/0.5.0/ga/$publication_contract_build/signed/Clash for Mac.app"
   if [[ "$publication_contract_canonical_app" != "$publication_contract_expected_app" ]]; then
-    echo "error: publication gate accepts only the fixed 0.5.0/50028 GA app: $publication_contract_expected_app" >&2
+    echo "error: publication gate accepts only the fixed 0.5.0/$publication_contract_build GA app: $publication_contract_expected_app" >&2
     return 1
   fi
 }

@@ -12,13 +12,15 @@ fi
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
 # shellcheck source=scripts/release_tool_environment.sh
 source "$repo_root/scripts/release_tool_environment.sh"
 cfw_seal_release_tool_environment production
 cfw_select_release_apple_toolchain
 
-readonly app_path="$repo_root/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
-readonly native_products="$repo_root/target/candidates/0.5.0/ga/50028/signing-output/signed-native-products"
+readonly app_path="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app"
+readonly native_products="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signing-output/signed-native-products"
 exec /bin/bash -p \
   "$repo_root/scripts/verify_release_app.sh" \
   "$app_path" \

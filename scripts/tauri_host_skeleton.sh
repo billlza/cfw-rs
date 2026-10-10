@@ -54,7 +54,7 @@ cfw_build_tauri_host_skeleton() {
     "${CFW_RELEASE_PYTHON_EXECUTABLE:-python3}" -I -S -B -W error - \
     "$contract_tauri_host_app_dir" \
     "$contract_tauri_host_config_override" "$contract_tauri_host_preview" \
-    "${CFW_BUILD_NUMBER:-}" <<'PY' || return 1
+    "${CFW_BUILD_NUMBER:-}" "$contract_tauri_host_repository" <<'PY' || return 1
 import json
 import os
 import stat
@@ -127,10 +127,19 @@ for platform_name in (
 override = parse_json(sys.argv[2], "inline override")
 require_no_signing_identity(override, "inline override")
 if sys.argv[3] == "--native-ui-release":
-    if base_config.get("version") != "0.5.0" or sys.argv[4] != "50028":
-        raise SystemExit("error: native UI Host requires exact release version/build 0.5.0/50028")
-    if override["bundle"]["macOS"].get("bundleVersion") != "50028":
-        raise SystemExit("error: native UI Host override must retain release build 50028")
+    # The release build is the active GA build of the identity file.
+    sys.path.insert(0, sys.argv[5] + "/scripts")
+    from release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+    release_build = ACTIVE_RELEASE_IDENTITY.ga_build
+    if base_config.get("version") != "0.5.0" or sys.argv[4] != release_build:
+        raise SystemExit(
+            f"error: native UI Host requires exact release version/build 0.5.0/{release_build}"
+        )
+    if override["bundle"]["macOS"].get("bundleVersion") != sys.argv[4]:
+        raise SystemExit(
+            f"error: native UI Host override must retain release build {release_build}"
+        )
 elif sys.argv[3] == "--native-ui-unsigned-preview":
     if base_config.get("version") != "0.5.0" or sys.argv[4] != "50000":
         raise SystemExit("error: unsigned native UI Host requires exact validation version/build 0.5.0/50000")

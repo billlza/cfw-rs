@@ -13,12 +13,14 @@ if __package__:
     from .release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
         PRODUCT_VERSION,
+        UNSIGNED_VALIDATION_BUILD,
         canonical_build_version,
     )
 else:
     from release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
         PRODUCT_VERSION,
+        UNSIGNED_VALIDATION_BUILD,
         canonical_build_version,
     )
 
@@ -119,8 +121,13 @@ def verify(repository: Path) -> None:
             f"Xcode CFW_BUILD_NUMBER must occur once: {build_numbers}"
         )
     canonical_build_version(build_numbers[0], "Xcode CFW_BUILD_NUMBER")
-    if build_numbers[0] != expected_build:
-        raise ValueError("Xcode build differs from the fixed release identity")
+    # Candidate builders pass CFW_BUILD_NUMBER explicitly. The project default
+    # serves local unsigned validation only and never names a GA build.
+    if build_numbers[0] != UNSIGNED_VALIDATION_BUILD:
+        raise ValueError(
+            "Xcode CFW_BUILD_NUMBER default must be the unsigned validation build "
+            f"{UNSIGNED_VALIDATION_BUILD}"
+        )
     current_project_versions = re.findall(
         r"^\s*CURRENT_PROJECT_VERSION:\s*([^\s#]+)\s*$", project, re.M
     )
@@ -142,29 +149,25 @@ def verify(repository: Path) -> None:
         raise ValueError(f"the first changelog release is not {expected_version}")
 
     admission = (repository / "apps/cfw-tauri-shell/src/legacy/admission.rs").read_text(encoding="utf-8")
-    for constant, expected in (("RELEASE_VERSION", expected_version), ("RELEASE_BUILD", expected_build)):
-        values = re.findall(rf'^const {constant}: &str = "([^"]+)";$', admission, re.M)
-        if values != [expected]:
-            raise ValueError(
-                f"runtime migration admission {constant} differs from the release identity"
-            )
+    values = re.findall(r'^const RELEASE_VERSION: &str = "([^"]+)";$', admission, re.M)
+    if values != [expected_version]:
+        raise ValueError(
+            "runtime migration admission RELEASE_VERSION differs from the release identity"
+        )
     observation = (
         repository / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
     ).read_text(encoding="utf-8")
-    for name, expected in (
-        ("releaseProductVersion", expected_version),
-        ("releaseBuildNumber", expected_build),
-    ):
-        values = re.findall(
-            rf'^\s*static let {name} = "([^"]+)"$', observation, re.M
+    values = re.findall(r'^\s*static let releaseProductVersion = "([^"]+)"$', observation, re.M)
+    if values != [expected_version]:
+        raise ValueError(
+            "native release observation releaseProductVersion differs from the release identity"
         )
-        if values != [expected]:
-            raise ValueError(f"native release observation {name} differs from the release identity")
 
     print(
         f"version contract verified: {expected_version} (release {expected_build}) "
         f"across {len(versions)} Cargo packages and lock entries, cfw-core, Tauri, "
-        "Xcode marketing/build identity, runtime admission, native observation, and changelog"
+        "Xcode marketing version and unsigned default build, runtime admission, "
+        "native observation, and changelog"
     )
 
 

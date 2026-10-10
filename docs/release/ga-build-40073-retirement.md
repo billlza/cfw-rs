@@ -24,4 +24,26 @@ consumed during Developer ID signing and retired
 ([`ga-build-50026-retirement.md`](ga-build-50026-retirement.md)); its successor
 50027 was retired before installation
 ([`ga-build-50027-retirement.md`](ga-build-50027-retirement.md)), and 0.5.0
-build 50028 is the active GA.
+build 50028 was allocated after it.
+
+## Installation history retention
+
+Before the 0.5.0 GA installation of build 50028, the fixed install producer
+paths still held the completed 40072 → 40073 journals, while the installed
+application was the retained preview 50025 that had replaced 40073 through the
+retired preview installer. The history step therefore ran as:
+
+```bash
+scripts/run_archive_install_history.sh --previous-build 40073 --installed-build 50025
+```
+
+The explicit `--installed-build 50025` declaration retained those journals:
+the archiver proved that they describe the retained 40073 identity and that
+exactly the retained 50025 tree was installed, recorded that superseding
+identity in both history receipts, and did not describe 40073 as the current
+installation.
+
+That retention completed before the 50028 installation, whose completed
+50025 → 50028 journals then took the producer paths. The 0.4.0 predecessor
+profiles the 40073 retention required were removed on 2026-10-10, so its
+command is not repeatable.

@@ -6,6 +6,8 @@ unset CDPATH
 publication_repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$publication_repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_identity.env
+source "$publication_repo_root/scripts/release_identity.env"
 # shellcheck source=scripts/release_tool_environment.sh
 source "$publication_repo_root/scripts/release_tool_environment.sh"
 cfw_seal_release_tool_environment production
@@ -18,7 +20,9 @@ publication_artifact_repository="$(cfw_run_release_python_script \
   "$publication_repo_root/scripts/release_executor_source.py" \
   --print-frozen-artifact-repository)"
 readonly publication_artifact_repository
-readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.5.0/ga/50028"
+# The active GA build is captured once, when the gate is loaded.
+readonly publication_ga_build="$CFW_GA_BUILD"
+readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.5.0/ga/$publication_ga_build"
 readonly publication_native_products="$publication_ga_root/signing-output/signed-native-products"
 
 run_production_ga_stage() {
@@ -59,7 +63,8 @@ release_native_products_root_for_app() {
     echo "error: signed-native-products admission requires the fixed GA app" >&2
     return 1
   }
-  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$1" ||
+  cfw_require_fixed_publication_app_path \
+    "$publication_artifact_repository" "$publication_ga_build" "$1" ||
     return 1
   if [[ ! -d "$publication_native_products" || -L "$publication_native_products" ]]; then
     echo "error: fixed GA signed-native-products root is unavailable: $publication_native_products" >&2
@@ -73,7 +78,8 @@ verify_release_prepackage_evidence() {
     echo "error: prepackage verification requires the fixed signed app" >&2
     return 1
   }
-  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$1" ||
+  cfw_require_fixed_publication_app_path \
+    "$publication_artifact_repository" "$publication_ga_build" "$1" ||
     return 1
   run_production_ga_stage verify prepackage || return 1
   /bin/bash -p \

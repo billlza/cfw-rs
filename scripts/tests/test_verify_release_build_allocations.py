@@ -5,6 +5,7 @@ import copy
 import dataclasses
 import io
 from pathlib import Path
+import re
 import sys
 import tempfile
 from typing import Final
@@ -13,7 +14,9 @@ from unittest.mock import patch
 
 from scripts import verify_release_build_allocations as allocations
 from scripts.dormant_app_install import PredecessorProfile, SUPPORTED_PREDECESSORS
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, RELEASE_IDENTITY_PATH
+from scripts.release_git import run_release_git
+from scripts.repository_source_identity import RELEASE_PATHS
 from scripts.tests.release_identity_fixture import (
     NEXT_GA_BUILD,
     next_patch,
@@ -1268,6 +1271,140 @@ class LiveLedgerTests(unittest.TestCase):
             with self.subTest(version=version):
                 self.assertEqual(policy.product_version, version)
                 self.assertEqual(policy.closed, version != allocations.PRODUCT_VERSION)
+
+
+# The audit covers the reviewed release source closure except its documentation:
+# the allocation ledger and the retirement notes live under docs/, and the
+# guides record history and procedure in prose.
+AUDIT_EXCLUDED_DOCUMENTATION_ROOT: Final = "docs/"
+AUDIT_EXCLUDED_GUIDES: Final = frozenset({"CHANGELOG.md", "README.md", "RELEASE.md"})
+# The allocation files inside the audited closure: the identity file names the
+# active GA build and the install-predecessor registry names installed builds.
+REGISTRY_FILE: Final = "scripts/dormant_app_install.py"
+ALLOCATION_FILES: Final = frozenset(
+    {
+        RELEASE_IDENTITY_PATH.relative_to(allocations.REPOSITORY_ROOT).as_posix(),
+        REGISTRY_FILE,
+    }
+)
+# A token of 16 or more hexadecimal characters is a digest or an object ID
+# (a checksum, a pbxproj identifier), never a build name, even when a run of
+# its digits equals a build.
+HEX_TOKEN_RE: Final = re.compile(rb"\A[0-9A-Fa-f]{16,}\Z")
+ALPHANUMERIC_TOKEN_RE: Final = re.compile(rb"[0-9A-Za-z]+")
+
+
+def named_builds(data: bytes, builds: tuple[str, ...]) -> set[str]:
+    """The builds that `data` names as whole numbers outside digest tokens.
+
+    Digit boundaries, not word boundaries, delimit a build: `_<build>_`,
+    `ga/<build>/` and `Installed<build>Identity` all name it, while a longer
+    number does not.
+    """
+
+    pattern = re.compile(
+        rb"(?<![0-9])(" + b"|".join(build.encode("ascii") for build in builds) + rb")(?![0-9])"
+    )
+    readable = ALPHANUMERIC_TOKEN_RE.sub(
+        lambda token: b" " * len(token.group(0))
+        if HEX_TOKEN_RE.fullmatch(token.group(0))
+        else token.group(0),
+        data,
+    )
+    return {match.decode("ascii") for match in pattern.findall(readable)}
+
+
+def tracked_audited_files() -> dict[str, bytes]:
+    """The committed and staged files of the audited closure, by repository path."""
+
+    repository = allocations.REPOSITORY_ROOT
+    listing = run_release_git(
+        repository,
+        ["ls-files", "-z", "--cached", "--", *RELEASE_PATHS],
+        protected_roots=RELEASE_PATHS,
+    )
+    files: dict[str, bytes] = {}
+    for raw in filter(None, listing.split(b"\0")):
+        relative = raw.decode("utf-8")
+        if (
+            relative.startswith(AUDIT_EXCLUDED_DOCUMENTATION_ROOT)
+            or relative in AUDIT_EXCLUDED_GUIDES
+        ):
+            continue
+        files[relative] = (repository / relative).read_bytes()
+    return files
+
+
+def ga_role_ledger_builds() -> tuple[str, ...]:
+    """Every GA-role build the active ledger has allocated, retired or active."""
+
+    return tuple(
+        record["build"]
+        for record in allocations.load_contract()["allocations"]
+        if record["role"] == "ga"
+    )
+
+
+class AllocationLiteralAuditTests(unittest.TestCase):
+    """Only the allocation files may name a GA build or an installed tree."""
+
+    def test_build_names_are_digit_bounded_and_skip_digest_tokens(self) -> None:
+        build = GA_BUILD
+        for named in (
+            f"ga/{build}/signed",
+            f"_{build}_",
+            f"buildNumber={build}\n",
+            f'"{build}"',
+            f"Installed{build}ServiceIdentity",
+            f"0x{build}",
+        ):
+            with self.subTest(named=named):
+                self.assertEqual(named_builds(named.encode(), (build,)), {build})
+        for unnamed in (
+            f"1{build}",
+            f"{build}1",
+            f"{'a' * 11}{build}",
+            f"0A7B74B72B8B36F{build}CE94",
+            f"{'ab' * 8}{build}{'cd' * 8}",
+        ):
+            with self.subTest(unnamed=unnamed):
+                self.assertEqual(named_builds(unnamed.encode(), (build,)), set())
+        # A short hexadecimal token is a name, not a digest.
+        self.assertEqual(named_builds(f"a{build}".encode(), (build,)), {build})
+
+    def test_no_audited_file_outside_the_allocation_files_names_a_ga_build(self) -> None:
+        builds = ga_role_ledger_builds()
+        self.assertEqual(builds, (*retired_ga_builds(), GA_BUILD))
+        files = tracked_audited_files()
+        self.assertTrue(ALLOCATION_FILES <= set(files))
+        named = {
+            relative: sorted(found)
+            for relative, data in files.items()
+            if (found := named_builds(data, builds))
+        }
+        unexpected = {
+            relative: found
+            for relative, found in named.items()
+            if relative not in ALLOCATION_FILES
+        }
+        self.assertEqual(unexpected, {})
+        identity_file = RELEASE_IDENTITY_PATH.relative_to(allocations.REPOSITORY_ROOT)
+        self.assertEqual(named[identity_file.as_posix()], [GA_BUILD])
+
+    def test_no_installed_tree_digest_appears_outside_the_registry(self) -> None:
+        digests = {
+            profile.tree_sha256.encode("ascii"): build
+            for build, profile in SUPPORTED_PREDECESSORS.items()
+        }
+        self.assertTrue(digests)
+        files = tracked_audited_files()
+        self.assertTrue(all(digest in files[REGISTRY_FILE] for digest in digests))
+        outside = {
+            relative: sorted(build for digest, build in digests.items() if digest in data)
+            for relative, data in files.items()
+            if relative != REGISTRY_FILE
+        }
+        self.assertEqual({relative: found for relative, found in outside.items() if found}, {})
 
 
 if __name__ == "__main__":

@@ -631,6 +631,12 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         .get("MACOS_DEPLOYMENT_TARGET")
         .ok_or_else(|| "required pin MACOS_DEPLOYMENT_TARGET is missing".to_string())?;
     let products = candidate_native_products_root(repository_root)?;
+    // The bound build is the runtime migration admission's expected bundle
+    // build (src/legacy/admission.rs); no other build input reaches it.
+    println!(
+        "cargo:rustc-env=CFW_RELEASE_BUNDLE_BUILD={}",
+        products.build_number()
+    );
     let validation_version = optional_utf8_environment(VALIDATION_XCODE_VERSION_ENV)?;
     let validation_build = optional_utf8_environment(VALIDATION_XCODE_BUILD_ENV)?;
     let validation_python = optional_utf8_environment(VALIDATION_PYTHON_ENV)?;
@@ -672,9 +678,7 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         require_metadata(&product_manifest, "repositoryCommit", &repository_commit)?;
         require_metadata(&product_manifest, "xcodeVersion", xcode_version)?;
         require_metadata(&product_manifest, "xcodeBuild", xcode_build)?;
-        products
-            .context
-            .require_manifest_identity(&product_manifest.metadata, product)?;
+        products.require_manifest_identity(&product_manifest.metadata, product)?;
     }
     let bridge_header = products
         .root
@@ -691,9 +695,7 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     )?;
     require_metadata(&tombstone_manifest, "architecture", "arm64")?;
     require_metadata(&tombstone_manifest, "deploymentTarget", deployment_target)?;
-    products
-        .context
-        .require_manifest_identity(&tombstone_manifest.metadata, "CFWLegacyTombstone")?;
+    products.require_manifest_identity(&tombstone_manifest.metadata, "CFWLegacyTombstone")?;
     let rust_version = pins
         .get("RUST_VERSION")
         .ok_or_else(|| "required pin RUST_VERSION is missing".to_string())?;
@@ -744,10 +746,11 @@ fn optional_utf8_environment(name: &str) -> Result<Option<String>, String> {
 
 /// Resolve the candidate-scoped native product root that the release build must
 /// consume. The lane-exported `CFW_NATIVE_PRODUCTS_OUTPUT` is the only accepted
-/// input. Only the exact unsigned-validation and GA pre-sign roots are valid;
-/// their paths bind the one expected build number and signing mode for every
-/// native manifest. A missing variable, an aliased path, a different lane, or
-/// an incomplete product set fails the build.
+/// input. Only the exact unsigned-validation roots and the GA pre-sign root of
+/// the declared `CFW_BUILD_NUMBER` are valid; each path binds the one build
+/// number and signing mode every native manifest must carry. A missing
+/// variable, an aliased path, a different lane, or an incomplete product set
+/// fails the build.
 fn candidate_native_products_root(
     repository_root: &Path,
 ) -> Result<CandidateNativeProducts, String> {

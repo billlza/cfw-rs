@@ -86,28 +86,23 @@ readonly signing_transaction_command
 readonly notarization_recovery_id
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "signed candidates require Apple Silicon macOS"
-: "${CFW_BUILD_NUMBER:?set the explicit positive integer candidate build number}"
-PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
-  "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
+# The candidate build is the active GA build of scripts/release_identity.env,
+# read through its byte-strict loader. An operator does not export it; a
+# preset value is accepted only when it is exactly that build.
+active_ga_build="$(PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$repo_root" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
-from release_build_identity import (
-    ACTIVE_RELEASE_IDENTITY,
-    BuildIdentityError,
-    canonical_build_version,
-)
+from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
-try:
-    canonical_build_version(sys.argv[2], "CFW_BUILD_NUMBER")
-    if sys.argv[2] != ACTIVE_RELEASE_IDENTITY.ga_build:
-        raise BuildIdentityError(
-            "CFW_BUILD_NUMBER must be the single active GA build "
-            + ACTIVE_RELEASE_IDENTITY.ga_build
-        )
-except BuildIdentityError as error:
-    raise SystemExit(f"error: {error}") from None
+print(ACTIVE_RELEASE_IDENTITY.ga_build)
 PY
+)" || die "cannot read the active GA build from scripts/release_identity.env"
+if [[ -n "${CFW_BUILD_NUMBER+set}" && "$CFW_BUILD_NUMBER" != "$active_ga_build" ]]; then
+  die "preset CFW_BUILD_NUMBER differs from the active GA build $active_ga_build; unset it"
+fi
+export CFW_BUILD_NUMBER="$active_ga_build"
 preflight_root="$candidate_base/ga-preflight/$CFW_BUILD_NUMBER"
 frozen_root="$candidate_base/ga/$CFW_BUILD_NUMBER"
 native_products="$preflight_root/native-products"
@@ -306,6 +301,7 @@ run_isolated_python_script "$repo_root/scripts/release_component_entitlements.py
 product_input="$preflight_root/product-input.json"
 "$python_bin" -I -S -B -W error - \
   "$product_input" \
+  "$CFW_BUILD_NUMBER" \
   "$repository_commit" \
   "$release_source_sha256" \
   "$toolchain_sha256" \
@@ -324,6 +320,7 @@ import sys
 
 (
     output,
+    build_number,
     repository_commit,
     release_source_sha256,
     toolchain_sha256,
@@ -338,7 +335,7 @@ import sys
 ) = sys.argv[1:]
 value = {
     "document": "cfm-ga-product-input-v1",
-    "product": {"build_number": "50028", "version": "0.5.0"},
+    "product": {"build_number": build_number, "version": "0.5.0"},
     "schema_version": 1,
     "source": {
         "release_source_sha256": release_source_sha256,
@@ -500,7 +497,8 @@ else
   run_isolated_python_script "$repo_root/scripts/release_signing_plan.py" verify-frozen
   run_isolated_python_script "$repo_root/scripts/updater_key_possession_proof.py" verify-frozen
   frozen_product_input="$frozen_root/product-input.json"
-  frozen_binding="$($python_bin -I -S -B -W error - "$frozen_product_input" <<'PY'
+  frozen_binding="$($python_bin -I -S -B -W error - \
+    "$frozen_product_input" "$CFW_BUILD_NUMBER" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -518,7 +516,7 @@ if set(value) != {"document", "product", "schema_version", "source", "toolchain"
     raise SystemExit("error: frozen product input field set is invalid")
 if value["document"] != "cfm-ga-product-input-v1" or value["schema_version"] != 1:
     raise SystemExit("error: frozen product input identity is invalid")
-if value["product"] != {"build_number": "50028", "version": "0.5.0"}:
+if value["product"] != {"build_number": sys.argv[2], "version": "0.5.0"}:
     raise SystemExit("error: frozen product identity is invalid")
 source = value["source"]
 toolchain = value["toolchain"]

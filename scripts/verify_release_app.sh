@@ -6,6 +6,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
 # shellcheck source=scripts/libbox_source_contract.sh
 source "$repo_root/scripts/libbox_source_contract.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
@@ -367,9 +369,9 @@ configure_release_verification_context() {
   case "$context" in
     signing-attempt-work|signing-attempt-publish-ready|canonical-native-content)
       expected_version="0.5.0"
-      expected_build_number="50028"
-      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/ga/50028/profiles/signing-preflight.json"
-      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/ga/50028/native-products"
+      expected_build_number="$CFW_GA_BUILD"
+      signing_preflight_manifest="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/profiles/signing-preflight.json"
+      pre_sign_native_products_root="$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/native-products"
       ;;
     unsigned-host)
       die "release application verification rejects unsigned or pre-sign context"

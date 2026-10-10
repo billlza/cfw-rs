@@ -103,6 +103,15 @@ fn unsigned_apple_identity_rejects_partial_or_malformed_selection() {
     }
 }
 
+/// Neutral GA builds. The resolver derives the GA pre-sign root from the
+/// declared build, so no test names the active allocation.
+const FIXTURE_BUILD: &str = "70001";
+const OTHER_BUILD: &str = "70002";
+
+fn ga_pre_sign_relative(build: &str) -> String {
+    format!("ga-preflight/{build}/native-products")
+}
+
 struct CandidateFixture {
     _temporary: TempDir,
     candidate_root: PathBuf,
@@ -113,10 +122,13 @@ impl CandidateFixture {
         let temporary = tempfile::tempdir().expect("create candidate fixture");
         let canonical_temporary = fs::canonicalize(temporary.path()).expect("resolve fixture root");
         let candidate_root = canonical_temporary.join("target/candidates/0.5.0");
-        fs::create_dir_all(candidate_root.join("unsigned/native-products"))
-            .expect("create unsigned candidate root");
-        fs::create_dir_all(candidate_root.join("ga-preflight/50028/native-products"))
-            .expect("create GA pre-sign candidate root");
+        for relative in [
+            "unsigned/native-products".to_owned(),
+            ga_pre_sign_relative(FIXTURE_BUILD),
+            ga_pre_sign_relative(OTHER_BUILD),
+        ] {
+            fs::create_dir_all(candidate_root.join(relative)).expect("create candidate root");
+        }
         Self {
             _temporary: temporary,
             candidate_root,
@@ -130,6 +142,24 @@ impl CandidateFixture {
             .expect("fixture path is UTF-8")
             .to_string()
     }
+
+    fn unsigned_products(&self) -> CandidateNativeProducts {
+        CandidateNativeProducts::resolve(
+            &self.candidate_root,
+            &self.output("unsigned/native-products"),
+            "40000",
+        )
+        .expect("resolve unsigned candidate")
+    }
+
+    fn ga_products(&self, build: &str) -> CandidateNativeProducts {
+        CandidateNativeProducts::resolve(
+            &self.candidate_root,
+            &self.output(&ga_pre_sign_relative(build)),
+            build,
+        )
+        .expect("resolve GA pre-sign candidate")
+    }
 }
 
 fn metadata(build_number: &str, signing_mode: &str) -> BTreeMap<String, String> {
@@ -142,43 +172,42 @@ fn metadata(build_number: &str, signing_mode: &str) -> BTreeMap<String, String> 
 #[test]
 fn exact_candidate_roots_select_one_context() {
     let fixture = CandidateFixture::new();
-    let unsigned = CandidateNativeProducts::resolve(
-        &fixture.candidate_root,
-        &fixture.output("unsigned/native-products"),
-        "40000",
-    )
-    .expect("resolve unsigned candidate");
+    let unsigned = fixture.unsigned_products();
     assert_eq!(unsigned.context, NativeProductContext::UnsignedValidation);
+    assert_eq!(unsigned.build_number(), "40000");
     assert_eq!(
         unsigned.context.expected_signing_mode(),
         "unsigned-validation"
     );
-    assert_eq!(unsigned.context.expected_build_number(), "40000");
+    unsigned
+        .require_manifest_identity(&metadata("40000", "unsigned-validation"), "UI")
+        .expect("accept the unsigned validation identity");
 
-    let ga = CandidateNativeProducts::resolve(
-        &fixture.candidate_root,
-        &fixture.output("ga-preflight/50028/native-products"),
-        "50028",
-    )
-    .expect("resolve GA pre-sign candidate");
-    assert_eq!(ga.context, NativeProductContext::GaPreSign);
-    assert_eq!(ga.context.expected_signing_mode(), "pre-sign");
-    assert_eq!(ga.context.expected_build_number(), "50028");
+    // Each GA pre-sign root admits exactly the build it is named after.
+    for build in [FIXTURE_BUILD, OTHER_BUILD] {
+        let ga = fixture.ga_products(build);
+        assert_eq!(ga.context, NativeProductContext::GaPreSign);
+        assert_eq!(ga.build_number(), build);
+        assert_eq!(ga.context.expected_signing_mode(), "pre-sign");
+        ga.require_manifest_identity(&metadata(build, "pre-sign"), "UI")
+            .expect("accept the GA pre-sign identity");
+    }
 }
 
 #[test]
 fn candidate_root_and_build_number_must_match_exactly() {
     let fixture = CandidateFixture::new();
+    let ga = ga_pre_sign_relative(FIXTURE_BUILD);
+    let leading_zero = format!("0{FIXTURE_BUILD}");
     for (relative, build_number) in [
-        ("unsigned/native-products", "50028"),
-        ("ga-preflight/50028/native-products", "40000"),
-        ("ga-preflight/50028/native-products", "40043"),
-        ("ga-preflight/50028/native-products", "40044"),
-        ("ga-preflight/50028/native-products", "40045"),
-        ("ga-preflight/50028/native-products", "040049"),
-        ("ga-preflight/50028/native-products", "0"),
-        ("ga-preflight/50028/native-products", "not-a-build"),
-        ("ga-preflight/50028/native-products", "9223372036854775808"),
+        ("unsigned/native-products", FIXTURE_BUILD),
+        (ga.as_str(), "40000"),
+        (ga.as_str(), OTHER_BUILD),
+        (ga.as_str(), leading_zero.as_str()),
+        (ga.as_str(), "0"),
+        (ga.as_str(), ""),
+        (ga.as_str(), "not-a-build"),
+        (ga.as_str(), "9223372036854775808"),
     ] {
         let error = CandidateNativeProducts::resolve(
             &fixture.candidate_root,
@@ -193,41 +222,84 @@ fn candidate_root_and_build_number_must_match_exactly() {
 #[test]
 fn unapproved_or_noncanonical_candidate_paths_are_rejected() {
     let fixture = CandidateFixture::new();
+    let root = fixture.candidate_root.display();
     for declared in [
         fixture.output("validation/40073/native-products"),
         fixture.output("release-build/40073/native-products"),
-        fixture.output("ga-preflight/40030/native-products"),
-        fixture.output("ga-preflight/40031/native-products"),
-        fixture.output("ga-preflight/40032/native-products"),
-        fixture.output("ga-preflight/40033/native-products"),
-        fixture.output("ga-preflight/40034/native-products"),
-        fixture.output("ga-preflight/40035/native-products"),
-        fixture.output("ga-preflight/40036/native-products"),
-        fixture.output("ga-preflight/40037/native-products"),
-        fixture.output("ga-preflight/40038/native-products"),
-        fixture.output("ga-preflight/40039/native-products"),
-        fixture.output("ga-preflight/40040/native-products"),
-        fixture.output("ga-preflight/40041/native-products"),
-        fixture.output("ga-preflight/40042/native-products"),
-        fixture.output("ga-preflight/40043/native-products"),
-        fixture.output("ga-preflight/40044/native-products"),
-        fixture.output("ga-preflight/40045/native-products"),
         fixture.output("ga/40073/signing-output/signed-native-products"),
-        fixture.output("ga-preflight/50028/native-products/extra"),
-        format!(
-            "{}/ga-preflight//40073/native-products",
-            fixture.candidate_root.display()
-        ),
-        format!(
-            "{}/ga-preflight/../ga-preflight/50028/native-products",
-            fixture.candidate_root.display()
-        ),
-        "ga-preflight/50028/native-products".to_string(),
+        fixture.output(&format!(
+            "ga/{FIXTURE_BUILD}/signing-output/signed-native-products"
+        )),
+        fixture.output(&format!("{}/extra", ga_pre_sign_relative(FIXTURE_BUILD))),
+        fixture.output(&ga_pre_sign_relative(&format!("0{FIXTURE_BUILD}"))),
+        fixture.output(&ga_pre_sign_relative(&format!("+{FIXTURE_BUILD}"))),
+        fixture.output(&ga_pre_sign_relative("0")),
+        fixture.output(&ga_pre_sign_relative("not-a-build")),
+        fixture.output(&ga_pre_sign_relative("9223372036854775808")),
+        format!("{root}/ga-preflight//{FIXTURE_BUILD}/native-products"),
+        format!("{root}/ga-preflight/../ga-preflight/{FIXTURE_BUILD}/native-products"),
+        format!("{root}/ga-preflight/{FIXTURE_BUILD}/../{FIXTURE_BUILD}/native-products"),
+        ga_pre_sign_relative(FIXTURE_BUILD),
     ] {
-        let error = CandidateNativeProducts::resolve(&fixture.candidate_root, &declared, "50028")
-            .expect_err("reject unapproved candidate path");
+        let error =
+            CandidateNativeProducts::resolve(&fixture.candidate_root, &declared, FIXTURE_BUILD)
+                .expect_err("reject unapproved candidate path");
         assert!(error.contains("must be exactly"), "{error}");
     }
+}
+
+#[test]
+fn a_noncanonical_root_is_rejected_even_when_it_names_the_declared_build() {
+    let fixture = CandidateFixture::new();
+    for build in [
+        format!("0{FIXTURE_BUILD}"),
+        format!("+{FIXTURE_BUILD}"),
+        "9223372036854775808".to_owned(),
+    ] {
+        let relative = ga_pre_sign_relative(&build);
+        fs::create_dir_all(fixture.candidate_root.join(&relative))
+            .expect("create noncanonical candidate root");
+        let error = CandidateNativeProducts::resolve(
+            &fixture.candidate_root,
+            &fixture.output(&relative),
+            &build,
+        )
+        .expect_err("reject noncanonical GA root");
+        assert!(error.contains("must be exactly"), "{build}: {error}");
+    }
+}
+
+#[test]
+fn the_largest_signed_64_bit_build_is_a_ga_root() {
+    let fixture = CandidateFixture::new();
+    let build = "9223372036854775807";
+    fs::create_dir_all(fixture.candidate_root.join(ga_pre_sign_relative(build)))
+        .expect("create upper-bound candidate root");
+    let products = fixture.ga_products(build);
+    assert_eq!(products.context, NativeProductContext::GaPreSign);
+    products
+        .require_manifest_identity(&metadata(build, "pre-sign"), "UI")
+        .expect("accept the upper-bound identity");
+}
+
+#[test]
+fn a_ga_root_aliasing_another_build_is_rejected() {
+    let fixture = CandidateFixture::new();
+    let alias = fixture.candidate_root.join("ga-preflight/70003");
+    std::os::unix::fs::symlink(
+        fixture
+            .candidate_root
+            .join(format!("ga-preflight/{OTHER_BUILD}")),
+        &alias,
+    )
+    .expect("create aliasing build root");
+    let error = CandidateNativeProducts::resolve(
+        &fixture.candidate_root,
+        &fixture.output(&ga_pre_sign_relative("70003")),
+        "70003",
+    )
+    .expect_err("reject aliased GA root");
+    assert!(error.contains("real directory"), "{error}");
 }
 
 #[test]
@@ -254,71 +326,72 @@ fn symlinked_candidate_component_is_rejected() {
 }
 
 #[test]
-fn every_artifact_uses_the_context_identity() {
-    for (context, good, bad) in [
+fn every_artifact_uses_the_resolved_identity() {
+    let fixture = CandidateFixture::new();
+    for (products, good, bad) in [
         (
-            NativeProductContext::UnsignedValidation,
+            fixture.unsigned_products(),
             metadata("40000", "unsigned-validation"),
-            metadata("50028", "pre-sign"),
+            [
+                metadata(FIXTURE_BUILD, "pre-sign"),
+                metadata(FIXTURE_BUILD, "unsigned-validation"),
+            ],
         ),
         (
-            NativeProductContext::GaPreSign,
-            metadata("50028", "pre-sign"),
-            metadata("40000", "unsigned-validation"),
+            fixture.ga_products(FIXTURE_BUILD),
+            metadata(FIXTURE_BUILD, "pre-sign"),
+            [
+                metadata("40000", "unsigned-validation"),
+                metadata(OTHER_BUILD, "pre-sign"),
+            ],
         ),
     ] {
         for artifact in ARTIFACTS {
-            context
+            products
                 .require_manifest_identity(&good, artifact)
                 .expect("accept matching manifest identity");
-            let error = context
-                .require_manifest_identity(&bad, artifact)
-                .expect_err("reject mixed manifest identity");
-            assert!(error.contains(artifact), "{error}");
+            for mixed in &bad {
+                let error = products
+                    .require_manifest_identity(mixed, artifact)
+                    .expect_err("reject mixed manifest identity");
+                assert!(error.contains(artifact), "{error}");
+            }
         }
     }
 }
 
 #[test]
 fn missing_unknown_and_developer_id_metadata_are_rejected() {
+    let fixture = CandidateFixture::new();
+    let ga = fixture.ga_products(FIXTURE_BUILD);
+    let leading_zero = format!("0{FIXTURE_BUILD}");
     for artifact in ARTIFACTS {
         for invalid in [
-            metadata("50028", "developer-id"),
-            metadata("50028", ""),
-            metadata("50028", "unknown"),
-            metadata("40030", "pre-sign"),
-            metadata("40031", "pre-sign"),
-            metadata("40032", "pre-sign"),
-            metadata("40033", "pre-sign"),
-            metadata("40034", "pre-sign"),
-            metadata("40035", "pre-sign"),
-            metadata("40036", "pre-sign"),
-            metadata("40037", "pre-sign"),
-            metadata("40038", "pre-sign"),
-            metadata("40039", "pre-sign"),
-            metadata("40040", "pre-sign"),
-            metadata("40041", "pre-sign"),
-            metadata("40042", "pre-sign"),
-            metadata("40043", "pre-sign"),
-            metadata("40044", "pre-sign"),
-            metadata("40045", "pre-sign"),
+            metadata(FIXTURE_BUILD, "developer-id"),
+            metadata(FIXTURE_BUILD, ""),
+            metadata(FIXTURE_BUILD, "unknown"),
+            metadata(FIXTURE_BUILD, "unsigned-validation"),
+            metadata(OTHER_BUILD, "pre-sign"),
+            metadata(&leading_zero, "pre-sign"),
+            metadata("40000", "pre-sign"),
+            metadata("", "pre-sign"),
         ] {
-            let error = NativeProductContext::GaPreSign
+            let error = ga
                 .require_manifest_identity(&invalid, artifact)
                 .expect_err("reject wrong manifest identity");
             assert!(error.contains(artifact), "{error}");
         }
 
-        let mut missing_build = metadata("50028", "pre-sign");
+        let mut missing_build = metadata(FIXTURE_BUILD, "pre-sign");
         missing_build.remove("buildNumber");
-        let error = NativeProductContext::GaPreSign
+        let error = ga
             .require_manifest_identity(&missing_build, artifact)
             .expect_err("reject missing build number");
         assert!(error.contains("buildNumber"), "{error}");
 
-        let mut missing_mode = metadata("50028", "pre-sign");
+        let mut missing_mode = metadata(FIXTURE_BUILD, "pre-sign");
         missing_mode.remove("signingMode");
-        let error = NativeProductContext::GaPreSign
+        let error = ga
             .require_manifest_identity(&missing_mode, artifact)
             .expect_err("reject missing signing mode");
         assert!(error.contains("signingMode"), "{error}");

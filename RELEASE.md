@@ -363,14 +363,17 @@ the complete failed preparation with `git worktree move` in a new private
 history path outside the main workspace. Preserve its source, generated inputs,
 attempt logs and original receipt; the receipt remains in the original main
 Git administrative directory and does not authorize the moved history path.
-Recreate the fixed `target/release-worktrees/50028` path at the verified new
-commit, create an empty `target` with mode `0700`, and run
-`scripts/authorize_release_worktree.sh 50028` from the main checkout before
-copying and revalidating managed dependency inputs. Never edit the old receipt
-or copy it into the new registration. Git may name the new administrative
-directory `400491`; scope identity comes from the reciprocal worktree path and
-receipt, not this suffix. This is another preparation attempt using build
-40073, not candidate retirement or a new build allocation.
+Recreate the fixed `target/release-worktrees/$CFW_GA_BUILD` path at the
+verified new commit, create an empty `target` with mode `0700`, and run
+`scripts/authorize_release_worktree.sh "$CFW_GA_BUILD"` from the main checkout
+before copying and revalidating managed dependency inputs (`CFW_GA_BUILD` is
+the active GA build of `scripts/release_identity.env`; see
+[the GA release sequence](#single-ga-release-sequence)). Never edit the old
+receipt or copy it into the new registration. Git may give the new
+administrative directory a numeric suffix (for example `400491`); scope
+identity comes from the reciprocal worktree path and receipt, not this suffix.
+This is another preparation attempt using the same active GA build, not
+candidate retirement or a new build allocation.
 These reversible checkout, enrollment, input-copy and environment-preflight
 steps, followed by the candidate build, may run in parallel with hosted CI for
 the same source commit. Required local source/build admission checks still run
@@ -464,9 +467,10 @@ Preparation is explicit and networked; the release build is offline:
 Release-critical shell entrypoints rebuild one closed execution environment
 from the effective macOS account rather than caller `HOME` or `PATH`.
 Production signing, publication, and physical-evidence entrypoints accept only
-the exact Rust SDK selected above and Python 3.14.7 Cellar path. The build-40000
-unsigned CI entrypoint alone may accept the absolute Python executable emitted
-by the SHA-pinned `setup-python` action; it verifies the same exact version and
+the exact Rust SDK selected above and Python 3.14.7 Cellar path. Only the
+unsigned validation entrypoints, build 40000 and the unsigned preview build
+50000, may accept the absolute Python executable emitted by the SHA-pinned
+`setup-python` action; it verifies the same exact version and
 real executable/runtime identities and includes their content digests in the
 toolchain binding. Developer-ID and publication paths reject that selection.
 The environment keeps system Git/Bash/Zsh ahead of the owner-only, versioned
@@ -730,8 +734,11 @@ the sealed publication evidence but remains fail closed until that evidence has
 been prepared, legally reviewed, and finalized for the exact signed app. It has
 no success override and accepts only:
 
-- `target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app` as the signed binary root;
-- `target/candidates/0.5.0/ga/50028/stage-inputs/publication` as the final evidence root.
+- `target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app` as the signed binary root;
+- `target/candidates/0.5.0/ga/$CFW_GA_BUILD/stage-inputs/publication` as the final evidence root.
+
+The gate sources `scripts/release_identity.env` and passes `CFW_GA_BUILD` to the
+pure path contract; no packaging script names a build.
 
 It never scans or accepts `target/release`, which retains historical 0.3.5
 signed artifacts containing the old core/helper layout.
@@ -776,8 +783,9 @@ been signed, notarized, and stapled. Tools use the fixed frozen checkout for
 all product inputs and outputs:
 
 ```bash
-publication_artifact_repository="$PWD/target/release-worktrees/50028"
-publication_ga="$publication_artifact_repository/target/candidates/0.5.0/ga/50028"
+source scripts/release_identity.env
+publication_artifact_repository="$PWD/target/release-worktrees/$CFW_GA_BUILD"
+publication_ga="$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
 publication_inputs="$publication_ga/stage-inputs"
 publication_libbox="$publication_artifact_repository/target/sources/sing-box-v1.14.2-patched"
 
@@ -811,94 +819,82 @@ the old approval and record the comparison separately. The current closure
 record must name its own digest and current release authorization; it must not
 pretend that the earlier reviewer saw a subsequently rebuilt source archive.
 
-### Single-GA 50028 release sequence
+### Single-GA release sequence
 
 The canonical allocation ledger is
 [`docs/release/build-allocations-v050.json`](docs/release/build-allocations-v050.json);
 the closed v0.4.0 ledger
 [`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json)
-retains the history below.
-The build-boundary gate rejects any active validation/final pair or any change
-to the immutable retired prefix. Builds 40021 through 40029 retain their
-historical retirement records and artifacts; none may be relabelled, rebuilt,
-resubmitted, installed, or reused. Build 40030 is retired unbuilt by policy.
-Builds 40031, 40032, 40033, 40034, and 40035 are consumed, failed GA
-lineages with no canonical signed output or notarization submission. Build
-40036 is a consumed, signed, and notarized lineage retired before install.
-Build 40037 is a consumed private signed-work lineage retired before canonical
-output or notarization.
-Build 40038 is a consumed private signed-work lineage retired before a
-transformation receipt, canonical output, or notarization.
-Build 40039 is a consumed, canonically signed lineage retired because SOCKS5
-changes its product inputs. Its original notarization outcome remains unknown
-and quarantined, not accepted or failed. Do not resubmit or reuse its bytes.
-Build 40040 is a consumed, canonically signed lineage retired before
-notarization because fixing the newly reported SSH vulnerabilities changes
-its dependency inputs. Its signed bytes and historical CI receipt remain
-unchanged and cannot be used as evidence for the corrected candidate.
-Build 40041 is a consumed, notarized, packaged and installed lineage retired
-before GA runtime acceptance: its legacy cutover preflight attributed the live
-Clash for Windows network to the retired installation and could never confirm
-the cutover while acceptance required that network to be preserved. Its signed
-bytes, notarization, package seals, install journal and aborted collection
-remain unchanged. Its completed migration to 40043 is retained as historical
-installation evidence.
-Build 40042 is a consumed, canonically signed and notarized lineage retired
-before packaging or installation because the `release-tooling-tests` lane of
-its own frozen source fails under the lane collector's toolchain selection.
-Its signed bytes, notarization and hosted receipt remain unchanged and cannot
-be used as evidence for the corrected candidate.
-Build 40043 completed signing, notarization, both package sets and installation,
-then retired for the credential-receipt product defect before GA runtime
-collection started. Its signed bytes, original hosted CI, prepackage seal,
-package seals and completed 40041→40043 installation journals remain unchanged.
-Its subsequent 40043→40044 installation remains historical evidence.
-Build 40044 completed signing, application and DMG notarization, both package
-sets and installation, then exposed a migration handoff process-exit defect.
-The fix changes application bytes, so its consumed lineage is retired with
-all original evidence retained. Its completed 40044→40045 installation remains
-historical evidence. Build 40045 then completed application notarization,
-installation, GPL closure and prepackage before the requested normal-start and
-System Proxy ownership changes required build 40046. Build 40046 completed
-notarization, both packages and installation. Runtime diagnosis then proved
-that its native target had omitted the real libbox implementation. The fix
-changes application bytes and required build 40047. Preserve all 40046 bytes
-and receipts. See
-[`ga-build-40046-retirement.md`](docs/release/ga-build-40046-retirement.md).
-40047 completed application notarization and installation, then exposed an
-existing-proxy rejection and a service-registration recovery cycle. Their fixes
-shipped in 40048. The completed 40047 installation supplies the exact predecessor
-identity for 40047 -> 40048; its frozen validator preserves the original receipt
-semantics. See [`ga-build-40047-retirement.md`](docs/release/ga-build-40047-retirement.md).
-40048 then completed installation but failed actual System Proxy activation
-while awaiting macOS authorization. 40054 separates authorization from runtime
-startup and fixes repeated revocation after quarantine. The preserved 40048
-signed tree is its predecessor; see
-[`ga-build-40048-retirement.md`](docs/release/ga-build-40048-retirement.md).
-Build 40070 completed signing, notarization, packaging and installation before
-its bounded-startup product correction required successor 40071; see
-[`ga-build-40070-retirement.md`](docs/release/ga-build-40070-retirement.md).
-Build 40072 added the SOCKS setup-budget correction and passed local traffic
-checks. The requested internationalization changes application bytes and requires
-build 40073; see [`ga-build-40072-retirement.md`](docs/release/ga-build-40072-retirement.md).
-Build 40073 was retired unpublished on 2026-10-07 as
-`retired_superseded_by_next_product_version`; the v0.4.0 ledger is closed. The
-first 0.5.0 GA allocation, 50026, was consumed on 2026-10-07 when its Developer
-ID signing attempt failed after signing started; see
-[`ga-build-50026-retirement.md`](docs/release/ga-build-50026-retirement.md).
-Its successor, 50027, was signed, notarized and sealed for prepackage, then
-retired on 2026-10-08 before any package or installation because the release
-line changed its application bytes; see
-[`ga-build-50027-retirement.md`](docs/release/ga-build-50027-retirement.md).
-The sole `active_ga` identity is now 0.5.0 build 50028, allocated in
-[`docs/release/build-allocations-v050.json`](docs/release/build-allocations-v050.json)
-after the consumed preview validation lineages 50001–50025 and the retired GAs
-50026 and 50027; see
+retains the earlier history and is only read. The build-boundary gate rejects
+any active validation/final pair or any change to an immutable retired prefix.
+Builds 40021 through 40029 retain their historical retirement records and
+artifacts; none may be relabelled, rebuilt, resubmitted, installed, or reused.
+Build 40030 is retired unbuilt by policy. The consumed 0.5.0 preview
+validation lineages 50001–50025 form the fixed prefix of the v0.5.0 ledger.
+Every retired GA build, in either ledger, keeps its cause, consumed lineage and
+retained evidence in its own `docs/release/ga-build-<build>-retirement.md`;
+those notes, not this guide, are the per-build history. The original v0.5.0
+identity plan is recorded in
 [`docs/release/ga-identity-plan-v050.md`](docs/release/ga-identity-plan-v050.md).
-The sequence below is the 0.5.0 GA sequence: its migration predecessor is the
-retained installed preview 50025, and the SwiftUI dashboard library is signed as
-one more nested component. Local installation and smoke testing do not require
-the public-release evidence or claim GA acceptance.
+
+The sole `active_ga` identity is 0.5.0 build `CFW_GA_BUILD` of
+[`scripts/release_identity.env`](scripts/release_identity.env). Release tools
+read it from there: Python through the byte-strict loader in
+`scripts/release_build_identity.py`, release shell entry points by sourcing the
+file next to `scripts/dependency_pins.env`. Load it into the operator shell
+before the commands below:
+
+```bash
+source scripts/release_identity.env
+```
+
+The migration predecessor is the active predecessor: the newest
+`SUPPORTED_PREDECESSORS` profile in `scripts/dormant_app_install.py` whose
+build is below `CFW_GA_BUILD`. Install admission accepts only that profile,
+verified by product version, build number and installed signed-tree digest.
+The SwiftUI dashboard library is signed as one more nested component. Local
+installation and smoke testing do not require the public-release evidence or
+claim GA acceptance.
+
+#### Allocating a GA build
+
+Retiring the active GA build `N` and allocating `N+1` follows the decision
+table in
+[`docs/release/candidate-identity-lifecycle.md`](docs/release/candidate-identity-lifecycle.md#build-number-allocation-and-consumption)
+and needs the release owner's approval. These are the allocation files:
+
+1. `scripts/release_identity.env`: `CFW_GA_BUILD=N+1`;
+2. `docs/release/build-allocations-v050.json`: give `N`'s record its exact
+   retired status, append `{"build":"N+1","role":"ga","status":"active_ga"}`
+   and set `active_ga` to `N+1`, keeping canonical JSON;
+3. `docs/release/ga-build-N-retirement.md`: a new note whose classification
+   sentence opens a line as ``GA build N is permanently classified as
+   `<status>`.`` with that exact ledger status;
+4. `scripts/dormant_app_install.py`, only when `N` was installed on the release
+   Mac (an `*_after_install_*` status or
+   `retired_superseded_by_next_product_version`): add `N`'s
+   `PredecessorProfile` with its retained installed tree SHA-256 to
+   `SUPPORTED_PREDECESSORS`. `N` then becomes the active predecessor.
+
+No other file changes. The runtime migration admission compares the bundle
+installed at the canonical path with the build its executable was compiled as,
+which `build.rs` injects from the validated `CFW_BUILD_NUMBER`; release
+observations accept any canonical build of the product version and are bound
+to the frozen candidate by their consumers.
+
+`./scripts/run_release_ci_gate.sh build-script-boundary` then verifies the
+allocation: the ledger must end with the identity file's build as its one
+`active_ga`; every record between the fixed prefix and that tail must be a
+retired GA with its exact retirement note; no retirement note may exist for a
+build at or above the active GA; every installed retired GA must have a
+registry profile; and every 0.5.0 registry profile must be an allocated build
+below the active GA. Candidate
+freeze applies the same rules to the artifact repository, so a missing
+predecessor profile fails before signing. The release-tool tests derive every
+build from the identity file and the ledger, and an allocation audit rejects
+any other tracked file of the release source closure, apart from `docs/` and
+the top-level guides, that names a GA-role ledger build outside a digest or
+object-ID token, and any installed tree digest outside the registry.
 
 Run the sequence below from one clean release commit. Source, CI, preflight, or
 evidence failures before candidate freeze use their own append-only attempt or
@@ -909,7 +905,7 @@ confirm that no freeze intent or signing mutation exists, then preserve the
 old preflight tree under a unique private history path. The builder refuses to
 overwrite an existing preflight root. Once
 `candidate-freeze/intent.json` exists, recovery may only continue an exact
-supported 50028 transaction without changing application or nested-code
+supported transaction of the active GA build without changing application or nested-code
 signature bytes. A transaction in the explicit post-receipt
 `verification_blocked` state may reopen and verify only its complete exact
 private work and receipt; it must not invoke the signing helper or receipt
@@ -950,7 +946,6 @@ never adopted.
 
    ```bash
    CFW_RELEASE_RUST_TOOLCHAIN=private \
-   CFW_BUILD_NUMBER=50028 \
    NOTARY_PROFILE=clashformac-notary \
    MACOS_SIGN_IDENTITY='Developer ID Application: Zi ang Li (YKUPL7Z869)' \
    HOST_PROVISIONING_PROFILE_PATH=/absolute/path/to/host.provisionprofile \
@@ -958,6 +953,11 @@ never adopted.
    PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER=3f275eaf-0fca-4af6-97a3-c93c4e83dc15 \
    scripts/build_signed_candidate.sh --ga
    ```
+
+   The builder derives `CFW_BUILD_NUMBER` from `scripts/release_identity.env`
+   through the byte-strict loader and exports it to every product build step;
+   do not export it. A preset `CFW_BUILD_NUMBER` that differs from the active
+   GA build is refused before any candidate directory is created.
 
    The builder first creates a pre-sign app and native graph, proves current
    updater-key possession against the embedded public key, and freezes the
@@ -995,9 +995,10 @@ never adopted.
    adapters and `scripts/tests/`, satisfies ordinary GA's deterministic CI
    requirement. Receipt v5 binds both source identities and the actual hosted
    Xcode version; runtime, dependency-lock and signing inputs must remain equal.
-   The reviewed Rust build adapter accepts a hosted selection only for unsigned
-   build 40000. GA pre-sign builds reject every such override and retain their
-   exact production pins. The frozen signed application is not rebuilt.
+   The reviewed Rust build adapter accepts a hosted selection only for the
+   unsigned validation builds 40000 and 50000 (the unsigned preview). GA
+   pre-sign builds reject every such override and retain their exact
+   production pins. The frozen signed application is not rebuilt.
    It runs the same 27 lane
    commands. A second full local reproduction is optional assurance evidence,
    not a prepackage or corresponding-source prerequisite. The signed product
@@ -1039,9 +1040,9 @@ never adopted.
 
    ```bash
    scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
-     --artifact-repository /absolute/operator/target/release-worktrees/50028 \
-     --output /absolute/operator/target/release-worktrees/50028/target/candidates/0.5.0/ga/50028/stage-inputs/local-ci-lanes.json \
-     --journal /absolute/private/history/local-ci-50028
+     --artifact-repository "/absolute/operator/target/release-worktrees/$CFW_GA_BUILD" \
+     --output "/absolute/operator/target/release-worktrees/$CFW_GA_BUILD/target/candidates/0.5.0/ga/$CFW_GA_BUILD/stage-inputs/local-ci-lanes.json" \
+     --journal "/absolute/private/history/local-ci-$CFW_GA_BUILD"
    ```
 
    Run this entry from the clean operator checkout. The explicit artifact path
@@ -1080,7 +1081,7 @@ never adopted.
    fixed recovery entry:
 
    ```bash
-   CFW_BUILD_NUMBER=50028 NOTARY_PROFILE=clashformac-notary \
+   NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --resume-signing
    ```
 
@@ -1093,8 +1094,8 @@ never adopted.
    helper success. It is not a resume path and never creates new signed bytes.
    A helper failure, an interruption after signing may have started but before
    one complete receipt-bound output was durably recorded, or any other
-   ambiguous signing state requires preserving the attempt, retiring build
-   50028, and allocating a successor. Never create fresh timestamped signature
+   ambiguous signing state requires preserving the attempt, retiring the active
+   GA build, and allocating a successor. Never create fresh timestamped signature
    bytes under the same frozen build.
 
    When Apple upload traffic needs the running local proxy, explicitly set
@@ -1107,7 +1108,7 @@ never adopted.
    recover only with that observed ID:
 
    ```bash
-   CFW_BUILD_NUMBER=50028 NOTARY_PROFILE=clashformac-notary \
+   NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --recover-notarization-id UUID
    ```
 
@@ -1141,7 +1142,7 @@ never adopted.
 
    Run post-freeze stage verification, packaging, installation, journal export and
    runtime acceptance from the clean **operator checkout** containing the
-   fixed `target/release-worktrees/50028` artifact checkout. These operations
+   fixed `target/release-worktrees/$CFW_GA_BUILD` artifact checkout. These operations
    never fall back to treating the operator checkout as artifact source.
    Publication preparation/draft/finalization remain artifact-source operations;
    keep their already reviewed fixed outputs in the frozen checkout. A corrected
@@ -1208,7 +1209,7 @@ never adopted.
    is added to the installer.
 
    ```bash
-   scripts/run_archive_install_history.sh --previous-build 40073 --installed-build 50025
+   scripts/run_archive_install_history.sh --previous-build PREDECESSOR_BUILD
    scripts/run_current_service_transaction.sh --decommission
    scripts/run_dormant_app_install.sh --install
    scripts/run_current_service_transaction.sh --recommission
@@ -1239,26 +1240,25 @@ never adopted.
    occupies the fixed producer paths. It validates both terminal journals and
    the exact installed predecessor under the existing maintenance, service and
    install locks. It retains their original bytes beneath
-   `/Applications/.com.bill.clashformac.install-history-v1/40070`, with a durable
-   intent and completion receipt. A retry resumes the same two renames;
+   `/Applications/.com.bill.clashformac.install-history-v1/<previous build>`,
+   with a durable intent and completion receipt. A retry resumes the same two renames;
    pending work, contradictory records, changed bytes or unsafe paths block it.
    It neither changes network/service state nor removes an application bundle.
 
-   For 50028 the fixed producer paths still hold the completed 40072 → 40073
-   journals, while the installed application is the retained preview 50025
-   that replaced 40073 through the retired preview installer. The explicit
-   `--installed-build 50025` declaration retains those journals: the archiver
-   proves that they describe the retained 40073 identity and that exactly the
-   retained 50025 tree is installed, records that superseding identity in both
-   history receipts, and never describes 40073 as the current installation.
-   Without the declaration the archiver still requires the archived build
-   itself to be installed.
-
-   That 40073 retention completed before the 50028 installation. The 0.4.0
-   predecessor profiles it required were removed on 2026-10-10, so the command
-   above is not repeatable. The next allocation's history step retains the
-   completed 50025 → 50028 journals instead; reading them needs only the 50025
-   profile plus the profile that allocation adds for the installed 50028.
+   `--previous-build` names the build whose completed installation journals
+   occupy the producer paths. After a completed GA installation that is the
+   installed active predecessor, so `PREDECESSOR_BUILD` is the build number of
+   the active predecessor described above, and no `--installed-build` is
+   given. Both builds the archiver reads must be registry profiles; it rejects
+   any other value before touching the journals. `--installed-build` declares
+   a newer registered build that replaced the archived one outside the install
+   transaction: the archiver then proves that the journals describe the
+   archived identity and that exactly the declared tree is installed, records
+   that superseding identity in both history receipts, and never describes the
+   archived build as the current installation. Without the declaration the
+   archiver requires the archived build itself to be installed. The one-time
+   retention of the 40072 → 40073 journals is recorded in
+   [`ga-build-40073-retirement.md`](docs/release/ga-build-40073-retirement.md).
 
    Decommission and install each perform their own mandatory admission checks;
    separate `--preflight` calls remain available for diagnosis. The first
@@ -1315,7 +1315,7 @@ never adopted.
    environment; it must not overwrite an already published container;
 7. after the atomic journal export verifies, run the fixed GA runtime collector.
    It independently reopens the DMG set, proves the DMG's
-   contained app equals the installed 50028 tree, derives all twelve required
+   contained app equals the installed active GA tree, derives all twelve required
    checks from bounded command output and packet captures, and proves shutdown
    restored the CFW guard. Before any command, `collection-intent-v3` stores a
    fresh complete CFW baseline and binds the closed installation/service
@@ -1336,15 +1336,16 @@ never adopted.
    `collect` refuses it. Run `recover` to archive that attempt, then start a
    fresh `collect` from a real terminal.
 
-   For 50028 the stages have different executors. The frozen candidate commit
-   `d686a85` sealed `prepackage`. Runtime collection, GA acceptance and
-   publication run from a newer clean operator commit that changes only
-   release tooling, checked out in place in the same operator directory, while
-   `target/release-worktrees/50028` stays at `d686a85`. Each new seal records
-   its own executor, and later verifiers still reopen `prepackage` under
-   `d686a85`. Runtime evidence binds the operator path and the release
-   Python, so do not move, re-clone or re-bootstrap the operator between
-   collection and the final upload allowlist.
+   Stages may have different executors. The frozen candidate commit seals
+   `prepackage`. Runtime collection, GA acceptance and publication may run
+   from a newer clean operator commit that changes only release tooling,
+   checked out in place in the same operator directory, while
+   `target/release-worktrees/$CFW_GA_BUILD` stays at the frozen commit. Each
+   new seal records its own executor, and later verifiers still reopen
+   `prepackage` under the frozen commit. Runtime evidence binds the operator
+   path and the release Python, so do not move, re-clone or re-bootstrap the
+   operator between collection and the final upload allowlist. (For build
+   50028 the frozen commit was `d686a85`.)
 
    The DNS check observes the product's tunnel leg on the Packet Tunnel
    `utun`, which tcpdump opens as `link-type RAW (Raw IP)`. The Packet Tunnel
@@ -1380,15 +1381,15 @@ never adopted.
 
    When the collector waits for macOS approval and Tunnel mode, approve the
    System Extension and select Tunnel mode with IPv6 enabled in the installed
-   50028 dashboard; the Packet Host baseline accepts only a ready Tunnel with
-   IPv6 enabled. The system-extension check requires exactly one
-   `com.bill.clashformac.packet-tunnel (0.5.0/50028)` row in
+   active GA dashboard; the Packet Host baseline accepts only a ready Tunnel
+   with IPv6 enabled. The system-extension check requires exactly one
+   `com.bill.clashformac.packet-tunnel (0.5.0/$CFW_GA_BUILD)` row in
    `[activated enabled]`. macOS keeps each replaced version listed until the
    next reboot as `[terminated waiting to uninstall on reboot]`, with its
    enabled and active columns empty. Every other row for that bundle must be
-   exactly such a row with a lower build than 50028; a row from another team,
-   with either column marked, in any other state, or with a malformed version
-   or a build of 50028 or later blocks this stage.
+   exactly such a row with a lower build than the active GA; a row from
+   another team, with either column marked, in any other state, or with a
+   malformed version or a build of the active GA or later blocks this stage.
    Use the ordinary TUN controls without legacy Prepare or Confirm:
 
    ```bash
@@ -1397,7 +1398,7 @@ never adopted.
    ```
 
    Near the end, after the stop/restore case, `collect` prints one line asking
-   you to quit the installed 50028 Clash for Mac. Quit it with Quit Clash for
+   you to quit the installed active GA Clash for Mac. Quit it with Quit Clash for
    Mac (⌘Q) in its app menu or Quit in its menu bar menu. Never quit it from
    the Dock, AppleScript or Activity Monitor, and never with the macOS Force
    Quit window (Option-Command-Esc). The product's graceful shutdown, which
@@ -1685,7 +1686,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 50028. No updater key, Apple notarization key, local private key, or older
+the active GA build. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
@@ -1717,10 +1718,10 @@ Tauri; neither the password nor a caller-selected key/signer path enters argv.
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
 receipt are sealed and atomically published as
-`target/candidates/0.5.0/ga/50028/packages/updater/vVERSION/`. The DMG, accepted result,
+`target/candidates/0.5.0/ga/$CFW_GA_BUILD/packages/updater/vVERSION/`. The DMG, accepted result,
 normalized log, private Gatekeeper evidence, submission receipt, and artifact
 manifest are sealed and atomically published for release operations as
-`target/candidates/0.5.0/ga/50028/packages/dmg/vVERSION/`. The canonical seals bind exact
+`target/candidates/0.5.0/ga/$CFW_GA_BUILD/packages/dmg/vVERSION/`. The canonical seals bind exact
 names, sizes, SHA-256 values, version/build/source identity, official URL, and
 verification result. Each component seal also binds the exact
 `Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
@@ -1745,7 +1746,7 @@ scripts/release_publication_gate.sh --upload-assets 0.5.0
 ```
 
 The atomic
-`ga/50028/packages/distribution/vVERSION/distribution-set.seal.json` joins the
+`ga/$CFW_GA_BUILD/packages/distribution/vVERSION/distribution-set.seal.json` joins the
 same signed app and app manifest to both package seals and every DMG/updater
 asset. It also binds the complete publication-evidence tree and records direct
 digests for the sealed outer Evidence Manifest, machine closure, inventory,

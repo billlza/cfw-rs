@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../verify_release_app.sh
 source "$repo_root/scripts/verify_release_app.sh"
@@ -10,7 +12,7 @@ tombstone_test_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-tombstone-provenance.XXXXX
 tombstone_test_root="$(cd "$tombstone_test_root" && pwd -P)"
 trap '/bin/rm -rf "$tombstone_test_root"' EXIT
 fixture_repository="$tombstone_test_root/repository"
-fixture_ga_root="$fixture_repository/target/candidates/0.5.0/ga/50028"
+fixture_ga_root="$fixture_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
 pre_sign_products="$fixture_ga_root/native-products"
 transactions_root="$fixture_ga_root/transactions"
 attempts_root="$transactions_root/signing-attempts"
@@ -45,7 +47,7 @@ done
   "$repo_root/crates/cfw-legacy-tombstone/Cargo.toml" \
   "$fixture_repository/crates/cfw-legacy-tombstone/Cargo.toml"
 /bin/cp "$repo_root/Cargo.lock" "$fixture_repository/Cargo.lock"
-"$python_bin" -I -S -B -W error - "$embedded_app" <<'PY'
+"$python_bin" -I -S -B -W error - "$embedded_app" "$CFW_GA_BUILD" <<'PY'
 import plistlib
 import sys
 from pathlib import Path
@@ -53,7 +55,7 @@ from pathlib import Path
 app = Path(sys.argv[1])
 identity = {
     "CFBundleShortVersionString": "0.5.0",
-    "CFBundleVersion": "50028",
+    "CFBundleVersion": sys.argv[2],
 }
 for relative in (
     "Contents/Info.plist",
@@ -109,7 +111,7 @@ cfw_run_release_python_script \
   --output "$pre_sign_products/CFWLegacyTombstone.manifest.json" \
   --metadata "artifactKind=legacy-service-tombstone-v1" \
   --metadata "architecture=arm64" \
-  --metadata "buildNumber=50028" \
+  --metadata "buildNumber=$CFW_GA_BUILD" \
   --metadata "deploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
   --metadata "signingMode=pre-sign" \
   --metadata "rustVersion=$RUST_VERSION" \
@@ -130,7 +132,7 @@ verify_tombstone_provenance_fixture() {
   cfw_run_release_python_script \
     "$repo_root" "$repo_root/scripts/verify_legacy_tombstone_provenance.py" \
     --repository "$fixture_repository" \
-    --build-number 50028 \
+    --build-number "$CFW_GA_BUILD" \
     --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
     --rust-version "$RUST_VERSION" \
     --pre-sign-artifact "$pre_sign_root" \

@@ -450,7 +450,8 @@ def release_test_source_changes(
 # Explicit post-freeze validation/provenance adapter surfaces. Application
 # runtime and native implementation sources, dependency locks/pins, and signing
 # inputs remain outside this set. The Rust build adapter admits hosted Xcode
-# only for unsigned build 40000; its GA context still rejects all overrides.
+# only for the unsigned validation builds 40000 and 50000; its GA context
+# still rejects all overrides.
 # Receipt v5 retains every changed path and both source identities.
 CI_VALIDATION_SOURCE_PATHS = frozenset({
     "apps/cfw-tauri-shell/build.rs",

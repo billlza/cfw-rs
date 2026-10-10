@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import plistlib
 import re
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -33,10 +34,18 @@ from scripts.release_build_identity import (
     ga_signing_attempt_output_root,
     load_active_ga_build,
 )
-from scripts.tests.release_identity_fixture import noncanonical
+from scripts.tests.release_identity_fixture import (
+    NEXT_GA_BUILD,
+    noncanonical,
+    retired_ga_builds,
+)
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+# The signed builder derives CFW_BUILD_NUMBER from the release identity
+# between these two lines, before it creates any candidate directory.
+SIGNED_BUILDER_DERIVATION_START = 'active_ga_build="$(PYTHONDONTWRITEBYTECODE=1 '
+SIGNED_BUILDER_DERIVATION_END = 'export CFW_BUILD_NUMBER="$active_ga_build"'
 
 
 class ReleaseIdentityFileTests(unittest.TestCase):
@@ -541,21 +550,164 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         for operation_mapping in operation_mappings:
             self.assertEqual(source.count(operation_mapping), 1)
 
-        build_admission = (
-            "    if sys.argv[2] != ACTIVE_RELEASE_IDENTITY.ga_build:\n"
-            "        raise BuildIdentityError(\n"
-        )
-        self.assertEqual(source.count(build_admission), 1)
-        admission = source.index(build_admission)
+        self.assertEqual(source.count(SIGNED_BUILDER_DERIVATION_START), 1)
+        self.assertEqual(source.count(SIGNED_BUILDER_DERIVATION_END), 1)
+        derivation_start = source.index(SIGNED_BUILDER_DERIVATION_START)
+        derivation_end = source.index(SIGNED_BUILDER_DERIVATION_END)
         preflight_assignment = source.index(
             'preflight_root="$candidate_base/ga-preflight/$CFW_BUILD_NUMBER"'
         )
         candidate_parent_creation = source.index('mkdir -p "$parent"')
         preflight_creation = source.index('mkdir -m 0700 "$preflight_root"')
 
-        self.assertLess(admission, preflight_assignment)
-        self.assertLess(admission, candidate_parent_creation)
-        self.assertLess(admission, preflight_creation)
+        self.assertLess(derivation_start, derivation_end)
+        self.assertLess(derivation_end, preflight_assignment)
+        self.assertLess(derivation_end, candidate_parent_creation)
+        self.assertLess(derivation_end, preflight_creation)
+
+    def run_signed_builder_derivation(
+        self, preset: str | None, identity_repository: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Runs the signed builder's build derivation with an optional preset."""
+
+        repository = Path(__file__).resolve().parents[2]
+        source = (repository / "scripts/build_signed_candidate.sh").read_text(
+            encoding="utf-8"
+        )
+        die_start = source.index("die() {\n")
+        die_end = source.index("\n}\n", die_start) + len("\n}\n")
+        start = source.index(SIGNED_BUILDER_DERIVATION_START)
+        end = source.index(SIGNED_BUILDER_DERIVATION_END) + len(
+            SIGNED_BUILDER_DERIVATION_END
+        )
+        script = (
+            "set -euo pipefail\n"
+            'repo_root="$1"\npython_bin="$2"\n'
+            + source[die_start:die_end]
+            + source[start:end]
+            + "\n/usr/bin/printenv CFW_BUILD_NUMBER\n"
+        )
+        environment = {"PATH": "/usr/bin:/bin"}
+        if preset is not None:
+            environment["CFW_BUILD_NUMBER"] = preset
+        return subprocess.run(
+            [
+                "/bin/bash",
+                "-p",
+                "-c",
+                script,
+                "signed-builder-build",
+                str(identity_repository or repository),
+                sys.executable,
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    def test_signed_builder_derives_and_exports_the_active_build(self) -> None:
+        for preset in (None, GA_BUILD):
+            with self.subTest(preset=preset):
+                completed = self.run_signed_builder_derivation(preset)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout, f"{GA_BUILD}\n")
+                self.assertEqual(completed.stderr, "")
+
+    def test_signed_builder_refuses_a_preset_build_that_differs(self) -> None:
+        for preset in (
+            NEXT_GA_BUILD,
+            *retired_ga_builds(),
+            UNSIGNED_VALIDATION_BUILD,
+            noncanonical(GA_BUILD),
+            f"{GA_BUILD} ",
+            "",
+        ):
+            with self.subTest(preset=preset):
+                completed = self.run_signed_builder_derivation(preset)
+                self.assertEqual(completed.returncode, 1)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn(
+                    f"differs from the active GA build {GA_BUILD}", completed.stderr
+                )
+
+    def test_signed_builder_refuses_an_unreadable_release_identity(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            identity_repository = Path(directory).resolve()
+            scripts = identity_repository / "scripts"
+            scripts.mkdir()
+            for name in ("release_build_identity.py", "release_regular_file.py"):
+                (scripts / name).write_bytes((repository / "scripts" / name).read_bytes())
+            (scripts / "release_identity.env").write_bytes(
+                f"CFW_GA_BUILD={noncanonical(GA_BUILD)}\n".encode("ascii")
+            )
+            completed = self.run_signed_builder_derivation(None, identity_repository)
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("not one canonical CFW_GA_BUILD record", completed.stderr)
+        self.assertIn(
+            "cannot read the active GA build from scripts/release_identity.env",
+            completed.stderr,
+        )
+
+    def run_signing_helper(
+        self, inherited_build: str | None
+    ) -> subprocess.CompletedProcess[str]:
+        """Runs the signing helper until its first refusal."""
+
+        repository = Path(__file__).resolve().parents[2]
+        environment = dict(os.environ)
+        environment.pop("CFW_BUILD_NUMBER", None)
+        environment.update(
+            {
+                "CFW_SIGNING_ATTEMPT_WORK": "/nonexistent/cfm-signing-attempt-work",
+                "CFW_SIGNING_CERTIFICATE_SHA1": "A" * 40,
+                "CFW_SIGNING_CERTIFICATE_SHA256": "B" * 64,
+            }
+        )
+        if inherited_build is not None:
+            environment["CFW_BUILD_NUMBER"] = inherited_build
+        return subprocess.run(
+            [
+                "/bin/bash",
+                "-p",
+                str(repository / "scripts/run_ga_signing_attempt.sh"),
+                "--transaction-owned",
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    def test_signing_helper_requires_the_build_its_builder_exported(self) -> None:
+        # The build check precedes the production environment seal, which
+        # the hosted unsigned-validation role refuses next.
+        accepted = self.run_signing_helper(GA_BUILD)
+        self.assertEqual(accepted.returncode, 1)
+        self.assertNotIn("inherited CFW_BUILD_NUMBER", accepted.stderr)
+        if "CFW_UNSIGNED_VALIDATION_PYTHON" in os.environ:
+            self.assertIn(
+                "refuses an unsigned-validation Python selection", accepted.stderr
+            )
+        else:
+            self.assertIn(
+                "transaction work root is not a real directory", accepted.stderr
+            )
+        for inherited in (None, "", NEXT_GA_BUILD, noncanonical(GA_BUILD)):
+            with self.subTest(inherited=inherited):
+                refused = self.run_signing_helper(inherited)
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn(
+                    "inherited CFW_BUILD_NUMBER is not the active GA build "
+                    f"{GA_BUILD}",
+                    refused.stderr,
+                )
+                self.assertNotIn("transaction work root", refused.stderr)
+                self.assertNotIn("unsigned-validation", refused.stderr)
 
     def test_candidate_native_output_accepts_only_exact_build_roots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

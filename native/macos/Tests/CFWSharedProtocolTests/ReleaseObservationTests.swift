@@ -5,19 +5,19 @@ import Testing
 
 @Suite("Release observation")
 struct ReleaseObservationTests {
-  @Test("release observation requires its explicit version and build")
-  func fixedReleaseIdentity() throws {
-    let candidate = try ReleaseObservationCandidate(version: "0.5.0", buildNumber: "50028")
-    #expect(candidate.version == "0.5.0")
-    #expect(candidate.buildNumber == "50028")
+  @Test("release observation admits the current or 0.4.0 version with any canonical build")
+  func releaseObservationVersions() throws {
+    let version = ReleaseObservationCandidate.releaseProductVersion
+    for build in ["1", "70001", "999999999999999999"] {
+      let candidate = try ReleaseObservationCandidate(version: version, buildNumber: build)
+      #expect(candidate.version == version)
+      #expect(candidate.buildNumber == build)
+    }
     for (version, build) in [
-      ("0.5.0", "40073"), ("0.5.0", "50001"), ("0.5.0", "50002"), ("0.5.0", "50003"),
-      ("0.5.0", "50004"), ("0.5.0", "50005"), ("0.5.0", "50007"), ("0.5.0", "50008"),
-      ("0.5.0", "50009"), ("0.5.0", "50012"), ("0.5.0", "50013"), ("0.5.0", "50014"),
-      ("0.5.0", "50015"), ("0.5.0", "50016"),
-      ("0.5.0", "50017"), ("0.5.0", "50018"), ("0.5.0", "50019"), ("0.5.0", "50025"),
-      ("0.5.0", "50026"), ("0.5.0", "50027"), ("0.5.0", "50029"), ("0.5.1", "50028"),
-      ("0.5.0", "050028"), ("0.5.0", "５００１１"),
+      ("0.5.1", "70001"), ("0.4.1", "70001"), ("0.5.0-preview", "70001"), ("", "70001"),
+      (version, ""), (version, "070001"), (version, "0"), (version, "+70001"),
+      (version, "70001 "), (version, "1000000000000000000"), (version, "７０００１"),
+      (version, "7٠٠٠1"),
     ] {
       #expect(throws: ReleaseObservationError.invalidCandidate) {
         _ = try ReleaseObservationCandidate(version: version, buildNumber: build)

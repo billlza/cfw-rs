@@ -2,7 +2,8 @@
 
 > **Superseded on 2026-10-07.** Build 40073 was retired unpublished and the
 > v0.4.0 allocation ledger is closed. The policy below continues to govern the
-> 0.5.0 release with the active identity 0.5.0/50028; see
+> 0.5.0 release, whose active GA build is the one named by
+> [`scripts/release_identity.env`](../../scripts/release_identity.env); see
 > [`ga-identity-plan-v050.md`](ga-identity-plan-v050.md),
 > [`ga-build-40073-retirement.md`](ga-build-40073-retirement.md),
 > [`ga-build-50026-retirement.md`](ga-build-50026-retirement.md) and
@@ -515,8 +516,9 @@ retains the frozen product source and separately records the actual tested
 commit. A different tested commit is admitted only when both complete immutable
 Git trees differ solely in regular files under `scripts/tests/` or the explicit
 `CI_VALIDATION_SOURCE_PATHS` validation/provenance adapter list. The Rust build
-adapter accepts a selected hosted Xcode only for unsigned build 40000 and rejects
-every validation override in the GA pre-sign context. Application runtime and
+adapter accepts a selected hosted Xcode only for the unsigned validation builds
+40000 and 50000 and rejects every validation override in the GA pre-sign
+context. Application runtime and
 native implementation sources, dependency locks and version pins, signing/provisioning inputs,
 their modes and unclassified changes remain rejected. The actual tested workflow
 is re-read from its own immutable Git commit, separately from the artifact's

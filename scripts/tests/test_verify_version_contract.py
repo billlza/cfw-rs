@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 from scripts import verify_version_contract as contract
 from scripts.dormant_app_install import ACTIVE_PREDECESSOR
-from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.release_build_identity import (
+    ACTIVE_RELEASE_IDENTITY,
+    UNSIGNED_VALIDATION_BUILD,
+)
 from scripts.verify_version_contract import (
     EXPECTED_BUILD,
     EXPECTED_VERSION,
@@ -29,7 +32,6 @@ PREDECESSOR_BUILD = ACTIVE_PREDECESSOR.build_number
 class VersionContractTests(unittest.TestCase):
     def make_repository(self, root: Path) -> None:
         version = EXPECTED_VERSION
-        build = EXPECTED_BUILD
         (root / "apps/cfw-tauri-shell").mkdir(parents=True)
         (root / "native/macos/Config").mkdir(parents=True)
         (root / "crates").mkdir()
@@ -59,7 +61,7 @@ class VersionContractTests(unittest.TestCase):
         )
         (root / "native/macos/project.yml").write_text(
             f"settings:\n  base:\n    MARKETING_VERSION: {version}\n"
-            f"    CFW_BUILD_NUMBER: {build}\n"
+            f"    CFW_BUILD_NUMBER: {UNSIGNED_VALIDATION_BUILD}\n"
             "    CURRENT_PROJECT_VERSION: $(CFW_BUILD_NUMBER)\n",
             encoding="utf-8",
         )
@@ -74,12 +76,11 @@ class VersionContractTests(unittest.TestCase):
         )
         admission = root / "apps/cfw-tauri-shell/src/legacy/admission.rs"
         admission.parent.mkdir(parents=True)
-        admission.write_text(f'const RELEASE_VERSION: &str = "{version}";\nconst RELEASE_BUILD: &str = "{build}";\n')
+        admission.write_text(f'const RELEASE_VERSION: &str = "{version}";\n')
         observation = root / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
         observation.parent.mkdir(parents=True)
         observation.write_text(
-            f'  static let releaseProductVersion = "{version}"\n'
-            f'  static let releaseBuildNumber = "{build}"\n', encoding="utf-8",
+            f'  static let releaseProductVersion = "{version}"\n', encoding="utf-8"
         )
 
     def test_complete_contract_passes(self) -> None:
@@ -98,13 +99,15 @@ class VersionContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Tauri version"):
                 verify(repository)
 
-    def test_runtime_admission_must_match_the_release_build(self) -> None:
+    def test_runtime_admission_must_match_the_release_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
             self.make_repository(repository)
             source = repository / "apps/cfw-tauri-shell/src/legacy/admission.rs"
-            source.write_text(source.read_text().replace(GA_BUILD, PREDECESSOR_BUILD))
-            with self.assertRaisesRegex(ValueError, "runtime migration admission RELEASE_BUILD"):
+            source.write_text(source.read_text().replace(EXPECTED_VERSION, "0.4.0"))
+            with self.assertRaisesRegex(
+                ValueError, "runtime migration admission RELEASE_VERSION"
+            ):
                 verify(repository)
 
     def test_release_identity_remains_frozen(self) -> None:
@@ -112,15 +115,22 @@ class VersionContractTests(unittest.TestCase):
             (EXPECTED_VERSION, EXPECTED_BUILD),
             (ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build),
         )
-        # The installed predecessor shares the product version; a tree
-        # still carrying its build number is not the release.
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            self.make_repository(repository)
-            project = repository / "native/macos/project.yml"
-            project.write_text(project.read_text().replace(GA_BUILD, PREDECESSOR_BUILD))
-            with self.assertRaisesRegex(ValueError, "Xcode build differs from the fixed release identity"):
-                verify(repository)
+
+    def test_xcode_default_build_is_the_unsigned_validation_build(self) -> None:
+        # Candidate builders pass CFW_BUILD_NUMBER explicitly; the project
+        # default serves local unsigned validation and never names a GA build.
+        for build in (GA_BUILD, PREDECESSOR_BUILD, NEXT_GA_BUILD, *retired_ga_builds()):
+            with self.subTest(build=build), tempfile.TemporaryDirectory() as temporary:
+                repository = Path(temporary)
+                self.make_repository(repository)
+                project = repository / "native/macos/project.yml"
+                project.write_text(
+                    project.read_text().replace(UNSIGNED_VALIDATION_BUILD, build)
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "default must be the unsigned validation build"
+                ):
+                    verify(repository)
 
     def test_controller_version_is_included(self) -> None:
         self.assertIn("cfw-controller", PRODUCT_PACKAGES)
@@ -172,36 +182,38 @@ class VersionContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "workspace package version"):
                 verify(repository)
 
-    def test_release_build_is_exact_and_canonical(self) -> None:
+    def test_xcode_default_build_is_exact_and_canonical(self) -> None:
         for build in (
             "40073",
-            PREDECESSOR_BUILD,
-            *retired_ga_builds(),
-            NEXT_GA_BUILD,
-            noncanonical(GA_BUILD),
-            GA_BUILD[:-1],
-            f"+{GA_BUILD}",
-            f"{GA_BUILD}a",
+            noncanonical(UNSIGNED_VALIDATION_BUILD),
+            UNSIGNED_VALIDATION_BUILD[:-1],
+            f"+{UNSIGNED_VALIDATION_BUILD}",
+            f"{UNSIGNED_VALIDATION_BUILD}a",
         ):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository)
                 project = repository / "native/macos/project.yml"
-                project.write_text(project.read_text().replace(GA_BUILD, build))
-                with self.assertRaisesRegex(ValueError, "fixed release identity|canonical positive"):
+                project.write_text(
+                    project.read_text().replace(UNSIGNED_VALIDATION_BUILD, build)
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "unsigned validation build|canonical positive"
+                ):
                     verify(repository)
 
-    def test_observation_identity_is_checked(self) -> None:
-        for original, replacement in ((GA_BUILD, PREDECESSOR_BUILD), ("0.5.0", "0.4.0")):
-            with self.subTest(original=original), tempfile.TemporaryDirectory() as temporary:
-                repository = Path(temporary)
-                self.make_repository(repository)
-                observation = (
-                    repository / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
-                )
-                observation.write_text(observation.read_text().replace(original, replacement))
-                with self.assertRaisesRegex(ValueError, "native release observation"):
-                    verify(repository)
+    def test_observation_version_is_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            self.make_repository(repository)
+            observation = (
+                repository / "native/macos/Sources/CFWSharedProtocol/ReleaseObservation.swift"
+            )
+            observation.write_text(observation.read_text().replace(EXPECTED_VERSION, "0.4.0"))
+            with self.assertRaisesRegex(
+                ValueError, "native release observation releaseProductVersion"
+            ):
+                verify(repository)
 
     def test_every_version_surface_is_checked(self) -> None:
         for relative, old, new, error in (

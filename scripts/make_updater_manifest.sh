@@ -106,6 +106,8 @@ require_regular_file() {
 
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_identity.env
+source "$repo_root/scripts/release_identity.env"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/release_publication_gate.sh
@@ -150,7 +152,7 @@ assert_semver() {
   die "updater release creation requires Apple Silicon macOS"
 cfw_verify_tauri_toolchain_tree "$artifact_repository" "$toolchain_root"
 
-readonly ga_root="$artifact_repository/target/candidates/0.5.0/ga/50028"
+readonly ga_root="$artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
 readonly app_path="$ga_root/signed/Clash for Mac.app"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "app bundle not found or is a symlink: $app_path"
 app_directory="$(dirname "$app_path")"
@@ -165,8 +167,8 @@ version="$bundle_version"
 assert_semver "$version"
 build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist" 2>/dev/null)" ||
   die "cannot read CFBundleVersion"
-[[ "$version" == "0.5.0" && "$build_number" == "50028" ]] ||
-  die "signed app is not the active GA 0.5.0/50028 identity"
+[[ "$version" == "0.5.0" && "$build_number" == "$CFW_GA_BUILD" ]] ||
+  die "signed app is not the active GA 0.5.0/$CFW_GA_BUILD identity"
 
 native_products_root="$(release_native_products_root_for_app "$app_path")" ||
   die "cannot resolve candidate-specific native products"

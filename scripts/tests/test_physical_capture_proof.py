@@ -12,6 +12,10 @@ from scripts.physical_capture.proof import (
     build_proof_material,
 )
 from scripts.tests.test_physical_collector_request import _candidate, _runner
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 class PhysicalCaptureProofTests(unittest.TestCase):
@@ -21,7 +25,7 @@ class PhysicalCaptureProofTests(unittest.TestCase):
         self.runner = _runner()
         self.context = initialize_context(
             _candidate(),
-            run_id="run-50028-macos15",
+            run_id=f"run-{GA_BUILD}-macos15",
             clean_install_confirmed=True,
             runner=self.runner,
             observed_at=self.initialized_at,
@@ -42,7 +46,7 @@ class PhysicalCaptureProofTests(unittest.TestCase):
         self.assertEqual(material.proof, parse_proof_binding(material.proof))
         self.assertEqual(material.proof["schema_version"], 3)
         self.assertEqual(material.proof["run_nonce"], "d" * 64)
-        self.assertEqual(material.proof["candidate"]["build_number"], "50028")
+        self.assertEqual(material.proof["candidate"]["build_number"], GA_BUILD)
         self.assertNotIn("built_at", material.proof["candidate"])
         self.assertEqual(
             material.nonce_issued_at,

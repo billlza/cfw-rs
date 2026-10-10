@@ -20,16 +20,21 @@ from scripts.publication.durable_file import (
     DurabilityOutcomeUnknown,
     RootedDirectoryChanged,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 
-# The recorded predecessor is the installed 50025 with its real frozen tree
+# The recorded predecessor is the active predecessor with its real frozen tree
 # identity; the install journal is only readable against the exact supported
 # predecessor it names.
 PREVIOUS = install.AppIdentity(
-    "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
+    install.ACTIVE_PREDECESSOR.product_version,
+    install.ACTIVE_PREDECESSOR.build_number,
+    install.ACTIVE_PREDECESSOR.tree_sha256,
 )
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.5.0", "50028", "b" * 64),
+    app=install.AppIdentity(
+        ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build, "b" * 64
+    ),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -240,17 +245,21 @@ class GAAcceptanceJournalExportTests(unittest.TestCase):
     def test_another_supported_predecessor_cannot_authorize_the_current_ga_migration(self) -> None:
         # A second registry entry stands in for any other supported
         # predecessor: its completed journals are readable, but they are not
-        # the fixed 50025 -> 50028 migration the export binds.
-        other = install.PredecessorProfile("0.5.0", "50024", "f" * 64)
+        # the fixed active-predecessor -> active-GA migration the export binds.
+        other = install.PredecessorProfile(
+            PREVIOUS.version, str(int(PREVIOUS.build_number) - 1), "f" * 64
+        )
         registry = MappingProxyType(
             {**install.SUPPORTED_PREDECESSORS, other.build_number: other}
         )
         with patch.object(install, "SUPPORTED_PREDECESSORS", registry):
-            fixture = JournalExportFixture(
-                previous=install.AppIdentity(
-                    other.product_version, other.build_number, other.tree_sha256
+            # The journals were written by a release that replaced `other`.
+            with patch.object(install, "ACTIVE_PREDECESSOR", other):
+                fixture = JournalExportFixture(
+                    previous=install.AppIdentity(
+                        other.product_version, other.build_number, other.tree_sha256
+                    )
                 )
-            )
             self.addCleanup(fixture.cleanup)
             before = {
                 path.relative_to(fixture.source_parent): path.read_bytes()
@@ -888,7 +897,18 @@ class JournalExportSourceContractTests(unittest.TestCase):
                 journal_export.PREVIOUS_BUILD,
                 journal_export.GA_BUILD,
             ),
-            ("0.5.0", "50025", "50028"),
+            (
+                ACTIVE_RELEASE_IDENTITY.product_version,
+                install.ACTIVE_PREDECESSOR.build_number,
+                ACTIVE_RELEASE_IDENTITY.ga_build,
+            ),
+        )
+        self.assertEqual(
+            journal_export.MIGRATION_RELATIVE,
+            Path(
+                f"target/candidates/0.5.0/ga/{ACTIVE_RELEASE_IDENTITY.ga_build}/stage-inputs/"
+                "ga-acceptance/migration-journals"
+            ),
         )
         self.assertEqual(
             journal_export.ENVIRONMENT_RELATIVE,

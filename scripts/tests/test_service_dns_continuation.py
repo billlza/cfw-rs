@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import json
 import os
 import unittest
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 from scripts import current_service_transaction as service
 from scripts import dormant_app_install as install
-from test_current_service_transaction import CANDIDATE, GA_ENVIRONMENT, ServiceFixture, guard
+from test_current_service_transaction import CANDIDATE, GA_ENVIRONMENT, PREVIOUS, ServiceFixture, guard
 from test_ga_acceptance_journal_export import JournalExportFixture, ENVIRONMENT, guard as export_guard
 
 
@@ -17,9 +18,7 @@ class DNSContinuationTests(unittest.TestCase):
         self.fixture = ServiceFixture()
         self.paths = self.fixture.paths
         self.transaction = self.fixture.transaction
-        self.previous = install.AppIdentity(
-            "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
-        )
+        self.previous = PREVIOUS
         self.old = guard()
         self.new = {**self.old, "dns_sha256": "a" * 64}
         with service.ServiceEventStore(self.paths) as store, store.locked():
@@ -125,7 +124,7 @@ class DNSContinuationTests(unittest.TestCase):
 
     def test_changed_application_identity_cannot_create_continuation(self) -> None:
         self.fixture.runtime.guards = [self.new]
-        foreign = install.AppIdentity("0.5.0", "50025", "f" * 64)
+        foreign = replace(PREVIOUS, tree_sha256="f" * 64)
         with patch.object(self.transaction, "_identity_pair", return_value=(CANDIDATE, foreign)), self.assertRaises(install.InstallError) as error:
             self.transaction.continue_after_dns_change()
         self.assertEqual(error.exception.code, "service_identity_drift")

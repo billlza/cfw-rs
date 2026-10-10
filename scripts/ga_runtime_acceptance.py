@@ -4,13 +4,13 @@
 This module deliberately does not accept a caller-selected evidence path and it
 does not accept a list of boolean outcomes. Collection starts only after the
 existing dormant-install and current-service owners have closed their
-50025 -> 50028 journals. ``collect`` creates a durable CSPRNG challenge intent,
-owns every runtime command and packet byte, atomically publishes the exact
-raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore
-of a collection without published raw evidence; it never duplicates either
-installation state machine. ``resume-seal`` runs no runtime command: it only
-completes sealing of the collection whose raw tree was published after the
-proven restore. ``verify`` reopens every byte and journal.
+active-predecessor -> active-GA journals. ``collect`` creates a durable CSPRNG
+challenge intent, owns every runtime command and packet byte, atomically
+publishes the exact raw tree, and seals the adapter. ``recover`` owns only
+runtime shutdown/restore of a collection without published raw evidence; it
+never duplicates either installation state machine. ``resume-seal`` runs no
+runtime command: it only completes sealing of the collection whose raw tree was
+published after the proven restore. ``verify`` reopens every byte and journal.
 
 The larger physical/research harness remains assurance-only.  GA acceptance
 reuses the signed Host's authenticated Packet control and the source-pinned
@@ -214,7 +214,7 @@ PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
 
 PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 TO_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
-FROM_BUILD: Final = "50025"
+FROM_BUILD: Final = dormant_app_install.ACTIVE_PREDECESSOR.build_number
 TEAM_ID: Final = "YKUPL7Z869"
 APP_BUNDLE_ID: Final = "com.bill.clashformac"
 PACKET_EXTENSION_BUNDLE_ID: Final = "com.bill.clashformac.packet-tunnel"
@@ -372,7 +372,7 @@ PACKET_HOST_SCHEMA_VERSION: Final = 5
 # keeps this request as the instruction that was issued: no quit control
 # leaves a receipt, so it cannot show which control ended the Host.
 OPERATOR_QUIT_INSTRUCTION: Final = (
-    "GA runtime collection is waiting for you to quit the installed 50028 Clash "
+    f"GA runtime collection is waiting for you to quit the installed {TO_BUILD} Clash "
     "for Mac with Quit Clash for Mac (⌘Q) in its app menu or Quit in its menu "
     "bar menu; do not quit it from the Dock, AppleScript or Activity Monitor, "
     "or with the macOS Force Quit window (Option-Command-Esc)"
@@ -539,9 +539,9 @@ def _require_fixed_paths(
 ) -> None:
     expected_acceptance, expected_raw = _fixed_paths(repository)
     if Path(acceptance_path).absolute() != expected_acceptance:
-        raise _error("GA runtime adapter path is not the fixed 50028 path")
+        raise _error(f"GA runtime adapter path is not the fixed {TO_BUILD} path")
     if Path(raw_evidence_root).absolute() != expected_raw:
-        raise _error("GA runtime raw-evidence path is not the fixed 50028 path")
+        raise _error(f"GA runtime raw-evidence path is not the fixed {TO_BUILD} path")
 
 
 def _strict_json(data: bytes, label: str) -> dict[str, Any]:
@@ -755,7 +755,9 @@ def _validate_expected(value: object) -> dict[str, Any]:
         or expected["from_build"] != FROM_BUILD
         or expected["to_build"] != TO_BUILD
     ):
-        raise _error("GA runtime expected identity or check set differs from 0.5.0/50028")
+        raise _error(
+            f"GA runtime expected identity or check set differs from {PRODUCT_VERSION}/{TO_BUILD}"
+        )
     for field in (
         "dmg_gatekeeper_sha256",
         "dmg_set_seal_sha256",
@@ -1091,11 +1093,13 @@ def _installed_candidate_tree(repository: Path, expected: dict[str, Any]) -> str
         or normalized["candidate"]["build_number"] != TO_BUILD
         or normalized["previous"]["build_number"] != FROM_BUILD
     ):
-        raise _error("GA install journal is not the completed 50025 to 50028 install")
+        raise _error(
+            f"GA install journal is not the completed {FROM_BUILD} to {TO_BUILD} install"
+        )
     try:
         installed = dormant_app_install.read_app_identity(INSTALLED_APP)
     except dormant_app_install.InstallError as error:
-        raise _error("installed 50028 application tree cannot be identified") from error
+        raise _error(f"installed {TO_BUILD} application tree cannot be identified") from error
     if installed.document() != normalized["candidate"]:
         raise _error("installed application bytes differ from the closed install journal")
     return installed.tree_sha256
@@ -1219,7 +1223,9 @@ def _validate_exact_dmg_install(
         or document["installed_app_tree_sha256"] != installed_tree
         or dmg_tree != installed_tree
     ):
-        raise _error("DMG-contained app and installed 50028 app are not the same tree")
+        raise _error(
+            f"DMG-contained app and installed {TO_BUILD} app are not the same tree"
+        )
     commands = require_exact_keys(
         document["commands"],
         {"dmg_gatekeeper", "dmg_set_verify"},
@@ -1273,7 +1279,9 @@ def _running_host_observation(value: object) -> list[dict[str, Any]]:
         item for item in processes if item["path"] == INSTALLED_EXECUTABLE.as_posix()
     ]
     if len(app_processes) != 1:
-        raise _error("raw process table does not contain exactly one installed 50028 Host")
+        raise _error(
+            f"raw process table does not contain exactly one installed {TO_BUILD} Host"
+        )
     return processes
 
 
@@ -1291,7 +1299,9 @@ def _host_absence_observation(value: object) -> list[dict[str, Any]]:
     if any(
         process["path"] == INSTALLED_EXECUTABLE.as_posix() for process in processes
     ):
-        raise _error("normal shutdown evidence still contains the installed 50028 Host")
+        raise _error(
+            f"normal shutdown evidence still contains the installed {TO_BUILD} Host"
+        )
     return processes
 
 
@@ -1303,10 +1313,10 @@ def _validate_launch(value: dict[str, Any]) -> None:
         document["launch_command"],
         expected_argv=["/usr/bin/open", "-a", INSTALLED_APP.as_posix()],
         expected_exit=0,
-        label="installed 50028 launch command",
+        label=f"installed {TO_BUILD} launch command",
     )
     if launch["stderr"]:
-        raise _error("installed 50028 launch command emitted an error")
+        raise _error(f"installed {TO_BUILD} launch command emitted an error")
     _running_host_observation(document["process_observation"])
 
 
@@ -1328,7 +1338,7 @@ def _require_launchctl_running(
     This is the same fixed job contract the release service transaction already
     proves in `current_service_transaction._registered_job_pid`, and it binds
     strictly more than an absolute path: the running executable is the one
-    inside the installed 50028 bundle, registered through ServiceManagement,
+    inside the installed active GA bundle, registered through ServiceManagement,
     and signed under the fixed team and service identifiers.
     """
 
@@ -1336,7 +1346,7 @@ def _require_launchctl_running(
         relative = program.relative_to(INSTALLED_APP)
     except ValueError as error:
         raise _error(
-            f"fixed {label} executable is outside the installed 50028 bundle"
+            f"fixed {label} executable is outside the installed {TO_BUILD} bundle"
         ) from error
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     required = (
@@ -1424,7 +1434,7 @@ def _validate_system_extension(value: dict[str, Any]) -> None:
         if registration.version == PACKET_EXTENSION_VERSION
     ]
     if len(candidates) != 1:
-        raise _error("raw system extension output lacks the fixed 50028 extension")
+        raise _error(f"raw system extension output lacks the fixed {TO_BUILD} extension")
     candidate = candidates[0]
     if not (
         candidate.enabled
@@ -2706,7 +2716,7 @@ class ProductionCollectorRuntime:
                 if waiting_for_operator and not announced_operator_boundary:
                     print(
                         "GA runtime collection is waiting for macOS approval and "
-                        "Tunnel mode in the installed 50028 dashboard",
+                        f"Tunnel mode in the installed {TO_BUILD} dashboard",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -4296,8 +4306,7 @@ def self_check() -> None:
     except OSError as error:
         raise _error("GA runtime collector source/build registry is unavailable") from error
     if (
-        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.5.0", "50025", "50028")
-        or (MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS)
+        (MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS)
         != (15 * 60, 30 * 60)
         or len(CHECKS) != 12
         or tuple(sorted(CHECKS)) != CHECKS
@@ -4322,22 +4331,22 @@ def self_check() -> None:
         )
         or ACCEPTANCE_RELATIVE
         != Path(
-            "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+            f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
             "runtime-acceptance.json"
         )
         or RAW_ROOT_RELATIVE
         != Path(
-            "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+            f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
             "runtime-evidence"
         )
         or ENVIRONMENT_RELATIVE
         != Path(
-            "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+            f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
             "migration-journals/service-transaction/environment.json"
         )
         or INSTALL_JOURNAL_RELATIVE
         != Path(
-            "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+            f"target/candidates/{PRODUCT_VERSION}/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
             "migration-journals/dormant-install.json"
         )
         or not stat.S_ISREG(runner_metadata.st_mode)

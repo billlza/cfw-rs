@@ -15,6 +15,9 @@ from scripts.hash_artifact import build_manifest
 from scripts.promote_signed_native_manifest import promote_manifest, SignedNativeManifestError
 
 
+GA_BUILD = identity.ACTIVE_RELEASE_IDENTITY.ga_build
+
+
 class UnsignedPreviewValidationTests(unittest.TestCase):
     def pair(self, repository: Path, *, build="50000", version="0.5.0"):
         native = identity.unsigned_preview_native_products_root(repository)
@@ -50,7 +53,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
         # native-products root and build.
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()
-            app, _native = self.pair(repository, build="50028")
+            app, _native = self.pair(repository, build=GA_BUILD)
             ga_native = identity.ga_pre_sign_native_products_root(repository)
             ga_native.mkdir(parents=True)
             with self.assertRaisesRegex(
@@ -62,7 +65,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                 )
 
     def test_new_context_refuses_wrong_or_mixed_component_identity(self):
-        for build, version in (("40000", "0.5.0"), ("50028", "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
+        for build, version in (("40000", "0.5.0"), (GA_BUILD, "0.5.0"), ("50013", "0.5.0"), ("50014", "0.5.0"), ("50015", "0.5.0"), ("50025", "0.5.0"), ("50000", "0.4.0")):
             with self.subTest(build=build, version=version), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary).resolve()
                 app, native = self.pair(repository, build=build, version=version)
@@ -81,7 +84,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             repository = Path(temporary).resolve()
             roots = {
                 "40000": repository / "target/candidates/0.5.0/unsigned/native-products",
-                "50028": identity.ga_pre_sign_native_products_root(repository),
+                GA_BUILD: identity.ga_pre_sign_native_products_root(repository),
                 "50000": identity.unsigned_preview_native_products_root(repository),
             }
             for build, expected in roots.items():
@@ -103,7 +106,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
             ("50015", "pre-sign", ui.NativeUiContext.RELEASE),
             ("50017", "pre-sign", ui.NativeUiContext.RELEASE),
             ("50018", "pre-sign", ui.NativeUiContext.RELEASE),
-            ("50028", "unsigned-validation", ui.NativeUiContext.RELEASE),
+            (GA_BUILD, "unsigned-validation", ui.NativeUiContext.RELEASE),
             ("50013", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50014", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
             ("50015", "unsigned-validation", ui.NativeUiContext.UNSIGNED_PREVIEW_VALIDATION),
@@ -117,8 +120,8 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                     ui.expected_metadata(Path("/never-read"), build, signing=signing, clean=False, context=context)
                 tool.assert_not_called()
         identity.require_native_product_build_mode("50000", "unsigned-validation")
-        identity.require_native_product_build_mode("50028", "pre-sign")
-        for build, mode in (("50000", "pre-sign"), ("50028", "developer-id")):
+        identity.require_native_product_build_mode(GA_BUILD, "pre-sign")
+        for build, mode in (("50000", "pre-sign"), (GA_BUILD, "developer-id")):
             with self.assertRaises(identity.BuildIdentityError):
                 identity.require_native_product_build_mode(build, mode)
 
@@ -142,7 +145,7 @@ class UnsignedPreviewValidationTests(unittest.TestCase):
                              {"CFW_UNSIGNED_VALIDATION_XCODE_VERSION": "27.0", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION": "27A266a"}):
                 with self.subTest(selector=selector), patch.dict(os.environ, selector, clear=True), patch.object(ui, "command") as tool:
                     with self.assertRaisesRegex(ui.NativeUiArtifactError, "refuses unsigned-validation"):
-                        ui.expected_metadata(repository, "50028", signing="pre-sign", clean=False,
+                        ui.expected_metadata(repository, GA_BUILD, signing="pre-sign", clean=False,
                                              context=ui.NativeUiContext.RELEASE)
                     tool.assert_not_called()
 

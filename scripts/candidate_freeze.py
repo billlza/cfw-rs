@@ -54,7 +54,9 @@ if __package__:
     from .verify_release_build_allocations import (
         ReleaseBuildAllocationError,
         CONTRACT_RELATIVE_PATH as LEDGER_RELATIVE_PATH,
-        validate_contract as validate_allocation_contract,
+        RETIREMENT_NOTES_RELATIVE,
+        supported_predecessors,
+        verify_source_bindings as verify_allocation_bindings,
     )
 else:
     from macos_durability import full_fsync
@@ -82,7 +84,9 @@ else:
     from verify_release_build_allocations import (
         ReleaseBuildAllocationError,
         CONTRACT_RELATIVE_PATH as LEDGER_RELATIVE_PATH,
-        validate_contract as validate_allocation_contract,
+        RETIREMENT_NOTES_RELATIVE,
+        supported_predecessors,
+        verify_source_bindings as verify_allocation_bindings,
     )
 
 
@@ -382,20 +386,13 @@ def _require_canonical_repository(repository: Path) -> Path:
 
 def _fixed_roots(repository: Path) -> tuple[Path, Path]:
     identity = ACTIVE_RELEASE_IDENTITY
-    if (
-        not isinstance(identity.product_version, str)
-        or not isinstance(identity.ga_build, str)
-        or identity.product_version != "0.5.0"
-        or identity.ga_build != "50028"
-    ):
-        raise CandidateFreezeError(
-            "active_release_identity_invalid",
-            "candidate freeze requires the fixed v0.5.0 build 50028 identity",
-        )
-    base = repository / "target/candidates/0.5.0"
+    base = repository / f"target/candidates/{identity.product_version}"
     preflight = ga_preflight_root(repository)
     frozen = ga_root(repository)
-    if preflight != base / "ga-preflight/50028" or frozen != base / "ga/50028":
+    if (
+        preflight != base / f"ga-preflight/{identity.ga_build}"
+        or frozen != base / f"ga/{identity.ga_build}"
+    ):
         raise CandidateFreezeError(
             "active_release_path_invalid",
             "candidate-freeze roots differ from the fixed active release identity",
@@ -1089,13 +1086,18 @@ def _expected_intent(
         repository / LEDGER_RELATIVE_PATH, label="release build allocation ledger"
     )
     try:
-        validate_allocation_contract(
-            ledger, expected_ga=ACTIVE_RELEASE_IDENTITY.ga_build
+        # The artifact repository's ledger, retirement notes and the install
+        # predecessor registry must agree before any build is signed.
+        verify_allocation_bindings(
+            ledger,
+            notes_directory=repository / RETIREMENT_NOTES_RELATIVE,
+            predecessors=supported_predecessors(),
         )
     except ReleaseBuildAllocationError as error:
         raise CandidateFreezeError(
             "allocation_ledger_invalid",
-            "release build allocation ledger is incompatible with the active GA identity",
+            "release build allocation ledger, its retirement notes or the install "
+            "predecessor registry disagree with the active GA identity",
         ) from error
     pre_sign = _tree_identity(root / "pre-sign")
     app = _tree_identity(root / "pre-sign/Clash for Mac.app")

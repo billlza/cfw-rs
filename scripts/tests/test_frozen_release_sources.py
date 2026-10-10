@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from scripts.release_build_identity import frozen_ga_repository
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, frozen_ga_repository
 from scripts.release_executor_source import (
     ExecutorSourceError,
     FrozenReleaseSources,
@@ -13,6 +13,9 @@ from scripts.release_executor_source import (
     require_frozen_sources_unchanged,
 )
 from scripts.repository_source_identity import SourceIdentityError
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 EXECUTOR_IDENTITY = {"repositoryCommit": "a" * 40, "releaseSourceSha256": "b" * 64}
@@ -42,7 +45,7 @@ class FrozenReleaseSourcesTests(unittest.TestCase):
 
     def test_fixed_artifact_repository_has_no_source_checkout_fallback(self) -> None:
         self.assertEqual(
-            self.artifact, self.executor / "target/release-worktrees/50028"
+            self.artifact, self.executor / f"target/release-worktrees/{GA_BUILD}"
         )
 
     def test_artifact_and_executor_keep_distinct_clean_identities(self) -> None:

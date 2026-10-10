@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import verify_version_contract as contract
+from scripts.dormant_app_install import ACTIVE_PREDECESSOR
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 from scripts.verify_version_contract import (
     EXPECTED_BUILD,
@@ -14,6 +15,15 @@ from scripts.verify_version_contract import (
     PRODUCT_PACKAGES,
     verify,
 )
+from scripts.tests.release_identity_fixture import (
+    NEXT_GA_BUILD,
+    noncanonical,
+    retired_ga_builds,
+)
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+PREDECESSOR_BUILD = ACTIVE_PREDECESSOR.build_number
 
 
 class VersionContractTests(unittest.TestCase):
@@ -93,23 +103,22 @@ class VersionContractTests(unittest.TestCase):
             repository = Path(temporary)
             self.make_repository(repository)
             source = repository / "apps/cfw-tauri-shell/src/legacy/admission.rs"
-            source.write_text(source.read_text().replace("50028", "50025"))
+            source.write_text(source.read_text().replace(GA_BUILD, PREDECESSOR_BUILD))
             with self.assertRaisesRegex(ValueError, "runtime migration admission RELEASE_BUILD"):
                 verify(repository)
 
     def test_release_identity_remains_frozen(self) -> None:
-        self.assertEqual((EXPECTED_VERSION, EXPECTED_BUILD), ("0.5.0", "50028"))
         self.assertEqual(
+            (EXPECTED_VERSION, EXPECTED_BUILD),
             (ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build),
-            ("0.5.0", "50028"),
         )
-        # The installed 50025 predecessor shares the product version; a tree
+        # The installed predecessor shares the product version; a tree
         # still carrying its build number is not the release.
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
             self.make_repository(repository)
             project = repository / "native/macos/project.yml"
-            project.write_text(project.read_text().replace("50028", "50025"))
+            project.write_text(project.read_text().replace(GA_BUILD, PREDECESSOR_BUILD))
             with self.assertRaisesRegex(ValueError, "Xcode build differs from the fixed release identity"):
                 verify(repository)
 
@@ -164,17 +173,26 @@ class VersionContractTests(unittest.TestCase):
                 verify(repository)
 
     def test_release_build_is_exact_and_canonical(self) -> None:
-        for build in ("40073", "50025", "50026", "50027", "50029", "050028", "5002", "+50028", "50028a"):
+        for build in (
+            "40073",
+            PREDECESSOR_BUILD,
+            *retired_ga_builds(),
+            NEXT_GA_BUILD,
+            noncanonical(GA_BUILD),
+            GA_BUILD[:-1],
+            f"+{GA_BUILD}",
+            f"{GA_BUILD}a",
+        ):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository)
                 project = repository / "native/macos/project.yml"
-                project.write_text(project.read_text().replace("50028", build))
+                project.write_text(project.read_text().replace(GA_BUILD, build))
                 with self.assertRaisesRegex(ValueError, "fixed release identity|canonical positive"):
                     verify(repository)
 
     def test_observation_identity_is_checked(self) -> None:
-        for original, replacement in (("50028", "50025"), ("0.5.0", "0.4.0")):
+        for original, replacement in ((GA_BUILD, PREDECESSOR_BUILD), ("0.5.0", "0.4.0")):
             with self.subTest(original=original), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)
                 self.make_repository(repository)
@@ -191,7 +209,7 @@ class VersionContractTests(unittest.TestCase):
             ("native/macos/project.yml", "0.5.0", "0.4.0", "MARKETING_VERSION"),
             ("CHANGELOG.md", "0.5.0", "0.4.0", "first changelog release"),
             ("native/macos/Config/ProxyAgent-Info.plist", "$(CURRENT_PROJECT_VERSION)",
-             "50028", "must inherit the canonical"),
+             GA_BUILD, "must inherit the canonical"),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
                 repository = Path(temporary)

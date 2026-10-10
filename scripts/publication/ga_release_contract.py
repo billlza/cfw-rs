@@ -5,7 +5,7 @@ The only production state transition is::
     prepackage -> ga-acceptance -> publication
 
 Each stage is derived by reopening every required input and validating the
-exact 50028 identity.  State mutation is owned by ``orchestrator``; this module
+exact active GA identity.  State mutation is owned by ``orchestrator``; this module
 only composes expected bytes and reopens immutable evidence.
 Assurance-only physical, performance, and capability-report evidence is kept
 outside this graph and can never satisfy a missing GA-required input.
@@ -334,24 +334,6 @@ def _validate_release_application(
     )
 
 
-def _verify_publication_adapter(repository: Path) -> None:
-    from . import release_contract
-
-    expected_app = _path(repository, SIGNED_APP)
-    expected_native = _path(repository, GA_NATIVE_PRODUCTS)
-    expected_evidence = _path(repository, PUBLICATION_INPUT_ROOT)
-    if (
-        release_contract.signed_app(repository) != expected_app
-        or release_contract.native_products_root(repository, GA_BUILD)
-        != expected_native
-        or release_contract.evidence_root(repository) != expected_evidence
-    ):
-        raise PublicationError(
-            "GA publication verifier adapter is not migrated to ga/50028; "
-            "legacy path fallback is forbidden"
-        )
-
-
 def _verified_legal_source_closure(
     repository: Path, app: Path, *, freeze_verifier: FreezeVerifier | None = None
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -359,10 +341,9 @@ def _verified_legal_source_closure(
         from .verify import verify_evidence as verify_publication_evidence
     except ImportError as error:
         raise PublicationError(
-            "GA publication verifier adapter cannot load after identity migration"
+            "GA publication verifier adapter cannot be imported"
         ) from error
 
-    _verify_publication_adapter(repository)
     root = _path(repository, PUBLICATION_INPUT_ROOT)
     try:
         verify_publication_evidence(
@@ -477,8 +458,6 @@ def _verified_prepackage_inputs(
     freeze_verifier: FreezeVerifier | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     repository = _canonical_repository(repository)
-    if (PRODUCT_VERSION, GA_BUILD) != ("0.5.0", "50028"):
-        raise PublicationError("prepackage requires the fixed v0.5.0/50028 identity")
     selected_freeze_verifier = (
         verify_frozen_candidate if freeze_verifier is None else freeze_verifier
     )
@@ -598,7 +577,9 @@ def _verified_prepackage_inputs(
         bundle_identity.product_version != PRODUCT_VERSION
         or bundle_identity.build_version != GA_BUILD
     ):
-        raise PublicationError("signed application is not exactly v0.5.0/50028")
+        raise PublicationError(
+            f"signed application is not exactly v{PRODUCT_VERSION}/{GA_BUILD}"
+        )
     environment = _release_environment(repository)
     _validate_release_application(repository, environment)
 
@@ -808,20 +789,13 @@ def _prepackage_files(
     }
 
 
-def _require_artifact_set_adapter(repository: Path):
+def _require_artifact_set_adapter():
     try:
         from scripts import release_artifact_set
     except ImportError as error:
         raise PublicationError(
-            "GA package verifier adapter cannot load after identity migration"
+            "GA package verifier adapter cannot be imported"
         ) from error
-
-    expected = _repo_relative(repository, _path(repository, SIGNED_APP))
-    if release_artifact_set.CANDIDATE_APP_RELATIVE != expected:
-        raise PublicationError(
-            "GA package verifier adapter is not migrated to ga/50028; "
-            "legacy package fallback is forbidden"
-        )
     return release_artifact_set
 
 
@@ -831,7 +805,7 @@ def _verified_package_sets(
     *,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
-    artifact_set = _require_artifact_set_adapter(repository)
+    artifact_set = _require_artifact_set_adapter()
     source = prepackage["bindings"]["source"]
     expected_source = {
         "repository_commit": source["repository_commit"],
@@ -1298,7 +1272,7 @@ def verify_prepackage_authorization(
     """Reopen prepackage and return the exact artifact-set binding schema."""
 
     repository = _canonical_repository(repository)
-    artifact_set = _require_artifact_set_adapter(repository)
+    artifact_set = _require_artifact_set_adapter()
     manifest_path = _path(repository, PREPACKAGE_OUTPUT) / "manifest.json"
     try:
         before = artifact_set._artifact_record(
@@ -1329,7 +1303,7 @@ def verify_publication_authorization(
     """Reopen the complete publication stage in artifact-set binding form."""
 
     repository = _canonical_repository(repository)
-    artifact_set = _require_artifact_set_adapter(repository)
+    artifact_set = _require_artifact_set_adapter()
     prepackage = verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
     publication = verify_stage(repository, "publication", freeze_verifier=freeze_verifier)
     try:
@@ -1384,11 +1358,7 @@ def derive_runtime_expectation(
 def self_check(repository: Path) -> None:
     repository = _canonical_source_repository(repository)
     if (
-        ACTIVE_RELEASE_IDENTITY.product_version != "0.5.0"
-        or ACTIVE_RELEASE_IDENTITY.ga_build != "50028"
-        or _path(repository, GA_ROOT)
-        != repository / "target/candidates/0.5.0/ga/50028"
-        or STAGES != ("prepackage", "ga-acceptance", "publication")
+        STAGES != ("prepackage", "ga-acceptance", "publication")
         or STAGE_SCHEMA_VERSIONS
         != {"prepackage": 3, "ga-acceptance": 3, "publication": 3}
         or ACCEPTANCE_INPUT_ROOT.parent != STAGE_INPUT_ROOT

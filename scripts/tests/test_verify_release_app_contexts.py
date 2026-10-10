@@ -9,6 +9,11 @@ import sys
 import tempfile
 import unittest
 
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 VERIFIER = REPOSITORY / "scripts/verify_release_app.sh"
@@ -29,7 +34,7 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
         )
 
     def test_signed_contexts_select_the_fixed_ga_version_and_preflight_paths(self) -> None:
-        preflight = "target/candidates/0.5.0/ga/50028"
+        preflight = f"target/candidates/0.5.0/ga/{GA_BUILD}"
         for context in ("signing-attempt-work", "signing-attempt-publish-ready", "canonical-native-content"):
             with self.subTest(context=context):
                 result = self.run_function(
@@ -40,7 +45,7 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.splitlines(), [
-                    "0.5.0", "50028", str(REPOSITORY / preflight / "profiles/signing-preflight.json"),
+                    "0.5.0", GA_BUILD, str(REPOSITORY / preflight / "profiles/signing-preflight.json"),
                     str(REPOSITORY / preflight / "native-products"),
                 ])
 

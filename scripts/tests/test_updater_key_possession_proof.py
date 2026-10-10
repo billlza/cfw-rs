@@ -23,6 +23,10 @@ from scripts.tests.test_release_artifact_transaction import (
     verified_cargo_fixture,
 )
 from scripts import updater_key_possession_proof as possession
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 SOURCE_IDENTITY = {
@@ -91,7 +95,7 @@ class PossessionFixture:
         tauri_config.write_bytes(TAURI_CONFIG_DATA)
         tauri_config.chmod(0o644)
         self.preflight_root = (
-            self.repository / "target/candidates/0.5.0/ga-preflight/50028"
+            self.repository / f"target/candidates/0.5.0/ga-preflight/{GA_BUILD}"
         )
         self.preflight_root.mkdir(parents=True, mode=0o700)
         self.preflight_root.chmod(0o700)
@@ -1212,7 +1216,7 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
 
     def test_frozen_root_verification_uses_the_same_proof(self) -> None:
         created = self.fixture.create()
-        frozen_root = self.fixture.repository / "target/candidates/0.5.0/ga/50028"
+        frozen_root = self.fixture.repository / f"target/candidates/0.5.0/ga/{GA_BUILD}"
         frozen_root.parent.mkdir(parents=True)
         self.fixture.preflight_root.rename(frozen_root)
 

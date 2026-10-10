@@ -27,6 +27,10 @@ from scripts.tests.test_release_artifact_transaction import (
     publisher,
     verified_cargo_fixture,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 class ReleaseVerifierCommandSessionTests(unittest.TestCase):
@@ -262,7 +266,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
         arguments = [
             str(Path(dmg.__file__)), command,
             "--repository", str(self.repository),
-            "--version", "0.5.0", "--build-number", "50028",
+            "--version", "0.5.0", "--build-number", GA_BUILD,
             "--notary-profile", NOTARY_PROFILE,
         ]
         if command == "start":
@@ -374,7 +378,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
 
     def test_dmg_preexisting_output_does_not_relabel_primary_failure(self) -> None:
         context = dmg.DmgContext(
-            repository=self.repository, version="0.5.0", build_number="50028",
+            repository=self.repository, version="0.5.0", build_number=GA_BUILD,
             notary_profile=NOTARY_PROFILE, source_identity=SOURCE_IDENTITY,
         )
         context.final_root.mkdir(parents=True)
@@ -387,7 +391,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
 
     def test_dmg_unreadable_new_publication_state_preserves_unknown(self) -> None:
         context = dmg.DmgContext(
-            repository=self.repository, version="0.5.0", build_number="50028",
+            repository=self.repository, version="0.5.0", build_number=GA_BUILD,
             notary_profile=NOTARY_PROFILE, source_identity=SOURCE_IDENTITY,
         )
         primary = artifacts.ArtifactSetError("post-publication verification failed")

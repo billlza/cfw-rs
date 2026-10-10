@@ -18,12 +18,14 @@ from scripts import candidate_freeze
 from scripts import github_hosted_ci_receipt as hosted_ci_receipt
 from scripts.publication import durable_file
 from scripts.publication import ga_release_contract as contract
+from scripts.publication import release_contract
 from scripts.publication.common import (
     PublicationError,
     canonical_json,
     sha256_bytes,
     sha256_file,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 from scripts.release_executor_source import (
     ExecutorSource,
     FrozenReleaseSources,
@@ -68,7 +70,6 @@ from scripts.publication.ga_release_contract import (
     _verified_migration_journals,
     _verified_prepackage_inputs,
     _verified_runtime_acceptance_adapter,
-    _verify_publication_adapter,
     derive_runtime_expectation,
     self_check,
     verify_stage,
@@ -222,11 +223,14 @@ class StageFixture:
 
 class ProductionStageIdentityTests(unittest.TestCase):
     def test_contract_is_one_ga_root_and_three_ordered_stages(self) -> None:
-        self.assertEqual((PRODUCT_VERSION, GA_BUILD), ("0.5.0", "50028"))
+        self.assertEqual(
+            (PRODUCT_VERSION, GA_BUILD),
+            (ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build),
+        )
         self.assertEqual(GA_APP_ARTIFACT_KIND, "notarized-ga-candidate-v1")
         self.assertEqual(
             GA_ROOT,
-            Path("target/candidates/0.5.0/ga/50028"),
+            Path(f"target/candidates/0.5.0/ga/{GA_BUILD}"),
         )
         self.assertEqual(STAGES, ("prepackage", "ga-acceptance", "publication"))
         self.assertEqual(SIGNED_APP, GA_ROOT / "signed/Clash for Mac.app")
@@ -767,7 +771,7 @@ class AdapterContractTests(unittest.TestCase):
         }
         for repository in (
             self.fixture.repository,
-            self.fixture.repository / "target/release-worktrees/50028",
+            self.fixture.repository / f"target/release-worktrees/{GA_BUILD}",
         ):
             with self.subTest(repository=repository):
                 self.assertEqual(
@@ -1028,17 +1032,28 @@ class AdapterContractTests(unittest.TestCase):
         called["validate_notary_files"].assert_not_called()
 
     def test_package_adapter_uses_the_fixed_ga_candidate_contract(self) -> None:
-        adapter = _require_artifact_set_adapter(self.fixture.repository)
+        adapter = _require_artifact_set_adapter()
 
         self.assertEqual(
             adapter.CANDIDATE_APP_RELATIVE,
-            "target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app",
+            f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app",
         )
         self.assertTrue(callable(adapter.verify_dmg_set))
         self.assertTrue(callable(adapter.verify_updater_set))
 
-    def test_publication_adapter_uses_the_fixed_ga_stage_inputs(self) -> None:
-        _verify_publication_adapter(self.fixture.repository)
+    def test_publication_verifier_and_stage_contract_share_the_ga_paths(self) -> None:
+        repository = self.fixture.repository
+        self.assertEqual(
+            release_contract.signed_app(repository), repository.joinpath(*SIGNED_APP.parts)
+        )
+        self.assertEqual(
+            release_contract.native_products_root(repository, GA_BUILD),
+            repository.joinpath(*GA_NATIVE_PRODUCTS.parts),
+        )
+        self.assertEqual(
+            release_contract.evidence_root(repository),
+            repository.joinpath(*contract.PUBLICATION_INPUT_ROOT.parts),
+        )
 
     def test_signing_notarization_binding_rejects_every_identity_drift(self) -> None:
         transformation = {
@@ -1197,7 +1212,7 @@ class AdapterContractTests(unittest.TestCase):
     def test_acceptance_binds_prepackage_journals_and_trusted_runtime_result(self) -> None:
         install = {
             "candidate": {
-                "build_number": "50028",
+                "build_number": GA_BUILD,
                 "manifest_sha256": "1" * 64,
                 "release_source_sha256": "2" * 64,
                 "repository_commit": "3" * 40,
@@ -1383,7 +1398,7 @@ class MigrationJournalContractIntegrationTests(unittest.TestCase):
         fixture = StageFixture()
         self.addCleanup(fixture.cleanup)
         expected_candidate = {
-            "build_number": "50028",
+            "build_number": GA_BUILD,
             "manifest_sha256": "1" * 64,
             "release_source_sha256": "2" * 64,
             "repository_commit": "3" * 40,

@@ -99,11 +99,15 @@ from scripts.tests.release_app_verifier_fixture import (
     complete_verifier_stderr,
     complete_verifier_stdout,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 APP_MANIFEST = "a" * 64
 SIGNED_TREE = "b" * 64
-BUILD_NUMBER = "50028"
+BUILD_NUMBER = GA_BUILD
 BUILT_AT = "2026-07-01T00:00:00Z"
 CAPTURED_AT = "2026-07-27T12:00:00Z"
 PERFORMANCE_COMPLETED_AT = "2026-07-27T15:20:00Z"
@@ -2323,7 +2327,7 @@ class PhysicalEvidenceFixture:
         identity_finished = identity_started + timedelta(seconds=1)
         identity_app = (
             "/fixture/repository/"
-            "target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
+            f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
         )
         identity_stdout_bytes = complete_verifier_stdout(identity_app)
         identity_stderr_bytes = complete_verifier_stderr(identity_app)

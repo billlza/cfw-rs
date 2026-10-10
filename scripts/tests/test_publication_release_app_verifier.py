@@ -12,18 +12,21 @@ from scripts.publication.bounded_process import BoundedProcessError
 from scripts.publication.common import PublicationError
 from scripts.publication import ga_release_contract, preparer
 from scripts.publication.release_app_verifier import verify_release_app
-from scripts.release_build_identity import ga_root
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
 from scripts.tests.release_app_verifier_fixture import (
     complete_verifier_stderr,
     complete_verifier_stdout,
 )
 
 
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+
+
 REPOSITORY = Path("/private/tmp/release")
-APP = REPOSITORY / "target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
+APP = REPOSITORY / f"target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
 NATIVE_PRODUCTS = (
     REPOSITORY
-    / "target/candidates/0.5.0/ga/50028/signing-output/signed-native-products"
+    / f"target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signed-native-products"
 )
 
 
@@ -169,7 +172,7 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
             ) as verifier, patch.object(
                 preparer,
                 "bundle_build_identity",
-                return_value=SimpleNamespace(build_version="50028"),
+                return_value=SimpleNamespace(build_version=GA_BUILD),
             ) as build_identity, patch.object(
                 preparer, "release_native_products_root", return_value=native
             ) as native_root, patch.object(
@@ -181,7 +184,7 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
                     preparer.prepare(repository, app, repository, reviewed, output)
             verifier.assert_called_once()
             build_identity.assert_called_once_with(app)
-            native_root.assert_called_once_with(repository, "50028")
+            native_root.assert_called_once_with(repository, GA_BUILD)
 
     def test_source_contract_keeps_the_zero_stderr_graph_runner(self) -> None:
         repository = Path("/private/tmp/release")

@@ -19,6 +19,9 @@ from scripts import promote_signed_native_manifest as promotion
 from scripts.promote_signed_native_manifest import promote_manifest, SignedNativeManifestError
 
 
+GA_BUILD = identity.ACTIVE_RELEASE_IDENTITY.ga_build
+
+
 def load_commands(*paths: str, name: str = ui.INSTALL_NAME) -> str:
     value = f"cmd LC_ID_DYLIB\ncmdsize 64\nname {name} (offset 24)\n"
     return value + "".join(f"cmd LC_RPATH\ncmdsize 80\npath {path} (offset 12)\n" for path in paths)
@@ -224,26 +227,26 @@ class NativeUiArtifactTests(unittest.TestCase):
             ), patch(
                 "scripts.release_build_identity.ga_frozen_native_products_root", return_value=pre_sign
             ):
-                ui.verify_products(repository, signed, build="50028", signing="developer-id",
+                ui.verify_products(repository, signed, build=GA_BUILD, signing="developer-id",
                                    context=ui.NativeUiContext.RELEASE)
                 manifest = signed / (ui.LIBRARY + ".manifest.json")
                 bad = json.loads(manifest.read_text())
                 bad["metadata"]["preSignArtifactSha256"] = "0" * 64
                 manifest.write_text(json.dumps(bad))
                 with self.assertRaisesRegex(SignedNativeManifestError, "exact pre-sign promotion"):
-                    ui.verify_products(repository, signed, build="50028", signing="developer-id",
+                    ui.verify_products(repository, signed, build=GA_BUILD, signing="developer-id",
                                        context=ui.NativeUiContext.RELEASE)
                 manifests()
                 (signed / ui.RESOURCES / "Contents/Resources/en.lproj/Localizable.strings").write_text('"key" = "modified";')
                 manifests()
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "must not modify"):
-                    ui.verify_products(repository, signed, build="50028", signing="developer-id",
+                    ui.verify_products(repository, signed, build=GA_BUILD, signing="developer-id",
                                        context=ui.NativeUiContext.RELEASE)
 
     def test_cli_requires_one_explicit_mode_before_any_artifact_access(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = ["native_ui_artifact.py", "verify", "--repository", temporary,
-                    "--products", temporary, "--build-number", "50028"]
+                    "--products", temporary, "--build-number", GA_BUILD]
             for extra in ([], ["--release", "--unsigned-preview-validation"]):
                 with self.subTest(extra=extra), patch("sys.argv", base + extra), patch(
                     "sys.stderr", new_callable=io.StringIO
@@ -284,38 +287,38 @@ class NativeUiArtifactTests(unittest.TestCase):
             library.chmod(0o755)
             resources(root / ui.RESOURCES)
             metadata = {key: "bound" for key in ui.METADATA_KEYS}
-            metadata.update(configuration="release", buildNumber="50028", productVersion="0.5.0")
+            metadata.update(configuration="release", buildNumber=GA_BUILD, productVersion="0.5.0")
             for name in (ui.LIBRARY, ui.RESOURCES):
                 manifest = root / (name + ".manifest.json")
                 manifest.write_text(json.dumps(build_manifest(root / name, metadata)))
                 manifest.chmod(ui.MANIFEST_MODE)
             with patch.object(ui, "expected_metadata", return_value=metadata), patch.object(ui, "verify_library"):
-                ui.verify_products(root, root, build="50028", context=ui.NativeUiContext.RELEASE)
+                ui.verify_products(root, root, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
                 manifest = root / (ui.LIBRARY + ".manifest.json")
                 good = manifest.read_text()
                 bad = json.loads(good)
                 bad["metadata"]["configuration"] = "debug"
                 manifest.write_text(json.dumps(bad))
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "Release inputs"):
-                    ui.verify_products(root, root, build="50028", context=ui.NativeUiContext.RELEASE)
+                    ui.verify_products(root, root, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
                 manifest.write_text(good)
                 library.write_bytes(b"different library")
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "bytes differ"):
-                    ui.verify_products(root, root, build="50028", context=ui.NativeUiContext.RELEASE)
+                    ui.verify_products(root, root, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
                 library.write_bytes(b"unsigned test fixture")
                 (root / ui.RESOURCES / "Contents/Resources/en.lproj/Localizable.strings").write_text('"key" = "changed";')
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "bytes differ"):
-                    ui.verify_products(root, root, build="50028", context=ui.NativeUiContext.RELEASE)
+                    ui.verify_products(root, root, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
 
     def _release_metadata(self, signing: str) -> dict[str, str]:
         metadata = {key: "bound" for key in ui.METADATA_KEYS}
-        metadata.update(configuration="release", buildNumber="50028", productVersion="0.5.0", signingMode=signing)
+        metadata.update(configuration="release", buildNumber=GA_BUILD, productVersion="0.5.0", signingMode=signing)
         return metadata
 
     def _release_expected(self, metadata: dict[str, str]):
         def expected(_repository, build, *, signing, clean, context):
             self.assertIs(context, ui.NativeUiContext.RELEASE)
-            self.assertEqual(build, "50028")
+            self.assertEqual(build, GA_BUILD)
             return {**metadata, "signingMode": signing}
         return expected
 
@@ -337,9 +340,9 @@ class NativeUiArtifactTests(unittest.TestCase):
                 frozen = identity.ga_root(repository) / "native-products"
                 frozen.mkdir(parents=True)
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "exact candidate products root"):
-                    ui.build_products(repository, frozen, build="50028", context=ui.NativeUiContext.RELEASE)
+                    ui.build_products(repository, frozen, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
                 run.assert_not_called()
-                ui.build_products(repository, products, build="50028", context=ui.NativeUiContext.RELEASE)
+                ui.build_products(repository, products, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
             self.assertEqual(
                 sorted(entry.name for entry in products.iterdir()),
                 sorted([ui.LIBRARY, ui.RESOURCES, ui.LIBRARY + ".manifest.json", ui.RESOURCES + ".manifest.json"]),
@@ -362,7 +365,7 @@ class NativeUiArtifactTests(unittest.TestCase):
                 ui.subprocess, "run", return_value=SimpleNamespace(returncode=1)
             ):
                 with self.assertRaisesRegex(ui.NativeUiArtifactError, "SwiftUI Release build failed"):
-                    ui.build_products(repository, products, build="50028", context=ui.NativeUiContext.RELEASE)
+                    ui.build_products(repository, products, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
             self.assertTrue((identity.ga_preflight_root(repository) / "swift-ui-build/build.log").is_file())
             self.assertEqual(list(products.iterdir()), [])
 
@@ -380,7 +383,7 @@ class NativeUiArtifactTests(unittest.TestCase):
         ), patch.object(ui, "command", return_value=f"{output}\n"), patch.object(
             ui, "remove_build_rpaths"
         ), patch.object(ui, "verify_library"):
-            ui.build_products(repository, products, build="50028", context=ui.NativeUiContext.RELEASE)
+            ui.build_products(repository, products, build=GA_BUILD, context=ui.NativeUiContext.RELEASE)
         return products
 
     def _freeze_and_sign(self, repository: Path) -> tuple[Path, Path]:
@@ -388,7 +391,7 @@ class NativeUiArtifactTests(unittest.TestCase):
         preflight = identity.ga_preflight_root(repository)
         frozen_root = identity.ga_root(repository)
         frozen_root.parent.mkdir(parents=True)
-        # Candidate freeze promotes ga-preflight/50028 to ga/50028; signing
+        # Candidate freeze promotes ga-preflight/<build> to ga/<build>; signing
         # happens only after that promotion.
         preflight.rename(frozen_root)
         pre_sign = identity.ga_frozen_native_products_root(repository)
@@ -419,12 +422,12 @@ class NativeUiArtifactTests(unittest.TestCase):
                 ui, "verify_library"
             ):
                 ui.verify_products(
-                    repository, signed, build="50028", signing="developer-id", context=ui.NativeUiContext.RELEASE
+                    repository, signed, build=GA_BUILD, signing="developer-id", context=ui.NativeUiContext.RELEASE
                 )
                 (pre_sign / ui.LIBRARY).write_bytes(b"replaced pre-sign library")
                 with self.assertRaises((ui.NativeUiArtifactError, SignedNativeManifestError)):
                     ui.verify_products(
-                        repository, signed, build="50028", signing="developer-id", context=ui.NativeUiContext.RELEASE
+                        repository, signed, build=GA_BUILD, signing="developer-id", context=ui.NativeUiContext.RELEASE
                     )
 
     def test_manifest_mode_must_match_its_producer(self) -> None:
@@ -444,7 +447,7 @@ class NativeUiArtifactTests(unittest.TestCase):
                         ui.NativeUiArtifactError, re.escape(f"unexpected file mode: {manifest}")
                     ):
                         ui.verify_products(
-                            repository, signed, build="50028", signing="developer-id",
+                            repository, signed, build=GA_BUILD, signing="developer-id",
                             context=ui.NativeUiContext.RELEASE,
                         )
 

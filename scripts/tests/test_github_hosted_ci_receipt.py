@@ -20,6 +20,7 @@ from scripts import repository_source_identity as source_identity
 from scripts import verify_ci_no_masking as ci_policy
 from scripts.tests.test_repository_source_identity import git, git_output
 from scripts.publication.common import PublicationError
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
 
@@ -256,6 +257,18 @@ class FakeOpener:
     def open(self, request, *, timeout: int):
         self.requests.append((request, timeout))
         return self.response
+
+
+class HostedCIIdentityTests(unittest.TestCase):
+    def test_receipt_binds_the_active_identity_at_its_fixed_path(self) -> None:
+        self.assertEqual(
+            (hosted.PRODUCT_VERSION, hosted.GA_BUILD),
+            (ACTIVE_RELEASE_IDENTITY.product_version, ACTIVE_RELEASE_IDENTITY.ga_build),
+        )
+        self.assertEqual(
+            hosted.RECEIPT_RELATIVE,
+            Path(f"target/candidates/0.5.0/ga/{hosted.GA_BUILD}/stage-inputs/hosted-ci.json"),
+        )
 
 
 class HostedCIReceiptTests(unittest.TestCase):
@@ -917,7 +930,7 @@ class HostedCICommandSessionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.executor = Path(temporary.name).resolve()
-        self.repository = self.executor / "target/release-worktrees/50028"
+        self.repository = self.executor / f"target/release-worktrees/{hosted.GA_BUILD}"
         workflow_path = self.repository / hosted.WORKFLOW_PATH
         workflow_path.parent.mkdir(parents=True)
         workflow_path.write_bytes(WORKFLOW_BYTES)

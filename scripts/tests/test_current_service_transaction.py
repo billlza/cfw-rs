@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import io
 import json
 import os
@@ -14,15 +15,19 @@ from unittest.mock import patch
 from scripts import current_service_transaction as service
 from scripts import dormant_app_install as install
 from scripts import ga_acceptance_environment as ga_environment
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 
-# The installed 50025 with its real frozen tree identity: the one supported
-# predecessor of this build.
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+# The active predecessor with its real frozen tree identity: the one
+# installation this build may replace.
 PREVIOUS = install.AppIdentity(
-    "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256
+    install.ACTIVE_PREDECESSOR.product_version,
+    install.ACTIVE_PREDECESSOR.build_number,
+    install.ACTIVE_PREDECESSOR.tree_sha256,
 )
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.5.0", "50028", "b" * 64),
+    app=install.AppIdentity(ACTIVE_RELEASE_IDENTITY.product_version, GA_BUILD, "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -164,12 +169,12 @@ class ServiceEventStoreTests(unittest.TestCase):
         paths = service.ServicePaths.production()
 
         self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
-        self.assertEqual(paths.install_paths.profile.build_number, "50028")
+        self.assertEqual(paths.install_paths.profile.build_number, GA_BUILD)
         # The predecessor is observed and bound, never declared on the profile.
         self.assertFalse(hasattr(paths.install_paths.profile, "previous_build_number"))
         self.assertEqual(
-            dict(install.SUPPORTED_PREDECESSORS),
-            {"50025": install.INSTALLED_50025_PREDECESSOR},
+            install.resolve_predecessor(PREVIOUS, paths.install_paths.profile.build_number),
+            install.ACTIVE_PREDECESSOR,
         )
         self.assertEqual(
             paths.transaction_directory.name,
@@ -1012,7 +1017,9 @@ class RegisteredServiceObservationTests(unittest.TestCase):
         with patch.object(install, "require_managed_tunnel_location"), patch.object(
             service, "_absolute_process_path", side_effect=lambda pid: paths[pid]
         ):
-            service._require_registered_services(runtime, parent_build="50025", uid=501)
+            service._require_registered_services(
+                runtime, parent_build=PREVIOUS.build_number, uid=501
+            )
 
     @staticmethod
     def runtime(process_output: str) -> service.ServiceRuntime:
@@ -1027,7 +1034,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
                     registered_job(
                         proxy_domain,
                         program=service.PROXY_PROGRAM,
-                        build="50025",
+                        build=PREVIOUS.build_number,
                         signing_identifier="com.bill.clashformac.proxy-agent",
                         pid=6805,
                     ),
@@ -1039,7 +1046,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
                     registered_job(
                         service.AUTHORITY_DOMAIN,
                         program=service.AUTHORITY_PROGRAM,
-                        build="50025",
+                        build=PREVIOUS.build_number,
                         signing_identifier="com.bill.clashformac.global-authority",
                         pid=6806,
                     ),
@@ -1067,7 +1074,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
             service, "_absolute_process_path", side_effect=lambda pid: paths[pid]
         ):
             service._require_registered_services(
-                self.runtime(service_processes()), parent_build="50025", uid=501
+                self.runtime(service_processes()), parent_build=PREVIOUS.build_number, uid=501
             )
 
     def test_wrong_absolute_helper_path_fails_closed(self) -> None:
@@ -1078,7 +1085,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
         ):
             with self.assertRaises(install.InstallError) as captured:
                 service._require_registered_services(
-                    self.runtime(service_processes()), parent_build="50025", uid=501
+                    self.runtime(service_processes()), parent_build=PREVIOUS.build_number, uid=501
                 )
         self.assertEqual(captured.exception.code, "service_process_identity_invalid")
 
@@ -1090,7 +1097,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
         with self.assertRaises(install.InstallError) as session_error:
             service._require_registered_services(
                 self.runtime(service_processes(extra=(other_login,))),
-                parent_build="50025",
+                parent_build=PREVIOUS.build_number,
                 uid=501,
             )
         self.assertEqual(session_error.exception.code, "service_multi_user_session")
@@ -1110,7 +1117,7 @@ class RegisteredServiceObservationTests(unittest.TestCase):
             with self.assertRaises(install.InstallError) as helper_error:
                 service._require_registered_services(
                     self.runtime(service_processes(extra=(extra_helper,))),
-                    parent_build="50025",
+                    parent_build=PREVIOUS.build_number,
                     uid=501,
                 )
         self.assertEqual(helper_error.exception.code, "service_process_identity_invalid")
@@ -1320,9 +1327,9 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             # Earlier installs are no longer predecessors of any GA transaction.
             (CANDIDATE, install.AppIdentity("0.4.0", "40073", "a" * 64), "predecessor_unsupported"),
             # The GA build itself is never a predecessor.
-            (CANDIDATE, install.AppIdentity("0.5.0", "50028", "a" * 64), "predecessor_unsupported"),
-            (CANDIDATE, install.AppIdentity("0.5.0", "50025", "f" * 64), "predecessor_identity_mismatch"),
-            (CANDIDATE, install.AppIdentity("0.4.0", "50025", PREVIOUS.tree_sha256), "install_identity_mismatch"),
+            (CANDIDATE, install.AppIdentity("0.5.0", GA_BUILD, "a" * 64), "predecessor_unsupported"),
+            (CANDIDATE, replace(PREVIOUS, tree_sha256="f" * 64), "predecessor_identity_mismatch"),
+            (CANDIDATE, replace(PREVIOUS, version="0.4.0"), "install_identity_mismatch"),
             (
                 install.CandidateIdentity(
                     app=install.AppIdentity("0.4.0", "40040", "b" * 64),

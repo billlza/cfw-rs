@@ -25,6 +25,12 @@ else:
 
 
 PRODUCT_VERSION = "0.5.0"
+# The one release-owned record of the active GA build. A GA allocation edits
+# this file together with the allocation ledger; nothing else restates it.
+RELEASE_IDENTITY_PATH: Final = Path(__file__).resolve().parent / "release_identity.env"
+RELEASE_IDENTITY_RE: Final = re.compile(
+    rb"\A(?:#[ -~]*\n)*CFW_GA_BUILD=([1-9][0-9]{0,18})\n\Z"
+)
 POSITIVE_INTEGER_RE = re.compile(r"^[1-9][0-9]*$")
 MAX_BUILD_VERSION = 9_223_372_036_854_775_807
 MAX_BUILD_VERSION_TEXT = str(MAX_BUILD_VERSION)
@@ -67,7 +73,32 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "50028")
+def load_active_ga_build(path: Path) -> str:
+    """Read the active GA build from the byte-strict release identity file.
+
+    The file is printable ASCII with LF line endings: full-line ``#``
+    comments followed by exactly one ``CFW_GA_BUILD=<canonical build>`` line.
+    """
+
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        raise BuildIdentityError(
+            f"release identity file is unavailable: {path}"
+        ) from error
+    match = RELEASE_IDENTITY_RE.fullmatch(data)
+    if match is None:
+        raise BuildIdentityError(
+            f"release identity file is not one canonical CFW_GA_BUILD record: {path}"
+        )
+    return canonical_build_version(
+        match.group(1).decode("ascii"), f"CFW_GA_BUILD in {path}"
+    )
+
+
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(
+    PRODUCT_VERSION, load_active_ga_build(RELEASE_IDENTITY_PATH)
+)
 PREVIEW_PRODUCT_VERSION: Final = "0.5.0"
 FROZEN_GA_REPOSITORY_RELATIVE = Path(
     f"target/release-worktrees/{ACTIVE_RELEASE_IDENTITY.ga_build}"

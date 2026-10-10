@@ -78,7 +78,7 @@ else:
 
 PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 GA_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
-PREVIOUS_BUILD: Final = "50025"
+PREVIOUS_BUILD: Final = install.ACTIVE_PREDECESSOR.build_number
 GA_ROOT_RELATIVE: Final = ga_root(Path("."))
 STAGE_INPUT_ROOT_RELATIVE: Final = GA_ROOT_RELATIVE / "stage-inputs"
 ACCEPTANCE_ROOT_RELATIVE: Final = STAGE_INPUT_ROOT_RELATIVE / "ga-acceptance"
@@ -1162,10 +1162,9 @@ def verify_ga_acceptance_journal_export(
 
 def self_check() -> None:
     if (
-        (PRODUCT_VERSION, PREVIOUS_BUILD, GA_BUILD) != ("0.5.0", "50025", "50028")
-        or MIGRATION_RELATIVE
+        MIGRATION_RELATIVE
         != Path(
-            "target/candidates/0.5.0/ga/50028/stage-inputs/"
+            f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/stage-inputs/"
             "ga-acceptance/migration-journals"
         )
         or ENVIRONMENT_RELATIVE

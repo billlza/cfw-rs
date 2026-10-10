@@ -27,6 +27,10 @@ from scripts.physical_capture import observation, packet
 from scripts.physical_capture.execution import CommandResult, command_sha256
 from scripts.physical_capture.packet import PacketCaptureAdapterError
 from scripts.physical_capture.session import CaptureEvent, PhysicalCaptureSession
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 def _sha256(value: str) -> str:
@@ -49,7 +53,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
         )
         self.candidate = {
             "version": "0.5.0",
-            "build_number": "50028",
+            "build_number": GA_BUILD,
             "app_manifest_sha256": _sha256("app"),
             "signed_app_tree_sha256": _sha256("tree"),
             "artifact_hash_manifest_sha256": _sha256("artifacts"),

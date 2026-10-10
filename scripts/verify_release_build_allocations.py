@@ -6,9 +6,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 if __package__:
     from .release_build_identity import ACTIVE_RELEASE_IDENTITY
@@ -31,6 +32,7 @@ STATUSES: Final = frozenset(
         "retired_product_change_notarization_outcome_unknown",
         "retired_security_dependency_change_before_notarization",
         "retired_product_change_after_install_before_ga_runtime_acceptance",
+        "retired_security_dependency_change_after_install_before_ga_runtime_acceptance",
         "retired_after_notarization_before_install_lane_test_not_hermetic",
         "retired_before_candidate_build_source_gate_contract_incomplete",
         "retired_unbuilt_policy_superseded",
@@ -39,6 +41,11 @@ STATUSES: Final = frozenset(
         "retired_preview_validation_consumed",
     }
 )
+# GA retirements after the application was installed on the release Mac: each
+# such build is the recorded predecessor whose journals a later install reads.
+INSTALLED_GA_STATUSES: Final = frozenset(
+    status for status in STATUSES if "_after_install_" in status
+) | {"retired_superseded_by_next_product_version"}
 IMMUTABLE_RETIRED_PREFIX: Final = (
     ("40021", "validation", "retired_after_notarization_before_install"),
     (
@@ -289,14 +296,10 @@ RETIRED_GA_ALLOCATIONS: Final = (
 )
 
 
+# The consumed 0.5.0 preview validation builds 50001 through 50025.
 PREVIEW_VALIDATION_PREFIX: Final = tuple(
     (str(build), "validation", "retired_preview_validation_consumed")
-    for build in range(50001, 50026)
-)
-
-RETIRED_GA_ALLOCATIONS_V050: Final = (
-    ("50026", "ga", "retired_after_candidate_freeze_before_canonical_signing_output"),
-    ("50027", "ga", "retired_after_notarization_before_install"),
+    for build in range(50001, 50025 + 1)
 )
 
 
@@ -304,47 +307,58 @@ RETIRED_GA_ALLOCATIONS_V050: Final = (
 class LedgerPolicy:
     """The fixed allocation history of one product version.
 
-    A closed product version has no active GA: every allocation is retired and
-    the ledger may only be read. The active product version ends its history
-    with exactly one `active_ga` allocation.
+    A closed product version has no active GA: its whole history, including
+    every retired GA allocation, is fixed here and the ledger may only be
+    read. The active product version fixes only the history before its GA
+    allocations; the release identity file names its one active GA, and each
+    retired GA allocation is bound by its retirement note instead.
     """
 
     product_version: str
-    path: Path
+    relative_path: Path
     immutable_prefix: tuple[tuple[str, str, str], ...]
     superseded: tuple[str, str, str] | None
     retired_ga: tuple[tuple[str, str, str], ...]
-    active_ga: str | None
-
-    @property
-    def closed(self) -> bool:
-        return self.active_ga is None
+    closed: bool
 
 
 POLICIES: Final = {
     "0.4.0": LedgerPolicy(
         "0.4.0",
-        REPOSITORY_ROOT / "docs/release/build-allocations-v040.json",
+        Path("docs/release/build-allocations-v040.json"),
         IMMUTABLE_RETIRED_PREFIX,
         POLICY_SUPERSEDED_ALLOCATION,
         RETIRED_GA_ALLOCATIONS,
-        None,
+        closed=True,
     ),
     "0.5.0": LedgerPolicy(
         "0.5.0",
-        REPOSITORY_ROOT / "docs/release/build-allocations-v050.json",
+        Path("docs/release/build-allocations-v050.json"),
         PREVIEW_VALIDATION_PREFIX,
         None,
-        RETIRED_GA_ALLOCATIONS_V050,
-        "50028",
+        (),
+        closed=False,
     ),
 }
 ACTIVE_POLICY: Final = POLICIES[PRODUCT_VERSION]
-CONTRACT_RELATIVE_PATH: Final = Path("docs/release/build-allocations-v050.json")
-CONTRACT_PATH: Final = ACTIVE_POLICY.path
+CONTRACT_RELATIVE_PATH: Final = ACTIVE_POLICY.relative_path
+CONTRACT_PATH: Final = REPOSITORY_ROOT / CONTRACT_RELATIVE_PATH
 CLOSED_CONTRACT_PATHS: Final = {
-    version: policy.path for version, policy in POLICIES.items() if policy.closed
+    version: REPOSITORY_ROOT / policy.relative_path
+    for version, policy in POLICIES.items()
+    if policy.closed
 }
+RETIREMENT_NOTES_RELATIVE: Final = Path("docs/release")
+RETIREMENT_NOTES_DIRECTORY: Final = REPOSITORY_ROOT / RETIREMENT_NOTES_RELATIVE
+# Case-insensitive so that a misspelt note on a case-insensitive volume is
+# reported instead of being skipped.
+RETIREMENT_NOTE_NAME_RE: Final = re.compile(
+    r"\Aga-build-([0-9]+)-retirement\.md\Z", re.IGNORECASE
+)
+# The classification sentence opens a line; a note may quote another build's.
+RETIREMENT_CLASSIFICATION_RE: Final = re.compile(
+    r"^GA build ([0-9]+) is permanently classified as\s`([a-z_]+)`\.", re.MULTILINE
+)
 
 
 class ReleaseBuildAllocationError(ValueError):
@@ -484,12 +498,37 @@ def _require_final_companions(records: dict[str, dict[str, object]]) -> None:
                 )
 
 
+@dataclass(frozen=True)
+class ActiveLedger:
+    """The validated allocation ledger of the active product version."""
+
+    product_version: str
+    first_build: int
+    active_ga: str
+    builds: frozenset[str]
+    retired_ga: tuple[tuple[str, str], ...]
+
+
+class RegisteredPredecessor(Protocol):
+    """The identity of one install-predecessor registry profile."""
+
+    @property
+    def product_version(self) -> str: ...
+
+    @property
+    def build_number(self) -> str: ...
+
+
 def validate_contract(
     value: dict[str, object],
     *,
     expected_ga: str,
-) -> None:
-    """Validates the ledger of the active product version against its one GA."""
+) -> ActiveLedger:
+    """Validates the ledger of the active product version against its one GA.
+
+    Every record after the fixed history is a GA allocation: the retired ones
+    in allocation order, then the active GA as the one last record.
+    """
     policy, allocations, records, ordered_builds = _parse_allocations(value)
     if policy.closed:
         raise ReleaseBuildAllocationError("allocation ledger product version is closed")
@@ -497,16 +536,12 @@ def validate_contract(
     active_ga = value["active_ga"]
     if active_ga != expected_ga:
         raise ReleaseBuildAllocationError(
-            "active GA build differs from release source constants"
+            f"active GA build {active_ga} differs from the release identity {expected_ga}"
         )
     if not isinstance(active_ga, str) or not BUILD_PATTERN.fullmatch(active_ga):
         raise ReleaseBuildAllocationError("active GA build is not canonical")
-    if active_ga != policy.active_ga:
-        raise ReleaseBuildAllocationError(
-            "active GA allocation differs from the fixed successor"
-        )
 
-    retired_end = _require_fixed_history(policy, allocations)
+    fixed_end = _require_fixed_history(policy, allocations)
     _require_gap_free(policy, ordered_builds)
     record = records.get(active_ga)
     if record is None:
@@ -527,20 +562,125 @@ def validate_contract(
     ]
     if active_records != [active_ga]:
         raise ReleaseBuildAllocationError("allocation ledger must have exactly one active GA")
-    if len(allocations) != retired_end + 1:
+    if allocations[-1] is not record:
         raise ReleaseBuildAllocationError(
             "allocation ledger must end with exactly one active GA allocation"
         )
-    active_tail = allocations[retired_end]
-    if (
-        active_tail["build"],
-        active_tail["role"],
-        active_tail["status"],
-    ) != (expected_ga, "ga", "active_ga"):
-        raise ReleaseBuildAllocationError(
-            "active GA allocation differs from the fixed successor"
-        )
+    retired_ga = allocations[fixed_end:-1]
+    for retired in retired_ga:
+        if retired["role"] != "ga" or not str(retired["status"]).startswith("retired_"):
+            raise ReleaseBuildAllocationError(
+                f"build {retired['build']} between the fixed history and the active GA "
+                "is not a retired GA allocation"
+            )
     _require_final_companions(records)
+    return ActiveLedger(
+        product_version=policy.product_version,
+        first_build=ordered_builds[0],
+        active_ga=active_ga,
+        builds=frozenset(records),
+        retired_ga=tuple(
+            (str(retired["build"]), str(retired["status"])) for retired in retired_ga
+        ),
+    )
+
+
+def validate_retirement_notes(ledger: ActiveLedger, notes_directory: Path) -> None:
+    """Binds every retired GA allocation to the classification of its note.
+
+    Each retired GA build has ``ga-build-<n>-retirement.md`` whose one
+    classification sentence states its exact ledger status, and every such
+    note from the ledger's first build on names one of those retired builds.
+    """
+    retired = dict(ledger.retired_ga)
+    for build, status in ledger.retired_ga:
+        note = notes_directory / f"ga-build-{build}-retirement.md"
+        try:
+            text = note.read_text(encoding="utf-8")
+        except FileNotFoundError as error:
+            raise ReleaseBuildAllocationError(
+                f"retired GA build {build} has no retirement note: {note}"
+            ) from error
+        except (OSError, UnicodeDecodeError) as error:
+            raise ReleaseBuildAllocationError(
+                f"retirement note is unreadable: {note}"
+            ) from error
+        classifications = [
+            classified
+            for classified_build, classified in RETIREMENT_CLASSIFICATION_RE.findall(text)
+            if classified_build == build
+        ]
+        if classifications != [status]:
+            raise ReleaseBuildAllocationError(
+                f"retirement note does not classify GA build {build} exactly once "
+                f"as `{status}`: {note}"
+            )
+    try:
+        names = sorted(entry.name for entry in notes_directory.iterdir())
+    except OSError as error:
+        raise ReleaseBuildAllocationError(
+            f"retirement notes directory is unreadable: {notes_directory}"
+        ) from error
+    for name in names:
+        match = RETIREMENT_NOTE_NAME_RE.fullmatch(name)
+        if match is None:
+            continue
+        build = match.group(1)
+        if (
+            not BUILD_PATTERN.fullmatch(build)
+            or name != f"ga-build-{build}-retirement.md"
+        ):
+            raise ReleaseBuildAllocationError(
+                f"retirement note name is not canonical: {name}"
+            )
+        if int(build) < ledger.first_build:
+            continue
+        if int(build) >= int(ledger.active_ga):
+            raise ReleaseBuildAllocationError(
+                f"retirement note {name} names a build at or above the active GA "
+                f"{ledger.active_ga}"
+            )
+        if build not in retired:
+            raise ReleaseBuildAllocationError(
+                f"retirement note {name} names no retired GA allocation"
+            )
+
+
+def validate_predecessor_registry(
+    ledger: ActiveLedger, predecessors: Mapping[str, RegisteredPredecessor]
+) -> None:
+    """Requires the installed GA builds and the registry to name the same builds.
+
+    A GA build retired after it was installed on the release Mac is the
+    recorded predecessor of the next install, so allocating its successor
+    without registering that profile fails here, before anything is signed.
+    Conversely every registered build of this product version is an allocation
+    below the active GA, and a registered GA build was retired after install.
+    The registry keys its profiles by their own build numbers.
+    """
+    retired = dict(ledger.retired_ga)
+    for build, status in ledger.retired_ga:
+        if status not in INSTALLED_GA_STATUSES:
+            continue
+        profile = predecessors.get(build)
+        if profile is None or profile.product_version != ledger.product_version:
+            raise ReleaseBuildAllocationError(
+                f"installed GA build {build} ({status}) is not a registered "
+                f"{ledger.product_version} install predecessor"
+            )
+    for build, profile in predecessors.items():
+        if profile.product_version != ledger.product_version:
+            continue
+        if build not in ledger.builds or int(build) >= int(ledger.active_ga):
+            raise ReleaseBuildAllocationError(
+                f"install predecessor {build} is not an allocated {ledger.product_version} "
+                f"build below the active GA {ledger.active_ga}"
+            )
+        if build in retired and retired[build] not in INSTALLED_GA_STATUSES:
+            raise ReleaseBuildAllocationError(
+                f"install predecessor {build} is a GA build retired as {retired[build]}, "
+                "which was never installed"
+            )
 
 
 def validate_closed_contract(value: dict[str, object]) -> None:
@@ -561,8 +701,16 @@ def validate_closed_contract(value: dict[str, object]) -> None:
     _require_final_companions(records)
 
 
-def verify_source_bindings(value: dict[str, object]) -> None:
-    validate_contract(value, expected_ga=ACTIVE_RELEASE_IDENTITY.ga_build)
+def verify_source_bindings(
+    value: dict[str, object],
+    *,
+    notes_directory: Path,
+    predecessors: Mapping[str, RegisteredPredecessor],
+) -> None:
+    """Binds the active ledger to the identity file, its notes and the registry."""
+    ledger = validate_contract(value, expected_ga=ACTIVE_RELEASE_IDENTITY.ga_build)
+    validate_retirement_notes(ledger, notes_directory)
+    validate_predecessor_registry(ledger, predecessors)
 
 
 def verify_closed_ledgers() -> None:
@@ -570,9 +718,31 @@ def verify_closed_ledgers() -> None:
         validate_closed_contract(load_contract(path))
 
 
+def supported_predecessors() -> Mapping[str, RegisteredPredecessor]:
+    """Load the install-predecessor registry when the gate runs.
+
+    dormant_app_install imports candidate_freeze, which imports this module,
+    so the registry cannot be imported while this module initializes.
+    """
+    try:
+        if __package__:
+            from .dormant_app_install import SUPPORTED_PREDECESSORS
+        else:
+            from dormant_app_install import SUPPORTED_PREDECESSORS
+    except ImportError as error:
+        raise ReleaseBuildAllocationError(
+            f"install predecessor registry is unavailable: {error}"
+        ) from error
+    return SUPPORTED_PREDECESSORS
+
+
 def main() -> int:
     try:
-        verify_source_bindings(load_contract())
+        verify_source_bindings(
+            load_contract(),
+            notes_directory=RETIREMENT_NOTES_DIRECTORY,
+            predecessors=supported_predecessors(),
+        )
         verify_closed_ledgers()
     except (OSError, ReleaseBuildAllocationError) as error:
         print(f"error: {error}", file=sys.stderr)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture and live-verify the exact hosted GitHub Actions receipt for GA 50028.
+"""Capture and live-verify the exact hosted GitHub Actions receipt for the active GA.
 
 This module is intentionally separate from the deterministic local CI-lane
 collector.  A local command result can corroborate a hosted run, but it can
@@ -55,6 +55,7 @@ if __package__:
         read_private_pending_locked,
         write_private_pending_locked,
     )
+    from .release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from .repository_source_identity import (
         SourceIdentityError,
         current_identity,
@@ -85,6 +86,7 @@ else:
         read_private_pending_locked,
         write_private_pending_locked,
     )
+    from release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from repository_source_identity import (
         SourceIdentityError,
         current_identity,
@@ -104,8 +106,8 @@ class HostedCIReceiptError(PublicationError):
 
 SCHEMA_VERSION: Final = 5
 DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v5"
-PRODUCT_VERSION: Final = "0.5.0"
-GA_BUILD: Final = "50028"
+PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
+GA_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
 
 API_ORIGIN: Final = "https://api.github.com"
 API_ACCEPT: Final = "application/vnd.github+json"
@@ -162,9 +164,7 @@ REQUIRED_JOB_STEP_NAMES: Final = {
     ),
 }
 
-RECEIPT_RELATIVE: Final = Path(
-    "target/candidates/0.5.0/ga/50028/stage-inputs/hosted-ci.json"
-)
+RECEIPT_RELATIVE: Final = ga_root(Path(".")) / "stage-inputs/hosted-ci.json"
 COMMIT_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 BRANCH_RE: Final = re.compile(r"^[^\x00-\x20\x7f~^:?*\\\[\]]{1,255}$")
 TIMESTAMP_RE: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -874,8 +874,7 @@ def _source_binding(
     if (
         frozen.product_version != PRODUCT_VERSION
         or frozen.build_number != GA_BUILD
-        or frozen.root
-        != repository / f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}"
+        or frozen.root != ga_root(repository)
         or not isinstance(intent, dict)
         or intent.get("document") != "cfm-candidate-freeze-intent-v3"
         or intent.get("repository_commit") != current["repositoryCommit"]

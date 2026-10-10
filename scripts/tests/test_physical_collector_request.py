@@ -48,6 +48,10 @@ from scripts.harness.raw_artifacts import (
     RawArtifactError,
     canonical_json,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 PLATFORM_UUID = "01234567-89AB-CDEF-0123-456789ABCDEF"
@@ -62,7 +66,7 @@ REQUEST_SCRIPT = (
 def _candidate() -> dict:
     return {
         "version": "0.5.0",
-        "build_number": "50028",
+        "build_number": GA_BUILD,
         "app_manifest_sha256": "a" * 64,
         "signed_app_tree_sha256": "b" * 64,
         "artifact_hash_manifest_sha256": "c" * 64,
@@ -264,7 +268,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         self.runner = _runner()
         self.context = initialize_context(
             _candidate(),
-            run_id="run-50028-macos15",
+            run_id=f"run-{GA_BUILD}-macos15",
             clean_install_confirmed=True,
             runner=self.runner,
             observed_at=self.observed_at,
@@ -332,7 +336,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
                 "--candidate",
                 "/missing/candidate.json",
                 "--run-id",
-                "run-50028-macos15",
+                f"run-{GA_BUILD}-macos15",
                 "--confirm-clean-install",
                 "--output",
                 "/missing/context.json",
@@ -394,42 +398,42 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         ):
             initialize_context(
                 _candidate(),
-                run_id="run-50028-macos15",
+                run_id=f"run-{GA_BUILD}-macos15",
                 clean_install_confirmed=False,
                 runner=self.runner,
                 observed_at=self.observed_at,
             )
 
-    def test_initialize_requires_ga_50028_build_with_signed_64_bit_bound(self) -> None:
+    def test_initialize_requires_the_active_ga_build_with_signed_64_bit_bound(self) -> None:
         for build_number, message in (
-            ("40002", "must be GA release build 50028"),
-            ("40003", "must be GA release build 50028"),
-            ("40004", "must be GA release build 50028"),
-            ("40005", "must be GA release build 50028"),
-            ("40019", "must be GA release build 50028"),
-            ("40020", "must be GA release build 50028"),
-            ("40022", "must be GA release build 50028"),
-            ("40023", "must be GA release build 50028"),
-            ("40026", "must be GA release build 50028"),
-            ("40027", "must be GA release build 50028"),
-            ("40028", "must be GA release build 50028"),
-            ("40029", "must be GA release build 50028"),
-            ("40030", "must be GA release build 50028"),
-            ("40031", "must be GA release build 50028"),
-            ("40032", "must be GA release build 50028"),
-            ("40033", "must be GA release build 50028"),
-            ("40034", "must be GA release build 50028"),
-            ("40035", "must be GA release build 50028"),
-            ("40036", "must be GA release build 50028"),
-            ("40037", "must be GA release build 50028"),
-            ("40038", "must be GA release build 50028"),
-            ("40039", "must be GA release build 50028"),
-            ("40040", "must be GA release build 50028"),
-            ("40041", "must be GA release build 50028"),
-            ("40042", "must be GA release build 50028"),
-            ("40043", "must be GA release build 50028"),
-            ("40044", "must be GA release build 50028"),
-            ("40045", "must be GA release build 50028"),
+            ("40002", f"must be GA release build {GA_BUILD}"),
+            ("40003", f"must be GA release build {GA_BUILD}"),
+            ("40004", f"must be GA release build {GA_BUILD}"),
+            ("40005", f"must be GA release build {GA_BUILD}"),
+            ("40019", f"must be GA release build {GA_BUILD}"),
+            ("40020", f"must be GA release build {GA_BUILD}"),
+            ("40022", f"must be GA release build {GA_BUILD}"),
+            ("40023", f"must be GA release build {GA_BUILD}"),
+            ("40026", f"must be GA release build {GA_BUILD}"),
+            ("40027", f"must be GA release build {GA_BUILD}"),
+            ("40028", f"must be GA release build {GA_BUILD}"),
+            ("40029", f"must be GA release build {GA_BUILD}"),
+            ("40030", f"must be GA release build {GA_BUILD}"),
+            ("40031", f"must be GA release build {GA_BUILD}"),
+            ("40032", f"must be GA release build {GA_BUILD}"),
+            ("40033", f"must be GA release build {GA_BUILD}"),
+            ("40034", f"must be GA release build {GA_BUILD}"),
+            ("40035", f"must be GA release build {GA_BUILD}"),
+            ("40036", f"must be GA release build {GA_BUILD}"),
+            ("40037", f"must be GA release build {GA_BUILD}"),
+            ("40038", f"must be GA release build {GA_BUILD}"),
+            ("40039", f"must be GA release build {GA_BUILD}"),
+            ("40040", f"must be GA release build {GA_BUILD}"),
+            ("40041", f"must be GA release build {GA_BUILD}"),
+            ("40042", f"must be GA release build {GA_BUILD}"),
+            ("40043", f"must be GA release build {GA_BUILD}"),
+            ("40044", f"must be GA release build {GA_BUILD}"),
+            ("40045", f"must be GA release build {GA_BUILD}"),
             (str(2**63), "signed 64-bit"),
             ("9" * 5_000, "signed 64-bit"),
         ):

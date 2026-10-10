@@ -14,7 +14,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Iterator
 import unittest
 from unittest.mock import MagicMock, patch
@@ -79,6 +79,11 @@ from scripts.physical_capture.packet_host import (
 from scripts.publication import common
 from scripts.publication.common import PublicationError, canonical_json, sha256_bytes
 from scripts.publication.durable_file import DurabilityOutcomeUnknown
+from scripts import dormant_app_install
+from scripts.dormant_app_install import ACTIVE_PREDECESSOR
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.tests import test_ga_acceptance_journal_export as journal_fixture
+from scripts.tests.release_identity_fixture import NEXT_GA_BUILD
 from scripts.tests.physical_evidence_fixture import pcap_bytes
 
 
@@ -119,7 +124,7 @@ RECOVERY_COMMAND = "scripts/run_ga_runtime_acceptance.sh recover"
 # collector asks the operator for one and sends the Host no quit request. The
 # app's own Settings Force Quit is graceful; the macOS Force Quit window is not.
 OPERATOR_QUIT_INSTRUCTION = (
-    "GA runtime collection is waiting for you to quit the installed 50028 Clash "
+    f"GA runtime collection is waiting for you to quit the installed {TO_BUILD} Clash "
     "for Mac with Quit Clash for Mac (⌘Q) in its app menu or Quit in its menu "
     "bar menu; do not quit it from the Dock, AppleScript or Activity Monitor, "
     "or with the macOS Force Quit window (Option-Command-Esc)"
@@ -655,7 +660,7 @@ def launchctl_output(
     domain_target: str,
     program_identifier: str,
     service_label: str,
-    parent_bundle_version: str = "50028",
+    parent_bundle_version: str = TO_BUILD,
 ) -> str:
     """Reproduce the exact `launchctl print` shape for an SMAppService job.
 
@@ -697,7 +702,7 @@ def system_extension_output() -> str:
         "--- com.apple.system_extension.network_extension\n"
         "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n"
         "*\t*\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel "
-        "(0.5.0/50028)\tCFWPacketTunnel\t[activated enabled]\n"
+        f"(0.5.0/{TO_BUILD})\tCFWPacketTunnel\t[activated enabled]\n"
     )
 
 
@@ -756,13 +761,14 @@ def packet_tunnel_listing(*rows: str) -> str:
 
 
 def observed_replacement_rows() -> tuple[str, ...]:
-    # The GA Mac lists 50008 and 40073 retained and 50025 activated. Enabling
-    # Tunnel on 50028 replaces 50025, which macOS then retains until reboot.
+    # The GA Mac lists 50008 and 40073 retained and the predecessor activated.
+    # Enabling Tunnel on the GA build replaces the predecessor, which macOS then
+    # retains until reboot.
     return (
         packet_tunnel_row("0.5.0/50008", SYSTEM_EXTENSION_RETAINED),
         packet_tunnel_row("0.4.0/40073", SYSTEM_EXTENSION_RETAINED),
-        packet_tunnel_row("0.5.0/50025", SYSTEM_EXTENSION_RETAINED),
-        packet_tunnel_row("0.5.0/50028", SYSTEM_EXTENSION_ACTIVATED),
+        packet_tunnel_row(f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED),
+        packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED),
     )
 
 
@@ -987,7 +993,7 @@ class RuntimeFixture:
                         "context:primary-signature",
                         "-vv",
                         (
-                            "target/candidates/0.5.0/ga/50028/packages/dmg/v0.5.0/"
+                            f"target/candidates/0.5.0/ga/{TO_BUILD}/packages/dmg/v0.5.0/"
                             "Clash.for.Mac_0.5.0_arm64.dmg"
                         ),
                     ],
@@ -1386,7 +1392,14 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.5.0", "50025", "50028"))
+        self.assertEqual(
+            (PRODUCT_VERSION, FROM_BUILD, TO_BUILD),
+            (
+                ACTIVE_RELEASE_IDENTITY.product_version,
+                ACTIVE_PREDECESSOR.build_number,
+                ACTIVE_RELEASE_IDENTITY.ga_build,
+            ),
+        )
         self.assertEqual(
             (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
             (15 * 60, 30 * 60),
@@ -1416,28 +1429,28 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             ACCEPTANCE_RELATIVE,
             Path(
-                "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "runtime-acceptance.json"
             ),
         )
         self.assertEqual(
             RAW_ROOT_RELATIVE,
             Path(
-                "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "runtime-evidence"
             ),
         )
         self.assertEqual(
             ENVIRONMENT_RELATIVE,
             Path(
-                "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "migration-journals/service-transaction/environment.json"
             ),
         )
         self.assertEqual(
             INSTALL_JOURNAL_RELATIVE,
             Path(
-                "target/candidates/0.5.0/ga/50028/stage-inputs/ga-acceptance/"
+                f"target/candidates/0.5.0/ga/{TO_BUILD}/stage-inputs/ga-acceptance/"
                 "migration-journals/dormant-install.json"
             ),
         )
@@ -1445,14 +1458,18 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     def test_historical_migration_bindings_cannot_seal_the_active_candidate(self) -> None:
         for from_build, to_build in (
             ("40041", "40043"),
-            ("40041", "50028"),
+            ("40041", TO_BUILD),
             ("40043", "40043"),
             ("40043", "40044"),
-            ("40043", "50028"),
+            ("40043", TO_BUILD),
             ("40044", "40044"),
             ("40044", "40045"),
-            ("40044", "50028"),
+            ("40044", TO_BUILD),
             ("40045", "40045"),
+            # An older registered installation or the next allocation.
+            (str(int(FROM_BUILD) - 1), TO_BUILD),
+            (FROM_BUILD, NEXT_GA_BUILD),
+            (TO_BUILD, NEXT_GA_BUILD),
         ):
             with self.subTest(from_build=from_build, to_build=to_build):
                 self.fixture.expected["from_build"] = from_build
@@ -1463,6 +1480,49 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
                 ):
                     self.fixture.seal()
                 self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_install_journal_must_record_the_active_predecessor(self) -> None:
+        older = dormant_app_install.PredecessorProfile(
+            ACTIVE_PREDECESSOR.product_version, str(int(FROM_BUILD) - 1), "e" * 64
+        )
+        registry = MappingProxyType(
+            {**dormant_app_install.SUPPORTED_PREDECESSORS, older.build_number: older}
+        )
+        cases = (
+            (older, f"is not the completed {FROM_BUILD} to {TO_BUILD} install"),
+            # The active predecessor passes and reaches the installed-app read.
+            (ACTIVE_PREDECESSOR, f"installed {TO_BUILD} application tree cannot be identified"),
+        )
+        for previous, message in cases:
+            with self.subTest(previous=previous.build_number), patch.object(
+                dormant_app_install, "SUPPORTED_PREDECESSORS", registry
+            ):
+                with patch.object(dormant_app_install, "ACTIVE_PREDECESSOR", previous):
+                    journals = journal_fixture.JournalExportFixture(
+                        previous=dormant_app_install.AppIdentity(
+                            previous.product_version,
+                            previous.build_number,
+                            previous.tree_sha256,
+                        )
+                    )
+                self.addCleanup(journals.cleanup)
+                data = canonical_json(journals.install_document())
+                with tempfile.TemporaryDirectory() as temporary:
+                    repository = Path(temporary)
+                    journal = repository.joinpath(*INSTALL_JOURNAL_RELATIVE.parts)
+                    journal.parent.mkdir(parents=True)
+                    journal.write_bytes(data)
+                    journal.chmod(0o600)
+                    with patch.object(
+                        dormant_app_install,
+                        "read_app_identity",
+                        side_effect=dormant_app_install.InstallError(
+                            "app_identity_invalid", "fixture installed app"
+                        ),
+                    ), self.assertRaisesRegex(GARuntimeAcceptanceError, message):
+                        ga_runtime._installed_candidate_tree(
+                            repository, {"install_journal_sha256": sha256_bytes(data)}
+                        )
 
     def test_runtime_json_recursion_is_a_stable_domain_error(self) -> None:
         deeply_nested = (
@@ -1601,7 +1661,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             GARuntimeAcceptanceError,
-            "installed 50028 launch command command identity, exit, or duration is invalid",
+            f"installed {TO_BUILD} launch command command identity, exit, or duration is invalid",
         ):
             self.fixture.seal()
 
@@ -2902,12 +2962,17 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_service_registration_rejects_a_different_parent_bundle_build(self) -> None:
         original = self._service_stdout("proxy_agent")
-        for build in ("40041", "40043", "40044", "40045", "40046", "40047", "40048", "40067"):
+        for build in (
+            "40041", "40043", "40044", "40045", "40046", "40047", "40048", "40067",
+            # Services still registered by the replaced predecessor.
+            FROM_BUILD,
+            NEXT_GA_BUILD,
+        ):
             with self.subTest(build=build):
                 self._set_service_stdout(
                     "proxy_agent",
                     original.replace(
-                        "parent bundle version = 50028",
+                        f"parent bundle version = {TO_BUILD}",
                         f"parent bundle version = {build}",
                     ),
                 )
@@ -3027,11 +3092,11 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     def test_activated_predecessor_cannot_seal_as_the_candidate(self) -> None:
         self._set_system_extension_stdout(
             packet_tunnel_listing(
-                packet_tunnel_row("0.5.0/50025", SYSTEM_EXTENSION_ACTIVATED)
+                packet_tunnel_row(f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
             )
         )
         with self.assertRaisesRegex(
-            GARuntimeAcceptanceError, "lacks the fixed 50028 extension"
+            GARuntimeAcceptanceError, f"lacks the fixed {TO_BUILD} extension"
         ):
             self.fixture.seal()
 
@@ -3079,9 +3144,9 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
 class GARuntimeSystemExtensionTests(unittest.TestCase):
     """macOS lists each replaced Packet Tunnel version until reboot, so only
-    the exact 0.5.0/50028 row can prove the candidate extension is live."""
+    the exact candidate row can prove the candidate extension is live."""
 
-    MISSING = "raw system extension output lacks the fixed 50028 extension"
+    MISSING = f"raw system extension output lacks the fixed {TO_BUILD} extension"
     NOT_ENABLED = "fixed system extension is not both activated and enabled"
     NOT_RETAINED = (
         "another Packet Tunnel registration is not terminated and waiting to "
@@ -3089,7 +3154,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
     )
     FOREIGN_TEAM = "raw system extension output lists a foreign-team Packet Tunnel"
     MALFORMED = "raw systemextensionsctl output is malformed"
-    NOT_EARLIER = "another Packet Tunnel registration is not an earlier build than 50028"
+    NOT_EARLIER = f"another Packet Tunnel registration is not an earlier build than {TO_BUILD}"
     MALFORMED_RETAINED_VERSION = (
         "another Packet Tunnel registration has a malformed version"
     )
@@ -3132,7 +3197,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
                 self._validate(stdout)
 
     def test_near_match_bundle_identifiers_are_ignored(self) -> None:
-        candidate = packet_tunnel_row("0.5.0/50028", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         for bundle_id in (
             "com.bill.clashformac.packet-tunnelx",
             "com.bill.clashformac.packet-tunnel.helper",
@@ -3140,7 +3205,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         ):
             for team_id in ("YKUPL7Z869", "ABCDE12345"):
                 near_match = packet_tunnel_row(
-                    "0.5.0/50028",
+                    f"0.5.0/{TO_BUILD}",
                     SYSTEM_EXTENSION_ACTIVATED,
                     team_id=team_id,
                     bundle_id=bundle_id,
@@ -3155,19 +3220,19 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         self._assert_rejected(
             {
                 "predecessor alone after reboot": (
-                    packet_tunnel_listing(row("0.5.0/50025", activated)),
+                    packet_tunnel_listing(row(f"0.5.0/{FROM_BUILD}", activated)),
                     self.MISSING,
                 ),
-                "listing before the 50028 replacement": (
+                f"listing before the {TO_BUILD} replacement": (
                     packet_tunnel_listing(
                         row("0.5.0/50008", retained),
                         row("0.4.0/40073", retained),
-                        row("0.5.0/50025", activated),
+                        row(f"0.5.0/{FROM_BUILD}", activated),
                     ),
                     self.MISSING,
                 ),
                 "candidate build under another product version": (
-                    packet_tunnel_listing(row("0.5.1/50028", activated)),
+                    packet_tunnel_listing(row(f"0.5.1/{TO_BUILD}", activated)),
                     self.MISSING,
                 ),
             }
@@ -3180,13 +3245,13 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
             {
                 "predecessor still activated": (
                     packet_tunnel_listing(
-                        row("0.5.0/50025", activated), row("0.5.0/50028", activated)
+                        row(f"0.5.0/{FROM_BUILD}", activated), row(f"0.5.0/{TO_BUILD}", activated)
                     ),
                     self.NOT_RETAINED,
                 ),
                 "later build activated": (
                     packet_tunnel_listing(
-                        row("0.5.0/50028", activated), row("0.5.0/50029", activated)
+                        row(f"0.5.0/{TO_BUILD}", activated), row(f"0.5.0/{NEXT_GA_BUILD}", activated)
                     ),
                     self.NOT_RETAINED,
                 ),
@@ -3196,18 +3261,18 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
     def test_candidate_must_be_activated_enabled_and_flagged(self) -> None:
         row = packet_tunnel_row
         activated = SYSTEM_EXTENSION_ACTIVATED
-        predecessor = row("0.5.0/50025", SYSTEM_EXTENSION_RETAINED)
+        predecessor = row(f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED)
         cases = {
             "waiting for user": (
                 packet_tunnel_listing(
                     predecessor,
-                    row("0.5.0/50028", "[activated waiting for user]", flags="*\t*"),
+                    row(f"0.5.0/{TO_BUILD}", "[activated waiting for user]", flags="*\t*"),
                 ),
                 self.NOT_ENABLED,
             ),
             "retained itself": (
                 packet_tunnel_listing(
-                    predecessor, row("0.5.0/50028", SYSTEM_EXTENSION_RETAINED)
+                    predecessor, row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_RETAINED)
                 ),
                 self.NOT_ENABLED,
             ),
@@ -3215,18 +3280,18 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         # The state column alone is not proof: both flag columns must agree.
         for flags in ("\t", "*\t", "\t*"):
             cases[f"flags {flags!r}"] = (
-                packet_tunnel_listing(row("0.5.0/50028", activated, flags=flags)),
+                packet_tunnel_listing(row(f"0.5.0/{TO_BUILD}", activated, flags=flags)),
                 self.NOT_ENABLED,
             )
         self._assert_rejected(cases)
 
     def test_predecessor_in_an_unexpected_state_is_rejected(self) -> None:
-        candidate = packet_tunnel_row("0.5.0/50028", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         self._assert_rejected(
             {
                 state: (
                     packet_tunnel_listing(
-                        packet_tunnel_row("0.5.0/50025", state), candidate
+                        packet_tunnel_row(f"0.5.0/{FROM_BUILD}", state), candidate
                     ),
                     self.NOT_RETAINED,
                 )
@@ -3241,8 +3306,8 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
 
     def test_fixture_rows_keep_the_observed_listing_layout(self) -> None:
         # Copied byte for byte from one read-only `systemextensionsctl list` on
-        # the GA Mac before 50028 replaced 50025: retained rows lead with two
-        # empty flag columns.
+        # the GA Mac before the GA install replaced the 0.5.0 preview: retained
+        # rows lead with two empty flag columns.
         observed = (
             "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]",
             "\t\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel (0.5.0/50008)"
@@ -3262,14 +3327,14 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         )
 
     def test_retained_registration_must_be_disabled_and_inactive(self) -> None:
-        candidate = packet_tunnel_row("0.5.0/50028", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         # A retained state beside either flag is a self-contradicting row.
         self._assert_rejected(
             {
                 f"retained flags {flags!r}": (
                     packet_tunnel_listing(
                         packet_tunnel_row(
-                            "0.5.0/50025", SYSTEM_EXTENSION_RETAINED, flags=flags
+                            f"0.5.0/{FROM_BUILD}", SYSTEM_EXTENSION_RETAINED, flags=flags
                         ),
                         candidate,
                     ),
@@ -3280,7 +3345,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         )
 
     def test_retained_registration_must_be_an_earlier_build(self) -> None:
-        candidate = packet_tunnel_row("0.5.0/50028", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = packet_tunnel_row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
 
         def listing(version: str) -> str:
             return packet_tunnel_listing(
@@ -3290,8 +3355,8 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
         cases = {
             f"retained {version}": (listing(version), self.NOT_EARLIER)
             for version in (
-                "0.5.1/50028",
-                "0.5.0/50029",
+                f"0.5.1/{TO_BUILD}",
+                f"0.5.0/{NEXT_GA_BUILD}",
                 "0.6.0/60001",
                 "0.4.0/9223372036854775807",
             )
@@ -3326,15 +3391,15 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
             {
                 "foreign predecessor": (
                     packet_tunnel_listing(
-                        row("0.5.0/50025", retained, team_id="ABCDE12345"),
-                        row("0.5.0/50028", activated),
+                        row(f"0.5.0/{FROM_BUILD}", retained, team_id="ABCDE12345"),
+                        row(f"0.5.0/{TO_BUILD}", activated),
                     ),
                     self.FOREIGN_TEAM,
                 ),
                 "foreign candidate": (
                     packet_tunnel_listing(
-                        row("0.5.0/50025", retained),
-                        row("0.5.0/50028", activated, team_id="ABCDE12345"),
+                        row(f"0.5.0/{FROM_BUILD}", retained),
+                        row(f"0.5.0/{TO_BUILD}", activated, team_id="ABCDE12345"),
                     ),
                     self.FOREIGN_TEAM,
                 ),
@@ -3343,12 +3408,12 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
 
     def test_duplicate_or_miscounted_listing_is_malformed(self) -> None:
         row = packet_tunnel_row
-        candidate = row("0.5.0/50028", SYSTEM_EXTENSION_ACTIVATED)
+        candidate = row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_ACTIVATED)
         self._assert_rejected(
             {
                 "duplicate candidate registration": (
                     packet_tunnel_listing(
-                        row("0.5.0/50028", SYSTEM_EXTENSION_RETAINED), candidate
+                        row(f"0.5.0/{TO_BUILD}", SYSTEM_EXTENSION_RETAINED), candidate
                     ),
                     self.MALFORMED,
                 ),
@@ -3357,7 +3422,7 @@ class GARuntimeSystemExtensionTests(unittest.TestCase):
                 "duplicate under a distinct-registration count": (
                     packet_tunnel_listing(candidate).replace(
                         candidate,
-                        f"{row('0.5.0/50028', SYSTEM_EXTENSION_RETAINED)}\n{candidate}",
+                        f"{row(f'0.5.0/{TO_BUILD}', SYSTEM_EXTENSION_RETAINED)}\n{candidate}",
                         1,
                     ),
                     self.MALFORMED,
@@ -3940,7 +4005,7 @@ class GARuntimeCollectorTests(unittest.TestCase):
     def test_seal_failure_after_raw_publication_requires_only_seal_retry(self) -> None:
         runtime = FakeCollectorRuntime(self.fixture)
         transient = GARuntimeAcceptanceError(
-            "installed 50028 application tree cannot be identified"
+            f"installed {TO_BUILD} application tree cannot be identified"
         )
         transient.__cause__ = ValueError("artifact entry changed while revalidating: .")
         publish = ga_runtime._publish_collected_raw
@@ -4651,7 +4716,7 @@ class GARuntimeCollectorTests(unittest.TestCase):
         ), self.assertRaises(GACollectionRecoveryRequired) as raised:
             self._collect(self.fixture, runtime)
         self.assertRegex(
-            str(raised.exception.__cause__), "still contains the installed 50028 Host"
+            str(raised.exception.__cause__), f"still contains the installed {TO_BUILD} Host"
         )
         self.assertNotIn(list(OFF_PROOF_COMMAND), [argv for argv, _ in runtime.calls])
         self.assertFalse(self.fixture.raw_root.exists())
@@ -5536,7 +5601,7 @@ class GARuntimeFailureDiagnosticTests(unittest.TestCase):
     def test_explicit_causes_render_in_order_with_their_notes(self) -> None:
         root = ValueError("artifact entry changed while revalidating: .")
         middle = GARuntimeAcceptanceError(
-            "installed 50028 application tree cannot be identified"
+            f"installed {TO_BUILD} application tree cannot be identified"
         )
         middle.add_note("fixture middle note")
         middle.__cause__ = root
@@ -5552,7 +5617,7 @@ class GARuntimeFailureDiagnosticTests(unittest.TestCase):
                 "error: fixture headline",
                 "fixture top note",
                 "caused by GARuntimeAcceptanceError: "
-                "installed 50028 application tree cannot be identified",
+                f"installed {TO_BUILD} application tree cannot be identified",
                 "  fixture middle note",
                 "caused by ValueError: artifact entry changed while revalidating: .",
             ],
@@ -5643,7 +5708,7 @@ class GARuntimeFailureDiagnosticTests(unittest.TestCase):
 
     def test_main_prints_the_cause_chain_of_a_seal_retry(self) -> None:
         transient = GARuntimeAcceptanceError(
-            "installed 50028 application tree cannot be identified"
+            f"installed {TO_BUILD} application tree cannot be identified"
         )
         transient.__cause__ = ValueError("artifact entry changed while revalidating: .")
         retry = ga_runtime.GASealRetryRequired(
@@ -5665,7 +5730,7 @@ class GARuntimeFailureDiagnosticTests(unittest.TestCase):
                 "error: GA runtime acceptance: sealing did not complete; run "
                 f"{SEAL_RETRY_COMMAND}",
                 "caused by GARuntimeAcceptanceError: "
-                "installed 50028 application tree cannot be identified",
+                f"installed {TO_BUILD} application tree cannot be identified",
                 "caused by ValueError: artifact entry changed while revalidating: .",
             ],
         )

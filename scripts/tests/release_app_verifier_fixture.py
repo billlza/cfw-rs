@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import os
 
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 
-def complete_verifier_stdout(app: str, build_number: str = "50028") -> bytes:
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+
+
+def complete_verifier_stdout(app: str, build_number: str = GA_BUILD) -> bytes:
     candidate_root = os.path.dirname(os.path.dirname(app))
     native_products = os.path.join(
         candidate_root, "signing-output", "signed-native-products"

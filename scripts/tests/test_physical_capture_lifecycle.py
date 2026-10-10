@@ -15,6 +15,10 @@ from scripts.physical_capture.session import (
     CaptureEvent,
     PhysicalCaptureSession,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 def _sha256(value: str) -> str:
@@ -82,7 +86,7 @@ class LifecycleCaptureBoundaryTests(unittest.TestCase):
         }
         candidate = {
             "version": "0.5.0",
-            "build_number": "50028",
+            "build_number": GA_BUILD,
             "app_manifest_sha256": _sha256("app"),
             "signed_app_tree_sha256": _sha256("tree"),
             "artifact_hash_manifest_sha256": _sha256("artifacts"),
@@ -91,7 +95,7 @@ class LifecycleCaptureBoundaryTests(unittest.TestCase):
         self.state.context = {
             "candidate": candidate,
             "run": {
-                "run_id": "run-50028-macos15",
+                "run_id": f"run-{GA_BUILD}-macos15",
                 **{
                     field: environment[field]
                     for field in lifecycle._CONTEXT_ENVIRONMENT_FIELDS
@@ -102,7 +106,7 @@ class LifecycleCaptureBoundaryTests(unittest.TestCase):
             "schema_version": 1,
             "document": "cfw-lifecycle-observation-v1",
             "candidate": candidate,
-            "run_id": "run-50028-macos15",
+            "run_id": f"run-{GA_BUILD}-macos15",
             "environment": environment,
             "probe_id": "login",
             "category": "session",

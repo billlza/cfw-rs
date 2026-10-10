@@ -10,6 +10,10 @@ from unittest.mock import patch
 
 from scripts.hash_artifact import build_manifest
 from scripts import promote_signed_native_manifest as promotion
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 class SignedNativeManifestTests(unittest.TestCase):
@@ -21,7 +25,7 @@ class SignedNativeManifestTests(unittest.TestCase):
         (self.unsigned / "binary").write_bytes(b"unsigned")
         self.metadata = {
             "artifactKind": "native-proxy-agent-v1",
-            "buildNumber": "50028",
+            "buildNumber": GA_BUILD,
             "signingMode": "pre-sign",
         }
         self.manifest = self.root / "CFWProxyAgent.app.manifest.json"
@@ -50,7 +54,7 @@ class SignedNativeManifestTests(unittest.TestCase):
         metadata = value["metadata"]
         pre_sign = json.loads(self.manifest.read_bytes())
         self.assertEqual(metadata["artifactKind"], "native-proxy-agent-v1")
-        self.assertEqual(metadata["buildNumber"], "50028")
+        self.assertEqual(metadata["buildNumber"], GA_BUILD)
         self.assertEqual(metadata["signingMode"], "developer-id")
         self.assertEqual(metadata["preSignArtifactSha256"], pre_sign["sha256"])
         self.assertEqual(

@@ -19,6 +19,10 @@ from scripts.hash_artifact import build_manifest
 from scripts.publication import durable_file
 from scripts.publication.common import PublicationError
 from scripts import verify_signing_transformation as transformation
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 ADHOC_SIGNATURE_SIZE = 0x1000
@@ -177,7 +181,7 @@ class SigningTransformationFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.root = (
-            self.repository / "target/candidates/0.5.0/ga/50028"
+            self.repository / f"target/candidates/0.5.0/ga/{GA_BUILD}"
         )
         self.pre_sign_app = self.root / transformation.PRE_SIGN_APP_RELATIVE
         self.signing_output = (
@@ -236,7 +240,7 @@ class SigningTransformationFixture:
     def _write_pre_sign_manifest(self) -> None:
         metadata = {
             "artifactKind": "pre-sign-application-v1",
-            "buildNumber": "50028",
+            "buildNumber": GA_BUILD,
             "version": "0.5.0",
         }
         value = build_manifest(
@@ -285,7 +289,7 @@ class SigningTransformationFixture:
 
     def _write_intent(self) -> None:
         value = {
-            "build_number": "50028",
+            "build_number": GA_BUILD,
             "consumption_state": "candidate_frozen_consumed",
             "document": "cfm-candidate-freeze-intent-v3",
             "pre_sign_app_tree_sha256": "a" * 64,
@@ -304,7 +308,7 @@ class SigningTransformationFixture:
             intent_path=self.intent_path,
             intent_sha256=hashlib.sha256(self.intent_path.read_bytes()).hexdigest(),
             product_version="0.5.0",
-            build_number="50028",
+            build_number=GA_BUILD,
             recovered=False,
         )
 

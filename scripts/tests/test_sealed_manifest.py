@@ -79,6 +79,10 @@ from scripts.tests.physical_evidence_fixture import (
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.test_sealed_closure import _request as _closure_request
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
@@ -1049,7 +1053,7 @@ class SealedManifestContractTests(unittest.TestCase):
     def test_default_state_is_confined_to_the_active_ga_stage_root(self) -> None:
         self.assertEqual(
             DEFAULT_EVIDENCE_DIRECTORY,
-            "target/candidates/0.5.0/ga/50028/stage-inputs/sealed-manifest",
+            f"target/candidates/0.5.0/ga/{GA_BUILD}/stage-inputs/sealed-manifest",
         )
         self.assertEqual(
             DEFAULT_MANIFEST_PATH,

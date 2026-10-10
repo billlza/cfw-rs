@@ -171,9 +171,10 @@ class NotaryLogValidationTests(unittest.TestCase):
     def test_code_free_resource_tickets_carry_no_architecture(self) -> None:
         # Observed in Apple's Accepted log of the signed 0.5.0 Host: the
         # SwiftUI resource bundle has a null architecture and its Info.plist
-        # none. Both normalize to a ticket without an architecture.
+        # none. Both normalize to a ticket without an architecture. The build
+        # in the archive name is a neutral fixture value.
         bundle = (
-            "Clash.for.Mac_0.5.0_50028_notary.zip/Clash for Mac.app/Contents/Resources/"
+            "Clash.for.Mac_0.5.0_70001_notary.zip/Clash for Mac.app/Contents/Resources/"
             "CFMNativeDashboard_CFMNativeDashboard.bundle"
         )
         log = _log()

@@ -17,6 +17,9 @@ from scripts.hash_artifact import build_manifest, write_new_manifest
 from scripts.promote_signed_native_manifest import promote_manifest
 
 
+GA_BUILD = ids.ACTIVE_RELEASE_IDENTITY.ga_build
+
+
 def write(path: Path, data: bytes, *, executable: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
@@ -54,7 +57,7 @@ class CandidateFixture:
         self.context = context
         self.unsigned_preview = context is ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST
         self.version = "0.5.0"
-        self.build = "50028"
+        self.build = GA_BUILD
         self.signing = "developer-id"
         private = []
         if self.unsigned_preview:
@@ -260,7 +263,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
         ):
             with self.subTest(context=context):
                 fixture = self.fixture(context, ga_pre_sign=ga_pre_sign)
-                self.assertEqual(fixture.build, "50028")
+                self.assertEqual(fixture.build, GA_BUILD)
                 self.assertEqual(self.verify(fixture), unsigned_checks)
 
     def test_ga_pre_sign_cannot_skip_unsigned_host_check(self) -> None:
@@ -351,7 +354,7 @@ class PreviewCandidateBundleTests(unittest.TestCase):
             fixture = CandidateFixture(self.root / str(index), ids.CandidateBundleContext.UNSIGNED_PREVIEW_HOST)
             path = fixture.app / relative
             value = plistlib.loads(path.read_bytes())
-            value["CFBundleVersion"] = "50028"
+            value["CFBundleVersion"] = GA_BUILD
             write_plist(path, value)
             with self.subTest(component=relative), self.assertRaises(bundle.CandidateError):
                 self.verify(fixture)

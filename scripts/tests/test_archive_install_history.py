@@ -10,12 +10,21 @@ from unittest.mock import patch
 
 from scripts import archive_install_history as archive
 from scripts import dormant_app_install as install
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 from scripts.tests import test_ga_acceptance_journal_export as fixture_module
 
 
 # Synthetic lineage entries: a completed upgrade under another product version
 # and build than the active GA, as every real retention archives.
 ARCHIVED_PREVIOUS = install.PredecessorProfile("0.4.0", "40998", "1" * 64)
+# The retained installation that replaced every archived lineage entry.
+RETAINED_PREDECESSOR = install.AppIdentity(
+    install.ACTIVE_PREDECESSOR.product_version,
+    install.ACTIVE_PREDECESSOR.build_number,
+    install.ACTIVE_PREDECESSOR.tree_sha256,
+)
+# The active GA build is never a registered predecessor.
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 class InstallHistoryTests(unittest.TestCase):
@@ -36,17 +45,17 @@ class InstallHistoryTests(unittest.TestCase):
         candidate = replace(fixture_module.CANDIDATE, app=self.expected)
         previous = install.AppIdentity(
             ARCHIVED_PREVIOUS.product_version, ARCHIVED_PREVIOUS.build_number, ARCHIVED_PREVIOUS.tree_sha256)
+        # The historical release replaced ARCHIVED_PREVIOUS as its active predecessor.
         with patch.object(install, "GA_INSTALL_PROFILE", profile), patch.object(
-            fixture_module, "CANDIDATE", candidate
-        ):
+            install, "ACTIVE_PREDECESSOR", ARCHIVED_PREVIOUS
+        ), patch.object(fixture_module, "CANDIDATE", candidate):
             self.fixture = fixture_module.JournalExportFixture(previous=previous)
         self.addCleanup(self.fixture.cleanup)
         self.paths = self.fixture.install_paths
         self.destination = self.paths.target_parent / archive.HISTORY_NAME / "40999"
         self.executor = {"repositoryCommit": "a" * 40, "releaseSourceSha256": "b" * 64}
-        # The retained preview that replaced the archived build on this Mac.
-        self.installed = install.AppIdentity(
-            "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256)
+        # The retained predecessor that replaced the archived build on this Mac.
+        self.installed = RETAINED_PREDECESSOR
 
     def retain(self, **options: object) -> Path:
         return archive.archive_completed_history(
@@ -198,8 +207,7 @@ class InstallHistoryTests(unittest.TestCase):
         registry = MappingProxyType(
             {**install.SUPPORTED_PREDECESSORS, archived.build_number: archived}
         )
-        retained_preview = install.AppIdentity(
-            "0.5.0", "50025", install.INSTALLED_50025_PREDECESSOR.tree_sha256)
+        retained_preview = RETAINED_PREDECESSOR
         with patch.object(install, "SUPPORTED_PREDECESSORS", registry):
             expected, installed, profile = archive._retention_plan("40999", None)
             self.assertEqual(expected, install.AppIdentity("0.4.0", "40999", archived.tree_sha256))
@@ -209,13 +217,13 @@ class InstallHistoryTests(unittest.TestCase):
                 replace(profile, product_version=install.VERSION, build_number=install.BUILD_NUMBER),
                 install.GA_INSTALL_PROFILE,
             )
-            expected, installed, _ = archive._retention_plan("40999", "50025")
+            expected, installed, _ = archive._retention_plan("40999", RETAINED_PREDECESSOR.build_number)
             self.assertEqual(expected.build_number, "40999")
             self.assertEqual(installed, retained_preview)
             for previous, declared, message in (
-                ("50028", None, "not an explicitly supported predecessor"),
-                ("40999", "50028", "declared installed build is not an explicitly supported"),
-                ("50025", "40999", "must be newer than the archived build"),
+                (GA_BUILD, None, "not an explicitly supported predecessor"),
+                ("40999", GA_BUILD, "declared installed build is not an explicitly supported"),
+                (RETAINED_PREDECESSOR.build_number, "40999", "must be newer than the archived build"),
                 ("40999", "40999", "must be newer than the archived build"),
             ):
                 with self.subTest(previous=previous, declared=declared), self.assertRaisesRegex(

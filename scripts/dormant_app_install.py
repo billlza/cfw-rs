@@ -20,6 +20,7 @@ filesystem mutation using read-only process and network observations.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from contextlib import contextmanager
 import ctypes
 from dataclasses import dataclass
@@ -194,7 +195,7 @@ RETIRED_SERVICE_TRANSACTION_NAMES: Final = (
 CURRENT_OFF_PROOF_PROFILE: Final = "current_engine_v6_authority_v1_1"
 # The one service vocabulary (engine v6 / Authority v1.1) the transaction
 # speaks through the candidate Host. Every supported predecessor implements it;
-# admission only proves that the observed predecessor is one of them.
+# admission only proves that the observed predecessor is the active one.
 SERVICE_ACTIONS: Final = (
     "prepare",
     "unregister-proxy-agent",
@@ -272,6 +273,59 @@ class InstallError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def require_predecessor_registry(registry: Mapping[str, PredecessorProfile]) -> None:
+    """Require each profile under its own canonical build and an exact tree digest."""
+
+    for build, profile in registry.items():
+        try:
+            canonical = canonical_build_version(
+                profile.build_number, f"install predecessor {build} build number"
+            )
+        except BuildIdentityError as error:
+            raise InstallError("predecessor_registry_invalid", str(error)) from error
+        if canonical != build:
+            raise InstallError(
+                "predecessor_registry_invalid",
+                f"install predecessor registry key {build} names build {canonical}",
+            )
+        if re.fullmatch(r"[0-9a-f]{64}", profile.tree_sha256) is None:
+            raise InstallError(
+                "predecessor_registry_invalid",
+                f"install predecessor {build} tree digest is not a SHA-256",
+            )
+
+
+def select_active_predecessor(
+    registry: Mapping[str, PredecessorProfile],
+    product_version: str,
+    ga_build: str,
+) -> PredecessorProfile:
+    """The newest registered installation of this product below the GA.
+
+    It is the only installation a GA install may replace. Older registry
+    entries stay readable as the recorded predecessors of completed journals.
+    """
+
+    require_predecessor_registry(registry)
+    eligible = [
+        profile
+        for profile in registry.values()
+        if profile.product_version == product_version
+        and int(profile.build_number) < int(ga_build)
+    ]
+    if not eligible:
+        raise InstallError(
+            "predecessor_registry_invalid",
+            f"no registered {product_version} install predecessor precedes GA build {ga_build}",
+        )
+    return max(eligible, key=lambda profile: int(profile.build_number))
+
+
+ACTIVE_PREDECESSOR: Final = select_active_predecessor(
+    SUPPORTED_PREDECESSORS, VERSION, BUILD_NUMBER
+)
 
 
 @dataclass(frozen=True)
@@ -602,19 +656,21 @@ def require_target_application_present(path: Path) -> None:
 
 
 def resolve_predecessor(observed: AppIdentity, candidate_build: str) -> PredecessorProfile:
-    """Admit the observed installed application as a supported predecessor.
+    """Admit the observed installed application as the active predecessor.
 
-    Only an exact supported predecessor is known to implement the service
-    vocabulary, so an unrecognised installation is rejected rather than guessed
-    at. The exact tree digest is required as well as the build number: the
-    build number alone is an unauthenticated bundle string.
+    Only `ACTIVE_PREDECESSOR` may be replaced: any other installation,
+    including an older registry entry whose journals remain readable, is
+    rejected rather than guessed at. The exact tree digest is required as well
+    as the build number: the build number alone is an unauthenticated bundle
+    string.
     """
 
-    predecessor = SUPPORTED_PREDECESSORS.get(observed.build_number)
-    if predecessor is None:
+    predecessor = ACTIVE_PREDECESSOR
+    if observed.build_number != predecessor.build_number:
         raise InstallError(
             "predecessor_unsupported",
-            f"installed build {observed.build_number} is not a supported install predecessor",
+            f"installed build {observed.build_number} is not the active install "
+            f"predecessor {predecessor.build_number}",
         )
     if observed.version != predecessor.product_version:
         raise InstallError(

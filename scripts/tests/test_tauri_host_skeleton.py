@@ -15,8 +15,11 @@ from scripts.verify_candidate_bundle import (
     verify_macho,
     verify_unsigned_host_skeleton,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.tests.release_identity_fixture import NEXT_GA_BUILD, retired_ga_builds
 
 
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 REPOSITORY = Path(__file__).resolve().parents[2]
 CONTRACT = REPOSITORY / "scripts/tauri_host_skeleton.sh"
 SIGNING_VARIABLES = (
@@ -203,8 +206,8 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
 
     def test_release_build_is_explicit_and_does_not_enable_rejected_dashboard(self) -> None:
         self.write_config({"version": "0.5.0", "bundle": {"macOS": {}}})
-        override = json.dumps({"bundle": {"macOS": {"bundleVersion": "50028"}}})
-        completed = self.run_contract(release=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50028"})
+        override = json.dumps({"bundle": {"macOS": {"bundleVersion": GA_BUILD}}})
+        completed = self.run_contract(release=True, override=override, environment_updates={"CFW_BUILD_NUMBER": GA_BUILD})
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         self.assertIn(b"[--features]\n[physical-release-evidence,native-ui]", completed.stdout)
         self.assertNotIn(b"native-dashboard", completed.stdout)
@@ -218,19 +221,18 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             ({"CFW_BUILD_NUMBER": "50017"}, override),
             ({"CFW_BUILD_NUMBER": "50018"}, override),
             ({"CFW_BUILD_NUMBER": "50025"}, override),
-            ({"CFW_BUILD_NUMBER": "50026"}, override),
-            ({"CFW_BUILD_NUMBER": "50027"}, override),
-            ({"CFW_BUILD_NUMBER": "50029"}, override),
+            *(({"CFW_BUILD_NUMBER": retired}, override) for retired in retired_ga_builds()),
+            ({"CFW_BUILD_NUMBER": NEXT_GA_BUILD}, override),
             ({"CFW_BUILD_NUMBER": None}, override),
-            ({"CFW_BUILD_NUMBER": "50028"}, self.override),
-            ({"CFW_BUILD_NUMBER": "50028", "APPLE_SIGNING_IDENTITY": "unexpected"}, override),
+            ({"CFW_BUILD_NUMBER": GA_BUILD}, self.override),
+            ({"CFW_BUILD_NUMBER": GA_BUILD, "APPLE_SIGNING_IDENTITY": "unexpected"}, override),
         ]:
             with self.subTest(environment=environment, override=config):
                 denied = self.run_contract(release=True, override=config, environment_updates=environment)
                 self.assertNotEqual(denied.returncode, 0)
                 self.assertNotIn(b"[build]", denied.stdout)
         self.write_config({"version": "0.4.0", "bundle": {"macOS": {}}})
-        denied = self.run_contract(release=True, override=override, environment_updates={"CFW_BUILD_NUMBER": "50028"})
+        denied = self.run_contract(release=True, override=override, environment_updates={"CFW_BUILD_NUMBER": GA_BUILD})
         self.assertNotEqual(denied.returncode, 0)
         self.assertNotIn(b"[build]", denied.stdout)
 

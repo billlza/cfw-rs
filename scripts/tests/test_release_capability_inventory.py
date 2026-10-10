@@ -17,6 +17,10 @@ from scripts.release_capability_inventory import (
     require_fixed_evidence_mapping,
     validate_inventory,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
@@ -144,10 +148,10 @@ class ReleaseCapabilityInventoryTests(unittest.TestCase):
         self.assertEqual(len(reports), len(CAPABILITY_IDS))
         self.assertEqual(
             {report["path"] for report in reports},
-            {"target/candidates/0.5.0/ga/50028/stage-inputs/local-ci-lanes.json"},
+            {f"target/candidates/0.5.0/ga/{GA_BUILD}/stage-inputs/local-ci-lanes.json"},
         )
         require_fixed_evidence_mapping(value)
-        reports[0]["path"] = "target/candidates/0.5.0/ga/50028/prepackage/local-ci-lanes.json"
+        reports[0]["path"] = f"target/candidates/0.5.0/ga/{GA_BUILD}/prepackage/local-ci-lanes.json"
         with self.assertRaisesRegex(PublicationError, "report policy drifted"):
             require_fixed_evidence_mapping(value)
 

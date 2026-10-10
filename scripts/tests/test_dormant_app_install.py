@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import errno
+import hashlib
 import io
 import json
 import os
@@ -58,19 +59,33 @@ from scripts.dormant_app_install import (
     exclusive_release_maintenance_lock,
 )
 from scripts.dormant_app_install import (
-    INSTALLED_50025_PREDECESSOR,
+    ACTIVE_PREDECESSOR,
+    PredecessorProfile,
     SUPPORTED_PREDECESSORS,
     bind_journal_predecessor,
     require_target_application_present,
     resolve_predecessor,
+    select_active_predecessor,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.tests.release_identity_fixture import next_patch
 
 
-# The predecessor fixture is the installed 50025 with its real frozen tree
+# The predecessor fixture is the active predecessor with its real frozen tree
 # identity: the install admits a predecessor only against its exact recorded
 # tree digest, so an invented digest would be rejected as a tampered bundle.
-OLD = AppIdentity("0.5.0", "50025", INSTALLED_50025_PREDECESSOR.tree_sha256)
-NEW = AppIdentity("0.5.0", "50028", "b" * 64)
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+# Append-only: the canonical-JSON digest of every registered predecessor
+# profile, so the frozen tree identities stay stated only in the registry.
+RETAINED_PREDECESSOR_DIGESTS = {
+    "50025": "5d21d6a9fd40e05a466d9a8fc9103c9fdabb6e7d84b7c5bd1ae1b80d56d8daa4",
+}
+OLD = AppIdentity(
+    ACTIVE_PREDECESSOR.product_version,
+    ACTIVE_PREDECESSOR.build_number,
+    ACTIVE_PREDECESSOR.tree_sha256,
+)
+NEW = AppIdentity(ACTIVE_RELEASE_IDENTITY.product_version, GA_BUILD, "b" * 64)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -383,10 +398,10 @@ class DormantInstallTransactionTests(unittest.TestCase):
             (AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
             # Earlier installs are no longer predecessors of any GA install.
             (AppIdentity("0.4.0", "40073", "a" * 64), "predecessor_unsupported"),
-            (AppIdentity("0.5.0", "50025", "f" * 64), "predecessor_identity_mismatch"),
+            (replace(OLD, tree_sha256="f" * 64), "predecessor_identity_mismatch"),
             # The GA build itself is never a predecessor.
             (NEW, "predecessor_unsupported"),
-            (AppIdentity("0.4.0", "50025", OLD.tree_sha256), "install_identity_mismatch"),
+            (replace(OLD, version="0.4.0"), "install_identity_mismatch"),
         )
         for installed, code in cases:
             with self.subTest(code=code):
@@ -727,7 +742,7 @@ class DormantInstallTransactionTests(unittest.TestCase):
         backup = self.fixture.staging_payload()
         # The installed application is now this GA build itself, which is never
         # a supported predecessor; admission fails before any mutation.
-        with self.assertRaisesRegex(InstallError, "not a supported install predecessor"):
+        with self.assertRaisesRegex(InstallError, "not the active install predecessor"):
             self.fixture.transaction().install()
         self.assertEqual(self.fixture.read_identity(backup), OLD)
         self.assertEqual(self.fixture.swap_count, 1)
@@ -1123,27 +1138,27 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "candidate_toolchain_override")
 
-    def test_ga_profile_has_one_fixed_50028_path_and_journal(self) -> None:
+    def test_ga_profile_has_one_fixed_active_ga_path_and_journal(self) -> None:
         paths = InstallPaths.production()
 
         self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "50028")
+        self.assertEqual(paths.profile.build_number, GA_BUILD)
         # An unbound profile cannot express a predecessor claim at all; the
         # predecessor is observed on the machine and bound separately.
         self.assertFalse(hasattr(paths.profile, "previous_build_number"))
         self.assertEqual(
             paths.repository,
-            paths.operator_repository / "target/release-worktrees/50028",
+            paths.operator_repository / f"target/release-worktrees/{GA_BUILD}",
         )
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                "/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
+                f"/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                "target/candidates/0.5.0/ga/50028/signing-output/signed-native-products"
+                f"target/candidates/0.5.0/ga/{GA_BUILD}/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1363,11 +1378,11 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_50028_ga_root(self) -> None:
+    def test_production_candidate_is_fixed_to_the_active_ga_root(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/candidates/0.5.0/ga/50028/signed/Clash for Mac.app"
+                f"/target/candidates/0.5.0/ga/{GA_BUILD}/signed/Clash for Mac.app"
             )
         )
 
@@ -1375,7 +1390,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
         operator = Path("/operator")
-        artifact = operator / "target/release-worktrees/50028"
+        artifact = operator / f"target/release-worktrees/{GA_BUILD}"
         sources = FrozenReleaseSources(
             executor=ExecutorSource(operator, "a" * 40, "b" * 64),
             artifact=ExecutorSource(artifact, "c" * 40, "d" * 64),
@@ -1412,7 +1427,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                 paths.release_toolchain_root.mkdir(parents=True)
                 paths.candidate_manifest.parent.mkdir(parents=True)
                 paths.candidate_manifest.write_text(
-                    '{"metadata":{"buildNumber":"50028"}}\n', encoding="utf-8"
+                    f'{{"metadata":{{"buildNumber":"{GA_BUILD}"}}}}\n', encoding="utf-8"
                 )
                 sources = FrozenReleaseSources(
                     executor=ExecutorSource(operator, "a" * 40, "b" * 64),
@@ -1664,35 +1679,86 @@ class DormantInstallValidationTests(unittest.TestCase):
 class InstallPredecessorTests(unittest.TestCase):
     """The install predecessor is observed, not pre-declared, and fails closed."""
 
-    def test_installed_50025_requires_its_retained_exact_signed_tree(self) -> None:
-        # The installed and retained notarized 0.5.0 preview: the production
-        # observation of the 50028 GA install, rehashed from the installed bundle.
-        identity = AppIdentity(
-            "0.5.0", "50025",
-            "d5a8a7f951fa3530ed0fa1982cc01ac7b9d6ec1b7f4579ec59883f99303302b9",
+    def test_install_admits_only_the_active_predecessor(self) -> None:
+        # An older registered installation stays readable as the recorded
+        # predecessor of completed journals, but no install replaces it again.
+        older = PredecessorProfile(
+            ACTIVE_PREDECESSOR.product_version,
+            str(int(ACTIVE_PREDECESSOR.build_number) - 1),
+            "e" * 64,
         )
-        predecessor = resolve_predecessor(identity, "50028")
-        self.assertEqual(predecessor, INSTALLED_50025_PREDECESSOR)
-        self.assertEqual(predecessor.product_version, "0.5.0")
-        self.assertEqual(bind_journal_predecessor(identity), predecessor)
+        observed = AppIdentity(older.product_version, older.build_number, older.tree_sha256)
+        registry = MappingProxyType({**SUPPORTED_PREDECESSORS, older.build_number: older})
+        with patch.object(install, "SUPPORTED_PREDECESSORS", registry):
+            self.assertEqual(bind_journal_predecessor(observed), older)
+            with self.assertRaises(InstallError) as raised:
+                resolve_predecessor(observed, ACTIVE_RELEASE_IDENTITY.ga_build)
+            self.assertEqual(raised.exception.code, "predecessor_unsupported")
+            self.assertEqual(
+                resolve_predecessor(
+                    AppIdentity(
+                        ACTIVE_PREDECESSOR.product_version,
+                        ACTIVE_PREDECESSOR.build_number,
+                        ACTIVE_PREDECESSOR.tree_sha256,
+                    ),
+                    ACTIVE_RELEASE_IDENTITY.ga_build,
+                ),
+                ACTIVE_PREDECESSOR,
+            )
+
+    def test_active_predecessor_is_the_newest_registered_build_below_the_ga(self) -> None:
+        version = ACTIVE_RELEASE_IDENTITY.product_version
+        self.assertIs(SUPPORTED_PREDECESSORS[ACTIVE_PREDECESSOR.build_number], ACTIVE_PREDECESSOR)
+        self.assertEqual(
+            select_active_predecessor(
+                SUPPORTED_PREDECESSORS, version, ACTIVE_RELEASE_IDENTITY.ga_build
+            ),
+            ACTIVE_PREDECESSOR,
+        )
+        oldest, older, newer_other_version, numeric_not_lexical = (
+            PredecessorProfile(version, "70001", "1" * 64),
+            PredecessorProfile(version, "70003", "3" * 64),
+            PredecessorProfile("0.4.0", "70004", "4" * 64),
+            PredecessorProfile(version, "800", "8" * 64),
+        )
+        registry = MappingProxyType(
+            {
+                profile.build_number: profile
+                for profile in (oldest, older, newer_other_version, numeric_not_lexical)
+            }
+        )
+        for ga_build, expected in (("70005", older), ("70003", oldest), ("70002", oldest)):
+            with self.subTest(ga_build=ga_build):
+                self.assertEqual(select_active_predecessor(registry, version, ga_build), expected)
+        self.assertEqual(select_active_predecessor(registry, version, "70001"), numeric_not_lexical)
+        with self.assertRaises(InstallError) as raised:
+            select_active_predecessor(registry, version, "800")
+        self.assertEqual(raised.exception.code, "predecessor_registry_invalid")
+
+    def test_active_predecessor_requires_its_retained_exact_signed_tree(self) -> None:
+        # The installed and retained predecessor is admitted only with the exact
+        # tree digest its registry profile recorded from the installed bundle.
+        predecessor = resolve_predecessor(OLD, GA_BUILD)
+        self.assertEqual(predecessor, ACTIVE_PREDECESSOR)
+        self.assertEqual(bind_journal_predecessor(OLD), predecessor)
         for resolve in (
-            lambda observed: resolve_predecessor(observed, "50028"),
+            lambda observed: resolve_predecessor(observed, GA_BUILD),
             bind_journal_predecessor,
         ):
             with self.assertRaises(InstallError) as raised:
-                resolve(AppIdentity("0.5.0", "50025", "f" * 64))
+                resolve(replace(OLD, tree_sha256="f" * 64))
             self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
-        for candidate in ("50025", "50024", "40073"):
+        for candidate in (OLD.build_number, str(int(OLD.build_number) - 1), "40073"):
             with self.subTest(candidate=candidate), self.assertRaises(InstallError) as raised:
-                resolve_predecessor(identity, candidate)
+                resolve_predecessor(OLD, candidate)
             self.assertEqual(raised.exception.code, "candidate_not_newer")
 
     def test_earlier_installs_are_no_longer_predecessors(self) -> None:
         # Neither admission nor a recorded journal accepts the retired 0.4.0
-        # lineage; the next release reads only the 50025 -> 50028 journals.
+        # lineage; the next release reads only the active predecessor journals.
         for build in ("40019", "40041", "40072", "40073"):
             for resolve in (
-                lambda observed: resolve_predecessor(observed, "50028"),
+                lambda observed: resolve_predecessor(observed, GA_BUILD),
                 bind_journal_predecessor,
             ):
                 with self.subTest(build=build), self.assertRaises(InstallError) as raised:
@@ -1701,18 +1767,18 @@ class InstallPredecessorTests(unittest.TestCase):
 
     def test_unrecognised_predecessor_is_rejected_rather_than_guessed(self) -> None:
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "50028")
+            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), GA_BUILD)
         self.assertEqual(raised.exception.code, "predecessor_unsupported")
 
     def test_predecessor_build_number_alone_is_not_trusted(self) -> None:
         # CFBundleVersion is an unauthenticated bundle string; the exact frozen
         # tree identity must agree with it.
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.5.0", "50025", "f" * 64), "50028")
+            resolve_predecessor(replace(OLD, tree_sha256="f" * 64), GA_BUILD)
         self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
     def test_downgrade_and_reinstall_are_rejected(self) -> None:
-        for candidate in ("50025", "50024"):
+        for candidate in (OLD.build_number, str(int(OLD.build_number) - 1)):
             with self.subTest(candidate=candidate), self.assertRaises(InstallError) as raised:
                 resolve_predecessor(OLD, candidate)
             self.assertEqual(raised.exception.code, "candidate_not_newer")
@@ -1720,10 +1786,10 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_lineage_entries_bind_their_exact_product_version(self) -> None:
         # A build number names one lineage entry; the recorded product version
         # must agree with it, whichever direction the mismatch takes.
-        for version in ("0.4.0", "0.5.1", "0.3.5"):
-            observed = AppIdentity(version, "50025", INSTALLED_50025_PREDECESSOR.tree_sha256)
+        for version in ("0.4.0", next_patch(OLD.version), "0.3.5"):
+            observed = replace(OLD, version=version)
             for resolve in (
-                lambda value: resolve_predecessor(value, "50028"),
+                lambda value: resolve_predecessor(value, GA_BUILD),
                 bind_journal_predecessor,
             ):
                 with self.subTest(version=version), self.assertRaises(InstallError) as raised:
@@ -1747,13 +1813,41 @@ class InstallPredecessorTests(unittest.TestCase):
                 require_target_application_present(link)
             self.assertEqual(raised.exception.code, "app_identity_invalid")
 
-    def test_the_supported_predecessor_table_is_an_exact_frozen_contract(self) -> None:
-        self.assertEqual(
-            dict(SUPPORTED_PREDECESSORS),
-            {"50025": INSTALLED_50025_PREDECESSOR},
-        )
+    def test_the_supported_predecessor_registry_is_immutable_and_keyed_by_build(self) -> None:
+        for build, profile in SUPPORTED_PREDECESSORS.items():
+            with self.subTest(build=build):
+                self.assertEqual(build, profile.build_number)
+        self.assertIn(ACTIVE_PREDECESSOR.build_number, SUPPORTED_PREDECESSORS)
+        self.assertNotIn(GA_BUILD, SUPPORTED_PREDECESSORS)
         with self.assertRaises(TypeError):
-            SUPPORTED_PREDECESSORS["50028"] = INSTALLED_50025_PREDECESSOR  # type: ignore[index]
+            SUPPORTED_PREDECESSORS[GA_BUILD] = ACTIVE_PREDECESSOR  # type: ignore[index]
+
+    def test_registered_predecessors_are_retained_unchanged(self) -> None:
+        # Later releases read and archive the journals each registered
+        # installation recorded, so an allocation only ever adds a profile.
+        for build, digest in RETAINED_PREDECESSOR_DIGESTS.items():
+            with self.subTest(build=build):
+                profile = SUPPORTED_PREDECESSORS[build]
+                canonical = json.dumps(
+                    asdict(profile), sort_keys=True, separators=(",", ":")
+                ).encode("ascii")
+                self.assertEqual(hashlib.sha256(canonical).hexdigest(), digest)
+
+    def test_registry_profiles_carry_their_canonical_build_and_tree_digest(self) -> None:
+        install.require_predecessor_registry(SUPPORTED_PREDECESSORS)
+        version = ACTIVE_RELEASE_IDENTITY.product_version
+        for registry in (
+            {"70001": PredecessorProfile(version, "70002", "1" * 64)},
+            {"070001": PredecessorProfile(version, "070001", "1" * 64)},
+            {"70001": PredecessorProfile(version, "70001", "1" * 63)},
+            {"70001": PredecessorProfile(version, "70001", "A" * 64)},
+        ):
+            with self.subTest(registry=registry):
+                with self.assertRaises(InstallError) as raised:
+                    select_active_predecessor(
+                        MappingProxyType(registry), version, "70005"
+                    )
+                self.assertEqual(raised.exception.code, "predecessor_registry_invalid")
 
     def test_service_event_contract_is_the_current_vocabulary_at_every_event(self) -> None:
         for sequence, action in enumerate(install.SERVICE_ACTIONS):
@@ -1771,8 +1865,8 @@ class InstallPredecessorTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "service_journal_invalid")
 
     def test_a_predecessor_is_reached_only_through_observation_or_the_record(self) -> None:
-        self.assertEqual(resolve_predecessor(OLD, GA_INSTALL_PROFILE.build_number), INSTALLED_50025_PREDECESSOR)
-        self.assertEqual(bind_journal_predecessor(OLD), INSTALLED_50025_PREDECESSOR)
+        self.assertEqual(resolve_predecessor(OLD, GA_INSTALL_PROFILE.build_number), ACTIVE_PREDECESSOR)
+        self.assertEqual(bind_journal_predecessor(OLD), ACTIVE_PREDECESSOR)
         # Observation demands a supported predecessor strictly older than this
         # build; the GA build itself is neither.
         with self.assertRaises(InstallError) as raised:
@@ -1780,7 +1874,7 @@ class InstallPredecessorTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "predecessor_unsupported")
         # The record carries the same identity proof.
         with self.assertRaises(InstallError) as raised:
-            bind_journal_predecessor(AppIdentity("0.5.0", "50025", "f" * 64))
+            bind_journal_predecessor(replace(OLD, tree_sha256="f" * 64))
         self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
 
@@ -1870,10 +1964,10 @@ class SystemExtensionParserTests(unittest.TestCase):
                 "3 extension(s)",
                 self.NETWORK_SECTION,
                 self.HEADER,
-                self._tunnel_row("\t", "0.5.0/50025", self.RETAINED),
+                self._tunnel_row("\t", "0.5.0/70001", self.RETAINED),
                 # Deliberately asymmetric flags pin each column to its field.
-                self._tunnel_row("*\t", "0.5.0/50027", "[activated waiting for user]"),
-                self._tunnel_row("*\t*", "0.5.0/50028", "[activated enabled]"),
+                self._tunnel_row("*\t", "0.5.0/70002", "[activated waiting for user]"),
+                self._tunnel_row("*\t*", "0.5.0/70003", "[activated enabled]"),
             )
         ) + "\n"
         registration = install.SystemExtensionRegistration
@@ -1884,7 +1978,7 @@ class SystemExtensionParserTests(unittest.TestCase):
                 registration(
                     team_id=team_id,
                     bundle_id=bundle_id,
-                    version="0.5.0/50025",
+                    version="0.5.0/70001",
                     enabled=False,
                     active=False,
                     state=self.RETAINED,
@@ -1892,7 +1986,7 @@ class SystemExtensionParserTests(unittest.TestCase):
                 registration(
                     team_id=team_id,
                     bundle_id=bundle_id,
-                    version="0.5.0/50027",
+                    version="0.5.0/70002",
                     enabled=True,
                     active=False,
                     state="[activated waiting for user]",
@@ -1900,7 +1994,7 @@ class SystemExtensionParserTests(unittest.TestCase):
                 registration(
                     team_id=team_id,
                     bundle_id=bundle_id,
-                    version="0.5.0/50028",
+                    version="0.5.0/70003",
                     enabled=True,
                     active=True,
                     state="[activated enabled]",

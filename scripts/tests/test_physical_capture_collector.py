@@ -60,6 +60,10 @@ from scripts.publication.common import tree_digest
 from scripts.tests.performance_evidence_fixture import (
     _command as performance_command,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 class _Prompt:
@@ -169,7 +173,7 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
         )
 
     @staticmethod
-    def release_context(run_id: str = "run-50028-macos15") -> dict[str, object]:
+    def release_context(run_id: str = f"run-{GA_BUILD}-macos15") -> dict[str, object]:
         def digest(value: str) -> str:
             return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -181,7 +185,7 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
             ).hexdigest(),
             "candidate": {
                 "version": "0.5.0",
-                "build_number": "50028",
+                "build_number": GA_BUILD,
                 "app_manifest_sha256": digest("app-manifest"),
                 "signed_app_tree_sha256": digest("signed-app-tree"),
                 "artifact_hash_manifest_sha256": digest("artifact-manifest"),

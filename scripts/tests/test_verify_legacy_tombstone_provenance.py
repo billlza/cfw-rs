@@ -15,10 +15,14 @@ from unittest.mock import patch
 from scripts.hash_artifact import build_manifest
 from scripts.promote_signed_native_manifest import promote_manifest
 from scripts import verify_legacy_tombstone_provenance as provenance
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
-    BUILD_NUMBER = "50028"
+    BUILD_NUMBER = GA_BUILD
     DEPLOYMENT_TARGET = "15.0"
     RUST_VERSION = "1.98.1"
 

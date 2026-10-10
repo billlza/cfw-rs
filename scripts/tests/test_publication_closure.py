@@ -17,6 +17,10 @@ from scripts.publication.closure import (
     validate_production_sets,
 )
 from scripts.publication.common import PublicationError
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+
+
+GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 
 
 EXPECTED_CODE_PATHS = {
@@ -121,7 +125,7 @@ class PublicationClosureTests(unittest.TestCase):
         )
 
     def test_prepackage_evidence_has_no_future_stage_dependency(self) -> None:
-        root = Path("target/candidates/0.5.0/ga/50028")
+        root = Path(f"target/candidates/0.5.0/ga/{GA_BUILD}")
         sources = _prepackage_evidence_sources(root)
         self.assertEqual(
             set(sources),

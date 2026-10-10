@@ -28,11 +28,9 @@ import uuid
 if __package__:
     from . import dormant_app_install as install
     from . import ga_acceptance_environment as ga_environment
-    from .release_build_identity import ACTIVE_RELEASE_IDENTITY
 else:
     import dormant_app_install as install
     import ga_acceptance_environment as ga_environment
-    from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 
 DOCUMENT: Final = "cfw-current-service-transaction-v3"
@@ -82,15 +80,6 @@ if install.SERVICE_ACTIONS != (
     "prove-off",
 ):
     raise RuntimeError("service actions differ from fixed transaction")
-if (
-    install.VERSION != ACTIVE_RELEASE_IDENTITY.product_version
-    or install.GA_INSTALL_PROFILE.build_number != ACTIVE_RELEASE_IDENTITY.ga_build
-    or dict(install.SUPPORTED_PREDECESSORS)
-    != {
-        "50025": install.INSTALLED_50025_PREDECESSOR,
-    }
-):
-    raise RuntimeError("service maintenance profile differs from active GA identity")
 PROXY_DOMAIN_TEMPLATE: Final = "gui/{uid}/com.bill.clashformac.proxy-agent"
 AUTHORITY_DOMAIN: Final = "system/com.bill.clashformac.global-authority"
 TOMBSTONE_DOMAIN: Final = "system/com.bill.clashformac.helper"

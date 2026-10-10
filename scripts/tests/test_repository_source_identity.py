@@ -11,7 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts import dormant_app_install
 from scripts import repository_source_identity as source_identity
+from scripts import verify_release_build_allocations as allocations
+from scripts.release_build_identity import RELEASE_IDENTITY_PATH
 from scripts.repository_source_identity import (
     RELEASE_PATHS,
     SourceIdentityError,
@@ -45,6 +48,16 @@ def single_file_digest(path: str, data: bytes, *, executable: bool = False) -> s
     }
     encoded = json.dumps(entry, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256((encoded + "\n").encode("utf-8")).hexdigest()
+
+
+REPOSITORY: Path = Path(__file__).resolve().parents[2]
+# The files a GA allocation edits that must stay byte-identical to the frozen
+# candidate in any tested CI head.
+ALLOCATION_INPUTS: tuple[str, ...] = (
+    RELEASE_IDENTITY_PATH.relative_to(REPOSITORY).as_posix(),
+    *(policy.relative_path.as_posix() for policy in allocations.POLICIES.values()),
+    Path(dormant_app_install.__file__).resolve().relative_to(REPOSITORY).as_posix(),
+)
 
 
 class RepositorySourceIdentityTests(unittest.TestCase):
@@ -472,6 +485,7 @@ class RepositorySourceIdentityTests(unittest.TestCase):
             "scripts/dependency_pins.env",
             "scripts/pinned_build_inputs.json",
             "scripts/build_signed_candidate.sh",
+            *ALLOCATION_INPUTS,
             "unreviewed-input.txt",
         ):
             with self.subTest(path=path):
@@ -483,6 +497,40 @@ class RepositorySourceIdentityTests(unittest.TestCase):
                 git(self.root, "commit", "-q", "-m", "change protected input")
                 with self.assertRaisesRegex(SourceIdentityError, "product or unreviewed"):
                     source_identity.release_ci_source_changes(self.root, prior, repository_commit(self.root))
+
+    def test_allocation_inputs_are_never_ci_validation_adapters(self) -> None:
+        # A tested CI head may differ from the frozen candidate in these
+        # adapters, never in the GA identity, its ledgers or the predecessor
+        # registry that decides which installation a GA build may replace.
+        self.assertEqual(
+            ALLOCATION_INPUTS,
+            (
+                "scripts/release_identity.env",
+                "docs/release/build-allocations-v040.json",
+                "docs/release/build-allocations-v050.json",
+                "scripts/dormant_app_install.py",
+            ),
+        )
+        self.assertEqual(
+            frozenset(ALLOCATION_INPUTS) & source_identity.CI_VALIDATION_SOURCE_PATHS,
+            frozenset(),
+        )
+        # The identity loader, the ledger verifier and every retirement note
+        # bind the allocation as well.
+        for path in (
+            "scripts/release_build_identity.py",
+            "scripts/verify_release_build_allocations.py",
+        ):
+            with self.subTest(path=path):
+                self.assertNotIn(path, source_identity.CI_VALIDATION_SOURCE_PATHS)
+        self.assertEqual(
+            [
+                path
+                for path in source_identity.CI_VALIDATION_SOURCE_PATHS
+                if allocations.RETIREMENT_NOTE_NAME_RE.fullmatch(Path(path).name)
+            ],
+            [],
+        )
 
     def test_ci_native_build_adapters_are_explicit_and_runtime_sources_stay_excluded(self) -> None:
         before = repository_commit(self.root)

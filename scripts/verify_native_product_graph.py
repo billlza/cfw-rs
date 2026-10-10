@@ -32,7 +32,6 @@ stage, or Release gate raises rather than silently passing.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import plistlib
 import sys
@@ -114,17 +113,6 @@ AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
         '  --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$proxy_app"',
     )
 )
-# Level 1 structural identities of the decoded UTF-8 source text around the
-# critical signing block. Together with the unique exact block, they detect
-# accidental or unreviewed reachability and post-verification drift; they are
-# not an authentication mechanism and do not defend against the repository
-# owner. The release-freeze source digest independently binds the raw file.
-AUTHORITY_SIGNING_PREFIX_SHA256 = (
-    "3d98cbea898e8f7d0fd853d257cc43704d92e5bc5349e10bc125aa556fb9f2ea"
-)
-AUTHORITY_SIGNING_SUFFIX_SHA256 = (
-    "1193eed9f5b73952c71ad45a4d367693b42638f7114db4dcebc64a7962eb9097"
-)
 DEPLOYMENT_TARGET = "15.0"
 TOMBSTONE_PROVENANCE_COMMAND = "\n".join(
     (
@@ -148,51 +136,6 @@ DAEMON_PLIST_EMBED = "Library/LaunchDaemons/com.bill.clashformac.global-authorit
 BRIDGE_EMBED = "Frameworks/CFWNativeBridge.framework"
 AGENT_EMBED = "Library/LoginItems/CFWProxyAgent.app"
 EXTENSION_EMBED = f"Library/SystemExtensions/{EXTENSION_WRAPPER}"
-
-
-def _verify_top_level_straight_line_shell_block(
-    source: str,
-    expected_block: str,
-    *,
-    required_prefix_sha256: str,
-    required_suffix_sha256: str,
-) -> None:
-    """Bind the exact block and decoded source text before and after it."""
-
-    for position, required_sha256 in (
-        ("prefix", required_prefix_sha256),
-        ("suffix", required_suffix_sha256),
-    ):
-        if (
-            not isinstance(required_sha256, str)
-            or len(required_sha256) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in required_sha256
-            )
-        ):
-            raise NativeProductGraphError(
-                f"GA signing helper critical-{position} identity is malformed"
-            )
-    if source.count(expected_block) != 1:
-        raise NativeProductGraphError(
-            "GA signing helper does not contain one exact straight-line "
-            "Global Authority signing block"
-        )
-    block_index = source.find(expected_block)
-    prefix_sha256 = hashlib.sha256(source[:block_index].encode("utf-8")).hexdigest()
-    if prefix_sha256 != required_prefix_sha256:
-        raise NativeProductGraphError(
-            "GA signing helper critical-prefix identity differs from the "
-            "reviewed straight-line release policy"
-        )
-    block_end = block_index + len(expected_block)
-    suffix_sha256 = hashlib.sha256(source[block_end:].encode("utf-8")).hexdigest()
-    if suffix_sha256 != required_suffix_sha256:
-        raise NativeProductGraphError(
-            "GA signing helper critical-suffix identity differs from the "
-            "reviewed straight-line release policy"
-        )
 
 
 def verify_distribution_codesign_boundary(
@@ -856,9 +799,6 @@ def verify_signing_order(
     manifest: Any,
     files: dict[str, str],
     signing_script: str,
-    *,
-    critical_prefix_sha256: str,
-    critical_suffix_sha256: str,
 ) -> None:
     if not isinstance(manifest, dict):
         raise NativeProductGraphError("signing-order manifest root is not an object")
@@ -1103,12 +1043,11 @@ def verify_signing_order(
             "GA signing helper verifies the Global Authority designated "
             "requirement outside the signed nested-code boundary"
         )
-    _verify_top_level_straight_line_shell_block(
-        signing_script,
-        AUTHORITY_SIGNING_CRITICAL_BLOCK,
-        required_prefix_sha256=critical_prefix_sha256,
-        required_suffix_sha256=critical_suffix_sha256,
-    )
+    if signing_script.count(AUTHORITY_SIGNING_CRITICAL_BLOCK) != 1:
+        raise NativeProductGraphError(
+            "GA signing helper does not contain one exact Global Authority "
+            "signing block"
+        )
 
 
 def verify_signing_transaction_boundary(
@@ -1222,13 +1161,7 @@ def verify_repository(root: Path) -> None:
 
     manifest = read_json(root, "native/macos/Config/signing-order.json")
     verify_distribution_codesign_boundary(codesign_boundary, signing_helper)
-    verify_signing_order(
-        manifest,
-        files,
-        signing_helper,
-        critical_prefix_sha256=AUTHORITY_SIGNING_PREFIX_SHA256,
-        critical_suffix_sha256=AUTHORITY_SIGNING_SUFFIX_SHA256,
-    )
+    verify_signing_order(manifest, files, signing_helper)
     verify_signing_transaction_boundary(
         candidate_builder, signing_transaction, signing_helper
     )

@@ -132,13 +132,12 @@ Network access is isolated to explicit preparation:
    bootstrapped. The default `scripts/verify_pinned_build_inputs.py` entrypoint
    remains the complete source-plus-generated-artifact verification used when
    the fixed artifact is expected to exist.
-   The pinned manifest also freezes the exact SHA-256 of every artifact-bound
-   source except the verifier itself, whose recursive self-hash is replaced by
-   an AST-owned entrypoint contract. A code-owned digest of the complete
-   path-to-source-digest map makes deleted paths, comment-only bindings, dead
-   string bindings, and unreviewed shell/Python source changes fail closed. This
-   is Level 1 drift detection for reviewed release source, not authentication
-   against a repository owner.
+   The pinned manifest carries dependency and policy values only; it does not
+   re-attest individual release scripts. The exact Git commit bound by the
+   hosted CI receipt and the candidate freeze's clean-tree `repositoryCommit`
+   and release-source digest `releaseSourceSha256` identify every tracked
+   release source. Developer ID signing with designated-requirement checks,
+   notarization, and the behavioral release tests establish the rest.
 9. The retained `runtimeTools.adb` section pins the exact Android platform
    tool path, `37.0.0-14910828` version, and executable digest. The static gate
    opens the complete Android admission source through a repository-rooted,

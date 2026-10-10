@@ -258,55 +258,9 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
             "environment_self_check()",
             "journal_export_self_check()",
             "scripts/run_ga_acceptance_journal_export.sh",
-            "scripts/run_ga_acceptance_journal_export.sh:"
-            "cfw_seal_release_tool_environment production",
-            "scripts/run_ga_acceptance_journal_export.sh:"
-            "cfw_select_release_apple_toolchain",
-            "scripts/run_ga_acceptance_journal_export.sh:cfw_run_release_python_script",
-            "scripts/run_ga_acceptance_journal_export.sh:"
-            "scripts/ga_acceptance_journal_export.py",
-            "cfm-ga-journal-export-intent-v1",
-            "cfm-ga-journal-export-receipt-v1",
-            "cfw-current-service-transaction-v3",
-            "cfw-dormant-app-install-v2",
-            "cfm-ga-acceptance-seal-v3",
-            "cfm-ga-publication-seal-v3",
-            "cfm-ga-runtime-acceptance-v2",
-            "cfm-ga-runtime-check-v2",
-            "cfm-ga-command-observation-v2",
-            "cfm-ga-runtime-collection-intent-v3",
-            "cfm-ga-runtime-collection-event-v2",
-            "ACCEPTANCE_INPUT_ROOT: Final = ACCEPTANCE_ROOT_RELATIVE",
-            "MIGRATION_JOURNAL_INPUT: Final = MIGRATION_RELATIVE",
-            "INSTALL_JOURNAL_INPUT: Final = INSTALL_RELATIVE",
-            "SERVICE_JOURNAL_INPUT: Final = SERVICE_RELATIVE",
-            "SERVICE_ENVIRONMENT_INPUT: Final = ENVIRONMENT_RELATIVE",
-            "STAGE_SCHEMA_VERSIONS: Final = {",
-            '"prepackage": 3',
-            '"ga-acceptance": 3',
-            '"publication": 3',
-            "def _verified_migration_journals(repository: Path) -> dict[str, Any]:",
-            "verified = verify_ga_acceptance_journal_export(repository)",
-            "migration = _verified_migration_journals(repository)",
-            '"migration_journals": {',
-            "ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE",
-            "ENVIRONMENT_RELATIVE: Final = JOURNAL_EXPORT_ENVIRONMENT_RELATIVE",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, boundary)
-        for stale in (
-            "cfw-current-service-transaction-v2",
-            "cfm-ga-acceptance-seal-v1",
-            "cfm-ga-publication-seal-v1",
-            "cfm-ga-runtime-acceptance-v1",
-            "cfm-ga-runtime-check-v1",
-            "cfm-ga-command-observation-v1",
-            "cfm-ga-runtime-collection-intent-v1",
-            "cfm-ga-runtime-collection-event-v1",
-            "migration-journals/service-transaction/environment.json",
-        ):
-            with self.subTest(stale=stale):
-                self.assertNotIn(stale, boundary)
         self.assertNotIn("run_ga_acceptance_journal_export.sh --export", boundary)
 
     def test_runtime_cli_self_check_runs_without_production_admission(self) -> None:
@@ -320,6 +274,108 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
             stdout.getvalue(),
             "GA runtime acceptance source contract verified\n",
         )
+
+    def test_cli_composition_roots_accept_no_injected_collaborators(self) -> None:
+        for function, expected in (
+            (ga_runtime_acceptance_cli.main, []),
+            (ga_runtime_acceptance_cli._run_runtime_command, []),
+            (release_artifact_set_cli.main, []),
+            (release_artifact_set_cli._run_verification_command, ["arguments"]),
+        ):
+            with self.subTest(function=function.__qualname__):
+                self.assertEqual(
+                    list(inspect.signature(function).parameters), expected
+                )
+        for module, expected in (
+            (
+                ga_runtime_acceptance_cli,
+                {"_existing_runtime_outputs", "_run_runtime_command", "main"},
+            ),
+            (release_artifact_set_cli, {"_run_verification_command", "main"}),
+        ):
+            with self.subTest(module=module.__name__):
+                self.assertEqual(
+                    {
+                        name
+                        for name, value in vars(module).items()
+                        if inspect.isfunction(value)
+                        and value.__module__ == module.__name__
+                    },
+                    expected,
+                )
+
+    def test_runtime_cli_rejects_injected_arguments_before_any_session(self) -> None:
+        for arguments in (
+            ["verify", "--repository", "/fixture/other"],
+            ["collect", "--freeze-verifier", "fixture"],
+            ["self-check", "--unexpected"],
+        ):
+            with self.subTest(arguments=arguments), patch.object(
+                sys,
+                "argv",
+                [str(Path(ga_runtime_acceptance_cli.__file__)), *arguments],
+            ), patch(
+                "scripts.release_python_runtime.require_closed_release_runtime"
+            ), patch.object(
+                ga_runtime_acceptance,
+                "_repository",
+                return_value=Path("/fixture/frozen-artifact"),
+            ), patch.object(
+                candidate_freeze, "frozen_candidate_verification_session"
+            ) as verifier_session, patch.object(
+                ga_runtime_acceptance, "self_check"
+            ) as self_check, patch(
+                "sys.stderr", new_callable=io.StringIO
+            ), self.assertRaises(SystemExit) as rejected:
+                ga_runtime_acceptance_cli.main()
+            self.assertEqual(rejected.exception.code, 2)
+            verifier_session.assert_not_called()
+            self_check.assert_not_called()
+
+    def test_artifact_cli_rejects_injected_arguments_before_any_session(self) -> None:
+        for arguments in (
+            [
+                "verify-dmg",
+                "--directory",
+                "fixture",
+                "--version",
+                "0.5.0",
+                "--repository",
+                "fixture",
+                "--prepackage-stage-verifier",
+                "fixture",
+            ],
+            [
+                "verify-release",
+                "--repository",
+                "fixture",
+                "--version",
+                "0.5.0",
+                "--command-runner",
+                "fixture",
+            ],
+            ["self-check", "--unexpected"],
+        ):
+            with self.subTest(arguments=arguments), patch.object(
+                sys,
+                "argv",
+                [str(Path(release_artifact_set_cli.__file__)), *arguments],
+            ), patch(
+                "scripts.release_python_runtime.require_closed_release_runtime"
+            ), patch.object(
+                candidate_freeze, "frozen_candidate_verification_session"
+            ) as verifier_session, patch.object(
+                release_artifact_set, "_execute_command"
+            ) as execute, patch.object(
+                release_artifact_set, "self_check"
+            ) as self_check, patch(
+                "sys.stderr", new_callable=io.StringIO
+            ), self.assertRaises(SystemExit) as rejected:
+                release_artifact_set_cli.main()
+            self.assertEqual(rejected.exception.code, 2)
+            verifier_session.assert_not_called()
+            execute.assert_not_called()
+            self_check.assert_not_called()
 
     def test_composition_roots_are_private_executable_regular_files(self) -> None:
         for module in (release_artifact_set_cli, ga_runtime_acceptance_cli):

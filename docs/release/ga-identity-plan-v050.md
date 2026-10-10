@@ -112,10 +112,9 @@ superseded by the next preview). 50025 is the currently installed preview.
   verifier table unchanged and gains one terminal status for 40073,
   `retired_superseded_by_next_product_version`.
 - `scripts/candidate_freeze.py`: `LEDGER_RELATIVE_PATH` follows the version.
-- `scripts/pinned_build_inputs.json` and `verify_pinned_build_inputs.py`:
-  the new ledger is a pinned input; re-derive the bindings from the committed
-  tree (`REQUIRED_ARTIFACT_BINDINGS_SHA256`,
-  `REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256`).
+- The new ledger needs no separate pin: the candidate freeze binds it through
+  the clean-tree `repositoryCommit` and the release-source digest
+  `releaseSourceSha256`, and the hosted CI receipt binds the same commit.
 - `scripts/tests/test_candidate_freeze.py`,
   `test_release_build_identity.py` and the allocation verifier tests gain the
   0.5.0 cases; the "future build" constant in those tests moves past 50026.

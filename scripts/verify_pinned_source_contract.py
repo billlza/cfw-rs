@@ -30,8 +30,7 @@ def main() -> int:
         return 1
     print(
         "pinned source contract verified: static source, tool, policy, script, "
-        "protocol, deployment, generated-artifact identity bindings, and exact "
-        "artifact-source release-freeze digests"
+        "protocol, deployment, and generated-artifact identity bindings"
     )
     return 0
 

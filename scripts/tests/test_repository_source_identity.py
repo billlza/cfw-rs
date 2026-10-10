@@ -466,7 +466,14 @@ class RepositorySourceIdentityTests(unittest.TestCase):
         git(self.root, "commit", "-q", "-m", "adjust hosted validation toolchain")
         tested = repository_commit(self.root)
         self.assertEqual(source_identity.release_ci_source_changes(self.root, before, tested), (".github/workflows/ci.yml",))
-        for path in ("apps/app.rs", "Cargo.lock", "scripts/dependency_pins.env", "scripts/build_signed_candidate.sh", "unreviewed-input.txt"):
+        for path in (
+            "apps/app.rs",
+            "Cargo.lock",
+            "scripts/dependency_pins.env",
+            "scripts/pinned_build_inputs.json",
+            "scripts/build_signed_candidate.sh",
+            "unreviewed-input.txt",
+        ):
             with self.subTest(path=path):
                 prior = repository_commit(self.root)
                 target = self.root / path

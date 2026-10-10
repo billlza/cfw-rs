@@ -32,10 +32,12 @@ entrypoint additionally requires the generated packet LAN peer artifact, while
 * the native dependency lock agrees with the pins (source-tree binding);
 * the offline libbox build script references the pins with no floating versions and
   no network or recursive build actions;
-* the build scripts bind the pinned commit, patch, and combined-diff hashes into the
-  produced artifact manifests (artifact-hash bindings);
-* every artifact-bound source except this self-referential verifier has an exact
-  release-freeze SHA-256 whose complete mapping has a code-owned Level 1 identity.
+* every CI job that enters the closed release gate uses exactly the pinned
+  unsigned-validation Python.
+
+Source files are not re-attested here: the exact Git commit bound by the hosted
+CI receipt and the candidate freeze's release-source identity remain the
+trust root for every tracked release script.
 
 Any unavailable, missing, malformed, wrong, or partial input fails closed.
 """
@@ -43,17 +45,14 @@ Any unavailable, missing, malformed, wrong, or partial input fails closed.
 from __future__ import annotations
 
 import ast
-import copy
 import errno
 import hashlib
-import io
 import json
 import math
 import os
 import re
 import stat
 import sys
-import tokenize
 from pathlib import Path, PurePosixPath
 
 if __package__:
@@ -66,18 +65,11 @@ MANIFEST_RELATIVE_PATH = "scripts/pinned_build_inputs.json"
 DEPENDENCY_PINS_RELATIVE_PATH = "scripts/dependency_pins.env"
 NATIVE_LOCK_RELATIVE_PATH = "native/macos/Dependencies.lock.json"
 TAURI_CLI_INSTALLER_RELATIVE_PATH = "scripts/install_pinned_tauri_cli.sh"
-# Level 1 source identity: detect accidental or unreviewed installer drift.
-# Exact Git/hosted-CI identity remains the trust root; this is not authentication.
-REQUIRED_TAURI_CLI_INSTALLER_SHA256 = (
-    "f99045e8f7fdd95078d27bcd6c4479e511f594ca69d4a4b7de5ea554394fce7f"
-)
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
 MAX_NATIVE_LOCK_BYTES = 256 * 1024
 PINNED_MANIFEST_FIELDS = frozenset(
     {
-        "artifactBindings",
-        "artifactSourceSha256",
         "buildScripts",
         "cargoDeny",
         "combinedDiffSha256",
@@ -104,67 +96,6 @@ PINNED_MANIFEST_FIELDS = frozenset(
         "verifiedGoModuleInputKeys",
         "xcodegen",
     }
-)
-# This Level 1 identity detects accidental or unreviewed policy drift in the
-# complete path-to-fragment mapping. It is an exact policy checksum, not an
-# authentication mechanism or a claim that the repository resists its owner.
-REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "97b3400679a54adcb3633df1fafeaf1d9b5eda9fba3ba726442587df7dee950e"
-)
-# Level 1 identity of the complete path-to-source-digest release-freeze map.
-# It detects accidental or unreviewed drift; it is not authentication and does
-# not claim to protect the repository from its owner. The verifier itself is
-# excluded to avoid a recursive self-hash.
-ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
-REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "90fb909b5f3aad6ddb1173cb059b4c529ba3875e9504e000e81f7815abb7f851"
-)
-# Level 1 structural identities for the fixed release-policy functions.  AST
-# identities deliberately omit source locations so formatting cannot alter the
-# result.  They detect reviewed-function drift; exact Git/hosted-CI identity is
-# still the external trust root and these checks are not authentication.
-GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
-    "_publish_and_confirm_stage": "f8647aa681a7e02ca7e38be3f18cfd903fdc2c9cfedf938d0f8313f407dc1c93",
-    "_require_hosted_ci_source_binding": "92650a8b0033892fc352a00d91f60aa711eaf62e5a6a74ebc6260efd784b36c5",
-    "_verified_prepackage_inputs": "bdfdc7ebe58540afe55ab0638633c26eb9aa8993101cd54103dde9f7db1fbbda",
-    "_verified_package_sets": "03322fad12344a0f9dbf70acaf152a78a6fa09778794c52202bc6c804110791d",
-    "_verified_migration_journals": "aae37ebedddaa00d345475f26ed45e28d69d1097bee7a9a9997b6dd63b7bcc28",
-    "_expected_candidate_from_prepackage": "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e",
-    "_require_migration_matches_prepackage": "84725a8a83750a98262267fc289e7d2852f3a88777aa565ba08d862c87cf68e1",
-    "_verified_acceptance_inputs": "6a326b17cf90c28e4410a5b883676d4c64d79c18c9d87e7b9e6a1717d561e702",
-    "_verified_runtime_acceptance_adapter": "9675cb4d791344a746d864460aa62578e36394c587c10baea67bc22c26ba167f",
-    "_ga_acceptance_files": "d4530d6ef4c092df45eab0dd91f0751872ad82f69c0a8d011f5a0382e3cb9023",
-    "_prepackage_files": "ae7f93e1836002314db2e95eebd3377e40d832bed219f05923cc2789b08cf766",
-    "build_expected_stage_files": "48ccccf9fffbad3948ac662cffd812856ad39863be5410c15e6d521a2f7fabda",
-    "verify_stage": "9b60090cc53552fe01d9891ec634678b9faa6df7cb5bd40b7ced755b9d8c0dd8",
-    "verify_prepackage_authorization": "0b9ae7f3ec556847e8f65af5a4760c25eb359552d42de8e3cba26cf09629f29a",
-    "verify_publication_authorization": "cdc26323dba3a714add18e1e30394717e3a98eafef0e87adfa460f7a0b67ae61",
-    "derive_runtime_expectation": "17b134ce9f37c24e23273d1270139f23386af3914e039ea1f5335d236daf72a5",
-    "seal_prepackage": "3d63970071f5c47783136635b7091ce7f352f91f9cba15019f37f16dd9a5b223",
-    "seal_ga_acceptance": "b466842247c69b0404a138c6219f0c19c392f01c9e741a19c6c22d5f4a852ec2",
-    "seal_publication": "808fbaaea13245bb940eecaf1abc047f472211f8e1e95192a34f47e4a71e1f89",
-    "_compose_stage_files": "284e186baba2f7dbb21d02b3fc3fb2380e86ada30464b4ceb81a5df9d459ce8f",
-    "_current_stage_executor": "4640733086dffe90fffdef7b33fc52163268546e16d404200ee6b18eb9517b55",
-    "_verify_stage": "8f6f61fd8a69a137b8bb5cce99fd6a7f1104f7ee5558162d92072213cdfc594f"
-}
-GA_RELEASE_CLI_FUNCTION_AST_SHA256 = {
-    "scripts/ga_runtime_acceptance_cli.py": {
-        "_existing_runtime_outputs": "d37a6c6a3011b0acfa634f7a9f6ff2aadb24eb0750b0f762a182f469d1e74063",
-        "_run_runtime_command": "e1fe064c3fe0fd48a28584128be8e5a19696088cd6a14c0c274fc6d8738fc4a2",
-        "main": "62813d84408747de2ad669bca9afc5c393443bc5938972e93f83a14f01ea551b"
-    },
-    "scripts/release_artifact_set_cli.py": {
-        "_run_verification_command": "679c3827128d6ec7fbcbf3e2b3c1bd938a54470efe304a32540bc5cad64fa862",
-        "main": "7144daa7b40662a231b907a366ea1798b234f9306c672cce77258cf5aa26631b"
-    }
-}
-PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
-    "_artifact_binding_surface": "fae882ae2244166f36c3a5376b9a3e8777ce2aefc41c0cf852b5fe5bbc2f3e77",
-    "_verify_build_scripts": "291949f92e88f7786a706e74f05ebf4140f68fccb8d86dbb6b16a9224ff409af",
-    "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
-}
-PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "458cd84b9bd79af0eeae2cb466caddf758519d87d19665fa9e404163fd04c11b"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -847,1385 +778,6 @@ def _read_text(
         return body.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise PinnedInputError(f"{description} is not strict UTF-8") from error
-
-
-def _python_binding_surface(source: str, relative: str) -> tuple[str, ast.Module]:
-    """Return Python source with comments and docstrings removed from policy use."""
-
-    try:
-        module = ast.parse(source, filename=relative)
-        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-    except (SyntaxError, tokenize.TokenError, IndentationError) as error:
-        raise PinnedInputError(
-            f"artifact-bound Python source is malformed: {relative}: {error}"
-        ) from error
-
-    for node in ast.walk(module):
-        if (
-            isinstance(node, (ast.If, ast.While))
-            and isinstance(node.test, ast.Constant)
-            and not bool(node.test.value)
-        ):
-            raise PinnedInputError(
-                f"artifact-bound Python source contains a statically unreachable block: {relative}"
-            )
-
-    docstring_starts: set[tuple[int, int]] = set()
-    for owner in (module, *(
-        node
-        for node in ast.walk(module)
-        if isinstance(
-            node,
-            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
-        )
-    )):
-        body = owner.body
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)
-        ):
-            docstring_starts.add(
-                (body[0].value.lineno, body[0].value.col_offset)
-            )
-
-    lines = [list(line) for line in source.splitlines(keepends=True)]
-
-    def blank(start: tuple[int, int], end: tuple[int, int]) -> None:
-        start_line, start_column = start
-        end_line, end_column = end
-        for line_number in range(start_line, end_line + 1):
-            line = lines[line_number - 1]
-            first = start_column if line_number == start_line else 0
-            last = end_column if line_number == end_line else len(line)
-            for index in range(first, min(last, len(line))):
-                if line[index] not in {"\n", "\r"}:
-                    line[index] = " "
-
-    for token in tokens:
-        if token.type == tokenize.COMMENT or (
-            token.type == tokenize.STRING and token.start in docstring_starts
-        ):
-            blank(token.start, token.end)
-    return "".join("".join(line) for line in lines), module
-
-
-def _direct_call_positions(
-    function: ast.FunctionDef,
-    call_names: frozenset[str],
-    *,
-    require_unconditional: bool = False,
-    verified_alias_targets: tuple[ast.Name, ...] = (),
-    protected_provider_names: frozenset[str] = frozenset(),
-) -> dict[str, list[int]]:
-    positions = {name: [] for name in call_names}
-
-    def call_identifier(node: ast.Call) -> str | None:
-        parts: list[str] = []
-        target: ast.expr = node.func
-        while isinstance(target, ast.Attribute):
-            parts.append(target.attr)
-            target = target.value
-        if not isinstance(target, ast.Name):
-            return None
-        parts.append(target.id)
-        return ".".join(reversed(parts))
-
-    protected_names = {name for name in call_names if "." not in name}
-    protected_names.update(protected_provider_names)
-    forbidden_control_calls = frozenset(
-        {
-            "builtins.eval",
-            "builtins.exec",
-            "builtins.exit",
-            "builtins.quit",
-            "builtins.SystemExit",
-            "eval",
-            "exec",
-            "exit",
-            "GeneratorExit",
-            "KeyboardInterrupt",
-            "os._exit",
-            "quit",
-            "SystemExit",
-            "sys.exit",
-        }
-    )
-    for node in ast.walk(function):
-        if isinstance(node, (ast.Assert, ast.ClassDef, ast.TryStar, ast.Yield, ast.YieldFrom)):
-            raise PinnedInputError(
-                f"release guard function {function.name} contains forbidden "
-                f"{type(node).__name__} control flow"
-            )
-        if (
-            isinstance(node, ast.Call)
-            and (identifier := call_identifier(node)) in forbidden_control_calls
-        ):
-            raise PinnedInputError(
-                f"release guard function {function.name} contains a forbidden "
-                f"control call {identifier}"
-            )
-        if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-            and node.id in protected_names
-            and node not in verified_alias_targets
-        ) or (
-            isinstance(node, ast.arg)
-            and node.arg in protected_names
-        ) or (
-            isinstance(node, (ast.Global, ast.Nonlocal))
-            and protected_names.intersection(node.names)
-        ):
-            raise PinnedInputError(
-                f"release guard function {function.name} rebinds a policy validator"
-            )
-        if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            raise PinnedInputError(
-                f"release guard function {function.name} mutates a dotted policy binding"
-            )
-
-    for index, statement in enumerate(function.body):
-        if any(
-            isinstance(
-                node,
-                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
-            )
-            for node in ast.walk(statement)
-            if node is not statement
-        ):
-            raise PinnedInputError(
-                f"release guard function {function.name} contains a nested callable"
-            )
-        parents = {
-            child: parent
-            for parent in ast.walk(statement)
-            for child in ast.iter_child_nodes(parent)
-        }
-        for node in ast.walk(statement):
-            call_name = call_identifier(node) if isinstance(node, ast.Call) else None
-            if (
-                call_name is not None
-                and call_name in positions
-            ):
-                if require_unconditional:
-                    ancestor = parents.get(node)
-                    while ancestor is not None:
-                        if isinstance(
-                            ancestor,
-                            (
-                                ast.If,
-                                ast.IfExp,
-                                ast.For,
-                                ast.AsyncFor,
-                                ast.While,
-                                ast.Match,
-                                ast.comprehension,
-                                ast.BoolOp,
-                                ast.ExceptHandler,
-                                ast.With,
-                                ast.AsyncWith,
-                            ),
-                        ):
-                            raise PinnedInputError(
-                                f"production orchestrator {function.name} critical "
-                                "guard is conditional"
-                            )
-                        if isinstance(ancestor, ast.Try) and (
-                            ancestor.orelse
-                            or ancestor.finalbody
-                            or not ancestor.handlers
-                            or any(
-                                len(handler.body) != 1
-                                or not isinstance(handler.body[0], ast.Raise)
-                                for handler in ancestor.handlers
-                            )
-                        ):
-                            raise PinnedInputError(
-                                f"production orchestrator {function.name} critical "
-                                "guard exception path is not fail closed"
-                            )
-                        ancestor = parents.get(ancestor)
-                positions[call_name].append(index)
-
-    required_positions = [
-        position for observed in positions.values() for position in observed
-    ]
-    if required_positions:
-        last_required_position = max(required_positions)
-        for index, statement in enumerate(function.body[: last_required_position + 1]):
-            returns = [node for node in ast.walk(statement) if isinstance(node, ast.Return)]
-            if returns and (
-                index < last_required_position or index != len(function.body) - 1
-            ):
-                raise PinnedInputError(
-                    f"release guard function {function.name} returns before a "
-                    "required policy validator"
-                )
-            if index < last_required_position and isinstance(statement, ast.Raise):
-                raise PinnedInputError(
-                    f"release guard function {function.name} raises before a "
-                    "required policy validator"
-                )
-    return positions
-
-
-def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> None:
-    orchestrator_relative = "scripts/publication/orchestrator.py"
-    contract_relative = "scripts/publication/ga_release_contract.py"
-    if relative not in {orchestrator_relative, contract_relative}:
-        raise PinnedInputError("GA release guard was applied to an unexpected module")
-
-    imported_guards = frozenset(
-        {
-            "ACCEPTANCE_ROOT_RELATIVE",
-            "ENVIRONMENT_RELATIVE",
-            "INSTALL_RELATIVE",
-            "MIGRATION_RELATIVE",
-            "SERVICE_RELATIVE",
-            "build_manifest",
-            "capture_executor_source",
-            "identity_at_commit",
-            "live_verify_hosted_ci_receipt",
-            "require_executor_unchanged",
-            "require_historical_executor",
-            "validate_source_identity",
-            "validate_candidate_app_manifest",
-            "validate_gatekeeper_evidence",
-            "validate_hosted_ci_receipt_offline",
-            "validate_notary_files",
-            "validate_published_transaction_receipt",
-            "verify_ga_acceptance_journal_export",
-            "verify_ga_workspace_path_preconditions",
-            "verify_frozen_candidate",
-            "verify_signing_transformation_receipt",
-            "validate_ga_runtime_acceptance",
-        }
-    )
-    expected_imports = {
-        "ACCEPTANCE_ROOT_RELATIVE": (
-            "scripts.ga_acceptance_journal_export",
-            0,
-            "ACCEPTANCE_ROOT_RELATIVE",
-            None,
-        ),
-        "ENVIRONMENT_RELATIVE": (
-            "scripts.ga_acceptance_journal_export",
-            0,
-            "ENVIRONMENT_RELATIVE",
-            None,
-        ),
-        "INSTALL_RELATIVE": (
-            "scripts.ga_acceptance_journal_export",
-            0,
-            "INSTALL_RELATIVE",
-            None,
-        ),
-        "MIGRATION_RELATIVE": (
-            "scripts.ga_acceptance_journal_export",
-            0,
-            "MIGRATION_RELATIVE",
-            None,
-        ),
-        "SERVICE_RELATIVE": (
-            "scripts.ga_acceptance_journal_export",
-            0,
-            "SERVICE_RELATIVE",
-            None,
-        ),
-        "build_manifest": ("scripts.hash_artifact", 0, "build_manifest", None),
-        "capture_executor_source": (
-            "scripts.release_executor_source", 0, "capture_executor_source", None
-        ),
-        "identity_at_commit": (
-            "scripts.repository_source_identity", 0, "identity_at_commit", None
-        ),
-        "require_executor_unchanged": (
-            "scripts.release_executor_source", 0, "require_executor_unchanged", None
-        ),
-        "require_historical_executor": (
-            "scripts.release_executor_source", 0, "require_historical_executor", None
-        ),
-        "validate_source_identity": (
-            "scripts.release_executor_source", 0, "validate_source_identity", None
-        ),
-        "live_verify_hosted_ci_receipt": (
-            "scripts.github_hosted_ci_receipt",
-            0,
-            "verify_receipt",
-            "live_verify_hosted_ci_receipt",
-        ),
-        "validate_candidate_app_manifest": (
-            "scripts.candidate_artifact_binding",
-            0,
-            "validate_candidate_app_manifest",
-            None,
-        ),
-        "validate_ga_runtime_acceptance": (
-            "scripts.ga_runtime_acceptance",
-            0,
-            "validate_ga_runtime_acceptance",
-            None,
-        ),
-        "validate_gatekeeper_evidence": (
-            "scripts.gatekeeper_assessment",
-            0,
-            "validate_evidence",
-            "validate_gatekeeper_evidence",
-        ),
-        "verify_ga_acceptance_journal_export": (
-            "scripts.ga_acceptance_journal_export",
-            0,
-            "verify_ga_acceptance_journal_export",
-            None,
-        ),
-        "verify_ga_workspace_path_preconditions": (
-            "scripts.release_build_identity",
-            0,
-            "verify_ga_workspace_path_preconditions",
-            None,
-        ),
-        "validate_hosted_ci_receipt_offline": (
-            "scripts.github_hosted_ci_receipt",
-            0,
-            "validate_receipt_offline",
-            "validate_hosted_ci_receipt_offline",
-        ),
-        "validate_notary_files": (
-            "scripts.verify_notary_log",
-            0,
-            "validate_files",
-            "validate_notary_files",
-        ),
-        "validate_published_transaction_receipt": (
-            "scripts.notarization_transaction",
-            0,
-            "validate_published_transaction_receipt",
-            None,
-        ),
-        "verify_frozen_candidate": (
-            "scripts.candidate_freeze",
-            0,
-            "verify_frozen_candidate",
-            None,
-        ),
-        "verify_signing_transformation_receipt": (
-            "scripts.verify_signing_transformation",
-            0,
-            "verify_retained_receipt",
-            "verify_signing_transformation_receipt",
-        ),
-    }
-    orchestrator_functions = (
-        "_publish_and_confirm_stage",
-        "seal_prepackage",
-        "seal_ga_acceptance",
-        "seal_publication",
-    )
-    contract_functions = (
-        "_require_hosted_ci_source_binding",
-        "_verified_prepackage_inputs",
-        "_verified_package_sets",
-        "_verified_migration_journals",
-        "_expected_candidate_from_prepackage",
-        "_require_migration_matches_prepackage",
-        "_verified_acceptance_inputs",
-        "_verified_runtime_acceptance_adapter",
-        "_ga_acceptance_files",
-        "_prepackage_files",
-        "_compose_stage_files",
-        "_current_stage_executor",
-        "build_expected_stage_files",
-        "_verify_stage",
-        "verify_stage",
-        "verify_prepackage_authorization",
-        "verify_publication_authorization",
-        "derive_runtime_expectation",
-    )
-    expected_function_names = (
-        orchestrator_functions
-        if relative == orchestrator_relative
-        else contract_functions
-    )
-    if set(GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256) != set(
-        orchestrator_functions + contract_functions
-    ):
-        raise PinnedInputError("GA release guarded function policy is incomplete")
-
-    if relative == orchestrator_relative:
-        observed_contract_imports: list[tuple[str | None, int, str, str | None]] = []
-        for node in ast.walk(module):
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            for alias in node.names:
-                if (alias.asname or alias.name) == "contract":
-                    observed_contract_imports.append(
-                        (node.module, node.level, alias.name, alias.asname)
-                    )
-        if observed_contract_imports != [(None, 1, "ga_release_contract", "contract")]:
-            raise PinnedInputError(
-                "production orchestrator contract import differs from policy"
-            )
-    else:
-        observed_imports = {name: [] for name in expected_imports}
-        for node in ast.walk(module):
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            for alias in node.names:
-                target = alias.asname or alias.name
-                if target in observed_imports:
-                    observed_imports[target].append(
-                        (node.module, node.level, alias.name, alias.asname)
-                    )
-        if any(
-            observed_imports[name] != [expected]
-            for name, expected in expected_imports.items()
-        ):
-            raise PinnedInputError(
-                "production GA contract policy validator imports differ from policy"
-            )
-
-    functions: dict[str, ast.FunctionDef] = {}
-    for name in expected_function_names:
-        matches = [
-            node
-            for node in module.body
-            if isinstance(node, ast.FunctionDef) and node.name == name
-        ]
-        if len(matches) != 1:
-            raise PinnedInputError(
-                "production GA release entrypoints differ from policy"
-            )
-        if matches[0].decorator_list:
-            raise PinnedInputError(
-                "production GA release guard entrypoints cannot be decorated"
-            )
-        functions[name] = matches[0]
-    stage_assignments = [
-        node
-        for node in module.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        and any(
-            isinstance(target, ast.Name) and target.id == "STAGES"
-            for target in (
-                node.targets if isinstance(node, ast.Assign) else (node.target,)
-            )
-        )
-    ]
-    schema_assignments = [
-        node
-        for node in module.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        and any(
-            isinstance(target, ast.Name) and target.id == "STAGE_SCHEMA_VERSIONS"
-            for target in (
-                node.targets if isinstance(node, ast.Assign) else (node.target,)
-            )
-        )
-    ]
-    if relative == contract_relative:
-        if len(stage_assignments) != 1:
-            raise PinnedInputError("production GA contract stage order is not unique")
-        stage_value = stage_assignments[0].value
-        if (
-            not isinstance(stage_value, ast.Tuple)
-            or tuple(
-                item.value if isinstance(item, ast.Constant) else None
-                for item in stage_value.elts
-            )
-            != ("prepackage", "ga-acceptance", "publication")
-        ):
-            raise PinnedInputError(
-                "production GA contract stage order differs from policy"
-            )
-        try:
-            stage_schema_versions = (
-                ast.literal_eval(schema_assignments[0].value)
-                if len(schema_assignments) == 1
-                else None
-            )
-        except (ValueError, TypeError):
-            stage_schema_versions = None
-        if stage_schema_versions != {
-            "prepackage": 3,
-            "ga-acceptance": 3,
-            "publication": 3,
-        }:
-            raise PinnedInputError(
-                "production GA contract stage schemas differ from policy"
-            )
-    elif stage_assignments or schema_assignments:
-        raise PinnedInputError(
-            "production orchestrator must not own stage order or schemas"
-        )
-
-    imported_bindings = imported_guards if relative == contract_relative else {"contract"}
-    protected_module_names = (
-        frozenset(imported_bindings)
-        | frozenset(functions)
-        | {"STAGES", "STAGE_SCHEMA_VERSIONS"}
-    )
-    allowed_statement_ids = {id(function) for function in functions.values()}
-    allowed_statement_ids.update(id(statement) for statement in stage_assignments)
-    allowed_statement_ids.update(id(statement) for statement in schema_assignments)
-    dynamic_mutators = {
-        "delattr",
-        "eval",
-        "exec",
-        "globals",
-        "locals",
-        "setattr",
-    }
-    for statement in module.body:
-        if id(statement) in allowed_statement_ids:
-            continue
-        if isinstance(statement, (ast.Import, ast.ImportFrom)):
-            aliases = {
-                alias.asname or alias.name.split(".", 1)[0]
-                for alias in statement.names
-            }
-            if aliases.intersection(
-                frozenset(functions) | {"STAGES", "STAGE_SCHEMA_VERSIONS"}
-            ):
-                raise PinnedInputError(
-                    "production GA release module imports over a protected binding"
-                )
-            continue
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if statement.name in protected_module_names:
-                raise PinnedInputError(
-                    "production GA release module redefines a protected binding"
-                )
-            continue
-        for node in ast.walk(statement):
-            if (
-                isinstance(node, ast.Name)
-                and isinstance(node.ctx, (ast.Store, ast.Del))
-                and node.id in protected_module_names
-            ):
-                raise PinnedInputError(
-                    "production GA release module rebinds a protected binding"
-                )
-            if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
-                node.ctx, (ast.Store, ast.Del)
-            ):
-                raise PinnedInputError(
-                    "production GA release module performs a dynamic binding mutation"
-                )
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in dynamic_mutators
-            ):
-                raise PinnedInputError(
-                    "production GA release module invokes a dynamic binding mutator"
-                )
-
-    def require_calls(
-        function_name: str,
-        expected: dict[str, list[int]],
-        *,
-        require_unconditional: bool = True,
-    ) -> None:
-        calls = _direct_call_positions(
-            functions[function_name],
-            frozenset(expected),
-            require_unconditional=require_unconditional,
-        )
-        if calls != expected:
-            raise PinnedInputError(
-                f"production GA release {function_name} guard calls differ from policy"
-            )
-    if relative == orchestrator_relative:
-        require_calls(
-            "_publish_and_confirm_stage",
-            {"_publish_stage": [0], "contract.verify_stage": [1]},
-        )
-        for function_name in (
-            "seal_prepackage",
-            "seal_ga_acceptance",
-            "seal_publication",
-        ):
-            require_calls(
-                function_name,
-                {
-                    "contract.build_expected_stage_files": [1],
-                    "_publish_and_confirm_stage": [2],
-                },
-            )
-    else:
-        require_calls(
-            "verify_stage",
-            {
-                "_canonical_repository": [1],
-                "_current_stage_executor": [2],
-                "_verify_stage": [3],
-                "require_executor_unchanged": [4],
-            },
-        )
-        require_calls(
-            "_verify_stage",
-            {
-                "_read_stage_files": [1, 9],
-                "_manifest_from_files": [2],
-                "_path": [2],
-                "identity_at_commit": [4],
-                "validate_source_identity": [5],
-                "_compose_stage_files": [7],
-            },
-        )
-
-    verified_alias_targets: dict[str, tuple[ast.Name, ...]] = {}
-    if relative == contract_relative:
-        freeze_function = functions["_verified_prepackage_inputs"]
-        alias_assignments = [
-            node
-            for node in freeze_function.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name)
-                and target.id == "selected_freeze_verifier"
-                for target in node.targets
-            )
-        ]
-        expected_alias = ast.parse(
-            "selected_freeze_verifier = "
-            "verify_frozen_candidate if freeze_verifier is None else freeze_verifier"
-        ).body[0]
-        if (
-            len(alias_assignments) != 1
-            or ast.dump(alias_assignments[0], include_attributes=False)
-            != ast.dump(expected_alias, include_attributes=False)
-        ):
-            raise PinnedInputError("GA frozen verifier provider selection differs from policy")
-        # Admit only this exact, unconditional provider selection. Any later
-        # assignment, deletion, argument shadow or global rebind still fails.
-        target = alias_assignments[0].targets[0]
-        if not isinstance(target, ast.Name):
-            raise PinnedInputError("GA frozen verifier provider target is invalid")
-        verified_alias_targets[freeze_function.name] = (target,)
-
-    critical_calls = {
-        "_verified_prepackage_inputs": frozenset(
-            {
-                "selected_freeze_verifier",
-                "validate_hosted_ci_receipt_offline",
-                "_require_hosted_ci_source_binding",
-                "validate_candidate_app_manifest",
-                "_validate_release_application",
-                "verify_signing_transformation_receipt",
-                "validate_published_transaction_receipt",
-                "_validate_signing_notarization_binding",
-                "validate_notary_files",
-                "validate_gatekeeper_evidence",
-                "verify_ga_workspace_path_preconditions",
-                "_verified_legal_source_closure",
-                "build_manifest",
-            }
-        ),
-        "_verified_package_sets": frozenset(
-            {"artifact_set.verify_dmg_set", "artifact_set.verify_updater_set"}
-        ),
-        "_verified_migration_journals": frozenset(
-            {"verify_ga_acceptance_journal_export"}
-        ),
-        "_require_migration_matches_prepackage": frozenset(
-            {"_expected_candidate_from_prepackage"}
-        ),
-        "_verified_acceptance_inputs": frozenset(
-            {
-                "_verified_migration_journals",
-                "_require_migration_matches_prepackage",
-                "_verified_runtime_acceptance_adapter",
-            }
-        ),
-        "_verified_runtime_acceptance_adapter": frozenset(
-            {"validate_ga_runtime_acceptance"}
-        ),
-        "_ga_acceptance_files": frozenset(
-            {"_verified_package_sets", "_verified_acceptance_inputs"}
-        ),
-        "_prepackage_files": frozenset(
-            {"_verified_prepackage_inputs", "_stage_manifest"}
-        ),
-        "_current_stage_executor": frozenset(
-            {"capture_executor_source", "require_historical_executor"}
-        ),
-        "build_expected_stage_files": frozenset(
-            {
-                "_canonical_repository",
-                "_current_stage_executor",
-                "_compose_stage_files",
-                "require_executor_unchanged",
-            }
-        ),
-        "verify_prepackage_authorization": frozenset(
-            {
-                "_canonical_repository",
-                "_require_artifact_set_adapter",
-                "verify_stage",
-                "artifact_set._validate_prepackage_binding",
-            }
-        ),
-        "verify_publication_authorization": frozenset(
-            {
-                "_canonical_repository",
-                "_require_artifact_set_adapter",
-            }
-        ),
-        "derive_runtime_expectation": frozenset(
-            {
-                "_canonical_repository",
-                "verify_stage",
-                "_verified_package_sets",
-                "_verified_migration_journals",
-                "_require_migration_matches_prepackage",
-            }
-        ),
-    }
-    for function_name, expected_calls in critical_calls.items():
-        if function_name not in functions:
-            continue
-        positions = _direct_call_positions(
-            functions[function_name],
-            expected_calls,
-            require_unconditional=function_name != "build_expected_stage_files",
-            verified_alias_targets=verified_alias_targets.get(function_name, ()),
-            protected_provider_names=(
-                frozenset({"verify_frozen_candidate"})
-                if function_name == "_verified_prepackage_inputs"
-                else frozenset()
-            ),
-        )
-        if any(len(observed) != 1 for observed in positions.values()):
-            raise PinnedInputError(
-                f"production GA release {function_name} critical guards differ from policy"
-            )
-    if relative == contract_relative:
-        acceptance_positions = _direct_call_positions(
-            functions["_ga_acceptance_files"],
-            frozenset({"_verified_package_sets", "_verified_acceptance_inputs"}),
-            require_unconditional=True,
-        )
-        if not (
-            acceptance_positions["_verified_package_sets"][0]
-            < acceptance_positions["_verified_acceptance_inputs"][0]
-        ):
-            raise PinnedInputError(
-                "GA package verification must precede runtime acceptance"
-            )
-        migration_positions = _direct_call_positions(
-            functions["_verified_acceptance_inputs"],
-            frozenset(
-                {
-                    "_verified_migration_journals",
-                    "_require_migration_matches_prepackage",
-                    "_verified_runtime_acceptance_adapter",
-                }
-            ),
-            require_unconditional=True,
-        )
-        if not (
-            migration_positions["_verified_migration_journals"][0]
-            < migration_positions["_require_migration_matches_prepackage"][0]
-            < migration_positions["_verified_runtime_acceptance_adapter"][0]
-        ):
-            raise PinnedInputError(
-                "GA migration export and candidate verification must precede runtime acceptance"
-            )
-        derivation_positions = _direct_call_positions(
-            functions["derive_runtime_expectation"],
-            frozenset(
-                {
-                    "verify_stage",
-                    "_verified_package_sets",
-                    "_verified_migration_journals",
-                    "_require_migration_matches_prepackage",
-                }
-            ),
-            require_unconditional=True,
-        )
-        if not (
-            derivation_positions["verify_stage"][0]
-            < derivation_positions["_verified_package_sets"][0]
-            < derivation_positions["_verified_migration_journals"][0]
-            < derivation_positions["_require_migration_matches_prepackage"][0]
-        ):
-            raise PinnedInputError(
-                "GA runtime derivation order differs from release policy"
-            )
-
-    expected_stage_calls = (
-        {
-            "_compose_stage_files": (
-                "prepackage",
-                "prepackage",
-                "ga-acceptance",
-            ),
-            "verify_prepackage_authorization": ("prepackage",),
-            "verify_publication_authorization": ("prepackage", "publication"),
-            "derive_runtime_expectation": ("prepackage",),
-        }
-        if relative == contract_relative
-        else {}
-    )
-    for function_name, expected_stages in expected_stage_calls.items():
-        observed: list[tuple[int, str | None]] = []
-        for node in ast.walk(functions[function_name]):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id
-                == ("_verify_stage" if function_name == "_compose_stage_files" else "verify_stage")
-            ):
-                stage = (
-                    node.args[1].value
-                    if len(node.args) == 2
-                    and isinstance(node.args[0], ast.Name)
-                    and node.args[0].id == "repository"
-                    and isinstance(node.args[1], ast.Constant)
-                    and isinstance(node.args[1].value, str)
-                    and len(node.keywords) == 1
-                    and node.keywords[0].arg == "freeze_verifier"
-                    and isinstance(node.keywords[0].value, ast.Name)
-                    and node.keywords[0].value.id == "freeze_verifier"
-                    else None
-                )
-                observed.append((node.lineno, stage))
-        if tuple(stage for _line, stage in sorted(observed)) != expected_stages:
-            raise PinnedInputError(
-                f"production GA contract {function_name} predecessor order differs from policy"
-            )
-    function_ast_sha256 = {
-        name: hashlib.sha256(
-            ast.dump(
-                function,
-                annotate_fields=True,
-                include_attributes=False,
-            ).encode("utf-8")
-        ).hexdigest()
-        for name, function in functions.items()
-    }
-    expected_ast_sha256 = {
-        name: GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256[name]
-        for name in expected_function_names
-    }
-    if function_ast_sha256 != expected_ast_sha256:
-        raise PinnedInputError(
-            "production GA release guarded function AST differs from release policy"
-        )
-
-
-def _verify_ga_release_cli_guard(module: ast.Module, relative: str) -> None:
-    expected_functions = GA_RELEASE_CLI_FUNCTION_AST_SHA256.get(relative)
-    if expected_functions is None:
-        raise PinnedInputError("GA release CLI guard was applied to an unexpected module")
-    functions = [
-        node
-        for node in module.body
-        if isinstance(node, ast.FunctionDef)
-    ]
-    if (
-        {node.name for node in functions} != set(expected_functions)
-        or len(functions) != len(expected_functions)
-        or any(node.decorator_list for node in functions)
-        or "main" not in expected_functions
-    ):
-        raise PinnedInputError("GA release CLI main entrypoint differs from policy")
-    observed_functions = {
-        node.name: hashlib.sha256(
-            ast.dump(
-                node,
-                annotate_fields=True,
-                include_attributes=False,
-            ).encode("utf-8")
-        ).hexdigest()
-        for node in functions
-    }
-    if observed_functions != expected_functions:
-        raise PinnedInputError("GA release CLI injection AST differs from policy")
-    dispatches = [
-        statement
-        for statement in module.body
-        if isinstance(statement, ast.If)
-        and isinstance(statement.test, ast.Compare)
-        and isinstance(statement.test.left, ast.Name)
-        and statement.test.left.id == "__name__"
-        and len(statement.test.ops) == 1
-        and isinstance(statement.test.ops[0], ast.Eq)
-        and len(statement.test.comparators) == 1
-        and isinstance(statement.test.comparators[0], ast.Constant)
-        and statement.test.comparators[0].value == "__main__"
-    ]
-    dispatch = dispatches[0] if len(dispatches) == 1 else None
-    if not (
-        dispatch is not None
-        and module.body[-1] is dispatch
-        and len(dispatch.body) == 1
-        and not dispatch.orelse
-        and isinstance(dispatch.body[0], ast.Expr)
-        and isinstance(dispatch.body[0].value, ast.Call)
-        and isinstance(dispatch.body[0].value.func, ast.Name)
-        and dispatch.body[0].value.func.id == "main"
-        and not dispatch.body[0].value.args
-        and not dispatch.body[0].value.keywords
-    ):
-        raise PinnedInputError("GA release CLI module dispatch differs from policy")
-
-
-def _verify_pinned_verifier_structure(module: ast.Module) -> None:
-    functions = {
-        name: [
-            node
-            for node in module.body
-            if isinstance(node, ast.FunctionDef) and node.name == name
-        ]
-        for name in (
-            "_artifact_binding_surface",
-            "_verify",
-            "_verify_build_scripts",
-            "_verify_pinned_verifier_structure",
-            "verify_source_contract",
-            "verify",
-            "main",
-        )
-    }
-    if any(len(matches) != 1 for matches in functions.values()):
-        raise PinnedInputError(
-            "pinned-input verifier entrypoint structure differs from release policy"
-        )
-    if any(matches[0].decorator_list for matches in functions.values()):
-        raise PinnedInputError(
-            "pinned-input verifier validation functions cannot be decorated"
-        )
-    assignments = {
-        target.id
-        for node in module.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        for target in (
-            node.targets if isinstance(node, ast.Assign) else (node.target,)
-        )
-        if isinstance(target, ast.Name)
-    }
-    required_constants = {
-        "DEPENDENCY_PINS_RELATIVE_PATH",
-        "NATIVE_LOCK_RELATIVE_PATH",
-        "REQUIRED_ARTIFACT_BINDINGS_SHA256",
-        "ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION",
-        "REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256",
-        "GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256",
-        "GA_RELEASE_CLI_FUNCTION_AST_SHA256",
-        "PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256",
-        "PINNED_VERIFIER_MODULE_AST_SHA256",
-        "TAURI_CLI_INSTALLER_RELATIVE_PATH",
-        "REQUIRED_TAURI_CLI_INSTALLER_SHA256",
-        "REQUIRED_TOOL_PIN_KEYS",
-        "REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS",
-        "REQUIRED_PATCH_POLICIES",
-        "REQUIRED_REJECTED_PATCH_DIGESTS",
-        "REQUIRED_ENGINE_START_PATH_BINDINGS",
-        "REQUIRED_LIBBOX_BUILD_TAGS",
-        "REQUIRED_BUILD_SCRIPT_POLICIES",
-    }
-    if not required_constants.issubset(assignments):
-        raise PinnedInputError(
-            "pinned-input verifier constants differ from release policy"
-        )
-
-    self_exclusion_assignments = [
-        node
-        for node in module.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        and any(
-            isinstance(target, ast.Name)
-            and target.id == "ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION"
-            for target in (
-                node.targets if isinstance(node, ast.Assign) else (node.target,)
-            )
-        )
-    ]
-    if (
-        len(self_exclusion_assignments) != 1
-        or not isinstance(self_exclusion_assignments[0].value, ast.Constant)
-        or self_exclusion_assignments[0].value.value
-        != "scripts/verify_pinned_build_inputs.py"
-    ):
-        raise PinnedInputError(
-            "pinned-input verifier self-exclusion differs from release policy"
-        )
-
-    def executable_body(function: ast.FunctionDef) -> list[ast.stmt]:
-        body = list(function.body)
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)
-        ):
-            body.pop(0)
-        return body
-
-    for function_name, expected_value in (
-        ("verify_source_contract", False),
-        ("verify", True),
-    ):
-        function = functions[function_name][0]
-        body = executable_body(function)
-        call = body[0].value if len(body) == 1 and isinstance(body[0], ast.Expr) else None
-        if not (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Name)
-            and call.func.id == "_verify"
-            and len(call.args) == 1
-            and isinstance(call.args[0], ast.Name)
-            and call.args[0].id == "repository"
-            and len(call.keywords) == 1
-            and call.keywords[0].arg == "require_packet_lan_peer_artifact"
-            and isinstance(call.keywords[0].value, ast.Constant)
-            and call.keywords[0].value.value is expected_value
-        ):
-            raise PinnedInputError(
-                f"pinned-input verifier entrypoint {function_name} differs from policy"
-            )
-
-    validation_chain = functions["_verify"][0]
-    if any(
-        isinstance(node, (ast.Return, ast.Assert))
-        for node in ast.walk(validation_chain)
-    ):
-        raise PinnedInputError(
-            "pinned-input verifier validation chain has an early exit"
-        )
-    guarded_validation_functions = (
-        validation_chain,
-        functions["_verify_build_scripts"][0],
-    )
-    forbidden_validation_calls = {
-        "eval",
-        "exec",
-        "exit",
-        "quit",
-        "sys.exit",
-        "os._exit",
-        "builtins.eval",
-        "builtins.exec",
-        "builtins.exit",
-        "builtins.quit",
-    }
-    for function in guarded_validation_functions:
-        for node in ast.walk(function):
-            if isinstance(node, ast.Raise) and not (
-                isinstance(node.exc, ast.Call)
-                and isinstance(node.exc.func, ast.Name)
-                and node.exc.func.id == "PinnedInputError"
-            ):
-                raise PinnedInputError(
-                    f"pinned-input verifier {function.name} has a non-policy exit"
-                )
-            if isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Name):
-                    identifier = node.func.id
-                elif (
-                    isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name)
-                ):
-                    identifier = f"{node.func.value.id}.{node.func.attr}"
-                else:
-                    identifier = None
-                if identifier in forbidden_validation_calls:
-                    raise PinnedInputError(
-                        f"pinned-input verifier {function.name} has a forbidden "
-                        f"control call {identifier}"
-                    )
-    expected_chain = (
-        "_load_manifest",
-        "_parse_env",
-        "_verify_tools",
-        "_verify_runtime_tools",
-        "_verify_packet_evidence_endpoint",
-        "_verify_packet_lan_peer_source_contract",
-        "_verify_packet_lan_peer_artifact",
-        "_verify_physical_collector_module",
-        "_verify_cargo_deny",
-        "_verify_xcodegen",
-        "_verify_tauri_cli",
-        "_verify_commits",
-        "_verify_patches",
-        "_verify_combined_diff",
-        "_verify_source_contract",
-        "_verify_libbox_module_cache_contract",
-        "_verify_go_module_inputs",
-        "_verify_libbox_build_tags",
-        "_verify_native_lock",
-        "_verify_build_scripts",
-    )
-    observed_chain = tuple(
-        node.func.id
-        for node in sorted(
-            (
-                node
-                for node in ast.walk(validation_chain)
-                if isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in expected_chain
-            ),
-            key=lambda node: (node.lineno, node.col_offset),
-        )
-    )
-    if observed_chain != expected_chain:
-        raise PinnedInputError(
-            "pinned-input verifier validation call order differs from release policy"
-        )
-    chain_parents = {
-        child: parent
-        for parent in ast.walk(validation_chain)
-        for child in ast.iter_child_nodes(parent)
-    }
-    for node in ast.walk(validation_chain):
-        if (
-            not isinstance(node, ast.Call)
-            or not isinstance(node.func, ast.Name)
-            or node.func.id not in expected_chain
-        ):
-            continue
-        conditional_ancestors: list[ast.AST] = []
-        ancestor = chain_parents.get(node)
-        while ancestor is not None and ancestor is not validation_chain:
-            if isinstance(
-                ancestor,
-                (ast.If, ast.IfExp, ast.For, ast.AsyncFor, ast.While, ast.Try,
-                 ast.Match, ast.comprehension, ast.BoolOp, ast.With, ast.AsyncWith),
-            ):
-                conditional_ancestors.append(ancestor)
-            ancestor = chain_parents.get(ancestor)
-        if node.func.id == "_verify_packet_lan_peer_artifact":
-            if (
-                len(conditional_ancestors) != 1
-                or not isinstance(conditional_ancestors[0], ast.If)
-                or not isinstance(conditional_ancestors[0].test, ast.Name)
-                or conditional_ancestors[0].test.id
-                != "require_packet_lan_peer_artifact"
-            ):
-                raise PinnedInputError(
-                    "pinned-input verifier generated-artifact branch differs from policy"
-                )
-        elif conditional_ancestors:
-            raise PinnedInputError(
-                "pinned-input verifier validation call became conditional"
-            )
-
-    build_script_verifier = functions["_verify_build_scripts"][0]
-    if any(isinstance(node, ast.Return) for node in ast.walk(build_script_verifier)):
-        raise PinnedInputError(
-            "pinned-input artifact-source verifier has an early return"
-        )
-    required_identity_comparisons = {
-        (
-            "artifact_binding_identity",
-            "REQUIRED_ARTIFACT_BINDINGS_SHA256",
-        ),
-        (
-            "artifact_source_identity",
-            "REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256",
-        ),
-    }
-    observed_identity_comparisons = {
-        (node.left.id, node.comparators[0].id)
-        for node in ast.walk(build_script_verifier)
-        if isinstance(node, ast.Compare)
-        and len(node.ops) == 1
-        and isinstance(node.ops[0], ast.NotEq)
-        and isinstance(node.left, ast.Name)
-        and len(node.comparators) == 1
-        and isinstance(node.comparators[0], ast.Name)
-    }
-    if not required_identity_comparisons.issubset(observed_identity_comparisons):
-        raise PinnedInputError(
-            "pinned-input artifact-source identity checks differ from release policy"
-        )
-
-    main_function = functions["main"][0]
-    main_body = executable_body(main_function)
-    if (
-        len(main_body) != 4
-        or not isinstance(main_body[0], ast.Assign)
-        or not isinstance(main_body[1], ast.Try)
-        or len(main_body[1].body) != 1
-        or not isinstance(main_body[1].body[0], ast.Expr)
-        or not isinstance(main_body[1].body[0].value, ast.Call)
-        or not isinstance(main_body[1].body[0].value.func, ast.Name)
-        or main_body[1].body[0].value.func.id != "verify"
-        or main_body[1].orelse
-        or main_body[1].finalbody
-        or len(main_body[1].handlers) != 1
-        or len(main_body[1].handlers[0].body) != 2
-        or not isinstance(main_body[1].handlers[0].body[-1], ast.Return)
-        or not isinstance(main_body[1].handlers[0].body[-1].value, ast.Constant)
-        or main_body[1].handlers[0].body[-1].value.value != 1
-        or not isinstance(main_body[2], ast.Expr)
-        or not isinstance(main_body[3], ast.Return)
-        or not isinstance(main_body[3].value, ast.Constant)
-        or main_body[3].value.value != 0
-    ):
-        raise PinnedInputError(
-            "pinned-input verifier main failure propagation differs from policy"
-        )
-    main_dispatches = [
-        statement
-        for statement in module.body
-        if isinstance(statement, ast.If)
-        and isinstance(statement.test, ast.Compare)
-        and isinstance(statement.test.left, ast.Name)
-        and statement.test.left.id == "__name__"
-        and len(statement.test.ops) == 1
-        and isinstance(statement.test.ops[0], ast.Eq)
-        and len(statement.test.comparators) == 1
-        and isinstance(statement.test.comparators[0], ast.Constant)
-        and statement.test.comparators[0].value == "__main__"
-    ]
-    dispatch = main_dispatches[0] if len(main_dispatches) == 1 else None
-    dispatch_raise = (
-        dispatch.body[0]
-        if dispatch is not None
-        and module.body[-1] is dispatch
-        and len(dispatch.body) == 1
-        and not dispatch.orelse
-        and isinstance(dispatch.body[0], ast.Raise)
-        else None
-    )
-    dispatch_exit = (
-        dispatch_raise.exc
-        if dispatch_raise is not None and dispatch_raise.cause is None
-        else None
-    )
-    dispatch_main = (
-        dispatch_exit.args[0]
-        if isinstance(dispatch_exit, ast.Call)
-        and isinstance(dispatch_exit.func, ast.Name)
-        and dispatch_exit.func.id == "SystemExit"
-        and len(dispatch_exit.args) == 1
-        and not dispatch_exit.keywords
-        else None
-    )
-    if not (
-        isinstance(dispatch_main, ast.Call)
-        and isinstance(dispatch_main.func, ast.Name)
-        and dispatch_main.func.id == "main"
-        and not dispatch_main.args
-        and not dispatch_main.keywords
-    ):
-        raise PinnedInputError(
-            "pinned-input verifier module dispatch differs from release policy"
-        )
-    verifier_function_ast_sha256 = {
-        name: hashlib.sha256(
-            ast.dump(
-                functions[name][0],
-                annotate_fields=True,
-                include_attributes=False,
-            ).encode("utf-8")
-        ).hexdigest()
-        for name in PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256
-    }
-    if verifier_function_ast_sha256 != PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256:
-        raise PinnedInputError(
-            "pinned-input verifier guarded function AST differs from release policy"
-        )
-    normalized_module = copy.deepcopy(module)
-    recursive_identity_names = {
-        "PINNED_VERIFIER_MODULE_AST_SHA256",
-        "REQUIRED_ARTIFACT_BINDINGS_SHA256",
-        "REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256",
-    }
-    for statement in normalized_module.body:
-        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = (
-            statement.targets
-            if isinstance(statement, ast.Assign)
-            else (statement.target,)
-        )
-        if any(
-            isinstance(target, ast.Name)
-            and target.id in recursive_identity_names
-            for target in targets
-        ):
-            statement.value = ast.Constant(value="<normalized-release-identity>")
-    module_ast_sha256 = hashlib.sha256(
-        ast.dump(
-            normalized_module,
-            annotate_fields=True,
-            include_attributes=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    if module_ast_sha256 != PINNED_VERIFIER_MODULE_AST_SHA256:
-        raise PinnedInputError(
-            "pinned-input verifier module AST differs from release policy"
-        )
-
-
-def _shell_binding_surface(source: str) -> str:
-    """Remove shell comments without treating quoted ``#`` bytes as comments."""
-
-    result: list[str] = []
-    for line_number, line in enumerate(source.splitlines(keepends=True), start=1):
-        if line_number == 1 and line.startswith("#!"):
-            result.append(line)
-            continue
-        single_quoted = False
-        double_quoted = False
-        escaped = False
-        comment_at: int | None = None
-        for index, character in enumerate(line):
-            if escaped:
-                escaped = False
-                continue
-            if character == "\\" and not single_quoted:
-                escaped = True
-                continue
-            if character == "'" and not double_quoted:
-                single_quoted = not single_quoted
-                continue
-            if character == '"' and not single_quoted:
-                double_quoted = not double_quoted
-                continue
-            if (
-                character == "#"
-                and not single_quoted
-                and not double_quoted
-                and (
-                    index == 0
-                    or line[index - 1].isspace()
-                    or line[index - 1] in ";|&()<>{}"
-                )
-            ):
-                comment_at = index
-                break
-        if comment_at is None:
-            result.append(line)
-            continue
-        ending = "\n" if line.endswith("\n") else ""
-        result.append(line[:comment_at] + ending)
-    return "".join(result)
-
-
-def _artifact_binding_surface(source: str, relative: str) -> str:
-    if relative.endswith(".py"):
-        surface, module = _python_binding_surface(source, relative)
-        if relative in {
-            "scripts/publication/orchestrator.py",
-            "scripts/publication/ga_release_contract.py",
-        }:
-            _verify_orchestrator_release_guard(module, relative)
-        elif relative in GA_RELEASE_CLI_FUNCTION_AST_SHA256:
-            _verify_ga_release_cli_guard(module, relative)
-        elif relative == ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION:
-            _verify_pinned_verifier_structure(module)
-        return surface
-    if relative.endswith(".sh"):
-        return _shell_binding_surface(source)
-    return source
 
 
 def _load_strict_json(
@@ -3267,29 +1819,18 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         raise PinnedInputError("Tauri CLI spin input version differs from the manifest")
 
     installer_relative = spec.get("installerPath")
-    installer_expected_sha256 = spec.get("installerSha256")
     fragments = spec.get("requiredInstallerFragments")
     if (
         installer_relative != TAURI_CLI_INSTALLER_RELATIVE_PATH
-        or not isinstance(installer_expected_sha256, str)
         or not isinstance(fragments, list)
         or not fragments
     ):
         raise PinnedInputError("Tauri CLI installer binding is incomplete")
-    _require_sha256(
-        installer_expected_sha256,
-        "manifest digest for Tauri CLI installer",
-    )
-    if installer_expected_sha256 != REQUIRED_TAURI_CLI_INSTALLER_SHA256:
-        raise PinnedInputError(
-            "Tauri CLI installer digest differs from the fixed release policy"
-        )
     installer_body = _read_bytes(
         repository,
         installer_relative,
         "Tauri CLI installer",
     )
-    computed_installer_sha256 = hashlib.sha256(installer_body).hexdigest()
     try:
         installer = installer_body.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
@@ -3623,10 +2164,6 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         raise PinnedInputError("CI does not use the checksum-bound Tauri CLI installer")
     if re.search(r"cargo\s+install\s+tauri-cli", workflow):
         raise PinnedInputError("CI still contains a floating direct Tauri CLI installation")
-    if computed_installer_sha256 != installer_expected_sha256:
-        raise PinnedInputError(
-            "Tauri CLI installer source digest differs from the pinned release policy"
-        )
 
 
 def _verify_commits(manifest: dict, env: dict[str, str]) -> None:
@@ -4028,9 +2565,7 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
         )
 
 
-def _verify_build_scripts(
-    manifest: dict, repository: Path, environment_pins: dict[str, str]
-) -> None:
+def _verify_build_scripts(manifest: dict, repository: Path) -> None:
     build_scripts = manifest.get("buildScripts")
     if (
         not isinstance(build_scripts, dict)
@@ -4084,168 +2619,89 @@ def _verify_build_scripts(
                 f"build script {relative} contains a network or recursive action: {match.group(0)!r}"
             )
 
-    artifact_bindings = manifest.get("artifactBindings")
-    if not isinstance(artifact_bindings, dict) or not artifact_bindings:
-        raise PinnedInputError("pinned-input manifest has no artifact bindings")
-    for relative, bindings in artifact_bindings.items():
-        if (
-            not isinstance(relative, str)
-            or not relative
-            or not isinstance(bindings, list)
-            or not bindings
-            or any(not isinstance(binding, str) or not binding for binding in bindings)
-            or len(bindings) != len(set(bindings))
-        ):
-            raise PinnedInputError(
-                "pinned-input manifest has a malformed artifact binding"
-            )
-    artifact_binding_identity = hashlib.sha256(
-        json.dumps(
-            artifact_bindings,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    if artifact_binding_identity != REQUIRED_ARTIFACT_BINDINGS_SHA256:
-        raise PinnedInputError(
-            "pinned-input manifest artifact bindings differ from release policy"
-        )
-    artifact_source_digests = manifest.get("artifactSourceSha256")
-    expected_source_paths = set(artifact_bindings) - {
-        ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION
-    }
-    if (
-        not isinstance(artifact_source_digests, dict)
-        or set(artifact_source_digests) != expected_source_paths
-        or any(
-            type(relative) is not str
-            or type(digest) is not str
-            or not _SHA256_RE.fullmatch(digest)
-            for relative, digest in artifact_source_digests.items()
-        )
-    ):
-        raise PinnedInputError(
-            "artifact source digest map differs from the complete release policy"
-        )
-    artifact_source_identity = hashlib.sha256(
-        json.dumps(
-            artifact_source_digests,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    if artifact_source_identity != REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256:
-        raise PinnedInputError(
-            "artifact source digest map identity differs from release policy"
-        )
-    for relative, bindings in artifact_bindings.items():
-        text = _read_text(
-            repository,
-            relative,
-            f"build script {relative}",
-        )
-        if relative != ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION and (
-            hashlib.sha256(text.encode("utf-8")).hexdigest()
-            != artifact_source_digests[relative]
-        ):
-            raise PinnedInputError(
-                f"artifact source digest differs from release policy: {relative}"
-            )
-        if relative == ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION:
-            binding_surface, verifier_module = _python_binding_surface(text, relative)
-            _verify_pinned_verifier_structure(verifier_module)
-        else:
-            binding_surface = _artifact_binding_surface(text, relative)
-        for binding in bindings:
-            if binding not in binding_surface:
-                raise PinnedInputError(
-                    f"build script {relative} is missing executable artifact-hash binding "
-                    f"{binding!r}"
-                )
 
-    workflow_relative = ".github/workflows/ci.yml"
-    if workflow_relative in artifact_bindings:
-        workflow = _read_text(
-            repository,
-            workflow_relative,
-            "CI workflow",
+def _verify_ci_release_python(
+    repository: Path, environment_pins: dict[str, str]
+) -> None:
+    workflow = _read_text(
+        repository,
+        ".github/workflows/ci.yml",
+        "CI workflow",
+    )
+    expected_python = _require_env(environment_pins, "PYTHON_VERSION")
+    lines = workflow.splitlines()
+    jobs: dict[str, list[str]] = {}
+    current_job: str | None = None
+    in_jobs = False
+    job_header = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+    for line in lines:
+        if not in_jobs:
+            in_jobs = line == "jobs:"
+            continue
+        if line and not line.startswith(" ") and not line.startswith("#"):
+            break
+        match = job_header.match(line)
+        if match:
+            current_job = match.group(1)
+            jobs[current_job] = []
+        elif current_job is not None:
+            jobs[current_job].append(line)
+    release_jobs = {
+        name: "\n".join(body)
+        for name, body in jobs.items()
+        if "./scripts/run_release_ci_gate.sh" in "\n".join(body)
+    }
+    if not release_jobs:
+        raise PinnedInputError(
+            "CI workflow has no job using the closed release gate"
         )
-        expected_python = _require_env(environment_pins, "PYTHON_VERSION")
-        lines = workflow.splitlines()
-        jobs: dict[str, list[str]] = {}
-        current_job: str | None = None
-        in_jobs = False
-        job_header = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
-        for line in lines:
-            if not in_jobs:
-                in_jobs = line == "jobs:"
-                continue
-            if line and not line.startswith(" ") and not line.startswith("#"):
-                break
-            match = job_header.match(line)
-            if match:
-                current_job = match.group(1)
-                jobs[current_job] = []
-            elif current_job is not None:
-                jobs[current_job].append(line)
-        release_jobs = {
-            name: "\n".join(body)
-            for name, body in jobs.items()
-            if "./scripts/run_release_ci_gate.sh" in "\n".join(body)
-        }
-        if not release_jobs:
+    for name, body in release_jobs.items():
+        configured_python_versions = re.findall(
+            r'(?m)^\s+python-version:\s*"([0-9]+[.][0-9]+[.][0-9]+)"\s*$',
+            body,
+        )
+        if configured_python_versions != [expected_python]:
             raise PinnedInputError(
-                "CI workflow has no job using the closed release gate"
+                f"CI job {name!r} unsigned-validation Python version does not "
+                "exactly match dependency_pins.env"
             )
-        for name, body in release_jobs.items():
-            configured_python_versions = re.findall(
-                r'(?m)^\s+python-version:\s*"([0-9]+[.][0-9]+[.][0-9]+)"\s*$',
-                body,
-            )
-            if configured_python_versions != [expected_python]:
+        required_python_fragments = (
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "id: validation-python",
+            "architecture: arm64",
+            "update-environment: false",
+        )
+        for fragment in required_python_fragments:
+            if body.count(fragment) != 1:
                 raise PinnedInputError(
-                    f"CI job {name!r} unsigned-validation Python version does not "
-                    "exactly match dependency_pins.env"
+                    f"CI job {name!r} does not bind exactly one closed "
+                    f"unsigned-validation Python through {fragment!r}"
                 )
-            required_python_fragments = (
-                "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
-                "id: validation-python",
-                "architecture: arm64",
-                "update-environment: false",
-            )
-            for fragment in required_python_fragments:
-                if body.count(fragment) != 1:
-                    raise PinnedInputError(
-                        f"CI job {name!r} does not bind exactly one closed "
-                        f"unsigned-validation Python through {fragment!r}"
-                    )
-            body_lines = body.splitlines()
-            gate_commands: list[str] = []
-            index = 0
-            while index < len(body_lines):
-                line = body_lines[index]
-                if "./scripts/run_release_ci_gate.sh" not in line:
-                    index += 1
-                    continue
-                command = line.strip()
-                while command.endswith("\\"):
-                    index += 1
-                    if index >= len(body_lines):
-                        break
-                    command = command[:-1].rstrip() + " " + body_lines[index].strip()
-                gate_commands.append(command)
+        body_lines = body.splitlines()
+        gate_commands: list[str] = []
+        index = 0
+        while index < len(body_lines):
+            line = body_lines[index]
+            if "./scripts/run_release_ci_gate.sh" not in line:
                 index += 1
-            if not gate_commands or any(
-                "--validation-python-executable" not in command
-                or "steps.validation-python.outputs.python-path" not in command
-                for command in gate_commands
-            ):
-                raise PinnedInputError(
-                    f"CI job {name!r} has a release gate outside its exact "
-                    "unsigned-validation Python boundary"
-                )
+                continue
+            command = line.strip()
+            while command.endswith("\\"):
+                index += 1
+                if index >= len(body_lines):
+                    break
+                command = command[:-1].rstrip() + " " + body_lines[index].strip()
+            gate_commands.append(command)
+            index += 1
+        if not gate_commands or any(
+            "--validation-python-executable" not in command
+            or "steps.validation-python.outputs.python-path" not in command
+            for command in gate_commands
+        ):
+            raise PinnedInputError(
+                f"CI job {name!r} has a release gate outside its exact "
+                "unsigned-validation Python boundary"
+            )
 
 
 def _verify(
@@ -4284,7 +2740,8 @@ def _verify(
     _verify_go_module_inputs(manifest, env)
     _verify_libbox_build_tags(manifest, env, repository)
     _verify_native_lock(manifest, env, repository)
-    _verify_build_scripts(manifest, repository, env)
+    _verify_build_scripts(manifest, repository)
+    _verify_ci_release_python(repository, env)
 
 
 def verify_source_contract(repository: Path) -> None:
@@ -4315,8 +2772,7 @@ def main() -> int:
         "XcodeGen patch/source binding, sing-box and gomobile commits, six libbox patch "
         "digests, combined diff, Go module inputs and module-cache closure contract, "
         "libbox build tags required by the engine start path, native lock binding, "
-        "offline artifact-hash build-script references, and the exact artifact-source "
-        "release-freeze map"
+        "offline build-script pin references, and the CI release-gate Python pin"
     )
     return 0
 

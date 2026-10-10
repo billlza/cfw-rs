@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -23,7 +22,7 @@ from scripts.verify_native_product_graph import (
     verify_distribution_codesign_boundary,
     verify_generated_project,
     verify_repository,
-    verify_signing_order as _verify_signing_order,
+    verify_signing_order,
     verify_signing_transaction_boundary,
     verify_tauri_embedding,
     verify_xcodegen_spec,
@@ -106,30 +105,6 @@ _SIGNING_SCRIPT = "\n".join(
         '"$CFW_SIGNING_CERTIFICATE_SHA1" "$staged_app"',
     ]
 )
-_SIGNING_CRITICAL_PREFIX_SHA256 = hashlib.sha256(
-    _SIGNING_SCRIPT[: _SIGNING_SCRIPT.index(AUTHORITY_SIGNING_CRITICAL_BLOCK)].encode(
-        "utf-8"
-    )
-).hexdigest()
-_SIGNING_CRITICAL_BLOCK_END = (
-    _SIGNING_SCRIPT.index(AUTHORITY_SIGNING_CRITICAL_BLOCK)
-    + len(AUTHORITY_SIGNING_CRITICAL_BLOCK)
-)
-_SIGNING_CRITICAL_SUFFIX_SHA256 = hashlib.sha256(
-    _SIGNING_SCRIPT[_SIGNING_CRITICAL_BLOCK_END:].encode("utf-8")
-).hexdigest()
-
-
-def verify_signing_order(
-    manifest: object, files: dict[str, str], signing_script: str
-) -> None:
-    _verify_signing_order(
-        manifest,
-        files,
-        signing_script,
-        critical_prefix_sha256=_SIGNING_CRITICAL_PREFIX_SHA256,
-        critical_suffix_sha256=_SIGNING_CRITICAL_SUFFIX_SHA256,
-    )
 
 
 class RepositoryContractTests(unittest.TestCase):
@@ -343,25 +318,6 @@ class SigningOrderTests(unittest.TestCase):
                 ):
                     verify_signing_order(
                         _valid_manifest(), _valid_embedding(), drifted
-                    )
-
-    def test_critical_hash_identities_require_strings(self) -> None:
-        cases = (
-            ("prefix", None, _SIGNING_CRITICAL_SUFFIX_SHA256),
-            ("suffix", _SIGNING_CRITICAL_PREFIX_SHA256, None),
-        )
-        for position, prefix, suffix in cases:
-            with self.subTest(position=position):
-                with self.assertRaisesRegex(
-                    NativeProductGraphError,
-                    f"critical-{position} identity is malformed",
-                ):
-                    _verify_signing_order(
-                        _valid_manifest(),
-                        _valid_embedding(),
-                        _SIGNING_SCRIPT,
-                        critical_prefix_sha256=prefix,
-                        critical_suffix_sha256=suffix,
                     )
 
     def test_outer_not_signed_last_fails_closed(self) -> None:
@@ -581,119 +537,12 @@ class SigningOrderTests(unittest.TestCase):
         ):
             verify_signing_order(_valid_manifest(), _valid_embedding(), script)
 
-    def test_critical_signing_block_cannot_hide_in_uncalled_function(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "unreachable_signing_block() {\n"
-            + AUTHORITY_SIGNING_CRITICAL_BLOCK
-            + "\n}",
-            1,
-        )
+    def test_critical_signing_block_must_remain_exact(self) -> None:
+        bridge_identifier = "  --identifier com.bill.clashformac.native-bridge \\\n"
+        self.assertEqual(AUTHORITY_SIGNING_CRITICAL_BLOCK.count(bridge_identifier), 1)
+        script = _SIGNING_SCRIPT.replace(bridge_identifier, "", 1)
         with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_hide_after_inline_function_body(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "unreachable_signing_block() { :\n"
-            + AUTHORITY_SIGNING_CRITICAL_BLOCK
-            + "\n}",
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_hide_in_false_branch(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "if false; then\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\nfi",
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_hide_in_short_circuit_group(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "false && {\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\n}",
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_hide_after_inline_group_body(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "false && { :\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\n}",
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_hide_in_process_substitution(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            ": <(\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\n)",
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_hide_in_coprocess(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "coproc hidden_signing {\n"
-            + AUTHORITY_SIGNING_CRITICAL_BLOCK
-            + "\n}",
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_follow_early_exit(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "exit 0\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_follow_exec_replacement(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "exec /usr/bin/true\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
-        ):
-            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
-
-    def test_critical_signing_block_cannot_follow_die_redefinition(self) -> None:
-        script = _SIGNING_SCRIPT.replace(
-            AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            "die() {\n  return 0\n}\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK,
-            1,
-        )
-        with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-prefix identity differs"
+            NativeProductGraphError, "one exact Global Authority signing block"
         ):
             verify_signing_order(_valid_manifest(), _valid_embedding(), script)
 

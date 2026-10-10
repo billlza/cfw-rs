@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -643,7 +642,7 @@ class ReadinessCliAndWiringTests(unittest.TestCase):
         self.assertIn("collector_source_closure_unactivated", stderr.getvalue())
         self.assertIn("physical_capture_source_not_ready", stderr.getvalue())
 
-    def test_release_entrypoints_and_pin_name_the_fixed_gate(self) -> None:
+    def test_release_entrypoints_name_the_fixed_gate(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         gate = "scripts/verify_physical_capture_readiness.py"
         from scripts.publication.sealed_manifest import REQUIRED_SOURCE_GATES
@@ -655,27 +654,6 @@ class ReadinessCliAndWiringTests(unittest.TestCase):
         ):
             text = (repository / relative).read_text(encoding="utf-8")
             self.assertEqual(text.count(gate), 1, relative)
-        manifest = json.loads(
-            (repository / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
-        )
-        bindings = manifest["artifactBindings"]
-        self.assertIn(gate, bindings)
-        self.assertIn("scripts/physical_capture/policy.py", bindings)
-        self.assertIn("scripts/physical_capture/cloud_run.py", bindings)
-        self.assertIn(
-            "require_current_collector_source_activation",
-            bindings["scripts/physical_capture/cloud_run.py"],
-        )
-        self.assertIn(
-            "collector_source_closure_unactivated",
-            bindings[gate],
-        )
-        for relative in (
-            "scripts/publication/sealed_manifest.py",
-            "scripts/verify_build_boundaries.sh",
-            "scripts/verify_release_environment.sh",
-        ):
-            self.assertIn(gate, bindings[relative])
 
 
 if __name__ == "__main__":

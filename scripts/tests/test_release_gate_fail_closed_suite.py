@@ -297,18 +297,13 @@ def _copy_pinned_tree(destination: Path) -> Path:
     )
     if not isinstance(lan_artifact_path, str):
         raise AssertionError("shipped packet LAN peer artifact path is malformed")
-    artifact_bindings = manifest.get("artifactBindings")
-    if not isinstance(artifact_bindings, dict):
-        raise AssertionError("shipped artifact-binding closure is unavailable")
     fixture_inputs = tuple(
-        relative
-        for relative in dict.fromkeys((*_PINNED_INPUTS, *sorted(artifact_bindings)))
-        if relative != lan_artifact_path
+        relative for relative in _PINNED_INPUTS if relative != lan_artifact_path
     )
     for relative in fixture_inputs:
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise AssertionError("shipped artifact-binding path is not repository-relative")
+            raise AssertionError("pinned fixture input path is not repository-relative")
         source = REPO_ROOT / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -378,15 +373,12 @@ def _copy_pinned_tree(destination: Path) -> Path:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    manifest_paths: set[str] = set()
-    for section in ("buildScripts", "artifactBindings"):
-        entries = manifest.get(section)
-        if not isinstance(entries, dict):
-            raise AssertionError(f"shipped pinned-input {section} is malformed")
-        if any(not isinstance(relative, str) for relative in entries):
-            raise AssertionError(f"shipped pinned-input {section} path is malformed")
-        manifest_paths.update(entries)
-    for relative in sorted(manifest_paths):
+    build_scripts = manifest.get("buildScripts")
+    if not isinstance(build_scripts, dict):
+        raise AssertionError("shipped pinned-input buildScripts is malformed")
+    if any(not isinstance(relative, str) for relative in build_scripts):
+        raise AssertionError("shipped pinned-input buildScripts path is malformed")
+    for relative in sorted(build_scripts):
         source = REPO_ROOT / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)

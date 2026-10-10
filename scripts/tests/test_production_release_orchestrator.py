@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from functools import partial
 import io
 import os
 from pathlib import Path
 import stat
 import sys
 import tempfile
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from scripts import ga_acceptance_journal_export as journal_export
 from scripts import production_release_evidence
 from scripts import candidate_freeze
+from scripts import github_hosted_ci_receipt as hosted_ci_receipt
 from scripts.publication import durable_file
 from scripts.publication import ga_release_contract as contract
 from scripts.publication.common import (
@@ -137,6 +139,7 @@ class StageFixture:
         executor_source: dict[str, str],
         *,
         freeze_verifier: contract.FreezeVerifier | None = None,
+        dmg_seal_marker: str = "1",
     ) -> dict[str, bytes]:
         del freeze_verifier
         self.assert_repository(repository)
@@ -145,7 +148,7 @@ class StageFixture:
             "ga-acceptance",
             {
                 "package_sets": {
-                    "dmg": {"seal": {"sha256": "1" * 64}},
+                    "dmg": {"seal": {"sha256": dmg_seal_marker * 64}},
                     "updater": {"seal": {"sha256": "2" * 64}},
                 },
                 "prepackage_manifest_sha256": sha256_file(
@@ -571,19 +574,110 @@ class StageOrderTests(unittest.TestCase):
             self.assertEqual(verify_stage(self.fixture.repository, "prepackage"), sealed)
             self.live_hosted_ci.assert_not_called()
 
+    def test_prepackage_refuses_without_the_hosted_ci_receipt(self) -> None:
+        workflow = self.fixture.repository / hosted_ci_receipt.WORKFLOW_PATH
+        workflow.parent.mkdir(parents=True)
+        workflow.write_bytes(b"name: CI\n")
+        self.fixture.ga_root.chmod(0o700)
+        stage_inputs = self.fixture.repository / hosted_ci_receipt.RECEIPT_RELATIVE.parent
+        stage_inputs.mkdir(mode=0o700)
+        source = {
+            "candidate_freeze_intent_sha256": "3" * 64,
+            "release_source_sha256": self.fixture.candidate_source["release_source_sha256"],
+            "repository_commit": self.fixture.candidate_source["repository_commit"],
+            "workflow_sha256": sha256_bytes(b"name: CI\n"),
+        }
+        with patch.object(
+            contract,
+            "live_verify_hosted_ci_receipt",
+            new=hosted_ci_receipt.verify_receipt,
+        ), patch.object(
+            hosted_ci_receipt, "_source_binding", return_value=source
+        ), patch.object(
+            hosted_ci_receipt,
+            "_fetch_api_json",
+            side_effect=AssertionError("a missing receipt reached GitHub"),
+        ), patch.object(contract, "_prepackage_files") as compose:
+            with self.assertRaisesRegex(
+                PublicationError,
+                "cannot inspect private pending file .*/stage-inputs/hosted-ci.json",
+            ):
+                seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
+        compose.assert_not_called()
+        self.assertFalse((self.fixture.ga_root / "prepackage").exists())
+
     def test_ga_acceptance_cannot_skip_prepackage(self) -> None:
         pre, ga, publication = self.fixture.patches()
-        with pre, ga, publication:
-            with self.assertRaises(PublicationError):
+        with pre, ga as compose_acceptance, publication:
+            with self.assertRaisesRegex(
+                PublicationError, "cannot inspect private publication directory .*/prepackage"
+            ):
                 seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
+        compose_acceptance.assert_not_called()
+        self.assertFalse((self.fixture.ga_root / "ga-acceptance").exists())
+
+    def test_ga_acceptance_refuses_a_prepackage_seal_that_no_longer_reopens(self) -> None:
+        pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication:
+            seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
+        with patch.object(
+            contract, "_prepackage_files", return_value=self.fixture.prepackage_files("9")
+        ), patch.object(
+            contract, "_ga_acceptance_files", side_effect=self.fixture.ga_acceptance_files
+        ) as compose_acceptance:
+            with self.assertRaisesRegex(
+                PublicationError, "sealed prepackage stage differs from reopened GA inputs"
+            ):
+                seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
+        compose_acceptance.assert_not_called()
         self.assertFalse((self.fixture.ga_root / "ga-acceptance").exists())
 
     def test_publication_cannot_skip_ga_acceptance(self) -> None:
         pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication as compose_publication:
+            seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
+            with self.assertRaisesRegex(
+                PublicationError, "cannot inspect private publication directory .*/ga-acceptance"
+            ):
+                seal_publication(self.fixture.repository, executor=self.fixture.executor)
+        compose_publication.assert_not_called()
+        self.assertFalse((self.fixture.ga_root / "publication").exists())
+
+    def test_publication_refuses_a_ga_acceptance_seal_that_no_longer_reopens(self) -> None:
+        pre, ga, publication = self.fixture.patches()
         with pre, ga, publication:
             seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
-            with self.assertRaises(PublicationError):
+            seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
+        pre, _ga, publication = self.fixture.patches()
+        with pre, patch.object(
+            contract,
+            "_ga_acceptance_files",
+            side_effect=partial(self.fixture.ga_acceptance_files, dmg_seal_marker="4"),
+        ), publication as compose_publication:
+            with self.assertRaisesRegex(
+                PublicationError, "sealed ga-acceptance stage differs from reopened GA inputs"
+            ):
                 seal_publication(self.fixture.repository, executor=self.fixture.executor)
+        compose_publication.assert_not_called()
+        self.assertFalse((self.fixture.ga_root / "publication").exists())
+
+    def test_publication_refuses_when_live_hosted_ci_verification_fails(self) -> None:
+        pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication:
+            seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
+            seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
+        self.live_hosted_ci.reset_mock()
+        self.live_hosted_ci.side_effect = hosted_ci_receipt.HostedCIReceiptError(
+            "fixture retained hosted CI receipt differs from live GitHub state"
+        )
+        pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication as compose_publication:
+            with self.assertRaisesRegex(
+                PublicationError, "differs from live GitHub state"
+            ):
+                seal_publication(self.fixture.repository, executor=self.fixture.executor)
+        self.live_hosted_ci.assert_called_once()
+        compose_publication.assert_not_called()
         self.assertFalse((self.fixture.ga_root / "publication").exists())
 
     def test_three_stages_publish_in_order_and_bind_predecessors(self) -> None:
@@ -771,6 +865,169 @@ class AdapterContractTests(unittest.TestCase):
                 PublicationError
             ):
                 _require_hosted_ci_source_binding(hosted_ci, **arguments)
+
+    def test_prepackage_inputs_refuse_when_any_unconsumed_guard_rejects(self) -> None:
+        repository = self.fixture.repository
+        source = dict(self.fixture.candidate_source)
+        product_input_path = repository.joinpath(*contract.PRODUCT_INPUT.parts)
+        product_input_path.write_bytes(
+            canonical_json(
+                {
+                    "document": "cfm-ga-product-input-v1",
+                    "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
+                    "schema_version": 1,
+                    "source": source,
+                    "toolchain": {
+                        name: "f" * 64
+                        for name in (
+                            "cargoWorkspaceSourcesTreeSha256",
+                            "goModuleCacheTreeSha256",
+                            "goToolchainTreeSha256",
+                            "goToolsTreeSha256",
+                            "nodeToolchainTreeSha256",
+                            "tauriToolchainTreeSha256",
+                            "toolchainSha256",
+                            "uiDependenciesTreeSha256",
+                            "xcodegenToolchainTreeSha256",
+                        )
+                    },
+                }
+            )
+        )
+        intent_path = repository.joinpath(*contract.CANDIDATE_FREEZE_INTENT.parts)
+        intent_path.parent.mkdir(parents=True)
+        intent = {
+            name: "0" * 64
+            for name in (
+                "allocation_ledger_sha256",
+                "entitlements_tree_sha256",
+                "native_products_tree_sha256",
+                "pre_sign_app_tree_sha256",
+                "pre_sign_tree_sha256",
+                "product_input_sha256",
+                "profiles_tree_sha256",
+                "signing_preflight_sha256",
+                "signing_plan_sha256",
+                "updater_embedded_public_key_sha256",
+                "updater_key_possession_proof_sha256",
+                "updater_tauri_config_sha256",
+            )
+        }
+        intent.update(
+            {
+                "build_number": GA_BUILD,
+                "consumption_state": "candidate_frozen_consumed",
+                "document": "cfm-candidate-freeze-intent-v3",
+                "product_input_document_sha256": sha256_file(product_input_path),
+                "product_version": PRODUCT_VERSION,
+                "schema_version": 3,
+                **source,
+            }
+        )
+        intent_path.write_bytes(canonical_json(intent))
+        frozen = SimpleNamespace(
+            intent_path=intent_path,
+            intent_sha256=sha256_file(intent_path),
+            root=self.fixture.ga_root,
+        )
+        workflow = repository / ".github/workflows/ci.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_bytes(b"name: CI\n")
+        bound_source = {
+            "candidate_freeze_intent_sha256": frozen.intent_sha256,
+            "workflow_sha256": sha256_file(workflow),
+            **source,
+        }
+        app_manifest_path = repository.joinpath(*contract.SIGNED_APP_MANIFEST.parts)
+        app_manifest_path.parent.mkdir(parents=True)
+        app_manifest_path.write_bytes(b"{}\n")
+        transformation_bytes = b'{"fixture":"signing transformation"}'
+        transformation_path = repository.joinpath(*contract.SIGNING_TRANSFORMATION.parts)
+        transformation_path.parent.mkdir(parents=True)
+        transformation_path.write_bytes(transformation_bytes)
+
+        def run(
+            hosted_source: dict[str, str],
+            *,
+            release_application_error: PublicationError | None = None,
+            signing_binding_error: PublicationError | None = None,
+        ) -> tuple[PublicationError, dict[str, Mock]]:
+            collaborators = {
+                "verify_ga_workspace_path_preconditions": Mock(),
+                "validate_hosted_ci_receipt_offline": Mock(
+                    return_value={
+                        "source": hosted_source,
+                        "workflow": {"source": {"sha256": bound_source["workflow_sha256"]}},
+                    }
+                ),
+                "_require_hosted_ci_source_binding": Mock(
+                    wraps=_require_hosted_ci_source_binding
+                ),
+                "validate_candidate_app_manifest": Mock(
+                    return_value={"algorithm": "sha256-tree-v2", "sha256": "a" * 64}
+                ),
+                "bundle_build_identity": Mock(
+                    return_value=SimpleNamespace(
+                        product_version=PRODUCT_VERSION, build_version=GA_BUILD
+                    )
+                ),
+                "_release_environment": Mock(return_value={}),
+                "_validate_release_application": Mock(
+                    side_effect=release_application_error
+                ),
+                "validate_published_transaction_receipt": Mock(
+                    return_value=SimpleNamespace(
+                        receipt={"fixture": "notarization"},
+                        receipt_path=repository / "notarization-receipt.json",
+                        retained_signed_app=repository / "retained.app",
+                    )
+                ),
+                "verify_signing_transformation_receipt": Mock(
+                    return_value={"fixture": "signing transformation"}
+                ),
+                "canonical_signing_transformation_json": Mock(
+                    return_value=transformation_bytes
+                ),
+                "_validate_signing_notarization_binding": Mock(
+                    side_effect=signing_binding_error
+                ),
+                "validate_notary_files": Mock(
+                    side_effect=OSError("fixture has no notary evidence")
+                ),
+            }
+            with ExitStack() as stack:
+                for name, collaborator in collaborators.items():
+                    stack.enter_context(patch.object(contract, name, collaborator))
+                with self.assertRaises(PublicationError) as rejected:
+                    _verified_prepackage_inputs(
+                        repository, freeze_verifier=lambda _repository: frozen
+                    )
+            return rejected.exception, collaborators
+
+        # Control: every guard accepts, so the chain reaches the notary evidence.
+        rejected, called = run(bound_source)
+        self.assertEqual(str(rejected), "GA application notarization evidence is invalid")
+        for name in (
+            "_require_hosted_ci_source_binding",
+            "_validate_release_application",
+            "_validate_signing_notarization_binding",
+            "validate_notary_files",
+        ):
+            called[name].assert_called_once()
+
+        rejected, called = run({**bound_source, "repository_commit": "9" * 40})
+        self.assertEqual(str(rejected), "hosted CI receipt differs from the frozen candidate")
+        called["validate_candidate_app_manifest"].assert_not_called()
+
+        release_error = PublicationError("fixture release application rejected")
+        rejected, called = run(bound_source, release_application_error=release_error)
+        self.assertIs(rejected, release_error)
+        called["validate_published_transaction_receipt"].assert_not_called()
+
+        binding_error = PublicationError("fixture signing binding rejected")
+        rejected, called = run(bound_source, signing_binding_error=binding_error)
+        self.assertIs(rejected, binding_error)
+        called["validate_notary_files"].assert_not_called()
 
     def test_package_adapter_uses_the_fixed_ga_candidate_contract(self) -> None:
         adapter = _require_artifact_set_adapter(self.fixture.repository)

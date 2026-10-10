@@ -380,7 +380,6 @@ class ReleaseAppVerifierWrapperTests(unittest.TestCase):
             [str(wrapper), "unexpected"],
             cwd="/",
             env={
-                "ADB_MDNS": "0",
                 "LANG": "C",
                 "LC_ALL": "C",
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",

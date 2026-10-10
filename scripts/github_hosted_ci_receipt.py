@@ -156,7 +156,6 @@ REQUIRED_JOB_STEP_NAMES: Final = {
     ),
     "libbox, Network Extension, and app skeleton gates": frozenset(
         {
-            "Build and verify pinned packet LAN peer",
             "Build source-bound libbox",
             "Build and verify unsigned 0.5.0 validation skeleton (50000)",
         }

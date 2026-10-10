@@ -108,8 +108,6 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' release-tool-tests
       - name: Bootstrap release tools
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-release-toolchain
-      - name: Verify packet LAN peer
-        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' packet-lan-peer
       - name: Verify Xcode project
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' verify-xcode-project
       - name: Materialize libbox
@@ -286,13 +284,13 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             ):
                 audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
 
-    def test_packet_gate_commands_cannot_be_made_unreachable(self) -> None:
+    def test_gate_commands_cannot_be_made_unreachable(self) -> None:
         source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
         source = source_gate.read_text(encoding="utf-8")
         active = (
-            '    /bin/bash -p "$repo_root/scripts/verify_packet_lan_peer.sh"\n'
-            "    cfw_run_release_python_script \\\n"
-            '      "$repo_root" "$repo_root/scripts/verify_pinned_build_inputs.py"'
+            "    cfw_run_with_release_cargo_runtime \\\n"
+            '      "$repo_root" cfw_run_release_python_script \\\n'
+            '      "$repo_root" "$repo_root/scripts/audit_cargo_policy.py"'
         )
         unreachable = (
             "    if false; then\n"
@@ -711,8 +709,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
                 1,
             ),
             GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer\n",
-                "      - name: Verify packet LAN peer\n"
+                "      - name: Verify Xcode project\n",
+                "      - name: Verify Xcode project\n"
                 "        env:\n"
                 "          BASH_ENV: .github/ci-bootstrap.sh\n",
             ),
@@ -726,34 +724,13 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_github_env_cannot_inject_bash_env_for_later_steps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer",
+                "      - name: Verify Xcode project",
                 "      - name: Inject startup hook\n"
                 "        run: echo 'BASH_ENV=.github/ci-bootstrap.sh' >>\"$GITHUB_ENV\"\n"
-                "      - name: Verify packet LAN peer",
+                "      - name: Verify Xcode project",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "BASH_ENV"):
-                audit_workflow(workflow_path, pins_path)
-
-    def test_packet_lan_peer_requires_release_toolchain_bootstrap_first(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            packet_step = (
-                "      - name: Verify packet LAN peer\n"
-                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer\n"
-            )
-            bad = GOOD_WORKFLOW.replace(packet_step, "", 1).replace(
-                "      - name: Bootstrap release tools\n"
-                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' bootstrap-release-toolchain\n",
-                packet_step
-                + "      - name: Bootstrap release tools\n"
-                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' bootstrap-release-toolchain\n",
-                1,
-            )
-            workflow_path, pins_path = self._write(Path(tmp), bad)
-            with self.assertRaisesRegex(CiPolicyError, "before release-toolchain bootstrap"):
                 audit_workflow(workflow_path, pins_path)
 
     def test_or_true_is_rejected(self) -> None:
@@ -789,8 +766,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_step_shell_override_cannot_mask_a_release_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer\n",
-                "      - name: Verify packet LAN peer\n"
+                "      - name: Verify Xcode project\n",
+                "      - name: Verify Xcode project\n"
                 "        shell: bash --noprofile --norc -c 'source {0}; exit 0'\n",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
@@ -814,8 +791,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_step_working_directory_cannot_substitute_a_release_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer\n",
-                "      - name: Verify packet LAN peer\n"
+                "      - name: Verify Xcode project\n",
+                "      - name: Verify Xcode project\n"
                 "        working-directory: /tmp/substitute\n",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
@@ -851,8 +828,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_expression_condition_on_required_step_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer",
-                "      - name: Verify packet LAN peer\n"
+                "      - name: Verify Xcode project",
+                "      - name: Verify Xcode project\n"
                 "        if: github.event_name == 'schedule'",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
@@ -862,8 +839,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_sequence_first_condition_key_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer",
-                "      - if: false\n        name: Verify packet LAN peer",
+                "      - name: Verify Xcode project",
+                "      - if: false\n        name: Verify Xcode project",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "conditionally skip"):
@@ -872,9 +849,9 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_sequence_first_continue_on_error_key_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer",
+                "      - name: Verify Xcode project",
                 "      - continue-on-error: true\n"
-                "        name: Verify packet LAN peer",
+                "        name: Verify Xcode project",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "mask"):
@@ -883,18 +860,18 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_condition_after_compact_sequence_block_scalar_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old = (
-                "      - name: Verify packet LAN peer\n"
+                "      - name: Verify Xcode project\n"
                 "        run: ./scripts/run_release_ci_gate.sh "
                 "--validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+                "'${{ steps.validation-python.outputs.python-path }}' verify-xcode-project"
             )
             new = (
                 "      - run: |\n"
                 "          ./scripts/run_release_ci_gate.sh "
                 "--validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer\n"
+                "'${{ steps.validation-python.outputs.python-path }}' verify-xcode-project\n"
                 "        if: false\n"
-                "        name: Verify packet LAN peer"
+                "        name: Verify Xcode project"
             )
             workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW.replace(old, new))
             with self.assertRaisesRegex(CiPolicyError, "conditionally skip"):
@@ -903,8 +880,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_quoted_condition_key_is_outside_the_release_yaml_dialect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer",
-                "      - name: Verify packet LAN peer\n        \"if\": false",
+                "      - name: Verify Xcode project",
+                "      - name: Verify Xcode project\n        \"if\": false",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "quoted YAML mapping keys"):
@@ -913,15 +890,15 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_flow_mapping_condition_is_outside_the_release_yaml_dialect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old = (
-                "      - name: Verify packet LAN peer\n"
+                "      - name: Verify Xcode project\n"
                 "        run: ./scripts/run_release_ci_gate.sh "
                 "--validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+                "'${{ steps.validation-python.outputs.python-path }}' verify-xcode-project"
             )
             new = (
-                "      - {name: Verify packet LAN peer, if: false, run: "
+                "      - {name: Verify Xcode project, if: false, run: "
                 "./scripts/run_release_ci_gate.sh --validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer}"
+                "'${{ steps.validation-python.outputs.python-path }}' verify-xcode-project}"
             )
             workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW.replace(old, new))
             with self.assertRaisesRegex(CiPolicyError, "flow-style YAML mappings"):
@@ -930,13 +907,13 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_anchor_merge_condition_is_outside_the_release_yaml_dialect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer",
+                "      - name: Verify Xcode project",
                 "      - &conditional\n"
                 "        \"if\": false\n"
                 "        name: Conditional template\n"
                 "        run: echo template\n"
                 "      - <<: *conditional\n"
-                "        name: Verify packet LAN peer",
+                "        name: Verify Xcode project",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "anchors, aliases, and merges"):
@@ -945,19 +922,19 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_multiline_explicit_condition_key_is_outside_release_dialect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old = (
-                "      - name: Verify packet LAN peer\n"
+                "      - name: Verify Xcode project\n"
                 "        run: ./scripts/run_release_ci_gate.sh "
                 "--validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+                "'${{ steps.validation-python.outputs.python-path }}' verify-xcode-project"
             )
             new = (
                 "      - ?\n"
                 "          if\n"
                 "        : false\n"
-                "        name: Verify packet LAN peer\n"
+                "        name: Verify Xcode project\n"
                 "        run: ./scripts/run_release_ci_gate.sh "
                 "--validation-python-executable "
-                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+                "'${{ steps.validation-python.outputs.python-path }}' verify-xcode-project"
             )
             workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW.replace(old, new))
             with self.assertRaisesRegex(CiPolicyError, "explicit YAML mapping"):
@@ -966,8 +943,8 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_explicit_mapping_value_is_outside_release_dialect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                "      - name: Verify packet LAN peer",
-                "      - : false\n        name: Verify packet LAN peer",
+                "      - name: Verify Xcode project",
+                "      - : false\n        name: Verify Xcode project",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "explicit YAML mapping values"):

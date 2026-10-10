@@ -17,7 +17,7 @@ import selectors
 import signal
 import subprocess
 import time
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 
 MAX_ARGUMENTS = 64
@@ -31,17 +31,7 @@ FIXED_ENVIRONMENT = {
     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
     "LC_ALL": "C",
     "LANG": "C",
-    "ADB_MDNS": "0",
 }
-_FIXED_ENVIRONMENT_KEYS = frozenset(FIXED_ENVIRONMENT)
-_CONTROLLED_EXTRA_ENVIRONMENT_KEYS = frozenset(
-    {
-        "HOME",
-        "ANDROID_USER_HOME",
-        "ANDROID_ADB_LOG_PATH",
-        "ADB_VENDOR_KEYS",
-    }
-)
 
 
 class ProbeExecutionError(RuntimeError):
@@ -70,10 +60,6 @@ class CommandSpec:
     accepted_exit_codes: frozenset[int] = frozenset({0})
     stdout_limit: int = MAX_STREAM_BYTES
     stderr_limit: int = 0
-    # Empty means the normal fixed environment.  Non-empty values are only
-    # accepted for source-owned, private-directory bindings such as the
-    # Android LAN peer's isolated ADB server workspace.
-    environment: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,51 +167,7 @@ def _validate_spec(spec: CommandSpec) -> tuple[str, ...]:
             or not 0 <= limit <= MAX_STREAM_BYTES
         ):
             raise ProbeExecutionError(f"probe {label} limit is outside the bound")
-    if not isinstance(spec.environment, tuple):
-        raise ProbeExecutionError("probe environment contract is not a tuple")
-    if len(spec.environment) > 8:
-        raise ProbeExecutionError("probe environment contract exceeds its bound")
-    environment: dict[str, str] = {}
-    environment_bytes = 0
-    for item in spec.environment:
-        if (
-            not isinstance(item, tuple)
-            or len(item) != 2
-            or not isinstance(item[0], str)
-            or not isinstance(item[1], str)
-            or not item[0]
-            or "\x00" in item[0]
-            or "\x00" in item[1]
-            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in item[0])
-            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in item[1])
-            or item[0] in environment
-        ):
-            raise ProbeExecutionError("probe environment contract is not canonical")
-        environment_bytes += len(item[0].encode("utf-8")) + len(item[1].encode("utf-8"))
-        if environment_bytes > MAX_ARGUMENT_BYTES:
-            raise ProbeExecutionError("probe environment contract exceeds its byte bound")
-        environment[item[0]] = item[1]
-    unknown = set(environment) - (
-        _FIXED_ENVIRONMENT_KEYS | _CONTROLLED_EXTRA_ENVIRONMENT_KEYS
-    )
-    if unknown:
-        raise ProbeExecutionError("probe environment contains an unreviewed variable")
-    for key, value in FIXED_ENVIRONMENT.items():
-        if key in environment and environment[key] != value:
-            raise ProbeExecutionError("probe environment differs from the fixed contract")
-    for key in _CONTROLLED_EXTRA_ENVIRONMENT_KEYS & set(environment):
-        value = environment[key]
-        if not Path(value).is_absolute() or Path(value).is_symlink():
-            raise ProbeExecutionError(
-                "probe private environment paths must be absolute non-symlinks"
-            )
     return tuple(argv)
-
-
-def _command_environment(spec: CommandSpec) -> dict[str, str]:
-    environment = dict(FIXED_ENVIRONMENT)
-    environment.update(dict(spec.environment))
-    return environment
 
 
 def _validate_readiness(spec: CommandSpec, readiness: ReadinessSpec) -> None:
@@ -602,25 +544,19 @@ def start_fixed_command(
     spec: CommandSpec,
     *,
     popen_factory: PopenFactory = subprocess.Popen,
-    environment: Mapping[str, str] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = _utc_now,
 ) -> StartedCommand:
     """Start one fixed command without exposing shell, stdin, or caller argv."""
 
     argv = _validate_spec(spec)
-    command_environment = (
-        _command_environment(spec) if environment is None else dict(environment)
-    )
-    if environment is not None and command_environment != FIXED_ENVIRONMENT:
-        raise ProbeExecutionError("probe environment differs from the fixed contract")
     started_wall = wall_clock()
     started_monotonic = monotonic()
     try:
         process = popen_factory(
             argv,
             cwd=str(spec.cwd.resolve(strict=True)),
-            env=command_environment,
+            env=dict(FIXED_ENVIRONMENT),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -649,7 +585,6 @@ def run_fixed_command(
     spec: CommandSpec,
     *,
     popen_factory: PopenFactory = subprocess.Popen,
-    environment: Mapping[str, str] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = _utc_now,
 ) -> CommandResult:
@@ -658,7 +593,6 @@ def run_fixed_command(
     with start_fixed_command(
         spec,
         popen_factory=popen_factory,
-        environment=environment,
         monotonic=monotonic,
         wall_clock=wall_clock,
     ) as command:

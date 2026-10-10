@@ -22,7 +22,6 @@ The machine-readable values live in
 | cargo-deny | `0.20.2` | Rust `1.98.1` locked source install, version identity, and target-aware policy run |
 | sing-box/libbox | `v1.14.2`, `af6e64c3b69e6132ebaee0e1a3d24e93903f6709` | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, endpoint-conflict, profile-probe and SOCKS-lifecycle patches, with individual and combined SHA-256 values |
 | iPhone Packet LAN peer (test-only) | signed thin-arm64 app tree `9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7` | source-tree identity, signed executable/profile/entitlements/certificate pins, dual-hash physical-device selection, CoreDevice receipt validation, and exact install/process/uninstall ownership |
-| Legacy Android packet peer (inactive) | Linux/arm64 artifact pinned as `packetLanPeer` in `scripts/pinned_build_inputs.json` | retained offline regression/build closure; it is not selected by the active Packet endpoint policy |
 | Apple provider reference | `2b1763a80f2c1dee1ab3ac62d84dbda7dc5178f4` | Git commit identity; reference only |
 | deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
@@ -110,57 +109,30 @@ Network access is isolated to explicit preparation:
    byte-for-byte reproducible. The script refuses a different or unexpectedly
    modified checkout and invokes the pinned gomobile binder for `macos/arm64`
    only.
-8. `scripts/build_packet_lan_peer.sh` builds the retained legacy Android peer
-   twice in separate empty Go caches with the pinned Go toolchain,
-   `GOPROXY=off`, `GOTOOLCHAIN=local`, `CGO_ENABLED=0`, `GOOS=linux`, and
-   `GOARCH=arm64`, then publishes only byte-identical output. The independent
-   `packetLanPeer` manifest section binds the four-file source tree,
-   both release scripts, the output's digest and size, TCP port `44333`, the eight
-   connection/64-byte/five-second limits, and the exact shell-owned Android
-   deployment path and modes. `scripts/verify_packet_lan_peer.sh` separately
-   checks formatting, imports, absence of non-standard dependencies and cgo,
-   unit tests, vet, race tests, target metadata, empty build ID, and the
-   deterministic build. It also compares the just-built artifact directly with
-   the fixed SHA-256, size, and mode. The complete pinned-input verifier opens that
-   same target with `O_NOFOLLOW`, holds the descriptor while hashing, and rejects
-   non-regular files, hard links, ownership or mode drift, size or digest drift,
-   and any before/after metadata change. These checks are intentionally layered:
-   `scripts/verify_pinned_source_contract.py` validates the complete static
-   source/script/protocol/deployment contract without requiring generated output,
-   while the independent `packet-lan-peer` CI lane runs
-   `scripts/verify_packet_lan_peer.sh` after the pinned release toolchain is
-   bootstrapped. The default `scripts/verify_pinned_build_inputs.py` entrypoint
-   remains the complete source-plus-generated-artifact verification used when
-   the fixed artifact is expected to exist.
+8. `scripts/verify_pinned_source_contract.py`, the P0 source gate run by the
+   build-script boundary, validates the complete static pinned-input contract
+   in `scripts/pinned_build_inputs.json` without invoking a toolchain or
+   requiring generated output; the verification itself lives in
+   `scripts/verify_pinned_build_inputs.py`. Every input it reads is opened
+   through a repository-rooted, no-follow descriptor chain that rejects
+   symlinks, hard links, non-regular files, foreign ownership, group- or
+   other-writable modes, and any before/after metadata change.
    The pinned manifest carries dependency and policy values only; it does not
    re-attest individual release scripts. The exact Git commit bound by the
    hosted CI receipt and the candidate freeze's clean-tree `repositoryCommit`
    and release-source digest `releaseSourceSha256` identify every tracked
    release source. Developer ID signing with designated-requirement checks,
    notarization, and the behavioral release tests establish the rest.
-9. The retained `runtimeTools.adb` section pins the exact Android platform
-   tool path, `37.0.0-14910828` version, and executable digest. The static gate
-   opens the complete Android admission source through a repository-rooted,
-   no-follow descriptor chain and binds its SHA-256, byte size, owner, mode, and
-   path identity. It then parses (but never imports or executes) those bytes and
-   requires the `ADB`, `ADB_VERSION`, and `ADB_SHA256` literals, the three fixed
-   ADB command-prefix branches, and the host digest check to consume the pinned
-   constants. The admission lane remains responsible for securely hashing the
-   installed executable and checking `adb version` at runtime. Device identity,
-   boot state, interface, IP, process, and socket observations remain live
-   physical evidence; they are not substituted with static build-input values.
-   This closure is regression-only and is not referenced by the active Packet
-   endpoint policy.
-10. The active iPhone Packet-LAN adapter independently reopens the source
-    identity, signed app tree, executable, profile, minimal entitlements,
-    signing certificate and thin-arm64/iOS build metadata before device
-    mutation. A fresh CoreDevice list must contain exactly one physical iPhone
-    matching both domain-separated device hashes. A dormant wireless list entry
-    is only a selection observation: device details must then prove the exact
-    connected/prepared state, and fresh lock-state receipts must immediately
-    precede the primer and Packet launches. The runtime endpoint is never stored
-    statically; it comes from the session-bound ready receipt and is jointly
-    checked against the Mac sender, pcap and cleanup evidence.
+9. The active iPhone Packet-LAN adapter independently reopens the source
+   identity, signed app tree, executable, profile, minimal entitlements,
+   signing certificate and thin-arm64/iOS build metadata before device
+   mutation. A fresh CoreDevice list must contain exactly one physical iPhone
+   matching both domain-separated device hashes. A dormant wireless list entry
+   is only a selection observation: device details must then prove the exact
+   connected/prepared state, and fresh lock-state receipts must immediately
+   precede the primer and Packet launches. The runtime endpoint is never stored
+   statically; it comes from the session-bound ready receipt and is jointly
+   checked against the Mac sender, pcap and cleanup evidence.
 
 The original tag's reachable libbox graph was not accepted as-is: the 2026-07-22
 symbol scan found reachable advisories in `golang.org/x/crypto`,
@@ -259,13 +231,6 @@ what makes the application-owned, loopback-bound `experimental.clash_api` block
 in the projection (`crates/cfw-singbox-config/src/controller.rs`) reachable.
 `scripts/verify_pinned_build_inputs.py` pins the tag list and fails closed if
 that block exists without the tag.
-
-P0 source collection, build-boundary validation, and sealed supply-chain
-derivation use the source-only wrapper. They therefore remain valid in a clean
-hosted checkout and cannot accidentally treat a missing generated packet peer
-as source drift. The generated binary is not skipped: `packet-lan-peer` is a
-mandatory unsigned-CI lane, and only its full format/test/vet/race/rebuild/
-metadata/digest verification can satisfy that artifact gate.
 
 ## Artifact identity
 

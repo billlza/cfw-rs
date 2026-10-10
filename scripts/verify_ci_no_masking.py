@@ -107,10 +107,10 @@ REQUIRED_SWIFT_TARGET_INFO_PROBE = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "d7ff5e3d9b24de4230565f38ca55ed64fdbbb6bd2ed26450bece551667a6a948"
+    "5b9e3bfd91d8ad33090589b7e9f5d1235588dd768986837be97efd524cda231c"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "1979681f2e222087b6574e62fbe74877d8369e9fbc086234b170628dc12acce2"
+    "f510ef7158de0ec90abe1bbe9c283fa2322f5c81459c765e17c85b4e99ceb2b4"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -756,7 +756,6 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         "rust-test",
         "rust-target-audit",
         "cargo-deny",
-        "packet-lan-peer",
         "bootstrap-node-toolchain",
         "prepare-ui-dependencies",
         "ui-test",
@@ -842,17 +841,6 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
                 findings.append(
                     f"job {name!r} prepares verified Cargo inputs after policy bootstrap"
                 )
-        if "packet-lan-peer" in job_gates:
-            if "bootstrap-release-toolchain" not in job_gates:
-                findings.append(
-                    f"job {name!r} verifies the packet LAN peer without the pinned release toolchain"
-                )
-            elif job_gates.index("bootstrap-release-toolchain") > job_gates.index(
-                "packet-lan-peer"
-            ):
-                findings.append(
-                    f"job {name!r} verifies the packet LAN peer before release-toolchain bootstrap"
-                )
 
     if RELEASE_CI_GATE.is_symlink() or not RELEASE_CI_GATE.is_file():
         findings.append("closed release CI gate script is missing or is a symlink")
@@ -890,8 +878,6 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         "cfw_run_release_python_script",
         '"$repo_root/scripts/run_release_python_tests.py"',
         '"$repo_root/scripts/audit_cargo_policy.py"',
-        '"$repo_root/scripts/verify_packet_lan_peer.sh"',
-        '"$repo_root/scripts/verify_pinned_build_inputs.py"',
         '/bin/bash -p "$test_script"',
         "/usr/bin/swift format lint --recursive --strict",
         "/usr/bin/swift test --package-path native/macos",
@@ -982,25 +968,6 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
                     required += ("--", "-D", "warnings")
                 if not _source_contains_token_sequence(helper_source, required):
                     findings.append("native UI helper omits required Cargo command " + repr(" ".join(required)))
-    expected_packet_command = (
-        "/bin/bash",
-        "-p",
-        "$repo_root/scripts/verify_packet_lan_peer.sh",
-    )
-    if not _source_contains_token_sequence(gate_source, expected_packet_command):
-        findings.append(
-            "closed release CI gate omits required packet LAN peer command "
-            + repr(" ".join(expected_packet_command))
-        )
-    expected_complete_pin_command = (
-        "cfw_run_release_python_script",
-        "$repo_root",
-        "$repo_root/scripts/verify_pinned_build_inputs.py",
-    )
-    if not _source_contains_token_sequence(gate_source, expected_complete_pin_command):
-        findings.append(
-            "closed release CI gate omits the complete packet artifact pin verifier"
-        )
     expected_swift_test_command = (
         "/usr/bin/swift",
         "test",

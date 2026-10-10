@@ -258,7 +258,6 @@ REQUIRED_CI_LANES: tuple[str, ...] = (
     "rust-test",
     "rust-target-audit",
     "cargo-deny",
-    "packet-lan-peer",
     "node-install",
     "node-test",
     "node-build",

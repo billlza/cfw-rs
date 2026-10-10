@@ -77,32 +77,8 @@ instance resource, not to Compute instance IAM or project IAM: the fixed client
 service account has `roles/iap.tunnelResourceAccessor` under condition
 `destination.port == 22` (title `packet-capture-ssh-only`). Future audits must
 read that IAP resource policy directly. The Host-owned DNS transaction and
-remote stream capture now have closed source paths; the controlled Android LAN
-peer remains the sole Packet source-readiness blocker.
+remote stream capture now have closed source paths.
 
-## Controlled Android LAN peer (not yet admitted)
-
-The GCE endpoint executable is not the LAN artifact. It also owns UDP/DNS
-behavior and assumes a server installation model, so reusing it on an
-unprivileged phone would widen the LAN proof surface. The pending LAN source
-package must be a separate minimal `linux/arm64` build variant with this closed
-contract:
-
-- one compile-time TCP listener on port `44333`; no flags, environment
-  configuration, config files, UDP socket, DNS role, subprocess, or shell;
-- a fixed connection cap and deadline, a maximum 64-byte request, read/discard
-  semantics, and explicit close on overflow, timeout, or I/O failure;
-- standard-library-only source, `CGO_ENABLED=0 GOOS=linux GOARCH=arm64`,
-  reproducible build flags, unit tests for bounds/timeouts, and a reviewed
-  source plus executable SHA-256 before admission;
-- no root requirement: deploy and execute as the Android `shell` user from a
-  private fixed path made available by an explicitly authorized ADB session.
-
-Admission requires one live on-device capture transaction. It must retain the
-exact hotspot peer IPv4 address and Mac route/interface, SHA-256 hashes of the
-ADB serial, Android build fingerprint, and boot ID, plus the raw verified-boot
-state, device-lock state, `arm64-v8a` ABI, pushed/executed binary SHA-256,
-executable owner/mode, process identity, fixed ADB argv receipts, and an
-independent packet window from the Mac. Until those fields are collected and
-reviewed, `lan-bypass` stays absent from `packet_endpoints.json` and both LAN
-source constants stay `None`.
+This GCE executable is not a LAN endpoint: it owns UDP/DNS behavior and assumes
+a server installation model. The `lan-bypass` endpoint is the separately
+pinned, test-only iPhone Packet-LAN peer in `tools/physical-transport-peer-ios`.

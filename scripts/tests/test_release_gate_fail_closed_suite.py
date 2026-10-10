@@ -288,61 +288,10 @@ def _copy_pinned_tree(destination: Path) -> Path:
     manifest = json.loads(
         (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
     )
-    lan_peer = manifest.get("packetLanPeer")
-    if not isinstance(lan_peer, dict):
-        raise AssertionError("shipped packet LAN peer closure is unavailable")
-    lan_artifact = lan_peer.get("artifact")
-    lan_artifact_path = (
-        lan_artifact.get("path") if isinstance(lan_artifact, dict) else None
-    )
-    if not isinstance(lan_artifact_path, str):
-        raise AssertionError("shipped packet LAN peer artifact path is malformed")
-    fixture_inputs = tuple(
-        relative for relative in _PINNED_INPUTS if relative != lan_artifact_path
-    )
-    for relative in fixture_inputs:
+    for relative in _PINNED_INPUTS:
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise AssertionError("pinned fixture input path is not repository-relative")
-        source = REPO_ROOT / relative
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-    runtime_tools = manifest.get("runtimeTools")
-    if not isinstance(runtime_tools, dict):
-        raise AssertionError("shipped runtime-tool source closure is unavailable")
-    for tool_name, tool in runtime_tools.items():
-        if not isinstance(tool_name, str) or not isinstance(tool, dict):
-            raise AssertionError("shipped runtime-tool entry is malformed")
-        source_binding = tool.get("sourceBinding")
-        if not isinstance(source_binding, dict):
-            raise AssertionError(f"shipped runtime-tool {tool_name} source binding is malformed")
-        relative = source_binding.get("path")
-        if not isinstance(relative, str):
-            raise AssertionError(f"shipped runtime-tool {tool_name} source path is malformed")
-        source = REPO_ROOT / relative
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-
-    lan_source = lan_peer.get("source")
-    if not isinstance(lan_source, dict):
-        raise AssertionError("shipped packet LAN peer source closure is malformed")
-    lan_root = lan_source.get("root")
-    lan_files = lan_source.get("files")
-    if not isinstance(lan_root, str) or not isinstance(lan_files, list):
-        raise AssertionError("shipped packet LAN peer source members are malformed")
-    lan_paths: set[str] = set()
-    for entry in lan_files:
-        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
-            raise AssertionError("shipped packet LAN peer source entry is malformed")
-        lan_paths.add(f"{lan_root}/{entry['path']}")
-    for contract_name in ("buildScript", "verifyScript"):
-        contract = lan_peer.get(contract_name)
-        if not isinstance(contract, dict) or not isinstance(contract.get("path"), str):
-            raise AssertionError(f"shipped packet LAN peer {contract_name} is malformed")
-        lan_paths.add(contract["path"])
-    for relative in sorted(lan_paths):
         source = REPO_ROOT / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -387,10 +336,9 @@ def _copy_pinned_tree(destination: Path) -> Path:
 
 
 class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
-    def test_copied_shipped_source_pins_pass_without_generated_artifact(self) -> None:
+    def test_copied_shipped_source_pins_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
-            self.assertFalse((root / "target/packet-lan-peer-linux-arm64").exists())
             verify_pinned(root)
 
     def test_drifted_toolchain_version_fails_closed(self) -> None:

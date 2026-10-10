@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -19,7 +18,6 @@ from scripts.verify_pinned_build_inputs import (
     MAX_PINNED_MANIFEST_BYTES,
     PinnedInputError,
     REQUIRED_REJECTED_PATCH_DIGESTS,
-    verify,
     verify_source_contract,
 )
 
@@ -54,91 +52,6 @@ PACKET_ENDPOINT_BUILD_FRAGMENTS = [
     "-ldflags='-s -w -buildid='",
     "-o ../../target/packet-evidence-endpoint-linux-amd64",
     PACKET_ENDPOINT_BINARY_SHA,
-]
-ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
-ADB_RUNTIME_TOOL_VERSION = "37.0.0-14910828"
-ADB_RUNTIME_TOOL_SHA256 = (
-    "5759ea07285e5a5b66d84f489c118a3fa3998e69cd37725e5a3dc7cbe0597278"
-)
-ANDROID_LAN_PEER_SOURCE_PATH = "scripts/physical_capture/android_lan_peer.py"
-SYNTHETIC_PACKET_LAN_PEER_ARTIFACT = b"synthetic packet LAN peer binary\n"
-SYNTHETIC_ANDROID_ADMISSION_SOURCE = (
-    REPO_ROOT / ANDROID_LAN_PEER_SOURCE_PATH
-).read_bytes()
-PACKET_LAN_PEER_SOURCE_TREE_SHA = (
-    "f5d7c715fb96d43379d9e2c4fc72e15fbf17699ec6916e1dc438c9faf71807e2"
-)
-PACKET_LAN_PEER_SOURCE_ENTRIES = (
-    (
-        "README.md",
-        "b84a4528927d8b7ceb707203a35d8052579717fb19a9b380a4828147b38b3547",
-        2035,
-    ),
-    (
-        "go.mod",
-        "a660db09d0dbee6c5aaad2f379bf0e9f8973d5be773a499bf75dd4919705e734",
-        70,
-    ),
-    (
-        "main.go",
-        "fb6dd50acaa306f9664ef1e89929041459bf68b3ec13feee8166dcc8bf588b4b",
-        7757,
-    ),
-    (
-        "main_test.go",
-        "ef4b6eff3f31f4d17345bf0da67726f1c2f6b776c15ab2691bbb3710487ca87e",
-        10813,
-    ),
-)
-PACKET_LAN_PEER_BUILD_FRAGMENTS = [
-    'source "$repo_root/scripts/dependency_pins.env"',
-    'source "$repo_root/scripts/release_toolchain_contract.sh"',
-    'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
-    'source_root="$repo_root/tools/packet-lan-peer"',
-    'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "GOTOOLCHAIN=local",
-    "GOFLAGS=-mod=readonly",
-    "GOPROXY=off",
-    "GOSUMDB=sum.golang.org",
-    "GOVCS='*:off'",
-    "CGO_ENABLED=0",
-    "GOOS=linux",
-    "GOARCH=arm64",
-    "-buildvcs=false",
-    "-trimpath",
-    "-ldflags='-s -w -buildid='",
-    '/usr/bin/cmp -s "$first" "$second"',
-    '/bin/chmod 0555 "$artifact_staging"',
-    '/bin/mv -fh "$artifact_staging" "$artifact"',
-]
-PACKET_LAN_PEER_VERIFY_FRAGMENTS = [
-    'source "$repo_root/scripts/dependency_pins.env"',
-    'source "$repo_root/scripts/release_toolchain_contract.sh"',
-    'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
-    'source_root="$repo_root/tools/packet-lan-peer"',
-    'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
-    "expected_artifact_size=2293884",
-    "expected_artifact_mode=555",
-    "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
-    "GOTOOLCHAIN=local",
-    "GOFLAGS=-mod=readonly",
-    "GOPROXY=off",
-    "GOSUMDB=sum.golang.org",
-    "GOVCS='*:off'",
-    "CGO_ENABLED=0 GOOS=linux GOARCH=arm64",
-    'expected_imports="$(printf',
-    "net\\.(ListenPacket|ListenUDP)",
-    '"$go_bin" -C "$source_root" test -count=1 ./...',
-    '"$go_bin" -C "$source_root" vet ./...',
-    '"$go_bin" -C "$source_root" test -race -count=1 ./...',
-    '"$repo_root/scripts/build_packet_lan_peer.sh"',
-    '"$go_bin" version -m "$artifact"',
-    '"$go_bin" tool buildid "$artifact"',
-    'artifact_sha256="$(/usr/bin/shasum -a 256 "$artifact"',
-    '"$artifact_mode" != "$expected_artifact_mode"',
-    '"$artifact_size" != "$expected_artifact_size"',
-    '"$artifact_sha256" != "$expected_artifact_sha256"',
 ]
 PHYSICAL_COLLECTOR_PATHS = (
     "tools/physical-collector/go.mod",
@@ -524,26 +437,6 @@ class Fixture:
             relative: (REPO_ROOT / relative).read_bytes()
             for relative in PACKET_ENDPOINT_PATHS
         }
-        self.packet_lan_peer_files = {
-            f"tools/packet-lan-peer/{relative}": (
-                REPO_ROOT / "tools/packet-lan-peer" / relative
-            ).read_bytes()
-            for relative, _, _ in PACKET_LAN_PEER_SOURCE_ENTRIES
-        }
-        self.packet_lan_peer_modes = {
-            relative: 0o644 for relative in self.packet_lan_peer_files
-        }
-        self.packet_lan_peer_build_script = (
-            REPO_ROOT / "scripts/build_packet_lan_peer.sh"
-        ).read_bytes()
-        self.packet_lan_peer_verify_script = (
-            REPO_ROOT / "scripts/verify_packet_lan_peer.sh"
-        ).read_bytes()
-        self.packet_lan_peer_build_script_mode = 0o755
-        self.packet_lan_peer_verify_script_mode = 0o755
-        self.packet_lan_peer_artifact = SYNTHETIC_PACKET_LAN_PEER_ARTIFACT
-        self.packet_lan_peer_artifact_mode = 0o555
-        self.android_admission_source = SYNTHETIC_ANDROID_ADMISSION_SOURCE
         self.physical_collector_files = {
             relative: (REPO_ROOT / relative).read_bytes()
             for relative in PHYSICAL_COLLECTOR_PATHS
@@ -582,24 +475,6 @@ class Fixture:
                 "TAURI_CLI_VERSION": "2.12.0",
                 "SING_BOX_VERSION": "v1.14.2",
             },
-            "runtimeTools": {
-                "adb": {
-                    "schema": "cfw-runtime-tool-pin-v1",
-                    "path": ADB_RUNTIME_TOOL_PATH,
-                    "version": ADB_RUNTIME_TOOL_VERSION,
-                    "sha256": ADB_RUNTIME_TOOL_SHA256,
-                    "verificationPhase": "android-lan-peer-admission",
-                    "sourceBinding": {
-                        "path": ANDROID_LAN_PEER_SOURCE_PATH,
-                        "sha256": _sha(self.android_admission_source),
-                        "size": len(self.android_admission_source),
-                        "mode": "0644",
-                        "pathConstant": "ADB",
-                        "versionConstant": "ADB_VERSION",
-                        "sha256Constant": "ADB_SHA256",
-                    },
-                }
-            },
             "packetEvidenceEndpoint": {
                 "goVersionKey": "GO_VERSION",
                 "goVersion": "1.27.2",
@@ -615,78 +490,6 @@ class Fixture:
                     {"path": path, "sha256": _sha(body)}
                     for path, body in self.packet_endpoint_files.items()
                 ],
-            },
-            "packetLanPeer": {
-                "schema": "cfw-packet-lan-peer-build-input-v1",
-                "goToolchain": {
-                    "versionKey": "GO_VERSION",
-                    "version": "1.27.2",
-                    "goos": "linux",
-                    "goarch": "arm64",
-                    "cgoEnabled": "0",
-                },
-                "source": {
-                    "root": "tools/packet-lan-peer",
-                    "treeAlgorithm": "sha256-tree-v2",
-                    "treeSha256": PACKET_LAN_PEER_SOURCE_TREE_SHA,
-                    "rootMode": "0755",
-                    "files": [
-                        {
-                            "path": path,
-                            "sha256": sha256,
-                            "size": size,
-                            "mode": "0644",
-                        }
-                        for path, sha256, size in PACKET_LAN_PEER_SOURCE_ENTRIES
-                    ],
-                },
-                "artifact": {
-                    "path": "target/packet-lan-peer-linux-arm64",
-                    "sha256": _sha(self.packet_lan_peer_artifact),
-                    "size": len(self.packet_lan_peer_artifact),
-                    "fileType": "regular",
-                    "linkCount": 1,
-                    "hostOwner": "effective-uid",
-                    "hostMode": "0555",
-                },
-                "protocol": {
-                    "network": "tcp4",
-                    "listenAddress": ":44333",
-                    "port": 44333,
-                    "maximumConnections": 8,
-                    "maximumRequestBytes": 64,
-                    "readDeadlineSeconds": 5,
-                    "responseBytes": 0,
-                },
-                "androidDeployment": {
-                    "directory": "/data/local/tmp/cfw-release-evidence-v040",
-                    "directoryMode": "0700",
-                    "binaryPath": (
-                        "/data/local/tmp/cfw-release-evidence-v040/"
-                        "packet-lan-peer-linux-arm64"
-                    ),
-                    "binaryMode": "0500",
-                    "uid": 2000,
-                    "gid": 2000,
-                },
-                "buildScript": {
-                    "path": "scripts/build_packet_lan_peer.sh",
-                    "sha256": (
-                        "c3fb49c83d98a710a15874afe83a3606b3f50f1f65b01c76dbb03edfcc9b43d8"
-                    ),
-                    "size": 4933,
-                    "mode": "0755",
-                    "requiredFragments": list(PACKET_LAN_PEER_BUILD_FRAGMENTS),
-                },
-                "verifyScript": {
-                    "path": "scripts/verify_packet_lan_peer.sh",
-                    "sha256": (
-                        "4e56495dbf3815d562459da9f5f863f1c4e4f2aba87ea0cf42ebb3a21278e1a9"
-                    ),
-                    "size": 7357,
-                    "mode": "0755",
-                    "requiredFragments": list(PACKET_LAN_PEER_VERIFY_FRAGMENTS),
-                },
             },
             "physicalCollectorModule": {
                 "goVersionKey": "GO_VERSION",
@@ -993,11 +796,6 @@ class Fixture:
     def append_env_text(self, text: str) -> None:
         self._extra_env_text += text
 
-    def sync_android_admission_source_pin(self) -> None:
-        binding = self.manifest["runtimeTools"]["adb"]["sourceBinding"]
-        binding["sha256"] = _sha(self.android_admission_source)
-        binding["size"] = len(self.android_admission_source)
-
     def write(self, root: Path) -> Path:
         (root / "scripts").mkdir(parents=True, exist_ok=True)
         (root / "native/macos/patches").mkdir(parents=True, exist_ok=True)
@@ -1015,25 +813,6 @@ class Fixture:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(body)
-        for relative, body in self.packet_lan_peer_files.items():
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(body)
-            path.chmod(self.packet_lan_peer_modes.get(relative, 0o644))
-        (root / "tools/packet-lan-peer").chmod(0o755)
-        packet_lan_peer_build = root / "scripts/build_packet_lan_peer.sh"
-        packet_lan_peer_build.write_bytes(self.packet_lan_peer_build_script)
-        packet_lan_peer_build.chmod(self.packet_lan_peer_build_script_mode)
-        packet_lan_peer_verify = root / "scripts/verify_packet_lan_peer.sh"
-        packet_lan_peer_verify.write_bytes(self.packet_lan_peer_verify_script)
-        packet_lan_peer_verify.chmod(self.packet_lan_peer_verify_script_mode)
-        packet_lan_peer_artifact = root / "target/packet-lan-peer-linux-arm64"
-        packet_lan_peer_artifact.parent.mkdir(parents=True, exist_ok=True)
-        packet_lan_peer_artifact.write_bytes(self.packet_lan_peer_artifact)
-        packet_lan_peer_artifact.chmod(self.packet_lan_peer_artifact_mode)
-        android_admission = root / ANDROID_LAN_PEER_SOURCE_PATH
-        android_admission.parent.mkdir(parents=True, exist_ok=True)
-        android_admission.write_bytes(self.android_admission_source)
         for relative, body in self.physical_collector_files.items():
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1063,88 +842,34 @@ class Fixture:
 
 
 class PinnedBuildInputsTests(unittest.TestCase):
-    def _pinned_identity_patches(self, fixture: Fixture) -> tuple[object, ...]:
-        source_binding = fixture.manifest["runtimeTools"]["adb"]["sourceBinding"]
-        return (
-            mock.patch(
-                "scripts.verify_pinned_build_inputs._PACKET_LAN_PEER_ARTIFACT_SHA256",
-                _sha(fixture.packet_lan_peer_artifact),
-            ),
-            mock.patch(
-                "scripts.verify_pinned_build_inputs._PACKET_LAN_PEER_ARTIFACT_SIZE",
-                len(fixture.packet_lan_peer_artifact),
-            ),
-            mock.patch(
-                "scripts.verify_pinned_build_inputs._ANDROID_LAN_PEER_SOURCE_SHA256",
-                source_binding["sha256"],
-            ),
-            mock.patch(
-                "scripts.verify_pinned_build_inputs._ANDROID_LAN_PEER_SOURCE_SIZE",
-                source_binding["size"],
-            ),
-        )
-
-    def _verify_written_fixture(self, fixture: Fixture, root: Path) -> None:
-        with ExitStack() as stack:
-            for identity_patch in self._pinned_identity_patches(fixture):
-                stack.enter_context(identity_patch)
-            verify(root)
-
-    def _verify_source_written_fixture(self, fixture: Fixture, root: Path) -> None:
-        with ExitStack() as stack:
-            for identity_patch in self._pinned_identity_patches(fixture):
-                stack.enter_context(identity_patch)
-            verify_source_contract(root)
-
     def _verify_fixture(self, fixture: Fixture) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = fixture.write(Path(temporary))
-            self._verify_written_fixture(fixture, root)
+            verify_source_contract(root)
 
     def _assert_fails(self, fixture: Fixture, pattern: str) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = fixture.write(Path(temporary))
             with self.assertRaisesRegex(PinnedInputError, pattern):
-                self._verify_written_fixture(fixture, root)
+                verify_source_contract(root)
 
     # --- success ------------------------------------------------------------
 
     def test_correct_pins_pass(self) -> None:
         self._verify_fixture(Fixture())
 
-    def test_source_contract_does_not_require_generated_packet_artifact(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            artifact.unlink()
-            artifact.parent.rmdir()
-            self._verify_source_written_fixture(fixture, root)
-
-    def test_source_contract_still_rejects_packet_source_drift(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_files["tools/packet-lan-peer/main.go"] += b"// drift\n"
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            artifact.unlink()
-            artifact.parent.rmdir()
-            with self.assertRaisesRegex(PinnedInputError, "packet LAN peer source tree"):
-                self._verify_source_written_fixture(fixture, root)
-
     def test_real_repository_source_contract_passes(self) -> None:
         # Binds the shipped manifest, dependency_pins.env, patch files, native lock,
         # and offline build scripts together without relying on a generated target.
         verify_source_contract(REPO_ROOT)
 
-    def test_build_boundary_uses_source_only_pinned_contract(self) -> None:
+    def test_build_boundary_runs_the_pinned_source_contract_gate(self) -> None:
         boundary = (REPO_ROOT / "scripts/verify_build_boundaries.sh").read_text(
             encoding="utf-8"
         )
         self.assertIn(
             '"$repo_root/scripts/verify_pinned_source_contract.py"', boundary
         )
-        self.assertNotIn('"$repo_root/scripts/verify_pinned_build_inputs.py"', boundary)
 
     def test_packet_endpoint_source_drift_fails(self) -> None:
         fixture = Fixture()
@@ -1177,162 +902,6 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 entry["sha256"] = _sha(body)
         self._assert_fails(fixture, "README lacks build binding")
 
-    def test_adb_runtime_tool_path_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["runtimeTools"]["adb"]["path"] = "/usr/local/bin/adb"
-        self._assert_fails(fixture, "runtime-tool pin contract")
-
-    def test_adb_runtime_tool_version_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["runtimeTools"]["adb"]["version"] = "37.0.0"
-        self._assert_fails(fixture, "runtime-tool pin contract")
-
-    def test_adb_runtime_tool_digest_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["runtimeTools"]["adb"]["sha256"] = "0" * 64
-        self._assert_fails(fixture, "runtime-tool pin contract")
-
-    def test_adb_runtime_tool_unknown_field_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["runtimeTools"]["adb"]["fallback"] = True
-        self._assert_fails(fixture, "runtime-tool pin contract")
-
-    def test_adb_admission_source_constant_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.android_admission_source = fixture.android_admission_source.replace(
-            ADB_RUNTIME_TOOL_VERSION.encode(), b"37.0.0-incorrect", 1
-        )
-        fixture.sync_android_admission_source_pin()
-        self._assert_fails(fixture, "ADB constants differ")
-
-    def test_adb_admission_source_requires_literal_constants(self) -> None:
-        fixture = Fixture()
-        fixture.android_admission_source = fixture.android_admission_source.replace(
-            b'ADB_VERSION: Final = "37.0.0-14910828"',
-            b'ADB_VERSION: Final = "37.0.0-" + "14910828"',
-            1,
-        )
-        fixture.sync_android_admission_source_pin()
-        self._assert_fails(fixture, "ADB_VERSION must be a string literal")
-
-    def test_adb_admission_source_reassignment_fails(self) -> None:
-        fixture = Fixture()
-        fixture.android_admission_source += b'ADB = Path("/tmp/unpinned-adb")\n'
-        fixture.sync_android_admission_source_pin()
-        self._assert_fails(fixture, "non-Final reassignment")
-
-    def test_adb_admission_source_nested_reassignment_fails(self) -> None:
-        fixture = Fixture()
-        fixture.android_admission_source += (
-            b'if True:\n    ADB_VERSION = "37.0.0-unpinned"\n'
-        )
-        fixture.sync_android_admission_source_pin()
-        self._assert_fails(fixture, "exactly one source binding")
-
-    def test_adb_admission_source_parameter_shadow_fails(self) -> None:
-        fixture = Fixture()
-        fixture.android_admission_source = fixture.android_admission_source.replace(
-            b"def _fixed_spec(\n    role: str,\n",
-            b"def _fixed_spec(\n    role: str,\n    ADB: Path,\n",
-            1,
-        )
-        fixture.sync_android_admission_source_pin()
-        self._assert_fails(fixture, "exactly one source binding")
-
-    def test_adb_admission_source_whole_file_drift_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            source = root / ANDROID_LAN_PEER_SOURCE_PATH
-            body = bytearray(source.read_bytes())
-            body[-1] ^= 1
-            source.write_bytes(body)
-            with self.assertRaisesRegex(PinnedInputError, "SHA-256"):
-                self._verify_written_fixture(fixture, root)
-
-    def test_adb_admission_runtime_path_must_load_pinned_constant(self) -> None:
-        fixture = Fixture()
-        marker = f'ADB_SHA256: Final = "{ADB_RUNTIME_TOOL_SHA256}"\n'.encode()
-        fixture.android_admission_source = fixture.android_admission_source.replace(
-            marker,
-            marker + b'RUNTIME_ADB: Final = Path("/tmp/unpinned-adb")\n',
-            1,
-        ).replace(b"prefix = (adb_path,", b"prefix = (RUNTIME_ADB,", 1)
-        fixture.sync_android_admission_source_pin()
-        self._assert_fails(fixture, "pinned or private ADB client")
-
-    def test_packet_lan_peer_source_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_files["tools/packet-lan-peer/main.go"] += b"// drift\n"
-        self._assert_fails(fixture, "packet LAN peer source tree")
-
-    def test_packet_lan_peer_extra_source_file_fails(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_files["tools/packet-lan-peer/extra.go"] = b"package main\n"
-        self._assert_fails(fixture, "packet LAN peer source tree")
-
-    def test_packet_lan_peer_source_mode_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_modes["tools/packet-lan-peer/main.go"] = 0o600
-        self._assert_fails(fixture, "packet LAN peer source tree")
-
-    def test_packet_lan_peer_tree_digest_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["source"]["treeSha256"] = "0" * 64
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_target_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["goToolchain"]["goarch"] = "amd64"
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_integer_field_rejects_boolean_alias(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["protocol"]["port"] = True
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_resource_limit_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["protocol"]["maximumRequestBytes"] = 65
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_artifact_digest_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["artifact"]["sha256"] = "0" * 64
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_artifact_type_alias_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["artifact"]["fileType"] = "file"
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_artifact_link_count_rejects_boolean_alias(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["artifact"]["linkCount"] = True
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_actual_artifact_symlink_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            target = artifact.with_name("packet-lan-peer-real")
-            artifact.rename(target)
-            artifact.symlink_to(target.name)
-            with self.assertRaisesRegex(PinnedInputError, "symlink|unsafe path"):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_artifact_parent_symlink_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            target = root / "target"
-            real_target = root / "target-real"
-            target.rename(real_target)
-            target.symlink_to(real_target.name, target_is_directory=True)
-            with self.assertRaisesRegex(PinnedInputError, "parent.*symlink"):
-                self._verify_written_fixture(fixture, root)
-
     def test_rooted_reader_descriptor_dup_failure_is_typed(self) -> None:
         fixture = Fixture()
         with tempfile.TemporaryDirectory() as temporary:
@@ -1344,7 +913,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 PinnedInputError,
                 "descriptor cannot be duplicated",
             ):
-                self._verify_written_fixture(fixture, root)
+                verify_source_contract(root)
 
     def test_descriptor_cleanup_attempts_every_owned_descriptor(self) -> None:
         closed: list[int] = []
@@ -1360,182 +929,6 @@ class PinnedBuildInputsTests(unittest.TestCase):
         ), self.assertRaisesRegex(PinnedInputError, "descriptor cleanup failed"):
             pinned_verifier._close_descriptors((11, 12, 13), "fixture")
         self.assertEqual(closed, [11, 12, 13])
-
-    def test_packet_lan_peer_artifact_parent_replacement_during_read_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            artifact_identity = (artifact.stat().st_dev, artifact.stat().st_ino)
-            real_read = os.read
-            replaced = False
-
-            def replace_parent(descriptor: int, count: int) -> bytes:
-                nonlocal replaced
-                metadata = os.fstat(descriptor)
-                if not replaced and (
-                    metadata.st_dev,
-                    metadata.st_ino,
-                ) == artifact_identity:
-                    replaced = True
-                    artifact.parent.rename(root / "target-held")
-                    artifact.parent.mkdir(mode=0o755)
-                    artifact.write_bytes(b"unpinned replacement")
-                    artifact.chmod(0o555)
-                return real_read(descriptor, count)
-
-            with (
-                mock.patch(
-                    "scripts.verify_pinned_build_inputs.os.read",
-                    side_effect=replace_parent,
-                ),
-                self.assertRaisesRegex(
-                    PinnedInputError,
-                    "parent.*changed|repository.*changed|current path",
-                ),
-            ):
-                self._verify_written_fixture(fixture, root)
-            self.assertTrue(replaced)
-
-    def test_packet_lan_peer_actual_artifact_hardlink_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            os.link(artifact, artifact.with_name("packet-lan-peer-hardlink"))
-            with self.assertRaisesRegex(PinnedInputError, "exactly one hard link"):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_actual_artifact_non_regular_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            artifact.unlink()
-            artifact.mkdir(mode=0o555)
-            with self.assertRaisesRegex(PinnedInputError, "not a regular file"):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_actual_artifact_mode_fails(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_artifact_mode = 0o755
-        self._assert_fails(fixture, "mode is not 0555")
-
-    def test_packet_lan_peer_actual_artifact_size_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            artifact.chmod(0o755)
-            artifact.write_bytes(artifact.read_bytes() + b"x")
-            artifact.chmod(0o555)
-            with self.assertRaisesRegex(PinnedInputError, "size is"):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_actual_artifact_missing_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            (root / "target/packet-lan-peer-linux-arm64").unlink()
-            with self.assertRaisesRegex(PinnedInputError, "missing"):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_actual_artifact_owner_fails(self) -> None:
-        fixture = Fixture()
-        actual_uid = os.geteuid()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            with (
-                mock.patch(
-                    "scripts.verify_pinned_build_inputs.os.geteuid",
-                    side_effect=(actual_uid, actual_uid + 1),
-                ),
-                self.assertRaisesRegex(PinnedInputError, "effective user"),
-            ):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_actual_artifact_digest_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            artifact.chmod(0o755)
-            body = bytearray(artifact.read_bytes())
-            body[0] ^= 1
-            artifact.write_bytes(body)
-            artifact.chmod(0o555)
-            with self.assertRaisesRegex(PinnedInputError, "SHA-256"):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_actual_artifact_metadata_drift_fails(self) -> None:
-        fixture = Fixture()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = fixture.write(Path(temporary))
-            artifact = root / "target/packet-lan-peer-linux-arm64"
-            target_identity = (artifact.stat().st_dev, artifact.stat().st_ino)
-            real_fstat = os.fstat
-            target_calls = 0
-
-            def drifting_fstat(descriptor: int) -> os.stat_result:
-                nonlocal target_calls
-                metadata = real_fstat(descriptor)
-                if (metadata.st_dev, metadata.st_ino) != target_identity:
-                    return metadata
-                target_calls += 1
-                if target_calls != 2:
-                    return metadata
-                values = list(metadata)
-                values[6] += 1
-                return os.stat_result(values)
-
-            with (
-                mock.patch(
-                    "scripts.verify_pinned_build_inputs.os.fstat",
-                    side_effect=drifting_fstat,
-                ),
-                self.assertRaisesRegex(PinnedInputError, "metadata changed"),
-            ):
-                self._verify_written_fixture(fixture, root)
-
-    def test_packet_lan_peer_deployment_mode_mutation_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["androidDeployment"][
-            "binaryMode"
-        ] = "0555"
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_build_script_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_build_script = (
-            fixture.packet_lan_peer_build_script.replace(
-                b"GOARCH=arm64", b"GOARCH=amd64", 1
-            )
-        )
-        self._assert_fails(fixture, "packet LAN peer build script")
-
-    def test_packet_lan_peer_verify_script_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_verify_script = (
-            fixture.packet_lan_peer_verify_script.replace(
-                b"test -race -count=1", b"test -count=1", 1
-            )
-        )
-        self._assert_fails(fixture, "packet LAN peer verification script")
-
-    def test_packet_lan_peer_script_mode_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.packet_lan_peer_verify_script_mode = 0o700
-        self._assert_fails(fixture, "packet LAN peer verification script")
-
-    def test_packet_lan_peer_unknown_field_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["packetLanPeer"]["fallback"] = True
-        self._assert_fails(fixture, "packet LAN peer build-input contract")
-
-    def test_packet_lan_peer_missing_section_fails_closed(self) -> None:
-        fixture = Fixture()
-        del fixture.manifest["packetLanPeer"]
-        self._assert_fails(fixture, "exact top-level shape")
 
     def test_physical_collector_module_drift_fails(self) -> None:
         fixture = Fixture()
@@ -2415,14 +1808,14 @@ class PinnedBuildInputsTests(unittest.TestCase):
             root = Fixture().write(Path(temporary))
             (root / MANIFEST_RELATIVE_PATH).unlink()
             with self.assertRaisesRegex(PinnedInputError, "manifest is missing"):
-                verify(root)
+                verify_source_contract(root)
 
     def test_malformed_manifest_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Fixture().write(Path(temporary))
             (root / MANIFEST_RELATIVE_PATH).write_text("{not json", encoding="utf-8")
             with self.assertRaisesRegex(PinnedInputError, "malformed"):
-                verify(root)
+                verify_source_contract(root)
 
     def test_manifest_rejects_duplicate_keys_and_nonfinite_numbers(self) -> None:
         for replacement, pattern in (
@@ -2442,7 +1835,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 )
                 path.write_text(body, encoding="utf-8")
                 with self.assertRaisesRegex(PinnedInputError, pattern):
-                    verify(root)
+                    verify_source_contract(root)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Fixture().write(Path(temporary))
@@ -2453,14 +1846,14 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(PinnedInputError, "duplicate JSON field 'schema'"):
-                verify(root)
+                verify_source_contract(root)
 
     def test_manifest_rejects_non_utf8_oversize_and_inexact_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Fixture().write(Path(temporary))
             (root / MANIFEST_RELATIVE_PATH).write_bytes(b"\xff")
             with self.assertRaisesRegex(PinnedInputError, "strict UTF-8"):
-                verify(root)
+                verify_source_contract(root)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Fixture().write(Path(temporary))
@@ -2468,7 +1861,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 b" " * (MAX_PINNED_MANIFEST_BYTES + 1)
             )
             with self.assertRaisesRegex(PinnedInputError, "byte bound"):
-                verify(root)
+                verify_source_contract(root)
 
         fixture = Fixture()
         fixture.manifest["unexpected"] = True
@@ -2480,7 +1873,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             manifest = root / MANIFEST_RELATIVE_PATH
             os.link(manifest, root / "manifest-hardlink.json")
             with self.assertRaisesRegex(PinnedInputError, "exactly one hard link"):
-                verify(root)
+                verify_source_contract(root)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Fixture().write(Path(temporary))
@@ -2488,7 +1881,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             manifest.unlink()
             manifest.symlink_to(root / "scripts/dependency_pins.env")
             with self.assertRaisesRegex(PinnedInputError, "symlink|unsafe path"):
-                verify(root)
+                verify_source_contract(root)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Fixture().write(Path(temporary))
@@ -2513,7 +1906,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(PinnedInputError, "parent|changed"),
             ):
-                verify(root)
+                verify_source_contract(root)
 
     def test_native_lock_strict_json_and_identity_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2523,7 +1916,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             body = lock.read_text(encoding="utf-8")
             lock.write_text('{"go":"1.27.2",' + body[1:], encoding="utf-8")
             with self.assertRaisesRegex(PinnedInputError, "duplicate JSON field 'go'"):
-                self._verify_written_fixture(fixture, root)
+                verify_source_contract(root)
 
         fixture = Fixture()
         fixture.lock["unexpected"] = True
@@ -2543,7 +1936,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             lock = root / "native/macos/Dependencies.lock.json"
             os.link(lock, root / "native-lock-hardlink.json")
             with self.assertRaisesRegex(PinnedInputError, "exactly one hard link"):
-                self._verify_written_fixture(fixture, root)
+                verify_source_contract(root)
 
         with tempfile.TemporaryDirectory() as temporary:
             fixture = Fixture()
@@ -2551,7 +1944,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             lock = root / "native/macos/Dependencies.lock.json"
             lock.write_bytes(b"\xff")
             with self.assertRaisesRegex(PinnedInputError, "strict UTF-8"):
-                self._verify_written_fixture(fixture, root)
+                verify_source_contract(root)
 
         with tempfile.TemporaryDirectory() as temporary:
             fixture = Fixture()
@@ -2559,7 +1952,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             lock = root / "native/macos/Dependencies.lock.json"
             lock.write_bytes(b" " * (MAX_NATIVE_LOCK_BYTES + 1))
             with self.assertRaisesRegex(PinnedInputError, "byte bound"):
-                self._verify_written_fixture(fixture, root)
+                verify_source_contract(root)
 
     def test_build_script_hardlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2568,7 +1961,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             script = root / "scripts/build_libbox.sh"
             os.link(script, root / "build-libbox-hardlink.sh")
             with self.assertRaisesRegex(PinnedInputError, "exactly one hard link"):
-                self._verify_written_fixture(fixture, root)
+                verify_source_contract(root)
 
     # --- native lock and build-script bindings ------------------------------
 
@@ -2650,32 +2043,194 @@ class PinnedBuildInputsTests(unittest.TestCase):
         self._assert_fails(fixture, "Python version does not exactly match")
 
 
+class RepositoryRegularFileReaderTests(unittest.TestCase):
+    """Rooted-reader failures inherited by every pinned-input and readiness read."""
+
+    RELATIVE = "tools/fixture/input.txt"
+    BODY = b"pinned fixture input\n"
+
+    def _repository(self, temporary: str) -> tuple[Path, Path]:
+        root = Path(temporary).resolve()
+        source = root / self.RELATIVE
+        source.parent.mkdir(parents=True)
+        source.write_bytes(self.BODY)
+        source.chmod(0o644)
+        return root, source
+
+    def _read(self, root: Path, *, maximum_size: int = 1024) -> bytes:
+        return pinned_verifier.read_repository_regular_file(
+            root,
+            self.RELATIVE,
+            "fixture input",
+            maximum_size=maximum_size,
+        )
+
+    def test_owned_regular_file_is_returned_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _ = self._repository(temporary)
+            self.assertEqual(self._read(root), self.BODY)
+
+    def test_symlinked_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, source = self._repository(temporary)
+            target = source.with_name("input-real.txt")
+            source.rename(target)
+            source.symlink_to(target.name)
+            with self.assertRaisesRegex(PinnedInputError, "symlink|unsafe path"):
+                self._read(root)
+
+    def test_symlinked_parent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, source = self._repository(temporary)
+            parent = source.parent
+            real_parent = parent.with_name("fixture-real")
+            parent.rename(real_parent)
+            parent.symlink_to(real_parent.name, target_is_directory=True)
+            with self.assertRaisesRegex(PinnedInputError, "parent.*symlink"):
+                self._read(root)
+
+    def test_hard_linked_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, source = self._repository(temporary)
+            os.link(source, source.with_name("input-hardlink.txt"))
+            with self.assertRaisesRegex(PinnedInputError, "exactly one hard link"):
+                self._read(root)
+
+    def test_non_regular_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, source = self._repository(temporary)
+            source.unlink()
+            source.mkdir(mode=0o755)
+            with self.assertRaisesRegex(PinnedInputError, "not a regular file"):
+                self._read(root)
+
+    def test_missing_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, source = self._repository(temporary)
+            source.unlink()
+            with self.assertRaisesRegex(PinnedInputError, "missing"):
+                self._read(root)
+
+    def test_foreign_owner_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _ = self._repository(temporary)
+            with (
+                mock.patch(
+                    "scripts.verify_pinned_build_inputs.os.geteuid",
+                    return_value=os.geteuid() + 1,
+                ),
+                self.assertRaisesRegex(PinnedInputError, "effective user"),
+            ):
+                self._read(root)
+
+    def test_group_or_other_writable_file_is_rejected(self) -> None:
+        for mode in (0o664, 0o646):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as temporary:
+                root, source = self._repository(temporary)
+                source.chmod(mode)
+                with self.assertRaisesRegex(
+                    PinnedInputError, "writable by group or other users"
+                ):
+                    self._read(root)
+
+    def test_oversized_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _ = self._repository(temporary)
+            with self.assertRaisesRegex(PinnedInputError, "byte bound"):
+                self._read(root, maximum_size=len(self.BODY) - 1)
+
+    def test_metadata_drift_during_read_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, source = self._repository(temporary)
+            source_identity = (source.stat().st_dev, source.stat().st_ino)
+            real_read = os.read
+            drifted = False
+
+            def drift_mode(descriptor: int, count: int) -> bytes:
+                nonlocal drifted
+                metadata = os.fstat(descriptor)
+                if not drifted and (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                ) == source_identity:
+                    drifted = True
+                    source.chmod(0o600)
+                return real_read(descriptor, count)
+
+            with (
+                mock.patch(
+                    "scripts.verify_pinned_build_inputs.os.read",
+                    side_effect=drift_mode,
+                ),
+                self.assertRaisesRegex(PinnedInputError, "metadata changed"),
+            ):
+                self._read(root)
+            self.assertTrue(drifted)
+
+    def test_parent_replacement_during_read_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, source = self._repository(temporary)
+            source_identity = (source.stat().st_dev, source.stat().st_ino)
+            real_read = os.read
+            replaced = False
+
+            def replace_parent(descriptor: int, count: int) -> bytes:
+                nonlocal replaced
+                metadata = os.fstat(descriptor)
+                if not replaced and (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                ) == source_identity:
+                    replaced = True
+                    source.parent.rename(source.parent.with_name("fixture-held"))
+                    source.parent.mkdir(mode=0o755)
+                    source.write_bytes(b"unpinned replacement")
+                    source.chmod(0o644)
+                return real_read(descriptor, count)
+
+            with (
+                mock.patch(
+                    "scripts.verify_pinned_build_inputs.os.read",
+                    side_effect=replace_parent,
+                ),
+                self.assertRaisesRegex(
+                    PinnedInputError,
+                    "parent.*changed|repository.*changed|current path",
+                ),
+            ):
+                self._read(root)
+            self.assertTrue(replaced)
+
+
 class PinnedVerifierEntrypointTests(unittest.TestCase):
-    def test_entrypoints_exit_nonzero_when_the_pinned_contract_fails(self) -> None:
+    def test_entrypoint_exits_nonzero_when_the_pinned_contract_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             scripts = Path(temporary).resolve() / "scripts"
             scripts.mkdir()
             for name in (
-                "hash_artifact.py",
                 "verify_pinned_build_inputs.py",
                 "verify_pinned_source_contract.py",
             ):
                 shutil.copyfile(REPO_ROOT / "scripts" / name, scripts / name)
-            for name, diagnostic in (
-                ("verify_pinned_build_inputs.py", "error: pinned build inputs failed: "),
-                ("verify_pinned_source_contract.py", "error: pinned source contract failed: "),
-            ):
-                with self.subTest(entrypoint=name):
-                    completed = subprocess.run(
-                        [sys.executable, "-I", "-S", "-B", str(scripts / name)],
-                        check=False,
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                    self.assertEqual(completed.returncode, 1, completed.stderr)
-                    self.assertEqual(completed.stdout, "")
-                    self.assertTrue(completed.stderr.startswith(diagnostic), completed.stderr)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-B",
+                    str(scripts / "verify_pinned_source_contract.py"),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(completed.returncode, 1, completed.stderr)
+            self.assertEqual(completed.stdout, "")
+            self.assertTrue(
+                completed.stderr.startswith("error: pinned source contract failed: "),
+                completed.stderr,
+            )
 
 
 if __name__ == "__main__":

@@ -189,13 +189,14 @@ not automatically authorize another build number.
 
 Android and iOS are not release targets. Physical interoperability may use an
 iOS device as a test peer, but its harness, device identity, transport capture,
-and receipts must be independently source-bound; an Android peer record cannot
-be renamed or reused as iOS evidence.
+and receipts must be independently source-bound.
 The repository's test-only iOS transport peer remains outside the product and
-release bundle. The iPhone Packet-LAN mode now replaces the Android peer as the
-active `lan-bypass` evidence source, but no prior pilot or Android receipt is
-reusable: every assurance capture requires a fresh dynamic ready address, three
-joint Mac/iPhone connection bindings, pcap/Host evidence, and exact cleanup.
+release bundle. The iPhone Packet-LAN mode is the only `lan-bypass` evidence
+source; the legacy Android packet peer, its ADB pin, and its CI lane were
+removed, and none of their historical receipts is reusable. No prior pilot is
+reusable either: every assurance capture requires a fresh dynamic ready address,
+three joint Mac/iPhone connection bindings, pcap/Host evidence, and exact
+cleanup.
 The ordinary macOS environment gate verifies the checked-in iOS peer source
 identity without requiring its generated app, provisioning profile, or signing
 entitlements. The actual assurance admission owns those artifact and device
@@ -576,8 +577,7 @@ unlocked state immediately before both launches, and reconciles three ordered
 TCP/EOF server observations with the Mac sender tuples before exact PID
 termination and owned-app uninstall. An adapter-level physical pilot passed,
 but no fresh complete 13-case candidate Packet run has yet been collected.
-The retained Android peer is inactive legacy test infrastructure. A
-syntactically legal pcap, live endpoint, prior pilot, or manual capture cannot
+A syntactically legal pcap, live endpoint, prior pilot, or manual capture cannot
 substitute for the frozen product-state, route/interface, capture, send,
 server, restore, and cleanup receipts.
 

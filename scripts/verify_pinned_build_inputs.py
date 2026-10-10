@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
 """Fail-closed verifier for the design-pinned libbox and toolchain inputs.
 
-The source-contract layer binds the pinned-input manifest
+:func:`verify_source_contract` binds the pinned-input manifest
 (``scripts/pinned_build_inputs.json``) to the tracked release configuration
-without invoking any toolchain or the network. The default :func:`verify`
-entrypoint additionally requires the generated packet LAN peer artifact, while
-:func:`verify_source_contract` intentionally stops at its pinned identity:
+without invoking any toolchain or the network:
 
 * every pinned tool version and the sing-box/gomobile upstream commits in
   scripts/dependency_pins.env match the manifest exactly;
@@ -21,11 +18,6 @@ entrypoint additionally requires the generated packet LAN peer artifact, while
 * known legacy/partial patch digests are rejected;
 * the verified Go module inputs (module sums and go.mod/go.sum digests) are present
   and well formed;
-* the Android packet LAN peer's complete source tree, reproducible Linux/arm64
-  build and verification scripts, bounded TCP contract, generated artifact
-  identity, and fixed shell-owned deployment layout are independently pinned;
-* the ADB runtime path, version, and executable digest are pinned independently
-  and match the Android admission source constants exactly;
 * the pinned libbox Go build tag list is exactly the pinned value, is well formed,
   and contains every tag the engine start path requires — including the tags whose
   omission would make ``box.New`` fail on every start;
@@ -44,7 +36,6 @@ Any unavailable, missing, malformed, wrong, or partial input fails closed.
 
 from __future__ import annotations
 
-import ast
 import errno
 import hashlib
 import json
@@ -52,14 +43,7 @@ import math
 import os
 import re
 import stat
-import sys
 from pathlib import Path, PurePosixPath
-
-if __package__:
-    from .hash_artifact import build_manifest
-else:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from hash_artifact import build_manifest
 
 MANIFEST_RELATIVE_PATH = "scripts/pinned_build_inputs.json"
 DEPENDENCY_PINS_RELATIVE_PATH = "scripts/dependency_pins.env"
@@ -82,11 +66,9 @@ PINNED_MANIFEST_FIELDS = frozenset(
         "libboxModuleCacheContract",
         "nativeLockPath",
         "packetEvidenceEndpoint",
-        "packetLanPeer",
         "patches",
         "physicalCollectorModule",
         "rejectedPatchDigests",
-        "runtimeTools",
         "schema",
         "singBoxCommit",
         "singBoxCommitKey",
@@ -315,105 +297,6 @@ _PACKET_ENDPOINT_BUILD_FRAGMENTS = (
     "-o ../../target/packet-evidence-endpoint-linux-amd64",
     _PACKET_ENDPOINT_BINARY_SHA256,
 )
-_PACKET_LAN_PEER_ARTIFACT_SHA256 = (
-    "3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06"
-)
-_PACKET_LAN_PEER_ARTIFACT_SIZE = 2293884
-_ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
-_ADB_RUNTIME_TOOL_VERSION = "37.0.0-14910828"
-_ADB_RUNTIME_TOOL_SHA256 = (
-    "5759ea07285e5a5b66d84f489c118a3fa3998e69cd37725e5a3dc7cbe0597278"
-)
-_ANDROID_LAN_PEER_SOURCE_PATH = "scripts/physical_capture/android_lan_peer.py"
-_ANDROID_LAN_PEER_SOURCE_SHA256 = (
-    "978f015a7e71e962c0455c8f7866508be285c6a847e15ec2e04fe1d3b807cc75"
-)
-_ANDROID_LAN_PEER_SOURCE_SIZE = 137417
-_PACKET_LAN_PEER_SOURCE_TREE_SHA256 = (
-    "f5d7c715fb96d43379d9e2c4fc72e15fbf17699ec6916e1dc438c9faf71807e2"
-)
-_PACKET_LAN_PEER_BUILD_SCRIPT_SHA256 = (
-    "c3fb49c83d98a710a15874afe83a3606b3f50f1f65b01c76dbb03edfcc9b43d8"
-)
-_PACKET_LAN_PEER_VERIFY_SCRIPT_SHA256 = (
-    "4e56495dbf3815d562459da9f5f863f1c4e4f2aba87ea0cf42ebb3a21278e1a9"
-)
-_PACKET_LAN_PEER_SOURCE_FILES = (
-    (
-        "README.md",
-        "b84a4528927d8b7ceb707203a35d8052579717fb19a9b380a4828147b38b3547",
-        2035,
-        "0644",
-    ),
-    (
-        "go.mod",
-        "a660db09d0dbee6c5aaad2f379bf0e9f8973d5be773a499bf75dd4919705e734",
-        70,
-        "0644",
-    ),
-    (
-        "main.go",
-        "fb6dd50acaa306f9664ef1e89929041459bf68b3ec13feee8166dcc8bf588b4b",
-        7757,
-        "0644",
-    ),
-    (
-        "main_test.go",
-        "ef4b6eff3f31f4d17345bf0da67726f1c2f6b776c15ab2691bbb3710487ca87e",
-        10813,
-        "0644",
-    ),
-)
-_PACKET_LAN_PEER_BUILD_FRAGMENTS = (
-    'source "$repo_root/scripts/dependency_pins.env"',
-    'source "$repo_root/scripts/release_toolchain_contract.sh"',
-    'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
-    'source_root="$repo_root/tools/packet-lan-peer"',
-    'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "GOTOOLCHAIN=local",
-    "GOFLAGS=-mod=readonly",
-    "GOPROXY=off",
-    "GOSUMDB=sum.golang.org",
-    "GOVCS='*:off'",
-    "CGO_ENABLED=0",
-    "GOOS=linux",
-    "GOARCH=arm64",
-    "-buildvcs=false",
-    "-trimpath",
-    "-ldflags='-s -w -buildid='",
-    '/usr/bin/cmp -s "$first" "$second"',
-    '/bin/chmod 0555 "$artifact_staging"',
-    '/bin/mv -fh "$artifact_staging" "$artifact"',
-)
-_PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
-    'source "$repo_root/scripts/dependency_pins.env"',
-    'source "$repo_root/scripts/release_toolchain_contract.sh"',
-    'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
-    'source_root="$repo_root/tools/packet-lan-peer"',
-    'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
-    "expected_artifact_size=2293884",
-    "expected_artifact_mode=555",
-    "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
-    "GOTOOLCHAIN=local",
-    "GOFLAGS=-mod=readonly",
-    "GOPROXY=off",
-    "GOSUMDB=sum.golang.org",
-    "GOVCS='*:off'",
-    "CGO_ENABLED=0 GOOS=linux GOARCH=arm64",
-    'expected_imports="$(printf',
-    "net\\.(ListenPacket|ListenUDP)",
-    '"$go_bin" -C "$source_root" test -count=1 ./...',
-    '"$go_bin" -C "$source_root" vet ./...',
-    '"$go_bin" -C "$source_root" test -race -count=1 ./...',
-    '"$repo_root/scripts/build_packet_lan_peer.sh"',
-    '"$go_bin" version -m "$artifact"',
-    '"$go_bin" tool buildid "$artifact"',
-    'artifact_sha256="$(/usr/bin/shasum -a 256 "$artifact"',
-    '"$artifact_mode" != "$expected_artifact_mode"',
-    '"$artifact_size" != "$expected_artifact_size"',
-    '"$artifact_sha256" != "$expected_artifact_sha256"',
-)
 _PHYSICAL_COLLECTOR_GO_MOD_SHA256 = (
     "15a4a62864a708fe87dc6e4624036603ad27ca82a1bcdc3b5f06d678fdde24be"
 )
@@ -539,16 +422,10 @@ def read_repository_regular_file(
     description: str,
     *,
     maximum_size: int,
-    expected_uid: int | None = None,
-    expected_mode: int | None = None,
-    expected_size: int | None = None,
-    expected_sha256: str | None = None,
 ) -> bytes:
     """Read one repository file through a root-anchored held descriptor chain."""
     if type(maximum_size) is not int or maximum_size < 1:
         raise PinnedInputError(f"{description} has no positive byte bound")
-    if expected_uid is None:
-        expected_uid = os.geteuid()
     if not repository.is_absolute():
         raise PinnedInputError(f"{description} repository root must be absolute")
     nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -619,31 +496,19 @@ def read_repository_regular_file(
                 raise PinnedInputError(f"{description} is not a regular file")
             if opened.st_nlink != 1:
                 raise PinnedInputError(f"{description} must have exactly one hard link")
-            if opened.st_uid != expected_uid:
+            if opened.st_uid != os.geteuid():
                 raise PinnedInputError(
                     f"{description} is not owned by the effective user"
                 )
-            if expected_mode is None and opened.st_mode & 0o022:
+            if opened.st_mode & 0o022:
                 raise PinnedInputError(
                     f"{description} is writable by group or other users"
-                )
-            if (
-                expected_mode is not None
-                and stat.S_IMODE(opened.st_mode) != expected_mode
-            ):
-                raise PinnedInputError(
-                    f"{description} mode is not {expected_mode:04o}"
-                )
-            if expected_size is not None and opened.st_size != expected_size:
-                raise PinnedInputError(
-                    f"{description} size is {opened.st_size}, expected {expected_size}"
                 )
             if opened.st_size > maximum_size:
                 raise PinnedInputError(
                     f"{description} exceeds its {maximum_size}-byte bound"
                 )
 
-            digest = hashlib.sha256()
             chunks: list[bytes] = []
             remaining = opened.st_size
             while remaining:
@@ -658,7 +523,6 @@ def read_repository_regular_file(
                         f"{description} ended before its observed size"
                     )
                 chunks.append(chunk)
-                digest.update(chunk)
                 remaining -= len(chunk)
             if os.read(descriptor, 1):
                 raise PinnedInputError(f"{description} exceeds its observed size")
@@ -730,8 +594,6 @@ def read_repository_regular_file(
             raise PinnedInputError(
                 f"{description} repository, parent, path, or metadata changed while it was read"
             )
-        if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
-            raise PinnedInputError(f"{description} SHA-256 differs from its pin")
         return b"".join(chunks)
     finally:
         _close_descriptors(
@@ -909,23 +771,6 @@ def _safe_repository_path(repository: Path, relative: str, description: str) -> 
     return repository.joinpath(*candidate.parts)
 
 
-def _json_values_identical(actual: object, expected: object) -> bool:
-    """Compare JSON values without accepting bool/int or int/float aliases."""
-    if type(actual) is not type(expected):
-        return False
-    if isinstance(expected, dict):
-        return set(actual) == set(expected) and all(
-            _json_values_identical(actual[key], value)
-            for key, value in expected.items()
-        )
-    if isinstance(expected, list):
-        return len(actual) == len(expected) and all(
-            _json_values_identical(actual_item, expected_item)
-            for actual_item, expected_item in zip(actual, expected)
-        )
-    return actual == expected
-
-
 def _verify_tools(manifest: dict, env: dict[str, str]) -> None:
     tools = manifest.get("tools")
     if not isinstance(tools, dict) or set(tools) != REQUIRED_TOOL_PIN_KEYS:
@@ -938,344 +783,6 @@ def _verify_tools(manifest: dict, env: dict[str, str]) -> None:
             raise PinnedInputError(
                 f"pinned tool {key} must be {expected!r} but dependency_pins.env has {actual!r}"
             )
-
-
-def _is_loaded_name(node: ast.AST, name: str) -> bool:
-    return isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == name
-
-
-def _is_str_call_for(node: ast.AST, name: str) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "str"
-        and len(node.args) == 1
-        and not node.keywords
-        and _is_loaded_name(node.args[0], name)
-    )
-
-
-def _verify_android_admission_adb_uses(module: ast.Module) -> None:
-    functions = {
-        name: [
-            node
-            for node in module.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == name
-        ]
-        for name in ("_fixed_spec", "_validate_host_inputs")
-    }
-    if any(len(matches) != 1 for matches in functions.values()) or any(
-        isinstance(matches[0], ast.AsyncFunctionDef) for matches in functions.values()
-    ):
-        raise PinnedInputError(
-            "Android LAN peer admission must retain unique synchronous ADB boundary functions"
-        )
-
-    fixed_spec = functions["_fixed_spec"][0]
-    assert isinstance(fixed_spec, ast.FunctionDef)
-    prefix_assignments = [
-        node
-        for node in ast.walk(fixed_spec)
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == "prefix"
-    ]
-    prefix_bindings = [
-        node
-        for node in ast.walk(fixed_spec)
-        if isinstance(node, ast.Name)
-        and isinstance(node.ctx, (ast.Store, ast.Del))
-        and node.id == "prefix"
-    ]
-    if len(prefix_assignments) != 3 or len(prefix_bindings) != 3:
-        raise PinnedInputError(
-            "Android LAN peer fixed command constructor must retain three exact prefix branches"
-        )
-
-    branches: set[str] = set()
-    for assignment in prefix_assignments:
-        value = assignment.value
-        if not isinstance(value, ast.Tuple) or not value.elts:
-            raise PinnedInputError(
-                "Android LAN peer fixed command prefixes must be exact tuples"
-            )
-        first = value.elts[0]
-        if not (
-            _is_str_call_for(first, "ADB")
-            or _is_loaded_name(first, "adb_path")
-        ):
-            raise PinnedInputError(
-                "Android LAN peer fixed command prefixes must use the pinned or private ADB client"
-            )
-        tail = value.elts[1:]
-        if (
-            len(tail) == 3
-            and isinstance(tail[0], ast.Constant)
-            and tail[0].value == "-L"
-            and isinstance(tail[1], ast.JoinedStr)
-            and isinstance(tail[2], ast.Constant)
-            and tail[2].value == "-d"
-        ):
-            branches.add("inventory")
-        elif (
-            len(tail) == 4
-            and isinstance(tail[0], ast.Constant)
-            and tail[0].value == "-L"
-            and isinstance(tail[1], ast.JoinedStr)
-            and isinstance(tail[2], ast.Constant)
-            and tail[2].value == "-t"
-            and isinstance(tail[3], ast.Call)
-            and isinstance(tail[3].func, ast.Name)
-            and tail[3].func.id == "str"
-            and len(tail[3].args) == 1
-            and not tail[3].keywords
-            and isinstance(tail[3].args[0], ast.Attribute)
-            and tail[3].args[0].attr == "transport_id"
-            and _is_loaded_name(tail[3].args[0].value, "selector")
-        ):
-            branches.add("transport")
-        elif (
-            len(tail) == 2
-            and isinstance(tail[0], ast.Constant)
-            and tail[0].value == "-L"
-            and isinstance(tail[1], ast.JoinedStr)
-        ):
-            branches.add("default")
-        else:
-            raise PinnedInputError(
-                "Android LAN peer fixed command prefix arguments differ from policy"
-            )
-    if branches != {"inventory", "transport", "default"}:
-        raise PinnedInputError(
-            "Android LAN peer fixed command prefix branches are duplicated or incomplete"
-        )
-
-    returns = [node for node in ast.walk(fixed_spec) if isinstance(node, ast.Return)]
-    if (
-        len(returns) != 1
-        or not isinstance(returns[0].value, ast.Call)
-        or not isinstance(returns[0].value.func, ast.Name)
-        or returns[0].value.func.id != "CommandSpec"
-    ):
-        raise PinnedInputError(
-            "Android LAN peer fixed command constructor must return one CommandSpec"
-        )
-    argv_keywords = [
-        keyword
-        for keyword in returns[0].value.keywords
-        if keyword.arg == "argv"
-    ]
-    if len(argv_keywords) != 1:
-        raise PinnedInputError(
-            "Android LAN peer fixed command constructor must set one argv tuple"
-        )
-    argv = argv_keywords[0].value
-    if not (
-        isinstance(argv, ast.Tuple)
-        and len(argv.elts) == 2
-        and isinstance(argv.elts[0], ast.Starred)
-        and _is_loaded_name(argv.elts[0].value, "prefix")
-        and isinstance(argv.elts[1], ast.Starred)
-        and _is_loaded_name(argv.elts[1].value, "arguments")
-    ):
-        raise PinnedInputError(
-            "Android LAN peer CommandSpec argv must consume only the fixed prefix and arguments"
-        )
-
-    validate_inputs = functions["_validate_host_inputs"][0]
-    assert isinstance(validate_inputs, ast.FunctionDef)
-    adb_reads = []
-    for node in ast.walk(validate_inputs):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "_read_pinned_file"
-            and node.args
-            and _is_loaded_name(node.args[0], "ADB")
-        ):
-            continue
-        expected_digests = [
-            keyword.value
-            for keyword in node.keywords
-            if keyword.arg == "expected_sha256"
-        ]
-        if len(expected_digests) == 1 and _is_loaded_name(
-            expected_digests[0], "ADB_SHA256"
-        ):
-            adb_reads.append(node)
-    if len(adb_reads) != 1:
-        raise PinnedInputError(
-            "Android LAN peer host validation must hash the pinned ADB path with ADB_SHA256"
-        )
-
-
-def _extract_android_admission_constants(source: str) -> dict[str, str]:
-    try:
-        module = ast.parse(source)
-    except SyntaxError as error:
-        raise PinnedInputError(
-            f"Android LAN peer admission source is malformed: {error}"
-        ) from error
-
-    wanted = {"ADB", "ADB_VERSION", "ADB_SHA256"}
-    assignments: dict[str, ast.AST] = {}
-    for node in module.body:
-        if isinstance(node, ast.Assign):
-            rebound = {
-                target.id
-                for target in node.targets
-                if isinstance(target, ast.Name) and target.id in wanted
-            }
-            if rebound:
-                raise PinnedInputError(
-                    "Android LAN peer admission constants have a non-Final reassignment"
-                )
-            continue
-        if isinstance(node, ast.AugAssign):
-            if isinstance(node.target, ast.Name) and node.target.id in wanted:
-                raise PinnedInputError(
-                    "Android LAN peer admission constants have a non-Final reassignment"
-                )
-            continue
-        if not isinstance(node, ast.AnnAssign) or not isinstance(
-            node.target, ast.Name
-        ):
-            continue
-        name = node.target.id
-        if name not in wanted:
-            continue
-        if (
-            name in assignments
-            or node.value is None
-            or not isinstance(node.annotation, ast.Name)
-            or node.annotation.id != "Final"
-        ):
-            raise PinnedInputError(
-                f"Android LAN peer admission constant {name} is duplicated, empty, or not Final"
-            )
-        assignments[name] = node.value
-    if set(assignments) != wanted:
-        missing = ", ".join(sorted(wanted - set(assignments)))
-        raise PinnedInputError(
-            f"Android LAN peer admission constants are incomplete: {missing}"
-        )
-    binding_counts = {name: 0 for name in wanted}
-    for node in ast.walk(module):
-        if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-            and node.id in wanted
-        ):
-            binding_counts[node.id] += 1
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name in wanted:
-                binding_counts[node.name] += 1
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                bound_name = alias.asname or alias.name.split(".", 1)[0]
-                if bound_name in wanted:
-                    binding_counts[bound_name] += 1
-        elif isinstance(node, ast.ExceptHandler) and node.name in wanted:
-            binding_counts[node.name] += 1
-        elif isinstance(node, ast.arg) and node.arg in wanted:
-            binding_counts[node.arg] += 1
-        elif (
-            type(node).__name__ in {"MatchAs", "MatchStar"}
-            and getattr(node, "name", None) in wanted
-        ):
-            binding_counts[node.name] += 1
-    rebound = sorted(name for name, count in binding_counts.items() if count != 1)
-    if rebound:
-        raise PinnedInputError(
-            "Android LAN peer admission constants must each have exactly one "
-            f"source binding: {', '.join(rebound)}"
-        )
-
-    _verify_android_admission_adb_uses(module)
-
-    adb_value = assignments["ADB"]
-    if not (
-        isinstance(adb_value, ast.Call)
-        and isinstance(adb_value.func, ast.Name)
-        and adb_value.func.id == "Path"
-        and len(adb_value.args) == 1
-        and not adb_value.keywords
-        and isinstance(adb_value.args[0], ast.Constant)
-        and type(adb_value.args[0].value) is str
-    ):
-        raise PinnedInputError(
-            "Android LAN peer ADB constant must be a literal Path"
-        )
-
-    extracted = {"path": adb_value.args[0].value}
-    for constant_name, field_name in (
-        ("ADB_VERSION", "version"),
-        ("ADB_SHA256", "sha256"),
-    ):
-        value = assignments[constant_name]
-        if not (
-            isinstance(value, ast.Constant) and type(value.value) is str
-        ):
-            raise PinnedInputError(
-                f"Android LAN peer {constant_name} must be a string literal"
-            )
-        extracted[field_name] = value.value
-    return extracted
-
-
-def _verify_runtime_tools(manifest: dict, repository: Path) -> None:
-    expected = {
-        "adb": {
-            "schema": "cfw-runtime-tool-pin-v1",
-            "path": _ADB_RUNTIME_TOOL_PATH,
-            "version": _ADB_RUNTIME_TOOL_VERSION,
-            "sha256": _ADB_RUNTIME_TOOL_SHA256,
-            "verificationPhase": "android-lan-peer-admission",
-            "sourceBinding": {
-                "path": _ANDROID_LAN_PEER_SOURCE_PATH,
-                "sha256": _ANDROID_LAN_PEER_SOURCE_SHA256,
-                "size": _ANDROID_LAN_PEER_SOURCE_SIZE,
-                "mode": "0644",
-                "pathConstant": "ADB",
-                "versionConstant": "ADB_VERSION",
-                "sha256Constant": "ADB_SHA256",
-            },
-        }
-    }
-    runtime_tools = manifest.get("runtimeTools")
-    if not _json_values_identical(runtime_tools, expected):
-        raise PinnedInputError(
-            "runtime-tool pin contract is missing, malformed, or differs from policy"
-        )
-
-    source_bytes = read_repository_regular_file(
-        repository,
-        _ANDROID_LAN_PEER_SOURCE_PATH,
-        "Android LAN peer admission source",
-        maximum_size=_ANDROID_LAN_PEER_SOURCE_SIZE,
-        expected_uid=os.geteuid(),
-        expected_mode=0o644,
-        expected_size=_ANDROID_LAN_PEER_SOURCE_SIZE,
-        expected_sha256=_ANDROID_LAN_PEER_SOURCE_SHA256,
-    )
-    try:
-        source = source_bytes.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as error:
-        raise PinnedInputError(
-            "Android LAN peer admission source is not canonical UTF-8"
-        ) from error
-    observed = _extract_android_admission_constants(source)
-    pinned = expected["adb"]
-    if observed != {
-        "path": pinned["path"],
-        "version": pinned["version"],
-        "sha256": pinned["sha256"],
-    }:
-        raise PinnedInputError(
-            "Android LAN peer admission ADB constants differ from the runtime-tool pin"
-        )
 
 
 def _verify_packet_evidence_endpoint(
@@ -1408,202 +915,6 @@ def _verify_packet_evidence_endpoint(
             raise PinnedInputError(
                 f"packet evidence endpoint README lacks build binding {fragment!r}"
             )
-
-
-def _packet_lan_peer_script_contract(
-    path: str,
-    sha256: str,
-    size: int,
-    fragments: tuple[str, ...],
-) -> dict[str, object]:
-    return {
-        "path": path,
-        "sha256": sha256,
-        "size": size,
-        "mode": "0755",
-        "requiredFragments": list(fragments),
-    }
-
-
-def _verify_packet_lan_peer_script(
-    repository: Path,
-    contract: dict[str, object],
-    description: str,
-) -> None:
-    relative = contract["path"]
-    assert isinstance(relative, str)
-    size = contract["size"]
-    digest = contract["sha256"]
-    mode = contract["mode"]
-    if (
-        type(size) is not int
-        or size < 1
-        or not isinstance(digest, str)
-        or not isinstance(mode, str)
-        or not re.fullmatch(r"0[0-7]{3}", mode)
-    ):
-        raise PinnedInputError(f"{description} has malformed file identity")
-    _require_sha256(digest, f"{description} digest")
-    body = read_repository_regular_file(
-        repository,
-        relative,
-        description,
-        maximum_size=size,
-        expected_mode=int(mode, 8),
-        expected_size=size,
-        expected_sha256=digest,
-    )
-    try:
-        script = body.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as error:
-        raise PinnedInputError(f"{description} is not strict UTF-8") from error
-    for fragment in contract["requiredFragments"]:
-        assert isinstance(fragment, str)
-        if fragment not in script:
-            raise PinnedInputError(
-                f"{description} lacks required pinned fragment {fragment!r}"
-            )
-
-
-def _verify_packet_lan_peer_source_contract(
-    manifest: dict, env: dict[str, str], repository: Path
-) -> dict[str, object]:
-    source_files = [
-        {"path": path, "sha256": sha256, "size": size, "mode": mode}
-        for path, sha256, size, mode in _PACKET_LAN_PEER_SOURCE_FILES
-    ]
-    expected = {
-        "schema": "cfw-packet-lan-peer-build-input-v1",
-        "goToolchain": {
-            "versionKey": "GO_VERSION",
-            "version": _require_env(env, "GO_VERSION"),
-            "goos": "linux",
-            "goarch": "arm64",
-            "cgoEnabled": "0",
-        },
-        "source": {
-            "root": "tools/packet-lan-peer",
-            "treeAlgorithm": "sha256-tree-v2",
-            "treeSha256": _PACKET_LAN_PEER_SOURCE_TREE_SHA256,
-            "rootMode": "0755",
-            "files": source_files,
-        },
-        "artifact": {
-            "path": "target/packet-lan-peer-linux-arm64",
-            "sha256": _PACKET_LAN_PEER_ARTIFACT_SHA256,
-            "size": _PACKET_LAN_PEER_ARTIFACT_SIZE,
-            "fileType": "regular",
-            "linkCount": 1,
-            "hostOwner": "effective-uid",
-            "hostMode": "0555",
-        },
-        "protocol": {
-            "network": "tcp4",
-            "listenAddress": ":44333",
-            "port": 44333,
-            "maximumConnections": 8,
-            "maximumRequestBytes": 64,
-            "readDeadlineSeconds": 5,
-            "responseBytes": 0,
-        },
-        "androidDeployment": {
-            "directory": "/data/local/tmp/cfw-release-evidence-v040",
-            "directoryMode": "0700",
-            "binaryPath": (
-                "/data/local/tmp/cfw-release-evidence-v040/"
-                "packet-lan-peer-linux-arm64"
-            ),
-            "binaryMode": "0500",
-            "uid": 2000,
-            "gid": 2000,
-        },
-        "buildScript": _packet_lan_peer_script_contract(
-            "scripts/build_packet_lan_peer.sh",
-            _PACKET_LAN_PEER_BUILD_SCRIPT_SHA256,
-            4933,
-            _PACKET_LAN_PEER_BUILD_FRAGMENTS,
-        ),
-        "verifyScript": _packet_lan_peer_script_contract(
-            "scripts/verify_packet_lan_peer.sh",
-            _PACKET_LAN_PEER_VERIFY_SCRIPT_SHA256,
-            7357,
-            _PACKET_LAN_PEER_VERIFY_FRAGMENTS,
-        ),
-    }
-    spec = manifest.get("packetLanPeer")
-    if not _json_values_identical(spec, expected):
-        raise PinnedInputError(
-            "packet LAN peer build-input contract is missing, malformed, or differs from policy"
-        )
-
-    source = expected["source"]
-    assert isinstance(source, dict)
-    source_root_relative = source["root"]
-    assert isinstance(source_root_relative, str)
-    source_root = _safe_repository_path(
-        repository, source_root_relative, "packet LAN peer source root"
-    )
-    try:
-        source_manifest = build_manifest(source_root, algorithm="sha256-tree-v2")
-    except (OSError, ValueError) as error:
-        raise PinnedInputError(
-            f"packet LAN peer source tree cannot be securely hashed: {error}"
-        ) from error
-    expected_tree = {
-        "algorithm": "sha256-tree-v2",
-        "root": "packet-lan-peer",
-        "rootMode": "0755",
-        "sha256": _PACKET_LAN_PEER_SOURCE_TREE_SHA256,
-        "entries": [
-            {
-                "path": entry["path"],
-                "type": "file",
-                "size": entry["size"],
-                "sha256": entry["sha256"],
-                "mode": entry["mode"],
-            }
-            for entry in source_files
-        ],
-    }
-    if not _json_values_identical(source_manifest, expected_tree):
-        raise PinnedInputError(
-            "packet LAN peer source tree digest, file set, size, type, or mode drifted"
-        )
-
-    _verify_packet_lan_peer_script(
-        repository, expected["buildScript"], "packet LAN peer build script"
-    )
-    _verify_packet_lan_peer_script(
-        repository, expected["verifyScript"], "packet LAN peer verification script"
-    )
-
-    artifact = expected["artifact"]
-    assert isinstance(artifact, dict)
-    return artifact
-
-
-def _verify_packet_lan_peer_artifact(
-    repository: Path, artifact: dict[str, object]
-) -> None:
-    """Verify the generated packet-peer artifact without weakening its source pin.
-
-    The static source contract deliberately remains usable in a clean checkout
-    before this artifact exists. The default :func:`verify` entrypoint calls
-    this function as a second layer and therefore retains the historical,
-    complete source-plus-artifact check.
-    """
-    artifact_relative = artifact["path"]
-    assert isinstance(artifact_relative, str)
-    read_repository_regular_file(
-        repository,
-        artifact_relative,
-        "packet LAN peer artifact",
-        maximum_size=_PACKET_LAN_PEER_ARTIFACT_SIZE,
-        expected_uid=os.geteuid(),
-        expected_mode=0o555,
-        expected_size=_PACKET_LAN_PEER_ARTIFACT_SIZE,
-        expected_sha256=_PACKET_LAN_PEER_ARTIFACT_SHA256,
-    )
 
 
 def _verify_physical_collector_module(
@@ -2704,9 +2015,8 @@ def _verify_ci_release_python(
             )
 
 
-def _verify(
-    repository: Path, *, require_packet_lan_peer_artifact: bool
-) -> None:
+def verify_source_contract(repository: Path) -> None:
+    """Verify every static pinned input without invoking a toolchain."""
     manifest = _load_manifest(repository)
     dependency_pins_path = manifest.get("dependencyPinsPath")
     if dependency_pins_path != DEPENDENCY_PINS_RELATIVE_PATH:
@@ -2721,13 +2031,7 @@ def _verify(
         )
     )
     _verify_tools(manifest, env)
-    _verify_runtime_tools(manifest, repository)
     _verify_packet_evidence_endpoint(manifest, env, repository)
-    packet_lan_peer_artifact = _verify_packet_lan_peer_source_contract(
-        manifest, env, repository
-    )
-    if require_packet_lan_peer_artifact:
-        _verify_packet_lan_peer_artifact(repository, packet_lan_peer_artifact)
     _verify_physical_collector_module(manifest, env, repository)
     _verify_cargo_deny(manifest, repository)
     _verify_xcodegen(manifest, env, repository)
@@ -2742,40 +2046,3 @@ def _verify(
     _verify_native_lock(manifest, env, repository)
     _verify_build_scripts(manifest, repository)
     _verify_ci_release_python(repository, env)
-
-
-def verify_source_contract(repository: Path) -> None:
-    """Verify static pinned inputs without requiring generated packet output."""
-    _verify(repository, require_packet_lan_peer_artifact=False)
-
-
-def verify(repository: Path) -> None:
-    """Verify all pinned inputs, including the generated packet-peer artifact."""
-    _verify(repository, require_packet_lan_peer_artifact=True)
-
-
-def main() -> int:
-    repository = Path(__file__).resolve().parent.parent
-    try:
-        verify(repository)
-    except PinnedInputError as error:
-        print(f"error: pinned build inputs failed: {error}", file=sys.stderr)
-        return 1
-    print(
-        "pinned build inputs verified: Python/Rust/cargo-audit/cargo-deny/Node/Go/"
-        "gomobile/govulncheck/"
-        "Tauri CLI/sing-box versions, checksum-bound Tauri CLI local-source installation, "
-        "packet evidence endpoint source/service/sudoers/identity/known-hosts and "
-        "reproducible Linux artifact binding, Android packet LAN peer source/tree/"
-        "script/protocol/deployment/held-artifact binding, ADB runtime-tool source "
-        "binding, physical-collector module graph, "
-        "XcodeGen patch/source binding, sing-box and gomobile commits, six libbox patch "
-        "digests, combined diff, Go module inputs and module-cache closure contract, "
-        "libbox build tags required by the engine start path, native lock binding, "
-        "offline build-script pin references, and the CI release-gate Python pin"
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

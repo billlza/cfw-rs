@@ -119,51 +119,24 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
                     self.assertIsNone(captured.exception.result)
 
     def test_environment_override_and_invalid_limits_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ProbeExecutionError, "environment"):
-            run_fixed_command(
-                self.spec("/bin/echo", "x"), environment={"PATH": "/tmp"}
-            )
         with self.assertRaisesRegex(ProbeExecutionError, "stdout limit"):
             run_fixed_command(
                 self.spec("/bin/echo", "x", stdout_limit=-1)
             )
 
-    def test_source_bound_private_environment_is_applied_without_opening_new_keys(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            home = root / "home"
-            user_home = root / "android-user-home"
-            home.mkdir()
-            user_home.mkdir()
-            spec = self.spec(
-                "/usr/bin/env",
-                cwd=root,
-                stdout_limit=4096,
-                environment=(
-                    ("HOME", str(home)),
-                    ("ANDROID_USER_HOME", str(user_home)),
-                    ("ANDROID_ADB_LOG_PATH", str(root / "adb.log")),
-                ),
-            )
-            result = run_fixed_command(spec)
-            values = dict(
-                line.split("=", 1)
-                for line in result.stdout.decode("ascii").splitlines()
-                if "=" in line
-            )
-            self.assertEqual(values["HOME"], str(home))
-            self.assertEqual(values["ANDROID_USER_HOME"], str(user_home))
-            self.assertEqual(values["ANDROID_ADB_LOG_PATH"], str(root / "adb.log"))
-            self.assertEqual(values["ADB_MDNS"], "0")
-
-            with self.assertRaisesRegex(ProbeExecutionError, "unreviewed variable"):
-                run_fixed_command(
-                    self.spec(
-                        "/bin/echo",
-                        "x",
-                        environment=(("UNREVIEWED", "value"),),
-                    )
-                )
+    def test_probe_runs_with_exactly_the_fixed_environment(self) -> None:
+        result = run_fixed_command(self.spec("/usr/bin/env", stdout_limit=4096))
+        values = dict(
+            line.split("=", 1)
+            for line in result.stdout.decode("ascii").splitlines()
+        )
+        expected = {
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LC_ALL": "C",
+            "LANG": "C",
+        }
+        self.assertEqual(execution.FIXED_ENVIRONMENT, expected)
+        self.assertEqual(values, expected)
 
     def test_started_command_waits_for_one_exact_line_then_returns_command_result(
         self,

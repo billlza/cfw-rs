@@ -122,9 +122,7 @@ def derive_supply_chain(repository: Path) -> dict[str, Any]:
     This first runs the fail-closed static pinned source-contract verifier so a
     missing tool input, a partial/legacy patch digest, or a combined diff that
     collapses to a single patch digest is rejected before anything is bound.
-    Generated packet-peer output is proved by its independent CI lane and is
-    not an input to this source/toolchain derivation. The exact pinned
-    identities are then extracted into a canonical structure.
+    The exact pinned identities are then extracted into a canonical structure.
     """
     try:
         pinned.verify_source_contract(repository)

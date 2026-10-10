@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Verify the repository's static pinned build-input contract.
 
-This entrypoint is intentionally source-only. It validates the complete pinned
-source, tool, policy, script, protocol, and generated-artifact *identity*
-contract, but it does not require the generated packet LAN peer binary to
-already exist in ``target``. The independent ``packet-lan-peer`` CI lane builds
-and fully verifies that artifact. Call ``verify_pinned_build_inputs.py`` when a
-source-plus-artifact verification is required.
+This entrypoint is source-only: it validates the complete pinned source, tool,
+policy, script, and artifact-identity contract without invoking a toolchain or
+requiring generated output in ``target``. It is the P0 source gate that the
+build-script boundary runs and the only command-line entrypoint for the
+verification implemented in ``verify_pinned_build_inputs.py``.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ def main() -> int:
         return 1
     print(
         "pinned source contract verified: static source, tool, policy, script, "
-        "protocol, deployment, and generated-artifact identity bindings"
+        "and generated-artifact identity bindings"
     )
     return 0
 

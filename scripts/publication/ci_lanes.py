@@ -172,10 +172,9 @@ class Lane:
     runner_temp: bool = False
 
 
-# The 27 required lanes, in dependency order: the UI install lane precedes the
+# The 26 required lanes, in dependency order: the UI install lane precedes the
 # lanes that consume ``node_modules``, the libbox module lane precedes the scan
-# and build lanes, the packet LAN peer lane independently proves its generated
-# Linux/arm64 artifact, and the unsigned candidate lane runs last because it
+# and build lanes, and the unsigned candidate lane runs last because it
 # consumes the UI dependency tree and the native products.
 LANES: tuple[Lane, ...] = (
     Lane(
@@ -216,11 +215,6 @@ LANES: tuple[Lane, ...] = (
         timeout=1800,
     ),
     Lane("cargo-deny", "./scripts/run_release_ci_gate.sh cargo-deny", timeout=1800),
-    Lane(
-        "packet-lan-peer",
-        "./scripts/run_release_ci_gate.sh packet-lan-peer",
-        timeout=1800,
-    ),
     Lane(
         "node-install",
         "./scripts/run_release_ci_gate.sh prepare-ui-dependencies",

@@ -34,24 +34,6 @@
     "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
     "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6"
   },
-  "runtimeTools": {
-    "adb": {
-      "schema": "cfw-runtime-tool-pin-v1",
-      "path": "/Users/bill/Library/Android/sdk/platform-tools/adb",
-      "version": "37.0.0-14910828",
-      "sha256": "5759ea07285e5a5b66d84f489c118a3fa3998e69cd37725e5a3dc7cbe0597278",
-      "verificationPhase": "android-lan-peer-admission",
-      "sourceBinding": {
-        "path": "scripts/physical_capture/android_lan_peer.py",
-        "sha256": "978f015a7e71e962c0455c8f7866508be285c6a847e15ec2e04fe1d3b807cc75",
-        "size": 137417,
-        "mode": "0644",
-        "pathConstant": "ADB",
-        "versionConstant": "ADB_VERSION",
-        "sha256Constant": "ADB_SHA256"
-      }
-    }
-  },
   "packetEvidenceEndpoint": {
     "goVersionKey": "GO_VERSION",
     "goVersion": "1.27.2",
@@ -106,7 +88,7 @@
       },
       {
         "path": "tools/packet-evidence-endpoint/README.md",
-        "sha256": "eb06a8f017f019bf6716c9b2b43ecf51af6499e8681624051bab10e93d2d2e1d"
+        "sha256": "ff9260e9b39b689480f7900999d2fd406546d252d8ccbc4aed878eeac0eb36cf"
       },
       {
         "path": "scripts/physical_capture/packet_endpoints.json",
@@ -117,136 +99,6 @@
         "sha256": "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
       }
     ]
-  },
-  "packetLanPeer": {
-    "schema": "cfw-packet-lan-peer-build-input-v1",
-    "goToolchain": {
-      "versionKey": "GO_VERSION",
-      "version": "1.27.2",
-      "goos": "linux",
-      "goarch": "arm64",
-      "cgoEnabled": "0"
-    },
-    "source": {
-      "root": "tools/packet-lan-peer",
-      "treeAlgorithm": "sha256-tree-v2",
-      "treeSha256": "f5d7c715fb96d43379d9e2c4fc72e15fbf17699ec6916e1dc438c9faf71807e2",
-      "rootMode": "0755",
-      "files": [
-        {
-          "path": "README.md",
-          "sha256": "b84a4528927d8b7ceb707203a35d8052579717fb19a9b380a4828147b38b3547",
-          "size": 2035,
-          "mode": "0644"
-        },
-        {
-          "path": "go.mod",
-          "sha256": "a660db09d0dbee6c5aaad2f379bf0e9f8973d5be773a499bf75dd4919705e734",
-          "size": 70,
-          "mode": "0644"
-        },
-        {
-          "path": "main.go",
-          "sha256": "fb6dd50acaa306f9664ef1e89929041459bf68b3ec13feee8166dcc8bf588b4b",
-          "size": 7757,
-          "mode": "0644"
-        },
-        {
-          "path": "main_test.go",
-          "sha256": "ef4b6eff3f31f4d17345bf0da67726f1c2f6b776c15ab2691bbb3710487ca87e",
-          "size": 10813,
-          "mode": "0644"
-        }
-      ]
-    },
-    "artifact": {
-      "path": "target/packet-lan-peer-linux-arm64",
-      "sha256": "3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
-      "size": 2293884,
-      "fileType": "regular",
-      "linkCount": 1,
-      "hostOwner": "effective-uid",
-      "hostMode": "0555"
-    },
-    "protocol": {
-      "network": "tcp4",
-      "listenAddress": ":44333",
-      "port": 44333,
-      "maximumConnections": 8,
-      "maximumRequestBytes": 64,
-      "readDeadlineSeconds": 5,
-      "responseBytes": 0
-    },
-    "androidDeployment": {
-      "directory": "/data/local/tmp/cfw-release-evidence-v040",
-      "directoryMode": "0700",
-      "binaryPath": "/data/local/tmp/cfw-release-evidence-v040/packet-lan-peer-linux-arm64",
-      "binaryMode": "0500",
-      "uid": 2000,
-      "gid": 2000
-    },
-    "buildScript": {
-      "path": "scripts/build_packet_lan_peer.sh",
-      "sha256": "c3fb49c83d98a710a15874afe83a3606b3f50f1f65b01c76dbb03edfcc9b43d8",
-      "size": 4933,
-      "mode": "0755",
-      "requiredFragments": [
-        "source \"$repo_root/scripts/dependency_pins.env\"",
-        "source \"$repo_root/scripts/release_toolchain_contract.sh\"",
-        "cfw_verify_go_toolchain_tree \"$repo_root\" \"$toolchain_root\"",
-        "source_root=\"$repo_root/tools/packet-lan-peer\"",
-        "artifact=\"$repo_root/target/packet-lan-peer-linux-arm64\"",
-        "GOTOOLCHAIN=local",
-        "GOFLAGS=-mod=readonly",
-        "GOPROXY=off",
-        "GOSUMDB=sum.golang.org",
-        "GOVCS='*:off'",
-        "CGO_ENABLED=0",
-        "GOOS=linux",
-        "GOARCH=arm64",
-        "-buildvcs=false",
-        "-trimpath",
-        "-ldflags='-s -w -buildid='",
-        "/usr/bin/cmp -s \"$first\" \"$second\"",
-        "/bin/chmod 0555 \"$artifact_staging\"",
-        "/bin/mv -fh \"$artifact_staging\" \"$artifact\""
-      ]
-    },
-    "verifyScript": {
-      "path": "scripts/verify_packet_lan_peer.sh",
-      "sha256": "4e56495dbf3815d562459da9f5f863f1c4e4f2aba87ea0cf42ebb3a21278e1a9",
-      "size": 7357,
-      "mode": "0755",
-      "requiredFragments": [
-        "source \"$repo_root/scripts/dependency_pins.env\"",
-        "source \"$repo_root/scripts/release_toolchain_contract.sh\"",
-        "cfw_verify_go_toolchain_tree \"$repo_root\" \"$toolchain_root\"",
-        "source_root=\"$repo_root/tools/packet-lan-peer\"",
-        "artifact=\"$repo_root/target/packet-lan-peer-linux-arm64\"",
-        "expected_artifact_sha256=3c8c4664c103ed7950fcd06542769e2ddabab523b37ec783ff70dd6a4939aa06",
-        "expected_artifact_size=2293884",
-        "expected_artifact_mode=555",
-        "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
-        "GOTOOLCHAIN=local",
-        "GOFLAGS=-mod=readonly",
-        "GOPROXY=off",
-        "GOSUMDB=sum.golang.org",
-        "GOVCS='*:off'",
-        "CGO_ENABLED=0 GOOS=linux GOARCH=arm64",
-        "expected_imports=\"$(printf",
-        "net\\.(ListenPacket|ListenUDP)",
-        "\"$go_bin\" -C \"$source_root\" test -count=1 ./...",
-        "\"$go_bin\" -C \"$source_root\" vet ./...",
-        "\"$go_bin\" -C \"$source_root\" test -race -count=1 ./...",
-        "\"$repo_root/scripts/build_packet_lan_peer.sh\"",
-        "\"$go_bin\" version -m \"$artifact\"",
-        "\"$go_bin\" tool buildid \"$artifact\"",
-        "artifact_sha256=\"$(/usr/bin/shasum -a 256 \"$artifact\"",
-        "\"$artifact_mode\" != \"$expected_artifact_mode\"",
-        "\"$artifact_size\" != \"$expected_artifact_size\"",
-        "\"$artifact_sha256\" != \"$expected_artifact_sha256\""
-      ]
-    }
   },
   "physicalCollectorModule": {
     "goVersionKey": "GO_VERSION",

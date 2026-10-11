@@ -29,6 +29,9 @@ RENAME_EXCL = 0x00000004
 RENAME_NOFOLLOW_ANY = 0x00000010
 _RENAME_FLAGS = RENAME_EXCL | RENAME_NOFOLLOW_ANY
 _COPY_CHUNK_SIZE = 64 * 1024
+# publish_private_file_locked stages each file under this prefix plus a fresh
+# UUID; a crash can leave such a file, which no reader consults.
+FILE_STAGING_PREFIX = ".publication-file-pending-"
 
 
 class DurabilityOutcomeUnknown(PublicationError):
@@ -691,6 +694,53 @@ def exclusive_rooted_directory_lock(
 ) -> Iterator[int]:
     """Lock a directory reached component-by-component below one trusted root."""
 
+    with _exclusive_rooted_directory_chain(
+        root, directory, require_private=require_private
+    ) as descriptors:
+        yield descriptors[-1]
+
+
+@contextmanager
+def exclusive_rooted_directory_lock_with_parent(
+    root: Path,
+    directory: Path,
+    *,
+    require_private: bool = False,
+) -> Iterator[tuple[int, int]]:
+    """Lock a rooted directory and also yield its unlocked parent descriptor.
+
+    The parent comes from the same component-by-component chain, and its
+    identity is rechecked with the locked directory when the body exits
+    normally.
+    """
+
+    with _exclusive_rooted_directory_chain(
+        root, directory, require_private=require_private
+    ) as descriptors:
+        if len(descriptors) < 2:
+            raise PublicationError(
+                f"rooted publication directory has no parent below its root: {directory}"
+            )
+        parent_descriptor = descriptors[-2]
+        if require_private:
+            parent = Path(directory).absolute().parent
+            try:
+                parent_metadata = os.fstat(parent_descriptor)
+            except OSError as error:
+                raise PublicationError(
+                    f"cannot inspect rooted publication parent {parent}"
+                ) from error
+            _require_private_directory_metadata(parent_metadata, parent)
+        yield parent_descriptor, descriptors[-1]
+
+
+@contextmanager
+def _exclusive_rooted_directory_chain(
+    root: Path,
+    directory: Path,
+    *,
+    require_private: bool,
+) -> Iterator[tuple[int, ...]]:
     root = Path(root).absolute()
     directory = Path(directory).absolute()
     descriptors = _open_rooted_directory(
@@ -710,7 +760,7 @@ def exclusive_rooted_directory_lock(
             raise PublicationError(
                 f"cannot lock publication directory {directory}: {error}"
             ) from error
-        yield descriptor
+        yield descriptors
 
         try:
             fresh_descriptors = _open_rooted_directory(
@@ -1187,7 +1237,20 @@ def _write_private_pending_at(
     name: str,
     path: Path,
     data: bytes,
-) -> None:
+    *,
+    staging: bool,
+) -> tuple[int, int]:
+    """Create, write, F_FULLFSYNC and reread one private file; return its identity.
+
+    A pending file (``staging=False``) is a recovery point under its own name:
+    its directory entry is synchronized, and once verified it survives a later
+    failure. A staging file (``staging=True``) is only ever renamed elsewhere,
+    so its directory entry is not synchronized, and once created it is removed
+    after any failure, including an interrupt. If that removal fails, an
+    exception is replaced by the cleanup error raised from it, and an interrupt
+    propagates unchanged with the cleanup failure as a note.
+    """
+
     if not isinstance(data, bytes):
         raise PublicationError("private pending payload must be bytes")
     descriptor = -1
@@ -1232,35 +1295,42 @@ def _write_private_pending_at(
         )
         if observed != data or (metadata.st_dev, metadata.st_ino) != created_identity:
             raise PublicationError(f"private pending content changed after writing: {path}")
-        preserve_for_recovery = True
-        try:
-            fsync_locked_directory(directory_descriptor, path.parent)
-        except PublicationError as error:
-            raise PublicationError(
-                f"private pending write outcome is unknown after directory fsync failure: {path}"
-            ) from error
-        after_parent_barrier = os.fstat(verification_descriptor)
-        rebound_after_parent_barrier = os.stat(
-            name,
-            dir_fd=directory_descriptor,
-            follow_symlinks=False,
-        )
-        if (
-            _metadata_identity(metadata) != _metadata_identity(after_parent_barrier)
-            or _metadata_identity(metadata)
-            != _metadata_identity(rebound_after_parent_barrier)
-        ):
-            raise PublicationError(
-                f"private pending file changed after directory fsync: {path}"
+        if not staging:
+            preserve_for_recovery = True
+            try:
+                fsync_locked_directory(directory_descriptor, path.parent)
+            except PublicationError as error:
+                raise PublicationError(
+                    f"private pending write outcome is unknown after directory fsync failure: {path}"
+                ) from error
+            after_parent_barrier = os.fstat(verification_descriptor)
+            rebound_after_parent_barrier = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
             )
-    except Exception as error:
+            if (
+                _metadata_identity(metadata) != _metadata_identity(after_parent_barrier)
+                or _metadata_identity(metadata)
+                != _metadata_identity(rebound_after_parent_barrier)
+            ):
+                raise PublicationError(
+                    f"private pending file changed after directory fsync: {path}"
+                )
+        return (metadata.st_dev, metadata.st_ino)
+    except BaseException as error:
         if descriptor >= 0:
             os.close(descriptor)
             descriptor = -1
         if verification_descriptor >= 0:
             os.close(verification_descriptor)
             verification_descriptor = -1
-        if created_identity is not None and not preserve_for_recovery:
+        interrupted = not isinstance(error, Exception)
+        if (
+            created_identity is not None
+            and not preserve_for_recovery
+            and (staging or not interrupted)
+        ):
             try:
                 _remove_created_pending(
                     directory_descriptor,
@@ -1269,8 +1339,11 @@ def _write_private_pending_at(
                     created_identity,
                 )
             except PublicationError as cleanup_error:
-                raise cleanup_error from error
-        if isinstance(error, PublicationError):
+                if not interrupted:
+                    raise cleanup_error from error
+                # An interrupt keeps its own type; the leftover is noted.
+                error.add_note(f"private staging cleanup failed: {cleanup_error}")
+        if interrupted or isinstance(error, PublicationError):
             raise
         raise PublicationError(f"cannot write private pending file {path}: {error}") from error
     finally:
@@ -1287,7 +1360,7 @@ def write_private_pending(path: Path, data: bytes) -> None:
     name = _require_simple_name(path, "private pending path")
     directory_descriptor = _open_owned_directory(path.parent)
     try:
-        _write_private_pending_at(directory_descriptor, name, path, data)
+        _write_private_pending_at(directory_descriptor, name, path, data, staging=False)
     finally:
         os.close(directory_descriptor)
 
@@ -1308,6 +1381,7 @@ def write_private_pending_locked(
         name,
         directory / name,
         data,
+        staging=False,
     )
 
 
@@ -1376,64 +1450,98 @@ def _renameatx_np(
         raise OSError(error_number, os.strerror(error_number), destination_name)
 
 
-def promote_private_pending(pending: Path, destination: Path) -> None:
-    """Atomically promote one private pending file without replacing a target."""
-
-    pending = Path(pending).absolute()
-    destination = Path(destination).absolute()
-    if pending.parent != destination.parent:
-        raise PublicationError("private pending and destination must share one parent directory")
-    if pending == destination:
-        raise PublicationError("private pending and destination must be different paths")
-    pending_name = _require_simple_name(pending, "private pending path")
-    destination_name = _require_simple_name(destination, "private destination path")
-
-    directory_descriptor = _open_owned_directory(pending.parent)
-    descriptor = -1
+def _require_absent_at(directory_descriptor: int, name: str, path: Path) -> None:
     try:
-        descriptor, pending_metadata = _inspect_private_pending_at(
-            directory_descriptor,
-            pending_name,
-            pending,
-            maximum=None,
-        )
+        os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise PublicationError(f"cannot inspect private destination {path}") from error
+    raise PublicationError(f"private destination already exists: {path}")
+
+
+def _promote_private_file_at(
+    source_descriptor: int,
+    source_directory: Path,
+    source_name: str,
+    destination_descriptor: int,
+    destination_directory: Path,
+    destination_name: str,
+    *,
+    synchronized_identity: tuple[int, int] | None,
+) -> None:
+    """Rename one private file to a new name on the same volume.
+
+    Both directories are reached through caller-owned descriptors, and the
+    rename never replaces an existing destination. When the caller has just
+    written, F_FULLFSYNCed and reread the file, it passes that file's
+    ``(st_dev, st_ino)`` as ``synchronized_identity``: the source must still be
+    that inode, and its bytes are not synchronized again. Otherwise
+    (``None``) they are synchronized before and after the rename. The
+    destination directory, and the source directory when it is another one,
+    are synchronized after it. An ``OSError`` or ``PublicationError`` after the
+    rename is a ``DurabilityOutcomeUnknown``; an interrupt there propagates
+    unchanged and leaves the complete file under its new name.
+    """
+
+    pending = source_directory / source_name
+    destination = destination_directory / destination_name
+    try:
+        source_identity = os.fstat(source_descriptor)
+        destination_identity = os.fstat(destination_descriptor)
+    except OSError as error:
+        raise PublicationError(
+            f"cannot inspect the directories of private promotion {destination}"
+        ) from error
+    separate_directories = (source_identity.st_dev, source_identity.st_ino) != (
+        destination_identity.st_dev,
+        destination_identity.st_ino,
+    )
+    descriptor, pending_metadata = _inspect_private_pending_at(
+        source_descriptor,
+        source_name,
+        pending,
+        maximum=None,
+    )
+    try:
+        if synchronized_identity is not None:
+            if (pending_metadata.st_dev, pending_metadata.st_ino) != synchronized_identity:
+                raise PublicationError(
+                    f"private staging file changed before promotion: {pending}"
+                )
+            synchronized = pending_metadata
+        else:
+            try:
+                _full_fsync_descriptor(descriptor, pending, "private pending file")
+                synchronized = os.fstat(descriptor)
+            except PublicationError as error:
+                raise PublicationError(
+                    f"cannot make private pending durable before promotion: {pending}"
+                ) from error
+            if _metadata_identity(pending_metadata) != _metadata_identity(synchronized):
+                raise PublicationError(
+                    f"private pending changed while synchronizing before promotion: {pending}"
+                )
+        _require_absent_at(destination_descriptor, destination_name, destination)
+
         try:
-            _full_fsync_descriptor(descriptor, pending, "private pending file")
-            synchronized = os.fstat(descriptor)
-        except PublicationError as error:
-            raise PublicationError(
-                f"cannot make private pending durable before promotion: {pending}"
-            ) from error
-        if _metadata_identity(pending_metadata) != _metadata_identity(synchronized):
-            raise PublicationError(
-                f"private pending changed while synchronizing before promotion: {pending}"
-            )
-        try:
-            os.stat(
-                destination_name,
-                dir_fd=directory_descriptor,
+            rebound = os.stat(
+                source_name,
+                dir_fd=source_descriptor,
                 follow_symlinks=False,
             )
-        except FileNotFoundError:
-            pass
         except OSError as error:
-            raise PublicationError(f"cannot inspect private destination {destination}") from error
-        else:
-            raise PublicationError(f"private destination already exists: {destination}")
-
-        rebound = os.stat(
-            pending_name,
-            dir_fd=directory_descriptor,
-            follow_symlinks=False,
-        )
+            raise PublicationError(
+                f"cannot inspect private pending before promotion: {pending}"
+            ) from error
         if _metadata_identity(pending_metadata) != _metadata_identity(rebound):
             raise PublicationError(f"private pending changed before promotion: {pending}")
 
         try:
             _renameatx_np(
-                directory_descriptor,
-                pending_name,
-                directory_descriptor,
+                source_descriptor,
+                source_name,
+                destination_descriptor,
                 destination_name,
                 _RENAME_FLAGS,
             )
@@ -1447,15 +1555,16 @@ def promote_private_pending(pending: Path, destination: Path) -> None:
             ) from error
 
         try:
-            _full_fsync_descriptor(
-                descriptor,
-                destination,
-                "promoted private file",
-            )
+            if synchronized_identity is None:
+                _full_fsync_descriptor(
+                    descriptor,
+                    destination,
+                    "promoted private file",
+                )
             synchronized_after_rename = os.fstat(descriptor)
             promoted = os.stat(
                 destination_name,
-                dir_fd=directory_descriptor,
+                dir_fd=destination_descriptor,
                 follow_symlinks=False,
             )
             # A rename changes only the status-change time, which is not part
@@ -1469,11 +1578,13 @@ def promote_private_pending(pending: Path, destination: Path) -> None:
                 raise PublicationError(
                     f"promoted private file changed during rename: {destination}"
                 )
-            fsync_locked_directory(directory_descriptor, pending.parent)
+            fsync_locked_directory(destination_descriptor, destination_directory)
+            if separate_directories:
+                fsync_locked_directory(source_descriptor, source_directory)
             after_parent_barrier = os.fstat(descriptor)
             rebound_after_parent_barrier = os.stat(
                 destination_name,
-                dir_fd=directory_descriptor,
+                dir_fd=destination_descriptor,
                 follow_symlinks=False,
             )
             if (
@@ -1490,9 +1601,109 @@ def promote_private_pending(pending: Path, destination: Path) -> None:
                 f"private pending promotion outcome is unknown after rename: {destination}"
             ) from error
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
+
+
+def promote_private_pending(pending: Path, destination: Path) -> None:
+    """Atomically promote one private pending file without replacing a target."""
+
+    pending = Path(pending).absolute()
+    destination = Path(destination).absolute()
+    if pending.parent != destination.parent:
+        raise PublicationError("private pending and destination must share one parent directory")
+    if pending == destination:
+        raise PublicationError("private pending and destination must be different paths")
+    pending_name = _require_simple_name(pending, "private pending path")
+    destination_name = _require_simple_name(destination, "private destination path")
+
+    directory_descriptor = _open_owned_directory(pending.parent)
+    try:
+        _promote_private_file_at(
+            directory_descriptor,
+            pending.parent,
+            pending_name,
+            directory_descriptor,
+            pending.parent,
+            destination_name,
+            synchronized_identity=None,
+        )
+    finally:
         os.close(directory_descriptor)
+
+
+def publish_private_file_locked(
+    *,
+    staging_descriptor: int,
+    staging_directory: Path,
+    destination_descriptor: int,
+    destination_directory: Path,
+    name: str,
+    data: bytes,
+) -> None:
+    """Create one complete private file that never exists partially.
+
+    The bytes are written, F_FULLFSYNCed and reread under a fresh
+    ``.publication-file-pending-*`` name in the staging directory. One
+    exclusive rename then gives them ``name`` in the destination directory,
+    which the caller locks; only that directory and, when it is another one,
+    the staging directory are synchronized after the rename. The staging
+    directory needs no lock because the staging name is new. An existing
+    destination is never replaced.
+
+    A failure or interrupt before the rename removes the staging file. If that
+    removal fails too, the file stays: an exception is replaced by the cleanup
+    error raised from it, and an interrupt propagates unchanged with the
+    cleanup failure as a note. A crash can also leave one. Nothing reads a
+    staging file. An interrupt after the rename propagates unchanged with the
+    file published.
+    """
+
+    for descriptor in (staging_descriptor, destination_descriptor):
+        if type(descriptor) is not int or descriptor < 0:
+            raise PublicationError("locked publication directory descriptor is invalid")
+    staging_directory = Path(staging_directory).absolute()
+    destination_directory = Path(destination_directory).absolute()
+    try:
+        staging_metadata = os.fstat(staging_descriptor)
+        destination_metadata = os.fstat(destination_descriptor)
+    except OSError as error:
+        raise PublicationError(
+            f"cannot inspect the directories of private publication {name}"
+        ) from error
+    _require_owned_directory(staging_metadata, staging_directory)
+    _require_owned_directory(destination_metadata, destination_directory)
+    if type(name) is not str or _require_simple_name(Path(name), "private file") != name:
+        raise PublicationError("private file name is unsafe")
+    if not isinstance(data, bytes):
+        raise PublicationError("private file payload must be bytes")
+    _require_absent_at(destination_descriptor, name, destination_directory / name)
+    staging_name = f"{FILE_STAGING_PREFIX}{uuid.uuid4().hex}"
+    staging_path = staging_directory / staging_name
+    # A failed or interrupted staging write removes the file it created.
+    created = _write_private_pending_at(
+        staging_descriptor, staging_name, staging_path, data, staging=True
+    )
+    try:
+        _promote_private_file_at(
+            staging_descriptor,
+            staging_directory,
+            staging_name,
+            destination_descriptor,
+            destination_directory,
+            name,
+            synchronized_identity=created,
+        )
+    except DurabilityOutcomeUnknown:
+        raise
+    except BaseException as error:
+        try:
+            _remove_created_pending(staging_descriptor, staging_name, staging_path, created)
+        except PublicationError as cleanup_error:
+            if isinstance(error, Exception):
+                raise cleanup_error from error
+            # An interrupt keeps its own type; the leftover is noted.
+            error.add_note(f"private staging cleanup failed: {cleanup_error}")
+        raise
 
 
 def _promote_private_directory_at(
@@ -1886,6 +2097,7 @@ def publish_private_directory_locked(
                 entry_name,
                 staging_path / entry_name,
                 files[entry_name],
+                staging=False,
             )
         os.close(staging_descriptor)
         staging_descriptor = -1

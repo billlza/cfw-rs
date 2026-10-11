@@ -480,7 +480,7 @@ is forbidden. The producer schemas are `cfw-current-service-transaction-v3`,
 transaction uses `cfm-ga-journal-export-intent-v1` and
 `cfm-ga-journal-export-receipt-v1`. GA runtime evidence uses
 `cfm-ga-runtime-acceptance-v2`, `cfm-ga-runtime-check-v2`,
-`cfm-ga-command-observation-v2`, `cfm-ga-runtime-collection-intent-v3`, and
+`cfm-ga-command-observation-v2`, `cfm-ga-runtime-collection-intent-v4`, and
 `cfm-ga-runtime-collection-event-v2`. New prepackage stages use
 `cfm-ga-prepackage-seal-v3`; the acceptance and publication stages use
 `cfm-ga-acceptance-seal-v3` and `cfm-ga-publication-seal-v3`. Each stage records
@@ -490,13 +490,18 @@ running a newer verifier must not change the recorded sealer or immutable seal.
 The current candidate has no old stage seals to migrate. Historical candidates
 retain their original schemas and records unchanged.
 Older service/runtime/stage markers cannot be accepted as current evidence by
-relabeling them. Historical collection v2 records retain their original frozen
-verifier; new collections require v3 and never rewrite those records.
+relabeling them. Historical collection v2 and v3 records retain their original
+frozen verifier; new collections require v4 and never rewrite those records.
 
-Collection intent v3 durably records the complete live CFW guard before the first
+Collection intent v4 durably records the complete live CFW guard before the first
 runtime mutation. Every observation and recovery action is checked against that
-same collection baseline; recovery cannot sample a new baseline. The completed
-install and service journals remain immutable historical proof of their own
+same collection baseline; recovery cannot sample a new baseline. It also records
+the operator checkout and the release Python (path and version) that ran the
+collection; the closed launcher admits that Python. Command receipts that name
+that checkout or interpreter are checked against this record, not against the
+verifier's own location or Python, so a later operator or Python pin update
+does not invalidate collected evidence. The completed install and service
+journals remain immutable historical proof of their own
 guarded operations. A user restarting CFW between installation and collection
 does not invalidate that proof. Restarting or changing CFW during a collection
 still fails its live guard.

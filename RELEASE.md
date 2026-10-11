@@ -1374,11 +1374,14 @@ never adopted.
    It independently reopens the DMG set, proves the DMG's
    contained app equals the installed active GA tree, derives all twelve required
    checks from bounded command output and packet captures, and proves shutdown
-   restored the CFW guard. Before any command, `collection-intent-v3` stores a
-   fresh complete CFW baseline and binds the closed installation/service
-   journals. Historical journal closure remains required; CFW may have restarted
-   or legitimately updated between that history and this collection. Every
-   observation within this collection must match its own durable baseline.
+   restored the CFW guard. Before any command, `collection-intent-v4` stores a
+   fresh complete CFW baseline, binds the closed installation/service journals
+   and records the operator checkout and release Python (path and version)
+   running the collection. The closed launcher admits that Python before
+   collection starts. Historical journal closure remains required; CFW may
+   have restarted or legitimately updated between that history and this
+   collection. Every observation within this collection must match its own
+   durable baseline.
    Packet capture needs administrator authorization to open macOS BPF devices.
    The collector requests it before changing app state, sends credentials only
    through a private input pipe, and runs tcpdump with `-Z` to drop back to the
@@ -1399,9 +1402,20 @@ never adopted.
    checked out in place in the same operator directory, while
    `target/release-worktrees/$CFW_GA_BUILD` stays at the frozen commit. Each
    new seal records its own executor, and later verifiers still reopen
-   `prepackage` under the frozen commit. Runtime evidence binds the operator
-   path and the release Python, so do not move, re-clone or re-bootstrap the
-   operator between collection and the final upload allowlist. (For build
+   `prepackage` under the frozen commit. Runtime receipts that name the
+   operator checkout or the release Python are checked against the collection
+   intent's record of both, not against the verifier's own checkout or
+   interpreter, so updating the operator commit or the release Python
+   (including a Python pin change) between collection and the final upload
+   allowlist does not invalidate collected evidence. Moving or re-cloning the
+   operator checkout still does: the artifact checkout lives at
+   `<operator>/target/release-worktrees/$CFW_GA_BUILD`, the DMG verifier
+   receipt's own arguments name its absolute path, and verification compares
+   them with the current artifact path. That checkout is also a Git worktree
+   registered with the operator checkout by absolute path, with a cache-scope
+   receipt bound to that canonical path (see
+   [Release-worktree cache scope and recovery](#release-worktree-cache-scope-and-recovery)).
+   Do not move or re-clone the operator checkout in that window. (For build
    50028 the frozen commit was `d686a85`.)
 
    The DNS check observes the product's tunnel leg on the Packet Tunnel
@@ -1500,10 +1514,9 @@ never adopted.
    mode. If the Off proof still fails after that, stop and investigate
    instead of repeating these steps. Recovery never relaunches the app and
    never retries the Off proof. It refuses before any runtime
-   command while `runtime-evidence`, `runtime-acceptance.json` or its pending
-   adapter exists, so it cannot orphan published evidence. `collect` refuses
-   on the same three outputs before any runtime command. Never recover a
-   successful collection.
+   command while `runtime-evidence` or `runtime-acceptance.json` exists, so it
+   cannot orphan published evidence. `collect` refuses on the same two outputs
+   before any runtime command. Never recover a successful collection.
 
    `collect` publishes raw evidence only after shutdown, the signed Off proof,
    the exact CFW restore and the post-restore environment check succeed. If it
@@ -1518,40 +1531,19 @@ never adopted.
    `resume-seal` runs no runtime command and repeats every seal check. It
    accepts only this collection with every fixed step event, writes a missing
    `raw_published` marker only after durably reopening and revalidating the
-   raw tree, promotes only a byte-identical pending adapter, and only
-   reverifies an identical adapter. Repeating it is safe; a persistent failure
-   keeps this stage blocked. Never run `recover` after raw evidence is
+   raw tree, writes the adapter only when it is absent, and only durably
+   reverifies an identical adapter. Repeating it is safe; a persistent
+   failure keeps this stage blocked. Never run `recover` after raw evidence is
    published. Failures print their `caused by` chain, which names the
    underlying error.
 
-   Two residual windows remain, both from files that are created under their
-   final name and only then written and synced. In the first, each collection
-   event, including the `raw_published` marker, can be left as a zero-length
-   or truncated `event-NNN.json` by a power loss, forced termination or
-   interrupt inside that write.
-   Before raw publication this needs nothing extra: `recover` appends after
-   the truncated event and archives it with the attempt. After raw
-   publication the raw tree is durable and the runtime was already proven
-   closed, but a truncated `event-038.json` makes `resume-seal` fail with
-   `GA runtime event-038.json is not strict UTF-8 JSON`, and `recover`
-   refuses because `runtime-evidence` exists. No command repairs that state.
-   Stop and keep every tree. Only with the release owner's explicit approval,
-   quarantine that one truncated marker by moving it out of
-   `runtime-collection` to a retained location outside `stage-inputs`, then
-   run `resume-seal`; it revalidates the raw tree before it writes a fresh
-   marker.
-
-   In the second, sealing creates the pending adapter
-   `.runtime-acceptance.json.pending` beside `runtime-acceptance.json` the
-   same way, after raw publication, and an interrupted write leaves it
-   zero-length or truncated. `resume-seal` then fails with `pending GA runtime
-   adapter binds different evidence`, while `recover` and `collect` refuse
-   because the pending adapter exists. No command repairs that state either.
-   Stop and keep every tree. Only with the release owner's explicit approval,
-   quarantine that one truncated pending adapter by moving it, never deleting
-   it, to a retained location outside `stage-inputs`, then run `resume-seal`;
-   it fully revalidates the raw tree and collection before it writes and
-   promotes a fresh adapter.
+   Each collection event, including the `raw_published` marker, and the
+   adapter are written whole and synced under a temporary
+   `.publication-file-pending-*` name in `stage-inputs/ga-acceptance`, then
+   renamed to their final name, which is never replaced. A power loss, forced
+   termination or interrupt therefore leaves either no file or the complete
+   file under its final name. A leftover temporary file is read by no command
+   and blocks none; leave it in place, since recovery does not archive it.
 
    Missing System Extension approval, absent traffic, an installed-Host
    rejection that does not occur, an incomplete journal, or any cleanup drift

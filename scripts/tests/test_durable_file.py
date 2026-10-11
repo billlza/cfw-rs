@@ -856,6 +856,413 @@ class DurableFileTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicationError, "not a real directory|symlink"):
             durable_file.fsync_directory(link)
 
+    def _publication_directories(self) -> tuple[Path, Path]:
+        staging = self.root / "staging"
+        destination = staging / "collection"
+        destination.mkdir(parents=True, mode=0o700)
+        staging.chmod(0o700)
+        return staging, destination
+
+    @staticmethod
+    def _staged_names(directory: Path) -> list[str]:
+        return sorted(
+            name
+            for name in os.listdir(directory)
+            if name.startswith(durable_file.FILE_STAGING_PREFIX)
+        )
+
+    def _publish(
+        self,
+        staging: Path,
+        destination: Path,
+        name: str,
+        data: bytes,
+    ) -> None:
+        with durable_file.exclusive_rooted_directory_lock_with_parent(
+            self.root, destination, require_private=True
+        ) as (staging_descriptor, destination_descriptor):
+            if staging == destination:
+                staging_descriptor = destination_descriptor
+            durable_file.publish_private_file_locked(
+                staging_descriptor=staging_descriptor,
+                staging_directory=staging,
+                destination_descriptor=destination_descriptor,
+                destination_directory=destination,
+                name=name,
+                data=data,
+            )
+
+    def test_published_file_appears_complete_through_one_exclusive_rename(self) -> None:
+        staging, destination = self._publication_directories()
+        real_rename = durable_file._renameatx_np
+        renames: list[tuple[str, str, int]] = []
+
+        def capture(
+            source_descriptor: int,
+            source_name: str,
+            destination_descriptor: int,
+            destination_name: str,
+            flags: int,
+        ) -> None:
+            self.assertEqual(
+                os.fstat(source_descriptor).st_ino, staging.stat().st_ino
+            )
+            self.assertEqual(
+                os.fstat(destination_descriptor).st_ino, destination.stat().st_ino
+            )
+            self.assertEqual(
+                (staging / source_name).read_bytes(), b'{"sequence":0}\n'
+            )
+            self.assertFalse((destination / destination_name).exists())
+            renames.append((source_name, destination_name, flags))
+            real_rename(
+                source_descriptor,
+                source_name,
+                destination_descriptor,
+                destination_name,
+                flags,
+            )
+
+        with patch.object(durable_file, "_renameatx_np", side_effect=capture):
+            self._publish(staging, destination, "event-000.json", b'{"sequence":0}\n')
+        self.assertEqual(len(renames), 1)
+        source_name, destination_name, flags = renames[0]
+        self.assertTrue(source_name.startswith(durable_file.FILE_STAGING_PREFIX))
+        self.assertEqual(destination_name, "event-000.json")
+        self.assertEqual(
+            flags, durable_file.RENAME_EXCL | durable_file.RENAME_NOFOLLOW_ANY
+        )
+        published = destination / "event-000.json"
+        self.assertEqual(published.read_bytes(), b'{"sequence":0}\n')
+        self.assertEqual(published.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(os.listdir(destination), ["event-000.json"])
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_publication_syncs_the_file_before_both_directories(self) -> None:
+        staging, destination = self._publication_directories()
+        real_full_fsync = durable_file.full_fsync
+        synchronized: list[tuple[str, int]] = []
+
+        def observe(descriptor: int) -> None:
+            metadata = os.fstat(descriptor)
+            kind = "directory" if stat.S_ISDIR(metadata.st_mode) else "file"
+            synchronized.append((kind, metadata.st_ino))
+            real_full_fsync(descriptor)
+
+        real_rename = durable_file._renameatx_np
+
+        def rename(*arguments: object) -> None:
+            real_rename(*arguments)
+            synchronized.append(("rename", 0))
+
+        with patch.object(durable_file, "full_fsync", side_effect=observe), patch.object(
+            durable_file, "_renameatx_np", side_effect=rename
+        ):
+            self._publish(staging, destination, "event-000.json", b"data")
+        # Exactly the barriers that matter: the bytes before the rename, then
+        # the destination entry and the staging directory's removal.
+        file_inode = (destination / "event-000.json").stat().st_ino
+        self.assertEqual(
+            synchronized,
+            [
+                ("file", file_inode),
+                ("rename", 0),
+                ("directory", destination.stat().st_ino),
+                ("directory", staging.stat().st_ino),
+            ],
+        )
+
+        synchronized.clear()
+        with patch.object(durable_file, "full_fsync", side_effect=observe), patch.object(
+            durable_file, "_renameatx_np", side_effect=rename
+        ):
+            self._publish(staging, staging, "runtime-acceptance.json", b"adapter")
+        adapter_inode = (staging / "runtime-acceptance.json").stat().st_ino
+        self.assertEqual(
+            synchronized,
+            [("file", adapter_inode), ("rename", 0), ("directory", staging.stat().st_ino)],
+        )
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_publication_never_replaces_an_existing_destination(self) -> None:
+        staging, destination = self._publication_directories()
+        existing = destination / "event-000.json"
+        existing.write_bytes(b"existing")
+        existing.chmod(0o600)
+        with patch.object(
+            durable_file, "_write_private_pending_at"
+        ) as staged_write, self.assertRaisesRegex(
+            PublicationError, "private destination already exists"
+        ):
+            self._publish(staging, destination, "event-000.json", b"new")
+        staged_write.assert_not_called()
+        self.assertEqual(existing.read_bytes(), b"existing")
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_publication_rename_keeps_a_destination_that_appears_first(self) -> None:
+        staging, destination = self._publication_directories()
+        existing = destination / "event-000.json"
+        real_rename = durable_file._renameatx_np
+
+        def competing_writer_wins(*arguments: object) -> None:
+            existing.write_bytes(b"winner")
+            existing.chmod(0o600)
+            real_rename(*arguments)
+
+        with patch.object(
+            durable_file, "_renameatx_np", side_effect=competing_writer_wins
+        ), self.assertRaisesRegex(PublicationError, "private destination already exists"):
+            self._publish(staging, destination, "event-000.json", b"loser")
+        self.assertEqual(existing.read_bytes(), b"winner")
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_interrupted_publication_never_exposes_a_partial_destination(self) -> None:
+        staging, destination = self._publication_directories()
+        published = destination / "event-000.json"
+        real_write = durable_file.os.write
+        present: list[bool] = []
+
+        class Interrupted(BaseException):
+            pass
+
+        def interrupt_after_half(descriptor: int, data: object) -> int:
+            payload = bytes(data)
+            present.append(os.path.lexists(published))
+            real_write(descriptor, payload[: len(payload) // 2])
+            present.append(os.path.lexists(published))
+            raise Interrupted
+
+        with patch.object(
+            durable_file.os, "write", side_effect=interrupt_after_half
+        ), self.assertRaises(Interrupted):
+            self._publish(staging, destination, published.name, b'{"complete":true}\n')
+        self.assertEqual(present, [False, False])
+        self.assertFalse(os.path.lexists(published))
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_publication_barrier_failure_after_rename_is_unknown_outcome(self) -> None:
+        staging, destination = self._publication_directories()
+        real_rename = durable_file._renameatx_np
+        real_full_fsync = durable_file.full_fsync
+        renamed = False
+
+        def rename(*arguments: object) -> None:
+            nonlocal renamed
+            real_rename(*arguments)
+            renamed = True
+
+        def fail_directory_after_rename(descriptor: int) -> None:
+            if renamed and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError(errno.EIO, "injected directory full-fsync failure")
+            real_full_fsync(descriptor)
+
+        with patch.object(durable_file, "_renameatx_np", side_effect=rename), patch.object(
+            durable_file, "full_fsync", side_effect=fail_directory_after_rename
+        ), self.assertRaises(durable_file.DurabilityOutcomeUnknown):
+            self._publish(staging, destination, "event-000.json", b"data")
+        self.assertEqual((destination / "event-000.json").read_bytes(), b"data")
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_failed_staging_cleanup_keeps_the_file_and_the_original_cause(self) -> None:
+        staging, destination = self._publication_directories()
+        existing = destination / "event-000.json"
+        real_rename = durable_file._renameatx_np
+
+        def competing_writer_wins(*arguments: object) -> None:
+            existing.write_bytes(b"winner")
+            existing.chmod(0o600)
+            real_rename(*arguments)
+
+        with patch.object(
+            durable_file, "_renameatx_np", side_effect=competing_writer_wins
+        ), patch.object(
+            durable_file,
+            "_remove_created_pending",
+            side_effect=PublicationError("injected staging cleanup failure"),
+        ), self.assertRaisesRegex(
+            PublicationError, "injected staging cleanup failure"
+        ) as raised:
+            self._publish(staging, destination, "event-000.json", b"loser")
+        self.assertRegex(str(raised.exception.__cause__), "private destination already exists")
+        staged = self._staged_names(staging)
+        self.assertEqual(len(staged), 1)
+        self.assertEqual((staging / staged[0]).read_bytes(), b"loser")
+        self.assertEqual(existing.read_bytes(), b"winner")
+
+    def test_staging_name_collision_never_removes_the_other_file(self) -> None:
+        staging, destination = self._publication_directories()
+        fixed = durable_file.uuid.UUID(int=7)
+        foreign = staging / f"{durable_file.FILE_STAGING_PREFIX}{fixed.hex}"
+        foreign.write_bytes(b"not ours")
+        foreign.chmod(0o600)
+        with patch.object(
+            durable_file.uuid, "uuid4", return_value=fixed
+        ), self.assertRaisesRegex(PublicationError, "private pending file already exists"):
+            self._publish(staging, destination, "event-000.json", b"ours")
+        self.assertEqual(foreign.read_bytes(), b"not ours")
+        self.assertFalse((destination / "event-000.json").exists())
+
+    def test_staging_that_vanishes_before_rename_is_a_typed_error(self) -> None:
+        staging, destination = self._publication_directories()
+        inspect = durable_file._inspect_private_pending_at
+
+        def inspect_then_vanish(directory_descriptor: int, name: str, path: Path, **values):
+            opened = inspect(directory_descriptor, name, path, **values)
+            if values["maximum"] is None:
+                # Only the promotion's inspection, after the verified write.
+                os.unlink(name, dir_fd=directory_descriptor)
+            return opened
+
+        with patch.object(
+            durable_file, "_inspect_private_pending_at", side_effect=inspect_then_vanish
+        ), self.assertRaisesRegex(
+            PublicationError, "cannot inspect private pending before promotion"
+        ):
+            self._publish(staging, destination, "event-000.json", b"data")
+        self.assertFalse((destination / "event-000.json").exists())
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_replaced_staging_file_is_never_promoted_as_synchronized(self) -> None:
+        # The rename skips the file barriers only for the inode the staging
+        # write synchronized; a file swapped in under that name is refused.
+        staging, destination = self._publication_directories()
+        write = durable_file._write_private_pending_at
+
+        def write_then_swap(directory_descriptor, name, path, data, *, staging):
+            created = write(directory_descriptor, name, path, data, staging=staging)
+            os.unlink(name, dir_fd=directory_descriptor)
+            descriptor = os.open(
+                name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_descriptor
+            )
+            try:
+                os.write(descriptor, data)
+            finally:
+                os.close(descriptor)
+            return created
+
+        with patch.object(
+            durable_file, "_write_private_pending_at", side_effect=write_then_swap
+        ), self.assertRaisesRegex(
+            PublicationError, "cannot safely clean up failed private pending write"
+        ) as raised:
+            self._publish(staging, destination, "event-000.json", b"data")
+        self.assertRegex(
+            str(raised.exception.__cause__), "private staging file changed before promotion"
+        )
+        self.assertFalse((destination / "event-000.json").exists())
+        # The swapped-in file is not the one this write created, so it stays.
+        staged = self._staged_names(staging)
+        self.assertEqual(len(staged), 1)
+        self.assertEqual((staging / staged[0]).read_bytes(), b"data")
+
+    def test_interrupt_after_the_rename_keeps_the_published_file(self) -> None:
+        staging, destination = self._publication_directories()
+
+        class Interrupted(BaseException):
+            pass
+
+        with patch.object(
+            durable_file, "fsync_locked_directory", side_effect=Interrupted
+        ), self.assertRaises(Interrupted):
+            self._publish(staging, destination, "event-000.json", b"complete")
+        self.assertEqual((destination / "event-000.json").read_bytes(), b"complete")
+        self.assertEqual(self._staged_names(staging), [])
+
+    def test_failed_cleanup_after_an_interrupt_keeps_the_interrupt(self) -> None:
+        class Interrupted(BaseException):
+            pass
+
+        real_write = durable_file.os.write
+
+        def interrupt_after_half(descriptor: int, data: object) -> int:
+            payload = bytes(data)
+            real_write(descriptor, payload[: len(payload) // 2])
+            raise Interrupted
+
+        for case, interruption in (
+            ("staging write", patch.object(durable_file.os, "write", side_effect=interrupt_after_half)),
+            ("rename", patch.object(durable_file, "_renameatx_np", side_effect=Interrupted)),
+        ):
+            with self.subTest(case=case):
+                staging, destination = self._publication_directories()
+                with interruption, patch.object(
+                    durable_file,
+                    "_remove_created_pending",
+                    side_effect=PublicationError("injected staging cleanup failure"),
+                ), self.assertRaises(Interrupted) as raised:
+                    self._publish(staging, destination, "event-000.json", b"interrupted")
+                self.assertIn(
+                    "private staging cleanup failed: injected staging cleanup failure",
+                    getattr(raised.exception, "__notes__", []),
+                )
+                self.assertEqual(len(self._staged_names(staging)), 1)
+                self.assertFalse((destination / "event-000.json").exists())
+                for name in self._staged_names(staging):
+                    (staging / name).unlink()
+                destination.rmdir()
+                staging.rmdir()
+
+    def test_interrupted_pending_write_keeps_its_recovery_semantics(self) -> None:
+        # Only staging writes remove their file on an interrupt; an ordinary
+        # pending write is left for its owner's recovery as before.
+        pending = self.root / "attempt.pending"
+        real_write = durable_file.os.write
+
+        class Interrupted(BaseException):
+            pass
+
+        def interrupt_after_half(descriptor: int, data: object) -> int:
+            payload = bytes(data)
+            real_write(descriptor, payload[: len(payload) // 2])
+            raise Interrupted
+
+        with patch.object(
+            durable_file.os, "write", side_effect=interrupt_after_half
+        ), self.assertRaises(Interrupted):
+            durable_file.write_private_pending(pending, b"recovery bytes")
+        self.assertEqual(pending.read_bytes(), b"recovery bytes"[:7])
+
+    def test_rooted_lock_with_parent_yields_the_verified_unlocked_parent(self) -> None:
+        trusted = self.root / "trusted"
+        ancestor = trusted / "ancestor"
+        target = ancestor / "target"
+        target.mkdir(parents=True, mode=0o700)
+        ancestor.chmod(0o700)
+        with durable_file.exclusive_rooted_directory_lock_with_parent(
+            trusted, target, require_private=True
+        ) as (parent_descriptor, descriptor):
+            self.assertEqual(os.fstat(parent_descriptor).st_ino, ancestor.stat().st_ino)
+            self.assertEqual(os.fstat(descriptor).st_ino, target.stat().st_ino)
+            with self.assertRaisesRegex(PublicationError, "already held"):
+                with durable_file.exclusive_rooted_directory_lock(trusted, target):
+                    self.fail("the locked directory was locked twice")
+            with durable_file.exclusive_rooted_directory_lock(trusted, ancestor):
+                pass
+
+        displaced = trusted / "ancestor-displaced"
+        before = len(os.listdir("/dev/fd"))
+        with self.assertRaises(durable_file.RootedDirectoryChanged):
+            with durable_file.exclusive_rooted_directory_lock_with_parent(
+                trusted, target
+            ):
+                ancestor.rename(displaced)
+                ancestor.mkdir(mode=0o700)
+                (displaced / target.name).rename(ancestor / target.name)
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+        ancestor.chmod(0o755)
+        with self.assertRaisesRegex(PublicationError, "mode is not 0700"):
+            with durable_file.exclusive_rooted_directory_lock_with_parent(
+                trusted, target, require_private=True
+            ):
+                self.fail("a non-private parent was accepted")
+        with self.assertRaisesRegex(PublicationError, "no parent below its root"):
+            with durable_file.exclusive_rooted_directory_lock_with_parent(
+                trusted, trusted
+            ):
+                self.fail("the trusted root was given a parent")
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
+
 
 if __name__ == "__main__":
     unittest.main()

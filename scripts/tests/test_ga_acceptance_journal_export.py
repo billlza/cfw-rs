@@ -17,6 +17,7 @@ from scripts import ga_acceptance_environment as ga_environment
 from scripts import ga_acceptance_journal_export as journal_export
 from scripts.publication.common import PublicationError, canonical_json
 from scripts.publication.durable_file import (
+    FILE_STAGING_PREFIX,
     DurabilityOutcomeUnknown,
     RootedDirectoryChanged,
 )
@@ -876,6 +877,16 @@ class GAAcceptanceJournalExportTests(unittest.TestCase):
             "name is unsafe",
         ):
             self.fixture.verify()
+
+    def test_runtime_staging_leftover_does_not_block_verification(self) -> None:
+        # GA runtime evidence stages its files beside this container; one left
+        # by a crash was never published, and verification must not need it gone.
+        exported = self.fixture.export()
+        leftover = self.fixture.paths.acceptance_root / f"{FILE_STAGING_PREFIX}{'0' * 32}"
+        leftover.write_bytes(b'{"sequence":')
+        leftover.chmod(0o600)
+        self.assertEqual(self.fixture.verify(), exported)
+        self.assertEqual(leftover.read_bytes(), b'{"sequence":')
 
     def test_published_container_and_pending_container_cannot_coexist(self) -> None:
         self.fixture.export()

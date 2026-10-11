@@ -29,7 +29,8 @@ import getpass
 import ipaddress
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import platform
 import pwd
 import re
 import selectors
@@ -82,6 +83,7 @@ if __package__:
     )
     from .publication.common import (
         PublicationError,
+        bounded_text,
         canonical_json,
         failure_diagnostic,
         read_regular,
@@ -97,11 +99,11 @@ if __package__:
         DurabilityOutcomeUnknown,
         RootedDirectoryChanged,
         exclusive_rooted_directory_lock,
+        exclusive_rooted_directory_lock_with_parent,
         publish_private_directory_locked,
-        promote_private_pending,
+        publish_private_file_locked,
         read_private_directory_contents_locked,
         read_private_pending_locked,
-        write_private_pending_locked,
     )
     from .publication.graph_model import load_pins
     from .publication.release_environment import release_tool_environment
@@ -156,6 +158,7 @@ else:
     )
     from scripts.publication.common import (
         PublicationError,
+        bounded_text,
         canonical_json,
         failure_diagnostic,
         read_regular,
@@ -174,11 +177,11 @@ else:
         DurabilityOutcomeUnknown,
         RootedDirectoryChanged,
         exclusive_rooted_directory_lock,
+        exclusive_rooted_directory_lock_with_parent,
         publish_private_directory_locked,
-        promote_private_pending,
+        publish_private_file_locked,
         read_private_directory_contents_locked,
         read_private_pending_locked,
-        write_private_pending_locked,
     )
     from scripts.publication.graph_model import load_pins
     from scripts.publication.release_environment import release_tool_environment
@@ -298,7 +301,6 @@ PACKET_EXERCISE_SECONDS: Final = 35
 
 
 MAX_RUNTIME_FILES: Final = 32
-ADAPTER_PENDING_NAME: Final = ".runtime-acceptance.json.pending"
 TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,63}$")
 INTERFACE_RE: Final = re.compile(r"^(?:utun[0-9]{1,3}|en[0-9]{1,2}|pktap,all)$")
 # contracts/tunnel-address-plan-v1.json ipv4DnsPeer and ipv6DnsPeer. The
@@ -346,8 +348,10 @@ TRAFFIC_POLICY: Final = {
         "expected_records": 3,
     },
 }
-PACKET_SENDER_PREFIX: Final = (
-    sys.executable,
+# The sender's arguments after its interpreter. The collector runs the sender
+# with the release Python that the collection intent records; the artifact
+# checkout is the working directory.
+PACKET_SENDER_COMMAND: Final = (
     "-I",
     "-S",
     "-B",
@@ -355,6 +359,9 @@ PACKET_SENDER_PREFIX: Final = (
     "error",
     "scripts/physical_capture/packet_sender.py",
 )
+# release_python_runtime admits only a pinned CPython 3 release version.
+PYTHON_VERSION_RE: Final = re.compile(r"3\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+MAX_COLLECTOR_PATH_LENGTH: Final = 1024
 PACKET_STAGES: Final = ("start", "target", "end")
 PACKET_EVIDENCE_FLAG: Final = "--physical-packet-evidence-v5"
 SERVICE_MAINTENANCE_FLAG: Final = "--service-maintenance-v2"
@@ -496,7 +503,7 @@ def _fixed_path_present(path: Path) -> bool:
 
 
 def _published_runtime_outputs(repository: Path) -> tuple[str, ...]:
-    """Name each existing raw tree, adapter or pending adapter.
+    """Name each existing raw tree or adapter.
 
     collect admission and recover share this one predicate, so neither starts
     a runtime command while any published output exists.
@@ -504,14 +511,23 @@ def _published_runtime_outputs(repository: Path) -> tuple[str, ...]:
 
     acceptance_path, raw_root = _fixed_paths(repository)
     return tuple(
-        path.name
-        for path in (raw_root, acceptance_path, acceptance_path.parent / ADAPTER_PENDING_NAME)
-        if _fixed_path_present(path)
+        path.name for path in (raw_root, acceptance_path) if _fixed_path_present(path)
     )
 
 
-def _dmg_verifier_command(repository: Path) -> list[str]:
-    operator_repository = Path(__file__).resolve().parent.parent
+def _operator_root() -> Path:
+    """The operator checkout whose release tooling runs this module."""
+
+    return Path(__file__).resolve().parent.parent
+
+
+def _dmg_verifier_command(operator_root: Path, repository: Path) -> list[str]:
+    """Run the operator's DMG verifier against the artifact checkout's DMG set.
+
+    The prefix up to ``operator_root`` is the operator's launcher; the rest are
+    the command's own arguments.
+    """
+
     return [
         "/bin/bash",
         "-p",
@@ -521,7 +537,7 @@ def _dmg_verifier_command(repository: Path) -> list[str]:
         'cfw_run_release_python_script "$1" '
         '"$1/scripts/release_artifact_set_cli.py" "${@:2}"',
         "ga-dmg-verification",
-        str(operator_repository),
+        str(operator_root),
         "verify-dmg",
         "--directory",
         str(repository / DMG_SET_RELATIVE),
@@ -1177,6 +1193,7 @@ def _validate_exact_dmg_install(
     repository: Path,
     expected: dict[str, Any],
     prepackage_stage_verifier: PrepackageStageVerifier,
+    operator_root: Path,
 ) -> None:
     document = _check_document(
         value,
@@ -1250,7 +1267,7 @@ def _validate_exact_dmg_install(
         raise _error("raw DMG Gatekeeper output is not notarized acceptance")
     verification = _command(
         commands["dmg_set_verify"],
-        expected_argv=_dmg_verifier_command(repository),
+        expected_argv=_dmg_verifier_command(operator_root, repository),
         expected_exit=0,
         label="DMG contained-app byte-proof observation",
         maximum_seconds=DMG_BYTE_PROOF_TIMEOUT_SECONDS,
@@ -1624,7 +1641,8 @@ def _validate_legacy_cfw(
     repository: Path,
     expected: dict[str, Any],
     shutdown_guards: tuple[dict[str, Any], dict[str, Any]],
-) -> bytes:
+    intent: dict[str, Any],
+) -> None:
     document = _check_document(
         value,
         "legacy_cfw_preserved",
@@ -1644,11 +1662,6 @@ def _validate_legacy_cfw(
         or (before, after) != shutdown_guards
     ):
         raise _error("legacy CFW preservation is not bound to the exact install/runtime run")
-    intent, collection = _load_collection_intent(
-        repository, repository.joinpath(*COLLECTION_RELATIVE.parts)
-    )
-    if collection != document["collection"]:
-        raise _error("runtime CFW baseline belongs to a different collection")
     baseline = _collection_guard_baseline(repository, intent, expected)
     if before != baseline:
         raise _error("runtime CFW baseline differs from the durable collection intent")
@@ -1658,7 +1671,6 @@ def _validate_legacy_cfw(
         raise _error(
             "legacy Clash for Windows state changed during GA runtime acceptance"
         ) from error
-    return canonical_json(intent)
 
 
 def _traffic_descriptor(
@@ -1775,6 +1787,7 @@ def _endpoint(value: object, check_id: str) -> dict[str, Any]:
 
 
 def _packet_sender_argv(
+    interpreter: str,
     *,
     check_id: str,
     stage: str,
@@ -1783,7 +1796,8 @@ def _packet_sender_argv(
 ) -> list[str]:
     policy = TRAFFIC_POLICY[check_id]
     command = [
-        *PACKET_SENDER_PREFIX,
+        interpreter,
+        *PACKET_SENDER_COMMAND,
         "--case",
         policy["case_id"],
         "--stage",
@@ -1976,6 +1990,7 @@ def _validate_traffic(
     check_id: str,
     value: dict[str, Any],
     pcap: FileSnapshot,
+    interpreter: str,
 ) -> set[str]:
     document = _check_document(
         value,
@@ -2027,6 +2042,7 @@ def _validate_traffic(
         receipt = _command(
             send_values[index],
             expected_argv=_packet_sender_argv(
+                interpreter,
                 check_id=check_id,
                 stage=stage,
                 token=tokens[stage],
@@ -2175,11 +2191,20 @@ def _validate_raw_evidence(
     collection = dict(next(iter(collections)))
     if collection["ga_environment_sha256"] != expected["ga_environment_sha256"]:
         raise _error("GA runtime checks bind a different fixed GA environment")
+    intent, intent_collection = _load_collection_intent(
+        repository, repository.joinpath(*COLLECTION_RELATIVE.parts)
+    )
+    if intent_collection != collection:
+        raise _error("GA runtime checks belong to a different collection")
+    # Receipts embed the collector's operator checkout and release Python;
+    # they are checked against the collection's own record of both.
+    collector = intent["collector"]
     _validate_exact_dmg_install(
         documents["exact-dmg-install.json"],
         repository,
         expected,
         prepackage_stage_verifier,
+        Path(collector["operator_root"]),
     )
     _validate_launch(documents["launch.json"])
     _validate_service_registration(documents["service-registration.json"])
@@ -2187,11 +2212,12 @@ def _validate_raw_evidence(
     _validate_network_extension(documents["network-extension.json"], documents)
     _validate_high_risk_rejections(documents["high-risk-rejections.json"])
     shutdown_guards = _validate_shutdown_restore(documents["shutdown-restore.json"])
-    collection_intent = _validate_legacy_cfw(
+    _validate_legacy_cfw(
         documents["legacy-cfw-preserved.json"],
         repository,
         expected,
         shutdown_guards,
+        intent,
     )
     seen_tokens: set[str] = set()
     host_sessions = {
@@ -2200,7 +2226,12 @@ def _validate_raw_evidence(
     for check_id in TRAFFIC_CHECKS:
         filename = f"{check_id.replace('_', '-')}.json"
         pcap_name = f"{check_id.replace('_', '-')}.pcap"
-        tokens = _validate_traffic(check_id, documents[filename], snapshots[pcap_name])
+        tokens = _validate_traffic(
+            check_id,
+            documents[filename],
+            snapshots[pcap_name],
+            collector["python"]["executable"],
+        )
         expected_tokens = {
             _derive_capture_token(collection["challenge"], check_id, stage)
             for stage in PACKET_STAGES
@@ -2225,7 +2256,7 @@ def _validate_raw_evidence(
         if check_id in TRAFFIC_CHECKS:
             records.append(snapshots[f"{check_id.replace('_', '-')}.pcap"].record())
         artifacts[check_id] = records
-    return artifacts, collection, collection_intent
+    return artifacts, collection, canonical_json(intent)
 
 
 def _adapter_document(
@@ -2414,48 +2445,42 @@ def seal_ga_runtime_acceptance(
     )
     encoded = canonical_json(document)
     parent = acceptance_path.parent
-    pending = parent / ADAPTER_PENDING_NAME
     try:
         with exclusive_rooted_directory_lock(
             repository,
             parent,
             require_private=True,
         ) as descriptor:
-            destination_exists = os.path.lexists(acceptance_path)
-            pending_exists = os.path.lexists(pending)
-            if destination_exists and pending_exists:
-                raise _error("GA runtime adapter and pending adapter both exist")
-            if destination_exists:
+            if _fixed_path_present(acceptance_path):
                 _private_regular_metadata(acceptance_path)
+                # A retry after an unknown rename outcome must make the
+                # adapter and its directory entry durable before success.
                 try:
-                    observed = read_regular(acceptance_path, MAX_JSON_BYTES)
+                    observed = read_private_pending_locked(
+                        descriptor,
+                        parent,
+                        acceptance_path.name,
+                        MAX_JSON_BYTES,
+                    )
                 except PublicationError as error:
-                    raise _error("existing GA runtime adapter cannot be reopened") from error
+                    raise _error(
+                        "existing GA runtime adapter cannot be durably reopened"
+                    ) from error
                 if observed != encoded:
                     raise _error(
                         "refusing to replace a different immutable GA runtime adapter"
                     )
             else:
-                if pending_exists:
-                    try:
-                        observed = read_private_pending_locked(
-                            descriptor,
-                            parent,
-                            ADAPTER_PENDING_NAME,
-                            len(encoded),
-                        )
-                    except PublicationError as error:
-                        raise _error("pending GA runtime adapter cannot be recovered") from error
-                    if observed != encoded:
-                        raise _error("pending GA runtime adapter binds different evidence")
-                else:
-                    write_private_pending_locked(
-                        descriptor,
-                        parent,
-                        ADAPTER_PENDING_NAME,
-                        encoded,
-                    )
-                promote_private_pending(pending, acceptance_path)
+                # The adapter is derived from the reopened evidence, so a
+                # retry writes the same bytes; it appears only complete.
+                publish_private_file_locked(
+                    staging_descriptor=descriptor,
+                    staging_directory=parent,
+                    destination_descriptor=descriptor,
+                    destination_directory=parent,
+                    name=acceptance_path.name,
+                    data=encoded,
+                )
     except (DurabilityOutcomeUnknown, RootedDirectoryChanged):
         raise
     except PublicationError as error:
@@ -2469,8 +2494,8 @@ def seal_ga_runtime_acceptance(
     )
 
 
-COLLECTION_DOCUMENT: Final = "cfm-ga-runtime-collection-intent-v3"
-COLLECTION_INTENT_SCHEMA_VERSION: Final = 3
+COLLECTION_DOCUMENT: Final = "cfm-ga-runtime-collection-intent-v4"
+COLLECTION_INTENT_SCHEMA_VERSION: Final = 4
 COLLECTION_EVENT_DOCUMENT: Final = "cfm-ga-runtime-collection-event-v2"
 COLLECTION_SUCCESS_STEPS: Final = (
     "dmg-gatekeeper",
@@ -2792,6 +2817,8 @@ class ProductionCollectorRuntime:
         self,
         check_id: str,
         tokens: dict[str, str],
+        *,
+        interpreter: str,
     ) -> tuple[dict[str, Any], bytes]:
         exercise_deadline = time.monotonic() + PACKET_EXERCISE_SECONDS
 
@@ -2862,6 +2889,7 @@ class ProductionCollectorRuntime:
                 raise _error("tcpdump did not reach its bounded listening state")
             for index, stage in enumerate(PACKET_STAGES):
                 argv = _packet_sender_argv(
+                    interpreter,
                     check_id=check_id,
                     stage=stage,
                     token=tokens[stage],
@@ -2920,6 +2948,7 @@ class ProductionCollectorRuntime:
                     _command(
                         receipt,
                         expected_argv=_packet_sender_argv(
+                            interpreter,
                             check_id=check_id,
                             stage=stage,
                             token=tokens[stage],
@@ -3068,8 +3097,13 @@ class ProductionCollectorRuntime:
         self,
         check_id: str,
         tokens: dict[str, str],
+        *,
+        interpreter: str,
     ) -> tuple[dict[str, Any], bytes]:
-        """Capture traffic only while the authenticated signed Host reports test state."""
+        """Capture traffic only while the authenticated signed Host reports test state.
+
+        Each sender runs with ``interpreter``, the collection's recorded Python.
+        """
 
         captured: dict[str, object] = {}
 
@@ -3077,7 +3111,9 @@ class ProductionCollectorRuntime:
             return PacketCaptureDisposition.COMPLETE
 
         def exercise_test(_test: object) -> PacketCaptureDisposition:
-            traffic, capture = self._capture_traffic_bytes(check_id, tokens)
+            traffic, capture = self._capture_traffic_bytes(
+                check_id, tokens, interpreter=interpreter
+            )
             captured["traffic"] = traffic
             captured["capture"] = capture
             return PacketCaptureDisposition.COMPLETE
@@ -3196,14 +3232,73 @@ def _run_collector_command(
     )
 
 
+def _collector_path(value: object, label: str) -> str:
+    try:
+        text = bounded_text(value, label, maximum=MAX_COLLECTOR_PATH_LENGTH)
+    except PublicationError as error:
+        raise _error(f"{label} is not a bounded path") from error
+    path = PurePosixPath(text)
+    if (
+        not path.is_absolute()
+        or text.startswith("//")
+        or path.as_posix() != text
+        or ".." in path.parts
+    ):
+        raise _error(f"{label} is not a normalized absolute path")
+    return text
+
+
+def _collector(value: object, label: str) -> dict[str, Any]:
+    """Validate the record of where and with which Python a collection ran.
+
+    Only the shape is checked here. The receipts must match this record; the
+    record need not match the verifier, whose checkout or release Python may
+    be newer. The closed launcher admitted this Python when it collected.
+    """
+
+    collector = require_exact_keys(value, {"operator_root", "python"}, label)
+    python = require_exact_keys(
+        collector["python"], {"executable", "version"}, f"{label} Python"
+    )
+    _collector_path(collector["operator_root"], f"{label} operator root")
+    _collector_path(python["executable"], f"{label} Python executable")
+    if (
+        not isinstance(python["version"], str)
+        or PYTHON_VERSION_RE.fullmatch(python["version"]) is None
+    ):
+        raise _error(f"{label} Python version is not a release Python version")
+    return collector
+
+
+def _collector_identity(
+    executable: str, operator_root: Path, version: str
+) -> dict[str, Any]:
+    """Record the operator checkout and release Python running a collection.
+
+    ``executable`` is the exact ``sys.executable`` string that every sender
+    argv starts with. The closed launcher already admitted that Python, so
+    the record names it rather than proving it again.
+    """
+
+    return _collector(
+        {
+            "operator_root": str(operator_root),
+            "python": {"executable": executable, "version": version},
+        },
+        "GA runtime collector identity",
+    )
+
+
 def _collection_intent(
     expected: dict[str, Any],
     collection: dict[str, str],
     baseline: dict[str, Any],
+    collector: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "cfw_guard_baseline": _guard(baseline, "collection intent baseline"),
         "collection": collection,
+        "collector": collector,
         "document": COLLECTION_DOCUMENT,
         "journal_bindings": {
             key: expected[key]
@@ -3231,6 +3326,7 @@ def _publish_collection_intent(
     expected: dict[str, Any],
     collection: dict[str, str],
     baseline: dict[str, Any],
+    collector: dict[str, Any],
 ) -> Path:
     path = repository.joinpath(*COLLECTION_RELATIVE.parts)
     parent = path.parent
@@ -3245,7 +3341,7 @@ def _publish_collection_intent(
             path.name,
             {
                 "intent.json": canonical_json(
-                    _collection_intent(expected, collection, baseline)
+                    _collection_intent(expected, collection, baseline, collector)
                 )
             },
         )
@@ -3262,9 +3358,12 @@ def _append_collection_event(
     command: list[str] | None = None,
     expected_sequence: int | None = None,
 ) -> None:
-    with exclusive_rooted_directory_lock(
+    # The collection holds only its intent and events, so each event is staged
+    # in the unlocked acceptance root and renamed into the locked collection
+    # only when complete; a crash can leave only an unread staging file there.
+    with exclusive_rooted_directory_lock_with_parent(
         repository, collection_path, require_private=True
-    ) as descriptor:
+    ) as (staging_descriptor, descriptor):
         names = os.listdir(descriptor)
         events = sorted(name for name in names if re.fullmatch(r"event-[0-9]{3}\.json", name))
         if expected_sequence is not None and len(events) != expected_sequence:
@@ -3284,11 +3383,13 @@ def _append_collection_event(
             "sequence": len(events),
             "step": step,
         }
-        write_private_pending_locked(
-            descriptor,
-            collection_path,
-            name,
-            canonical_json(document),
+        publish_private_file_locked(
+            staging_descriptor=staging_descriptor,
+            staging_directory=collection_path.parent,
+            destination_descriptor=descriptor,
+            destination_directory=collection_path,
+            name=name,
+            data=canonical_json(document),
         )
 
 
@@ -3590,9 +3691,12 @@ def collect_ga_runtime_acceptance(
     # Installation and collection are separate transactions. Validate the closed
     # installation history, then bind this run to the current complete CFW guard.
     _installed_guard_baseline(repository, initial)
+    collector = _collector_identity(
+        sys.executable, _operator_root(), platform.python_version()
+    )
     before_guard = _guard(selected_runtime.capture_guard(), "collection baseline")
     collection_path = _publish_collection_intent(
-        repository, initial, collection, before_guard
+        repository, initial, collection, before_guard, collector
     )
     mutation_started = False
     raw_publication_started = False
@@ -3617,7 +3721,9 @@ def collect_ga_runtime_acceptance(
             step="dmg-gatekeeper",
             argv=gatekeeper_argv,
         )
-        dmg_verify_argv = _dmg_verifier_command(repository)
+        dmg_verify_argv = _dmg_verifier_command(
+            Path(collector["operator_root"]), repository
+        )
         dmg_verify = _step_command(
             repository,
             collection_path,
@@ -3753,7 +3859,9 @@ def collect_ga_runtime_acceptance(
                 phase="started",
                 step=f"traffic-{check_id}",
             )
-            traffic, pcap = selected_runtime.capture_traffic(check_id, tokens)
+            traffic, pcap = selected_runtime.capture_traffic(
+                check_id, tokens, interpreter=collector["python"]["executable"]
+            )
             _append_collection_event(
                 repository,
                 collection_path,
@@ -4011,6 +4119,7 @@ def _load_collection_intent(
         {
             "cfw_guard_baseline",
             "collection",
+            "collector",
             "document",
             "journal_bindings",
             "package_bindings",
@@ -4033,6 +4142,7 @@ def _load_collection_intent(
     ):
         raise _error("GA runtime collection intent identity is invalid")
     _guard(intent["cfw_guard_baseline"], "collection intent baseline")
+    _collector(intent["collector"], "GA runtime collection intent collector")
     return intent, collection
 
 
@@ -4267,8 +4377,7 @@ def resume_ga_runtime_seal(
         repository, collection, canonical_json(intent)
     )
     if observed == COLLECTION_STEP_PAIRS:
-        pending = acceptance_path.parent / ADAPTER_PENDING_NAME
-        if _fixed_path_present(acceptance_path) or _fixed_path_present(pending):
+        if _fixed_path_present(acceptance_path):
             raise _error(
                 "GA runtime adapter exists before its raw_published marker; "
                 "refusing an inconsistent collection"
@@ -4297,7 +4406,7 @@ def resume_ga_runtime_seal(
 
 
 def self_check() -> None:
-    repository = Path(__file__).resolve().parent.parent
+    repository = _operator_root()
     runner = repository / "scripts/run_ga_runtime_acceptance.sh"
     try:
         runner_metadata = runner.lstat()
@@ -4324,8 +4433,8 @@ def self_check() -> None:
             2,
             "cfm-ga-runtime-check-v2",
             "cfm-ga-command-observation-v2",
-            "cfm-ga-runtime-collection-intent-v3",
-            3,
+            "cfm-ga-runtime-collection-intent-v4",
+            4,
             "cfm-ga-runtime-collection-event-v2",
         )
         or ACCEPTANCE_RELATIVE

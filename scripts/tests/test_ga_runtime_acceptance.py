@@ -10,9 +10,11 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Iterator
@@ -76,7 +78,7 @@ from scripts.physical_capture.packet_host import (
     PacketHostReceipt,
     PacketHostSnapshot,
 )
-from scripts.publication import common
+from scripts.publication import common, durable_file
 from scripts.publication.common import PublicationError, canonical_json, sha256_bytes
 from scripts.publication.durable_file import DurabilityOutcomeUnknown
 from scripts import dormant_app_install
@@ -112,6 +114,24 @@ APP_TREE = "6" * 64
 SESSION_ID = "12345678-1234-4234-8234-123456789abc"
 CHALLENGE = base64.urlsafe_b64encode(b"C" * 32).decode("ascii").rstrip("=")
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
+# The collection intent's record of the checkout and Python that collected:
+# this test checkout and the interpreter running the tests.
+COLLECTOR = {
+    "operator_root": str(REPOSITORY),
+    "python": {"executable": sys.executable, "version": platform.python_version()},
+}
+# Another checkout and Python than the ones verifying, as after an operator
+# update or a release Python pin bump between collection and sealing.
+OTHER_COLLECTOR = {
+    "operator_root": "/Volumes/Release/collected-operator",
+    "python": {
+        "executable": (
+            "/opt/homebrew/Cellar/python@3.14/3.14.0/Frameworks/"
+            "Python.framework/Versions/3.14/bin/python3.14"
+        ),
+        "version": "3.14.0",
+    },
+}
 STEP_EVENTS = [
     (phase, step)
     for step in COLLECTION_SUCCESS_STEPS
@@ -503,6 +523,34 @@ def collection_events(repository: Path) -> list[tuple[str, str]]:
         for path in sorted(root.glob("event-*.json"))
     )
     return [(document["phase"], document["step"]) for document in documents]
+
+
+class _SimulatedTermination(BaseException):
+    """Ends a write like ^C or a forced kill: no ``except Exception`` runs."""
+
+
+@contextmanager
+def interrupted_write(payload_marker: bytes, final: Path) -> Iterator[list[bool]]:
+    """Write half of the first payload holding ``payload_marker``, then stop.
+
+    The yielded list records whether ``final`` existed when that payload's
+    bytes were being written and right after the half write.
+    """
+
+    real_write = os.write
+    final_present: list[bool] = []
+
+    def write(descriptor: int, data: Any) -> int:
+        payload = bytes(data)
+        if final_present or payload_marker not in payload:
+            return real_write(descriptor, data)
+        final_present.append(os.path.lexists(final))
+        real_write(descriptor, payload[: len(payload) // 2])
+        final_present.append(os.path.lexists(final))
+        raise _SimulatedTermination
+
+    with patch.object(os, "write", side_effect=write):
+        yield final_present
 
 
 def host_observation(case_id: str, *, stop_cleanup: bool = False) -> dict[str, Any]:
@@ -906,7 +954,7 @@ class RuntimeFixture:
                     }
                 )
             argv = [
-                os.sys.executable,
+                COLLECTOR["python"]["executable"],
                 "-I",
                 "-S",
                 "-B",
@@ -1000,7 +1048,7 @@ class RuntimeFixture:
                     stderr="accepted\nsource=Notarized Developer ID\n",
                 ),
                 "dmg_set_verify": command(
-                    ga_runtime._dmg_verifier_command(self.repository),
+                    ga_runtime._dmg_verifier_command(REPOSITORY, self.repository),
                     stdout=(
                         f"DMG release set verified: "
                         f"{self.repository / ga_runtime.DMG_SET_RELATIVE}\n"
@@ -1177,6 +1225,7 @@ class RuntimeFixture:
                 "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
                 "session_id": SESSION_ID,
             },
+            "collector": copy.deepcopy(COLLECTOR),
             "document": COLLECTION_DOCUMENT,
             "journal_bindings": {
                 key: DIGESTS[key]
@@ -1213,6 +1262,27 @@ class RuntimeFixture:
         path = self.raw_root / name
         path.write_bytes(canonical_json(self.documents[name]))
         path.chmod(0o600)
+
+    def rebind_receipts(self, collector: dict[str, Any]) -> None:
+        """Rewrite the receipts that embed the collector's checkout and Python."""
+
+        verification = self.documents["exact-dmg-install.json"]["commands"][
+            "dmg_set_verify"
+        ]
+        verification["argv"] = ga_runtime._dmg_verifier_command(
+            Path(collector["operator_root"]), self.repository
+        )
+        for check_id in TRAFFIC_CHECKS:
+            document = self.documents[f"{check_id.replace('_', '-')}.json"]
+            for receipt in document["send_commands"]:
+                receipt["argv"][0] = collector["python"]["executable"]
+        self.write_all()
+
+    def write_intent_collector(self, collector: object) -> None:
+        path = self.collection_root / "intent.json"
+        intent = json.loads(path.read_text(encoding="utf-8"))
+        intent["collector"] = copy.deepcopy(collector)
+        path.write_bytes(canonical_json(intent))
 
     def remove_unsealed_raw_tree(self) -> None:
         for name in sorted(os.listdir(self.raw_root)):
@@ -1298,7 +1368,9 @@ class GARuntimeDmgLauncherTests(unittest.TestCase):
         with patch.object(
             ga_runtime, "__file__", str(self.operator / "scripts/ga_runtime_acceptance.py")
         ):
-            argv = ga_runtime._dmg_verifier_command(self.artifact)
+            argv = ga_runtime._dmg_verifier_command(
+                ga_runtime._operator_root(), self.artifact
+            )
         self.assertEqual(argv[:3], ["/bin/bash", "-p", "-c"])
         self.assertEqual(
             argv[4:],
@@ -1419,8 +1491,8 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
                 2,
                 "cfm-ga-runtime-check-v2",
                 "cfm-ga-command-observation-v2",
-                "cfm-ga-runtime-collection-intent-v3",
-                3,
+                "cfm-ga-runtime-collection-intent-v4",
+                4,
                 "cfm-ga-runtime-collection-event-v2",
             ),
         )
@@ -1624,6 +1696,25 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
             self.fixture.seal()
         self.assertFalse(self.fixture.acceptance.exists())
 
+    def test_existing_adapter_that_cannot_be_made_durable_is_refused(self) -> None:
+        self.fixture.seal()
+        adapter = self.fixture.acceptance.stat()
+        real_full_fsync = durable_file.full_fsync
+
+        def fail_adapter(descriptor: int) -> None:
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) == (adapter.st_dev, adapter.st_ino):
+                raise OSError(5, "injected adapter full-fsync failure")
+            real_full_fsync(descriptor)
+
+        with patch.object(
+            durable_file, "full_fsync", side_effect=fail_adapter
+        ), self.assertRaisesRegex(
+            GARuntimeAcceptanceError, "existing GA runtime adapter cannot be durably reopened"
+        ):
+            self.fixture.seal()
+        self.assertEqual(self.fixture.acceptance.stat().st_ino, adapter.st_ino)
+
     def test_v2_collection_intent_requires_its_original_frozen_verifier(self) -> None:
         path = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts) / "intent.json"
         legacy = json.loads(path.read_text(encoding="utf-8"))
@@ -1637,6 +1728,135 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
             self.fixture.seal()
         self.assertEqual(path.read_bytes(), data)
         self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_v3_collection_intent_requires_its_original_frozen_verifier(self) -> None:
+        path = self.fixture.collection_root / "intent.json"
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        del legacy["collector"]
+        legacy["document"] = "cfm-ga-runtime-collection-intent-v3"
+        legacy["schema_version"] = 3
+        data = canonical_json(legacy)
+        path.write_bytes(data)
+        with self.assertRaisesRegex(PublicationError, "unexpected field set"):
+            self.fixture.seal()
+        self.assertEqual(path.read_bytes(), data)
+        self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_v3_document_with_a_collector_is_still_refused(self) -> None:
+        path = self.fixture.collection_root / "intent.json"
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        legacy["document"] = "cfm-ga-runtime-collection-intent-v3"
+        legacy["schema_version"] = 3
+        path.write_bytes(canonical_json(legacy))
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError, "collection intent identity is invalid"
+        ):
+            self.fixture.seal()
+        self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_evidence_from_another_operator_root_and_python_seals(self) -> None:
+        # A later operator checkout or Python pin bump must not invalidate
+        # evidence: receipts are checked against the collection's own record.
+        collector = copy.deepcopy(OTHER_COLLECTOR)
+        self.assertNotEqual(collector["operator_root"], str(ga_runtime._operator_root()))
+        self.assertNotEqual(collector["python"]["executable"], os.sys.executable)
+        self.fixture.rebind_receipts(collector)
+        self.fixture.write_intent_collector(collector)
+        result = self.fixture.seal()
+        self.assertEqual(result, self.fixture.validate())
+
+    def test_receipts_must_match_the_recorded_collector(self) -> None:
+        def other_operator(collector: dict[str, Any]) -> None:
+            collector["operator_root"] = "/Volumes/Release/another-operator"
+
+        def other_python(collector: dict[str, Any]) -> None:
+            collector["python"]["executable"] = (
+                "/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/"
+                "Python.framework/Versions/3.13/bin/python3.13"
+            )
+
+        dmg_error = "DMG contained-app byte-proof observation command identity"
+        sender_error = "dns_traffic start traffic send command command identity"
+        # Receipts from another collector, and receipts naming this verifier's
+        # own checkout or Python, are refused unless the record names them.
+        for receipts, mutate, error in (
+            (OTHER_COLLECTOR, other_operator, dmg_error),
+            (OTHER_COLLECTOR, other_python, sender_error),
+            (COLLECTOR, other_operator, dmg_error),
+            (COLLECTOR, other_python, sender_error),
+        ):
+            with self.subTest(receipts=receipts["operator_root"], case=mutate.__name__):
+                fixture = RuntimeFixture()
+                self.addCleanup(fixture.cleanup)
+                fixture.rebind_receipts(receipts)
+                recorded = copy.deepcopy(receipts)
+                mutate(recorded)
+                fixture.write_intent_collector(recorded)
+                with self.assertRaisesRegex(GARuntimeAcceptanceError, error):
+                    fixture.seal()
+                self.assertFalse(fixture.acceptance.exists())
+
+    def test_collector_record_is_a_normalized_absolute_release_python(self) -> None:
+        def update(section: str | None, key: str, value: object):
+            def mutate(collector: dict[str, Any]) -> None:
+                (collector if section is None else collector[section])[key] = value
+
+            return mutate
+
+        def remove(collector: dict[str, Any]) -> None:
+            del collector["python"]["version"]
+
+        cases = (
+            (update(None, "operator_root", "operator"), "normalized absolute path"),
+            (update(None, "operator_root", "/Volumes/a/../b"), "normalized absolute path"),
+            (update(None, "operator_root", "/Volumes/a/"), "normalized absolute path"),
+            (update(None, "operator_root", "/Volumes/a/./b"), "normalized absolute path"),
+            (update(None, "operator_root", "//Volumes/a"), "normalized absolute path"),
+            (update(None, "operator_root", "/Volumes/a\nb"), "is not a bounded path"),
+            (update(None, "operator_root", "/" + "a" * 1024), "is not a bounded path"),
+            (update("python", "executable", ""), "is not a bounded path"),
+            (update("python", "executable", 7), "is not a bounded path"),
+            (update("python", "executable_sha256", "a" * 64), "unexpected field set"),
+            (update("python", "version", "3.14"), "not a release Python version"),
+            (update("python", "version", "2.7.18"), "not a release Python version"),
+            (update("python", "version", "3.14.01"), "not a release Python version"),
+            (update(None, "host", "release-mac"), "unexpected field set"),
+            (remove, "unexpected field set"),
+        )
+        for index, (mutate, error) in enumerate(cases):
+            with self.subTest(case=index, error=error):
+                collector = copy.deepcopy(COLLECTOR)
+                mutate(collector)
+                self.fixture.write_intent_collector(collector)
+                with self.assertRaisesRegex(
+                    (GARuntimeAcceptanceError, PublicationError), error
+                ):
+                    self.fixture.seal()
+                self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_collector_identity_records_the_given_checkout_and_python(self) -> None:
+        # collect passes sys.executable unresolved, the operator root and
+        # platform.python_version(); see the collect intent assertion.
+        launcher = "/opt/homebrew/opt/python@3.14/bin/python3.14"
+        self.assertEqual(
+            ga_runtime._collector_identity(
+                launcher, Path("/Volumes/Release/operator"), "3.14.7"
+            ),
+            {
+                "operator_root": "/Volumes/Release/operator",
+                "python": {"executable": launcher, "version": "3.14.7"},
+            },
+        )
+        for executable, version, error in (
+            ("python3", "3.14.7", "is not a normalized absolute path"),
+            (launcher, "3.15.0a1", "not a release Python version"),
+        ):
+            with self.subTest(executable=executable, version=version), self.assertRaisesRegex(
+                GARuntimeAcceptanceError, error
+            ):
+                ga_runtime._collector_identity(
+                    executable, Path("/Volumes/Release/operator"), version
+                )
 
     def test_dmg_byte_proof_alone_accepts_the_extended_bounded_duration(self) -> None:
         verification = self.fixture.documents["exact-dmg-install.json"]["commands"][
@@ -1666,19 +1886,33 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
             self.fixture.seal()
 
     def test_adapter_rename_reply_loss_is_outcome_unknown_and_recoverable(self) -> None:
-        from scripts.publication.durable_file import promote_private_pending
+        publish = ga_runtime.publish_private_file_locked
 
-        def promote_then_lose_reply(pending: Path, destination: Path) -> None:
-            promote_private_pending(pending, destination)
+        def publish_then_lose_reply(**arguments: Any) -> None:
+            publish(**arguments)
             raise DurabilityOutcomeUnknown("simulated adapter rename reply loss")
 
-        with patch(
-            "scripts.ga_runtime_acceptance.promote_private_pending",
-            side_effect=promote_then_lose_reply,
+        with patch.object(
+            ga_runtime, "publish_private_file_locked", side_effect=publish_then_lose_reply
         ), self.assertRaises(DurabilityOutcomeUnknown):
             self.fixture.seal()
         self.assertTrue(self.fixture.acceptance.is_file())
-        self.assertEqual(self.fixture.seal(), self.fixture.validate())
+        # The retry must not report success before the adapter and its
+        # directory entry are on stable storage.
+        real_full_fsync = durable_file.full_fsync
+        synchronized: list[tuple[int, int]] = []
+
+        def observe(descriptor: int) -> None:
+            metadata = os.fstat(descriptor)
+            synchronized.append((metadata.st_dev, metadata.st_ino))
+            real_full_fsync(descriptor)
+
+        with patch.object(durable_file, "full_fsync", side_effect=observe):
+            result = self.fixture.seal()
+        self.assertEqual(result, self.fixture.validate())
+        for path in (self.fixture.acceptance, self.fixture.acceptance.parent):
+            metadata = path.stat()
+            self.assertIn((metadata.st_dev, metadata.st_ino), synchronized)
 
     def test_resume_seal_completes_only_a_missing_raw_published_marker(self) -> None:
         marker = self.fixture.collection_root / "event-038.json"
@@ -1701,100 +1935,143 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(result, self.fixture.validate())
 
-    def test_truncated_raw_published_marker_needs_the_documented_quarantine(
-        self,
-    ) -> None:
-        # RELEASE.md step 7 residual window: an event is created under its
-        # final name before its bytes are written, so an interrupted marker
-        # write leaves a truncated event-038.json that no command repairs.
+    def test_interrupted_marker_write_never_leaves_a_partial_event(self) -> None:
+        # A power loss, forced kill or ^C inside the raw_published marker's
+        # write once left a truncated event-038.json that no command repaired.
         marker = self.fixture.collection_root / "event-038.json"
         original = marker.read_bytes()
-        for size in (0, len(original) // 2):
-            with self.subTest(size=size):
-                marker.unlink()
-                marker.write_bytes(original[:size])
-                marker.chmod(0o600)
-                with self.assertRaisesRegex(
-                    GARuntimeAcceptanceError,
-                    "GA runtime event-038.json is not strict UTF-8 JSON",
-                ):
-                    self.fixture.resume_seal()
-                recovery = FakeCollectorRuntime(self.fixture)
-                with patch.object(
-                    ga_runtime, "_installed_guard_baseline", return_value=guard()
-                ), self.assertRaisesRegex(
-                    GARuntimeAcceptanceError, r"would orphan it.*resume-seal"
-                ):
-                    recover_ga_runtime_collection(
-                        repository=self.fixture.repository,
-                        expected=self.fixture.expected,
-                        runtime=recovery,
-                    )
-                self.assertEqual(recovery.calls, [])
-                self.assertEqual(marker.read_bytes(), original[:size])
-                self.assertFalse(self.fixture.acceptance.exists())
-        # The user-approved quarantine keeps the truncated marker outside the
-        # collection; resume-seal then revalidates the tree and rewrites it.
-        quarantine = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, quarantine)
-        marker.rename(quarantine / marker.name)
+        marker.unlink()
+        acceptance_root = self.fixture.acceptance.parent
+        entries = sorted(os.listdir(acceptance_root))
+        with interrupted_write(
+            b'"phase":"raw_published"', marker
+        ) as final_present, self.assertRaises(_SimulatedTermination):
+            self.fixture.resume_seal()
+        self.assertEqual(final_present, [False, False])
+        self.assertFalse(os.path.lexists(marker))
+        self.assertEqual(collection_events(self.fixture.repository), STEP_EVENTS)
+        self.assertEqual(sorted(os.listdir(acceptance_root)), entries)
+        # resume-seal completes the marker; nothing needs a manual quarantine.
         self.assertEqual(self.fixture.resume_seal(), self.fixture.validate())
         self.assertEqual(marker.read_bytes(), original)
 
-    def test_truncated_pending_adapter_needs_the_documented_quarantine(self) -> None:
-        # RELEASE.md step 7 second residual window: seal creates the pending
-        # adapter under its final name before its bytes are written, so an
-        # interrupted write leaves a truncated pending adapter.
-        self.fixture.seal()
-        sealed = self.fixture.acceptance.read_bytes()
-        self.fixture.acceptance.unlink()
-        pending = self.fixture.acceptance.parent / ".runtime-acceptance.json.pending"
-        for size in (0, len(sealed) // 2):
-            with self.subTest(size=size):
-                pending.write_bytes(sealed[:size])
-                pending.chmod(0o600)
-                with self.assertRaisesRegex(
-                    GARuntimeAcceptanceError,
-                    "pending GA runtime adapter binds different evidence",
-                ):
-                    self.fixture.resume_seal()
-                recovery = FakeCollectorRuntime(self.fixture)
-                with patch.object(
-                    ga_runtime, "_installed_guard_baseline", return_value=guard()
-                ), self.assertRaisesRegex(
-                    GARuntimeAcceptanceError, r"would orphan it.*resume-seal"
-                ):
-                    recover_ga_runtime_collection(
-                        repository=self.fixture.repository,
-                        expected=self.fixture.expected,
-                        runtime=recovery,
-                    )
-                collection = FakeCollectorRuntime(self.fixture)
-                with self.assertRaisesRegex(
-                    GARuntimeAcceptanceError,
-                    r"already exists \(runtime-evidence, \.runtime-acceptance\.json\.pending\)",
-                ):
-                    collect_ga_runtime_acceptance(
-                        repository=self.fixture.repository,
-                        expected=self.fixture.expected,
-                        prepackage_stage_verifier=prepackage_stage_verifier,
-                        runtime=collection,
-                    )
-                self.assertEqual((recovery.calls, collection.calls), ([], []))
-                self.assertEqual(pending.read_bytes(), sealed[:size])
-                self.assertFalse(self.fixture.acceptance.exists())
-        # The user-approved quarantine moves the truncated pending adapter out
-        # of stage-inputs; resume-seal then revalidates and rewrites it.
-        quarantine = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, quarantine)
-        pending.rename(quarantine / pending.name)
+    def test_interrupted_adapter_write_never_leaves_a_partial_adapter(self) -> None:
+        # The same interruption once left a truncated pending adapter that
+        # resume-seal, recover and collect all refused.
+        acceptance_root = self.fixture.acceptance.parent
+        entries = sorted(os.listdir(acceptance_root))
+        with interrupted_write(
+            b'"evidence_tree":', self.fixture.acceptance
+        ) as final_present, self.assertRaises(_SimulatedTermination):
+            self.fixture.seal()
+        self.assertEqual(final_present, [False, False])
+        self.assertFalse(os.path.lexists(self.fixture.acceptance))
+        self.assertEqual(sorted(os.listdir(acceptance_root)), entries)
         self.assertEqual(self.fixture.resume_seal(), self.fixture.validate())
-        self.assertEqual(self.fixture.acceptance.read_bytes(), sealed)
-        self.assertFalse(pending.exists())
+
+    def test_staging_left_by_a_crash_blocks_no_command(self) -> None:
+        # A forced kill or power loss after the marker's bytes were staged but
+        # before their rename runs no cleanup and leaves the staged file.
+        marker = self.fixture.collection_root / "event-038.json"
+        original = marker.read_bytes()
+        marker.unlink()
+        with patch.object(
+            durable_file, "_renameatx_np", side_effect=_SimulatedTermination
+        ), patch.object(durable_file, "_remove_created_pending"), self.assertRaises(
+            _SimulatedTermination
+        ):
+            self.fixture.resume_seal()
+        self.assertFalse(os.path.lexists(marker))
+        acceptance_root = self.fixture.acceptance.parent
+        staged = [
+            acceptance_root / name
+            for name in os.listdir(acceptance_root)
+            if name.startswith(durable_file.FILE_STAGING_PREFIX)
+        ]
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0].read_bytes(), original)
+        # Nothing reads it: collect and recover refuse only the published raw
+        # tree, and resume-seal completes the marker beside the leftover.
+        collection = FakeCollectorRuntime(self.fixture)
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError, r"already exists \(runtime-evidence\)$"
+        ):
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=collection,
+            )
+        recovery = FakeCollectorRuntime(self.fixture)
+        with patch.object(
+            ga_runtime, "_installed_guard_baseline", return_value=guard()
+        ), self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            r"already published \(runtime-evidence\); recovery would orphan it",
+        ):
+            recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        self.assertEqual((collection.calls, recovery.calls), ([], []))
+        self.assertEqual(self.fixture.resume_seal(), self.fixture.validate())
+        self.assertEqual(marker.read_bytes(), original)
+        self.assertEqual(staged[0].read_bytes(), original)
+
+    def test_event_publication_never_replaces_a_concurrent_event(self) -> None:
+        # Staging keeps exclusive creation: an event that appears under the
+        # same name before the rename is kept, and the append fails.
+        marker = self.fixture.collection_root / "event-038.json"
+        competing = collection_event(38, "recovery_required", "collection")
+        marker.unlink()
+        rename = durable_file._renameatx_np
+
+        def competing_writer_wins(*arguments: Any) -> None:
+            marker.write_bytes(competing)
+            marker.chmod(0o600)
+            rename(*arguments)
+
+        with patch.object(
+            durable_file, "_renameatx_np", side_effect=competing_writer_wins
+        ), self.assertRaisesRegex(PublicationError, "private destination already exists"):
+            ga_runtime._append_raw_published_marker(
+                self.fixture.repository,
+                self.fixture.collection_root,
+                json.loads(competing)["collection"],
+            )
+        self.assertEqual(marker.read_bytes(), competing)
+        self.assertEqual(
+            [
+                name
+                for name in os.listdir(self.fixture.acceptance.parent)
+                if name.startswith(durable_file.FILE_STAGING_PREFIX)
+            ],
+            [],
+        )
+
+    def test_event_append_leaves_the_acceptance_root_unlocked(self) -> None:
+        # verify and journal-export verification hold the acceptance root lock
+        # while they hash; a collection beside them keeps appending events.
+        marker = self.fixture.collection_root / "event-038.json"
+        original = marker.read_bytes()
+        marker.unlink()
+        with durable_file.exclusive_rooted_directory_lock(
+            self.fixture.repository,
+            self.fixture.acceptance.parent,
+            require_private=True,
+        ):
+            ga_runtime._append_raw_published_marker(
+                self.fixture.repository,
+                self.fixture.collection_root,
+                json.loads(original)["collection"],
+            )
+        self.assertEqual(marker.read_bytes(), original)
 
     def test_resume_seal_never_marks_invalid_raw_evidence_published(self) -> None:
         marker = self.fixture.collection_root / "event-038.json"
         marker.unlink()
+        entries = sorted(os.listdir(self.fixture.acceptance.parent))
         self.fixture.documents["launch.json"]["launch_command"]["exit_code"] = 1
         self.fixture.rewrite_json("launch.json")
         self.fixture.rebuild_scan()
@@ -1802,10 +2079,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(GARuntimeAcceptanceError, "launch command"):
             self.fixture.resume_seal()
         self.assertFalse(marker.exists())
-        self.assertFalse(self.fixture.acceptance.exists())
-        self.assertFalse(
-            (self.fixture.acceptance.parent / ".runtime-acceptance.json.pending").exists()
-        )
+        self.assertEqual(sorted(os.listdir(self.fixture.acceptance.parent)), entries)
 
     def test_resume_seal_refuses_terminal_or_incomplete_collections(self) -> None:
         def mark_recovery_required(root: Path) -> None:
@@ -1890,41 +2164,26 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertFalse(self.fixture.acceptance.exists())
 
     def test_resume_seal_refuses_an_adapter_without_its_marker(self) -> None:
-        for name in ("runtime-acceptance.json", ".runtime-acceptance.json.pending"):
-            with self.subTest(adapter=name):
-                fixture = RuntimeFixture()
-                self.addCleanup(fixture.cleanup)
-                marker = fixture.collection_root / "event-038.json"
-                marker.unlink()
-                adapter = fixture.acceptance.parent / name
-                adapter.write_bytes(b"{}\n")
-                adapter.chmod(0o600)
-                with self.assertRaisesRegex(
-                    GARuntimeAcceptanceError, "before its raw_published marker"
-                ):
-                    fixture.resume_seal()
-                self.assertFalse(marker.exists())
-                self.assertEqual(adapter.read_bytes(), b"{}\n")
-
-    def test_resume_seal_promotes_only_an_identical_pending_adapter(self) -> None:
-        self.fixture.seal()
-        sealed = self.fixture.acceptance.read_bytes()
-        pending = self.fixture.acceptance.parent / ".runtime-acceptance.json.pending"
-        self.fixture.acceptance.rename(pending)
-        self.assertEqual(self.fixture.resume_seal(), self.fixture.validate())
-        self.assertEqual(self.fixture.acceptance.read_bytes(), sealed)
-        self.assertFalse(pending.exists())
-
-    def test_resume_seal_refuses_a_different_pending_adapter_without_mutation(self) -> None:
-        pending = self.fixture.acceptance.parent / ".runtime-acceptance.json.pending"
-        pending.write_bytes(b"{}\n")
-        pending.chmod(0o600)
+        marker = self.fixture.collection_root / "event-038.json"
+        marker.unlink()
+        self.fixture.acceptance.write_bytes(b"{}\n")
+        self.fixture.acceptance.chmod(0o600)
         with self.assertRaisesRegex(
-            GARuntimeAcceptanceError, "pending GA runtime adapter binds different evidence"
+            GARuntimeAcceptanceError, "before its raw_published marker"
         ):
             self.fixture.resume_seal()
-        self.assertEqual(pending.read_bytes(), b"{}\n")
-        self.assertFalse(self.fixture.acceptance.exists())
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.fixture.acceptance.read_bytes(), b"{}\n")
+
+    def test_resume_seal_refuses_a_different_adapter_without_mutation(self) -> None:
+        self.fixture.acceptance.write_bytes(b"{}\n")
+        self.fixture.acceptance.chmod(0o600)
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "refusing to replace a different immutable GA runtime adapter",
+        ):
+            self.fixture.resume_seal()
+        self.assertEqual(self.fixture.acceptance.read_bytes(), b"{}\n")
 
     def test_resume_seal_only_reverifies_an_existing_identical_adapter(self) -> None:
         self.fixture.seal()
@@ -3506,8 +3765,10 @@ class FakeCollectorRuntime:
         return copy.deepcopy(self.guards.pop(0))
 
     def capture_traffic(
-        self, check_id: str, tokens: dict[str, str]
+        self, check_id: str, tokens: dict[str, str], *, interpreter: str
     ) -> tuple[dict[str, object], bytes]:
+        if interpreter != COLLECTOR["python"]["executable"]:
+            raise AssertionError("collector senders must use the recorded Python")
         document = self.fixture.documents[f"{check_id.replace('_', '-')}.json"]
         self.assert_tokens(tokens, document["tokens"])
         return (
@@ -3697,8 +3958,10 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 selector.select.return_value = [(SimpleNamespace(fd=22), 0)]
                 elapsed = [0.0]
                 sent = []
+                interpreters = []
                 def send(argv, *, timeout):
                     sent.append((argv[argv.index("--stage") + 1], timeout))
+                    interpreters.append(argv[0])
                     elapsed[0] += sender_seconds
                     return command(argv, exit_code=exit_code, stderr="resolver failed" if exit_code else "")
                 with patch.object(runtime, "_tunnel_interface", return_value="utun6"), \
@@ -3712,8 +3975,14 @@ class GARuntimeCollectorTests(unittest.TestCase):
                      patch.object(ga_runtime.time, "sleep"), \
                      patch.object(ga_runtime, "parse_packet_capture", return_value=SimpleNamespace(interfaces=[SimpleNamespace(link_type=0)])):
                     with self.assertRaisesRegex(GARuntimeAcceptanceError, message) as failure:
-                        runtime._capture_traffic_bytes("dns_traffic", RuntimeFixture._traffic_tokens("dns_traffic"))
+                        runtime._capture_traffic_bytes(
+                            "dns_traffic",
+                            RuntimeFixture._traffic_tokens("dns_traffic"),
+                            interpreter=OTHER_COLLECTOR["python"]["executable"],
+                        )
                 self.assertEqual([stage for stage, _ in sent], ["start"])
+                # Senders run with the collection's recorded Python.
+                self.assertEqual(interpreters, [OTHER_COLLECTOR["python"]["executable"]])
                 self.assertLessEqual(sent[0][1], 35)
                 terminate.assert_called_once_with(process)
                 self.assertTrue(process.stdout.closed)
@@ -3800,7 +4069,9 @@ class GARuntimeCollectorTests(unittest.TestCase):
              patch.object(ga_runtime.os, "set_blocking"), \
              patch.object(ga_runtime.os, "read", side_effect=listening), \
              patch.object(ga_runtime.time, "sleep"):
-            traffic, observed = runtime._capture_traffic_bytes("dns_traffic", tokens)
+            traffic, observed = runtime._capture_traffic_bytes(
+                "dns_traffic", tokens, interpreter=sys.executable
+            )
         expected_argv = ga_runtime._capture_command_argv(
             "utun6", 6, _expected_tunnel_dns_filter(tokens)
         )
@@ -3821,7 +4092,7 @@ class GARuntimeCollectorTests(unittest.TestCase):
              patch.object(ga_runtime.time, "monotonic", side_effect=lambda: elapsed[0]), \
              patch.object(ga_runtime.subprocess, "Popen") as spawn:
             with self.assertRaisesRegex(GARuntimeAcceptanceError, "complete bounded deadline"):
-                runtime._capture_traffic_bytes("dns_traffic", RuntimeFixture._traffic_tokens("dns_traffic"))
+                runtime._capture_traffic_bytes("dns_traffic", RuntimeFixture._traffic_tokens("dns_traffic"), interpreter=sys.executable)
         spawn.assert_not_called()
 
     def test_failed_capture_pipe_retention_is_bounded_and_distinguishes_eof(self) -> None:
@@ -3881,6 +4152,7 @@ class GARuntimeCollectorTests(unittest.TestCase):
                     runtime._capture_traffic_bytes(
                         "tcp_traffic",
                         RuntimeFixture._traffic_tokens("tcp_traffic"),
+                        interpreter=sys.executable,
                     )
                 self.assertIn(
                     (
@@ -3931,6 +4203,7 @@ class GARuntimeCollectorTests(unittest.TestCase):
                     runtime._capture_traffic_bytes(
                         "tcp_traffic",
                         RuntimeFixture._traffic_tokens("tcp_traffic"),
+                        interpreter=sys.executable,
                     )
                 if isinstance(failure, OSError):
                     self.assertIn("process I/O failed", str(captured.exception))
@@ -4216,15 +4489,18 @@ class GARuntimeCollectorTests(unittest.TestCase):
         self.assertEqual(self.fixture.resume_seal(), self.fixture.validate())
 
     def test_adapter_promotion_reply_loss_during_collect_resumes_without_rewrite(self) -> None:
-        promote = ga_runtime.promote_private_pending
+        publish = ga_runtime.publish_private_file_locked
 
-        def promote_then_lose_reply(pending: Path, destination: Path) -> None:
-            promote(pending, destination)
-            raise DurabilityOutcomeUnknown("simulated adapter rename reply loss")
+        def publish_then_lose_adapter_reply(**arguments: Any) -> None:
+            publish(**arguments)
+            if arguments["name"] == self.fixture.acceptance.name:
+                raise DurabilityOutcomeUnknown("simulated adapter rename reply loss")
 
         source_patches = self._patch_evidence_sources()
         with patch.object(
-            ga_runtime, "promote_private_pending", side_effect=promote_then_lose_reply
+            ga_runtime,
+            "publish_private_file_locked",
+            side_effect=publish_then_lose_adapter_reply,
         ), source_patches[0], source_patches[1], source_patches[2], self.assertRaises(
             DurabilityOutcomeUnknown
         ) as captured:
@@ -4244,13 +4520,12 @@ class GARuntimeCollectorTests(unittest.TestCase):
         )
 
     def test_collect_refuses_published_outputs_before_runtime_commands(self) -> None:
-        # Admission shares recovery's predicate: a stale pending adapter left
-        # without a raw tree must not admit a collection that recover refuses.
+        # Admission shares recovery's predicate: a stale adapter left without
+        # a raw tree must not admit a collection that recover refuses.
         parent = self.fixture.acceptance.parent
         for name, create in (
             ("runtime-evidence", lambda path: path.mkdir(mode=0o700)),
             ("runtime-acceptance.json", lambda path: path.write_bytes(b"{}\n")),
-            (".runtime-acceptance.json.pending", lambda path: path.write_bytes(b"{}\n")),
         ):
             with self.subTest(published=name):
                 path = parent / name
@@ -4278,20 +4553,20 @@ class GARuntimeCollectorTests(unittest.TestCase):
                     else:
                         path.unlink()
 
-    def test_collect_treats_an_unobservable_pending_adapter_as_an_error(self) -> None:
-        pending = self.fixture.acceptance.parent / ".runtime-acceptance.json.pending"
+    def test_collect_treats_an_unobservable_adapter_as_an_error(self) -> None:
+        adapter = self.fixture.acceptance
         lstat = Path.lstat
 
-        def unreadable_pending(path: Path, *arguments: Any, **values: Any):
-            if path == pending:
-                raise PermissionError("fixture pending-adapter probe denied")
+        def unreadable_adapter(path: Path, *arguments: Any, **values: Any):
+            if path == adapter:
+                raise PermissionError("fixture adapter probe denied")
             return lstat(path, *arguments, **values)
 
         runtime = FakeCollectorRuntime(self.fixture, fail_launch=True)
         sources = self._patch_evidence_sources()
         with sources[0], sources[1], sources[2], patch.object(
-            Path, "lstat", autospec=True, side_effect=unreadable_pending
-        ), self.assertRaisesRegex(PermissionError, "fixture pending-adapter probe denied"):
+            Path, "lstat", autospec=True, side_effect=unreadable_adapter
+        ), self.assertRaisesRegex(PermissionError, "fixture adapter probe denied"):
             self._collect(self.fixture, runtime)
         self.assertEqual(runtime.calls, [])
         self.assertEqual(len(runtime.environments), 3)
@@ -4304,7 +4579,6 @@ class GARuntimeCollectorTests(unittest.TestCase):
         for name, create in (
             ("runtime-evidence", lambda path: path.mkdir(mode=0o700)),
             ("runtime-acceptance.json", lambda path: path.write_bytes(b"{}\n")),
-            (".runtime-acceptance.json.pending", lambda path: path.write_bytes(b"{}\n")),
         ):
             with self.subTest(published=name):
                 path = parent / name
@@ -4409,9 +4683,13 @@ class GARuntimeCollectorTests(unittest.TestCase):
             "scripts.ga_runtime_acceptance.run_fixed_host_transaction",
             side_effect=transaction,
         ):
-            traffic, capture = runtime.capture_traffic("tcp_traffic", tokens)
+            traffic, capture = runtime.capture_traffic(
+                "tcp_traffic", tokens, interpreter=sys.executable
+            )
         self.assertEqual(order, ["host-begin", "host-test", "host-restore"])
-        capture_bytes.assert_called_once_with("tcp_traffic", tokens)
+        capture_bytes.assert_called_once_with(
+            "tcp_traffic", tokens, interpreter=sys.executable
+        )
         self.assertEqual(capture, expected_capture)
         self.assertEqual(traffic["host_observation"]["case_id"], "tcp-ipv4")
 
@@ -4603,7 +4881,13 @@ class GARuntimeCollectorTests(unittest.TestCase):
         self.assertIn(["/usr/bin/systemextensionsctl", "list"], commands)
         self.assertNotIn("CFWLifecycleProbe", repr(commands))
         self.assertEqual(
-            timeouts[tuple(ga_runtime._dmg_verifier_command(self.fixture.repository))],
+            timeouts[
+                tuple(
+                    ga_runtime._dmg_verifier_command(
+                        REPOSITORY, self.fixture.repository
+                    )
+                )
+            ],
             DMG_BYTE_PROOF_TIMEOUT_SECONDS,
         )
         self.assertTrue(
@@ -4760,9 +5044,6 @@ class GARuntimeCollectorTests(unittest.TestCase):
         )
         self.assertFalse(self.fixture.raw_root.exists())
         self.assertFalse(self.fixture.acceptance.exists())
-        self.assertFalse(
-            (self.fixture.acceptance.parent / ".runtime-acceptance.json.pending").exists()
-        )
 
     def _host_absence_clock(
         self, runtime: ProductionCollectorRuntime, *, exits_at: float | None
@@ -4952,8 +5233,9 @@ class GARuntimeCollectorTests(unittest.TestCase):
         def run_after_durable_baseline(argv, *, timeout):
             intent = json.loads(intent_path.read_text(encoding="utf-8"))
             self.assertEqual(intent["cfw_guard_baseline"], baseline)
-            self.assertEqual(intent["schema_version"], 3)
-            self.assertEqual(intent["document"], "cfm-ga-runtime-collection-intent-v3")
+            self.assertEqual(intent["schema_version"], 4)
+            self.assertEqual(intent["document"], "cfm-ga-runtime-collection-intent-v4")
+            self.assertEqual(intent["collector"], COLLECTOR)
             self.assertEqual(intent_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(
                 intent["journal_bindings"],
@@ -5238,17 +5520,28 @@ class GARuntimeCollectorTests(unittest.TestCase):
             ],
         )
 
-    def test_recovery_archives_a_truncated_event_left_before_raw_publication(
+    def test_interrupted_event_before_raw_publication_keeps_a_whole_sequence(
         self,
     ) -> None:
-        # RELEASE.md step 7: before raw publication an interrupted event write
-        # leaves a truncated file; recovery appends after it and archives it.
-        self._create_recoverable_collection()
-        events = sorted(self.fixture.collection_root.glob("event-*.json"))
-        torn = events[-1]
-        torn.unlink()
-        torn.write_bytes(b"")
-        torn.chmod(0o600)
+        # An interrupt inside an event write before raw publication once left
+        # a torn event that recovery appended after and archived.
+        launch_started = self.fixture.collection_root / "event-004.json"
+        runtime = FakeCollectorRuntime(self.fixture)
+        sources = self._patch_evidence_sources()
+        with sources[0], sources[1], sources[2], interrupted_write(
+            b'"sequence":4,"step":"launch"}', launch_started
+        ) as final_present, self.assertRaises(GACollectionRecoveryRequired) as raised:
+            self._collect(self.fixture, runtime)
+        self.assertIsInstance(raised.exception.__cause__, _SimulatedTermination)
+        self.assertEqual(final_present, [False, False])
+        self.assertEqual(
+            collection_events(self.fixture.repository),
+            [*STEP_EVENTS[:4], ("recovery_required", "collection")],
+        )
+        self.assertNotIn(
+            ["/usr/bin/open", "-a", "/Applications/Clash for Mac.app"],
+            [argv for argv, _timeout in runtime.calls],
+        )
         recovery = self._absent_host_recovery_runtime([GA_ENVIRONMENT, GA_ENVIRONMENT])
         with patch.object(ga_runtime, "_installed_guard_baseline", return_value=guard()):
             archived = recover_ga_runtime_collection(
@@ -5256,16 +5549,97 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 expected=self.fixture.expected,
                 runtime=recovery,
             )
-        archived_events = sorted(archived.glob("event-*.json"))
-        self.assertEqual((archived / torn.name).read_bytes(), b"")
+        archived_events = [
+            json.loads(path.read_bytes()) for path in sorted(archived.glob("event-*.json"))
+        ]
         self.assertEqual(
-            [path.name for path in archived_events],
-            [f"event-{index:03d}.json" for index in range(len(archived_events))],
+            [event["sequence"] for event in archived_events],
+            list(range(len(archived_events))),
         )
         self.assertEqual(
-            json.loads(archived_events[-1].read_bytes())["phase"], "recovered"
+            (archived_events[4]["phase"], archived_events[-1]["phase"]),
+            ("recovery_required", "recovered"),
         )
         self.assertFalse(self.fixture.collection_root.exists())
+
+    def test_unknown_event_durability_mid_collection_points_to_recover(self) -> None:
+        # The launch "started" event is renamed into place but its directory
+        # barrier fails: the outcome is unknown, no recovery_required event is
+        # appended in-process, and recover handles the attempt.
+        collection_target: list[tuple[int, int]] = []
+        real_rename = durable_file._renameatx_np
+        real_full_fsync = durable_file.full_fsync
+
+        def rename(source, source_name, destination, destination_name, flags):
+            real_rename(source, source_name, destination, destination_name, flags)
+            if destination_name == "event-004.json":
+                metadata = os.fstat(destination)
+                collection_target.append((metadata.st_dev, metadata.st_ino))
+
+        def fail_collection_barrier(descriptor: int) -> None:
+            metadata = os.fstat(descriptor)
+            if collection_target and (metadata.st_dev, metadata.st_ino) == collection_target[0]:
+                raise OSError(5, "injected collection directory full-fsync failure")
+            real_full_fsync(descriptor)
+
+        runtime = FakeCollectorRuntime(self.fixture)
+        sources = self._patch_evidence_sources()
+        with sources[0], sources[1], sources[2], patch.object(
+            durable_file, "_renameatx_np", side_effect=rename
+        ), patch.object(
+            durable_file, "full_fsync", side_effect=fail_collection_barrier
+        ), self.assertRaises(DurabilityOutcomeUnknown) as raised:
+            self._collect(self.fixture, runtime)
+        notes = getattr(raised.exception, "__notes__", [])
+        self.assertTrue(any(RECOVERY_COMMAND in note for note in notes), notes)
+        self.assertEqual(
+            collection_events(self.fixture.repository),
+            [*STEP_EVENTS[:4], ("started", "launch")],
+        )
+        self.assertNotIn(
+            ["/usr/bin/open", "-a", "/Applications/Clash for Mac.app"],
+            [argv for argv, _timeout in runtime.calls],
+        )
+        recovery = self._absent_host_recovery_runtime([GA_ENVIRONMENT, GA_ENVIRONMENT])
+        with patch.object(ga_runtime, "_installed_guard_baseline", return_value=guard()):
+            archived = recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        archived_events = [
+            json.loads(path.read_bytes()) for path in sorted(archived.glob("event-*.json"))
+        ]
+        self.assertEqual(
+            [event["sequence"] for event in archived_events],
+            list(range(len(archived_events))),
+        )
+        self.assertEqual(archived_events[-1]["phase"], "recovered")
+
+    def test_staging_left_before_raw_publication_blocks_neither_recover_nor_collect(
+        self,
+    ) -> None:
+        # A crash before raw publication can leave a staged event beside the
+        # collection; recovery archives the attempt and a fresh collect seals.
+        self._create_recoverable_collection()
+        leftover = self.fixture.acceptance.parent / (
+            f"{durable_file.FILE_STAGING_PREFIX}{'0' * 32}"
+        )
+        leftover.write_bytes(b'{"phase":')
+        leftover.chmod(0o600)
+        recovery = self._absent_host_recovery_runtime([GA_ENVIRONMENT, GA_ENVIRONMENT])
+        with patch.object(ga_runtime, "_installed_guard_baseline", return_value=guard()):
+            archived = recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        self.assertTrue(archived.is_dir())
+        sources = self._patch_evidence_sources()
+        with sources[0], sources[1], sources[2]:
+            result = self._collect(self.fixture, FakeCollectorRuntime(self.fixture))
+        self.assertEqual(result, self.fixture.validate())
+        self.assertEqual(leftover.read_bytes(), b'{"phase":')
 
     def test_recovery_restores_the_recorded_run_baseline_without_resampling_it(self) -> None:
         baseline = restarted_guard()

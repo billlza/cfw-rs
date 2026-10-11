@@ -77,8 +77,11 @@ from scripts.tests.release_identity_fixture import next_patch
 # identity: the install admits a predecessor only against its exact recorded
 # tree digest, so an invented digest would be rejected as a tampered bundle.
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
-# Append-only: the canonical-JSON digest of every registered predecessor
-# profile, so the frozen tree identities stay stated only in the registry.
+# Append-only: the canonical-JSON digest of each registered preview-lineage
+# predecessor profile, so the frozen tree identities stay stated only in the
+# registry. The allocation audit keeps GA-role builds out of this file; their
+# profiles are checked against the installed signed tree at admission, which
+# fails closed before any mutation.
 RETAINED_PREDECESSOR_DIGESTS = {
     "50025": "5d21d6a9fd40e05a466d9a8fc9103c9fdabb6e7d84b7c5bd1ae1b80d56d8daa4",
 }

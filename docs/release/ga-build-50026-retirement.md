@@ -97,11 +97,13 @@ is now checked against `native/macos/Config/signing-order.json`.
 
 Build 50027 was the only active 0.5.0 GA successor when 50026 was retired. It
 was itself retired before installation on 2026-10-08
-([`ga-build-50027-retirement.md`](ga-build-50027-retirement.md)); build 50028
-is now the active GA. Each successor must start from one
+([`ga-build-50027-retirement.md`](ga-build-50027-retirement.md)). Each later
+retired successor has its own retirement note, and the active GA is
+`CFW_GA_BUILD` in `scripts/release_identity.env`. Each successor must start from one
 new clean source identity and repeat the complete hosted-CI, build, freeze,
 signing, notarization, publication-evidence, package, installation, runtime,
-and final publication sequence. The retained installed preview 50025 remains
-its migration predecessor. No application tree, profile copy, possession
+and final publication sequence. The retained installed preview 50025 was the
+migration predecessor of every successor up to 50028. No application tree,
+profile copy, possession
 proof, signature, manifest, attempt file, hosted-CI receipt, review, or
 evidence tree from build 50026 may be copied forward as successful evidence.

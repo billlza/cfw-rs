@@ -19,16 +19,21 @@ only as the installed-predecessor profile in `scripts/dormant_app_install.py`.
 The first GA allocation below, 50026, was consumed on 2026-10-07 when its
 Developer ID signing attempt failed after signing started
 ([`ga-build-50026-retirement.md`](ga-build-50026-retirement.md)). The ledger
-now records it as `retired_after_candidate_freeze_before_canonical_signing_output`
-and allocates 50027 as the single `active_ga`; the migration predecessor is
-still the installed preview 50025. Sections 1–3 keep the original 50026 plan.
+records it as `retired_after_candidate_freeze_before_canonical_signing_output`;
+50027 was then allocated as the single `active_ga`, and the migration
+predecessor was still the installed preview 50025. Sections 1–3 keep the
+original 50026 plan.
 
 Build 50027 was signed, notarized and sealed for prepackage, then retired on
 2026-10-08 before any package or installation, because protocol and import
 changes on the release line changed its application bytes
 ([`ga-build-50027-retirement.md`](ga-build-50027-retirement.md)). The ledger
-records it as `retired_after_notarization_before_install` and allocates 50028 as
-the single `active_ga`; the migration predecessor is still 50025.
+records it as `retired_after_notarization_before_install`; 50028 was then
+allocated as the single `active_ga`, and the migration predecessor was still
+50025. Later allocations are recorded only in the ledger and their retirement
+notes: the active GA is `CFW_GA_BUILD` in `scripts/release_identity.env`, and
+its migration predecessor is the active predecessor of
+`scripts/dormant_app_install.py`.
 
 ## 1. Decision required first
 

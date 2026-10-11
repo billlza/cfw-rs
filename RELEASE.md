@@ -241,8 +241,10 @@ The compatible dependency refresh pins `golang.org/x/mod v0.41.0` and
 `golang.org/x/crypto v0.57.0`. The 2026-10-08 Go security releases moved the
 compiler (`GO_VERSION`) and the module's minimum Go version past `1.27.1` and
 `golang.org/x/net` to `v0.60.0`; the scan had reported reachable standard
-library and `x/net` HTTP/2, HTTP/1, `crypto/tls` and `html/template` findings
-in `1.27.1` and `v0.59.0`. The SOCKS correction materializes a checksum-bound
+library and `x/net` HTTP/2, HTTP/1, MIME header and `crypto/tls` findings in
+`1.27.1` and `v0.59.0`, and `html/template` findings in an imported package
+whose affected code the engine does not call. The SOCKS correction
+materializes a checksum-bound
 private build workspace containing the corrected `sing v0.9.4` source while
 preserving the original module cache. The release vulnerability scan checks
 both the original versioned dependency graph and the corrected workspace,
@@ -909,7 +911,8 @@ and needs the release owner's approval. These are the allocation files:
    `PredecessorProfile` with its retained installed tree SHA-256 to
    `SUPPORTED_PREDECESSORS`. `N` then becomes the active predecessor.
 
-No other file changes. The runtime migration admission compares the bundle
+No other file belongs to an allocation; dating the changelog is part of the
+release commit (below). The runtime migration admission compares the bundle
 installed at the canonical path with the build its executable was compiled as,
 which `build.rs` injects from the validated `CFW_BUILD_NUMBER`; release
 observations accept any canonical build of the product version and are bound
@@ -929,7 +932,10 @@ any other tracked file of the release source closure, apart from `docs/` and
 the top-level guides, that names a GA-role ledger build outside a digest or
 object-ID token, and any installed tree digest outside the registry.
 
-Run the sequence below from one clean release commit. Source, CI, preflight, or
+Run the sequence below from one clean release commit. Its `CHANGELOG.md`
+heading for the product version reads `## <version> — <freeze date>`: the
+publication set ships the frozen file as `MODIFICATIONS.md`, so the date
+cannot change after candidate freeze. Source, CI, preflight, or
 evidence failures before candidate freeze use their own append-only attempt or
 run identity and do not allocate another application build. A failed builder
 retains its preflight inputs and partial products and reports their path; only
@@ -1031,7 +1037,7 @@ never adopted.
    unsigned validation builds 40000 and 50000 (the unsigned preview). GA
    pre-sign builds reject every such override and retain their exact
    production pins. The frozen signed application is not rebuilt.
-   It runs the same 27 lane
+   It runs the same 26 lane
    commands. A second full local reproduction is optional assurance evidence,
    not a prepackage or corresponding-source prerequisite. The signed product
    still binds its actual build toolchain; installed-app and network acceptance
@@ -1104,10 +1110,10 @@ never adopted.
    but all jobs must agree and the fixed public Contents API must return a
    `ci.yml` at that commit whose decoded bytes equal the clean tested source.
    They read the run both before and after its attempt-specific jobs.
-   `prepackage`, final publication, and upload live-revalidate the v4 receipt;
+   `prepackage`, final publication, and upload live-revalidate the v5 receipt;
    ordinary sealed-stage verification performs no network access and instead
    reopens the retained workflow projection against the local clean source.
-   The local 27-lane record remains corroborating toolchain evidence and can
+   The local 26-lane record remains corroborating toolchain evidence and can
    never replace `hosted-ci.json`;
 4. after a signing interruption, inspect the retained attempt through the
    fixed recovery entry:

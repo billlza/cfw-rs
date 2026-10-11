@@ -112,8 +112,9 @@
 ### Security
 
 - Build the network engine with Go 1.27.2 and `golang.org/x/net` v0.60.0.
-  They fix the 2026-10-08 Go advisories in HTTP/2, HTTP/1, TLS ECH and
-  `html/template` handling that the engine's code can reach.
+  They fix the 2026-10-08 Go advisories in HTTP/2, HTTP/1, MIME header and
+  TLS ECH handling that the engine's code can reach, and two `html/template`
+  advisories in a package it imports without calling the affected code.
 
 ## 0.4.0 - Unreleased
 

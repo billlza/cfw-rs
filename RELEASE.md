@@ -552,12 +552,24 @@ TCPv6, UDP/QUIC, DNS A/AAAA, LAN bypass, included routes, and excluded routes.
 A connected VPN status or an existing `utun` interface is not data-plane
 evidence.
 
-The receive-only Packet peer under `tools/packet-evidence-endpoint/` is bound
-to the repository-pinned Go toolchain and a reproducible Linux/amd64 binary.
-Its binary, sole Debian installation transaction (`install-endpoint.sh`),
-systemd unit, fixed GCE resolver and exact capture sudoers digests are the
-`packetEvidenceEndpoint` values in `scripts/pinned_build_inputs.json`; this
-document does not repeat them. Each Go toolchain change rebinds the binary.
+The receive-only Packet peer under `tools/packet-evidence-endpoint/` is built
+with its own Go toolchain (`PACKET_EVIDENCE_ENDPOINT_GO_VERSION`,
+`PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256`), not the product's
+`GO_VERSION`, into a reproducible Linux/amd64 binary whose digest is
+`PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256`. A product Go bump leaves it
+unchanged; an endpoint Go bump is a separate change that rebinds the binary
+pin, the installer, the endpoint identities and policy, and the digests that
+record them (the installer and policy digests in `packet.py`, the verifier and
+the `packetEvidenceEndpoint` source digests, and the identity digests in
+`scripts/harness/packet_evidence.py`). The endpoint pins live in
+`scripts/dependency_pins.env`, so any endpoint rebinding also changes that
+file's digest, which the CI toolchain binding, the native UI source digest and
+the release verifier's inputs record: after a freeze it is not an
+evidence-only change. The digests of its sole Debian
+installation transaction (`install-endpoint.sh`), systemd unit, fixed GCE
+resolver and exact capture sudoers are the `packetEvidenceEndpoint` source
+digests in `scripts/pinned_build_inputs.json`; this document does not repeat
+them.
 GA runtime acceptance uses the endpoints only as DNS and TCP/UDP peers and
 does not depend on the deployed binary's identity, so a rebinding does not
 block GA. Physical assurance evidence binds the identity, and its collection

@@ -463,6 +463,28 @@ class PhysicalCollectorCloudContractTests(unittest.TestCase):
         self.assertNotRegex(cloud_build, r"(?i)gcloud\s+run\s+deploy|--image(?:=|\s)")
         self.assertNotRegex(cloud_build, r"(?i)(?:latest|:main|:master)(?:\s|@|$)")
 
+    def test_go_identity_is_the_module_directive_and_one_pinned_image(self) -> None:
+        # The collector's Go toolchain is its own, not the product GO_VERSION:
+        # the go.mod directive and the one digest-pinned golang image that
+        # builds the container and runs the Cloud Build checks.
+        directives = re.findall(r"(?m)^go (\S+)$", _read(COLLECTOR / "go.mod"))
+        self.assertEqual(len(directives), 1, "go.mod must declare one go directive")
+        dockerfile = _read(COLLECTOR / "Dockerfile")
+        cloud_build = _read(COLLECTOR / "cloudbuild.yaml")
+        build_stages = re.findall(
+            rf"(?m)^FROM\s+(golang:{re.escape(directives[0])}@sha256:[0-9a-f]{{64}})"
+            r"\s+AS\s+build$",
+            dockerfile,
+        )
+        self.assertEqual(len(build_stages), 1, "one golang build stage at the directive")
+        image = build_stages[0]
+        # Every golang reference, however written or registry-qualified, must be
+        # that exact image.
+        for name, text in (("Dockerfile", dockerfile), ("cloudbuild.yaml", cloud_build)):
+            with self.subTest(file=name):
+                self.assertEqual(text.count("golang:"), text.count(image))
+        self.assertGreaterEqual(cloud_build.count(image), 1, "no golang Cloud Build step")
+
     def test_runtime_uses_service_identity_not_static_credentials(self) -> None:
         all_text = self.go_source + "\n" + _read(COLLECTOR / "Dockerfile")
         self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", all_text)

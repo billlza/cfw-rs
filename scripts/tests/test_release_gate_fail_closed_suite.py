@@ -348,14 +348,16 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
             root = _copy_pinned_tree(Path(tmp))
             env_path = root / _PINS_ENV
             go_version = _shipped_pins()["GO_VERSION"]
+            # Anchored at the line start: other pins' keys end in GO_VERSION.
+            pin_line = f"\nGO_VERSION={go_version}\n"
+            pins_text = env_path.read_text(encoding="utf-8")
+            self.assertEqual(pins_text.count(pin_line), 1)
             env_path.write_text(
-                env_path.read_text(encoding="utf-8").replace(
-                    f"GO_VERSION={go_version}\n", f"GO_VERSION={go_version}.0\n"
-                ),
+                pins_text.replace(pin_line, f"\nGO_VERSION={go_version}.0\n"),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(
-                PinnedInputError, "GO_VERSION is not a version value"
+                PinnedInputError, "pin GO_VERSION is not a version value"
             ):
                 verify_pinned(root)
 

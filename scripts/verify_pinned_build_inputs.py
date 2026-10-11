@@ -25,10 +25,20 @@ network:
 * the offline libbox build script references the pins with no floating versions and
   no network or recursive build actions;
 * every CI job that enters the closed release gate uses exactly the pinned
-  unsigned-validation Python.
+  unsigned-validation Python;
+* the packet-evidence endpoint names its own Go toolchain and binary pins, not
+  ``GO_VERSION`` (when both name one Go version, their archive digests agree);
+  its README keeps the exact fail-closed build recipe (archive check,
+  reproducible build, comparison with the binary pin); the installer and
+  every endpoint identity, which run on or describe the evidence instances and
+  cannot read the pin file, carry exactly that binary pin; and the endpoint's
+  source, deployed and policy files hash to their recorded digests;
+* the physical collector's go.mod and go.sum hash to their recorded digests and
+  keep the required module versions. Nothing binds the collector to
+  ``GO_VERSION``.
 
-Source files are not re-attested here: the exact Git commit bound by the hosted
-CI receipt and the candidate freeze's release-source identity remain the
+Release scripts are not re-attested here: the exact Git commit bound by the
+hosted CI receipt and the candidate freeze's release-source identity remain the
 trust root for every tracked release script.
 
 Any unavailable, missing, malformed, wrong, or partial input fails closed.
@@ -147,6 +157,9 @@ REQUIRED_PIN_KEYS = frozenset(
         "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
         "GO_RELEASE_TOOLS_GO_MOD_SHA256",
         "GO_RELEASE_TOOLS_GO_SUM_SHA256",
+        "PACKET_EVIDENCE_ENDPOINT_GO_VERSION",
+        "PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256",
+        "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
     }
 )
 # Value formats a pin may declare. ``repository-path`` values must also satisfy
@@ -291,8 +304,35 @@ _NETWORK_RECURSION_RE = re.compile(
     r"(?<![A-Za-z])wget(?![A-Za-z])|go\s+get|go\s+install|GOPROXY\s*=\s*https?",
     re.IGNORECASE,
 )
-_PACKET_ENDPOINT_BINARY_SHA256 = (
-    "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb"
+# The packet-evidence endpoint's own Go toolchain and reviewed Linux/amd64
+# output, bumped independently of the product GO_VERSION.
+_PACKET_ENDPOINT_GO_VERSION_KEY = "PACKET_EVIDENCE_ENDPOINT_GO_VERSION"
+_PACKET_ENDPOINT_GO_ARCHIVE_SHA256_KEY = (
+    "PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256"
+)
+PACKET_ENDPOINT_BINARY_SHA256_KEY = "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256"
+_PACKET_ENDPOINT_README = "tools/packet-evidence-endpoint/README.md"
+_PACKET_ENDPOINT_INSTALLER = "tools/packet-evidence-endpoint/install-endpoint.sh"
+_PACKET_ENDPOINT_POLICY = "scripts/physical_capture/packet_endpoints.json"
+# The installer runs on the evidence instances and the endpoint identities
+# describe them; neither can read the pin file, so each carries the binary pin
+# and is checked against it.
+_PACKET_ENDPOINT_INSTALLER_BINARY_PATHS = (
+    "/tmp/packet-evidence-endpoint-linux-amd64",
+    "/usr/local/libexec/cfw-packet-evidence-endpoint",
+)
+_PACKET_ENDPOINT_INSTALLER_DIGEST_CHECK_RE = re.compile(
+    r"^verify_sha256 \\\n  ([0-9a-f]{64}) \\\n  (\S+)$", re.MULTILINE
+)
+_PACKET_ENDPOINT_POLICY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "document",
+        "identities",
+        "cases",
+        "unresolved_cases",
+        "unresolved_controls",
+    }
 )
 _PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256 = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
@@ -315,28 +355,44 @@ _PACKET_ENDPOINT_POLICY_SHA256 = (
 _PACKET_ENDPOINT_SOURCE_PATHS = frozenset(
     {
         "tools/packet-evidence-endpoint/go.mod",
-        "tools/packet-evidence-endpoint/install-endpoint.sh",
+        _PACKET_ENDPOINT_INSTALLER,
         "tools/packet-evidence-endpoint/main.go",
         "tools/packet-evidence-endpoint/main_test.go",
         "tools/packet-evidence-endpoint/packet-evidence-capture.sudoers",
         "tools/packet-evidence-endpoint/packet-evidence-endpoint.service",
         "tools/packet-evidence-endpoint/packet-evidence-resolv.conf",
-        "tools/packet-evidence-endpoint/README.md",
-        "scripts/physical_capture/packet_endpoints.json",
+        _PACKET_ENDPOINT_README,
+        _PACKET_ENDPOINT_POLICY,
         "scripts/physical_capture/packet_known_hosts",
     }
 )
-_PACKET_ENDPOINT_BUILD_FRAGMENTS = (
-    "GOTOOLCHAIN=local",
-    "CGO_ENABLED=0",
-    "GOOS=linux",
-    "GOARCH=amd64",
-    "target/toolchains/go-1.27.2/bin/go",
-    "-C tools/packet-evidence-endpoint",
-    "-buildvcs=false",
-    "-trimpath",
-    "-ldflags='-s -w -buildid='",
-    "-o ../../target/packet-evidence-endpoint-linux-amd64",
+# The README recipe, required verbatim: one fail-closed bash subshell that checks
+# the endpoint's own Go archive before extracting it, builds the reproducible
+# Linux/amd64 artifact with no inherited Go environment, and compares the output
+# with the binary pin.
+_PACKET_ENDPOINT_BUILD_RECIPE = (
+    "(",
+    "  set -euo pipefail",
+    "  source scripts/dependency_pins.env",
+    '  work="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/packet-evidence-endpoint.XXXXXX")"',
+    "  trap '/bin/rm -rf \"$work\"' EXIT",
+    '  archive="$work/go.darwin-arm64.tar.gz"',
+    "  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 \\",
+    f'    "https://go.dev/dl/go${_PACKET_ENDPOINT_GO_VERSION_KEY}.darwin-arm64.tar.gz" \\',
+    '    --output "$archive"',
+    f"  printf '%s  %s\\n' \"${_PACKET_ENDPOINT_GO_ARCHIVE_SHA256_KEY}\" \"$archive\" |",
+    "    /usr/bin/shasum -a 256 --check",
+    '  /bin/mkdir "$work/go" "$work/home"',
+    '  /usr/bin/tar -xzf "$archive" -C "$work/go" --strip-components 1',
+    "  /bin/mkdir -p target",
+    '  /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work/home" GOTOOLCHAIN=local \\',
+    '    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOCACHE="$work/go-build-cache" \\',
+    '    "$work/go/bin/go" -C tools/packet-evidence-endpoint build \\',
+    "    -buildvcs=false -trimpath -ldflags='-s -w -buildid=' \\",
+    "    -o ../../target/packet-evidence-endpoint-linux-amd64 .",
+    f"  printf '%s  %s\\n' \"${PACKET_ENDPOINT_BINARY_SHA256_KEY}\" \\",
+    "    target/packet-evidence-endpoint-linux-amd64 | /usr/bin/shasum -a 256 --check",
+    ")",
 )
 _PHYSICAL_COLLECTOR_GO_MOD_SHA256 = (
     "15a4a62864a708fe87dc6e4624036603ad27ca82a1bcdc3b5f06d678fdde24be"
@@ -701,12 +757,18 @@ def _read_text(
     *,
     maximum_size: int = MAX_CONTROL_FILE_BYTES,
 ) -> str:
-    body = _read_bytes(
-        repository,
-        relative,
+    return _utf8(
+        _read_bytes(
+            repository,
+            relative,
+            description,
+            maximum_size=maximum_size,
+        ),
         description,
-        maximum_size=maximum_size,
     )
+
+
+def _utf8(body: bytes, description: str) -> str:
     try:
         return body.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
@@ -810,15 +872,6 @@ def _parse_env(text: str) -> dict[str, str]:
     return values
 
 
-def _require_env(env: dict[str, str], key: str) -> str:
-    if key not in env:
-        raise PinnedInputError(f"dependency_pins.env is missing required pin {key}")
-    value = env[key]
-    if value == "":
-        raise PinnedInputError(f"dependency_pins.env pin {key} is empty")
-    return value
-
-
 def _require_sha256(value: str, description: str) -> str:
     if not _SHA256_RE.match(value):
         raise PinnedInputError(f"{description} is not a lowercase 64-hex SHA-256: {value!r}")
@@ -844,7 +897,12 @@ def _require_canonical_relative_path(relative: object, description: str) -> None
         raise PinnedInputError(f"{description} path has an unsafe component: {relative!r}")
 
 
-def _load_dependency_pins(repository: Path) -> dict[str, str]:
+def load_dependency_pins(repository: Path) -> dict[str, str]:
+    """Parse ``scripts/dependency_pins.env`` exactly as bash splits it.
+
+    The file is read through the rooted reader; a missing, unsafe or malformed
+    file raises :class:`PinnedInputError`. Pin formats are not checked here.
+    """
     return _parse_env(
         _read_text(
             repository,
@@ -912,20 +970,20 @@ def _verify_pinned_file_digest(
 
 
 def _verify_packet_evidence_endpoint(
-    manifest: dict, env: dict[str, str], repository: Path
+    manifest: dict, pins: _DeclaredPins, repository: Path
 ) -> None:
     spec = manifest.get("packetEvidenceEndpoint")
     expected_fields = {
         "goVersionKey",
-        "goVersion",
+        "goArchiveSha256Key",
+        "binarySha256Key",
         "goos",
         "goarch",
         "cgoEnabled",
-        "binarySha256",
         "transportPort",
         "dnsPort",
         "readmePath",
-        "requiredBuildFragments",
+        "buildRecipe",
         "sourceFiles",
     }
     if not isinstance(spec, dict) or set(spec) != expected_fields:
@@ -933,20 +991,44 @@ def _verify_packet_evidence_endpoint(
             "packet evidence endpoint pinned-input contract is missing or has unknown fields"
         )
     if (
-        spec["goVersionKey"] != "GO_VERSION"
-        or spec["goVersion"] != _require_env(env, "GO_VERSION")
-        or spec["goos"] != "linux"
+        spec["goVersionKey"] != _PACKET_ENDPOINT_GO_VERSION_KEY
+        or spec["goArchiveSha256Key"] != _PACKET_ENDPOINT_GO_ARCHIVE_SHA256_KEY
+        or spec["binarySha256Key"] != PACKET_ENDPOINT_BINARY_SHA256_KEY
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint must name its own Go toolchain and binary pins"
+        )
+    endpoint_go = pins.value(
+        spec["goVersionKey"], "version", "packet evidence endpoint Go version"
+    )
+    endpoint_go_archive = pins.value(
+        spec["goArchiveSha256Key"], "sha256", "packet evidence endpoint Go archive"
+    )
+    # Independent pins may still name the same official release; one Go
+    # version has one darwin-arm64 archive, so its two digests must agree.
+    if endpoint_go == pins.value(
+        "GO_VERSION", "version", "product Go version"
+    ) and endpoint_go_archive != pins.value(
+        "GO_DARWIN_ARM64_SHA256", "sha256", "product Go archive"
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint and product pin one Go version with "
+            "different archive digests"
+        )
+    binary_sha256 = pins.value(
+        spec["binarySha256Key"], "sha256", "packet evidence endpoint binary"
+    )
+    if (
+        spec["goos"] != "linux"
         or spec["goarch"] != "amd64"
         or spec["cgoEnabled"] != "0"
         or spec["transportPort"] != 44333
         or spec["dnsPort"] != 53
-        or spec["binarySha256"] != _PACKET_ENDPOINT_BINARY_SHA256
-        or spec["readmePath"] != "tools/packet-evidence-endpoint/README.md"
-        or spec["requiredBuildFragments"]
-        != list(_PACKET_ENDPOINT_BUILD_FRAGMENTS)
+        or spec["readmePath"] != _PACKET_ENDPOINT_README
+        or spec["buildRecipe"] != list(_PACKET_ENDPOINT_BUILD_RECIPE)
     ):
         raise PinnedInputError(
-            "packet evidence endpoint build target, ports, or binary digest drifted"
+            "packet evidence endpoint build target, ports, or build recipe drifted"
         )
 
     source_files = spec["sourceFiles"]
@@ -956,6 +1038,7 @@ def _verify_packet_evidence_endpoint(
         raise PinnedInputError(
             "packet evidence endpoint must bind the exact source, test, service, policy, host-key, and README set"
         )
+    contents: dict[str, bytes] = {}
     observed: dict[str, str] = {}
     for index, entry in enumerate(source_files):
         if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
@@ -973,17 +1056,16 @@ def _verify_packet_evidence_endpoint(
                 f"packet evidence endpoint source digest is malformed for {relative!r}"
             )
         _require_sha256(digest, f"packet evidence endpoint source digest for {relative}")
-        actual = hashlib.sha256(
-            _read_bytes(
-                repository,
-                relative,
-                f"packet evidence endpoint source {relative}",
-            )
-        ).hexdigest()
-        if actual != digest:
+        body = _read_bytes(
+            repository,
+            relative,
+            f"packet evidence endpoint source {relative}",
+        )
+        if hashlib.sha256(body).hexdigest() != digest:
             raise PinnedInputError(
                 f"packet evidence endpoint source digest drifted for {relative!r}"
             )
+        contents[relative] = body
         observed[relative] = digest
     if set(observed) != _PACKET_ENDPOINT_SOURCE_PATHS:
         raise PinnedInputError(
@@ -996,10 +1078,7 @@ def _verify_packet_evidence_endpoint(
         raise PinnedInputError(
             "packet evidence endpoint systemd unit differs from the packet policy"
         )
-    if (
-        observed["tools/packet-evidence-endpoint/install-endpoint.sh"]
-        != _PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256
-    ):
+    if observed[_PACKET_ENDPOINT_INSTALLER] != _PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256:
         raise PinnedInputError(
             "packet evidence endpoint installer differs from the packet policy"
         )
@@ -1024,32 +1103,58 @@ def _verify_packet_evidence_endpoint(
         raise PinnedInputError(
             "packet evidence endpoint known-hosts bytes differ from the packet policy"
         )
-    if (
-        observed["scripts/physical_capture/packet_endpoints.json"]
-        != _PACKET_ENDPOINT_POLICY_SHA256
-    ):
+    if observed[_PACKET_ENDPOINT_POLICY] != _PACKET_ENDPOINT_POLICY_SHA256:
         raise PinnedInputError(
             "packet evidence endpoint instance policy differs from its whole-file pin"
         )
-    readme = _read_text(
-        repository,
-        spec["readmePath"],
-        "packet evidence endpoint README",
+    readme = _utf8(contents[_PACKET_ENDPOINT_README], "packet evidence endpoint README")
+    if "\n".join(("```sh", *_PACKET_ENDPOINT_BUILD_RECIPE, "```")) not in readme:
+        raise PinnedInputError(
+            "packet evidence endpoint README lacks the exact build recipe"
+        )
+    _verify_packet_endpoint_binary_copies(
+        _utf8(contents[_PACKET_ENDPOINT_INSTALLER], "packet evidence endpoint installer"),
+        _utf8(contents[_PACKET_ENDPOINT_POLICY], "packet evidence endpoint policy"),
+        binary_sha256,
     )
-    for fragment in _PACKET_ENDPOINT_BUILD_FRAGMENTS:
-        if fragment not in readme:
+
+
+def _verify_packet_endpoint_binary_copies(
+    installer: str, policy_text: str, binary_sha256: str
+) -> None:
+    """Require the installer and every instance identity to carry the binary pin."""
+    checks = _PACKET_ENDPOINT_INSTALLER_DIGEST_CHECK_RE.findall(installer)
+    for path in _PACKET_ENDPOINT_INSTALLER_BINARY_PATHS:
+        if [digest for digest, checked in checks if checked == path] != [binary_sha256]:
             raise PinnedInputError(
-                f"packet evidence endpoint README lacks build binding {fragment!r}"
+                f"packet evidence endpoint installer must verify {path} exactly once "
+                f"against {PACKET_ENDPOINT_BINARY_SHA256_KEY}"
+            )
+    policy = _load_strict_json(
+        policy_text,
+        "packet evidence endpoint policy",
+        expected_fields=_PACKET_ENDPOINT_POLICY_FIELDS,
+    )
+    identities = policy["identities"]
+    if not isinstance(identities, list) or not identities:
+        raise PinnedInputError(
+            "packet evidence endpoint policy binds no instance identity"
+        )
+    for index, entry in enumerate(identities):
+        identity = entry.get("identity") if isinstance(entry, dict) else None
+        if (
+            not isinstance(identity, dict)
+            or identity.get("endpoint_binary_sha256") != binary_sha256
+        ):
+            raise PinnedInputError(
+                f"packet evidence endpoint identities[{index}] does not carry "
+                f"{PACKET_ENDPOINT_BINARY_SHA256_KEY}"
             )
 
 
-def _verify_physical_collector_module(
-    manifest: dict, env: dict[str, str], repository: Path
-) -> None:
+def _verify_physical_collector_module(manifest: dict, repository: Path) -> None:
     spec = manifest.get("physicalCollectorModule")
     expected_fields = {
-        "goVersionKey",
-        "goVersion",
         "goModPath",
         "goModSha256",
         "goSumPath",
@@ -1061,9 +1166,7 @@ def _verify_physical_collector_module(
             "pinned-input manifest has no exact physical-collector module binding"
         )
     if (
-        spec["goVersionKey"] != "GO_VERSION"
-        or spec["goVersion"] != env.get("GO_VERSION")
-        or spec["goModPath"] != "tools/physical-collector/go.mod"
+        spec["goModPath"] != "tools/physical-collector/go.mod"
         or spec["goSumPath"] != "tools/physical-collector/go.sum"
         or spec["goModSha256"] != _PHYSICAL_COLLECTOR_GO_MOD_SHA256
         or spec["goSumSha256"] != _PHYSICAL_COLLECTOR_GO_SUM_SHA256
@@ -1081,10 +1184,7 @@ def _verify_physical_collector_module(
         raise PinnedInputError("physical-collector go.mod digest drifted")
     if hashlib.sha256(go_sum).hexdigest() != spec["goSumSha256"]:
         raise PinnedInputError("physical-collector go.sum digest drifted")
-    try:
-        go_mod_text = go_mod.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as error:
-        raise PinnedInputError("physical-collector go.mod is not UTF-8") from error
+    go_mod_text = _utf8(go_mod, "physical-collector go.mod")
     for fragment in _PHYSICAL_COLLECTOR_MODULE_FRAGMENTS:
         if fragment not in go_mod_text:
             raise PinnedInputError(
@@ -1860,10 +1960,10 @@ def verify_source_contract(repository: Path) -> VerifiedBuildInputs:
     instead of re-reading the pin file.
     """
     manifest = _load_manifest(repository)
-    env = _load_dependency_pins(repository)
+    env = load_dependency_pins(repository)
     pins = _verify_pin_formats(manifest, env)
-    _verify_packet_evidence_endpoint(manifest, env, repository)
-    _verify_physical_collector_module(manifest, env, repository)
+    _verify_packet_evidence_endpoint(manifest, pins, repository)
+    _verify_physical_collector_module(manifest, repository)
     _verify_cargo_deny(manifest, repository)
     _verify_xcodegen(manifest, pins, repository)
     _verify_tauri_cli(manifest, pins, repository)

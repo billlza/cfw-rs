@@ -30,7 +30,7 @@ SHIPPED_PINNED_MANIFEST = json.loads(
 # The shipped pin values, parsed by the verifier's own strict reader. Tests read
 # every real value from here so that a pin bump edits
 # scripts/dependency_pins.env and nothing that repeats it.
-SHIPPED_PINS = pinned_verifier._load_dependency_pins(REPO_ROOT)
+SHIPPED_PINS = pinned_verifier.load_dependency_pins(REPO_ROOT)
 REJECTED_PATCH_DIGESTS = sorted(SHIPPED_PINNED_MANIFEST["rejectedPatchDigests"])
 BUILD_TAGS = SHIPPED_PINS["LIBBOX_BUILD_TAGS"]
 PACKET_ENDPOINT_PATHS = tuple(
@@ -633,6 +633,19 @@ class PinnedBuildInputsTests(unittest.TestCase):
             verified.combined_diff_sha256, _sha(b"next combined diff")
         )
 
+    def test_product_go_bump_edits_only_the_pin_file(self) -> None:
+        # The packet-evidence endpoint and the physical collector carry their
+        # own Go identities, so a product Go bump leaves their policy, sources
+        # and recorded digests untouched.
+        fixture = Fixture()
+        major, minor, patch = fixture.env["GO_VERSION"].split(".")
+        next_go = f"{major}.{minor}.{int(patch) + 1}"
+        fixture.env["GO_VERSION"] = next_go
+        fixture.env["GO_DARWIN_ARM64_SHA256"] = _sha(b"next go archive")
+        with tempfile.TemporaryDirectory() as temporary:
+            verified = verify_source_contract(fixture.write(Path(temporary)))
+        self.assertEqual(verified.pins["GO_VERSION"], next_go)
+
     def test_build_boundary_runs_the_pinned_source_contract_gate(self) -> None:
         boundary = (REPO_ROOT / "scripts/verify_build_boundaries.sh").read_text(
             encoding="utf-8"
@@ -655,22 +668,256 @@ class PinnedBuildInputsTests(unittest.TestCase):
             fixture, "exact source, test, service, policy, host-key, and README set"
         )
 
-    def test_packet_endpoint_build_digest_cannot_drift(self) -> None:
+    def test_endpoint_toolchain_pins_are_named_by_key_only(self) -> None:
+        # The policy and the README recipe name the endpoint toolchain by key,
+        # so moving it edits only its pins (and, once rebuilt, the binary pin
+        # with the installer and identities that carry it).
         fixture = Fixture()
-        fixture.manifest["packetEvidenceEndpoint"]["binarySha256"] = "0" * 64
-        self._assert_fails(fixture, "build target, ports, or binary digest drifted")
-
-    def test_packet_endpoint_readme_must_retain_reproducible_build(self) -> None:
-        fixture = Fixture()
-        readme_path = "tools/packet-evidence-endpoint/README.md"
-        body = fixture.packet_endpoint_files[readme_path].replace(
-            b"CGO_ENABLED=0", b"CGO_ENABLED=1"
+        major, minor, patch = fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"].split(".")
+        next_go = f"{major}.{minor}.{int(patch) + 1}"
+        fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"] = next_go
+        fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256"] = _sha(
+            b"next endpoint go archive"
         )
-        fixture.packet_endpoint_files[readme_path] = body
+        with tempfile.TemporaryDirectory() as temporary:
+            verified = verify_source_contract(fixture.write(Path(temporary)))
+        self.assertEqual(verified.pins["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"], next_go)
+
+    def test_endpoint_and_product_go_pins_agree_on_one_release(self) -> None:
+        fixture = Fixture()
+        fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_VERSION"] = fixture.env["GO_VERSION"]
+        fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256"] = fixture.env[
+            "GO_DARWIN_ARM64_SHA256"
+        ]
+        self._verify_fixture(fixture)
+        fixture.env["PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256"] = _sha(
+            b"mistyped endpoint go archive"
+        )
+        self._assert_fails(
+            fixture, "pin one Go version with different archive digests"
+        )
+
+    def test_packet_endpoint_must_name_its_own_pin_keys(self) -> None:
+        for field, other_key in (
+            ("goVersionKey", "GO_VERSION"),
+            ("goArchiveSha256Key", "GO_DARWIN_ARM64_SHA256"),
+            ("binarySha256Key", "GO_RELEASE_TOOLS_GO_MOD_SHA256"),
+        ):
+            with self.subTest(field=field):
+                fixture = Fixture()
+                fixture.manifest["packetEvidenceEndpoint"][field] = other_key
+                self._assert_fails(
+                    fixture, "must name its own Go toolchain and binary pins"
+                )
+
+    def test_packet_endpoint_pins_must_keep_their_declared_formats(self) -> None:
+        for key, other_format, declared in (
+            ("PACKET_EVIDENCE_ENDPOINT_GO_VERSION", "apple-version", "version"),
+            ("PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256", "go-build-tags", "sha256"),
+            ("PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256", "go-build-tags", "sha256"),
+        ):
+            with self.subTest(key=key):
+                fixture = Fixture()
+                fixture.manifest["pinFormats"][key] = other_format
+                self._assert_fails(
+                    fixture, f"must name a declared {declared} pin, not '{key}'"
+                )
+
+    def test_packet_endpoint_build_target_ports_and_recipe_are_fixed(self) -> None:
+        for name, mutate in (
+            ("goos", lambda spec: spec.update(goos="darwin")),
+            ("goarch", lambda spec: spec.update(goarch="arm64")),
+            ("cgoEnabled", lambda spec: spec.update(cgoEnabled="1")),
+            ("transportPort", lambda spec: spec.update(transportPort=44334)),
+            ("dnsPort", lambda spec: spec.update(dnsPort=54)),
+            ("readmePath", lambda spec: spec.update(readmePath="README.md")),
+            ("recipe", lambda spec: spec["buildRecipe"].pop()),
+        ):
+            with self.subTest(field=name):
+                fixture = Fixture()
+                mutate(fixture.manifest["packetEvidenceEndpoint"])
+                self._assert_fails(
+                    fixture, "build target, ports, or build recipe drifted"
+                )
+
+    def _assert_endpoint_file_fails(
+        self, relative: str, body: bytes, constant: str, pattern: str
+    ) -> None:
+        fixture = Fixture()
+        fixture.packet_endpoint_files[relative] = body
         for entry in fixture.manifest["packetEvidenceEndpoint"]["sourceFiles"]:
-            if entry["path"] == readme_path:
+            if entry["path"] == relative:
                 entry["sha256"] = _sha(body)
-        self._assert_fails(fixture, "README lacks build binding")
+        with mock.patch.object(pinned_verifier, constant, _sha(body)):
+            self._assert_fails(fixture, pattern)
+
+    def test_packet_endpoint_binary_pin_must_match_the_installer(self) -> None:
+        fixture = Fixture()
+        fixture.env["PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256"] = _sha(b"rebuilt endpoint")
+        self._assert_fails(
+            fixture,
+            "installer must verify /tmp/packet-evidence-endpoint-linux-amd64 exactly "
+            "once against PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
+        )
+
+    def test_packet_endpoint_installer_checks_each_binary_path_once_against_the_pin(
+        self,
+    ) -> None:
+        installer_path = "tools/packet-evidence-endpoint/install-endpoint.sh"
+        binary = SHIPPED_PINS["PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256"]
+        staged = "/tmp/packet-evidence-endpoint-linux-amd64"
+        installed = "/usr/local/libexec/cfw-packet-evidence-endpoint"
+
+        def check(digest: str, path: str) -> str:
+            return f"verify_sha256 \\\n  {digest} \\\n  {path}\n"
+
+        shipped = (REPO_ROOT / installer_path).read_text(encoding="utf-8")
+        for name, old, new, path in (
+            (
+                "installed binary digest",
+                check(binary, installed),
+                check("0" * 64, installed),
+                installed,
+            ),
+            (
+                "second staged binary check",
+                check(binary, staged),
+                check(binary, staged) + check("1" * 64, staged),
+                staged,
+            ),
+        ):
+            with self.subTest(change=name):
+                self.assertEqual(shipped.count(old), 1)
+                self._assert_endpoint_file_fails(
+                    installer_path,
+                    shipped.replace(old, new).encode("utf-8"),
+                    "_PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256",
+                    f"installer must verify {path} exactly once against "
+                    "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
+                )
+
+    def test_packet_endpoint_identities_must_carry_the_binary_pin(self) -> None:
+        policy_path = "scripts/physical_capture/packet_endpoints.json"
+        shipped = json.loads((REPO_ROOT / policy_path).read_bytes())
+
+        def wrong_binary(policy: dict) -> None:
+            policy["identities"][2]["identity"]["endpoint_binary_sha256"] = "0" * 64
+
+        for name, mutate, pattern in (
+            (
+                "wrong binary",
+                wrong_binary,
+                r"identities\[2\] does not carry PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
+            ),
+            (
+                "identity is not an object",
+                lambda policy: policy["identities"].__setitem__(1, "identity"),
+                r"identities\[1\] does not carry PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
+            ),
+            (
+                "entry without identity",
+                lambda policy: policy["identities"][0].pop("identity"),
+                r"identities\[0\] does not carry PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
+            ),
+            (
+                "no identities",
+                lambda policy: policy.update(identities=[]),
+                "policy binds no instance identity",
+            ),
+            (
+                "unknown top-level field",
+                lambda policy: policy.update(unreviewed=True),
+                "policy does not have its exact top-level shape",
+            ),
+        ):
+            with self.subTest(change=name):
+                policy = copy.deepcopy(shipped)
+                mutate(policy)
+                self._assert_endpoint_file_fails(
+                    policy_path,
+                    json.dumps(policy, indent=2).encode("utf-8") + b"\n",
+                    "_PACKET_ENDPOINT_POLICY_SHA256",
+                    pattern,
+                )
+
+    def test_packet_endpoint_readme_must_keep_the_exact_recipe(self) -> None:
+        readme_path = "tools/packet-evidence-endpoint/README.md"
+        shipped = (REPO_ROOT / readme_path).read_bytes()
+        for name, old, new in (
+            ("cgo", b"CGO_ENABLED=0", b"CGO_ENABLED=1"),
+            (
+                "archive check",
+                b' "$archive" |\n    /usr/bin/shasum -a 256 --check\n',
+                b' "$archive"\n',
+            ),
+            (
+                "binary comparison",
+                b"linux-amd64 | /usr/bin/shasum -a 256 --check\n",
+                b"linux-amd64\n",
+            ),
+            ("errexit", b"  set -euo pipefail\n", b""),
+            ("inherited environment", b"/usr/bin/env -i PATH", b"/usr/bin/env PATH"),
+        ):
+            with self.subTest(change=name):
+                self.assertEqual(shipped.count(old), 1)
+                body = shipped.replace(old, new)
+                fixture = Fixture()
+                fixture.packet_endpoint_files[readme_path] = body
+                for entry in fixture.manifest["packetEvidenceEndpoint"]["sourceFiles"]:
+                    if entry["path"] == readme_path:
+                        entry["sha256"] = _sha(body)
+                self._assert_fails(fixture, "README lacks the exact build recipe")
+
+    def test_packet_endpoint_recipe_checks_inputs_before_use_and_output_after_build(
+        self,
+    ) -> None:
+        # Guards the required recipe itself, which the verifier and the policy
+        # could otherwise lose together.
+        recipe = pinned_verifier._PACKET_ENDPOINT_BUILD_RECIPE
+        self.assertEqual(
+            list(recipe),
+            SHIPPED_PINNED_MANIFEST["packetEvidenceEndpoint"]["buildRecipe"],
+        )
+
+        def line(fragment: str) -> int:
+            matches = [index for index, text in enumerate(recipe) if fragment in text]
+            self.assertEqual(len(matches), 1, fragment)
+            return matches[0]
+
+        self.assertEqual(recipe[:2], ("(", "  set -euo pipefail"))
+        self.assertEqual(recipe[-1], ")")
+        download = line(
+            "https://go.dev/dl/go$PACKET_EVIDENCE_ENDPOINT_GO_VERSION.darwin-arm64.tar.gz"
+        )
+        archive_check = line(
+            '"$PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256" "$archive" |'
+        )
+        extract = line('/usr/bin/tar -xzf "$archive"')
+        build = line('"$work/go/bin/go" -C tools/packet-evidence-endpoint build')
+        compare = line('"$PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256"')
+        self.assertEqual(recipe[archive_check + 1], "    /usr/bin/shasum -a 256 --check")
+        self.assertEqual(
+            recipe[compare + 1],
+            "    target/packet-evidence-endpoint-linux-amd64 | "
+            "/usr/bin/shasum -a 256 --check",
+        )
+        self.assertLess(download, archive_check)
+        self.assertLess(archive_check, extract)
+        self.assertLess(extract, build)
+        self.assertLess(build, compare)
+        for flag in (
+            "--proto '=https'",
+            "/usr/bin/env -i",
+            "GOTOOLCHAIN=local",
+            "CGO_ENABLED=0",
+            "GOOS=linux",
+            "GOARCH=amd64",
+            "-buildvcs=false",
+            "-trimpath",
+            "-ldflags='-s -w -buildid='",
+        ):
+            with self.subTest(flag=flag):
+                self.assertTrue(any(flag in text for text in recipe[:compare]))
 
     def test_rooted_reader_descriptor_dup_failure_is_typed(self) -> None:
         fixture = Fixture()
@@ -1831,21 +2078,17 @@ class PinValueCopyTests(unittest.TestCase):
     """Pinned values are written only in scripts/dependency_pins.env."""
 
     def test_bounded_pin_value_search_finds_copies_but_not_substrings(self) -> None:
-        go = SHIPPED_PINS["GO_VERSION"]
+        rust = SHIPPED_PINS["RUST_VERSION"]
         self.assertEqual(
-            _repeated_pin_values(f"target/toolchains/go-{go}/bin/go"), ["GO_VERSION"]
+            _repeated_pin_values(f"toolchains/rust-{rust}/bin/rustc"), ["RUST_VERSION"]
         )
-        self.assertEqual(_repeated_pin_values(f"go {go}0 and 1{go}"), [])
-        self.assertEqual(_repeated_pin_values(f"version {go}.1"), [])
+        self.assertEqual(_repeated_pin_values(f"rust {rust}0 and 1{rust}"), [])
+        self.assertEqual(_repeated_pin_values(f"version {rust}.1"), [])
 
     def test_shipped_policy_repeats_no_pin_value(self) -> None:
-        policy = copy.deepcopy(SHIPPED_PINNED_MANIFEST)
-        # The packet-evidence endpoint and collector sections still bind
-        # GO_VERSION and the endpoint build recipe until they get their own
-        # toolchain pin; every other rule names pin keys only.
-        del policy["packetEvidenceEndpoint"]
-        del policy["physicalCollectorModule"]
-        self.assertEqual(_repeated_pin_values(json.dumps(policy)), [])
+        self.assertEqual(
+            _repeated_pin_values(json.dumps(SHIPPED_PINNED_MANIFEST)), []
+        )
 
     def test_current_documents_name_pin_keys_not_values(self) -> None:
         # Dated history (CHANGELOG, dated reviews, planning) keeps the values it
@@ -1857,6 +2100,7 @@ class PinValueCopyTests(unittest.TestCase):
             "docs/physical-evidence-v5.md",
             "docs/supply-chain.md",
             "native/macos/README.md",
+            "tools/packet-evidence-endpoint/README.md",
             "tools/physical-transport-peer-ios/README.md",
         ):
             with self.subTest(document=relative):

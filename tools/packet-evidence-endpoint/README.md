@@ -23,27 +23,52 @@ that streams UDP/53 pcap bytes to standard output and exits after the exact
 six-packet, three-query/three-response DNS contract. The capture identity
 cannot select an interface, filter, path, count, or post-capture command.
 
-Build the Linux artifact with the repository-pinned Go toolchain:
+The endpoint has its own Go toolchain, independent of the product's
+`GO_VERSION`. Three pins in `scripts/dependency_pins.env` identify it:
+`PACKET_EVIDENCE_ENDPOINT_GO_VERSION` and
+`PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256` name the official
+darwin-arm64 Go archive that builds it, and
+`PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256` is the reviewed Linux/amd64 output.
+A product Go bump leaves the endpoint unchanged; bumping the endpoint's Go is a
+separate, deliberate change. Build the artifact from the repository root in
+bash. The recipe stops at the first failure: it checks the downloaded archive
+before extracting it, builds with no inherited Go environment, compares the
+output with the binary pin, and removes its temporary toolchain.
 
 ```sh
-GOTOOLCHAIN=local \
-CGO_ENABLED=0 \
-GOOS=linux \
-GOARCH=amd64 \
-GOCACHE="$PWD/target/toolchains/go-build-cache" \
-target/toolchains/go-1.27.2/bin/go \
-  -C tools/packet-evidence-endpoint \
-  build \
-  -buildvcs=false \
-  -trimpath \
-  -ldflags='-s -w -buildid=' \
-  -o ../../target/packet-evidence-endpoint-linux-amd64 \
-  .
+(
+  set -euo pipefail
+  source scripts/dependency_pins.env
+  work="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/packet-evidence-endpoint.XXXXXX")"
+  trap '/bin/rm -rf "$work"' EXIT
+  archive="$work/go.darwin-arm64.tar.gz"
+  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 \
+    "https://go.dev/dl/go$PACKET_EVIDENCE_ENDPOINT_GO_VERSION.darwin-arm64.tar.gz" \
+    --output "$archive"
+  printf '%s  %s\n' "$PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256" "$archive" |
+    /usr/bin/shasum -a 256 --check
+  /bin/mkdir "$work/go" "$work/home"
+  /usr/bin/tar -xzf "$archive" -C "$work/go" --strip-components 1
+  /bin/mkdir -p target
+  /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work/home" GOTOOLCHAIN=local \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOCACHE="$work/go-build-cache" \
+    "$work/go/bin/go" -C tools/packet-evidence-endpoint build \
+    -buildvcs=false -trimpath -ldflags='-s -w -buildid=' \
+    -o ../../target/packet-evidence-endpoint-linux-amd64 .
+  printf '%s  %s\n' "$PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256" \
+    target/packet-evidence-endpoint-linux-amd64 | /usr/bin/shasum -a 256 --check
+)
 ```
 
-The reviewed Linux/amd64 artifact from those exact inputs has the SHA-256
-recorded as `packetEvidenceEndpoint.binarySha256` in
-`scripts/pinned_build_inputs.json`.
+An endpoint Go bump first changes the two toolchain pins; the final comparison
+then fails until `PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256` holds the new output
+digest, after which the recipe must reproduce it.
+
+`scripts/verify_pinned_build_inputs.py` requires this exact recipe, and requires
+`install-endpoint.sh` and every endpoint identity in
+`scripts/physical_capture/packet_endpoints.json` to carry exactly
+`PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256`. Those files run on or describe the
+instances and cannot read the pin file, so they keep a checked copy.
 
 The reviewed endpoint policy must bind the resulting SHA-256, each GCE
 instance identity, the exact external IPv4/IPv6 addresses, the SSH host-key
@@ -63,13 +88,14 @@ upgrades and the unneeded telemetry manager, checks service health, and only
 then deletes its staging files. Run it only after separately verifying the five
 staged file digests.
 
-The binary, installer, service unit, resolver configuration, capture sudoers,
-strict known-hosts and endpoint policy SHA-256 values are the
-`packetEvidenceEndpoint` values in `scripts/pinned_build_inputs.json`; this
-README repeats none of them. A Go
-toolchain change rebinds the binary and therefore the installer and policy;
-the instances then run the earlier binary until the installation transaction
-is rerun, which physical assurance collection requires.
+The installer, service unit, resolver configuration, capture sudoers, strict
+known-hosts and endpoint policy SHA-256 values are the `packetEvidenceEndpoint`
+source digests in `scripts/pinned_build_inputs.json`; this README repeats none
+of them. An endpoint Go bump rebinds the binary pin and therefore the
+installer, the endpoint identities and the policy, together with the installer,
+identity and policy digests recorded for them; the instances then run the
+earlier binary until the installation transaction is rerun, which physical
+assurance collection requires.
 All three endpoint installation transactions and both dedicated remote-capture
 allow/deny preflights succeeded with an earlier binary before the instances
 were stopped. That is

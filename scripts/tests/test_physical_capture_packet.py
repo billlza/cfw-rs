@@ -28,9 +28,11 @@ from scripts.physical_capture.execution import CommandResult, command_sha256
 from scripts.physical_capture.packet import PacketCaptureAdapterError
 from scripts.physical_capture.session import CaptureEvent, PhysicalCaptureSession
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts import verify_pinned_build_inputs as pinned_inputs
 
 
 GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 
 def _sha256(value: str) -> str:
@@ -564,6 +566,65 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
         self.assertEqual(
             raised.exception.code, "packet_endpoint_artifact_identity_stale"
         )
+
+    def _pin_repository(self, name: str, pins_text: str) -> Path:
+        root = self.repository / f"pins-{name}"
+        (root / "scripts").mkdir(parents=True)
+        (root / "scripts/dependency_pins.env").write_text(pins_text, encoding="ascii")
+        return root
+
+    def test_endpoint_binary_digest_is_read_from_its_dependency_pin(self) -> None:
+        reviewed = _sha256("rebuilt endpoint")
+        root = self._pin_repository(
+            "rebuilt",
+            f"GO_VERSION=9.9.9\nPACKET_EVIDENCE_ENDPOINT_BINARY_SHA256={reviewed}\n",
+        )
+        with patch.object(packet, "REPOSITORY_ROOT", root):
+            self.assertEqual(packet._source_endpoint_binary_sha256(), reviewed)
+
+    def test_endpoint_binary_pin_must_exist_and_be_a_sha256(self) -> None:
+        for name, pins_text in (
+            ("missing", "GO_VERSION=9.9.9\n"),
+            ("malformed", "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256=F1589E\n"),
+            ("unparseable", "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256\n"),
+        ):
+            with self.subTest(pins=name):
+                root = self._pin_repository(name, pins_text)
+                with patch.object(packet, "REPOSITORY_ROOT", root):
+                    with self.assertRaises(PacketCaptureAdapterError) as raised:
+                        packet._source_endpoint_binary_sha256()
+                self.assertEqual(raised.exception.code, "packet_endpoint_pin_invalid")
+
+    def test_shipped_endpoint_identities_bind_the_current_binary_pin(self) -> None:
+        reviewed = pinned_inputs.load_dependency_pins(REPOSITORY)[
+            "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256"
+        ]
+        self.assertEqual(packet.PACKET_ENDPOINT_BINARY_SHA256, reviewed)
+        current = packet._validate_endpoint_policy(packet.SOURCE_PINNED_ENDPOINTS)
+        self.assertEqual(set(current), set(REQUIRED_CASES))
+        self.assertEqual(
+            {
+                plan.endpoint_binary_sha256
+                for plan in current.values()
+                if plan.network_role != "controlled-lan-peer"
+            },
+            {reviewed},
+        )
+
+    def test_source_pin_revalidation_accepts_the_unchanged_shipped_sources(self) -> None:
+        self.assertIsNone(packet._revalidate_source_pins())
+
+    def test_source_pin_revalidation_rejects_a_binary_pin_changed_after_import(
+        self,
+    ) -> None:
+        with patch.object(
+            packet,
+            "_source_endpoint_binary_sha256",
+            return_value=_sha256("binary pin edited during the run"),
+        ):
+            with self.assertRaises(PacketCaptureAdapterError) as raised:
+                packet._revalidate_source_pins()
+        self.assertEqual(raised.exception.code, "packet_source_policy_changed")
 
     def test_source_policy_rejects_identity_bytes_without_matching_canonical_hash(self) -> None:
         policy = json.loads(packet.ENDPOINT_POLICY_PATH.read_text(encoding="utf-8"))

@@ -61,6 +61,11 @@ from scripts.harness.raw_artifacts import (
     exact_object,
     load_json_bytes,
 )
+from scripts.verify_pinned_build_inputs import (
+    PACKET_ENDPOINT_BINARY_SHA256_KEY,
+    PinnedInputError,
+    load_dependency_pins,
+)
 
 from .execution import (
     CommandResult,
@@ -96,9 +101,6 @@ PACKET_COMMAND_TIMEOUT_SECONDS: Final = 30.0
 PACKET_CAPTURE_TIMEOUT_SECONDS: Final = 45.0
 PACKET_ENDPOINT_TRANSPORT_PORT: Final = 44333
 PACKET_ENDPOINT_DNS_PORT: Final = 53
-PACKET_ENDPOINT_BINARY_SHA256: Final = (
-    "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb"
-)
 PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256: Final = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
 )
@@ -290,6 +292,30 @@ class PacketCaseRuntime:
         self.stages = []
 
 
+REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[2]
+
+
+def _source_endpoint_binary_sha256() -> str:
+    """Read the reviewed endpoint binary digest from its dependency pin."""
+
+    try:
+        value = load_dependency_pins(REPOSITORY_ROOT).get(
+            PACKET_ENDPOINT_BINARY_SHA256_KEY
+        )
+    except PinnedInputError as error:
+        raise PacketCaptureAdapterError(
+            "packet_endpoint_pin_invalid",
+            "the dependency pin file is unavailable or malformed",
+        ) from error
+    if value is None or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise PacketCaptureAdapterError(
+            "packet_endpoint_pin_invalid",
+            f"{PACKET_ENDPOINT_BINARY_SHA256_KEY} is missing or not a SHA-256 digest",
+        )
+    return value
+
+
+PACKET_ENDPOINT_BINARY_SHA256: Final = _source_endpoint_binary_sha256()
 ENDPOINT_POLICY_PATH: Final = Path(__file__).with_name("packet_endpoints.json")
 ENDPOINT_POLICY_SHA256: Final = (
     "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a"
@@ -1116,6 +1142,7 @@ SOURCE_PINNED_ENDPOINTS: Final[Mapping[str, PacketEndpointPlan]] = (
 def _revalidate_source_pins() -> None:
     try:
         endpoint_policy = _source_endpoint_policy()
+        endpoint_binary_sha256 = _source_endpoint_binary_sha256()
         ios_identity = ios_packet_lan_peer_adapter.load_source_identity()
     except PacketCaptureAdapterError:
         raise
@@ -1138,6 +1165,7 @@ def _revalidate_source_pins() -> None:
         ) from error
     if (
         endpoint_policy != SOURCE_PINNED_ENDPOINTS
+        or endpoint_binary_sha256 != PACKET_ENDPOINT_BINARY_SHA256
         or ios_identity.file_sha256 != SOURCE_IOS_LAN_PEER_IDENTITY.file_sha256
         or ios_identity.identity_sha256
         != SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256
@@ -1145,7 +1173,8 @@ def _revalidate_source_pins() -> None:
     ):
         raise PacketCaptureAdapterError(
             "packet_source_policy_changed",
-            "source-pinned Packet endpoint or iPhone identity changed after import",
+            "source-pinned Packet endpoint, binary pin or iPhone identity changed "
+            "after import",
         )
 
 

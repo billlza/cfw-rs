@@ -1,6 +1,6 @@
 {
   "schema": "cfw-pinned-build-inputs-v2",
-  "description": "Release build-input policy. scripts/dependency_pins.env is the authoritative store of pinned versions, digests, commits and paths; this policy names the format of every pin key and the rules verify_pinned_build_inputs.py applies to those values: tracked files hashed against their digest pins, required libbox build tags and their reasons, and the pin references each release script must keep. It repeats no pin value, except that packetEvidenceEndpoint and physicalCollectorModule still bind GO_VERSION and the endpoint build recipe until they get their own toolchain pin.",
+  "description": "Release build-input policy. scripts/dependency_pins.env is the authoritative store of pinned versions, digests, commits and paths; this policy names the format of every pin key and the rules verify_pinned_build_inputs.py applies to those values: tracked files hashed against their digest pins, required libbox build tags and their reasons, and the pin references each release script must keep. It repeats no pin value.",
   "pinFormats": {
     "MACOS_DEPLOYMENT_TARGET": "apple-version",
     "XCODE_VERSION": "apple-version",
@@ -72,29 +72,44 @@
     "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH": "repository-path",
     "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256": "sha256",
     "GO_RELEASE_TOOLS_GO_MOD_SHA256": "sha256",
-    "GO_RELEASE_TOOLS_GO_SUM_SHA256": "sha256"
+    "GO_RELEASE_TOOLS_GO_SUM_SHA256": "sha256",
+    "PACKET_EVIDENCE_ENDPOINT_GO_VERSION": "version",
+    "PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256": "sha256",
+    "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256": "sha256"
   },
   "packetEvidenceEndpoint": {
-    "goVersionKey": "GO_VERSION",
-    "goVersion": "1.27.2",
+    "goVersionKey": "PACKET_EVIDENCE_ENDPOINT_GO_VERSION",
+    "goArchiveSha256Key": "PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256",
+    "binarySha256Key": "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
     "goos": "linux",
     "goarch": "amd64",
     "cgoEnabled": "0",
-    "binarySha256": "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb",
     "transportPort": 44333,
     "dnsPort": 53,
     "readmePath": "tools/packet-evidence-endpoint/README.md",
-    "requiredBuildFragments": [
-      "GOTOOLCHAIN=local",
-      "CGO_ENABLED=0",
-      "GOOS=linux",
-      "GOARCH=amd64",
-      "target/toolchains/go-1.27.2/bin/go",
-      "-C tools/packet-evidence-endpoint",
-      "-buildvcs=false",
-      "-trimpath",
-      "-ldflags='-s -w -buildid='",
-      "-o ../../target/packet-evidence-endpoint-linux-amd64"
+    "buildRecipe": [
+      "(",
+      "  set -euo pipefail",
+      "  source scripts/dependency_pins.env",
+      "  work=\"$(/usr/bin/mktemp -d \"${TMPDIR:-/tmp}/packet-evidence-endpoint.XXXXXX\")\"",
+      "  trap '/bin/rm -rf \"$work\"' EXIT",
+      "  archive=\"$work/go.darwin-arm64.tar.gz\"",
+      "  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 \\",
+      "    \"https://go.dev/dl/go$PACKET_EVIDENCE_ENDPOINT_GO_VERSION.darwin-arm64.tar.gz\" \\",
+      "    --output \"$archive\"",
+      "  printf '%s  %s\\n' \"$PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256\" \"$archive\" |",
+      "    /usr/bin/shasum -a 256 --check",
+      "  /bin/mkdir \"$work/go\" \"$work/home\"",
+      "  /usr/bin/tar -xzf \"$archive\" -C \"$work/go\" --strip-components 1",
+      "  /bin/mkdir -p target",
+      "  /usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$work/home\" GOTOOLCHAIN=local \\",
+      "    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOCACHE=\"$work/go-build-cache\" \\",
+      "    \"$work/go/bin/go\" -C tools/packet-evidence-endpoint build \\",
+      "    -buildvcs=false -trimpath -ldflags='-s -w -buildid=' \\",
+      "    -o ../../target/packet-evidence-endpoint-linux-amd64 .",
+      "  printf '%s  %s\\n' \"$PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256\" \\",
+      "    target/packet-evidence-endpoint-linux-amd64 | /usr/bin/shasum -a 256 --check",
+      ")"
     ],
     "sourceFiles": [
       {
@@ -127,7 +142,7 @@
       },
       {
         "path": "tools/packet-evidence-endpoint/README.md",
-        "sha256": "e1aecab943a38235253cbd28876e3c99a8ea08791cf8db9f1665faeba329602f"
+        "sha256": "8e8ce590a3f024bf8e59f6bfaa6e24de7718a2d67cf025ee6d980b619eb2f2e1"
       },
       {
         "path": "scripts/physical_capture/packet_endpoints.json",
@@ -140,8 +155,6 @@
     ]
   },
   "physicalCollectorModule": {
-    "goVersionKey": "GO_VERSION",
-    "goVersion": "1.27.2",
     "goModPath": "tools/physical-collector/go.mod",
     "goModSha256": "15a4a62864a708fe87dc6e4624036603ad27ca82a1bcdc3b5f06d678fdde24be",
     "goSumPath": "tools/physical-collector/go.sum",

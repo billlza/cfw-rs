@@ -335,6 +335,11 @@ def _license_closure(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# A plan names its source either as a fixed ``reference`` or as a
+# ``reference_template`` formatted with the component seed's version. The Go
+# toolchain seed carries GO_VERSION only after the native collector matched it
+# against the toolchain's `go version` output, so a Go bump edits only the pin
+# file.
 _SOURCE_CLOSURE_PLANS = {
     "@esbuild/darwin-arm64": {
         "classification": "shared-official-tag-source",
@@ -385,7 +390,7 @@ _SOURCE_CLOSURE_PLANS = {
     "go": {
         "classification": "external-build-tool-pinned-binary",
         "upstream": "https://go.dev/dl/",
-        "reference": "go1.27.2.darwin-arm64",
+        "reference_template": "go{version}.darwin-arm64",
         "closure_action": (
             "retain version, executable SHA-256, module verification, and the official release "
             "archive checksum as build provenance; do not add the compiler to corresponding source"
@@ -471,10 +476,14 @@ def _source_closure(seed: ComponentSeed) -> dict[str, Any]:
     plan = _SOURCE_CLOSURE_PLANS.get(seed.name)
     if plan is None:
         raise PublicationError(f"missing source-closure plan for {seed.identifier}")
-    return {
+    closure = {
         **plan,
         "release_impact": "non-blocking-external-build-tool-provenance",
     }
+    template = closure.pop("reference_template", None)
+    if template is not None:
+        closure["reference"] = template.format(version=seed.version)
+    return closure
 
 
 def _blocker_document(

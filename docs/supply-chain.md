@@ -18,17 +18,27 @@ also fixes the set of pin keys, so a pin cannot vanish from both files.
 A few consumers cannot read the pin file and keep a copy that a test or a
 release-time check compares with it: `rust-toolchain.toml` and the CI
 workflow's Rust and Python versions, the updater signing launcher's fixed Tauri
-toolchain metadata, and the publication source plans. Until they get their own
-toolchain pin, the `packetEvidenceEndpoint` and `physicalCollectorModule`
-policy entries and the endpoint build recipe also bind `GO_VERSION`. Otherwise
-a pinned value appears only in the pin file and in the sources that consume it
-(patches, `go.mod` files, lock files).
+toolchain metadata, the publication source plans, and the packet-evidence
+endpoint's installer and instance identities, which run on or describe the
+evidence instances and carry `PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256`.
+Otherwise a pinned value appears only in the pin file and in the sources that
+consume it (patches, `go.mod` files, lock files).
+
+The evidence tools do not follow the product's `GO_VERSION`. The packet-evidence
+endpoint has its own toolchain pins in the table below. The physical collector
+is a separate Cloud Run service whose Go identity is its own `go.mod` go
+directive and the one digest-pinned `golang` image in its Dockerfile and Cloud
+Build, which a release test keeps equal. The independence runs one way: the
+endpoint pins live in the pin file, so an endpoint rebinding changes the pin
+file's digest, which the CI toolchain binding, the native UI source digest and
+the release verifier's inputs record.
 
 | Input | Pin keys | Verification |
 |---|---|---|
 | Rust | `RUST_VERSION`, `RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256` | `rust-toolchain.toml`, exact six-component `rustup-component-file-tree-v2` surface, and compiler/version identity |
 | Node.js | `NODE_VERSION`, `NODE_DARWIN_ARM64_SHA256` | official darwin-arm64 archive SHA-256 |
 | Go | `GO_VERSION`, `GO_DARWIN_ARM64_SHA256` | official darwin-arm64 archive SHA-256 |
+| Packet-evidence endpoint (evidence tool) | `PACKET_EVIDENCE_ENDPOINT_GO_VERSION`, `PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256`, `PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256` | the pinned-input verifier requires the exact README recipe (its own official darwin-arm64 Go archive SHA-256, a reproducible Linux/amd64 build compared with the binary pin), which an operator runs to rebuild; the installer and instance identities are checked against the binary pin |
 | XcodeGen | `XCODEGEN_VERSION`, `XCODEGEN_COMMIT` and the other `XCODEGEN_*` pins | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
 | Tauri CLI | `TAURI_CLI_VERSION` and the other `TAURI_*` pins | official crate SHA-256, unchanged published lock digest, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
 | gomobile/gobind | `GOMOBILE_VERSION`, `GOMOBILE_COMMIT`, `GOMOBILE_MODULE_SUM` | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
@@ -131,8 +141,8 @@ Network access is isolated to explicit preparation:
    through a repository-rooted, no-follow descriptor chain that rejects
    symlinks, hard links, non-regular files, foreign ownership, group- or
    other-writable modes, and any before/after metadata change.
-   The policy repeats no pin value apart from the `GO_VERSION` bindings
-   named above, and it does not re-attest individual release scripts. The exact Git commit bound by the
+   The policy repeats no pin value, and it does not re-attest individual
+   release scripts. The exact Git commit bound by the
    hosted CI receipt and the candidate freeze's clean-tree `repositoryCommit`
    and release-source digest `releaseSourceSha256` identify every tracked
    release source. Developer ID signing with designated-requirement checks,

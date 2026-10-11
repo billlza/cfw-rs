@@ -493,9 +493,7 @@ PYTHON_STDLIB_MANIFEST_ALGORITHM = "sha256-tree-v1"
 
 def _pins(repository: Path) -> dict[str, str]:
     try:
-        return pinned._parse_env(
-            pinned._read_text(repository, PINS_RELATIVE, "dependency_pins.env")
-        )
+        return pinned.load_dependency_pins(repository)
     except pinned.PinnedInputError as error:
         raise PublicationError(f"cannot read the pinned toolchain set: {error}") from error
 

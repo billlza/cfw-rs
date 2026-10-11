@@ -93,8 +93,12 @@ TOCTOU-visible mutation fails the entire physical level.
   build instructions live in `tools/packet-evidence-endpoint/`. The only
   supported Debian installation transaction is `install-endpoint.sh`, with a
   fixed GCE metadata resolver configuration, capture sudoers rule and local
-  strict known-hosts file; the Linux/amd64 artifact, systemd unit and those
-  files' digests are the `packetEvidenceEndpoint` values in
+  strict known-hosts file. The Linux/amd64 artifact digest is the
+  `PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256` pin, built with the endpoint's own
+  `PACKET_EVIDENCE_ENDPOINT_GO_VERSION` and
+  `PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256` toolchain pins rather than
+  the product `GO_VERSION`; the systemd unit and those files' digests are the
+  `packetEvidenceEndpoint` source digests in
   `scripts/pinned_build_inputs.json`; this document does not repeat them. That
   policy and its offline verifier bind those bytes,
   fixed TCP/UDP port 44333, UDP-only DNS port 53, CGO-disabled Linux/amd64

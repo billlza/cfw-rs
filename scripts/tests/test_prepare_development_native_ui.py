@@ -54,6 +54,7 @@ class DevelopmentNativeUiTests(unittest.TestCase):
                 self.assertEqual(dev.manifest(directory / dev.RESOURCES), receipt["products"][dev.RESOURCES])
             self.assertEqual(dev.manifest(products / dev.LIBRARY), receipt["products"][dev.LIBRARY])
             self.assertTrue((products.parent / "build.log").exists())
+            self.assertFalse((products.parent / "swift-build").exists())
 
     def test_new_source_attempt_never_replaces_prior_receipt_or_resources(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -153,7 +154,10 @@ class DevelopmentNativeUiTests(unittest.TestCase):
             with patch.object(dev, "run_bounded_process", side_effect=wrong_architecture):
                 with self.assertRaisesRegex(ValueError, "thin arm64"):
                     dev.prepare(repository, repository / "target")
-            self.assertEqual(list((repository / "target/native-ui-development").rglob("receipt.json")), [])
+            attempts = repository / "target/native-ui-development"
+            self.assertEqual(list(attempts.rglob("receipt.json")), [])
+            # A failed attempt keeps its compiler scratch for diagnosis.
+            self.assertEqual(len(list(attempts.glob("*/*/swift-build"))), 1)
 
 
 if __name__ == "__main__":

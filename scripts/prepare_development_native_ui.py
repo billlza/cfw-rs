@@ -2,8 +2,11 @@
 """Explicitly prepare Swift debug UI inputs before running Cargo with native-ui.
 
 Never signs, installs, changes networking, or writes into release candidates.
-Every build keeps a fresh attempt, including failed compiler output. Cargo only
-validates the completed receipt and its current source/resource bytes.
+Every build keeps a fresh attempt with its logs, products and receipt. A
+completed attempt removes its Swift build scratch, which is plain compiler
+output already copied into the products; a failed attempt keeps it for
+diagnosis. Cargo only validates the completed receipt and its current
+source/resource bytes.
 """
 from __future__ import annotations
 
@@ -173,6 +176,7 @@ def prepare(repository: Path, target: Path, *, explicit_target: bool = False) ->
     with (products / "receipt.json").open("x") as handle:
         json.dump(receipt, handle, sort_keys=True, indent=2)
         handle.write("\n")
+    shutil.rmtree(scratch)
     return products
 
 

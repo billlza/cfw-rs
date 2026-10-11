@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from unittest.mock import patch
 
 import scripts.hash_artifact as hash_artifact
 import scripts.verify_artifact_manifest as verify_artifact_manifest
+from scripts.tests.metadata_change_fixture import change_only_ctime
 
 
 SCRIPTS = Path(__file__).resolve().parent.parent
@@ -362,11 +364,17 @@ class ArtifactManifestV2SecurityTests(unittest.TestCase):
                     parked.rename(target)
             return original(descriptor, expected_size, relative)
 
+        # The open descriptor hashes the original inode, and the swap back
+        # restores that inode's dev, ino, size and mtime. The two renames
+        # still rewrite the parent directory, so the walk fails closed there.
         with patch(
             "scripts.hash_artifact._descriptor_digest",
             side_effect=substituting_digest,
         ):
-            with self.assertRaisesRegex(ValueError, "changed while hashing"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "changed while enumerating directory: bin$",
+            ):
                 hash_artifact.build_manifest(
                     self.root,
                     algorithm="sha256-tree-v2",
@@ -460,6 +468,114 @@ class ArtifactManifestV2SecurityTests(unittest.TestCase):
                     self.root,
                     algorithm="sha256-tree-v2",
                 )
+
+    def test_metadata_only_change_during_hashing_keeps_the_digest(self) -> None:
+        (self.root / "second").write_bytes(b"second")
+        original = hash_artifact._descriptor_digest
+        for algorithm in hash_artifact.SUPPORTED_ALGORITHMS:
+            with self.subTest(algorithm=algorithm):
+                expected = hash_artifact.build_manifest(
+                    self.root,
+                    algorithm=algorithm,
+                )
+                hashed: list[Path] = []
+
+                def racing_digest(
+                    descriptor: int,
+                    expected_size: int,
+                    relative: str,
+                ) -> str:
+                    current = self.root / relative
+                    for path in (self.root, current.parent, current, *hashed):
+                        change_only_ctime(path)
+                    digest = original(descriptor, expected_size, relative)
+                    change_only_ctime(current)
+                    hashed.append(current)
+                    return digest
+
+                with patch(
+                    "scripts.hash_artifact._descriptor_digest",
+                    side_effect=racing_digest,
+                ):
+                    observed = hash_artifact.build_manifest(
+                        self.root,
+                        algorithm=algorithm,
+                    )
+                self.assertEqual(
+                    sorted(hashed),
+                    [self.root / "bin/tool", self.root / "second"],
+                )
+                self.assertEqual(observed, expected)
+
+    def test_metadata_only_change_while_hashing_a_file_root_keeps_the_digest(
+        self,
+    ) -> None:
+        artifact = self.root / "bin/tool"
+        original = hash_artifact._descriptor_digest
+        for algorithm in hash_artifact.SUPPORTED_ALGORITHMS:
+            with self.subTest(algorithm=algorithm):
+                expected = hash_artifact.build_manifest(
+                    artifact,
+                    algorithm=algorithm,
+                )
+                calls: list[str] = []
+
+                def racing_digest(
+                    descriptor: int,
+                    expected_size: int,
+                    relative: str,
+                ) -> str:
+                    calls.append(relative)
+                    change_only_ctime(artifact)
+                    digest = original(descriptor, expected_size, relative)
+                    change_only_ctime(artifact)
+                    return digest
+
+                with patch(
+                    "scripts.hash_artifact._descriptor_digest",
+                    side_effect=racing_digest,
+                ):
+                    observed = hash_artifact.build_manifest(
+                        artifact,
+                        algorithm=algorithm,
+                    )
+                self.assertEqual(calls, ["."])
+                self.assertEqual(observed, expected)
+
+    def test_mode_change_during_hashing_is_rejected(self) -> None:
+        original = hash_artifact._descriptor_digest
+        for algorithm in hash_artifact.SUPPORTED_ALGORITHMS:
+            for label, path in (
+                ("root", self.root),
+                ("directory", self.root / "bin"),
+                ("file", self.root / "bin/tool"),
+            ):
+                with self.subTest(algorithm=algorithm, entry=label):
+                    mode = stat.S_IMODE(os.stat(path).st_mode)
+
+                    def racing_digest(
+                        descriptor: int,
+                        expected_size: int,
+                        relative: str,
+                        path: Path = path,
+                        mode: int = mode,
+                    ) -> str:
+                        digest = original(descriptor, expected_size, relative)
+                        os.chmod(path, mode ^ stat.S_IXOTH)
+                        return digest
+
+                    try:
+                        with patch(
+                            "scripts.hash_artifact._descriptor_digest",
+                            side_effect=racing_digest,
+                        ):
+                            with self.assertRaisesRegex(ValueError, "changed while"):
+                                hash_artifact.build_manifest(
+                                    self.root,
+                                    algorithm=algorithm,
+                                )
+                    finally:
+                        os.chmod(path, mode)
 
     def test_entries_use_global_posix_sort_order(self) -> None:
         (self.root / "a").mkdir()

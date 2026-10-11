@@ -218,6 +218,26 @@ class FileMetadata:
             changed_ns=value.st_ctime_ns,
         )
 
+    def read_identity(self) -> tuple[object, ...]:
+        """Identity for one in-process read: the status-change time is left out.
+
+        macOS changes it without touching any byte. Only the persisted
+        updater-key custody record compares it, as ACL and extended-attribute
+        drift on key material.
+        """
+
+        return (
+            self.path,
+            self.device,
+            self.inode,
+            self.mode,
+            self.uid,
+            self.gid,
+            self.links,
+            self.size,
+            self.modified_ns,
+        )
+
     def as_manifest(self) -> dict[str, object]:
         return {
             "changedNs": self.changed_ns,
@@ -474,7 +494,10 @@ def _read_stable_regular_file(
     descriptor = -1
     try:
         descriptor = os.open(path, flags)
-        if FileMetadata.from_stat(path, os.fstat(descriptor)) != expected:
+        if (
+            FileMetadata.from_stat(path, os.fstat(descriptor)).read_identity()
+            != expected.read_identity()
+        ):
             raise SigningPreflightError(f"{label} changed before it was read")
         chunks: list[bytes] = []
         total = 0
@@ -487,7 +510,8 @@ def _read_stable_regular_file(
                 raise SigningPreflightError(f"{label} exceeds its fixed bound")
             chunks.append(chunk)
         if (
-            FileMetadata.from_stat(path, os.fstat(descriptor)) != expected
+            FileMetadata.from_stat(path, os.fstat(descriptor)).read_identity()
+            != expected.read_identity()
             or total != expected.size
         ):
             raise SigningPreflightError(f"{label} changed while it was read")
@@ -1158,7 +1182,7 @@ def _hash_profile(path: Path, expected: FileMetadata) -> str:
         descriptor = os.open(path, flags)
         before = os.fstat(descriptor)
         observed = FileMetadata.from_stat(path, before)
-        if observed != expected:
+        if observed.read_identity() != expected.read_identity():
             raise SigningPreflightError(
                 "provisioning profile changed before identity capture"
             )
@@ -1175,7 +1199,7 @@ def _hash_profile(path: Path, expected: FileMetadata) -> str:
                 )
             digest.update(chunk)
         after = FileMetadata.from_stat(path, os.fstat(descriptor))
-        if after != expected or total != expected.size:
+        if after.read_identity() != expected.read_identity() or total != expected.size:
             raise SigningPreflightError(
                 "provisioning profile changed while its identity was captured"
             )
@@ -1486,7 +1510,10 @@ def _decode_and_validate_profile(
         raise SigningPreflightError(
             f"{role} provisioning profile CMS payload is not a plist"
         ) from error
-    if _profile_file_identity(path, role, owner) != identity:
+    if (
+        _profile_file_identity(path, role, owner).read_identity()
+        != identity.read_identity()
+    ):
         raise SigningPreflightError(
             f"{role} provisioning profile changed during preflight"
         )

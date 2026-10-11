@@ -253,7 +253,6 @@ def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
         metadata.st_nlink,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
 
 

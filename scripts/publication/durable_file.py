@@ -357,7 +357,6 @@ def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
         metadata.st_nlink,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
 
 
@@ -1459,9 +1458,11 @@ def promote_private_pending(pending: Path, destination: Path) -> None:
                 dir_fd=directory_descriptor,
                 follow_symlinks=False,
             )
+            # A rename changes only the status-change time, which is not part
+            # of the identity, so the whole identity must survive it.
             if (
-                _metadata_identity(synchronized)[:-1]
-                != _metadata_identity(synchronized_after_rename)[:-1]
+                _metadata_identity(synchronized)
+                != _metadata_identity(synchronized_after_rename)
                 or _metadata_identity(synchronized_after_rename)
                 != _metadata_identity(promoted)
             ):
@@ -1637,9 +1638,11 @@ def _promote_private_directory_at(
             )
             _require_private_directory_metadata(synchronized_after_rename, destination)
             _require_private_directory_metadata(promoted, destination)
+            # A rename changes only the status-change time, which is not part
+            # of the identity, so the whole identity must survive it.
             if (
-                _metadata_identity(synchronized)[:-1]
-                != _metadata_identity(synchronized_after_rename)[:-1]
+                _metadata_identity(synchronized)
+                != _metadata_identity(synchronized_after_rename)
                 or _metadata_identity(synchronized_after_rename)
                 != _metadata_identity(promoted)
             ):

@@ -21,30 +21,20 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-import scripts.gatekeeper_assessment as gatekeeper_module
 import scripts.candidate_freeze as freeze_module
 import scripts.notarization_transaction as transaction_module
 from scripts.gatekeeper_assessment import validate_evidence as validate_gatekeeper_evidence
 from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import (
-    MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
-    MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
-    MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
-    MACOS_27_26A5425A_COMPATIBILITY_IDENTITY,
-    MACOS_27_COMPATIBILITY_IDENTITIES,
     MAX_COMMAND_OUTPUT_BYTES,
     CommandResult,
     CommandRole,
-    HostSystemIdentity,
-    PreSubmissionPolicyMode,
     TransactionContext,
     TransactionError,
     _claim_attempt,
-    _establish_pre_submission_policy,
     _run_bounded_process,
     execute_transaction,
     production_archive_builder,
-    production_host_system_identity_reader,
     production_manifest_verifier,
     production_manifest_writer,
     publish_exclusive,
@@ -313,7 +303,6 @@ class Fixture:
         arguments = self.arguments()
         arguments.pop("archive_builder")
         arguments.pop("attempt_id_factory")
-        arguments.pop("host_system_identity_reader", None)
         arguments.pop("candidate_freeze_verifier")
         arguments.pop("signing_transformation_verifier")
         arguments.update(
@@ -420,183 +409,283 @@ def known_notary_false_positive(app: Path) -> dict[str, str]:
     }
 
 
-def known_missing_ticket(app: Path) -> dict[str, str]:
-    return {
-        "SyspolicyCheckAdditionalInformation": "",
-        "SyspolicyCheckAdvice": (
-            "If this application has already been uploaded to the Apple notary "
-            "service, please make sure to attach the ticket with the `stapler "
-            "staple` command. If not, please upload to the Apple notary service "
-            "using Xcode or via `notarytool`. "
-        ),
-        "SyspolicyCheckDocumentationLink": (
-            "https://developer.apple.com/documentation/security/"
-            "notarizing_macos_software_before_distribution."
-        ),
-        "SyspolicyCheckErrorFile": str(app.resolve()),
-        "SyspolicyCheckErrorLevel": "Fatal",
-        "SyspolicyCheckLongError": (
-            "A Notarization ticket is not stapled to this application."
-        ),
-        "SyspolicyCheckShortError": "Notary Ticket Missing",
-    }
-
-
-class ReadinessRunner:
-    def __init__(
-        self,
-        readiness: CommandResult,
-        corroboration: CommandResult | None = None,
-    ) -> None:
-        self.readiness = readiness
-        self.corroboration = corroboration
-        self.calls: list[CommandRole] = []
-
-    def __call__(
-        self,
-        role: CommandRole,
-        _command: list[str],
-        _timeout: float,
-    ) -> CommandResult:
-        self.calls.append(role)
-        if role is CommandRole.NOTARY_READINESS:
-            return self.readiness
-        if role is CommandRole.NOTARY_READINESS_CORROBORATION:
-            if self.corroboration is None:
-                raise AssertionError("unexpected corroboration command")
-            return self.corroboration
-        raise AssertionError(f"unexpected command role: {role}")
-
-
-class NotarizationReadinessPolicyTests(unittest.TestCase):
+class NotaryReadinessAdvisoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
         self.app = Path(self.temporary.name).resolve() / "Clash for Mac.app"
         executable = self.app / "Contents/MacOS/clash-for-mac"
         executable.parent.mkdir(parents=True)
         executable.write_bytes(b"signed")
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    def capture(self, outcome: CommandResult | BaseException) -> dict[str, object]:
+        calls: list[tuple[CommandRole, tuple[str, ...], float]] = []
 
-    def _exact_runner(self, *, diagnostic: str = "") -> ReadinessRunner:
-        return ReadinessRunner(
-            CommandResult(
-                70,
-                json.dumps({"output": [known_notary_false_positive(self.app)]}),
-                diagnostic,
-            ),
-            CommandResult(
-                70,
-                json.dumps({"output": [known_missing_ticket(self.app)]}),
-                diagnostic,
-            ),
-        )
+        def runner(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            calls.append((role, tuple(command), timeout))
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
 
-    def test_standard_success_never_uses_beta_adapter(self) -> None:
-        for diagnostic in ("", single_signature_diagnostic(self.app)):
-            with self.subTest(diagnostic=bool(diagnostic)):
-                runner = ReadinessRunner(
-                    CommandResult(0, json.dumps({"output": []}), diagnostic)
-                )
-
-                def unexpected_identity() -> HostSystemIdentity:
-                    raise AssertionError("native readiness must not read host identity")
-
-                mode = _establish_pre_submission_policy(
-                    runner,
-                    self.app,
-                    unexpected_identity,
-                )
-                self.assertIs(mode, PreSubmissionPolicyMode.NATIVE)
-                self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
-
-    def test_accepts_exact_beta_failure_only_after_exact_corroboration(self) -> None:
-        for diagnostic in ("", single_signature_diagnostic(self.app)):
-            with self.subTest(diagnostic=bool(diagnostic)):
-                runner = self._exact_runner(diagnostic=diagnostic)
-                mode = _establish_pre_submission_policy(
-                    runner,
-                    self.app,
-                    lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
-                )
-                self.assertIs(
-                    mode,
-                    PreSubmissionPolicyMode.MACOS_27_EXACT_BUILD_COMPATIBILITY,
-                )
-                self.assertEqual(
-                    runner.calls,
-                    [
-                        CommandRole.NOTARY_READINESS,
-                        CommandRole.NOTARY_READINESS_CORROBORATION,
-                    ],
-                )
-
-    def test_accepts_each_reviewed_macOS_27_build_with_exact_corroboration(
-        self,
-    ) -> None:
-        self.assertEqual(
-            MACOS_27_COMPATIBILITY_IDENTITIES,
-            frozenset(
-                HostSystemIdentity(
-                    product_name="macOS",
-                    product_version="27.0",
-                    build_version=build_version,
-                    kernel_name="Darwin",
-                    kernel_release="27.0.0",
-                    architecture="arm64",
-                )
-                for build_version in (
-                    "26A5388g",
-                    "26A5406e",
-                    "26A5416b",
-                    "26A5421a",
-                    "26A5425a",
-                    "26A428",
-                )
-            ),
-        )
-        for identity in MACOS_27_COMPATIBILITY_IDENTITIES:
-            with self.subTest(build_version=identity.build_version):
-                runner = self._exact_runner()
-                mode = _establish_pre_submission_policy(
-                    runner,
-                    self.app,
-                    lambda identity=identity: identity,
-                )
-                self.assertIs(
-                    mode,
-                    PreSubmissionPolicyMode.MACOS_27_EXACT_BUILD_COMPATIBILITY,
-                )
-                self.assertEqual(
-                    runner.calls,
-                    [
-                        CommandRole.NOTARY_READINESS,
-                        CommandRole.NOTARY_READINESS_CORROBORATION,
-                    ],
-                )
-
-    def test_exact_host_rejects_a_different_codesign_failure(self) -> None:
-        finding = known_notary_false_positive(self.app)
-        finding["SyspolicyCheckLongError"] = (
-            "Main executable is missing one or more executable bits."
-        )
-        runner = ReadinessRunner(
-            CommandResult(70, json.dumps({"output": [finding]}), "")
-        )
-
-        with self.assertRaises(TransactionError) as raised:
-            _establish_pre_submission_policy(
+        try:
+            return transaction_module._capture_notary_readiness_advisory(
                 runner,
                 self.app,
-                lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
+            )
+        finally:
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        CommandRole.NOTARY_READINESS,
+                        (
+                            "/usr/bin/syspolicy_check",
+                            "notary-submission",
+                            str(self.app),
+                            "--json",
+                        ),
+                        600,
+                    )
+                ],
             )
 
+    def finding(self, error_file: str) -> dict[str, str]:
+        return {**known_notary_false_positive(self.app), "SyspolicyCheckErrorFile": error_file}
+
+    def test_completed_local_results_are_recorded_as_path_free_projections(
+        self,
+    ) -> None:
+        diagnostic = single_signature_diagnostic(self.app)
+        false_positive = {
+            "error_file": "Contents/MacOS/clash-for-mac",
+            "error_level": "Fatal",
+            "short_error": "Codesign Error",
+        }
+        root = str(self.app)
+        cases = {
+            "native-pass": (
+                CommandResult(0, json.dumps({"output": []}), ""),
+                {"status": "completed", "exit_code": 0, "diagnostic": "none", "findings": []},
+            ),
+            "single-signature-diagnostic": (
+                CommandResult(0, json.dumps({"output": []}), diagnostic),
+                {
+                    "status": "completed",
+                    "exit_code": 0,
+                    "diagnostic": "single-signature",
+                    "findings": [],
+                },
+            ),
+            "macos-27-false-positive": (
+                CommandResult(
+                    70,
+                    json.dumps({"output": [known_notary_false_positive(self.app)]}),
+                    diagnostic,
+                ),
+                {
+                    "status": "completed",
+                    "exit_code": 70,
+                    "diagnostic": "single-signature",
+                    "findings": [false_positive],
+                },
+            ),
+            "bundle-root-and-outside-paths": (
+                CommandResult(
+                    70,
+                    json.dumps(
+                        {
+                            "output": [
+                                self.finding(root),
+                                self.finding("/Users/person/other.app"),
+                                self.finding(f"{root}/../other.app"),
+                                self.finding(f"{root}x/Contents"),
+                                self.finding(""),
+                            ]
+                        }
+                    ),
+                    "",
+                ),
+                {
+                    "status": "completed",
+                    "exit_code": 70,
+                    "diagnostic": "none",
+                    "findings": [
+                        {**false_positive, "error_file": "."},
+                        *({**false_positive, "error_file": None} for _ in range(4)),
+                    ],
+                },
+            ),
+            "finding-without-categorical-fields": (
+                CommandResult(
+                    0,
+                    json.dumps({"output": [{"severity": "warning"}]}),
+                    "localized human-readable output",
+                ),
+                {"status": "unrecognized-output", "exit_code": 0, "diagnostic": "other"},
+            ),
+            "unparseable": (
+                CommandResult(1, "not json", "warning\n"),
+                {"status": "unrecognized-output", "exit_code": 1, "diagnostic": "other"},
+            ),
+            "signalled": (
+                CommandResult(-9, "", ""),
+                {"status": "unrecognized-output", "exit_code": -9, "diagnostic": "none"},
+            ),
+            "oversized-integer-literal": (
+                CommandResult(70, json.dumps({"output": []})[:-1] + ", \"n\": " + "1" * 5000 + "}", ""),
+                {"status": "unrecognized-output", "exit_code": 70, "diagnostic": "none"},
+            ),
+        }
+        for label, (result, expected) in cases.items():
+            with self.subTest(label=label):
+                record = self.capture(result)
+                self.assertEqual(record, expected)
+                self.assertTrue(
+                    transaction_module._is_valid_notary_readiness_advisory(record)
+                )
+
+    def test_free_form_command_output_is_never_recorded(self) -> None:
+        sentinel = "person@example.test /Users/person private-key fixture-profile"
+        finding = {
+            **known_notary_false_positive(self.app),
+            "SyspolicyCheckAdditionalInformation": sentinel,
+            "SyspolicyCheckAdvice": sentinel,
+            "SyspolicyCheckDocumentationLink": sentinel,
+            "SyspolicyCheckLongError": sentinel,
+            "Unexpected": sentinel,
+        }
+        categorical = {
+            **known_notary_false_positive(self.app),
+            "SyspolicyCheckErrorLevel": sentinel,
+            "SyspolicyCheckShortError": sentinel,
+        }
+        for result in (
+            CommandResult(70, json.dumps({"output": [finding]}), sentinel),
+            CommandResult(70, json.dumps({"output": [categorical]}), ""),
+            CommandResult(70, json.dumps({"output": [self.finding(f"/{sentinel}")]}), ""),
+            CommandResult(1, sentinel, sentinel),
+        ):
+            with self.subTest(result=result):
+                record = self.capture(result)
+                encoded = transaction_module._canonical_json(record)
+                self.assertNotIn(sentinel, encoded)
+                self.assertNotIn("person", encoded)
+                self.assertTrue(
+                    transaction_module._is_valid_notary_readiness_advisory(record)
+                )
         self.assertEqual(
-            raised.exception.code,
-            "notary-readiness_finding_mismatch",
+            self.capture(CommandResult(70, json.dumps({"output": [categorical]}), "")),
+            {
+                "status": "completed",
+                "exit_code": 70,
+                "diagnostic": "none",
+                "findings": [
+                    {
+                        "error_file": "Contents/MacOS/clash-for-mac",
+                        "error_level": None,
+                        "short_error": None,
+                    }
+                ],
+            },
         )
-        self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
+
+    def test_a_check_without_a_result_is_recorded_as_unavailable(self) -> None:
+        for code in (
+            "command_start_failed",
+            "command_timeout",
+            "command_output_oversized",
+            "command_output_invalid_utf8",
+            "command_descendant_survived",
+        ):
+            with self.subTest(code=code):
+                record = self.capture(TransactionError(code, "local check fault"))
+                self.assertEqual(
+                    record,
+                    {"status": "unavailable", "failure_code": code},
+                )
+                self.assertTrue(
+                    transaction_module._is_valid_notary_readiness_advisory(record)
+                )
+        self.assertEqual(
+            transaction_module.NOTARY_READINESS_ADVISORY_UNAVAILABLE_CODES,
+            {
+                "command_start_failed",
+                "command_timeout",
+                "command_output_oversized",
+                "command_output_invalid_utf8",
+                "command_descendant_survived",
+            },
+        )
+
+    def test_projected_stdout_is_bounded_in_utf8_bytes(self) -> None:
+        limit = transaction_module.MAX_NOTARY_READINESS_ADVISORY_OUTPUT_BYTES
+        # ASCII-only canonical JSON escapes one UTF-8 byte into at most six.
+        self.assertLessEqual(
+            6 * limit + 64 * 1024,
+            transaction_module.MAX_JSON_BYTES,
+            "a fully escaped advisory must leave the intent readable",
+        )
+        self.assertEqual(
+            self.capture(CommandResult(70, "x" * (limit - 2) + "\u00e9", "")),
+            {"status": "unrecognized-output", "exit_code": 70, "diagnostic": "none"},
+        )
+        oversized = {
+            "status": "unavailable",
+            "failure_code": "notary-readiness_advisory_output_oversized",
+        }
+        record = self.capture(CommandResult(70, "x" * (limit - 1) + "\u00e9", ""))
+        self.assertEqual(record, oversized)
+        self.assertTrue(transaction_module._is_valid_notary_readiness_advisory(record))
+        # stderr is only classified, never stored, so it does not count.
+        self.assertEqual(
+            self.capture(
+                CommandResult(0, json.dumps({"output": []}), "e" * (2 * limit))
+            ),
+            {"status": "completed", "exit_code": 0, "diagnostic": "other", "findings": []},
+        )
+
+    def test_a_crash_inside_the_local_check_is_never_recorded(self) -> None:
+        crash = SimulatedCrash("interrupted")
+        with self.assertRaises(SimulatedCrash) as raised:
+            self.capture(crash)
+        self.assertIs(raised.exception, crash)
+
+    def test_untyped_json_parse_failures_stay_typed(self) -> None:
+        # The C decoder raises RecursionError once nesting exhausts its stack
+        # (about a million levels here) and ValueError past 4300 digits.
+        for label, text in (
+            ("deep-nesting", "[" * 1_000_000 + "]" * 1_000_000),
+            ("oversized-integer", "1" * 5000),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(TransactionError) as raised:
+                    transaction_module._parse_command_json(text)
+                self.assertEqual(raised.exception.code, "invalid_command_output")
+                with self.assertRaises(TransactionError) as raised:
+                    transaction_module._decode_json_bytes(
+                        text.encode("utf-8"), Path("evidence.json")
+                    )
+                self.assertEqual(raised.exception.code, "invalid_evidence_json")
+
+    def test_release_host_faults_still_fail_closed(self) -> None:
+        for error in (
+            TransactionError("command_cleanup_failed", "cleanup unconfirmed"),
+            TransactionError("command_contract_invalid", "contract invalid"),
+            TransactionError("command_error_contract_drift", "unknown reason"),
+            OSError("runner fault"),
+        ):
+            with self.subTest(error=repr(error)):
+                with self.assertRaises(TransactionError) as raised:
+                    self.capture(error)
+                self.assertEqual(
+                    raised.exception.code,
+                    "notary-readiness_execution_failed",
+                )
+                self.assertIs(raised.exception.__cause__, error)
 
 
 class ProductionArchiveBuilderTests(unittest.TestCase):
@@ -691,212 +780,6 @@ class ProductionArchiveBuilderTests(unittest.TestCase):
         )
 
 
-class HostSystemIdentityReaderTests(unittest.TestCase):
-    def test_reads_the_exact_absolute_release_host_identity(self) -> None:
-        values = {
-            ("/usr/bin/sw_vers", "-productName"): "macOS",
-            ("/usr/bin/sw_vers", "-productVersion"): "27.0",
-            ("/usr/bin/sw_vers", "-buildVersion"): "26A5388g",
-            ("/usr/bin/uname", "-s"): "Darwin",
-            ("/usr/bin/uname", "-r"): "27.0.0",
-            ("/usr/bin/uname", "-m"): "arm64",
-        }
-        calls: list[tuple[tuple[str, ...], float]] = []
-
-        def run(command: list[str], timeout: float) -> CommandResult:
-            key = tuple(command)
-            calls.append((key, timeout))
-            return CommandResult(0, f"{values[key]}\n", "")
-
-        with patch(
-            "scripts.notarization_transaction._run_bounded_process",
-            side_effect=run,
-        ):
-            identity = production_host_system_identity_reader()
-        self.assertEqual(identity, MACOS_27_26A5388G_COMPATIBILITY_IDENTITY)
-        self.assertEqual(
-            calls,
-            [(command, 30) for command in values],
-        )
-
-    def test_rejects_failed_or_malformed_host_identity_output(self) -> None:
-        cases = (
-            CommandResult(1, "", ""),
-            CommandResult(0, "macOS", ""),
-            CommandResult(0, "mac OS\n", ""),
-            CommandResult(0, "macOS\n", "warning\n"),
-        )
-        for result in cases:
-            with self.subTest(result=result):
-                with patch(
-                    "scripts.notarization_transaction._run_bounded_process",
-                    return_value=result,
-                ):
-                    with self.assertRaises(TransactionError):
-                        production_host_system_identity_reader()
-
-
-class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.app = Path(self.temporary.name).resolve() / "Clash for Mac.app"
-        executable = self.app / "Contents/MacOS/clash-for-mac"
-        executable.parent.mkdir(parents=True)
-        executable.write_bytes(b"signed")
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
-    def _exact_runner(self) -> ReadinessRunner:
-        return ReadinessRunner(
-            CommandResult(
-                70,
-                json.dumps({"output": [known_notary_false_positive(self.app)]}),
-                "",
-            ),
-            CommandResult(
-                70,
-                json.dumps({"output": [known_missing_ticket(self.app)]}),
-                "",
-            ),
-        )
-
-    def test_rejects_every_host_identity_near_match(self) -> None:
-        for allowed_identity in MACOS_27_COMPATIBILITY_IDENTITIES:
-            for field in HostSystemIdentity.__dataclass_fields__:
-                with self.subTest(
-                    build_version=allowed_identity.build_version,
-                    field=field,
-                ):
-                    runner = self._exact_runner()
-                    identity = replace(
-                        allowed_identity,
-                        **{field: "different"},
-                    )
-                    with self.assertRaises(TransactionError):
-                        _establish_pre_submission_policy(
-                            runner,
-                            self.app,
-                            lambda identity=identity: identity,
-                        )
-                    self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
-
-    def test_rejects_every_notary_finding_and_diagnostic_near_match(self) -> None:
-        expected = known_notary_false_positive(self.app)
-        mutations: list[tuple[str, CommandResult]] = [
-            ("wrong-returncode", CommandResult(69, "{}", "")),
-            (
-                "empty-output",
-                CommandResult(70, json.dumps({"output": []}), ""),
-            ),
-            (
-                "two-findings",
-                CommandResult(
-                    70,
-                    json.dumps({"output": [expected, expected]}),
-                    "",
-                ),
-            ),
-            (
-                "extra-field",
-                CommandResult(
-                    70,
-                    json.dumps({"output": [{**expected, "extra": "value"}]}),
-                    "",
-                ),
-            ),
-        ]
-        for field in expected:
-            changed = dict(expected)
-            changed[field] = f"{changed[field]}x"
-            mutations.append(
-                (
-                    f"field-{field}",
-                    CommandResult(70, json.dumps({"output": [changed]}), ""),
-                )
-            )
-        diagnostic = single_signature_diagnostic(self.app)
-        for label, value in (
-            ("wrong-uri", diagnostic.replace("Clash%20for%20Mac", "Other")),
-            ("missing-newline", diagnostic[:-1]),
-            ("extra-line", diagnostic + "warning\n"),
-        ):
-            mutations.append(
-                (
-                    label,
-                    CommandResult(
-                        70,
-                        json.dumps({"output": [expected]}),
-                        value,
-                    ),
-                )
-            )
-        for label, readiness in mutations:
-            with self.subTest(label=label):
-                runner = ReadinessRunner(readiness)
-                with self.assertRaises(TransactionError):
-                    _establish_pre_submission_policy(
-                        runner,
-                        self.app,
-                        lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
-                    )
-                self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
-
-    def test_rejects_every_missing_ticket_corroboration_near_match(self) -> None:
-        exact = self._exact_runner()
-        if exact.corroboration is None:
-            self.fail("exact readiness fixture lacks corroboration")
-        expected = known_missing_ticket(self.app)
-        mutations: list[tuple[str, CommandResult]] = [
-            ("success", CommandResult(0, json.dumps({"output": []}), "")),
-            ("wrong-returncode", CommandResult(71, "{}", "")),
-            ("empty-output", CommandResult(70, json.dumps({"output": []}), "")),
-            (
-                "extra-finding",
-                CommandResult(
-                    70,
-                    json.dumps({"output": [expected, expected]}),
-                    "",
-                ),
-            ),
-        ]
-        for field in expected:
-            changed = dict(expected)
-            changed[field] = f"{changed[field]}x"
-            mutations.append(
-                (
-                    f"field-{field}",
-                    CommandResult(70, json.dumps({"output": [changed]}), ""),
-                )
-            )
-        mutations.append(
-            (
-                "diagnostic",
-                CommandResult(
-                    70,
-                    json.dumps({"output": [expected]}),
-                    single_signature_diagnostic(self.app) + "warning\n",
-                ),
-            )
-        )
-        for label, corroboration in mutations:
-            with self.subTest(label=label):
-                runner = ReadinessRunner(exact.readiness, corroboration)
-                with self.assertRaises(TransactionError):
-                    _establish_pre_submission_policy(
-                        runner,
-                        self.app,
-                        lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
-                    )
-                self.assertEqual(
-                    runner.calls,
-                    [
-                        CommandRole.NOTARY_READINESS,
-                        CommandRole.NOTARY_READINESS_CORROBORATION,
-                    ],
-                )
-
-
 class ArtifactToolchainReaderTests(unittest.TestCase):
     def test_dispatch_uses_shared_artifact_reader_without_reinterpreting_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -975,10 +858,28 @@ class FrozenCandidateExecutorTests(unittest.TestCase):
         self.assertEqual(fixture.runner.calls, calls)
         self.assertEqual(calls.count(CommandRole.SUBMIT), 1)
 
-    def test_readiness_failure_writes_no_executor_binding_and_keeps_signed_app(self) -> None:
-        self.fixture.runner.fail_role = CommandRole.NOTARY_READINESS
-        with self.assertRaises(TransactionError):
-            self.fixture.execute(**self.arguments())
+    def test_readiness_host_fault_writes_no_executor_binding_and_keeps_signed_app(
+        self,
+    ) -> None:
+        fixture = self.fixture
+
+        def host_fault(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role is CommandRole.NOTARY_READINESS:
+                fixture.runner.calls.append(role)
+                raise TransactionError(
+                    "command_cleanup_failed",
+                    "release command cleanup could not be confirmed",
+                )
+            return fixture.runner(role, command, timeout)
+
+        with self.assertRaises(TransactionError) as raised:
+            fixture.execute(command_runner=host_fault, **self.arguments())
+        self.assertEqual(raised.exception.code, "notary-readiness_execution_failed")
+        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
         self.assertFalse(self.fixture.context.attempt_root.exists())
         self.assertFalse((self.fixture.build / "stage-inputs").exists())
         self.assertTrue(self.fixture.app.is_dir())
@@ -1224,7 +1125,17 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         publish_ready_receipt = json.loads(
             sole_finalization_receipt(self.fixture).read_text(encoding="utf-8")
         )
-        self.assertEqual(intent["schema_version"], 4)
+        self.assertEqual(intent["schema_version"], 5)
+        self.assertEqual(intent["document"], "cfw-notarization-attempt-v5")
+        self.assertEqual(
+            intent["notary_readiness_advisory"],
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "diagnostic": "none",
+                "findings": [],
+            },
+        )
         self.assertEqual(
             intent["notary_profile"],
             transaction_module.NOTARY_PROFILE,
@@ -1423,201 +1334,151 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 self.assertFalse(self.fixture.context.attempt_root.exists())
                 self.assertEqual(self.fixture.runner.calls, [])
 
-    def test_exact_beta_compatibility_is_durable_and_never_claims_notary_ready(
-        self,
-    ) -> None:
-        fixture = self.fixture
-        checked_app = fixture.app
+    def _attempt_intent(self) -> dict[str, object]:
+        return json.loads(
+            (self.fixture.context.attempt_root / "intent.json").read_text(
+                encoding="utf-8"
+            )
+        )
 
-        def compatibility_runner(
+    def _attempt_states(self) -> list[str]:
+        return [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (self.fixture.context.attempt_root / "events").glob("*.json")
+            )
+        ]
+
+    def _readiness_runner(
+        self,
+        readiness: Callable[[list[str], float], CommandResult],
+    ):
+        fixture = self.fixture
+
+        def runner(
             role: CommandRole,
             command: list[str],
             timeout: float,
         ) -> CommandResult:
-            if role in {
-                CommandRole.NOTARY_READINESS,
-                CommandRole.NOTARY_READINESS_CORROBORATION,
-            }:
-                fixture.runner.calls.append(role)
-                fixture.runner.command_calls.append((role, tuple(command), timeout))
-                self.assertEqual(Path(command[2]), checked_app)
-                self.assertFalse(fixture.context.attempt_root.exists())
-                finding = (
-                    known_notary_false_positive(checked_app)
-                    if role is CommandRole.NOTARY_READINESS
-                    else known_missing_ticket(checked_app)
-                )
-                return CommandResult(
-                    70,
-                    json.dumps({"output": [finding]}),
-                    single_signature_diagnostic(checked_app),
-                )
-            return fixture.runner(role, command, timeout)
+            if role is not CommandRole.NOTARY_READINESS:
+                return fixture.runner(role, command, timeout)
+            fixture.runner.calls.append(role)
+            fixture.runner.command_calls.append((role, tuple(command), timeout))
+            self.assertEqual(Path(command[2]), fixture.app)
+            self.assertFalse(fixture.context.attempt_root.exists())
+            return readiness(command, timeout)
 
-        final_app = fixture.execute(
-            command_runner=compatibility_runner,
-            host_system_identity_reader=(
-                lambda: MACOS_27_26A5425A_COMPATIBILITY_IDENTITY
-            ),
+        return runner
+
+    def test_unlisted_host_build_never_blocks_submission(self) -> None:
+        fixture = self.fixture
+        readiness = CommandResult(
+            70,
+            json.dumps({"output": [known_notary_false_positive(fixture.app)]}),
+            single_signature_diagnostic(fixture.app),
         )
+        unlisted_host = {
+            ("/usr/bin/sw_vers", "-productName"): "macOS",
+            ("/usr/bin/sw_vers", "-productVersion"): "27.1",
+            ("/usr/bin/sw_vers", "-buildVersion"): "26B5047e",
+            ("/usr/bin/uname", "-s"): "Darwin",
+            ("/usr/bin/uname", "-r"): "27.1.0",
+            ("/usr/bin/uname", "-m"): "arm64",
+        }
+        host_reads: list[tuple[str, ...]] = []
+        bounded_process = transaction_module._run_bounded_process
+
+        def host_process(
+            command: list[str],
+            timeout: float,
+            **keywords: object,
+        ) -> CommandResult:
+            key = tuple(command)
+            if key in unlisted_host:
+                host_reads.append(key)
+                return CommandResult(0, f"{unlisted_host[key]}\n", "")
+            return bounded_process(command, timeout, **keywords)
+
+        with patch.object(
+            transaction_module,
+            "_run_bounded_process",
+            side_effect=host_process,
+        ):
+            final_app = fixture.execute(
+                command_runner=self._readiness_runner(
+                    lambda _command, _timeout: readiness
+                )
+            )
+
         self.assertTrue(final_app.is_dir())
+        self.assertEqual(host_reads, [])
         self.assertEqual(
-            fixture.runner.calls[:3],
-            [
-                CommandRole.NOTARY_READINESS,
-                CommandRole.NOTARY_READINESS_CORROBORATION,
-                CommandRole.SUBMIT,
-            ],
+            fixture.runner.calls[:2],
+            [CommandRole.NOTARY_READINESS, CommandRole.SUBMIT],
         )
-        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
-        states = [json.loads(path.read_text(encoding="utf-8"))["state"] for path in events]
+        self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
+        self.assertIn(CommandRole.DISTRIBUTION_CHECK, fixture.runner.calls)
+        intent = self._attempt_intent()
+        self.assertEqual(intent["schema_version"], 5)
+        self.assertEqual(intent["document"], "cfw-notarization-attempt-v5")
         self.assertEqual(
-            states,
-            [
-                "prepared",
-                "pre_submission_policy_compatibility_applied",
-                "submitting",
-                "submitted",
-                "direct_finalization_preparing",
-                "direct_finalization_ready",
-                "finalization_started",
-                "accepted",
-                "log_verified",
-                "stapling",
-                "stapled",
-                "gatekeeper_verified",
-                "app_verified",
-                "distribution_verified",
-                "sealed",
-            ],
+            intent["notary_readiness_advisory"],
+            {
+                "status": "completed",
+                "exit_code": 70,
+                "diagnostic": "single-signature",
+                "findings": [
+                    {
+                        "error_file": "Contents/MacOS/clash-for-mac",
+                        "error_level": "Fatal",
+                        "short_error": "Codesign Error",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(
+            self._attempt_states()[:3],
+            ["prepared", "notary_ready", "submitting"],
         )
 
-    def test_beta_near_match_fails_without_claiming_or_moving_app(self) -> None:
+    def test_missing_local_policy_tool_is_recorded_without_blocking(self) -> None:
         fixture = self.fixture
-        checked_app = fixture.app
+        bounded = transaction_module.run_release_bounded_process
 
-        def mismatch_runner(
-            role: CommandRole,
-            command: list[str],
-            timeout: float,
-        ) -> CommandResult:
-            fixture.runner.calls.append(role)
-            fixture.runner.command_calls.append((role, tuple(command), timeout))
-            if role is not CommandRole.NOTARY_READINESS:
-                self.fail(f"unexpected command after readiness mismatch: {role}")
-            finding = known_notary_false_positive(checked_app)
-            finding["SyspolicyCheckErrorFile"] = str(checked_app.resolve())
-            return CommandResult(70, json.dumps({"output": [finding]}), "")
+        def missing_tool(command: list[str], **keywords: object):
+            if command[0] == "/usr/bin/syspolicy_check":
+                raise transaction_module.BoundedProcessError(
+                    "start",
+                    "bounded command could not start",
+                ) from FileNotFoundError(command[0])
+            return bounded(command, **keywords)
 
-        with self.assertRaises(TransactionError) as raised:
-            fixture.execute(
-                command_runner=mismatch_runner,
-                host_system_identity_reader=(
-                    lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY
-                ),
-            )
-        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
-        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
-        self.assertFalse(
-            (fixture.context.attempt_root / "submission-receipt.json").exists()
-        )
-        self.assertFalse(fixture.context.attempt_root.exists())
-        self.assertTrue(fixture.app.is_dir())
-        self.assertEqual(
-            raised.exception.code,
-            "notary-readiness_finding_mismatch",
-        )
-
-    def test_unsupported_beta_host_retains_the_same_first_submission_input(
-        self,
-    ) -> None:
-        fixture = self.fixture
-        checked_app = fixture.app
-
-        def readiness_runner(
-            role: CommandRole,
-            command: list[str],
-            timeout: float,
-        ) -> CommandResult:
-            fixture.runner.calls.append(role)
-            fixture.runner.command_calls.append((role, tuple(command), timeout))
-            if role is not CommandRole.NOTARY_READINESS:
-                self.fail(f"unexpected command after unsupported host: {role}")
-            return CommandResult(
-                70,
-                json.dumps({"output": [known_notary_false_positive(checked_app)]}),
-                single_signature_diagnostic(checked_app),
+        with patch.object(
+            transaction_module,
+            "run_release_bounded_process",
+            side_effect=missing_tool,
+        ):
+            final_app = fixture.execute(
+                command_runner=self._readiness_runner(
+                    lambda command, timeout: (
+                        transaction_module.production_command_runner(
+                            CommandRole.NOTARY_READINESS,
+                            command,
+                            timeout,
+                        )
+                    )
+                )
             )
 
-        unsupported = replace(
-            MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
-            build_version="26A5416c",
-        )
-        with self.assertRaises(TransactionError) as raised:
-            fixture.execute(
-                command_runner=readiness_runner,
-                host_system_identity_reader=lambda: unsupported,
-            )
-        self.assertEqual(
-            raised.exception.code,
-            "notary-readiness_compatibility_unsupported_host",
-        )
-        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
-        self.assertFalse(fixture.context.attempt_root.exists())
-        self.assertTrue(fixture.app.is_dir())
-        self.assertEqual(
-            build_manifest(fixture.app, algorithm="sha256-tree-v2")["sha256"],
-            fixture.signed_app_tree_sha256,
-        )
-        final_app = fixture.execute()
         self.assertTrue(final_app.is_dir())
         self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
-
-    def test_beta_corroboration_near_match_retains_canonical_signed_input(self) -> None:
-        fixture = self.fixture
-        checked_app = fixture.app
-
-        def mismatch_runner(
-            role: CommandRole,
-            command: list[str],
-            timeout: float,
-        ) -> CommandResult:
-            fixture.runner.calls.append(role)
-            fixture.runner.command_calls.append((role, tuple(command), timeout))
-            if role is CommandRole.NOTARY_READINESS:
-                finding = known_notary_false_positive(checked_app)
-            elif role is CommandRole.NOTARY_READINESS_CORROBORATION:
-                finding = known_missing_ticket(checked_app)
-                finding["SyspolicyCheckErrorFile"] = str(
-                    checked_app.resolve() / "Contents"
-                )
-            else:
-                self.fail(f"unexpected command after corroboration mismatch: {role}")
-            return CommandResult(70, json.dumps({"output": [finding]}), "")
-
-        with self.assertRaises(TransactionError) as raised:
-            fixture.execute(
-                command_runner=mismatch_runner,
-                host_system_identity_reader=(
-                    lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY
-                ),
-            )
         self.assertEqual(
-            fixture.runner.calls,
-            [
-                CommandRole.NOTARY_READINESS,
-                CommandRole.NOTARY_READINESS_CORROBORATION,
-            ],
+            self._attempt_intent()["notary_readiness_advisory"],
+            {"status": "unavailable", "failure_code": "command_start_failed"},
         )
-        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
-        self.assertFalse(
-            (fixture.context.attempt_root / "submission-receipt.json").exists()
-        )
-        self.assertFalse(fixture.context.attempt_root.exists())
-        self.assertTrue(fixture.app.is_dir())
         self.assertEqual(
-            raised.exception.code,
-            "notary-readiness-corroboration_finding_mismatch",
+            self._attempt_states()[:3],
+            ["prepared", "notary_ready", "submitting"],
         )
 
     def test_final_distribution_accepts_only_the_path_bound_benign_diagnostic(
@@ -4283,6 +4144,164 @@ class NotarizationRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.fixture.runner.calls, [])
 
+    def test_recovery_admits_only_a_well_formed_readiness_advisory(self) -> None:
+        intent_path = self.fixture.context.attempt_root / "intent.json"
+        original_bytes = intent_path.read_bytes()
+        original = json.loads(original_bytes)
+        advisory = original["notary_readiness_advisory"]
+        self.assertEqual(advisory["status"], "completed")
+        context = replace(self.fixture.context, staged_app=None)
+
+        def load(intent: dict[str, object]) -> dict[str, object]:
+            intent_path.write_bytes(
+                transaction_module._canonical_json(intent).encode("utf-8")
+            )
+            intent_path.chmod(0o600)
+            return transaction_module._load_recovery_intent_document(context)[0]
+
+        v4_shape = {
+            key: value
+            for key, value in original.items()
+            if key != "notary_readiness_advisory"
+        }
+        v4_shape.update(schema_version=4, document="cfw-notarization-attempt-v4")
+        finding = {
+            "error_file": "Contents/MacOS/clash-for-mac",
+            "error_level": "Fatal",
+            "short_error": "Codesign Error",
+        }
+        completed = {**advisory, "exit_code": 70, "findings": [finding]}
+
+        def with_advisory(value: object) -> dict[str, object]:
+            return {**original, "notary_readiness_advisory": value}
+
+        rejected = {
+            "v4-shape": v4_shape,
+            "v5-fields-v4-schema": {
+                **original,
+                "schema_version": 4,
+                "document": "cfw-notarization-attempt-v4",
+            },
+            "boolean-schema": {**original, "schema_version": True},
+            "missing-advisory": {
+                key: value
+                for key, value in original.items()
+                if key != "notary_readiness_advisory"
+            },
+            "not-an-object": with_advisory("completed"),
+            "unhashable-status": with_advisory({**advisory, "status": ["completed"]}),
+            "unknown-status": with_advisory({**advisory, "status": "skipped"}),
+            "completed-extra-field": with_advisory({**advisory, "stderr": ""}),
+            "completed-missing-findings": with_advisory(
+                {key: value for key, value in advisory.items() if key != "findings"}
+            ),
+            "completed-boolean-exit": with_advisory({**advisory, "exit_code": True}),
+            "completed-unknown-diagnostic": with_advisory(
+                {**advisory, "diagnostic": "warning"}
+            ),
+            "completed-unhashable-diagnostic": with_advisory(
+                {**advisory, "diagnostic": ["none"]}
+            ),
+            "finding-free-form-field": with_advisory(
+                {**completed, "findings": [{**finding, "long_error": "text"}]}
+            ),
+            "finding-missing-field": with_advisory(
+                {
+                    **completed,
+                    "findings": [
+                        {k: v for k, v in finding.items() if k != "short_error"}
+                    ],
+                }
+            ),
+            "finding-absolute-path": with_advisory(
+                {**completed, "findings": [{**finding, "error_file": "/Users/person"}]}
+            ),
+            "finding-parent-path": with_advisory(
+                {**completed, "findings": [{**finding, "error_file": "../outside"}]}
+            ),
+            "finding-non-string-field": with_advisory(
+                {**completed, "findings": [{**finding, "error_level": 7}]}
+            ),
+            "finding-free-form-short-error": with_advisory(
+                {
+                    **completed,
+                    "findings": [
+                        {**finding, "short_error": "person@example.test /Users/person"}
+                    ],
+                }
+            ),
+            "finding-free-form-error-level": with_advisory(
+                {**completed, "findings": [{**finding, "error_level": "Fatal error!"}]}
+            ),
+            "unrecognized-with-findings": with_advisory(
+                {**completed, "status": "unrecognized-output"}
+            ),
+            "unavailable-host-fault": with_advisory(
+                {"status": "unavailable", "failure_code": "command_cleanup_failed"}
+            ),
+            "unavailable-unhashable-code": with_advisory(
+                {"status": "unavailable", "failure_code": ["command_start_failed"]}
+            ),
+            "unavailable-extra-field": with_advisory(
+                {
+                    "status": "unavailable",
+                    "failure_code": "command_start_failed",
+                    "exit_code": None,
+                }
+            ),
+        }
+        self._reset_runner_observations()
+        for label, intent in rejected.items():
+            with self.subTest(label=label):
+                with self.assertRaises(TransactionError) as raised:
+                    load(intent)
+                self.assertEqual(
+                    raised.exception.code,
+                    "notarization_intent_identity_drift",
+                )
+                if label in {"v4-shape", "v5-fields-v4-schema", "boolean-schema"}:
+                    self.assertIn("not attempt schema v5", str(raised.exception))
+        admitted = {
+            "completed-findings": completed,
+            "completed-root-and-unbound-paths": {
+                **completed,
+                "findings": [
+                    {**finding, "error_file": "."},
+                    {**finding, "error_file": None},
+                    {**finding, "error_level": None, "short_error": None},
+                ],
+            },
+            "unrecognized-output": {
+                "status": "unrecognized-output",
+                "exit_code": -9,
+                "diagnostic": "other",
+            },
+            **{
+                f"unavailable-{code}": {"status": "unavailable", "failure_code": code}
+                for code in (
+                    "command_start_failed",
+                    "command_timeout",
+                    "command_output_oversized",
+                    "command_output_invalid_utf8",
+                    "command_descendant_survived",
+                )
+            },
+            "unavailable-oversized": {
+                "status": "unavailable",
+                "failure_code": "notary-readiness_advisory_output_oversized",
+            },
+        }
+        for label, value in admitted.items():
+            with self.subTest(admitted=label):
+                self.assertEqual(
+                    load(with_advisory(value))["notary_readiness_advisory"],
+                    value,
+                )
+        intent_path.write_bytes(original_bytes)
+        intent_path.chmod(0o600)
+        self.assertEqual(load(original), original)
+        self.assertEqual(self.fixture.runner.calls, [])
+
     def test_reconciles_exact_orphan_without_resubmission(self) -> None:
         original_events = self._original_event_bytes()
         self._reset_runner_observations()
@@ -6840,14 +6859,74 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.assertEqual(states[-2:], ["distribution_verified", "failed"])
         self.assertEqual(events[-1]["failure_code"], expected_code)
 
-    def test_local_readiness_failure_preserves_input_without_claiming_attempt(self) -> None:
+    def test_local_check_crash_or_contract_drift_never_claims_the_attempt(
+        self,
+    ) -> None:
+        crashing = Fixture()
+        self.addCleanup(crashing.close)
+        crashing.runner.crash_role = CommandRole.NOTARY_READINESS
+        with self.assertRaises(SimulatedCrash):
+            crashing.execute()
+        drifting = Fixture()
+        self.addCleanup(drifting.close)
+        with patch.object(
+            transaction_module,
+            "_is_valid_notary_readiness_advisory",
+            return_value=False,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                drifting.execute()
+        self.assertEqual(
+            raised.exception.code,
+            "notary-readiness_advisory_contract_drift",
+        )
+        for fixture in (crashing, drifting):
+            self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+            self.assertFalse(fixture.context.attempt_root.exists())
+            self.assertEqual(
+                build_manifest(fixture.app, algorithm="sha256-tree-v2")["sha256"],
+                fixture.signed_app_tree_sha256,
+            )
+
+    def test_local_check_host_fault_preserves_input_without_claiming_attempt(
+        self,
+    ) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        fixture.runner.fail_role = CommandRole.NOTARY_READINESS
-        with self.assertRaises(TransactionError) as raised:
-            fixture.execute()
-        self.assertEqual(raised.exception.code, "notary-readiness_failed")
-        self.assertEqual(raised.exception.exit_code, 9)
+        bounded = transaction_module.run_release_bounded_process
+
+        def unconfirmed_cleanup(command: list[str], **keywords: object):
+            if command[0] == "/usr/bin/syspolicy_check":
+                raise transaction_module.BoundedProcessError(
+                    "cleanup",
+                    "bounded command descendants did not exit during cleanup",
+                )
+            return bounded(command, **keywords)
+
+        def runner(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role is CommandRole.NOTARY_READINESS:
+                fixture.runner.calls.append(role)
+                return transaction_module.production_command_runner(
+                    role,
+                    command,
+                    timeout,
+                )
+            return fixture.runner(role, command, timeout)
+
+        with patch.object(
+            transaction_module,
+            "run_release_bounded_process",
+            side_effect=unconfirmed_cleanup,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.execute(command_runner=runner)
+        self.assertEqual(raised.exception.code, "notary-readiness_execution_failed")
+        self.assertIsInstance(raised.exception.__cause__, TransactionError)
+        self.assertEqual(raised.exception.__cause__.code, "command_cleanup_failed")
         self.assertFalse(fixture.context.attempt_root.exists())
         self.assertFalse(fixture.context.final_root.exists())
         self.assertTrue(fixture.app.is_dir())
@@ -7857,28 +7936,57 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
             (fixture.context.attempt_root / "submission-receipt.json").exists()
         )
 
-    def test_syspolicy_finding_is_release_blocking(self) -> None:
-        fixture = Fixture()
-        self.addCleanup(fixture.close)
-
-        def finding(
-            role: CommandRole,
-            command: list[str],
-            timeout: float,
-        ) -> CommandResult:
-            if role == CommandRole.NOTARY_READINESS:
-                fixture.runner.calls.append(role)
-                return CommandResult(
+    def test_local_policy_finding_is_advisory_evidence_only(self) -> None:
+        local_results = {
+            "finding": (
+                CommandResult(
                     0,
                     json.dumps({"output": [{"severity": "warning"}]}),
                     "localized human-readable output",
-                )
-            return fixture.runner(role, command, timeout)
+                ),
+                {"status": "unrecognized-output", "exit_code": 0, "diagnostic": "other"},
+            ),
+            "stderr-without-findings": (
+                CommandResult(
+                    0,
+                    json.dumps({"output": []}),
+                    "warning: degraded policy check",
+                ),
+                {
+                    "status": "completed",
+                    "exit_code": 0,
+                    "diagnostic": "other",
+                    "findings": [],
+                },
+            ),
+            "failed-status": (
+                CommandResult(9, "", ""),
+                {"status": "unrecognized-output", "exit_code": 9, "diagnostic": "none"},
+            ),
+        }
+        for label, (local_result, expected) in local_results.items():
+            with self.subTest(label=label):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
 
-        with self.assertRaisesRegex(TransactionError, "release-blocking finding"):
-            fixture.execute(command_runner=finding)
-        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
-        self.assertFalse(os.path.lexists(fixture.context.final_root))
+                def finding(
+                    role: CommandRole,
+                    command: list[str],
+                    timeout: float,
+                    local_result: CommandResult = local_result,
+                ) -> CommandResult:
+                    if role == CommandRole.NOTARY_READINESS:
+                        fixture.runner.calls.append(role)
+                        return local_result
+                    return fixture.runner(role, command, timeout)
+
+                self.assertTrue(fixture.execute(command_runner=finding).is_dir())
+                self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
+                self.assertIn(CommandRole.DISTRIBUTION_CHECK, fixture.runner.calls)
+                intent = json.loads(
+                    (fixture.context.attempt_root / "intent.json").read_bytes()
+                )
+                self.assertEqual(intent["notary_readiness_advisory"], expected)
 
     def test_distribution_finding_is_release_blocking(self) -> None:
         fixture = Fixture()
@@ -7904,36 +8012,34 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.assertIn(CommandRole.DISTRIBUTION_CHECK, fixture.runner.calls)
         self.assertFalse(os.path.lexists(fixture.context.final_root))
 
-    def test_syspolicy_stderr_is_release_blocking_even_without_findings(self) -> None:
-        for role in (
-            CommandRole.NOTARY_READINESS,
-            CommandRole.DISTRIBUTION_CHECK,
-        ):
-            with self.subTest(role=role):
-                fixture = Fixture()
-                self.addCleanup(fixture.close)
+    def test_distribution_stderr_is_release_blocking_even_without_findings(
+        self,
+    ) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        role = CommandRole.DISTRIBUTION_CHECK
 
-                def diagnostic(
-                    observed_role: CommandRole,
-                    command: list[str],
-                    timeout: float,
-                ) -> CommandResult:
-                    if observed_role == role:
-                        fixture.runner.calls.append(observed_role)
-                        fixture.runner.command_calls.append(
-                            (observed_role, tuple(command), timeout)
-                        )
-                        return CommandResult(
-                            0,
-                            json.dumps({"output": []}),
-                            "warning: degraded policy check",
-                        )
-                    return fixture.runner(observed_role, command, timeout)
+        def diagnostic(
+            observed_role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if observed_role == role:
+                fixture.runner.calls.append(observed_role)
+                fixture.runner.command_calls.append(
+                    (observed_role, tuple(command), timeout)
+                )
+                return CommandResult(
+                    0,
+                    json.dumps({"output": []}),
+                    "warning: degraded policy check",
+                )
+            return fixture.runner(observed_role, command, timeout)
 
-                with self.assertRaises(TransactionError) as raised:
-                    fixture.execute(command_runner=diagnostic)
-                self.assertEqual(raised.exception.code, f"{role.value}_stderr")
-                self.assertFalse(os.path.lexists(fixture.context.final_root))
+        with self.assertRaises(TransactionError) as raised:
+            fixture.execute(command_runner=diagnostic)
+        self.assertEqual(raised.exception.code, "distribution-check_stderr")
+        self.assertFalse(os.path.lexists(fixture.context.final_root))
 
     def test_last_source_identity_drift_prevents_publisher_invocation(self) -> None:
         fixture = Fixture()

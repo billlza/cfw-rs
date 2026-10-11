@@ -313,7 +313,8 @@ def _read_stable_file(path: Path, *, maximum: int, label: str) -> bytes:
         value.st_ino,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        value.st_mode,
+        value.st_nlink,
     )
     if identity(before) != identity(after):
         raise IOSPeerLabError("ios_lab_file_invalid", f"{label} changed while read")
@@ -3401,7 +3402,8 @@ def validate_copied_receipt(
         value.st_ino,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
+        value.st_mode,
+        value.st_nlink,
     )
     if first != second or identity(first_metadata) != identity(second_metadata):
         raise IOSPeerLabError(
@@ -5418,13 +5420,15 @@ class IOSPeerTransactionJournal:
             metadata.st_ino,
             metadata.st_size,
             metadata.st_mtime_ns,
-            metadata.st_ctime_ns,
+            metadata.st_mode,
+            metadata.st_nlink,
         ) != (
             after.st_dev,
             after.st_ino,
             after.st_size,
             after.st_mtime_ns,
-            after.st_ctime_ns,
+            after.st_mode,
+            after.st_nlink,
         ):
             raise IOSPeerLabError(
                 "ios_lab_journal_invalid", "journal event changed while read"

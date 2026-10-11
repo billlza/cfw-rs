@@ -363,7 +363,6 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 st_gid=actual.st_gid,
                 st_size=actual.st_size,
                 st_mtime_ns=actual.st_mtime_ns,
-                st_ctime_ns=actual.st_ctime_ns,
             )
             with (
                 patch.object(Path, "lstat", return_value=root_owned),

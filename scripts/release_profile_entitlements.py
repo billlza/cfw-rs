@@ -106,7 +106,6 @@ def read_regular_bytes(path: Path, description: str) -> bytes:
         identity_before.st_mode,
         identity_before.st_size,
         identity_before.st_mtime_ns,
-        identity_before.st_ctime_ns,
     )
     stable_fields_after = (
         identity_after.st_dev,
@@ -114,7 +113,6 @@ def read_regular_bytes(path: Path, description: str) -> bytes:
         identity_after.st_mode,
         identity_after.st_size,
         identity_after.st_mtime_ns,
-        identity_after.st_ctime_ns,
     )
     if (
         stable_fields_before != stable_fields_after

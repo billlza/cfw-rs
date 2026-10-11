@@ -173,7 +173,7 @@ else:
 VERSION = "0.5.0"
 EXPECTED_TEAM_ID = "YKUPL7Z869"
 EXPECTED_DEPLOYMENT_TARGET = "15.0"
-ATTEMPT_DOCUMENT = "cfw-notarization-attempt-v4"
+ATTEMPT_DOCUMENT = "cfw-notarization-attempt-v5"
 EVENT_DOCUMENT = "cfw-notarization-event-v1"
 EVENT_DOCUMENT_V2 = "cfw-notarization-event-v2"
 SUBMISSION_DOCUMENT = "cfw-notarization-submission-receipt-v5"
@@ -197,6 +197,10 @@ RENAME_EXCL = 0x00000004
 RENAME_NOFOLLOW_ANY = 0x00000010
 MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
+# The local check's output is projected into intent.json only when it is
+# at most this large. ASCII-only canonical JSON expands one UTF-8 byte into
+# at most six, so the projection keeps the intent readable.
+MAX_NOTARY_READINESS_ADVISORY_OUTPUT_BYTES = 256 * 1024
 MAX_EVENT_DOCUMENTS = 4096
 MAX_FINALIZATION_RUNS = 8
 MAX_FINALIZATION_RUNS_BYTES = 4 * 1024 * 1024 * 1024
@@ -333,8 +337,40 @@ INTENT_FIELDS = {
     "archive_size",
     "pre_staple_app_tree_sha256",
     "candidate_freeze_intent_sha256",
+    "notary_readiness_advisory",
     "prepared_at",
 } | SIGNING_TRANSFORMATION_BINDING_FIELDS
+# The local syspolicy_check notary-submission result is advisory evidence.
+# These bounded-runner outcomes mean the check produced no usable result
+# and its process group is gone; any other fault still fails closed.
+NOTARY_READINESS_ADVISORY_UNAVAILABLE_CODES = frozenset(
+    {
+        "command_start_failed",
+        "command_timeout",
+        "command_output_oversized",
+        "command_output_invalid_utf8",
+        "command_descendant_survived",
+    }
+)
+NOTARY_READINESS_ADVISORY_OUTPUT_OVERSIZED = "notary-readiness_advisory_output_oversized"
+NOTARY_READINESS_ADVISORY_FIELDS = {
+    "completed": frozenset({"status", "exit_code", "diagnostic", "findings"}),
+    "unrecognized-output": frozenset({"status", "exit_code", "diagnostic"}),
+    "unavailable": frozenset({"status", "failure_code"}),
+}
+NOTARY_READINESS_ADVISORY_DIAGNOSTICS = frozenset({"none", "single-signature", "other"})
+# Only Apple's categorical finding fields are kept, and only when they are
+# short tokens, so free-form command text is never persisted.
+NOTARY_READINESS_FINDING_TOKENS = {
+    "SyspolicyCheckErrorLevel": ("error_level", re.compile(r"[A-Za-z]{1,32}")),
+    "SyspolicyCheckShortError": (
+        "short_error",
+        re.compile(r"[A-Za-z0-9][A-Za-z0-9 ()._-]{0,127}"),
+    ),
+}
+NOTARY_READINESS_FINDING_FIELDS = frozenset(
+    {"error_file", *(name for name, _ in NOTARY_READINESS_FINDING_TOKENS.values())}
+)
 RECOVERABLE_SUBMIT_FAILURE_CODES = {
     "command_output_invalid_utf8",
     "invalid_command_output",
@@ -395,22 +431,6 @@ FINAL_INVENTORY_TEMPLATE = {
 }
 _SINGLE_SIGNATURE_DIAGNOSTIC_PREFIX = "Only one signature found in "
 _SINGLE_SIGNATURE_DIAGNOSTIC_SUFFIX = ", skipping dual signature check\n"
-_KNOWN_NOTARY_FALSE_POSITIVE_LONG_ERROR = (
-    "Gatekeeper rejected this file. If there isn't a more descriptive error "
-    "elsewhere in this output, please file a Feedback through Feedback "
-    "Assistant.app so we can continue to improve syspolicy_check. Please include "
-    "the app bundle you are checking and a sysdiagnose taken immediately after "
-    "running syspolicy_check."
-)
-_MISSING_TICKET_LONG_ERROR = (
-    "A Notarization ticket is not stapled to this application."
-)
-_MISSING_TICKET_ADVICE = (
-    "If this application has already been uploaded to the Apple notary service, "
-    "please make sure to attach the ticket with the `stapler staple` command. If "
-    "not, please upload to the Apple notary service using Xcode or via "
-    "`notarytool`. "
-)
 _SUBMIT_SUCCESS_MESSAGE = "Successfully uploaded file"
 _WAIT_COMPLETE_MESSAGE = "Processing complete"
 _INFO_SUCCESS_MESSAGE = "Successfully received submission info"
@@ -440,7 +460,6 @@ class DuplicateKeyError(ValueError):
 
 class CommandRole(Enum):
     NOTARY_READINESS = "notary-readiness"
-    NOTARY_READINESS_CORROBORATION = "notary-readiness-corroboration"
     SUBMIT = "submit"
     INFO = "info"
     HISTORY = "history"
@@ -450,11 +469,6 @@ class CommandRole(Enum):
     STAPLE_VALIDATE = "staple-validate"
     FINAL_VERIFY = "final-verify"
     DISTRIBUTION_CHECK = "distribution-check"
-
-
-class PreSubmissionPolicyMode(Enum):
-    NATIVE = "native"
-    MACOS_27_EXACT_BUILD_COMPATIBILITY = "macos-27-exact-build-compatibility"
 
 
 class AttemptPhase(Enum):
@@ -474,83 +488,6 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
-
-
-@dataclass(frozen=True)
-class HostSystemIdentity:
-    product_name: str
-    product_version: str
-    build_version: str
-    kernel_name: str
-    kernel_release: str
-    architecture: str
-
-
-MACOS_27_26A5388G_COMPATIBILITY_IDENTITY = HostSystemIdentity(
-    product_name="macOS",
-    product_version="27.0",
-    build_version="26A5388g",
-    kernel_name="Darwin",
-    kernel_release="27.0.0",
-    architecture="arm64",
-)
-
-# Apple shipped the same pre-notarization syspolicy false positive on subsequent
-# macOS 27 seeds.  The exact finding and distribution corroboration remain
-# mandatory; only these individually observed host identities are allowlisted.
-MACOS_27_26A5406E_COMPATIBILITY_IDENTITY = HostSystemIdentity(
-    product_name="macOS",
-    product_version="27.0",
-    build_version="26A5406e",
-    kernel_name="Darwin",
-    kernel_release="27.0.0",
-    architecture="arm64",
-)
-MACOS_27_26A5416B_COMPATIBILITY_IDENTITY = HostSystemIdentity(
-    product_name="macOS",
-    product_version="27.0",
-    build_version="26A5416b",
-    kernel_name="Darwin",
-    kernel_release="27.0.0",
-    architecture="arm64",
-)
-MACOS_27_26A5421A_COMPATIBILITY_IDENTITY = HostSystemIdentity(
-    product_name="macOS",
-    product_version="27.0",
-    build_version="26A5421a",
-    kernel_name="Darwin",
-    kernel_release="27.0.0",
-    architecture="arm64",
-)
-MACOS_27_26A5425A_COMPATIBILITY_IDENTITY = HostSystemIdentity(
-    product_name="macOS",
-    product_version="27.0",
-    build_version="26A5425a",
-    kernel_name="Darwin",
-    kernel_release="27.0.0",
-    architecture="arm64",
-)
-# On this release build, strict codesign verification passes and distribution
-# reports only the missing pre-submission ticket, while notary-submission emits
-# the same exact finding. The later Apple and Gatekeeper checks still apply.
-MACOS_27_26A428_COMPATIBILITY_IDENTITY = HostSystemIdentity(
-    product_name="macOS",
-    product_version="27.0",
-    build_version="26A428",
-    kernel_name="Darwin",
-    kernel_release="27.0.0",
-    architecture="arm64",
-)
-MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
-    {
-        MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
-        MACOS_27_26A5406E_COMPATIBILITY_IDENTITY,
-        MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
-        MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
-        MACOS_27_26A5425A_COMPATIBILITY_IDENTITY,
-        MACOS_27_26A428_COMPATIBILITY_IDENTITY,
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -730,7 +667,6 @@ ToolchainMetadataReader = Callable[[Path], dict[str, str]]
 Publisher = Callable[[Path, Path], None]
 Clock = Callable[[], str]
 AttemptIdFactory = Callable[[], str]
-HostSystemIdentityReader = Callable[[], HostSystemIdentity]
 CandidateFreezeVerifier = Callable[[Path], FrozenCandidate]
 SigningTransformationVerifier = Callable[[Path], dict[str, Any]]
 SigningTransformationReceiptReader = Callable[[Path], dict[str, Any]]
@@ -767,7 +703,6 @@ def _transaction_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
         metadata.st_mode,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
         metadata.st_nlink,
     )
 
@@ -1338,7 +1273,7 @@ def _decode_json_bytes(data: bytes, path: Path) -> Any:
             data.decode("utf-8"),
             object_pairs_hook=_strict_object,
         )
-    except (UnicodeError, json.JSONDecodeError, DuplicateKeyError) as error:
+    except (ValueError, RecursionError) as error:
         raise TransactionError(
             "invalid_evidence_json", f"evidence is not strict UTF-8 JSON: {path.name}"
         ) from error
@@ -1370,7 +1305,7 @@ def _parse_command_json(output: str) -> Any:
         raise TransactionError("invalid_command_output", "command output is empty or oversized")
     try:
         return json.loads(output, object_pairs_hook=_strict_object)
-    except (json.JSONDecodeError, DuplicateKeyError) as error:
+    except (ValueError, RecursionError) as error:
         raise TransactionError(
             "invalid_command_output", "command output is not strict JSON"
         ) from error
@@ -1760,59 +1695,6 @@ def production_archive_validator(archive: Path, app: Path) -> None:
             "archive_validation_failed",
             "notarization archive differs from the signed application",
         ) from error
-
-
-def _read_exact_system_identity_value(
-    command: list[str],
-    label: str,
-) -> str:
-    result = _run_bounded_process(command, 30)
-    if result.returncode != 0 or result.stderr:
-        raise TransactionError(
-            "host_system_identity_unavailable",
-            f"cannot read the release host {label}",
-            exit_code=result.returncode,
-        )
-    if (
-        not result.stdout.endswith("\n")
-        or result.stdout.count("\n") != 1
-        or len(result.stdout) > 256
-        or "\0" in result.stdout
-    ):
-        raise TransactionError(
-            "host_system_identity_invalid",
-            f"release host {label} is malformed",
-        )
-    value = result.stdout[:-1]
-    if not value or any(character.isspace() for character in value):
-        raise TransactionError(
-            "host_system_identity_invalid",
-            f"release host {label} is malformed",
-        )
-    return value
-
-
-def production_host_system_identity_reader() -> HostSystemIdentity:
-    return HostSystemIdentity(
-        product_name=_read_exact_system_identity_value(
-            ["/usr/bin/sw_vers", "-productName"], "product name"
-        ),
-        product_version=_read_exact_system_identity_value(
-            ["/usr/bin/sw_vers", "-productVersion"], "product version"
-        ),
-        build_version=_read_exact_system_identity_value(
-            ["/usr/bin/sw_vers", "-buildVersion"], "build version"
-        ),
-        kernel_name=_read_exact_system_identity_value(
-            ["/usr/bin/uname", "-s"], "kernel name"
-        ),
-        kernel_release=_read_exact_system_identity_value(
-            ["/usr/bin/uname", "-r"], "kernel release"
-        ),
-        architecture=_read_exact_system_identity_value(
-            ["/usr/bin/uname", "-m"], "architecture"
-        ),
-    )
 
 
 def production_gatekeeper_capture(app: Path, tree_sha256: str) -> dict[str, Any]:
@@ -2649,7 +2531,18 @@ def _load_recovery_intent_document(
     path = context.attempt_root / "intent.json"
     data = _read_regular_bytes(path)
     value = _decode_json_bytes(data, path)
-    if not isinstance(value, dict) or set(value) != INTENT_FIELDS:
+    if (
+        not isinstance(value, dict)
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 5
+        or value.get("document") != ATTEMPT_DOCUMENT
+    ):
+        raise TransactionError(
+            "notarization_intent_identity_drift",
+            "notarization intent is not attempt schema v5; verify an older "
+            "attempt with the commit that produced it",
+        )
+    if set(value) != INTENT_FIELDS:
         raise TransactionError(
             "notarization_intent_identity_drift",
             "notarization intent has an unexpected field set",
@@ -2662,10 +2555,7 @@ def _load_recovery_intent_document(
     attempt_id = _canonical_uuid(value["attempt_id"], "local attempt id")
     archive_size = value["archive_size"]
     if (
-        type(value["schema_version"]) is not int
-        or value["schema_version"] != 4
-        or value["document"] != ATTEMPT_DOCUMENT
-        or value["build_number"] != context.build_number
+        value["build_number"] != context.build_number
         or value["version"] != VERSION
         or value["repository_commit"] != context.repository_commit
         or value["release_source_sha256"] != context.release_source_sha256
@@ -2686,6 +2576,11 @@ def _load_recovery_intent_document(
         raise TransactionError(
             "notarization_intent_identity_drift",
             "notarization intent differs from the recovery context",
+        )
+    if not _is_valid_notary_readiness_advisory(value["notary_readiness_advisory"]):
+        raise TransactionError(
+            "notarization_intent_identity_drift",
+            "notarization intent has a malformed notary readiness advisory",
         )
     transformation = _signing_transformation_binding_from_fields(
         value,
@@ -2742,8 +2637,7 @@ def _decode_recoverable_event_prefix(
     first, readiness, submitting = journal.documents[:3]
     if (
         first["state"] != "prepared"
-        or readiness["state"]
-        not in {"notary_ready", "pre_submission_policy_compatibility_applied"}
+        or readiness["state"] != "notary_ready"
         or submitting["state"] != "submitting"
     ):
         raise TransactionError(
@@ -3790,160 +3684,182 @@ def _require_syspolicy_success(
     _require_syspolicy_diagnostic(result, role, app)
 
 
+def _single_signature_diagnostic(app: Path) -> str:
+    return (
+        f"{_SINGLE_SIGNATURE_DIAGNOSTIC_PREFIX}{app.resolve().as_uri()}"
+        f"{_SINGLE_SIGNATURE_DIAGNOSTIC_SUFFIX}"
+    )
+
+
 def _require_syspolicy_diagnostic(
     result: CommandResult,
     role: CommandRole,
     app: Path,
 ) -> None:
-    expected = (
-        f"{_SINGLE_SIGNATURE_DIAGNOSTIC_PREFIX}{app.resolve().as_uri()}"
-        f"{_SINGLE_SIGNATURE_DIAGNOSTIC_SUFFIX}"
-    )
-    if result.stderr not in {"", expected}:
+    if result.stderr not in {"", _single_signature_diagnostic(app)}:
         raise TransactionError(
             f"{role.value}_stderr",
             f"{role.value} emitted unexpected diagnostic output",
         )
 
 
-def _require_exact_syspolicy_finding(
-    result: CommandResult,
-    role: CommandRole,
+def _capture_notary_readiness_advisory(
+    runner: CommandRunner,
     app: Path,
-    expected_finding: dict[str, str],
-    *,
-    expected_returncode: int,
-) -> None:
-    if result.returncode != expected_returncode:
-        raise TransactionError(
-            f"{role.value}_unexpected_status",
-            f"{role.value} returned an unsupported status",
-            exit_code=result.returncode,
+) -> dict[str, Any]:
+    """Record Apple's local notary-submission policy check without gating on it.
+
+    Apple's own verdict decides the release: notarytool's Accepted status, the
+    accepted notary log, stapling and the Gatekeeper assessment. The local
+    check is evidence only. A completed run is recorded as a path-free
+    projection; a run that produced no usable result is recorded with its
+    failure code. A release-host fault (unconfirmed cleanup, an invalid
+    command contract) still fails closed.
+    """
+    role = CommandRole.NOTARY_READINESS
+    try:
+        result = runner(
+            role,
+            [
+                "/usr/bin/syspolicy_check",
+                "notary-submission",
+                str(app),
+                "--json",
+            ],
+            600,
         )
-    value = _parse_command_json(result.stdout)
+    except TransactionError as error:
+        if error.code not in NOTARY_READINESS_ADVISORY_UNAVAILABLE_CODES:
+            raise TransactionError(
+                f"{role.value}_execution_failed",
+                f"{role.value} command did not complete",
+            ) from error
+        return {"status": "unavailable", "failure_code": error.code}
+    except Exception as error:
+        raise TransactionError(
+            f"{role.value}_execution_failed",
+            f"{role.value} command did not complete",
+        ) from error
+    if (
+        len(result.stdout.encode("utf-8"))
+        > MAX_NOTARY_READINESS_ADVISORY_OUTPUT_BYTES
+    ):
+        return {
+            "status": "unavailable",
+            "failure_code": NOTARY_READINESS_ADVISORY_OUTPUT_OVERSIZED,
+        }
+    diagnostic = (
+        "none"
+        if result.stderr == ""
+        else "single-signature"
+        if result.stderr == _single_signature_diagnostic(app)
+        else "other"
+    )
+    findings = _project_syspolicy_findings(result.stdout, app)
+    if findings is None:
+        return {
+            "status": "unrecognized-output",
+            "exit_code": result.returncode,
+            "diagnostic": diagnostic,
+        }
+    return {
+        "status": "completed",
+        "exit_code": result.returncode,
+        "diagnostic": diagnostic,
+        "findings": findings,
+    }
+
+
+def _project_syspolicy_findings(
+    stdout: str,
+    app: Path,
+) -> list[dict[str, str | None]] | None:
+    """Keep each finding's categorical fields; None marks unrecognized output.
+
+    A field that is not a short token, and a path outside the app, is kept as
+    null so that no free-form command text reaches the attempt evidence.
+    """
+    try:
+        value = _parse_command_json(stdout)
+    except TransactionError:
+        return None
     if (
         not isinstance(value, dict)
         or set(value) != {"output"}
         or not isinstance(value["output"], list)
-        or value["output"] != [expected_finding]
     ):
-        raise TransactionError(
-            f"{role.value}_finding_mismatch",
-            f"{role.value} did not return the exact expected finding",
-            exit_code=result.returncode,
+        return None
+    app_root = str(app.resolve())
+    findings: list[dict[str, str | None]] = []
+    for finding in value["output"]:
+        if not isinstance(finding, dict) or any(
+            not isinstance(finding.get(field), str)
+            for field in ("SyspolicyCheckErrorFile", *NOTARY_READINESS_FINDING_TOKENS)
+        ):
+            return None
+        projected: dict[str, str | None] = {
+            name: finding[field] if pattern.fullmatch(finding[field]) else None
+            for field, (name, pattern) in NOTARY_READINESS_FINDING_TOKENS.items()
+        }
+        projected["error_file"] = _app_relative_finding_path(
+            finding["SyspolicyCheckErrorFile"],
+            app_root,
         )
-    _require_syspolicy_diagnostic(result, role, app)
+        findings.append(projected)
+    return findings
 
 
-def _require_exact_macos_27_notary_false_positive(
-    result: CommandResult,
-    app: Path,
-    identity: HostSystemIdentity,
-) -> None:
-    role = CommandRole.NOTARY_READINESS
-    if identity not in MACOS_27_COMPATIBILITY_IDENTITIES:
-        raise TransactionError(
-            "notary-readiness_compatibility_unsupported_host",
-            "notary readiness failed outside the allowlisted host compatibility builds",
-            exit_code=result.returncode,
+def _is_relative_bundle_path(value: str) -> bool:
+    return all(part not in ("", ".", "..") for part in value.split("/"))
+
+
+def _app_relative_finding_path(value: str, app_root: str) -> str | None:
+    """Return the app-relative finding path; any other path is not persisted."""
+    if value == app_root:
+        return "."
+    prefix = f"{app_root}/"
+    if value.startswith(prefix) and _is_relative_bundle_path(value[len(prefix) :]):
+        return value[len(prefix) :]
+    return None
+
+
+def _is_valid_notary_readiness_advisory(value: Any) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("status"), str):
+        return False
+    fields = NOTARY_READINESS_ADVISORY_FIELDS.get(value["status"])
+    if fields is None or set(value) != fields:
+        return False
+    if value["status"] == "unavailable":
+        return isinstance(value["failure_code"], str) and (
+            value["failure_code"] in NOTARY_READINESS_ADVISORY_UNAVAILABLE_CODES
+            or value["failure_code"] == NOTARY_READINESS_ADVISORY_OUTPUT_OVERSIZED
         )
-    executable = app.resolve() / "Contents/MacOS/clash-for-mac"
-    _require_exact_syspolicy_finding(
-        result,
-        role,
-        app,
-        {
-            "SyspolicyCheckAdditionalInformation": "",
-            "SyspolicyCheckAdvice": "",
-            "SyspolicyCheckDocumentationLink": (
-                "https://developer.apple.com/forums/thread/706442"
-            ),
-            "SyspolicyCheckErrorFile": str(executable),
-            "SyspolicyCheckErrorLevel": "Fatal",
-            "SyspolicyCheckLongError": _KNOWN_NOTARY_FALSE_POSITIVE_LONG_ERROR,
-            "SyspolicyCheckShortError": "Codesign Error",
-        },
-        expected_returncode=70,
-    )
-
-
-def _require_exact_pre_notary_missing_ticket(
-    result: CommandResult,
-    app: Path,
-) -> None:
-    role = CommandRole.NOTARY_READINESS_CORROBORATION
-    _require_exact_syspolicy_finding(
-        result,
-        role,
-        app,
-        {
-            "SyspolicyCheckAdditionalInformation": "",
-            "SyspolicyCheckAdvice": _MISSING_TICKET_ADVICE,
-            "SyspolicyCheckDocumentationLink": (
-                "https://developer.apple.com/documentation/security/"
-                "notarizing_macos_software_before_distribution."
-            ),
-            "SyspolicyCheckErrorFile": str(app.resolve()),
-            "SyspolicyCheckErrorLevel": "Fatal",
-            "SyspolicyCheckLongError": _MISSING_TICKET_LONG_ERROR,
-            "SyspolicyCheckShortError": "Notary Ticket Missing",
-        },
-        expected_returncode=70,
-    )
-
-
-def _establish_pre_submission_policy(
-    runner: CommandRunner,
-    app: Path,
-    identity_reader: HostSystemIdentityReader,
-) -> PreSubmissionPolicyMode:
-    readiness = _capture_command_result(
-        runner,
-        CommandRole.NOTARY_READINESS,
-        [
-            "/usr/bin/syspolicy_check",
-            "notary-submission",
-            str(app),
-            "--json",
-        ],
-        600,
-    )
-    if readiness.returncode == 0:
-        _require_syspolicy_success(
-            readiness,
-            CommandRole.NOTARY_READINESS,
-            app,
+    if (
+        type(value["exit_code"]) is not int
+        or not isinstance(value["diagnostic"], str)
+        or value["diagnostic"] not in NOTARY_READINESS_ADVISORY_DIAGNOSTICS
+    ):
+        return False
+    if value["status"] == "unrecognized-output":
+        return True
+    return isinstance(value["findings"], list) and all(
+        isinstance(finding, dict)
+        and set(finding) == NOTARY_READINESS_FINDING_FIELDS
+        and all(
+            finding[name] is None
+            or (isinstance(finding[name], str) and pattern.fullmatch(finding[name]))
+            for name, pattern in NOTARY_READINESS_FINDING_TOKENS.values()
         )
-        return PreSubmissionPolicyMode.NATIVE
-    if readiness.returncode != 70:
-        raise TransactionError(
-            "notary-readiness_failed",
-            "notary-readiness command failed",
-            exit_code=readiness.returncode,
+        and (
+            finding["error_file"] is None
+            or finding["error_file"] == "."
+            or (
+                isinstance(finding["error_file"], str)
+                and _is_relative_bundle_path(finding["error_file"])
+            )
         )
-    try:
-        identity = identity_reader()
-    except TransactionError:
-        raise
-    except Exception as error:
-        raise TransactionError(
-            "host_system_identity_unavailable",
-            "cannot derive the release host identity",
-        ) from error
-    _require_exact_macos_27_notary_false_positive(readiness, app, identity)
-    corroboration = _capture_command_result(
-        runner,
-        CommandRole.NOTARY_READINESS_CORROBORATION,
-        [
-            "/usr/bin/syspolicy_check",
-            "distribution",
-            str(app),
-            "--json",
-        ],
-        600,
+        for finding in value["findings"]
     )
-    _require_exact_pre_notary_missing_ticket(corroboration, app)
-    return PreSubmissionPolicyMode.MACOS_27_EXACT_BUILD_COMPATIBILITY
 
 
 def _require_empty_notary_stderr(
@@ -4982,8 +4898,6 @@ def _validate_direct_sealed_event_grammar(
             "direct_sealed_journal_mismatch",
             "direct notarization journal is shorter than distribution verification",
         )
-    if observed_states[1] == "pre_submission_policy_compatibility_applied":
-        expected_states[1] = "pre_submission_policy_compatibility_applied"
     preseal_states = expected_states[:-1]
     if observed_states[: len(preseal_states)] != preseal_states:
         raise TransactionError(
@@ -8720,9 +8634,6 @@ def execute_transaction(
     publisher: Publisher = publish_exclusive,
     clock: Clock = _utc_now,
     attempt_id_factory: AttemptIdFactory = lambda: str(uuid.uuid4()),
-    host_system_identity_reader: HostSystemIdentityReader = (
-        production_host_system_identity_reader
-    ),
     candidate_freeze_verifier: CandidateFreezeVerifier = (
         verify_frozen_candidate
     ),
@@ -8776,13 +8687,18 @@ def execute_transaction(
         )
         attempt_lock_held = True
         _validate_context(context)
-        # Local admission must not consume the only first-submission attempt
-        # or move the canonical signed app when the host policy check fails.
-        readiness_mode = _establish_pre_submission_policy(
+        # The advisory check runs before the claim, so a release-host fault
+        # neither consumes the only first-submission attempt nor moves the
+        # canonical signed app.
+        notary_readiness_advisory = _capture_notary_readiness_advisory(
             command_runner,
             staged_app,
-            host_system_identity_reader,
         )
+        if not _is_valid_notary_readiness_advisory(notary_readiness_advisory):
+            raise TransactionError(
+                "notary-readiness_advisory_contract_drift",
+                "the notary readiness advisory would not be readable by recovery",
+            )
         _require_submission_executor_unchanged(executor, executor_source_reader)
         if executor is not None:
             try:
@@ -8866,7 +8782,7 @@ def execute_transaction(
 
         attempt_id = _canonical_uuid(attempt_id_factory(), "local attempt id")
         intent = {
-            "schema_version": 4,
+            "schema_version": 5,
             "document": ATTEMPT_DOCUMENT,
             "attempt_id": attempt_id,
             "build_number": context.build_number,
@@ -8882,6 +8798,7 @@ def execute_transaction(
             "candidate_freeze_intent_sha256": (
                 candidate_freeze_intent_sha256
             ),
+            "notary_readiness_advisory": notary_readiness_advisory,
             **signing_transformation.as_fields(),
             "prepared_at": clock(),
         }
@@ -8890,10 +8807,7 @@ def execute_transaction(
         intent_sha256 = _sha256_file(intent_path)
         journal = EventJournal(events, intent_sha256, clock)
         journal.append("prepared")
-        if readiness_mode is PreSubmissionPolicyMode.NATIVE:
-            journal.append("notary_ready")
-        else:
-            journal.append("pre_submission_policy_compatibility_applied")
+        journal.append("notary_ready")
         _require_source_identity(context, source_identity_reader)
         _require_toolchain_identity(context, toolchain_metadata_reader)
         _require_submission_executor_unchanged(executor, executor_source_reader)
@@ -9609,7 +9523,7 @@ def self_check() -> None:
     if NOTARY_PROFILE != "clashformac-notary":
         raise TransactionError("self_check_failed", "notary profile contract drifted")
     if (
-        ATTEMPT_DOCUMENT != "cfw-notarization-attempt-v4"
+        ATTEMPT_DOCUMENT != "cfw-notarization-attempt-v5"
         or SUBMISSION_DOCUMENT != "cfw-notarization-submission-receipt-v5"
     ):
         raise TransactionError("self_check_failed", "notary evidence contract drifted")

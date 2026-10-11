@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 from scripts import release_signing_preflight as preflight
+from scripts.tests.metadata_change_fixture import change_only_ctime
 
 
 IDENTITY = f"Developer ID Application: Release Owner ({preflight.TEAM_ID})"
@@ -381,6 +382,83 @@ class ReleaseSigningPreflightTests(unittest.TestCase):
             preflight.SigningPreflightError, "notary proof"
         ):
             preflight.load_preflight_manifest(manifest)
+
+    def test_metadata_only_writes_keep_materialized_profile_reads(self) -> None:
+        # macOS can write extended attributes without touching a byte; only
+        # the status-change time moves, and a plain read must not fail on it.
+        result = self.run_preflight()
+        manifest, materialized = self._materialized_profiles(result)
+        real_regular = preflight._require_regular_metadata
+        real_profile = preflight._profile_file_identity
+        changed: list[Path] = []
+
+        def regular_then_change(path: Path, *arguments, **keywords):
+            captured = real_regular(path, *arguments, **keywords)
+            change_only_ctime(path)
+            changed.append(path)
+            return captured
+
+        def profile_then_change(path: Path, *arguments):
+            captured = real_profile(path, *arguments)
+            change_only_ctime(path)
+            changed.append(path)
+            return captured
+
+        with (
+            mock.patch.object(
+                preflight,
+                "_require_regular_metadata",
+                side_effect=regular_then_change,
+            ),
+            mock.patch.object(
+                preflight,
+                "_profile_file_identity",
+                side_effect=profile_then_change,
+            ),
+        ):
+            verified = preflight.verify_materialized_profiles(manifest, materialized)
+
+        self.assertEqual(set(verified), set(materialized))
+        self.assertIn(manifest, changed)
+        self.assertTrue(set(materialized.values()) <= set(changed))
+
+    def test_metadata_only_profile_writes_do_not_break_the_preflight(self) -> None:
+        real_profile = preflight._profile_file_identity
+        changed: list[Path] = []
+
+        def profile_then_change(path: Path, *arguments):
+            captured = real_profile(path, *arguments)
+            change_only_ctime(path)
+            changed.append(path)
+            return captured
+
+        with mock.patch.object(
+            preflight,
+            "_profile_file_identity",
+            side_effect=profile_then_change,
+        ):
+            result = self.run_preflight()
+
+        self.assertEqual(
+            {profile.role for profile in result.profiles},
+            set(preflight.PROFILE_ROLES),
+        )
+        self.assertEqual(len(changed), 2 * len(preflight.PROFILE_ROLES))
+
+    def test_updater_key_metadata_only_change_is_custody_drift(self) -> None:
+        # The persisted custody record deliberately keeps the status-change
+        # time: ACL and extended-attribute drift on key material is the point.
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        change_only_ctime(self.fixture.updater_key)
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "private key changed after preflight"
+        ):
+            preflight.verify_live_custody_metadata(
+                manifest,
+                runner=self.runner,
+                repository=self.fixture.repository,
+            )
 
     def test_same_size_private_key_atomic_replacement_is_rejected(self) -> None:
         result = self.run_preflight()

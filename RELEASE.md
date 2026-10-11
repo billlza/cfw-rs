@@ -450,6 +450,19 @@ revalidation detect persistent or static drift; they do not claim to defeat code
 already executing concurrently as the release UID, which could also race the
 repository, build outputs, or signing process.
 
+Apart from two credential-custody checks, the release tools' read, hash,
+tree-walk and fsync stability checks never compare the status-change time. They
+compare at least device, inode, size and modification time, and most also mode
+and link count, plus owner where a reader enforces it. macOS changes the
+status-change time without touching any byte, for example when it rewrites
+`com.apple.macl` on an application root about 40 ms after an atomic swap. A
+rename changes only that time, so identities are compared whole across a
+rename. Content changes still move the size, modification time, inode or link
+count, and the final bytes are hashed again at packaging and upload. The two
+exceptions detect ACL, flag and extended-attribute drift on key material: the
+updater-key record persisted as `changedNs` in the signing preflight manifest,
+and the updater signing launcher's in-process credential path identities.
+
 Review [`docs/supply-chain.md`](./docs/supply-chain.md). Verify that the release
 commit, submodule/reference state, version, changelog, and complete
 corresponding-source candidate are immutable and have recorded SHA-256 hashes.
@@ -705,6 +718,33 @@ macOS 15 deployment target. Any mismatch blocks the outer signature.
 Submit the signed app, wait for an accepted result, staple the ticket, and
 verify both stapler and Gatekeeper before creating the DMG. Then run the same
 notarization and staple validation for the DMG.
+
+Before it claims the attempt, the app notarization transaction runs
+`syspolicy_check notary-submission` once as advisory evidence. The local result
+never blocks submission, and no macOS build identity is consulted. Apple's
+verdict decides: the Accepted notarytool status, the retained notary log and
+the stapled ticket. The local checks after it, stapler validation, the
+Gatekeeper assessment and the final `syspolicy_check distribution`, all still
+fail closed. Attempt schema v5 records the local result in `intent.json` as
+`notary_readiness_advisory`:
+
+- `completed` keeps the exit status, a stderr class (`none`,
+  `single-signature` or `other`), and for each finding its level and short
+  error when they are short tokens, and its app-relative file;
+- `unrecognized-output` keeps the exit status and stderr class when the output
+  is not the expected findings document;
+- `unavailable` names why no recordable result exists: a bounded-runner code
+  such as `command_start_failed` when the tool is missing, or
+  `notary-readiness_advisory_output_oversized` when stdout exceeds 256 KiB.
+
+Free-form command text and paths outside the app are never persisted, and the
+record is checked against the recovery validator before the claim. A
+release-host fault, such as process cleanup that cannot be confirmed, still
+stops the transaction before the claim. The second journal event,
+`notary_ready`, now means that pre-submission admission finished; it no longer
+implies that the local check passed. Tooling at this revision reads only
+attempt schema v5, so verify any older attempt with the commit that produced
+it.
 
 An accepted submission summary alone is insufficient. The signed-candidate
 builder retrieves and preserves `notarization-log.json`, binds its job ID and
@@ -985,15 +1025,14 @@ never adopted.
    it through stapling, Gatekeeper, and the final app manifest.
 
    If signing is already complete but no app-notary attempt has been claimed,
-   a tooling-only host compatibility correction can use
+   a tooling-only correction can use
    `scripts/run_notarization_transaction.sh --submit-frozen-candidate` from a
    separate clean executor checkout. Supply `--artifact-repository`, an explicit
    `--toolchain-root`, and the original candidate's source/toolchain arguments
    shown by `--help`. The app path is derived from canonical `signing-output`;
    arbitrary staged apps, existing attempts and repeated submissions are rejected.
-   Local readiness runs before claiming the attempt or moving signed bytes.
-   Only individually observed host identities with the exact known finding and
-   independent missing-ticket corroboration can use the compatibility branch.
+   The advisory local notary-readiness check (section 6) runs before claiming
+   the attempt or moving signed bytes.
    Toolchain derivation executes the original candidate's isolated verifier,
    not the executor checkout's newer pinned-source policy. Its complete fixed
    digest output must still match the candidate, with no diagnostics admitted.

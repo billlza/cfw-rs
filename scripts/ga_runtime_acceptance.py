@@ -451,7 +451,7 @@ class FileSnapshot:
     data: bytes
     size: int
     sha256: str
-    identity: tuple[int, int, int, int, int, int, int]
+    identity: tuple[int, int, int, int, int, int]
 
     def record(self) -> dict[str, Any]:
         return {"path": self.relative, "sha256": self.sha256, "size": self.size}
@@ -613,13 +613,12 @@ def _private_regular_metadata(path: Path) -> os.stat_result:
     return metadata
 
 
-def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
         metadata.st_mode,
         metadata.st_nlink,
     )
@@ -3427,7 +3426,7 @@ def _snapshots_from_collector_bytes(files: dict[str, bytes]) -> dict[str, FileSn
             data=data,
             size=len(data),
             sha256=sha256_bytes(data),
-            identity=(0, 0, len(data), 0, 0, 0o100600, 1),
+            identity=(0, 0, len(data), 0, 0o100600, 1),
         )
         for name, data in sorted(files.items())
     }

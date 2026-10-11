@@ -22,6 +22,8 @@ from unittest.mock import Mock, call, patch
 from scripts.candidate_artifact_binding import CandidateBindingError
 from scripts.candidate_freeze import CandidateFreezeError
 from scripts import dormant_app_install as install
+from scripts import hash_artifact
+from scripts.tests.metadata_change_fixture import change_only_ctime
 from scripts import ga_acceptance_environment as ga_environment
 
 from scripts.dormant_app_install import (
@@ -381,6 +383,57 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
         self.assertEqual(journal.parent, self.fixture.parent)
         self.assertNotIn(self.fixture.target, journal.parents)
+
+    def test_post_swap_app_root_metadata_write_keeps_the_tree_identity(self) -> None:
+        # macOS rewrites com.apple.macl on the swapped application root about
+        # 40 ms after the atomic swap. That write changes only st_ctime_ns
+        # while the post-swap layout checks hash the complete bundle.
+        fixture = self.fixture
+        swapped = False
+        hashing: Path | None = None
+        raced_digests: list[str] = []
+        racing = False
+
+        def swap(first_fd: int, first_name: str, second_fd: int, second_name: str) -> None:
+            nonlocal swapped
+            fixture.swap(first_fd, first_name, second_fd, second_name)
+            swapped = True
+
+        def read_identity(path: Path) -> AppIdentity:
+            nonlocal hashing, racing
+            hashing = path
+            try:
+                digest = install._tree_sha256(path, "application bundle")
+            finally:
+                hashing = None
+            if racing:
+                racing = False
+                raced_digests.append(digest)
+            return fixture.read_identity(path)
+
+        descriptor_digest = hash_artifact._descriptor_digest
+
+        def macl_write_during_hash(descriptor: int, expected_size: int, relative: str) -> str:
+            nonlocal racing
+            if swapped and hashing == fixture.target and not raced_digests and not racing:
+                racing = True
+                change_only_ctime(fixture.target)
+            return descriptor_digest(descriptor, expected_size, relative)
+
+        runtime = replace(fixture.runtime(swap=swap), read_identity=read_identity)
+        with patch(
+            "scripts.hash_artifact._descriptor_digest",
+            side_effect=macl_write_during_hash,
+        ):
+            result = DormantInstallTransaction(fixture.paths, runtime).install()
+
+        self.assertEqual(result["phase"], "installed")
+        self.assertEqual(fixture.swap_count, 1)
+        self.assertEqual(
+            raced_digests,
+            [install._tree_sha256(fixture.target, "application bundle")],
+        )
+        self.assertEqual(fixture.read_identity(fixture.target), NEW)
 
     def test_environment_drift_blocks_before_journal_copy_or_swap(self) -> None:
         changed = dict(GA_ENVIRONMENT)

@@ -230,7 +230,8 @@ def _file_record(
         or after.st_ino != before.st_ino
         or after.st_size != before.st_size
         or after.st_mtime_ns != before.st_mtime_ns
-        or after.st_ctime_ns != before.st_ctime_ns
+        or after.st_mode != before.st_mode
+        or after.st_nlink != before.st_nlink
     ):
         raise ReleaseAppleToolchainError(f"{label} changed while hashing")
     return {

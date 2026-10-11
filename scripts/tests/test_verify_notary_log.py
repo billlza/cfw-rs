@@ -390,10 +390,13 @@ class NotaryLogFileBoundaryTests(unittest.TestCase):
                     replacement.rename(archive)
                 return chunk
 
+            # The open descriptor keeps hashing the original inode, whose
+            # identity a rename does not change; the path binding then
+            # rejects the substituted file.
             with patch("scripts.verify_notary_log.os.read", side_effect=racing_read):
                 with self.assertRaisesRegex(
                     NotaryLogError,
-                    "changed (while|after) hashing",
+                    "submission archive changed after processing$",
                 ):
                     _file_sha256(archive)
 
@@ -461,10 +464,13 @@ class NotaryLogFileBoundaryTests(unittest.TestCase):
                     replacement.rename(submission)
                 return chunk
 
+            # The open descriptor keeps reading the original inode, whose
+            # identity a rename does not change; the path binding then
+            # rejects the substituted file.
             with patch("scripts.verify_notary_log.os.read", side_effect=racing_read):
                 with self.assertRaisesRegex(
                     NotaryLogError,
-                    "changed (while|after) reading",
+                    "submission result changed after processing$",
                 ):
                     validate_files(submission, log, archive)
 

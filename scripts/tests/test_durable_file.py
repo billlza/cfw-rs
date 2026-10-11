@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from scripts.publication.common import PublicationError
 from scripts.publication import durable_file
+from scripts.tests.metadata_change_fixture import change_only_ctime
 
 
 class DurableFileTests(unittest.TestCase):
@@ -349,6 +350,50 @@ class DurableFileTests(unittest.TestCase):
             with self.assertRaises(durable_file.DurabilityOutcomeUnknown):
                 durable_file.promote_private_directory(pending, destination)
         self.assertEqual(destination.stat().st_mode & 0o777, 0o777)
+
+    def test_private_tree_publication_tolerates_metadata_only_bundle_writes(
+        self,
+    ) -> None:
+        # macOS rewrites com.apple.macl and provenance attributes on a bundle
+        # without touching any byte; only the status-change time moves.
+        source = self.root / "work.pending"
+        executable = source / "Clash for Mac.app/Contents/MacOS/clash-for-mac"
+        executable.parent.mkdir(parents=True, mode=0o700)
+        source.chmod(0o700)
+        executable.write_bytes(b"signed")
+        executable.chmod(0o700)
+        destination = self.root / "work"
+        real_sync = durable_file._sync_regular_file
+        changed: list[Path] = []
+
+        def change_metadata_then_sync(path: Path, expected: os.stat_result) -> None:
+            tree = source if source.exists() else destination
+            for entry in (tree / "Clash for Mac.app", path):
+                change_only_ctime(entry)
+                changed.append(entry)
+            real_sync(path, expected)
+
+        with patch.object(
+            durable_file,
+            "_sync_regular_file",
+            side_effect=change_metadata_then_sync,
+        ):
+            durable_file.publish_private_directory_exclusive(source, destination)
+            durable_file.confirm_private_directory_published(source, destination)
+
+        self.assertEqual(
+            changed,
+            [
+                source / "Clash for Mac.app",
+                executable,
+                destination / "Clash for Mac.app",
+                destination / "Clash for Mac.app/Contents/MacOS/clash-for-mac",
+            ],
+        )
+        self.assertEqual(
+            (destination / "Clash for Mac.app/Contents/MacOS/clash-for-mac").read_bytes(),
+            b"signed",
+        )
 
     def test_private_directory_parent_replacement_is_typed_unknown_outcome(self) -> None:
         parent = self.root / "parent"

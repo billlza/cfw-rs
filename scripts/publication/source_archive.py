@@ -145,7 +145,6 @@ def _open_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
         metadata.st_uid,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
 
 

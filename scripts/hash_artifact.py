@@ -67,13 +67,17 @@ def _mode(metadata: os.stat_result) -> str:
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, ...]:
+    # The status-change time is deliberately absent. macOS changes it without
+    # touching any hashed byte or recorded attribute, for example when it
+    # rewrites com.apple.macl on an application root after an atomic swap.
+    # Content and replacement changes still move the size, mtime, inode or
+    # link count; same-user tampering is outside the release threat model.
     return (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_mode,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
         metadata.st_nlink,
     )
 

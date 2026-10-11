@@ -22,6 +22,7 @@ from scripts import release_signing_preflight
 from scripts import verify_release_build_allocations as allocations
 from scripts.dormant_app_install import SUPPORTED_PREDECESSORS, PredecessorProfile
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
+from scripts.tests.metadata_change_fixture import change_only_ctime
 from scripts.tests.release_identity_fixture import NEXT_GA_BUILD, retired_ga_builds
 
 
@@ -881,6 +882,41 @@ class CandidateFreezeTests(unittest.TestCase):
 
         self.assertIn(stat.S_IFREG, observed_types)
         self.assertIn(stat.S_IFDIR, observed_types)
+
+    def test_metadata_only_bundle_writes_do_not_break_the_freeze(self) -> None:
+        # macOS rewrites com.apple.macl and provenance attributes on a bundle
+        # without touching any byte; only the status-change time moves.
+        real_sync = candidate_freeze.full_fsync
+        real_file_flags = candidate_freeze._file_open_flags
+        changes = {"open": 0, "sync": 0}
+
+        def change_bundle_root_ctime(kind: str) -> None:
+            for root in (self.preflight, self.final):
+                app = root / "pre-sign/Clash for Mac.app"
+                if app.is_dir():
+                    change_only_ctime(app)
+                    changes[kind] += 1
+
+        def opening() -> int:
+            change_bundle_root_ctime("open")
+            return real_file_flags()
+
+        def syncing(descriptor: int) -> None:
+            change_only_ctime(descriptor)
+            change_bundle_root_ctime("sync")
+            real_sync(descriptor)
+
+        with (
+            patch.object(candidate_freeze, "_file_open_flags", side_effect=opening),
+            patch.object(candidate_freeze, "_stable_sync", side_effect=syncing),
+        ):
+            receipt = self.freeze()
+            verified = candidate_freeze.verify_frozen_candidate(self.repository)
+
+        self.assertGreater(changes["open"], 0)
+        self.assertGreater(changes["sync"], 0)
+        self.assertEqual(receipt.root, self.final)
+        self.assertEqual(verified.intent_sha256, receipt.intent_sha256)
 
     def test_fresh_freeze_refuses_existing_frozen_candidate(self) -> None:
         self.freeze()

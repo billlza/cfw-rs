@@ -246,7 +246,6 @@ def _read_regular(
         item.st_nlink,
         item.st_size,
         item.st_mtime_ns,
-        item.st_ctime_ns,
     )
     try:
         if (

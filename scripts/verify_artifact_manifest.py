@@ -42,7 +42,6 @@ def _manifest_identity(metadata: os.stat_result) -> tuple[int, ...]:
         metadata.st_mode,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
         metadata.st_nlink,
     )
 

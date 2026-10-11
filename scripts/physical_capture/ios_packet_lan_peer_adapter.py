@@ -319,7 +319,8 @@ def _source_tree_sha256() -> str:
             item.st_ino,
             item.st_size,
             item.st_mtime_ns,
-            item.st_ctime_ns,
+            item.st_mode,
+            item.st_nlink,
         )
         if (
             path.is_symlink()
@@ -361,7 +362,8 @@ def load_source_identity() -> IOSPacketLanPeerSourceIdentity:
         item.st_ino,
         item.st_size,
         item.st_mtime_ns,
-        item.st_ctime_ns,
+        item.st_mode,
+        item.st_nlink,
     )
     if (
         SOURCE_IDENTITY_PATH.is_symlink()
@@ -725,7 +727,8 @@ def _read_stable_file(path: Path, *, maximum: int, private: bool) -> bytes:
         item.st_ino,
         item.st_size,
         item.st_mtime_ns,
-        item.st_ctime_ns,
+        item.st_mode,
+        item.st_nlink,
     )
     if identity(before) != identity(after):
         raise IOSPacketLanPeerError(

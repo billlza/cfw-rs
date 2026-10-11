@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from scripts.tests.metadata_change_fixture import change_only_ctime
+
 from scripts import release_cargo_inputs as cargo_inputs_module
 from scripts.release_cargo_inputs import (
     CRATES_IO_SOURCE,
@@ -203,7 +205,7 @@ class ReleaseCargoInputsTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseCargoInputsError, "single-link"):
             verify_workspace_cargo_inputs(self.repository, inputs.root)
 
-    def test_archive_identity_change_during_inventory_is_rejected(self) -> None:
+    def _inventory_with_change(self, change) -> None:
         inputs = self._prepare()
         archive = inputs.archives / "fixture-dependency-1.2.3.crate"
         real_consume = cargo_inputs_module._consume_archive_file
@@ -214,16 +216,31 @@ class ReleaseCargoInputsTests(unittest.TestCase):
             digest = real_consume(*args, **kwargs)
             if not changed:
                 changed = True
-                archive.chmod(0o600)
-                archive.chmod(0o400)
+                change(archive)
             return digest
 
         with mock.patch.object(
             cargo_inputs_module,
             "_consume_archive_file",
             side_effect=consume_then_change,
-        ), self.assertRaisesRegex(ReleaseCargoInputsError, "changed during inspection"):
-            verify_workspace_cargo_inputs(self.repository, inputs.root)
+        ):
+            result = verify_workspace_cargo_inputs(self.repository, inputs.root)
+        self.assertTrue(changed)
+        self.assertEqual(result, inputs)
+
+    def test_archive_identity_change_during_inventory_is_rejected(self) -> None:
+        def rewrite_time(archive: Path) -> None:
+            metadata = archive.stat()
+            os.utime(
+                archive,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000),
+            )
+
+        with self.assertRaisesRegex(ReleaseCargoInputsError, "changed during inspection"):
+            self._inventory_with_change(rewrite_time)
+
+    def test_archive_metadata_only_change_during_inventory_is_accepted(self) -> None:
+        self._inventory_with_change(change_only_ctime)
 
     def test_vendor_mtime_only_change_preserves_semantic_identity(self) -> None:
         inputs = self._prepare()

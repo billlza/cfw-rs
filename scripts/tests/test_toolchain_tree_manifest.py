@@ -1355,13 +1355,17 @@ LIBBOX_VET_PACKAGES=(".")
             '"goModuleCacheTreeSha256"',
             '"archiveDeterminism"',
             '"zeroArDate-v1"',
-            "endpoint_conflict_patch: SingBoxSourcePatchLock",
+            "const SING_BOX_PATCH_PINS: [(&str, &str, &str); 6]",
             '"SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH"',
             '"SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"',
-            "sing-box {description} patch digest differs from dependency lock",
-            "socks_lifecycle_patch: SingBoxSourcePatchLock",
             '"SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH"',
             '"SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256"',
+            "for (description, path_pin, sha256_pin) in SING_BOX_PATCH_PINS {",
+            "sing-box {description} patch digest differs from {sha256_pin}",
+            '("sourceTag", "SING_BOX_VERSION")',
+            '("sourceCommit", "SING_BOX_COMMIT")',
+            '("goVersion", "GO_VERSION")',
+            '("gomobileVersion", "GOMOBILE_VERSION")',
             "actual_metadata_keys != expected_metadata_keys",
             "CFW_GO_TOOLCHAIN_TREE_SHA256",
             "CFW_GO_TOOLS_TREE_SHA256",
@@ -1382,6 +1386,74 @@ LIBBOX_VET_PACKAGES=(".")
         ):
             with self.subTest(function=function):
                 self.assertEqual(text.count(function), 2)
+
+    def test_release_environment_hashes_each_patch_against_its_pins(self) -> None:
+        # The release environment reads the patch path and digest pins directly
+        # (no echo lock file); run its embedded checker with the argv the shell
+        # passes so the argument order stays bound to the unpacking order.
+        script = (SCRIPTS / "verify_release_environment.sh").read_text(encoding="utf-8")
+        start = script.index('"$python_bin" -I -S -B -W error - \\\n  "$repo_root" \\\n')
+        arguments, body = script[start:].split("<<'PY'\n", 1)
+        body = body.split("\nPY\n", 1)[0]
+        names = re.findall(r'^  "\$([A-Za-z0-9_]+)"', arguments, re.MULTILINE)
+        self.assertEqual(names[0], "repo_root")
+        pins = _pins()
+
+        def run(
+            repository: Path, **overrides: str
+        ) -> subprocess.CompletedProcess[bytes]:
+            argv = [
+                str(repository),
+                *(overrides.get(name, pins[name]) for name in names[1:]),
+            ]
+            return subprocess.run(
+                [sys.executable, "-I", "-S", "-B", "-W", "error", "-", *argv],
+                input=body.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=60,
+            )
+
+        accepted = run(REPOSITORY)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr.decode())
+        patch_paths = [name for name in names if name.endswith("_PATCH_PATH")]
+        self.assertEqual(len(patch_paths), 6)
+        tauri_config = "apps/cfw-tauri-shell/tauri.conf.json"
+
+        def copy_inputs(destination: Path) -> None:
+            for relative in (
+                *(pins[key] for key in patch_paths),
+                "apps/cfw-tauri-shell/package.json",
+                tauri_config,
+            ):
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((REPOSITORY / relative).read_bytes())
+
+        for name in patch_paths:
+            with self.subTest(patch=name), tempfile.TemporaryDirectory() as temporary:
+                copy = Path(temporary)
+                copy_inputs(copy)
+                self.assertEqual(run(copy).returncode, 0)
+                tampered = copy / pins[name]
+                tampered.write_bytes(tampered.read_bytes() + b"\n")
+                rejected = run(copy)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(b"digest differs from release pin", rejected.stderr)
+        # The Tauri deployment target follows MACOS_DEPLOYMENT_TARGET instead of
+        # a copied literal.
+        with tempfile.TemporaryDirectory() as temporary:
+            copy = Path(temporary)
+            copy_inputs(copy)
+            config = json.loads((copy / tauri_config).read_text(encoding="utf-8"))
+            config["bundle"]["macOS"]["minimumSystemVersion"] = "99.0"
+            (copy / tauri_config).write_text(json.dumps(config), encoding="utf-8")
+            rejected = run(copy)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(b"differs from MACOS_DEPLOYMENT_TARGET", rejected.stderr)
+            accepted = run(copy, MACOS_DEPLOYMENT_TARGET="99.0")
+            self.assertEqual(accepted.returncode, 0, accepted.stderr.decode())
 
     def test_release_environment_requires_the_supported_python_line(self) -> None:
         contract = (SCRIPTS / "release_toolchain_contract.sh").read_text(
@@ -1629,18 +1701,15 @@ LIBBOX_VET_PACKAGES=(".")
             readme,
         )
 
-    def test_current_release_documents_name_the_active_pins(self) -> None:
-        pins = _pins()
-        sing_box = json.loads(
-            (REPOSITORY / "native/macos/Dependencies.lock.json").read_text(
+    def test_current_release_documents_state_the_active_counts(self) -> None:
+        # Pin values are named by key only (see PinValueCopyTests in
+        # test_verify_pinned_build_inputs.py); the component and patch counts the
+        # documents state must still follow the release contract.
+        patches = json.loads(
+            (REPOSITORY / "scripts/pinned_build_inputs.json").read_text(
                 encoding="utf-8"
             )
-        )["singBox"]
-        patches = {
-            Path(entry["path"]).name
-            for entry in sing_box.values()
-            if isinstance(entry, dict) and "path" in entry
-        }
+        )["patches"]
         counts = {4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
         documents = {
             relative: (REPOSITORY / relative).read_text(encoding="utf-8")
@@ -1655,30 +1724,12 @@ LIBBOX_VET_PACKAGES=(".")
         # supply-chain advisory narrative, keeps the values it recorded.
         statements = (
             (
-                r"toolchains/([0-9]+[.][0-9]+[.][0-9]+)-aarch64-apple-darwin",
-                pins["RUST_VERSION"],
-            ),
-            (r"Python ([0-9]+[.][0-9]+[.][0-9]+) Cellar", pins["PYTHON_VERSION"]),
-            (
                 r"(\w+)-component\s+`rustup-component-file-tree-v2`",
                 counts[len(EXPECTED_COMPONENTS)],
             ),
             (
-                r"sing-box-(v[0-9.]+)-(?:patched|[a-z-]+[.]patch)",
-                pins["SING_BOX_VERSION"],
-            ),
-            (
-                r"sing-box(?:/libbox)?\s+`?(v[0-9.]+)`?\s+at(?:\s+commit)?\s+"
-                r"`([0-9a-f]{40})`",
-                (pins["SING_BOX_VERSION"], pins["SING_BOX_COMMIT"]),
-            ),
-            (
                 r"(\w+)\s+digest-pinned\s+(?:repository\s+)?patches",
                 counts[len(patches)],
-            ),
-            (
-                r"Apple provider reference[^`]*`([0-9a-f]{40})`",
-                pins["SING_BOX_APPLE_REFERENCE_COMMIT"],
             ),
         )
         for pattern, expected in statements:
@@ -1687,34 +1738,18 @@ LIBBOX_VET_PACKAGES=(".")
                 for relative, text in documents.items()
             }
             with self.subTest(pattern=pattern):
-                self.assertTrue(any(found.values()), "no document states this pin")
+                self.assertTrue(any(found.values()), "no document states this count")
                 for relative, values in found.items():
                     self.assertEqual(
                         [value for value in values if value != expected],
                         [],
                         relative,
                     )
-        self.assertEqual(
-            set(
-                re.findall(
-                    r"sing-box-v[0-9.]+-[a-z-]+[.]patch",
-                    documents["native/macos/README.md"],
+        for patch in patches:
+            with self.subTest(native_readme_patch=patch["pathKey"]):
+                self.assertIn(
+                    f"`{patch['pathKey']}`", documents["native/macos/README.md"]
                 )
-            ),
-            patches,
-        )
-        readme = documents["README.md"]
-        pinned = readme[readme.index("## Pinned toolchain and dependencies"):]
-        pinned = pinned[: pinned.index("\n## ", 1)]
-        for label, key in (
-            ("Rust", "RUST_VERSION"),
-            ("Node.js", "NODE_VERSION"),
-            ("Go", "GO_VERSION"),
-            ("SagerNet gomobile", "GOMOBILE_VERSION"),
-            ("cargo-deny", "CARGO_DENY_VERSION"),
-        ):
-            with self.subTest(readme_pin=label):
-                self.assertIn(f"\n- {label} {pins[key]}\n", pinned)
 
     def test_tauri_installer_cleanup_preserves_failure_and_only_removes_own_success(
         self,

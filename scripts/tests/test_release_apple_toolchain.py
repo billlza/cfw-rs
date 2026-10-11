@@ -63,8 +63,9 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
             for name in ("CFW_UNSIGNED_VALIDATION_PYTHON", "CFW_UNSIGNED_VALIDATION_XCODE_VERSION", "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION")
             if name in os.environ
         })
+        cls.pins = load_pins(REPOSITORY / "scripts/dependency_pins.env")
         cls.expected_version, cls.expected_build = selected_apple_identity(
-            load_pins(REPOSITORY / "scripts/dependency_pins.env"), cls.environment
+            cls.pins, cls.environment
         )
         cls.sdk_version = subprocess.check_output(
             ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"],
@@ -87,7 +88,9 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
             binding["developer_directory"],
             DEVELOPER_DIRECTORY_PLACEHOLDER,
         )
-        self.assertEqual(binding["deployment_target"], "15.0")
+        self.assertEqual(
+            binding["deployment_target"], self.pins["MACOS_DEPLOYMENT_TARGET"]
+        )
         self.assertEqual(binding["xcode_version"], self.expected_version)
         self.assertEqual(binding["xcode_build_version"], self.expected_build)
         self.assertEqual(
@@ -123,7 +126,9 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
         self.assertTrue(self.observed.sdk_root.is_symlink())
 
     def test_deployment_target_comes_from_pins_and_rejects_ambient_drift(self) -> None:
-        self.assertEqual(self.observed.deployment_target, "15.0")
+        self.assertEqual(
+            self.observed.deployment_target, self.pins["MACOS_DEPLOYMENT_TARGET"]
+        )
         drifted = {
             **self.environment,
             "MACOSX_DEPLOYMENT_TARGET": "14.0",

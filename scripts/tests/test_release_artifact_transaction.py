@@ -234,22 +234,9 @@ def create_release_verifier_build(repository: Path) -> ReleaseVerifierBuild:
         + "\n",
         encoding="utf-8",
     )
+    # A release-verifier source input: hashed into the verifier seal, not parsed.
     (repository / "scripts/pinned_build_inputs.json").write_text(
-        json.dumps(
-            {
-                "schema": "cfw-pinned-build-inputs-v1",
-                "tools": {
-                    "RUST_VERSION": "1.98.1",
-                    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
-                        toolchain_surface["sha256"]
-                    )
-                },
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n",
+        '{"schema":"cfw-pinned-build-inputs-v2"}\n',
         encoding="utf-8",
     )
     executable.write_text(

@@ -1,27 +1,27 @@
-"""Fail-closed verifier for the design-pinned libbox and toolchain inputs.
+"""Fail-closed verifier for the pinned libbox and toolchain build inputs.
 
-:func:`verify_source_contract` binds the pinned-input manifest
-(``scripts/pinned_build_inputs.json``) to the tracked release configuration
-without invoking any toolchain or the network:
+``scripts/dependency_pins.env`` is the only store of pinned values.
+:func:`verify_source_contract` checks those values against the release policy in
+``scripts/pinned_build_inputs.json`` without invoking any toolchain or the
+network:
 
-* every pinned tool version and the sing-box/gomobile upstream commits in
-  scripts/dependency_pins.env match the manifest exactly;
+* the pin file defines exactly the fixed release pin keys, the policy declares a
+  format for each, and every value has its declared format (SHA-256, commit,
+  version, module sum, repository path, build-tag list);
 * cargo-audit and cargo-deny's CI installs consume their release pins with
   ``--locked`` and the release gate checks the exact Apple Silicon target graph;
-* the XcodeGen installed-resource patch and patched source digest are bound to
-    the isolated bootstrap and its installed-resource probe;
-* the official Tauri CLI crate, its unchanged published lock, and the exact Cargo
-  cache-normalization contract are checksum-bound to one installer entrypoint;
-* the six design-pinned patch files exist as regular files and their computed
-  SHA-256 digests match both the manifest and dependency_pins.env;
-* the combined diff SHA-256 is pinned and is distinct from any single patch digest;
-* known legacy/partial patch digests are rejected;
-* the verified Go module inputs (module sums and go.mod/go.sum digests) are present
-  and well formed;
-* the pinned libbox Go build tag list is exactly the pinned value, is well formed,
-  and contains every tag the engine start path requires — including the tags whose
-  omission would make ``box.New`` fail on every start;
-* the native dependency lock agrees with the pins (source-tree binding);
+* the XcodeGen installed-resource patch hashes to its pin and the isolated
+  bootstrap keeps its pinned patch, probe and metadata operations;
+* the exact Cargo cache-normalization contract hashes to its pin and the
+  official Tauri CLI installer keeps every checksum-bound operation;
+* the six sing-box patch files exist as regular files whose computed SHA-256
+  digests match their pins, are distinct, and are not known legacy digests;
+* the combined diff pin is distinct from every single patch digest and from the
+  dependency-only diff;
+* the libbox module-cache contract hashes to its pin;
+* the pinned libbox Go build tag list is well formed and is exactly the tags the
+  policy requires — including the tags whose omission would make ``box.New``
+  fail on every start;
 * the offline libbox build script references the pins with no floating versions and
   no network or recursive build actions;
 * every CI job that enters the closed release gate uses exactly the pinned
@@ -43,93 +43,47 @@ import math
 import os
 import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
+from typing import Mapping
 
 MANIFEST_RELATIVE_PATH = "scripts/pinned_build_inputs.json"
 DEPENDENCY_PINS_RELATIVE_PATH = "scripts/dependency_pins.env"
-NATIVE_LOCK_RELATIVE_PATH = "native/macos/Dependencies.lock.json"
 TAURI_CLI_INSTALLER_RELATIVE_PATH = "scripts/install_pinned_tauri_cli.sh"
+MANIFEST_SCHEMA = "cfw-pinned-build-inputs-v2"
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
-MAX_NATIVE_LOCK_BYTES = 256 * 1024
 PINNED_MANIFEST_FIELDS = frozenset(
     {
         "buildScripts",
         "cargoDeny",
-        "combinedDiffSha256",
-        "combinedDiffSha256Key",
-        "dependencyPinsPath",
         "description",
-        "gomobileCommit",
-        "gomobileCommitKey",
         "libboxBuildTags",
         "libboxModuleCacheContract",
-        "nativeLockPath",
         "packetEvidenceEndpoint",
         "patches",
         "physicalCollectorModule",
+        "pinFormats",
         "rejectedPatchDigests",
         "schema",
-        "singBoxCommit",
-        "singBoxCommitKey",
-        "sourceContract",
         "tauriCli",
-        "tools",
-        "verifiedGoModuleInputKeys",
         "xcodegen",
     }
 )
-NATIVE_LOCK_FIELDS = frozenset(
-    {"go", "gomobile", "singBox", "singBoxForAppleReference"}
-)
-NATIVE_LOCK_SING_BOX_FIELDS = frozenset(
+# Every key dependency_pins.env must define: the policy's format table must name
+# exactly these keys, so a pin cannot disappear from the pin file and the policy
+# together. Key names only; the values live in dependency_pins.env.
+REQUIRED_PIN_KEYS = frozenset(
     {
-        "androidReferenceCommit",
-        "combinedDiffSha256",
-        "commit",
-        "dnsFailoverPatch",
-        "endpointConflictPatch",
-        "profileProbePatch",
-        "socksLifecyclePatch",
-        "rawPacketPatch",
-        "securityPatch",
-        "tag",
-    }
-)
-NATIVE_LOCK_SECURITY_PATCH_FIELDS = frozenset(
-    {"patchedDiffSha256", "patchedGoModSha256", "patchedGoSumSha256", "path", "sha256"}
-)
-NATIVE_LOCK_PATCH_FIELDS = frozenset({"path", "sha256"})
-NATIVE_LOCK_APPLE_REFERENCE_FIELDS = frozenset({"commit"})
-PATCH_ENTRY_FIELDS = frozenset({"name", "pathKey", "sha256Key", "sha256"})
-LIBBOX_BUILD_TAG_FIELDS = frozenset(
-    {"pinKey", "value", "required", "engineStartPathBindings"}
-)
-LIBBOX_REQUIRED_TAG_FIELDS = frozenset({"tag", "reason"})
-LIBBOX_ENGINE_START_BINDING_FIELDS = frozenset(
-    {"tag", "path", "requiredWhenContains", "triggerRequired", "reason"}
-)
-BUILD_SCRIPT_RULE_FIELDS = frozenset(
-    {"requirePinReferences", "forbidNetworkRecursion"}
-)
-REQUIRED_TOOL_PIN_KEYS = frozenset(
-    {
-        "XCODE_BUILD_VERSION",
+        "MACOS_DEPLOYMENT_TARGET",
         "XCODE_VERSION",
-        "GO_RELEASE_TOOLS_GO_SUM_SHA256",
-        "GO_RELEASE_TOOLS_GO_MOD_SHA256",
-        "NPM_ARCHIVE_SHA256",
-        "NPM_VERSION",
-        "PYTHON_VERSION",
-        "RUST_VERSION",
-        "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256",
-        "CARGO_AUDIT_VERSION",
-        "CARGO_DENY_VERSION",
+        "XCODE_BUILD_VERSION",
         "XCODEGEN_VERSION",
         "XCODEGEN_COMMIT",
         "XCODEGEN_SOURCE_SHA256",
-        "XCODEGEN_PACKAGE_RESOLVED_SHA256",
         "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256",
+        "XCODEGEN_PACKAGE_RESOLVED_SHA256",
         "XCODEGEN_DEPENDENCY_PATCH_PATH",
         "XCODEGEN_DEPENDENCY_PATCH_SHA256",
         "XCODEGEN_AEXML_COMMIT",
@@ -137,57 +91,142 @@ REQUIRED_TOOL_PIN_KEYS = frozenset(
         "XCODEGEN_AEXML_PATCH_PATH",
         "XCODEGEN_AEXML_PATCH_SHA256",
         "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256",
-        "NODE_VERSION",
-        "GO_VERSION",
-        "GOMOBILE_VERSION",
-        "GOVULNCHECK_VERSION",
+        "XCODEGEN_PATCH_PATH",
+        "XCODEGEN_PATCH_SHA256",
+        "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+        "PYTHON_VERSION",
+        "RUST_VERSION",
+        "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256",
+        "CARGO_AUDIT_VERSION",
+        "CARGO_DENY_VERSION",
         "TAURI_CLI_VERSION",
-        "SING_BOX_VERSION",
-    }
-)
-REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS = frozenset(
-    {
+        "TAURI_CLI_CRATE_SHA256",
+        "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
+        "TAURI_CLI_SPIN_VERSION",
+        "TAURI_CLI_SPIN_CRATE_SHA256",
+        "TAURI_CARGO_CACHE_CONTRACT_SHA256",
+        "SHELLCHECK_VERSION",
+        "SHELLCHECK_DARWIN_ARM64_SHA256",
+        "NODE_VERSION",
+        "NODE_DARWIN_ARM64_SHA256",
+        "NPM_VERSION",
+        "NPM_ARCHIVE_SHA256",
+        "GO_VERSION",
+        "GO_DARWIN_ARM64_SHA256",
+        "GOMOBILE_VERSION",
+        "GOMOBILE_COMMIT",
         "GOMOBILE_MODULE_SUM",
+        "GOVULNCHECK_VERSION",
         "GOVULNCHECK_MODULE_SUM",
-        "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+        "SING_BOX_VERSION",
+        "SING_BOX_COMMIT",
         "SING_BOX_UPSTREAM_GO_MOD_SHA256",
         "SING_BOX_UPSTREAM_GO_SUM_SHA256",
-        "SING_BOX_PATCHED_GO_MOD_SHA256",
-        "SING_BOX_PATCHED_GO_SUM_SHA256",
-    }
-)
-REQUIRED_PATCH_POLICIES = {
-    "socksLifecyclePatch": (
-        "sing-box SOCKS lifecycle patch",
-        "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
-        "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-    ),
-    "securityPatch": (
-        "sing-box security dependencies patch",
         "SING_BOX_SECURITY_PATCH_PATH",
         "SING_BOX_SECURITY_PATCH_SHA256",
-    ),
-    "rawPacketPatch": (
-        "sing-box raw packet tun patch",
         "SING_BOX_RAW_PACKET_PATCH_PATH",
         "SING_BOX_RAW_PACKET_PATCH_SHA256",
-    ),
-    "dnsFailoverPatch": (
-        "sing-box DNS failover patch",
         "SING_BOX_DNS_FAILOVER_PATCH_PATH",
         "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-    ),
-    "profileProbePatch": (
-        "sing-box profile probe patch",
         "SING_BOX_PROFILE_PROBE_PATCH_PATH",
         "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
-    ),
-    "endpointConflictPatch": (
-        "sing-box endpoint conflict patch",
         "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
         "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-    ),
-}
+        "SING_BOX_PATCHED_DIFF_SHA256",
+        "SING_BOX_COMBINED_DIFF_SHA256",
+        "SING_BOX_PATCHED_GO_MOD_SHA256",
+        "SING_BOX_PATCHED_GO_SUM_SHA256",
+        "SING_BOX_ANDROID_REFERENCE_COMMIT",
+        "SING_BOX_APPLE_REFERENCE_COMMIT",
+        "LIBBOX_APPLE_PLATFORM",
+        "LIBBOX_BUILD_TAGS",
+        "LIBBOX_NON_MACOS_TAGS",
+        "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
+        "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
+        "GO_RELEASE_TOOLS_GO_MOD_SHA256",
+        "GO_RELEASE_TOOLS_GO_SUM_SHA256",
+    }
+)
+# Value formats a pin may declare. ``repository-path`` values must also satisfy
+# the canonical repository-relative path rules of the rooted reader.
+PIN_VALUE_FORMATS = MappingProxyType(
+    {
+        "apple-build": re.compile(r"[0-9]+[A-Z][0-9]+[a-z]?"),
+        "apple-version": re.compile(r"[0-9]+[.][0-9]+(?:[.][0-9]+)?"),
+        "git-commit": re.compile(r"[0-9a-f]{40}"),
+        "go-build-tags": re.compile(r"[a-z0-9_]+(?:,[a-z0-9_]+)*"),
+        "go-module-sum": re.compile(r"h1:[A-Za-z0-9+/]{43}="),
+        "go-module-version": re.compile(r"v[0-9]+[.][0-9]+[.][0-9]+"),
+        "gomobile-target": re.compile(r"[a-z]+/[a-z0-9]+"),
+        "repository-path": re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*"),
+        "sha256": re.compile(r"[0-9a-f]{64}"),
+        "version": re.compile(r"[0-9]+[.][0-9]+[.][0-9]+"),
+    }
+)
+# The whole-tree diff of the patched sing-box checkout and its dependency-only
+# go.mod/go.sum diff; the combined diff may equal neither a patch nor that diff.
+COMBINED_DIFF_PIN_KEY = "SING_BOX_COMBINED_DIFF_SHA256"
+PATCHED_DIFF_PIN_KEY = "SING_BOX_PATCHED_DIFF_SHA256"
+PATCH_ENTRY_FIELDS = frozenset({"name", "pathKey", "sha256Key"})
+XCODEGEN_POLICY_FIELDS = frozenset(
+    {"patchPathKey", "patchSha256Key", "bootstrapPath", "requiredBootstrapFragments"}
+)
+TAURI_CLI_POLICY_FIELDS = frozenset(
+    {
+        "cacheContractPath",
+        "cacheContractSha256Key",
+        "ciWorkflowPath",
+        "requiredCiFragment",
+        "installerPath",
+        "requiredInstallerFragments",
+    }
+)
+LIBBOX_MODULE_CACHE_CONTRACT_FIELDS = frozenset({"pathKey", "sha256Key"})
+LIBBOX_BUILD_TAG_FIELDS = frozenset({"pinKey", "required", "engineStartPathBindings"})
+LIBBOX_REQUIRED_TAG_FIELDS = frozenset({"tag", "reason"})
+LIBBOX_ENGINE_START_BINDING_FIELDS = frozenset(
+    {"tag", "path", "requiredWhenContains", "triggerRequired", "reason"}
+)
+BUILD_SCRIPT_RULE_FIELDS = frozenset(
+    {"requirePinReferences", "forbidNetworkRecursion"}
+)
+# (name, path pin, digest pin) of every sing-box patch the policy must hash.
+REQUIRED_PATCH_POLICIES = frozenset(
+    {
+        (
+            "sing-box SOCKS lifecycle patch",
+            "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+            "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
+        ),
+        (
+            "sing-box security dependencies patch",
+            "SING_BOX_SECURITY_PATCH_PATH",
+            "SING_BOX_SECURITY_PATCH_SHA256",
+        ),
+        (
+            "sing-box raw packet tun patch",
+            "SING_BOX_RAW_PACKET_PATCH_PATH",
+            "SING_BOX_RAW_PACKET_PATCH_SHA256",
+        ),
+        (
+            "sing-box DNS failover patch",
+            "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+            "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+        ),
+        (
+            "sing-box profile probe patch",
+            "SING_BOX_PROFILE_PROBE_PATCH_PATH",
+            "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+        ),
+        (
+            "sing-box endpoint conflict patch",
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        ),
+    }
+)
 REQUIRED_REJECTED_PATCH_DIGESTS = frozenset(
     {
         "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac",
@@ -243,6 +282,9 @@ REQUIRED_BUILD_SCRIPT_POLICIES = {
     )
 }
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+# Bash splits the sourced pin file on LF only; any other line break or control
+# byte would make the verified view differ from the one release scripts use.
+_ENV_TEXT_RE = re.compile(r"[\x20-\x7e\n]*")
 _ENV_LINE_RE = re.compile(r"\A([A-Za-z_][A-Za-z0-9_]*)=(.*)\Z")
 _NETWORK_RECURSION_RE = re.compile(
     r"git\s+clone|https?://|(?<![A-Za-z])curl(?![A-Za-z])|"
@@ -295,7 +337,6 @@ _PACKET_ENDPOINT_BUILD_FRAGMENTS = (
     "-trimpath",
     "-ldflags='-s -w -buildid='",
     "-o ../../target/packet-evidence-endpoint-linux-amd64",
-    _PACKET_ENDPOINT_BINARY_SHA256,
 )
 _PHYSICAL_COLLECTOR_GO_MOD_SHA256 = (
     "15a4a62864a708fe87dc6e4624036603ad27ca82a1bcdc3b5f06d678fdde24be"
@@ -311,6 +352,36 @@ _PHYSICAL_COLLECTOR_MODULE_FRAGMENTS = (
 
 class PinnedInputError(RuntimeError):
     """Raised when any pinned build input cannot be proven correct."""
+
+
+@dataclass(frozen=True)
+class VerifiedBuildInputs:
+    """The pin values that passed :func:`verify_source_contract` together.
+
+    ``pins`` is the complete parsed ``dependency_pins.env``; the patch and
+    combined diff digests are the values checked against the patch files.
+    """
+
+    pins: Mapping[str, str]
+    patch_digests: tuple[str, ...]
+    combined_diff_sha256: str
+    rejected_patch_digests: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _DeclaredPins:
+    """Pin values whose keys and formats match the policy's format table."""
+
+    formats: Mapping[str, str]
+    values: Mapping[str, str]
+
+    def value(self, key: object, expected_format: str, description: str) -> str:
+        """Return the pin a policy rule names, requiring its declared format."""
+        if not isinstance(key, str) or self.formats.get(key) != expected_format:
+            raise PinnedInputError(
+                f"{description} must name a declared {expected_format} pin, not {key!r}"
+            )
+        return self.values[key]
 
 
 def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
@@ -433,7 +504,7 @@ def read_repository_regular_file(
     if nofollow is None or directory is None:
         raise PinnedInputError(f"{description} requires O_NOFOLLOW and O_DIRECTORY")
     candidate = Path(relative)
-    _safe_repository_path(repository, relative, description)
+    _require_canonical_relative_path(relative, description)
     parent_components = tuple(candidate.parts[:-1])
     filename = candidate.parts[-1]
     flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
@@ -713,7 +784,7 @@ def _load_manifest(repository: Path) -> dict:
         "pinned-input manifest",
         expected_fields=PINNED_MANIFEST_FIELDS,
     )
-    if manifest.get("schema") != "cfw-pinned-build-inputs-v1":
+    if manifest.get("schema") != MANIFEST_SCHEMA:
         raise PinnedInputError("pinned-input manifest has an unsupported schema")
     if not isinstance(manifest.get("description"), str) or not manifest["description"]:
         raise PinnedInputError("pinned-input manifest description is empty or malformed")
@@ -721,14 +792,17 @@ def _load_manifest(repository: Path) -> dict:
 
 
 def _parse_env(text: str) -> dict[str, str]:
+    if not _ENV_TEXT_RE.fullmatch(text):
+        raise PinnedInputError(
+            "dependency_pins.env must hold only printable ASCII lines separated by LF"
+        )
     values: dict[str, str] = {}
-    for number, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
+    for number, line in enumerate(text.split("\n"), start=1):
         if not line or line.startswith("#"):
             continue
         match = _ENV_LINE_RE.match(line)
         if not match:
-            raise PinnedInputError(f"dependency_pins.env line {number} is malformed: {raw!r}")
+            raise PinnedInputError(f"dependency_pins.env line {number} is malformed: {line!r}")
         key, value = match.group(1), match.group(2)
         if key in values:
             raise PinnedInputError(f"dependency_pins.env defines {key} more than once")
@@ -751,7 +825,7 @@ def _require_sha256(value: str, description: str) -> str:
     return value
 
 
-def _safe_repository_path(repository: Path, relative: str, description: str) -> Path:
+def _require_canonical_relative_path(relative: object, description: str) -> None:
     if (
         type(relative) is not str
         or not relative
@@ -768,21 +842,73 @@ def _safe_repository_path(repository: Path, relative: str, description: str) -> 
         raise PinnedInputError(f"{description} path is not repository-relative: {relative!r}")
     if any(part in ("", ".", "..") for part in candidate.parts):
         raise PinnedInputError(f"{description} path has an unsafe component: {relative!r}")
-    return repository.joinpath(*candidate.parts)
 
 
-def _verify_tools(manifest: dict, env: dict[str, str]) -> None:
-    tools = manifest.get("tools")
-    if not isinstance(tools, dict) or set(tools) != REQUIRED_TOOL_PIN_KEYS:
-        raise PinnedInputError(
-            "pinned-input manifest differs from the fixed tool pin set"
+def _load_dependency_pins(repository: Path) -> dict[str, str]:
+    return _parse_env(
+        _read_text(
+            repository,
+            DEPENDENCY_PINS_RELATIVE_PATH,
+            "dependency_pins.env",
         )
-    for key, expected in tools.items():
-        actual = _require_env(env, key)
-        if actual != expected:
+    )
+
+
+def _verify_pin_formats(manifest: dict, env: dict[str, str]) -> _DeclaredPins:
+    """Require exactly the declared pin keys, each holding its declared format."""
+    formats = manifest.get("pinFormats")
+    if not isinstance(formats, dict) or not formats:
+        raise PinnedInputError("pinned-input policy has no pin format table")
+    if set(formats) != REQUIRED_PIN_KEYS:
+        raise PinnedInputError(
+            "pinned-input policy pin format table differs from the fixed release "
+            "pin key set: "
+            + ", ".join(sorted(set(formats) ^ REQUIRED_PIN_KEYS))
+        )
+    missing = sorted(set(formats) - set(env))
+    if missing:
+        raise PinnedInputError(
+            f"dependency_pins.env is missing required pins: {', '.join(missing)}"
+        )
+    undeclared = sorted(set(env) - set(formats))
+    if undeclared:
+        raise PinnedInputError(
+            "dependency_pins.env defines pins the policy does not declare: "
+            + ", ".join(undeclared)
+        )
+    for key, format_name in formats.items():
+        if not isinstance(format_name, str) or format_name not in PIN_VALUE_FORMATS:
+            raise PinnedInputError(f"pin {key} declares an unknown format {format_name!r}")
+        value = env[key]
+        if not PIN_VALUE_FORMATS[format_name].fullmatch(value):
             raise PinnedInputError(
-                f"pinned tool {key} must be {expected!r} but dependency_pins.env has {actual!r}"
+                f"dependency_pins.env pin {key} is not a {format_name} value: {value!r}"
             )
+        if format_name == "repository-path":
+            _require_canonical_relative_path(value, f"dependency_pins.env pin {key}")
+    return _DeclaredPins(
+        formats=MappingProxyType(dict(formats)),
+        values=MappingProxyType(dict(env)),
+    )
+
+
+def _verify_pinned_file_digest(
+    repository: Path,
+    pins: _DeclaredPins,
+    path_key: object,
+    sha256_key: object,
+    description: str,
+) -> str:
+    """Hash the tracked file a path pin names and require its digest pin."""
+    relative = pins.value(path_key, "repository-path", f"{description} path key")
+    expected = pins.value(sha256_key, "sha256", f"{description} digest key")
+    actual = hashlib.sha256(_read_bytes(repository, relative, description)).hexdigest()
+    if actual != expected:
+        raise PinnedInputError(
+            f"{description} file digest {actual} differs from the pinned "
+            f"{sha256_key} {expected}"
+        )
+    return expected
 
 
 def _verify_packet_evidence_endpoint(
@@ -996,45 +1122,17 @@ def _verify_cargo_deny(manifest: dict, repository: Path) -> None:
         )
 
 
-def _verify_xcodegen(manifest: dict, env: dict[str, str], repository: Path) -> None:
+def _verify_xcodegen(manifest: dict, pins: _DeclaredPins, repository: Path) -> None:
     spec = manifest.get("xcodegen")
-    if not isinstance(spec, dict):
-        raise PinnedInputError("pinned-input manifest has no XcodeGen patch binding")
-
-    patch_path_key = spec.get("patchPathKey")
-    patch_sha_key = spec.get("patchSha256Key")
-    patched_source_sha_key = spec.get("patchedSettingsBuilderSha256Key")
-    if not all(
-        isinstance(value, str)
-        for value in (patch_path_key, patch_sha_key, patched_source_sha_key)
-    ):
-        raise PinnedInputError("XcodeGen patch binding has incomplete pin keys")
-    expected_patch_sha = spec.get("patchSha256")
-    expected_patched_source_sha = spec.get("patchedSettingsBuilderSha256")
-    if not isinstance(expected_patch_sha, str) or not isinstance(
-        expected_patched_source_sha, str
-    ):
-        raise PinnedInputError("XcodeGen patch binding has incomplete digests")
-    _require_sha256(expected_patch_sha, "manifest XcodeGen patch digest")
-    _require_sha256(
-        expected_patched_source_sha, "manifest patched SettingsBuilder digest"
+    if not isinstance(spec, dict) or set(spec) != XCODEGEN_POLICY_FIELDS:
+        raise PinnedInputError("pinned-input policy has no exact XcodeGen patch binding")
+    _verify_pinned_file_digest(
+        repository,
+        pins,
+        spec["patchPathKey"],
+        spec["patchSha256Key"],
+        "XcodeGen patch",
     )
-    if _require_env(env, patch_sha_key) != expected_patch_sha:
-        raise PinnedInputError("XcodeGen patch digest differs from the manifest")
-    if _require_env(env, patched_source_sha_key) != expected_patched_source_sha:
-        raise PinnedInputError(
-            "XcodeGen patched SettingsBuilder digest differs from the manifest"
-        )
-
-    patch_relative = _require_env(env, patch_path_key)
-    actual_patch_sha = hashlib.sha256(
-        _read_bytes(repository, patch_relative, "XcodeGen patch")
-    ).hexdigest()
-    if actual_patch_sha != expected_patch_sha:
-        raise PinnedInputError(
-            f"XcodeGen patch file digest {actual_patch_sha} differs from the pinned "
-            f"{expected_patch_sha}"
-        )
 
     bootstrap_relative = spec.get("bootstrapPath")
     fragments = spec.get("requiredBootstrapFragments")
@@ -1056,56 +1154,19 @@ def _verify_xcodegen(manifest: dict, env: dict[str, str], repository: Path) -> N
             )
 
 
-def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> None:
+def _verify_tauri_cli(manifest: dict, pins: _DeclaredPins, repository: Path) -> None:
     spec = manifest.get("tauriCli")
-    if not isinstance(spec, dict):
-        raise PinnedInputError("pinned-input manifest has no Tauri CLI source binding")
+    if not isinstance(spec, dict) or set(spec) != TAURI_CLI_POLICY_FIELDS:
+        raise PinnedInputError("pinned-input policy has no exact Tauri CLI source binding")
 
-    digest_pairs = (
-        ("crateSha256Key", "crateSha256", "Tauri CLI crate"),
-        (
-            "upstreamCargoLockSha256Key",
-            "upstreamCargoLockSha256",
-            "Tauri CLI upstream Cargo.lock",
-        ),
-        ("spinCrateSha256Key", "spinCrateSha256", "Tauri CLI spin crate"),
+    cache_contract_relative = spec["cacheContractPath"]
+    if not isinstance(cache_contract_relative, str):
+        raise PinnedInputError("Tauri Cargo cache contract path is malformed")
+    cache_contract_expected = pins.value(
+        spec["cacheContractSha256Key"],
+        "sha256",
+        "Tauri Cargo cache contract digest key",
     )
-    for key_field, value_field, description in digest_pairs:
-        key = spec.get(key_field)
-        expected = spec.get(value_field)
-        if not isinstance(key, str) or not isinstance(expected, str):
-            raise PinnedInputError(f"{description} has no complete digest binding")
-        _require_sha256(expected, f"manifest digest for {description}")
-        actual = _require_env(env, key)
-        _require_sha256(actual, f"dependency_pins.env value {key}")
-        if actual != expected:
-            raise PinnedInputError(
-                f"{description} digest {key} is {actual} but must be {expected}"
-            )
-
-    cache_contract_relative = spec.get("cacheContractPath")
-    cache_contract_key = spec.get("cacheContractSha256Key")
-    cache_contract_expected = spec.get("cacheContractSha256")
-    if (
-        not isinstance(cache_contract_relative, str)
-        or not isinstance(cache_contract_key, str)
-        or not isinstance(cache_contract_expected, str)
-    ):
-        raise PinnedInputError("Tauri Cargo cache contract has no complete digest binding")
-    _require_sha256(
-        cache_contract_expected,
-        "manifest digest for Tauri Cargo cache contract",
-    )
-    cache_contract_env = _require_env(env, cache_contract_key)
-    _require_sha256(
-        cache_contract_env,
-        f"dependency_pins.env value {cache_contract_key}",
-    )
-    if cache_contract_env != cache_contract_expected:
-        raise PinnedInputError(
-            f"Tauri Cargo cache contract digest {cache_contract_key} is "
-            f"{cache_contract_env} but must be {cache_contract_expected}"
-        )
     computed_cache_contract_sha = hashlib.sha256(
         _read_bytes(
             repository,
@@ -1119,15 +1180,6 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
             f"{computed_cache_contract_sha} differs from the pinned "
             f"{cache_contract_expected}"
         )
-
-    spin_version_key = spec.get("spinVersionKey")
-    spin_version = spec.get("spinVersion")
-    if not isinstance(spin_version_key, str) or not isinstance(spin_version, str):
-        raise PinnedInputError("Tauri CLI spin input has no version binding")
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", spin_version):
-        raise PinnedInputError("Tauri CLI spin input version is malformed")
-    if _require_env(env, spin_version_key) != spin_version:
-        raise PinnedInputError("Tauri CLI spin input version differs from the manifest")
 
     installer_relative = spec.get("installerPath")
     fragments = spec.get("requiredInstallerFragments")
@@ -1477,33 +1529,7 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         raise PinnedInputError("CI still contains a floating direct Tauri CLI installation")
 
 
-def _verify_commits(manifest: dict, env: dict[str, str]) -> None:
-    for prefix, description in (
-        ("singBox", "sing-box"),
-        ("gomobile", "gomobile"),
-    ):
-        key = manifest.get(f"{prefix}CommitKey")
-        expected = manifest.get(f"{prefix}Commit")
-        if not isinstance(key, str) or not isinstance(expected, str):
-            raise PinnedInputError(
-                f"pinned-input manifest has no {description} commit binding"
-            )
-        if not re.fullmatch(r"[0-9a-f]{40}", expected):
-            raise PinnedInputError(
-                f"pinned {description} commit is not a 40-hex commit hash"
-            )
-        actual = _require_env(env, key)
-        if actual != expected:
-            raise PinnedInputError(
-                f"pinned {description} commit must be {expected} but "
-                f"dependency_pins.env has {actual}"
-            )
-
-
-def _verify_patches(manifest: dict, env: dict[str, str], repository: Path) -> list[str]:
-    patches = manifest.get("patches")
-    if not isinstance(patches, list) or len(patches) != 6:
-        raise PinnedInputError("pinned-input manifest must pin exactly six patches")
+def _rejected_patch_digests(manifest: dict) -> frozenset[str]:
     rejected_values = manifest.get("rejectedPatchDigests")
     if (
         not isinstance(rejected_values, list)
@@ -1516,176 +1542,84 @@ def _verify_patches(manifest: dict, env: dict[str, str], repository: Path) -> li
         )
     for digest in rejected_values:
         _require_sha256(digest, "rejected patch digest")
-    rejected = set(rejected_values)
+    rejected = frozenset(rejected_values)
     if rejected != REQUIRED_REJECTED_PATCH_DIGESTS:
         raise PinnedInputError(
             "pinned-input manifest rejected patch digests differ from release policy"
         )
-    normalized_patches: list[tuple[str, str, str, str]] = []
-    policy_identities: set[tuple[str, str, str]] = set()
+    return rejected
+
+
+def _verify_patches(
+    manifest: dict,
+    pins: _DeclaredPins,
+    repository: Path,
+    rejected: frozenset[str],
+) -> tuple[str, ...]:
+    patches = manifest.get("patches")
+    if not isinstance(patches, list) or len(patches) != len(REQUIRED_PATCH_POLICIES):
+        raise PinnedInputError("pinned-input policy must name exactly six patches")
+    policy_identities: list[tuple[str, str, str]] = []
     for patch in patches:
         if not isinstance(patch, dict) or set(patch) != PATCH_ENTRY_FIELDS:
-            raise PinnedInputError("pinned-input manifest has a malformed patch entry")
-        name = patch.get("name")
-        path_key = patch.get("pathKey")
-        sha_key = patch.get("sha256Key")
-        expected = patch.get("sha256")
-        if not all(
-            isinstance(item, str) and item
-            for item in (name, path_key, sha_key, expected)
-        ):
-            raise PinnedInputError(f"patch entry {name} is missing pin keys")
-        identity = (name, path_key, sha_key)
+            raise PinnedInputError("pinned-input policy has a malformed patch entry")
+        identity = (patch["name"], patch["pathKey"], patch["sha256Key"])
+        if not all(isinstance(item, str) and item for item in identity):
+            raise PinnedInputError(f"patch entry {identity[0]!r} is missing pin keys")
         if identity in policy_identities:
-            raise PinnedInputError("pinned-input manifest repeats a patch policy identity")
-        policy_identities.add(identity)
-        normalized_patches.append((name, path_key, sha_key, expected))
-
-    if policy_identities != frozenset(REQUIRED_PATCH_POLICIES.values()):
+            raise PinnedInputError("pinned-input policy repeats a patch policy identity")
+        policy_identities.append(identity)
+    if frozenset(policy_identities) != REQUIRED_PATCH_POLICIES:
         raise PinnedInputError(
-            "pinned-input manifest patches differ from the fixed patch policy set"
+            "pinned-input policy patches differ from the fixed patch policy set"
         )
 
-    seen: set[str] = set()
     digests: list[str] = []
-    for name, path_key, sha_key, expected in normalized_patches:
-        _require_sha256(expected, f"manifest digest for {name}")
-        if expected in rejected:
-            raise PinnedInputError(f"patch {name} pins a rejected/legacy digest: {expected}")
-        if expected in seen:
-            raise PinnedInputError(f"patch {name} reuses another patch digest: {expected}")
-        seen.add(expected)
-
-        env_sha = _require_env(env, sha_key)
-        _require_sha256(env_sha, f"dependency_pins.env value {sha_key}")
-        if env_sha != expected:
-            raise PinnedInputError(
-                f"patch {name} digest {sha_key} is {env_sha} but must be {expected}"
-            )
-        if env_sha in rejected:
-            raise PinnedInputError(f"patch {name} pins a rejected/legacy digest: {env_sha}")
-
-        relative = _require_env(env, path_key)
-        computed = hashlib.sha256(
-            _read_bytes(repository, relative, f"patch {name} file")
-        ).hexdigest()
-        if computed != expected:
-            raise PinnedInputError(
-                f"patch {name} file digest {computed} differs from the pinned {expected}"
-            )
-        digests.append(expected)
-    return digests
-
-
-def _verify_combined_diff(
-    manifest: dict, env: dict[str, str], patch_digests: list[str]
-) -> None:
-    key = manifest.get("combinedDiffSha256Key")
-    expected = manifest.get("combinedDiffSha256")
-    if not isinstance(key, str) or not isinstance(expected, str):
-        raise PinnedInputError("pinned-input manifest has no combined diff binding")
-    _require_sha256(expected, "manifest combined diff digest")
-    actual = _require_env(env, key)
-    _require_sha256(actual, f"dependency_pins.env value {key}")
-    if actual != expected:
-        raise PinnedInputError(
-            f"combined diff digest must be {expected} but dependency_pins.env has {actual}"
+    for name, path_key, sha_key in policy_identities:
+        digest = _verify_pinned_file_digest(
+            repository, pins, path_key, sha_key, f"patch {name}"
         )
-    if actual in patch_digests:
+        if digest in rejected:
+            raise PinnedInputError(f"patch {name} pins a rejected/legacy digest: {digest}")
+        if digest in digests:
+            raise PinnedInputError(f"patch {name} reuses another patch digest: {digest}")
+        digests.append(digest)
+    return tuple(digests)
+
+
+def _verify_combined_diff(pins: _DeclaredPins, patch_digests: tuple[str, ...]) -> str:
+    combined = pins.value(COMBINED_DIFF_PIN_KEY, "sha256", "combined diff")
+    if combined in patch_digests:
         raise PinnedInputError(
             "combined diff digest equals a single patch digest; partial digest rejected"
         )
-    partial = env.get("SING_BOX_PATCHED_DIFF_SHA256")
-    if partial is not None and actual == partial:
+    if combined == pins.value(PATCHED_DIFF_PIN_KEY, "sha256", "dependency-only diff"):
         raise PinnedInputError(
             "combined diff digest equals the partial go.mod/go.sum diff digest"
         )
-
-
-def _verify_source_contract(manifest: dict, env: dict[str, str]) -> None:
-    contract = manifest.get("sourceContract")
-    if not isinstance(contract, dict):
-        raise PinnedInputError("pinned-input manifest has no source contract binding")
-    for name in ("patchedDiffSha256", "patchedGoModSha256", "patchedGoSumSha256"):
-        key = contract.get(f"{name}Key")
-        expected = contract.get(name)
-        if not isinstance(key, str) or not isinstance(expected, str):
-            raise PinnedInputError(f"source contract is missing {name} binding")
-        _require_sha256(expected, f"manifest source contract {name}")
-        actual = _require_env(env, key)
-        _require_sha256(actual, f"dependency_pins.env value {key}")
-        if actual != expected:
-            raise PinnedInputError(
-                f"source contract {name} must be {expected} but dependency_pins.env has {actual}"
-            )
-
-
-def _verify_go_module_inputs(manifest: dict, env: dict[str, str]) -> None:
-    keys = manifest.get("verifiedGoModuleInputKeys")
-    if (
-        not isinstance(keys, list)
-        or len(keys) != len(REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS)
-        or any(not isinstance(key, str) for key in keys)
-        or len(keys) != len(set(keys))
-        or set(keys) != REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS
-    ):
-        raise PinnedInputError(
-            "pinned-input manifest differs from the fixed verified Go module input set"
-        )
-    for key in keys:
-        value = _require_env(env, key)
-        if key.endswith("_SHA256"):
-            _require_sha256(value, f"dependency_pins.env value {key}")
-        elif not value.startswith("h1:"):
-            raise PinnedInputError(f"Go module sum {key} is not an h1: checksum: {value!r}")
+    return combined
 
 
 def _verify_libbox_module_cache_contract(
-    manifest: dict, env: dict[str, str], repository: Path
+    manifest: dict, pins: _DeclaredPins, repository: Path
 ) -> None:
     spec = manifest.get("libboxModuleCacheContract")
-    expected_fields = {"pathKey", "path", "sha256Key", "sha256"}
-    if not isinstance(spec, dict) or set(spec) != expected_fields:
+    if not isinstance(spec, dict) or set(spec) != LIBBOX_MODULE_CACHE_CONTRACT_FIELDS:
         raise PinnedInputError(
-            "pinned-input manifest has no exact libbox module cache contract binding"
+            "pinned-input policy has no exact libbox module cache contract binding"
         )
-
-    path_key = spec["pathKey"]
-    relative = spec["path"]
-    sha256_key = spec["sha256Key"]
-    expected_sha256 = spec["sha256"]
-    if not all(
-        isinstance(value, str)
-        for value in (path_key, relative, sha256_key, expected_sha256)
-    ):
-        raise PinnedInputError("libbox module cache contract binding is malformed")
-    _require_sha256(expected_sha256, "manifest libbox module cache contract digest")
-
-    env_relative = _require_env(env, path_key)
-    if env_relative != relative:
-        raise PinnedInputError(
-            f"libbox module cache contract path {path_key} is {env_relative!r} "
-            f"but must be {relative!r}"
-        )
-    env_sha256 = _require_env(env, sha256_key)
-    _require_sha256(env_sha256, f"dependency_pins.env value {sha256_key}")
-    if env_sha256 != expected_sha256:
-        raise PinnedInputError(
-            f"libbox module cache contract digest {sha256_key} is {env_sha256} "
-            f"but must be {expected_sha256}"
-        )
-
-    actual_sha256 = hashlib.sha256(
-        _read_bytes(repository, relative, "libbox module cache contract")
-    ).hexdigest()
-    if actual_sha256 != expected_sha256:
-        raise PinnedInputError(
-            f"libbox module cache contract file digest {actual_sha256} differs "
-            f"from the pinned {expected_sha256}"
-        )
+    _verify_pinned_file_digest(
+        repository,
+        pins,
+        spec["pathKey"],
+        spec["sha256Key"],
+        "libbox module cache contract",
+    )
 
 
-def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: Path) -> None:
+def _verify_libbox_build_tags(
+    manifest: dict, pins: _DeclaredPins, repository: Path
+) -> None:
     """Bind the pinned libbox Go build tag list to the tags the engine requires.
 
     The tag list is a build input exactly like a version or a digest: omitting a
@@ -1693,31 +1627,22 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
     ``with_clash_api`` omission made ``box.New`` fail on every engine start
     because the patched tree enables the clash API whenever a platform log writer
     is installed and the daemon always installs one, so the stub constructor
-    returned an error instead of a server. This check therefore pins the exact
-    tag list, requires each tag the start path needs, and additionally binds
-    tracked source triggers (such as the application-owned
-    ``experimental.clash_api`` projection block) to the tag that makes them
-    reachable, so the same class of defect fails closed statically.
+    returned an error instead of a server. This check therefore requires the
+    pinned tag list to be exactly the policy's required tags, each with its
+    recorded reason, and additionally binds tracked source triggers (such as the
+    application-owned ``experimental.clash_api`` projection block) to the tag
+    that makes them reachable, so the same class of defect fails closed
+    statically.
     """
     spec = manifest.get("libboxBuildTags")
     if not isinstance(spec, dict) or set(spec) != LIBBOX_BUILD_TAG_FIELDS:
         raise PinnedInputError("pinned-input manifest has no libbox build tag binding")
-    pin_key = spec.get("pinKey")
-    expected_value = spec.get("value")
-    if not isinstance(pin_key, str) or not isinstance(expected_value, str):
-        raise PinnedInputError("libbox build tag binding has no pin key or pinned value")
-    actual_value = _require_env(env, pin_key)
-    if actual_value != expected_value:
-        raise PinnedInputError(
-            f"pinned libbox build tags {pin_key} must be {expected_value!r} but "
-            f"dependency_pins.env has {actual_value!r}"
-        )
+    pin_key = spec["pinKey"]
+    actual_value = pins.value(pin_key, "go-build-tags", "libbox build tag pin key")
 
     tags: list[str] = actual_value.split(",")
     seen: set[str] = set()
     for tag in tags:
-        if not re.fullmatch(r"[a-z0-9_]+", tag):
-            raise PinnedInputError(f"pinned libbox build tag is malformed: {tag!r}")
         if tag in seen:
             raise PinnedInputError(f"pinned libbox build tags repeat {tag!r}")
         seen.add(tag)
@@ -1791,91 +1716,6 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
         raise PinnedInputError("libbox required tags differ from release policy")
 
 
-def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -> None:
-    relative = manifest.get("nativeLockPath")
-    if relative != NATIVE_LOCK_RELATIVE_PATH:
-        raise PinnedInputError(
-            "pinned-input manifest native lock path differs from release policy"
-        )
-    text = _read_text(
-        repository,
-        relative,
-        "native dependency lock",
-        maximum_size=MAX_NATIVE_LOCK_BYTES,
-    )
-    lock = _load_strict_json(
-        text,
-        "native dependency lock",
-        expected_fields=NATIVE_LOCK_FIELDS,
-    )
-
-    def _expect(actual: object, expected: str, label: str) -> None:
-        if actual != expected:
-            raise PinnedInputError(
-                f"native dependency lock {label} is {actual!r} but must be {expected!r}"
-            )
-
-    sing_box = lock.get("singBox")
-    if not isinstance(sing_box, dict):
-        raise PinnedInputError("native dependency lock has no singBox table")
-    if set(sing_box) != NATIVE_LOCK_SING_BOX_FIELDS:
-        raise PinnedInputError("native dependency lock singBox table has an inexact shape")
-    _expect(lock.get("go"), _require_env(env, "GO_VERSION"), "go")
-    _expect(lock.get("gomobile"), _require_env(env, "GOMOBILE_VERSION"), "gomobile")
-    _expect(sing_box.get("tag"), _require_env(env, "SING_BOX_VERSION"), "singBox.tag")
-    _expect(sing_box.get("commit"), _require_env(env, "SING_BOX_COMMIT"), "singBox.commit")
-    _expect(
-        sing_box.get("androidReferenceCommit"),
-        _require_env(env, "SING_BOX_ANDROID_REFERENCE_COMMIT"),
-        "singBox.androidReferenceCommit",
-    )
-    apple_reference = lock.get("singBoxForAppleReference")
-    if (
-        not isinstance(apple_reference, dict)
-        or set(apple_reference) != NATIVE_LOCK_APPLE_REFERENCE_FIELDS
-    ):
-        raise PinnedInputError(
-            "native dependency lock singBoxForAppleReference table has an inexact shape"
-        )
-    _expect(
-        apple_reference.get("commit"),
-        _require_env(env, "SING_BOX_APPLE_REFERENCE_COMMIT"),
-        "singBoxForAppleReference.commit",
-    )
-    _expect(
-        sing_box.get("combinedDiffSha256"),
-        _require_env(env, "SING_BOX_COMBINED_DIFF_SHA256"),
-        "singBox.combinedDiffSha256",
-    )
-    lock_patches = {
-        lock_key: (path_key, sha_key)
-        for lock_key, (_name, path_key, sha_key) in REQUIRED_PATCH_POLICIES.items()
-    }
-    for lock_key, (path_key, sha_key) in lock_patches.items():
-        entry = sing_box.get(lock_key)
-        expected_fields = (
-            NATIVE_LOCK_SECURITY_PATCH_FIELDS
-            if lock_key == "securityPatch"
-            else NATIVE_LOCK_PATCH_FIELDS
-        )
-        if not isinstance(entry, dict) or set(entry) != expected_fields:
-            raise PinnedInputError(f"native dependency lock has no {lock_key} entry")
-        _expect(entry.get("path"), _require_env(env, path_key), f"singBox.{lock_key}.path")
-        _expect(entry.get("sha256"), _require_env(env, sha_key), f"singBox.{lock_key}.sha256")
-    security_patch = sing_box.get("securityPatch")
-    assert isinstance(security_patch, dict)
-    for lock_key, env_key in (
-        ("patchedDiffSha256", "SING_BOX_PATCHED_DIFF_SHA256"),
-        ("patchedGoModSha256", "SING_BOX_PATCHED_GO_MOD_SHA256"),
-        ("patchedGoSumSha256", "SING_BOX_PATCHED_GO_SUM_SHA256"),
-    ):
-        _expect(
-            security_patch.get(lock_key),
-            _require_env(env, env_key),
-            f"singBox.securityPatch.{lock_key}",
-        )
-
-
 def _verify_build_scripts(manifest: dict, repository: Path) -> None:
     build_scripts = manifest.get("buildScripts")
     if (
@@ -1931,15 +1771,13 @@ def _verify_build_scripts(manifest: dict, repository: Path) -> None:
             )
 
 
-def _verify_ci_release_python(
-    repository: Path, environment_pins: dict[str, str]
-) -> None:
+def _verify_ci_release_python(repository: Path, pins: _DeclaredPins) -> None:
     workflow = _read_text(
         repository,
         ".github/workflows/ci.yml",
         "CI workflow",
     )
-    expected_python = _require_env(environment_pins, "PYTHON_VERSION")
+    expected_python = pins.value("PYTHON_VERSION", "version", "release Python pin")
     lines = workflow.splitlines()
     jobs: dict[str, list[str]] = {}
     current_job: str | None = None
@@ -2015,34 +1853,30 @@ def _verify_ci_release_python(
             )
 
 
-def verify_source_contract(repository: Path) -> None:
-    """Verify every static pinned input without invoking a toolchain."""
+def verify_source_contract(repository: Path) -> VerifiedBuildInputs:
+    """Verify every static pinned input without invoking a toolchain.
+
+    Returns the pin values exactly as verified so callers bind the same values
+    instead of re-reading the pin file.
+    """
     manifest = _load_manifest(repository)
-    dependency_pins_path = manifest.get("dependencyPinsPath")
-    if dependency_pins_path != DEPENDENCY_PINS_RELATIVE_PATH:
-        raise PinnedInputError(
-            "pinned-input manifest dependency pins path differs from release policy"
-        )
-    env = _parse_env(
-        _read_text(
-            repository,
-            dependency_pins_path,
-            "dependency_pins.env",
-        )
-    )
-    _verify_tools(manifest, env)
+    env = _load_dependency_pins(repository)
+    pins = _verify_pin_formats(manifest, env)
     _verify_packet_evidence_endpoint(manifest, env, repository)
     _verify_physical_collector_module(manifest, env, repository)
     _verify_cargo_deny(manifest, repository)
-    _verify_xcodegen(manifest, env, repository)
-    _verify_tauri_cli(manifest, env, repository)
-    _verify_commits(manifest, env)
-    patch_digests = _verify_patches(manifest, env, repository)
-    _verify_combined_diff(manifest, env, patch_digests)
-    _verify_source_contract(manifest, env)
-    _verify_libbox_module_cache_contract(manifest, env, repository)
-    _verify_go_module_inputs(manifest, env)
-    _verify_libbox_build_tags(manifest, env, repository)
-    _verify_native_lock(manifest, env, repository)
+    _verify_xcodegen(manifest, pins, repository)
+    _verify_tauri_cli(manifest, pins, repository)
+    rejected = _rejected_patch_digests(manifest)
+    patch_digests = _verify_patches(manifest, pins, repository, rejected)
+    combined = _verify_combined_diff(pins, patch_digests)
+    _verify_libbox_module_cache_contract(manifest, pins, repository)
+    _verify_libbox_build_tags(manifest, pins, repository)
     _verify_build_scripts(manifest, repository)
-    _verify_ci_release_python(repository, env)
+    _verify_ci_release_python(repository, pins)
+    return VerifiedBuildInputs(
+        pins=pins.values,
+        patch_digests=patch_digests,
+        combined_diff_sha256=combined,
+        rejected_patch_digests=rejected,
+    )

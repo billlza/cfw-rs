@@ -217,38 +217,39 @@ Apple references:
 
 ## libbox composition and remaining evidence
 
-`Dependencies.lock.json` pins sing-box `v1.14.2` at commit
-`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`, Go `1.27.2`, and gomobile
-`v0.1.13` at commit `9f03b8f25789099c5c8abef4a02085da783ba923`. The
+`scripts/dependency_pins.env` pins sing-box `SING_BOX_VERSION` at commit
+`SING_BOX_COMMIT`, Go `GO_VERSION`, and gomobile `GOMOBILE_VERSION` at commit
+`GOMOBILE_COMMIT`; this document names those keys, never their values. The
 materialization step applies six digest-pinned patches in a
-fixed order:
+fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
+`SING_BOX_*_PATCH_SHA256` pins name:
 
-1. `sing-box-v1.14.2-security-dependencies.patch` updates the pinned Go module
-   graph, including go-chi `v5.3.2`, `x/crypto v0.57.0`, `x/mod v0.41.0`,
-   `x/net v0.60.0`, `x/sync v0.23.0`, `x/sys v0.48.0`, `x/term v0.46.0`,
-   `x/text v0.42.0`, `x/tools v0.50.0`, gRPC `v1.83.2`, and their exact coupled
-   requirements, and sets the module's Go directive to `1.27.2`. The `x/mod`
+1. The security dependencies patch (`SING_BOX_SECURITY_PATCH_PATH`) updates the
+   pinned Go module graph, including go-chi `v5.3.2`, `x/crypto v0.57.0`,
+   `x/mod v0.41.0`, `x/net v0.60.0`, `x/sync v0.23.0`, `x/sys v0.48.0`,
+   `x/term v0.46.0`, `x/text v0.42.0`, `x/tools v0.50.0`, gRPC `v1.83.2`, and
+   their exact coupled requirements, and raises the module's Go directive. The `x/mod`
    refresh keeps the module-level `GO-2026-6179` and `GO-2026-6180` findings
    absent without an ignore. The `x/crypto` refresh fixes `GO-2026-6354` and
-   `GO-2026-6355`; `x/crypto v0.57.0` requires Go `1.26.0` or later. Go
-   `1.27.2` and `x/net v0.60.0` fix the 2026-10-08 standard library and
-   `x/net` advisories, and the release compiler is `1.27.2`.
-2. `sing-box-v1.14.2-raw-packet-tun.patch` adds the explicit Darwin raw-packet
+   `GO-2026-6355`; `x/crypto v0.57.0` requires Go `1.26.0` or later. The
+   2026-10-08 Go security release and `x/net v0.60.0` fix that day's standard
+   library and `x/net` advisories.
+2. The raw-packet patch (`SING_BOX_RAW_PACKET_PATCH_PATH`) adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and
    presents headerless IP datagrams to sing-tun.
-3. `sing-box-v1.14.2-dns-failover.patch` implements the bounded primary/fallback
+3. The DNS failover patch (`SING_BOX_DNS_FAILOVER_PATCH_PATH`) implements the bounded primary/fallback
    resolver contract required by the closed product projection.
-4. `sing-box-v1.14.2-endpoint-conflict.patch` reports only exact mixed-listener
+4. The endpoint-conflict patch (`SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH`) reports only exact mixed-listener
    and controller `EADDRINUSE` failures as structured conflicts while preserving
    ordinary startup and cleanup failures.
-5. `sing-box-v1.14.2-profile-probe.patch` adds bounded, isolated profile
+5. The profile-probe patch (`SING_BOX_PROFILE_PROBE_PATCH_PATH`) adds bounded, isolated profile
    probes that originate application requests only: no inbounds, controller,
    system interface, routing policy, persistent cache, or background URL tests,
    and the probe instance is closed before it replies. It also makes ordered
    failover follow the declared member order and commits a group's per-flow
    member selection only when the TUN admits that flow.
-6. `sing-box-v1.14.2-socks-lifecycle.patch` keeps the upstream SOCKS protocol
+6. The SOCKS lifecycle patch (`SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH`) keeps the upstream SOCKS protocol
    implementation while giving each setup attempt its own cancellation scope;
    a dial context owns the handshake, not the lifetime of an established
    connection. It also carries the isolated build-workspace step that applies

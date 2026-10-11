@@ -223,20 +223,23 @@ the earlier missing-link placeholders:
   ProxyAgent, and Provider. Each direction applies an exact public code-signing
   requirement before exporting its typed protocol.
 
-The libbox input is upstream sing-box `v1.14.2` at commit
-`af6e64c3b69e6132ebaee0e1a3d24e93903f6709` plus six digest-pinned repository
+The libbox input is upstream sing-box `SING_BOX_VERSION` at commit
+`SING_BOX_COMMIT` plus six digest-pinned repository
 patches: security dependency updates, the public raw-packet adapter, bounded
 DNS failover, structured loopback endpoint-conflict reporting, isolated profile
-probes, and SOCKS lifecycle/concurrency corrections. The exact
-combined diff and patched `go.mod`/`go.sum` digests are
-release inputs in `scripts/dependency_pins.env` and
-`native/macos/Dependencies.lock.json`. The previous helper, mihomo, clash-rs,
+probes, and SOCKS lifecycle/concurrency corrections. Each patch path and
+digest, the exact combined diff (`SING_BOX_COMBINED_DIFF_SHA256`), and the
+patched `go.mod`/`go.sum` digests are release inputs in
+`scripts/dependency_pins.env`, the authoritative store of pinned values;
+`scripts/pinned_build_inputs.json` holds the policy those values must satisfy.
+This runbook names pin keys, never their values; `docs/supply-chain.md` lists
+the few verified copies that remain. The previous helper, mihomo, clash-rs,
 downloaded core, and private packet-flow file-descriptor access are not
 fallbacks.
 
 The compatible dependency refresh pins `golang.org/x/mod v0.41.0` and
 `golang.org/x/crypto v0.57.0`. The 2026-10-08 Go security releases moved the
-compiler and the module's minimum Go version to `1.27.2` and
+compiler (`GO_VERSION`) and the module's minimum Go version past `1.27.1` and
 `golang.org/x/net` to `v0.60.0`; the scan had reported reachable standard
 library and `x/net` HTTP/2, HTTP/1, `crypto/tls` and `html/template` findings
 in `1.27.1` and `v0.59.0`. The SOCKS correction materializes a checksum-bound
@@ -384,7 +387,8 @@ is required where publication preparation and prepackage consume that evidence.
 
 Before invoking a closed release entrypoint, separately prepare the fixed Rust
 SDK at the effective account's
-`~/.cfm-release-tooling/rust-toolchains/1.98.1-aarch64-apple-darwin`.
+`~/.cfm-release-tooling/rust-toolchains/$RUST_VERSION-aarch64-apple-darwin`,
+where `RUST_VERSION` comes from `scripts/dependency_pins.env`.
 This deployment/bootstrap step precedes environment consumption; release
 commands verify an existing SDK and never create, install, repair, or replace
 it automatically. On the release Mac, explicitly select `private` for input
@@ -410,7 +414,7 @@ TMPDIR="$tauri_install_tmp" ./scripts/run_release_ci_gate.sh install-tauri-cli
 ```
 
 `CFW_RELEASE_RUST_TOOLCHAIN=global` retains the existing CI SDK location,
-`~/.rustup/toolchains/1.98.1-aarch64-apple-darwin`. Only an unset bootstrap
+`~/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin`. Only an unset bootstrap
 selection defaults to `global`; the sealed environment always records an
 explicit `global` or `private` selection. Neither selection accepts arbitrary
 paths or falls back to the other SDK on failure. Both require the same exact
@@ -467,7 +471,8 @@ Preparation is explicit and networked; the release build is offline:
 Release-critical shell entrypoints rebuild one closed execution environment
 from the effective macOS account rather than caller `HOME` or `PATH`.
 Production signing, publication, and physical-evidence entrypoints accept only
-the exact Rust SDK selected above and Python 3.14.7 Cellar path. Only the
+the exact Rust SDK selected above and the Homebrew Cellar path of
+`PYTHON_VERSION`. Only the
 unsigned validation entrypoints, build 40000 and the unsigned preview build
 50000, may accept the absolute Python executable emitted by the SHA-pinned
 `setup-python` action; it verifies the same exact version and
@@ -480,7 +485,7 @@ in an isolated attempt journal until the ending identity matches the starting
 identity; output beyond the fixed 64 MiB streaming limit terminates the
 complete lane process group.
 
-The Tauri installer verifies the official 2.12.0 crate and its unchanged published
+The Tauri installer verifies the official `TAURI_CLI_VERSION` crate and its unchanged published
 lock, and installs only from that local source with `--locked` using isolated Cargo
 home and target directories. It normalizes only Cargo's three exact root-level
 runtime tracking/lock files in the private offline cache copy, then proves the
@@ -488,7 +493,7 @@ complete remaining registry tree is byte-identical before and after compilation.
 The normalization helper digest and policy are bound into the final toolchain
 manifest, and any fetch or install warning blocks the bootstrap. The sealed
 payload contains only its thin arm64 binary and clean official crate source, lock, and licenses under
-`target/toolchains/tauri-cli-2.12.0`. Release scripts invoke that absolute
+`target/toolchains/tauri-cli-$TAURI_CLI_VERSION`. Release scripts invoke that absolute
 binary; an ambient Cargo home cannot substitute it. Go, Node.js, XcodeGen,
 Tauri, the Go release tools, and the prepared Go module cache must each have a verified
 `sha256-tree-v2` manifest before use. A directory without its matching manifest,
@@ -784,10 +789,11 @@ all product inputs and outputs:
 
 ```bash
 source scripts/release_identity.env
+source scripts/dependency_pins.env
 publication_artifact_repository="$PWD/target/release-worktrees/$CFW_GA_BUILD"
 publication_ga="$publication_artifact_repository/target/candidates/0.5.0/ga/$CFW_GA_BUILD"
 publication_inputs="$publication_ga/stage-inputs"
-publication_libbox="$publication_artifact_repository/target/sources/sing-box-v1.14.2-patched"
+publication_libbox="$publication_artifact_repository/target/sources/sing-box-$SING_BOX_VERSION-patched"
 
 scripts/prepare_publication_evidence.sh review-template \
   --libbox-source "$publication_libbox"
@@ -1545,8 +1551,8 @@ repository, ancestor, or Cargo-home config, clears wrapper and flag injection
 variables, uses a private Cargo home and isolated workspace, and reconstructs
 its vendor tree only from crate archives whose SHA-256 matches the exact
 `Cargo.lock` dependency closure. The declared rustup component file surface is
-independently pinned in both `dependency_pins.env` and
-`pinned_build_inputs.json`. Independent updater, distribution, and upload
+pinned as `RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256` in
+`dependency_pins.env`. Independent updater, distribution, and upload
 operations establish their own private verification sessions. Repeated public
 possession-proof checks within one operation share the compiled verifier;
 updater archive checks likewise reuse their operation's verification producer.
@@ -1705,7 +1711,7 @@ current or legacy caller-supplied Tauri secret variable. It resets `PATH`,
 resolves one fixed Homebrew Python probe to a canonical interpreter, disables
 Python site customization with `-S`, and calls the source-pinned launcher in an
 empty, explicit environment with only the archive path.
-The launcher verifies the complete fixed Tauri 2.12.0 toolchain tree and signer
+The launcher verifies the complete fixed Tauri CLI toolchain tree and signer
 digest before requesting the password. It then opens the fixed owner-only key
 at `~/Library/Application Support/Clash for Mac Release/Updater/cfw-rs-v2.key`
 with `O_NOFOLLOW`, validates the private `~/Library` anchor and every held

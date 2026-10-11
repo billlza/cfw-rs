@@ -109,52 +109,40 @@ impl ArtifactEntry {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct NativeDependencyLock {
-    go: String,
-    gomobile: String,
-    sing_box: SingBoxLock,
-    sing_box_for_apple_reference: AppleReferenceLock,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SingBoxLock {
-    commit: String,
-    tag: String,
-    android_reference_commit: String,
-    security_patch: SingBoxSecurityPatchLock,
-    raw_packet_patch: SingBoxSourcePatchLock,
-    dns_failover_patch: SingBoxSourcePatchLock,
-    endpoint_conflict_patch: SingBoxSourcePatchLock,
-    profile_probe_patch: SingBoxSourcePatchLock,
-    socks_lifecycle_patch: SingBoxSourcePatchLock,
-    combined_diff_sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SingBoxSecurityPatchLock {
-    path: String,
-    sha256: String,
-    patched_diff_sha256: String,
-    patched_go_mod_sha256: String,
-    patched_go_sum_sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SingBoxSourcePatchLock {
-    path: String,
-    sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppleReferenceLock {
-    commit: String,
-}
+/// The sing-box patches libbox is built from, as `(description, path pin,
+/// digest pin)` keys in `scripts/dependency_pins.env`.
+const SING_BOX_PATCH_PINS: [(&str, &str, &str); 6] = [
+    (
+        "security",
+        "SING_BOX_SECURITY_PATCH_PATH",
+        "SING_BOX_SECURITY_PATCH_SHA256",
+    ),
+    (
+        "raw packet",
+        "SING_BOX_RAW_PACKET_PATCH_PATH",
+        "SING_BOX_RAW_PACKET_PATCH_SHA256",
+    ),
+    (
+        "DNS failover",
+        "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+        "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+    ),
+    (
+        "endpoint conflict",
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+    ),
+    (
+        "profile probe",
+        "SING_BOX_PROFILE_PROBE_PATCH_PATH",
+        "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+    ),
+    (
+        "SOCKS lifecycle",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
+    ),
+];
 
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -181,12 +169,6 @@ fn main() {
             });
         }
     }
-    println!(
-        "cargo:rerun-if-changed={}",
-        repository_root
-            .join("native/macos/Dependencies.lock.json")
-            .display()
-    );
     println!(
         "cargo:rerun-if-changed={}",
         repository_root
@@ -390,142 +372,9 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     )?;
     require_real_directory(&repository_root.join("native/macos/Sources/CFWNativeBridge"))?;
 
-    let dependency_lock_path = repository_root.join("native/macos/Dependencies.lock.json");
-    let dependency_lock: NativeDependencyLock = read_json(&dependency_lock_path)?;
     let pins = read_pins(&repository_root.join("scripts/dependency_pins.env"))?;
-    require_pin(&pins, "GO_VERSION", &dependency_lock.go)?;
-    require_pin(&pins, "GOMOBILE_VERSION", &dependency_lock.gomobile)?;
-    require_pin(&pins, "SING_BOX_VERSION", &dependency_lock.sing_box.tag)?;
-    require_pin(&pins, "SING_BOX_COMMIT", &dependency_lock.sing_box.commit)?;
-    require_pin(
-        &pins,
-        "SING_BOX_ANDROID_REFERENCE_COMMIT",
-        &dependency_lock.sing_box.android_reference_commit,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_SECURITY_PATCH_PATH",
-        &dependency_lock.sing_box.security_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_SECURITY_PATCH_SHA256",
-        &dependency_lock.sing_box.security_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_RAW_PACKET_PATCH_PATH",
-        &dependency_lock.sing_box.raw_packet_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_RAW_PACKET_PATCH_SHA256",
-        &dependency_lock.sing_box.raw_packet_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_DNS_FAILOVER_PATCH_PATH",
-        &dependency_lock.sing_box.dns_failover_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-        &dependency_lock.sing_box.dns_failover_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
-        &dependency_lock.sing_box.endpoint_conflict_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-        &dependency_lock.sing_box.endpoint_conflict_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PROFILE_PROBE_PATCH_PATH",
-        &dependency_lock.sing_box.profile_probe_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
-        &dependency_lock.sing_box.profile_probe_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
-        &dependency_lock.sing_box.socks_lifecycle_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-        &dependency_lock.sing_box.socks_lifecycle_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PATCHED_DIFF_SHA256",
-        &dependency_lock.sing_box.security_patch.patched_diff_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_COMBINED_DIFF_SHA256",
-        &dependency_lock.sing_box.combined_diff_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PATCHED_GO_MOD_SHA256",
-        &dependency_lock
-            .sing_box
-            .security_patch
-            .patched_go_mod_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PATCHED_GO_SUM_SHA256",
-        &dependency_lock
-            .sing_box
-            .security_patch
-            .patched_go_sum_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_APPLE_REFERENCE_COMMIT",
-        &dependency_lock.sing_box_for_apple_reference.commit,
-    )?;
-    for (description, relative, expected_sha256) in [
-        (
-            "security",
-            &dependency_lock.sing_box.security_patch.path,
-            &dependency_lock.sing_box.security_patch.sha256,
-        ),
-        (
-            "raw packet",
-            &dependency_lock.sing_box.raw_packet_patch.path,
-            &dependency_lock.sing_box.raw_packet_patch.sha256,
-        ),
-        (
-            "DNS failover",
-            &dependency_lock.sing_box.dns_failover_patch.path,
-            &dependency_lock.sing_box.dns_failover_patch.sha256,
-        ),
-        (
-            "endpoint conflict",
-            &dependency_lock.sing_box.endpoint_conflict_patch.path,
-            &dependency_lock.sing_box.endpoint_conflict_patch.sha256,
-        ),
-        (
-            "profile probe",
-            &dependency_lock.sing_box.profile_probe_patch.path,
-            &dependency_lock.sing_box.profile_probe_patch.sha256,
-        ),
-        (
-            "SOCKS lifecycle",
-            &dependency_lock.sing_box.socks_lifecycle_patch.path,
-            &dependency_lock.sing_box.socks_lifecycle_patch.sha256,
-        ),
-    ] {
-        let path = repository_root.join(safe_relative_path(relative)?);
+    for (description, path_pin, sha256_pin) in SING_BOX_PATCH_PINS {
+        let path = repository_root.join(safe_relative_path(required_pin(&pins, path_pin)?)?);
         println!("cargo:rerun-if-changed={}", path.display());
         require_single_link_regular_file(&path)?;
         let bytes = fs::read(&path).map_err(|error| {
@@ -534,9 +383,9 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
                 path.display()
             )
         })?;
-        if sha256_hex(&bytes) != *expected_sha256 {
+        if sha256_hex(&bytes) != required_pin(&pins, sha256_pin)? {
             return Err(format!(
-                "sing-box {description} patch digest differs from dependency lock"
+                "sing-box {description} patch digest differs from {sha256_pin}"
             ));
         }
     }
@@ -550,10 +399,6 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         &fs::read(&manifest_path)
             .map_err(|error| format!("read {}: {error}", manifest_path.display()))?,
     );
-    require_metadata(&manifest, "sourceTag", &dependency_lock.sing_box.tag)?;
-    require_metadata(&manifest, "sourceCommit", &dependency_lock.sing_box.commit)?;
-    require_metadata(&manifest, "goVersion", &dependency_lock.go)?;
-    require_metadata(&manifest, "gomobileVersion", &dependency_lock.gomobile)?;
     require_metadata(&manifest, "archiveDeterminism", "zeroArDate-v1")?;
     require_metadata(
         &manifest,
@@ -561,15 +406,12 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         "angleBracketFrameworkImports-v1",
     )?;
     for (metadata_key, pin_key) in [
+        ("sourceTag", "SING_BOX_VERSION"),
+        ("sourceCommit", "SING_BOX_COMMIT"),
+        ("goVersion", "GO_VERSION"),
+        ("gomobileVersion", "GOMOBILE_VERSION"),
         ("gomobileCommit", "GOMOBILE_COMMIT"),
         ("gomobileModuleSum", "GOMOBILE_MODULE_SUM"),
-    ] {
-        let expected = pins
-            .get(pin_key)
-            .ok_or_else(|| format!("required pin {pin_key} is missing"))?;
-        require_metadata(&manifest, metadata_key, expected)?;
-    }
-    for (metadata_key, pin_key) in [
         ("platform", "LIBBOX_APPLE_PLATFORM"),
         ("buildTags", "LIBBOX_BUILD_TAGS"),
         ("nonMacOsTags", "LIBBOX_NON_MACOS_TAGS"),
@@ -598,10 +440,7 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         ("patchedGoModSha256", "SING_BOX_PATCHED_GO_MOD_SHA256"),
         ("patchedGoSumSha256", "SING_BOX_PATCHED_GO_SUM_SHA256"),
     ] {
-        let expected = pins
-            .get(pin_key)
-            .ok_or_else(|| format!("required pin {pin_key} is missing"))?;
-        require_metadata(&manifest, metadata_key, expected)?;
+        require_metadata(&manifest, metadata_key, required_pin(&pins, pin_key)?)?;
     }
     for (metadata_key, environment_key) in [
         ("goToolchainTreeSha256", GO_TOOLCHAIN_TREE_SHA256_ENV),
@@ -621,15 +460,9 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     let native_source_sha256 = native_build_inputs_digest(repository_root)?;
     let repository_commit = required_lower_hex_environment(REPOSITORY_COMMIT_ENV, 40)?;
     let release_source_sha256 = required_lower_hex_environment(RELEASE_SOURCE_SHA256_ENV, 64)?;
-    let xcode_version = pins
-        .get("XCODE_VERSION")
-        .ok_or_else(|| "required pin XCODE_VERSION is missing".to_string())?;
-    let xcode_build = pins
-        .get("XCODE_BUILD_VERSION")
-        .ok_or_else(|| "required pin XCODE_BUILD_VERSION is missing".to_string())?;
-    let deployment_target = pins
-        .get("MACOS_DEPLOYMENT_TARGET")
-        .ok_or_else(|| "required pin MACOS_DEPLOYMENT_TARGET is missing".to_string())?;
+    let xcode_version = required_pin(&pins, "XCODE_VERSION")?;
+    let xcode_build = required_pin(&pins, "XCODE_BUILD_VERSION")?;
+    let deployment_target = required_pin(&pins, "MACOS_DEPLOYMENT_TARGET")?;
     let products = candidate_native_products_root(repository_root)?;
     // The bound build is the runtime migration admission's expected bundle
     // build (src/legacy/admission.rs); no other build input reaches it.
@@ -654,7 +487,7 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         require_metadata(
             &product_manifest,
             "singBoxCommit",
-            &dependency_lock.sing_box.commit,
+            required_pin(&pins, "SING_BOX_COMMIT")?,
         )?;
         require_metadata(&product_manifest, "architecture", "arm64")?;
         require_metadata(&product_manifest, "configuration", "Release")?;
@@ -696,10 +529,11 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     require_metadata(&tombstone_manifest, "architecture", "arm64")?;
     require_metadata(&tombstone_manifest, "deploymentTarget", deployment_target)?;
     products.require_manifest_identity(&tombstone_manifest.metadata, "CFWLegacyTombstone")?;
-    let rust_version = pins
-        .get("RUST_VERSION")
-        .ok_or_else(|| "required pin RUST_VERSION is missing".to_string())?;
-    require_metadata(&tombstone_manifest, "rustVersion", rust_version)?;
+    require_metadata(
+        &tombstone_manifest,
+        "rustVersion",
+        required_pin(&pins, "RUST_VERSION")?,
+    )?;
     require_file_digest_metadata(
         &tombstone_manifest,
         "sourceSha256",
@@ -833,12 +667,10 @@ fn read_pins(path: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(pins)
 }
 
-fn require_pin(pins: &BTreeMap<String, String>, key: &str, expected: &str) -> Result<(), String> {
-    match pins.get(key).map(String::as_str) {
-        Some(actual) if actual == expected => Ok(()),
-        Some(actual) => Err(format!("pin {key} is {actual}, expected {expected}")),
-        None => Err(format!("required pin {key} is missing")),
-    }
+fn required_pin<'a>(pins: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str, String> {
+    pins.get(key)
+        .map(String::as_str)
+        .ok_or_else(|| format!("required pin {key} is missing"))
 }
 
 fn require_metadata(manifest: &ArtifactManifest, key: &str, expected: &str) -> Result<(), String> {
@@ -903,7 +735,6 @@ fn native_build_inputs_digest(repository_root: &Path) -> Result<String, String> 
         "native/macos/Headers",
         "native/macos/Sources",
         "native/macos/SystemExtension",
-        "native/macos/Dependencies.lock.json",
         "native/macos/Package.swift",
         "native/macos/project.yml",
     ] {

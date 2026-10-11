@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,10 +16,8 @@ from unittest import mock
 from scripts import verify_pinned_build_inputs as pinned_verifier
 from scripts.verify_pinned_build_inputs import (
     MANIFEST_RELATIVE_PATH,
-    MAX_NATIVE_LOCK_BYTES,
     MAX_PINNED_MANIFEST_BYTES,
     PinnedInputError,
-    REQUIRED_REJECTED_PATCH_DIGESTS,
     verify_source_contract,
 )
 
@@ -25,57 +25,38 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED_PINNED_MANIFEST = json.loads(
     (REPO_ROOT / MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8")
 )
-PACKET_ENDPOINT_BINARY_SHA = (
-    "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb"
+
+
+# The shipped pin values, parsed by the verifier's own strict reader. Tests read
+# every real value from here so that a pin bump edits
+# scripts/dependency_pins.env and nothing that repeats it.
+SHIPPED_PINS = pinned_verifier._load_dependency_pins(REPO_ROOT)
+REJECTED_PATCH_DIGESTS = sorted(SHIPPED_PINNED_MANIFEST["rejectedPatchDigests"])
+BUILD_TAGS = SHIPPED_PINS["LIBBOX_BUILD_TAGS"]
+PACKET_ENDPOINT_PATHS = tuple(
+    entry["path"]
+    for entry in SHIPPED_PINNED_MANIFEST["packetEvidenceEndpoint"]["sourceFiles"]
 )
-PACKET_ENDPOINT_PATHS = (
-    "tools/packet-evidence-endpoint/go.mod",
-    "tools/packet-evidence-endpoint/install-endpoint.sh",
-    "tools/packet-evidence-endpoint/main.go",
-    "tools/packet-evidence-endpoint/main_test.go",
-    "tools/packet-evidence-endpoint/packet-evidence-capture.sudoers",
-    "tools/packet-evidence-endpoint/packet-evidence-endpoint.service",
-    "tools/packet-evidence-endpoint/packet-evidence-resolv.conf",
-    "tools/packet-evidence-endpoint/README.md",
-    "scripts/physical_capture/packet_endpoints.json",
-    "scripts/physical_capture/packet_known_hosts",
-)
-PACKET_ENDPOINT_BUILD_FRAGMENTS = [
-    "GOTOOLCHAIN=local",
-    "CGO_ENABLED=0",
-    "GOOS=linux",
-    "GOARCH=amd64",
-    "target/toolchains/go-1.27.2/bin/go",
-    "-C tools/packet-evidence-endpoint",
-    "-buildvcs=false",
-    "-trimpath",
-    "-ldflags='-s -w -buildid='",
-    "-o ../../target/packet-evidence-endpoint-linux-amd64",
-    PACKET_ENDPOINT_BINARY_SHA,
-]
 PHYSICAL_COLLECTOR_PATHS = (
-    "tools/physical-collector/go.mod",
-    "tools/physical-collector/go.sum",
+    SHIPPED_PINNED_MANIFEST["physicalCollectorModule"]["goModPath"],
+    SHIPPED_PINNED_MANIFEST["physicalCollectorModule"]["goSumPath"],
 )
-PHYSICAL_COLLECTOR_MODULE_FRAGMENTS = [
-    "google.golang.org/grpc v1.83.2",
-    "golang.org/x/text v0.42.0",
-]
 
 
 def _sha(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-# Synthetic, self-consistent patch bodies. Their real SHA-256 digests drive the
-# generated manifest, env, and lock so the verifier logic can be exercised without
-# needing SHA-256 preimages of the shipped design pins.
+# Synthetic, self-consistent patch bodies. Their real SHA-256 digests replace the
+# shipped patch path and digest pins so the verifier logic can be exercised
+# without needing SHA-256 preimages of the shipped patches.
 PATCH_BODIES = {
     "socks": b"synthetic SOCKS lifecycle patch body\n",
     "security": b"synthetic security dependencies patch body\n",
     "raw": b"synthetic raw packet tun patch body\n",
     "dns": b"synthetic dns failover patch body\n",
     "endpoint": b"synthetic endpoint conflict patch body\n",
+    "probe": b"profile probe patch fixture\n",
 }
 TAURI_CACHE_CONTRACT_BODY = b"synthetic Tauri Cargo cache contract\n"
 LIBBOX_MODULE_CACHE_CONTRACT_BODY = b"""\
@@ -90,41 +71,46 @@ XCODEGEN_PATCH_BODY = b"synthetic XcodeGen installed-resource patch body\n"
 
 SECURITY_SHA = _sha(PATCH_BODIES["security"])
 RAW_SHA = _sha(PATCH_BODIES["raw"])
-DNS_SHA = _sha(PATCH_BODIES["dns"])
-PATCH_BODIES["probe"] = b"profile probe patch fixture\n"
-PROBE_SHA = _sha(PATCH_BODIES["probe"])
-SOCKS_SHA = _sha(PATCH_BODIES["socks"])
-ENDPOINT_SHA = _sha(PATCH_BODIES["endpoint"])
-COMBINED_SHA = _sha(b"synthetic combined diff body\n")
-REJECTED_PATCH_DIGESTS = sorted(REQUIRED_REJECTED_PATCH_DIGESTS)
-TAURI_CRATE_SHA = _sha(b"synthetic official tauri-cli crate archive")
-TAURI_UPSTREAM_LOCK_SHA = _sha(b"synthetic upstream tauri-cli Cargo.lock")
-TAURI_SPIN_SHA = _sha(b"synthetic spin crate")
 TAURI_CACHE_CONTRACT_SHA = _sha(TAURI_CACHE_CONTRACT_BODY)
 LIBBOX_MODULE_CACHE_CONTRACT_SHA = _sha(LIBBOX_MODULE_CACHE_CONTRACT_BODY)
 XCODEGEN_PATCH_SHA = _sha(XCODEGEN_PATCH_BODY)
-XCODEGEN_PATCHED_SETTINGS_SHA = _sha(b"synthetic patched SettingsBuilder.swift")
-COMMIT = "af6e64c3b69e6132ebaee0e1a3d24e93903f6709"
-ANDROID_REFERENCE_COMMIT = "124a7c13038fcc389e3efbe61504fe6ab14724d9"
-APPLE_REFERENCE_COMMIT = "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"
-GOMOBILE_COMMIT = "9f03b8f25789099c5c8abef4a02085da783ba923"
 TAURI_CACHE_CONTRACT_PATH = "scripts/tauri_cargo_cache_contract.py"
 LIBBOX_MODULE_CACHE_CONTRACT_PATH = "scripts/libbox_module_cache_contract.sh"
 XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
     "socks": "native/macos/patches/socks-lifecycle.patch",
-    "probe": "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
+    "probe": "native/macos/patches/profile-probe.patch",
     "security": "native/macos/patches/security.patch",
     "raw": "native/macos/patches/raw-packet.patch",
     "dns": "native/macos/patches/dns-failover.patch",
     "endpoint": "native/macos/patches/endpoint-conflict.patch",
 }
+PATCH_PIN_PREFIXES = {
+    "socks": "SING_BOX_SOCKS_LIFECYCLE_PATCH",
+    "probe": "SING_BOX_PROFILE_PROBE_PATCH",
+    "security": "SING_BOX_SECURITY_PATCH",
+    "raw": "SING_BOX_RAW_PACKET_PATCH",
+    "dns": "SING_BOX_DNS_FAILOVER_PATCH",
+    "endpoint": "SING_BOX_ENDPOINT_CONFLICT_PATCH",
+}
 
-BUILD_TAGS = (
-    "with_quic,with_utls,with_clash_api,with_wireguard,with_gvisor,badlinkname,"
-    "tfogo_checklinkname0,grpcnotrace"
-)
+# A bounded occurrence of a pin value: not part of a longer identifier, number or
+# dotted version (``27.0`` is not a copy of anything inside ``127.0.0.1``).
+def _pin_value_pattern(value: str) -> re.Pattern[str]:
+    return re.compile(
+        r"(?<![A-Za-z0-9_.])" + re.escape(value) + r"(?![A-Za-z0-9_]|[.][0-9])"
+    )
+
+
+def _repeated_pin_values(text: str) -> list[str]:
+    return sorted(
+        key
+        for key, value in SHIPPED_PINS.items()
+        if _pin_value_pattern(value).search(text)
+    )
+
+
 CONTROLLER_RELATIVE_PATH = "crates/cfw-singbox-config/src/controller.rs"
 CONTROLLER_TRIGGER = '"clash_api": {'
 CONTROLLER_SOURCE = (
@@ -367,71 +353,28 @@ echo "XcodeGenResourceProbe.xcodeproj/project.pbxproj"
 
 
 class Fixture:
-    """A self-consistent, mutable pinned-input repository fixture."""
+    """A self-consistent, mutable pinned-input repository fixture.
+
+    The pin values are the shipped ones except where the fixture writes a
+    synthetic tracked file (patches, contracts): there the path and digest pins
+    name the synthetic file. The policy is the shipped policy except for the
+    script fragment lists that the synthetic installer and bootstrap satisfy.
+    """
 
     def __init__(self) -> None:
-        self.env: dict[str, str] = {
-            "PYTHON_VERSION": "3.14.7",
-            "RUST_VERSION": "1.98.1",
-            "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
-                "ee3c88a73088d81cb3234b4b7dedd42c3d28c01e845e6d01b8e49c104d3f3e03"
-            ),
-            "CARGO_AUDIT_VERSION": "0.22.2",
-            "CARGO_DENY_VERSION": "0.20.2",
-            "XCODEGEN_VERSION": "2.46.0",
-            "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
-            "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
-            "XCODEGEN_PACKAGE_RESOLVED_SHA256": "c71eacb628f5fb50d8cd266b5fbc1bbe8df48b880fc91570ca79f5f6deaab961",
-            "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
-            "XCODEGEN_DEPENDENCY_PATCH_PATH": "scripts/xcodegen-2.46.0-dependency-refresh.patch",
-            "XCODEGEN_DEPENDENCY_PATCH_SHA256": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
-            "XCODEGEN_AEXML_COMMIT": "db806756c989760b35108146381535aec231092b",
-            "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "357362479c2c2f0dc7359705b4668f0eb6e67e8ad80eeedc37f711a7a373e80b",
-            "XCODEGEN_AEXML_PATCH_PATH": "scripts/aexml-4.7.0-supported-watchos.patch",
-            "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
-            "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6",
-            "XCODEGEN_PATCH_PATH": XCODEGEN_PATCH_PATH,
-            "XCODEGEN_PATCH_SHA256": XCODEGEN_PATCH_SHA,
-            "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": XCODEGEN_PATCHED_SETTINGS_SHA,
-            "NODE_VERSION": "26.8.2",
-            "GO_VERSION": "1.27.2",
-            "TAURI_CLI_VERSION": "2.12.0",
-            "TAURI_CLI_CRATE_SHA256": TAURI_CRATE_SHA,
-            "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": TAURI_UPSTREAM_LOCK_SHA,
-            "TAURI_CLI_SPIN_VERSION": "0.9.9",
-            "TAURI_CLI_SPIN_CRATE_SHA256": TAURI_SPIN_SHA,
-            "TAURI_CARGO_CACHE_CONTRACT_SHA256": TAURI_CACHE_CONTRACT_SHA,
-            "GOMOBILE_VERSION": "v0.1.13",
-            "GOMOBILE_COMMIT": GOMOBILE_COMMIT,
-            "GOMOBILE_MODULE_SUM": "h1:foTOGKJetah9VwaJl1XJx5TswIAVg8NfYmHOhrOc95I=",
-            "GOVULNCHECK_VERSION": "v1.6.0",
-            "GOVULNCHECK_MODULE_SUM": "h1:FeMO9Rm/HwyduOztbvKcOw+zvDEPr4I4aQNSfevFcKY=",
-            "SING_BOX_VERSION": "v1.14.2",
-            "SING_BOX_COMMIT": COMMIT,
-            "SING_BOX_ANDROID_REFERENCE_COMMIT": ANDROID_REFERENCE_COMMIT,
-            "SING_BOX_APPLE_REFERENCE_COMMIT": APPLE_REFERENCE_COMMIT,
-            "SING_BOX_UPSTREAM_GO_MOD_SHA256": _sha(b"upstream go.mod"),
-            "SING_BOX_UPSTREAM_GO_SUM_SHA256": _sha(b"upstream go.sum"),
-            "SING_BOX_SECURITY_PATCH_PATH": PATCH_PATHS["security"],
-            "SING_BOX_SECURITY_PATCH_SHA256": SECURITY_SHA,
-            "SING_BOX_RAW_PACKET_PATCH_PATH": PATCH_PATHS["raw"],
-            "SING_BOX_RAW_PACKET_PATCH_SHA256": RAW_SHA,
-            "SING_BOX_DNS_FAILOVER_PATCH_PATH": PATCH_PATHS["dns"],
-            "SING_BOX_DNS_FAILOVER_PATCH_SHA256": DNS_SHA,
-            "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH": PATCH_PATHS["endpoint"],
-            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256": ENDPOINT_SHA,
-            "SING_BOX_PROFILE_PROBE_PATCH_PATH": PATCH_PATHS["probe"],
-            "SING_BOX_PROFILE_PROBE_PATCH_SHA256": PROBE_SHA,
-            "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH": PATCH_PATHS["socks"],
-            "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256": SOCKS_SHA,
-            "SING_BOX_PATCHED_DIFF_SHA256": SECURITY_SHA,
-            "SING_BOX_COMBINED_DIFF_SHA256": COMBINED_SHA,
-            "SING_BOX_PATCHED_GO_MOD_SHA256": _sha(b"patched go.mod"),
-            "SING_BOX_PATCHED_GO_SUM_SHA256": _sha(b"patched go.sum"),
-            "LIBBOX_BUILD_TAGS": BUILD_TAGS,
-            "LIBBOX_MODULE_CACHE_CONTRACT_PATH": LIBBOX_MODULE_CACHE_CONTRACT_PATH,
-            "LIBBOX_MODULE_CACHE_CONTRACT_SHA256": LIBBOX_MODULE_CACHE_CONTRACT_SHA,
-        }
+        self.env: dict[str, str] = dict(SHIPPED_PINS)
+        for key, prefix in PATCH_PIN_PREFIXES.items():
+            self.env[f"{prefix}_PATH"] = PATCH_PATHS[key]
+            self.env[f"{prefix}_SHA256"] = _sha(PATCH_BODIES[key])
+        self.env.update(
+            {
+                "XCODEGEN_PATCH_PATH": XCODEGEN_PATCH_PATH,
+                "XCODEGEN_PATCH_SHA256": XCODEGEN_PATCH_SHA,
+                "TAURI_CARGO_CACHE_CONTRACT_SHA256": TAURI_CACHE_CONTRACT_SHA,
+                "LIBBOX_MODULE_CACHE_CONTRACT_PATH": LIBBOX_MODULE_CACHE_CONTRACT_PATH,
+                "LIBBOX_MODULE_CACHE_CONTRACT_SHA256": LIBBOX_MODULE_CACHE_CONTRACT_SHA,
+            }
+        )
         self.patch_bodies = dict(PATCH_BODIES)
         self.packet_endpoint_files = {
             relative: (REPO_ROOT / relative).read_bytes()
@@ -443,75 +386,16 @@ class Fixture:
         }
         self.controller_source = CONTROLLER_SOURCE
         self.projection_source = PROJECTION_SOURCE
+        shipped = copy.deepcopy(SHIPPED_PINNED_MANIFEST)
         self.manifest = {
-            "schema": "cfw-pinned-build-inputs-v1",
+            "schema": shipped["schema"],
             "description": "synthetic pinned build inputs",
-            "dependencyPinsPath": "scripts/dependency_pins.env",
-            "nativeLockPath": "native/macos/Dependencies.lock.json",
-            "tools": {
-                "PYTHON_VERSION": "3.14.7",
-                "RUST_VERSION": "1.98.1",
-                "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
-                    "ee3c88a73088d81cb3234b4b7dedd42c3d28c01e845e6d01b8e49c104d3f3e03"
-                ),
-                "CARGO_AUDIT_VERSION": "0.22.2",
-                "CARGO_DENY_VERSION": "0.20.2",
-                "XCODEGEN_VERSION": "2.46.0",
-                "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
-                "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
-                "XCODEGEN_PACKAGE_RESOLVED_SHA256": "c71eacb628f5fb50d8cd266b5fbc1bbe8df48b880fc91570ca79f5f6deaab961",
-                "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
-                "XCODEGEN_DEPENDENCY_PATCH_PATH": "scripts/xcodegen-2.46.0-dependency-refresh.patch",
-                "XCODEGEN_DEPENDENCY_PATCH_SHA256": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
-                "XCODEGEN_AEXML_COMMIT": "db806756c989760b35108146381535aec231092b",
-                "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "357362479c2c2f0dc7359705b4668f0eb6e67e8ad80eeedc37f711a7a373e80b",
-                "XCODEGEN_AEXML_PATCH_PATH": "scripts/aexml-4.7.0-supported-watchos.patch",
-                "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
-                "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6",
-                "NODE_VERSION": "26.8.2",
-                "GO_VERSION": "1.27.2",
-                "GOMOBILE_VERSION": "v0.1.13",
-                "GOVULNCHECK_VERSION": "v1.6.0",
-                "TAURI_CLI_VERSION": "2.12.0",
-                "SING_BOX_VERSION": "v1.14.2",
-            },
-            "packetEvidenceEndpoint": {
-                "goVersionKey": "GO_VERSION",
-                "goVersion": "1.27.2",
-                "goos": "linux",
-                "goarch": "amd64",
-                "cgoEnabled": "0",
-                "binarySha256": PACKET_ENDPOINT_BINARY_SHA,
-                "transportPort": 44333,
-                "dnsPort": 53,
-                "readmePath": "tools/packet-evidence-endpoint/README.md",
-                "requiredBuildFragments": list(PACKET_ENDPOINT_BUILD_FRAGMENTS),
-                "sourceFiles": [
-                    {"path": path, "sha256": _sha(body)}
-                    for path, body in self.packet_endpoint_files.items()
-                ],
-            },
-            "physicalCollectorModule": {
-                "goVersionKey": "GO_VERSION",
-                "goVersion": "1.27.2",
-                "goModPath": "tools/physical-collector/go.mod",
-                "goModSha256": _sha(
-                    self.physical_collector_files["tools/physical-collector/go.mod"]
-                ),
-                "goSumPath": "tools/physical-collector/go.sum",
-                "goSumSha256": _sha(
-                    self.physical_collector_files["tools/physical-collector/go.sum"]
-                ),
-                "requiredModuleFragments": list(
-                    PHYSICAL_COLLECTOR_MODULE_FRAGMENTS
-                ),
-            },
+            "pinFormats": shipped["pinFormats"],
+            "packetEvidenceEndpoint": shipped["packetEvidenceEndpoint"],
+            "physicalCollectorModule": shipped["physicalCollectorModule"],
             "xcodegen": {
-                "patchPathKey": "XCODEGEN_PATCH_PATH",
-                "patchSha256Key": "XCODEGEN_PATCH_SHA256",
-                "patchSha256": XCODEGEN_PATCH_SHA,
-                "patchedSettingsBuilderSha256Key": "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
-                "patchedSettingsBuilderSha256": XCODEGEN_PATCHED_SETTINGS_SHA,
+                "patchPathKey": shipped["xcodegen"]["patchPathKey"],
+                "patchSha256Key": shipped["xcodegen"]["patchSha256Key"],
                 "bootstrapPath": "scripts/bootstrap_release_toolchain.sh",
                 "requiredBootstrapFragments": [
                     "$XCODEGEN_PATCH_PATH",
@@ -528,8 +412,6 @@ class Fixture:
                     "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
                 ],
             },
-            "gomobileCommitKey": "GOMOBILE_COMMIT",
-            "gomobileCommit": GOMOBILE_COMMIT,
             "cargoDeny": {
                 "ciWorkflowPath": ".github/workflows/ci.yml",
                 "requiredCiFragments": [
@@ -539,17 +421,8 @@ class Fixture:
                 ],
             },
             "tauriCli": {
-                "crateSha256Key": "TAURI_CLI_CRATE_SHA256",
-                "crateSha256": TAURI_CRATE_SHA,
-                "upstreamCargoLockSha256Key": "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
-                "upstreamCargoLockSha256": TAURI_UPSTREAM_LOCK_SHA,
-                "spinVersionKey": "TAURI_CLI_SPIN_VERSION",
-                "spinVersion": "0.9.9",
-                "spinCrateSha256Key": "TAURI_CLI_SPIN_CRATE_SHA256",
-                "spinCrateSha256": TAURI_SPIN_SHA,
                 "cacheContractPath": TAURI_CACHE_CONTRACT_PATH,
-                "cacheContractSha256Key": "TAURI_CARGO_CACHE_CONTRACT_SHA256",
-                "cacheContractSha256": TAURI_CACHE_CONTRACT_SHA,
+                "cacheContractSha256Key": shipped["tauriCli"]["cacheContractSha256Key"],
                 "ciWorkflowPath": ".github/workflows/ci.yml",
                 "requiredCiFragment": "install-tauri-cli",
                 "installerPath": "scripts/install_pinned_tauri_cli.sh",
@@ -621,152 +494,11 @@ class Fixture:
                     "cfw_verify_tauri_toolchain_tree",
                 ],
             },
-            "singBoxCommitKey": "SING_BOX_COMMIT",
-            "singBoxCommit": COMMIT,
-            "patches": [
-                {
-                    "name": "sing-box security dependencies patch",
-                    "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
-                    "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-                    "sha256": SECURITY_SHA,
-                },
-                {
-                    "name": "sing-box raw packet tun patch",
-                    "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
-                    "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
-                    "sha256": RAW_SHA,
-                },
-                {
-                    "name": "sing-box DNS failover patch",
-                    "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
-                    "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-                    "sha256": DNS_SHA,
-                },
-                {
-                    "name": "sing-box endpoint conflict patch",
-                    "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
-                    "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-                    "sha256": ENDPOINT_SHA,
-                },
-                {
-                    "name": "sing-box profile probe patch",
-                    "pathKey": "SING_BOX_PROFILE_PROBE_PATCH_PATH",
-                    "sha256Key": "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
-                    "sha256": PROBE_SHA,
-                },
-                {
-                    "name": "sing-box SOCKS lifecycle patch",
-                    "pathKey": "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
-                    "sha256Key": "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-                    "sha256": SOCKS_SHA,
-                },
-            ],
-            "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-            "combinedDiffSha256": COMBINED_SHA,
-            "sourceContract": {
-                "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
-                "patchedDiffSha256": SECURITY_SHA,
-                "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
-                "patchedGoModSha256": self.env["SING_BOX_PATCHED_GO_MOD_SHA256"],
-                "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
-                "patchedGoSumSha256": self.env["SING_BOX_PATCHED_GO_SUM_SHA256"],
-            },
-            "libboxModuleCacheContract": {
-                "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
-                "path": LIBBOX_MODULE_CACHE_CONTRACT_PATH,
-                "sha256Key": "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
-                "sha256": LIBBOX_MODULE_CACHE_CONTRACT_SHA,
-            },
-            "verifiedGoModuleInputKeys": [
-                "GOMOBILE_MODULE_SUM",
-                "GOVULNCHECK_MODULE_SUM",
-                "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
-                "SING_BOX_UPSTREAM_GO_MOD_SHA256",
-                "SING_BOX_UPSTREAM_GO_SUM_SHA256",
-                "SING_BOX_PATCHED_GO_MOD_SHA256",
-                "SING_BOX_PATCHED_GO_SUM_SHA256",
-            ],
-            "rejectedPatchDigests": list(REJECTED_PATCH_DIGESTS),
-            "libboxBuildTags": {
-                "pinKey": "LIBBOX_BUILD_TAGS",
-                "value": BUILD_TAGS,
-                "required": [
-                    {"tag": "with_wireguard", "reason": "WireGuard endpoints"},
-                    {"tag": "with_gvisor", "reason": "userspace WireGuard"},
-                    {"tag": "with_quic", "reason": "QUIC outbounds"},
-                    {"tag": "with_utls", "reason": "uTLS fingerprints"},
-                    {"tag": "with_clash_api", "reason": "engine start path needs the server"},
-                    {"tag": "badlinkname", "reason": "Go linkname compatibility"},
-                    {
-                        "tag": "tfogo_checklinkname0",
-                        "reason": "tfo-go linkname compatibility",
-                    },
-                    {"tag": "grpcnotrace", "reason": "no gRPC trace surface"},
-                ],
-                "engineStartPathBindings": [
-                    {
-                        "tag": "with_clash_api",
-                        "path": CONTROLLER_RELATIVE_PATH,
-                        "requiredWhenContains": CONTROLLER_TRIGGER,
-                        "triggerRequired": True,
-                        "reason": "the projected controller block needs the real server",
-                    },
-                    {
-                        "tag": "with_clash_api",
-                        "path": PROJECTION_RELATIVE_PATH,
-                        "requiredWhenContains": PROJECTION_TRIGGER,
-                        "triggerRequired": True,
-                        "reason": "every projected configuration needs the real server",
-                    }
-                ],
-            },
-            "buildScripts": {
-                "scripts/build_libbox.sh": {
-                    "requirePinReferences": [
-                        "$GO_VERSION",
-                        "$GOMOBILE_VERSION",
-                        "$GOMOBILE_COMMIT",
-                        "$GOMOBILE_MODULE_SUM",
-                        "$SING_BOX_VERSION",
-                        "$SING_BOX_COMMIT",
-                        "$LIBBOX_BUILD_TAGS",
-                        "$SING_BOX_COMBINED_DIFF_SHA256",
-                        "$SING_BOX_SECURITY_PATCH_SHA256",
-                        "$SING_BOX_RAW_PACKET_PATCH_SHA256",
-                        "$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-                        "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-                        "$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
-                        "$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-                    ],
-                    "forbidNetworkRecursion": True,
-                }
-            },
-        }
-        self.lock = {
-            "go": "1.27.2",
-            "gomobile": "v0.1.13",
-            "singBox": {
-                "commit": COMMIT,
-                "tag": "v1.14.2",
-                "androidReferenceCommit": ANDROID_REFERENCE_COMMIT,
-                "securityPatch": {
-                    "path": PATCH_PATHS["security"],
-                    "sha256": SECURITY_SHA,
-                    "patchedDiffSha256": SECURITY_SHA,
-                    "patchedGoModSha256": self.env["SING_BOX_PATCHED_GO_MOD_SHA256"],
-                    "patchedGoSumSha256": self.env["SING_BOX_PATCHED_GO_SUM_SHA256"],
-                },
-                "rawPacketPatch": {"path": PATCH_PATHS["raw"], "sha256": RAW_SHA},
-                "dnsFailoverPatch": {"path": PATCH_PATHS["dns"], "sha256": DNS_SHA},
-                "endpointConflictPatch": {
-                    "path": PATCH_PATHS["endpoint"],
-                    "sha256": ENDPOINT_SHA,
-                },
-                "profileProbePatch": {"path": PATCH_PATHS["probe"], "sha256": PROBE_SHA},
-                "socksLifecyclePatch": {"path": PATCH_PATHS["socks"], "sha256": SOCKS_SHA},
-                "combinedDiffSha256": COMBINED_SHA,
-            },
-            "singBoxForAppleReference": {"commit": APPLE_REFERENCE_COMMIT},
+            "patches": shipped["patches"],
+            "libboxModuleCacheContract": shipped["libboxModuleCacheContract"],
+            "rejectedPatchDigests": shipped["rejectedPatchDigests"],
+            "libboxBuildTags": shipped["libboxBuildTags"],
+            "buildScripts": shipped["buildScripts"],
         }
         self.build_libbox = (REPO_ROOT / "scripts/build_libbox.sh").read_text(
             encoding="utf-8"
@@ -779,13 +511,6 @@ class Fixture:
             encoding="utf-8"
         )
         self.extra_files: dict[str, str] = {}
-        for key in (
-            "NPM_VERSION", "NPM_ARCHIVE_SHA256",
-            "GO_RELEASE_TOOLS_GO_MOD_SHA256", "GO_RELEASE_TOOLS_GO_SUM_SHA256",
-            "XCODE_VERSION", "XCODE_BUILD_VERSION",
-        ):
-            self.env[key] = SHIPPED_PINNED_MANIFEST["tools"][key]
-            self.manifest["tools"][key] = self.env[key]
         self._extra_env_text = ""
 
     def env_text(self) -> str:
@@ -817,9 +542,6 @@ class Fixture:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(body)
-        (root / "native/macos/Dependencies.lock.json").write_text(
-            json.dumps(self.lock), encoding="utf-8"
-        )
         (root / "scripts/build_libbox.sh").write_text(self.build_libbox, encoding="utf-8")
         (root / TAURI_CACHE_CONTRACT_PATH).write_bytes(TAURI_CACHE_CONTRACT_BODY)
         (root / LIBBOX_MODULE_CACHE_CONTRACT_PATH).write_bytes(
@@ -859,9 +581,57 @@ class PinnedBuildInputsTests(unittest.TestCase):
         self._verify_fixture(Fixture())
 
     def test_real_repository_source_contract_passes(self) -> None:
-        # Binds the shipped manifest, dependency_pins.env, patch files, native lock,
-        # and offline build scripts together without relying on a generated target.
+        # Binds the shipped policy, dependency_pins.env, patch files, and offline
+        # build scripts together without relying on a generated target.
         verify_source_contract(REPO_ROOT)
+
+    def test_verified_inputs_bind_exactly_the_checked_values(self) -> None:
+        fixture = Fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            verified = verify_source_contract(fixture.write(Path(temporary)))
+        self.assertEqual(dict(verified.pins), fixture.env)
+        self.assertEqual(
+            verified.patch_digests,
+            tuple(
+                fixture.env[patch["sha256Key"]]
+                for patch in fixture.manifest["patches"]
+            ),
+        )
+        self.assertEqual(
+            set(verified.patch_digests),
+            {_sha(body) for body in PATCH_BODIES.values()},
+        )
+        self.assertEqual(
+            verified.combined_diff_sha256,
+            fixture.env["SING_BOX_COMBINED_DIFF_SHA256"],
+        )
+        self.assertEqual(
+            verified.rejected_patch_digests, frozenset(REJECTED_PATCH_DIGESTS)
+        )
+        with self.assertRaises(TypeError):
+            verified.pins["GO_VERSION"] = "0.0.0"  # type: ignore[index]
+
+    def test_value_bump_edits_only_the_pin_file_and_the_pinned_bytes(self) -> None:
+        # A version bump and a patch change edit dependency_pins.env and the
+        # patch itself; the fixture's policy is left untouched.
+        fixture = Fixture()
+        major, minor, patch = fixture.env["NODE_VERSION"].split(".")
+        fixture.env["NODE_VERSION"] = f"{major}.{minor}.{int(patch) + 1}"
+        fixture.env["NODE_DARWIN_ARM64_SHA256"] = _sha(b"next node archive")
+        fixture.env["SING_BOX_COMBINED_DIFF_SHA256"] = _sha(b"next combined diff")
+        fixture.patch_bodies["endpoint"] = b"next endpoint conflict patch body\n"
+        fixture.env["SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"] = _sha(
+            fixture.patch_bodies["endpoint"]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            verified = verify_source_contract(fixture.write(Path(temporary)))
+        self.assertEqual(verified.pins["NODE_VERSION"], f"{major}.{minor}.{int(patch) + 1}")
+        self.assertIn(
+            _sha(b"next endpoint conflict patch body\n"), verified.patch_digests
+        )
+        self.assertEqual(
+            verified.combined_diff_sha256, _sha(b"next combined diff")
+        )
 
     def test_build_boundary_runs_the_pinned_source_contract_gate(self) -> None:
         boundary = (REPO_ROOT / "scripts/verify_build_boundaries.sh").read_text(
@@ -944,76 +714,142 @@ class PinnedBuildInputsTests(unittest.TestCase):
         ] = "google.golang.org/grpc v1.82.0"
         self._assert_fails(fixture, "physical-collector module pins differ")
 
-    # --- wrong / missing pins -----------------------------------------------
-
-    def test_wrong_tool_version_fails(self) -> None:
-        fixture = Fixture()
-        fixture.env["GO_VERSION"] = "1.26.4"
-        self._assert_fails(fixture, "GO_VERSION")
+    # --- pin key set and value formats --------------------------------------
 
     def test_missing_pin_fails(self) -> None:
         fixture = Fixture()
         del fixture.env["GOVULNCHECK_VERSION"]
-        self._assert_fails(fixture, "GOVULNCHECK_VERSION")
+        self._assert_fails(fixture, "missing required pins: GOVULNCHECK_VERSION")
 
-    def test_coordinated_tool_pin_deletion_fails_fixed_policy(self) -> None:
-        fixture = Fixture()
-        del fixture.manifest["tools"]["GOVULNCHECK_VERSION"]
-        del fixture.env["GOVULNCHECK_VERSION"]
-        self._assert_fails(fixture, "fixed tool pin set")
+    def test_coordinated_pin_deletion_fails_the_fixed_key_set(self) -> None:
+        # Removing a pin from both the pin file and the policy cannot pass: the
+        # fixed key set still requires it (build_native_products.sh, for one,
+        # skips its Xcode identity check when XCODE_VERSION is unset).
+        for key in ("XCODE_VERSION", "GOVULNCHECK_MODULE_SUM", "NPM_ARCHIVE_SHA256"):
+            with self.subTest(key=key):
+                fixture = Fixture()
+                del fixture.env[key]
+                del fixture.manifest["pinFormats"][key]
+                self._assert_fails(
+                    fixture, f"differs from the fixed release pin key set: {key}$"
+                )
 
-    def test_wrong_commit_fails(self) -> None:
+    def test_coordinated_pin_addition_fails_the_fixed_key_set(self) -> None:
         fixture = Fixture()
-        fixture.env["SING_BOX_COMMIT"] = "0" * 40
-        self._assert_fails(fixture, "commit")
-
-    def test_wrong_gomobile_commit_fails(self) -> None:
-        fixture = Fixture()
-        fixture.env["GOMOBILE_COMMIT"] = "0" * 40
-        self._assert_fails(fixture, "gomobile commit")
-
-    def test_missing_go_module_input_fails(self) -> None:
-        fixture = Fixture()
-        del fixture.env["GOMOBILE_MODULE_SUM"]
-        self._assert_fails(fixture, "GOMOBILE_MODULE_SUM")
-
-    def test_coordinated_go_module_input_deletion_fails_fixed_policy(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["verifiedGoModuleInputKeys"].remove(
-            "GOVULNCHECK_MODULE_SUM"
+        fixture.env["UNDECLARED_TOOL_VERSION"] = "1.2.3"
+        fixture.manifest["pinFormats"]["UNDECLARED_TOOL_VERSION"] = "version"
+        self._assert_fails(
+            fixture,
+            "differs from the fixed release pin key set: UNDECLARED_TOOL_VERSION$",
         )
-        fixture.env["GOVULNCHECK_MODULE_SUM"] = "not-an-h1-sum"
-        self._assert_fails(fixture, "fixed verified Go module input set")
 
-    def test_go_module_input_policy_requires_strings_and_unique_keys(self) -> None:
-        invalid_values = (
-            None,
-            {},
-            [],
-            [
-                "GOMOBILE_MODULE_SUM",
-                "GOVULNCHECK_MODULE_SUM",
-                "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
-                "SING_BOX_UPSTREAM_GO_MOD_SHA256",
-                "SING_BOX_UPSTREAM_GO_SUM_SHA256",
-                "SING_BOX_PATCHED_GO_MOD_SHA256",
-                7,
-            ],
-            [
-                "GOMOBILE_MODULE_SUM",
-                "GOVULNCHECK_MODULE_SUM",
-                "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
-                "SING_BOX_UPSTREAM_GO_MOD_SHA256",
-                "SING_BOX_UPSTREAM_GO_SUM_SHA256",
-                "SING_BOX_PATCHED_GO_MOD_SHA256",
-                "SING_BOX_PATCHED_GO_MOD_SHA256",
-            ],
+    def test_fixed_policies_name_only_fixed_pin_keys(self) -> None:
+        referenced = {
+            pinned_verifier.COMBINED_DIFF_PIN_KEY,
+            pinned_verifier.PATCHED_DIFF_PIN_KEY,
+            "PYTHON_VERSION",
+        }
+        for _name, path_key, sha256_key in pinned_verifier.REQUIRED_PATCH_POLICIES:
+            referenced.update((path_key, sha256_key))
+        for references in pinned_verifier.REQUIRED_BUILD_SCRIPT_POLICIES.values():
+            self.assertTrue(all(reference.startswith("$") for reference in references))
+            referenced.update(reference[1:] for reference in references)
+        self.assertEqual(referenced - pinned_verifier.REQUIRED_PIN_KEYS, set())
+        self.assertEqual(
+            set(SHIPPED_PINNED_MANIFEST["pinFormats"]), pinned_verifier.REQUIRED_PIN_KEYS
         )
-        for value in invalid_values:
+
+    def test_undeclared_pin_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["UNDECLARED_TOOL_VERSION"] = "1.2.3"
+        self._assert_fails(
+            fixture, "pins the policy does not declare: UNDECLARED_TOOL_VERSION"
+        )
+
+    def test_every_pin_format_rejects_a_malformed_value(self) -> None:
+        malformed = {
+            "apple-build": ("XCODE_BUILD_VERSION", "27a266a"),
+            "apple-version": ("XCODE_VERSION", "27"),
+            "git-commit": ("SING_BOX_COMMIT", "a" * 39),
+            "go-build-tags": ("LIBBOX_BUILD_TAGS", "with_quic, with_utls"),
+            "go-module-sum": ("GOVULNCHECK_MODULE_SUM", "not-an-h1-sum"),
+            "go-module-version": ("SING_BOX_VERSION", "1.14.2"),
+            "gomobile-target": ("LIBBOX_APPLE_PLATFORM", "macos"),
+            "repository-path": ("XCODEGEN_AEXML_PATCH_PATH", "scripts/a b.patch"),
+            "sha256": ("GO_DARWIN_ARM64_SHA256", "A" * 64),
+            "version": ("GO_VERSION", "1.27"),
+        }
+        self.assertEqual(set(malformed), set(pinned_verifier.PIN_VALUE_FORMATS))
+        for format_name, (key, value) in malformed.items():
+            with self.subTest(format=format_name):
+                fixture = Fixture()
+                self.assertEqual(fixture.manifest["pinFormats"][key], format_name)
+                fixture.env[key] = value
+                self._assert_fails(fixture, f"{key} is not a {format_name} value")
+
+    def test_repository_path_pin_rejects_unsafe_components(self) -> None:
+        for value in ("../scripts/a.patch", "scripts/./a.patch", "/scripts/a.patch"):
             with self.subTest(value=value):
                 fixture = Fixture()
-                fixture.manifest["verifiedGoModuleInputKeys"] = value
-                self._assert_fails(fixture, "fixed verified Go module input set")
+                fixture.env["XCODEGEN_AEXML_PATCH_PATH"] = value
+                self._assert_fails(
+                    fixture,
+                    "XCODEGEN_AEXML_PATCH_PATH (path has an unsafe component|path is "
+                    "not repository-relative|is not a repository-path value)",
+                )
+
+    def test_pin_format_table_is_required_and_closed(self) -> None:
+        for value in (None, {}, [], "sha256"):
+            with self.subTest(value=value):
+                fixture = Fixture()
+                fixture.manifest["pinFormats"] = value
+                self._assert_fails(fixture, "no pin format table")
+        fixture = Fixture()
+        fixture.manifest["pinFormats"]["GO_VERSION"] = "anything"
+        self._assert_fails(fixture, "GO_VERSION declares an unknown format")
+
+    def test_policy_rules_must_name_pins_of_their_format(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["libboxModuleCacheContract"]["sha256Key"] = "GO_VERSION"
+        self._assert_fails(fixture, "must name a declared sha256 pin, not 'GO_VERSION'")
+        fixture = Fixture()
+        fixture.manifest["xcodegen"]["patchPathKey"] = "XCODEGEN_UNDECLARED_PATH"
+        self._assert_fails(fixture, "must name a declared repository-path pin")
+
+    def test_policy_cannot_reintroduce_pin_value_copies(self) -> None:
+        # The v1 manifest echoed dependency_pins.env values; none of those fields
+        # may return, at the top level or inside a rule.
+        for field in (
+            "tools",
+            "combinedDiffSha256Key",
+            "dependencyPinsPath",
+            "nativeLockPath",
+            "sourceContract",
+            "combinedDiffSha256",
+            "singBoxCommit",
+            "gomobileCommit",
+            "verifiedGoModuleInputKeys",
+        ):
+            with self.subTest(field=field):
+                fixture = Fixture()
+                fixture.manifest[field] = "copied value"
+                self._assert_fails(fixture, "exact top-level shape")
+        for section, field, message in (
+            ("xcodegen", "patchSha256", "exact XcodeGen patch binding"),
+            ("tauriCli", "crateSha256", "exact Tauri CLI source binding"),
+            ("tauriCli", "cacheContractSha256", "exact Tauri CLI source binding"),
+            ("libboxModuleCacheContract", "sha256", "exact libbox module cache"),
+            ("libboxBuildTags", "value", "no libbox build tag binding"),
+        ):
+            with self.subTest(section=section, field=field):
+                fixture = Fixture()
+                fixture.manifest[section][field] = "copied value"
+                self._assert_fails(fixture, message)
+        fixture = Fixture()
+        fixture.manifest["patches"][0]["sha256"] = fixture.env[
+            fixture.manifest["patches"][0]["sha256Key"]
+        ]
+        self._assert_fails(fixture, "malformed patch entry")
 
     def test_libbox_module_cache_contract_content_drift_fails(self) -> None:
         fixture = Fixture()
@@ -1023,37 +859,21 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_libbox_module_cache_contract_env_digest_drift_fails(self) -> None:
         fixture = Fixture()
         fixture.env["LIBBOX_MODULE_CACHE_CONTRACT_SHA256"] = "a" * 64
-        self._assert_fails(fixture, "libbox module cache contract digest")
+        self._assert_fails(
+            fixture,
+            "libbox module cache contract file digest .* "
+            "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+        )
 
-    def test_libbox_module_cache_contract_path_drift_fails(self) -> None:
+    def test_libbox_module_cache_contract_path_must_name_a_tracked_file(self) -> None:
         fixture = Fixture()
         fixture.env["LIBBOX_MODULE_CACHE_CONTRACT_PATH"] = "scripts/other-contract.sh"
-        self._assert_fails(fixture, "libbox module cache contract path")
+        self._assert_fails(fixture, "libbox module cache contract is missing")
 
     def test_missing_libbox_module_cache_contract_binding_fails_closed(self) -> None:
         fixture = Fixture()
         del fixture.manifest["libboxModuleCacheContract"]
         self._assert_fails(fixture, "exact top-level shape")
-
-    def test_source_contract_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.env["SING_BOX_PATCHED_GO_MOD_SHA256"] = "a" * 64
-        self._assert_fails(fixture, "source contract patchedGoModSha256")
-
-    def test_native_lock_source_contract_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.lock["singBox"]["securityPatch"]["patchedGoSumSha256"] = "a" * 64
-        self._assert_fails(fixture, "securityPatch.patchedGoSumSha256")
-
-    def test_native_lock_android_reference_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.lock["singBox"]["androidReferenceCommit"] = "a" * 40
-        self._assert_fails(fixture, "singBox.androidReferenceCommit")
-
-    def test_native_lock_apple_reference_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.lock["singBoxForAppleReference"]["commit"] = "a" * 40
-        self._assert_fails(fixture, "singBoxForAppleReference.commit")
 
     def test_cargo_deny_ci_hard_coded_version_fails(self) -> None:
         fixture = Fixture()
@@ -1076,16 +896,6 @@ class PinnedBuildInputsTests(unittest.TestCase):
             "true",
         )
         self._assert_fails(fixture, "XcodeGen bootstrap lacks required pinned fragment")
-
-    def test_tauri_cli_crate_digest_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.env["TAURI_CLI_CRATE_SHA256"] = "a" * 64
-        self._assert_fails(fixture, "Tauri CLI crate digest")
-
-    def test_tauri_cli_upstream_lock_digest_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.env["TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256"] = "a" * 64
-        self._assert_fails(fixture, "Tauri CLI upstream Cargo.lock digest")
 
     def test_tauri_cli_installer_requires_official_source_digest(self) -> None:
         fixture = Fixture()
@@ -1491,12 +1301,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_tauri_cache_contract_env_digest_drift_fails(self) -> None:
         fixture = Fixture()
         fixture.env["TAURI_CARGO_CACHE_CONTRACT_SHA256"] = "a" * 64
-        self._assert_fails(fixture, "cache contract digest")
-
-    def test_tauri_cache_contract_manifest_digest_drift_fails(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["tauriCli"]["cacheContractSha256"] = "a" * 64
-        self._assert_fails(fixture, "cache contract digest")
+        self._assert_fails(fixture, "cache contract file digest")
 
     def test_tauri_cache_contract_path_drift_fails(self) -> None:
         fixture = Fixture()
@@ -1602,17 +1407,30 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_wrong_patch_env_digest_fails(self) -> None:
         fixture = Fixture()
         fixture.env["SING_BOX_DNS_FAILOVER_PATCH_SHA256"] = "a" * 64
-        self._assert_fails(fixture, "DNS failover")
+        self._assert_fails(
+            fixture,
+            "patch sing-box DNS failover patch file digest [0-9a-f]{64} differs "
+            "from the pinned SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+        )
 
     def test_wrong_endpoint_conflict_patch_env_digest_fails(self) -> None:
         fixture = Fixture()
         fixture.env["SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"] = "a" * 64
-        self._assert_fails(fixture, "endpoint conflict")
+        self._assert_fails(
+            fixture,
+            "patch sing-box endpoint conflict patch file digest [0-9a-f]{64} "
+            "differs from the pinned SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        )
 
     def test_patch_file_content_drift_fails(self) -> None:
         fixture = Fixture()
         fixture.patch_bodies["security"] = b"tampered body\n"
-        self._assert_fails(fixture, "file digest")
+        self._assert_fails(
+            fixture,
+            "patch sing-box security dependencies patch file digest "
+            f"{_sha(b'tampered body' + bytes([10]))} differs from the pinned "
+            "SING_BOX_SECURITY_PATCH_SHA256",
+        )
 
     def test_missing_patch_file_fails_closed(self) -> None:
         fixture = Fixture()
@@ -1620,28 +1438,25 @@ class PinnedBuildInputsTests(unittest.TestCase):
         self._assert_fails(fixture, "missing, a symlink, or has an unsafe path")
 
     def test_coordinated_patch_policy_replacement_fails_fixed_policy(self) -> None:
+        # Point one sing-box patch rule at another declared path/digest pin pair.
         fixture = Fixture()
-        replacement = "synthetic unrelated patch policy body\n"
-        replacement_sha256 = _sha(replacement.encode("utf-8"))
-        fixture.env["UNRELATED_PATCH_PATH"] = "scripts/unrelated.patch"
-        fixture.env["UNRELATED_PATCH_SHA256"] = replacement_sha256
-        fixture.extra_files["scripts/unrelated.patch"] = replacement
         fixture.manifest["patches"][3] = {
             "name": "unrelated replacement patch",
-            "pathKey": "UNRELATED_PATCH_PATH",
-            "sha256Key": "UNRELATED_PATCH_SHA256",
-            "sha256": replacement_sha256,
+            "pathKey": "XCODEGEN_DEPENDENCY_PATCH_PATH",
+            "sha256Key": "XCODEGEN_DEPENDENCY_PATCH_SHA256",
         }
         self._assert_fails(fixture, "fixed patch policy set")
 
-    def test_legacy_partial_digest_rejected(self) -> None:
-        # Point the raw-packet patch entirely at the rejected legacy digest.
+    def test_legacy_patch_bytes_are_rejected(self) -> None:
+        # A rejected digest can only match when the legacy patch bytes return.
+        # Treat the synthetic raw-packet body as such a legacy patch.
         fixture = Fixture()
-        rejected_digest = REJECTED_PATCH_DIGESTS[0]
-        fixture.env["SING_BOX_RAW_PACKET_PATCH_SHA256"] = rejected_digest
-        fixture.manifest["patches"][1]["sha256"] = rejected_digest
-        fixture.lock["singBox"]["rawPacketPatch"]["sha256"] = rejected_digest
-        self._assert_fails(fixture, "rejected/legacy digest")
+        rejected = {*REJECTED_PATCH_DIGESTS[1:], RAW_SHA}
+        fixture.manifest["rejectedPatchDigests"] = sorted(rejected)
+        with mock.patch.object(
+            pinned_verifier, "REQUIRED_REJECTED_PATCH_DIGESTS", frozenset(rejected)
+        ):
+            self._assert_fails(fixture, "pins a rejected/legacy digest: " + RAW_SHA)
 
     def test_rejected_patch_digest_policy_cannot_be_disabled_or_malformed(self) -> None:
         invalid_values = (
@@ -1672,9 +1487,14 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_combined_diff_equal_to_patch_rejected(self) -> None:
         fixture = Fixture()
         fixture.env["SING_BOX_COMBINED_DIFF_SHA256"] = SECURITY_SHA
-        fixture.manifest["combinedDiffSha256"] = SECURITY_SHA
-        fixture.lock["singBox"]["combinedDiffSha256"] = SECURITY_SHA
-        self._assert_fails(fixture, "partial")
+        self._assert_fails(fixture, "equals a single patch digest")
+
+    def test_combined_diff_equal_to_dependency_only_diff_rejected(self) -> None:
+        fixture = Fixture()
+        fixture.env["SING_BOX_COMBINED_DIFF_SHA256"] = fixture.env[
+            "SING_BOX_PATCHED_DIFF_SHA256"
+        ]
+        self._assert_fails(fixture, "equals the partial go.mod/go.sum diff digest")
 
     # --- libbox build tags --------------------------------------------------
 
@@ -1685,13 +1505,17 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         reduced = BUILD_TAGS.replace("with_clash_api,", "", 1)
         fixture.env["LIBBOX_BUILD_TAGS"] = reduced
-        fixture.manifest["libboxBuildTags"]["value"] = reduced
         self._assert_fails(fixture, "required tag 'with_clash_api'")
 
-    def test_tag_list_drift_from_manifest_fails(self) -> None:
+    def test_tag_list_without_required_tags_fails(self) -> None:
         fixture = Fixture()
         fixture.env["LIBBOX_BUILD_TAGS"] = "with_quic,grpcnotrace"
-        self._assert_fails(fixture, "pinned libbox build tags LIBBOX_BUILD_TAGS")
+        self._assert_fails(fixture, "missing the required tag")
+
+    def test_tag_order_is_not_policy(self) -> None:
+        fixture = Fixture()
+        fixture.env["LIBBOX_BUILD_TAGS"] = ",".join(reversed(BUILD_TAGS.split(",")))
+        self._verify_fixture(fixture)
 
     def test_missing_tag_pin_fails_closed(self) -> None:
         fixture = Fixture()
@@ -1700,41 +1524,49 @@ class PinnedBuildInputsTests(unittest.TestCase):
 
     def test_malformed_tag_fails(self) -> None:
         fixture = Fixture()
-        malformed = "with_quic, with_clash_api,grpcnotrace"
-        fixture.env["LIBBOX_BUILD_TAGS"] = malformed
-        fixture.manifest["libboxBuildTags"]["value"] = malformed
-        self._assert_fails(fixture, "malformed")
+        fixture.env["LIBBOX_BUILD_TAGS"] = "with_quic, with_clash_api,grpcnotrace"
+        self._assert_fails(fixture, "LIBBOX_BUILD_TAGS is not a go-build-tags value")
 
     def test_repeated_tag_fails(self) -> None:
         fixture = Fixture()
-        repeated = "with_quic,with_clash_api,grpcnotrace,with_quic"
-        fixture.env["LIBBOX_BUILD_TAGS"] = repeated
-        fixture.manifest["libboxBuildTags"]["value"] = repeated
-        self._assert_fails(fixture, "repeat")
+        fixture.env["LIBBOX_BUILD_TAGS"] = BUILD_TAGS + ",with_quic"
+        self._assert_fails(fixture, "repeat 'with_quic'")
 
     def test_coordinated_build_tag_deletion_still_fails_fixed_policy(self) -> None:
         fixture = Fixture()
         reduced = BUILD_TAGS.replace("with_quic,", "", 1)
         fixture.env["LIBBOX_BUILD_TAGS"] = reduced
-        fixture.manifest["libboxBuildTags"]["value"] = reduced
         fixture.manifest["libboxBuildTags"]["required"] = [
             entry
             for entry in fixture.manifest["libboxBuildTags"]["required"]
             if entry["tag"] != "with_quic"
         ]
-        self._assert_fails(fixture, "differ from release policy")
+        self._assert_fails(fixture, "pinned libbox build tags differ from release policy")
 
     def test_same_cardinality_build_tag_replacement_fails_fixed_policy(self) -> None:
         fixture = Fixture()
         replaced = BUILD_TAGS.replace("with_quic", "with_fake", 1)
         fixture.env["LIBBOX_BUILD_TAGS"] = replaced
-        fixture.manifest["libboxBuildTags"]["value"] = replaced
         entry = next(
             entry for entry in fixture.manifest["libboxBuildTags"]["required"]
             if entry["tag"] == "with_quic"
         )
         entry["tag"] = "with_fake"
-        self._assert_fails(fixture, "differ from release policy")
+        self._assert_fails(fixture, "pinned libbox build tags differ from release policy")
+
+    def test_extra_build_tag_fails_fixed_policy(self) -> None:
+        fixture = Fixture()
+        fixture.env["LIBBOX_BUILD_TAGS"] = BUILD_TAGS + ",with_naive_outbound"
+        self._assert_fails(fixture, "pinned libbox build tags differ from release policy")
+
+    def test_required_tag_table_cannot_shrink(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["libboxBuildTags"]["required"] = [
+            entry
+            for entry in fixture.manifest["libboxBuildTags"]["required"]
+            if entry["tag"] != "grpcnotrace"
+        ]
+        self._assert_fails(fixture, "libbox required tags differ from release policy")
 
     def test_source_binding_without_required_tag_fails(self) -> None:
         # A source trigger may not be satisfied by the required-tag table alone:
@@ -1743,7 +1575,6 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         reduced = BUILD_TAGS.replace("with_clash_api,", "", 1)
         fixture.env["LIBBOX_BUILD_TAGS"] = reduced
-        fixture.manifest["libboxBuildTags"]["value"] = reduced
         fixture.manifest["libboxBuildTags"]["required"] = [
             entry
             for entry in fixture.manifest["libboxBuildTags"]["required"]
@@ -1801,7 +1632,25 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_malformed_env_line_fails(self) -> None:
         fixture = Fixture()
         fixture.append_env_text("this is not a valid pin line\n")
-        self._assert_fails(fixture, "malformed")
+        self._assert_fails(fixture, "line [0-9]+ is malformed")
+
+    def test_pin_file_is_split_like_bash(self) -> None:
+        # A form feed or CR would be a line break to the Python parser but part
+        # of a value to bash; both are rejected so the verified view is bash's.
+        for separator in ("\f", "\r\n", "\v", "\x85"):
+            with self.subTest(separator=repr(separator)):
+                fixture = Fixture()
+                go_version = fixture.env.pop("GO_VERSION")
+                fixture.append_env_text(f"GO_VERSION={go_version}{separator}")
+                self._assert_fails(fixture, "only printable ASCII lines separated by LF")
+        fixture = Fixture()
+        fixture.append_env_text(" NODE_VERSION=1.2.3\n")
+        self._assert_fails(fixture, "is malformed")
+
+    def test_duplicate_pin_fails(self) -> None:
+        fixture = Fixture()
+        fixture.append_env_text(f"GO_VERSION={fixture.env['GO_VERSION']}\n")
+        self._assert_fails(fixture, "defines GO_VERSION more than once")
 
     def test_missing_manifest_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1842,7 +1691,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             path = root / MANIFEST_RELATIVE_PATH
             body = path.read_text(encoding="utf-8")
             path.write_text(
-                '{"schema":"cfw-pinned-build-inputs-v1",' + body[1:],
+                '{"schema":"cfw-pinned-build-inputs-v2",' + body[1:],
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(PinnedInputError, "duplicate JSON field 'schema'"):
@@ -1908,52 +1757,6 @@ class PinnedBuildInputsTests(unittest.TestCase):
             ):
                 verify_source_contract(root)
 
-    def test_native_lock_strict_json_and_identity_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = Fixture()
-            root = fixture.write(Path(temporary))
-            lock = root / "native/macos/Dependencies.lock.json"
-            body = lock.read_text(encoding="utf-8")
-            lock.write_text('{"go":"1.27.2",' + body[1:], encoding="utf-8")
-            with self.assertRaisesRegex(PinnedInputError, "duplicate JSON field 'go'"):
-                verify_source_contract(root)
-
-        fixture = Fixture()
-        fixture.lock["unexpected"] = True
-        self._assert_fails(fixture, "exact top-level shape")
-
-        fixture = Fixture()
-        fixture.lock["go"] = float("nan")
-        self._assert_fails(fixture, "non-finite")
-
-        fixture = Fixture()
-        fixture.lock["singBox"]["unexpected"] = True
-        self._assert_fails(fixture, "singBox table has an inexact shape")
-
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = Fixture()
-            root = fixture.write(Path(temporary))
-            lock = root / "native/macos/Dependencies.lock.json"
-            os.link(lock, root / "native-lock-hardlink.json")
-            with self.assertRaisesRegex(PinnedInputError, "exactly one hard link"):
-                verify_source_contract(root)
-
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = Fixture()
-            root = fixture.write(Path(temporary))
-            lock = root / "native/macos/Dependencies.lock.json"
-            lock.write_bytes(b"\xff")
-            with self.assertRaisesRegex(PinnedInputError, "strict UTF-8"):
-                verify_source_contract(root)
-
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = Fixture()
-            root = fixture.write(Path(temporary))
-            lock = root / "native/macos/Dependencies.lock.json"
-            lock.write_bytes(b" " * (MAX_NATIVE_LOCK_BYTES + 1))
-            with self.assertRaisesRegex(PinnedInputError, "byte bound"):
-                verify_source_contract(root)
-
     def test_build_script_hardlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = Fixture()
@@ -1963,17 +1766,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             with self.assertRaisesRegex(PinnedInputError, "exactly one hard link"):
                 verify_source_contract(root)
 
-    # --- native lock and build-script bindings ------------------------------
-
-    def test_native_lock_mismatch_fails(self) -> None:
-        fixture = Fixture()
-        fixture.lock["singBox"]["rawPacketPatch"]["sha256"] = "b" * 64
-        self._assert_fails(fixture, "rawPacketPatch")
-
-    def test_endpoint_conflict_native_lock_mismatch_fails(self) -> None:
-        fixture = Fixture()
-        fixture.lock["singBox"]["endpointConflictPatch"]["sha256"] = "b" * 64
-        self._assert_fails(fixture, "endpointConflictPatch")
+    # --- build-script bindings ----------------------------------------------
 
     def test_build_script_missing_pin_reference_fails(self) -> None:
         fixture = Fixture()
@@ -2021,26 +1814,54 @@ class PinnedBuildInputsTests(unittest.TestCase):
                     "must forbid network",
                 )
 
-    def test_dependency_pins_path_cannot_redirect(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["dependencyPinsPath"] = "scripts/alternate-pins.env"
-        self._assert_fails(fixture, "dependency pins path differs from release policy")
-
-    def test_native_lock_path_cannot_redirect(self) -> None:
-        fixture = Fixture()
-        fixture.manifest["nativeLockPath"] = "native/macos/Alternate.lock.json"
-        self._assert_fails(fixture, "native lock path differs from release policy")
-
     def test_ci_unsigned_python_must_match_the_dependency_pin(self) -> None:
         fixture = Fixture()
-        fixture.env["PYTHON_VERSION"] = "3.14.7"
-        fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.7"
         self._verify_fixture(fixture)
 
+        pinned = fixture.env["PYTHON_VERSION"]
+        major, minor, patch = pinned.split(".")
         fixture.ci_workflow = fixture.ci_workflow.replace(
-            'python-version: "3.14.7"', 'python-version: "3.14.8"'
+            f'python-version: "{pinned}"',
+            f'python-version: "{major}.{minor}.{int(patch) + 1}"',
         )
         self._assert_fails(fixture, "Python version does not exactly match")
+
+
+class PinValueCopyTests(unittest.TestCase):
+    """Pinned values are written only in scripts/dependency_pins.env."""
+
+    def test_bounded_pin_value_search_finds_copies_but_not_substrings(self) -> None:
+        go = SHIPPED_PINS["GO_VERSION"]
+        self.assertEqual(
+            _repeated_pin_values(f"target/toolchains/go-{go}/bin/go"), ["GO_VERSION"]
+        )
+        self.assertEqual(_repeated_pin_values(f"go {go}0 and 1{go}"), [])
+        self.assertEqual(_repeated_pin_values(f"version {go}.1"), [])
+
+    def test_shipped_policy_repeats_no_pin_value(self) -> None:
+        policy = copy.deepcopy(SHIPPED_PINNED_MANIFEST)
+        # The packet-evidence endpoint and collector sections still bind
+        # GO_VERSION and the endpoint build recipe until they get their own
+        # toolchain pin; every other rule names pin keys only.
+        del policy["packetEvidenceEndpoint"]
+        del policy["physicalCollectorModule"]
+        self.assertEqual(_repeated_pin_values(json.dumps(policy)), [])
+
+    def test_current_documents_name_pin_keys_not_values(self) -> None:
+        # Dated history (CHANGELOG, dated reviews, planning) keeps the values it
+        # recorded; current-state documents must name the pin key instead.
+        for relative in (
+            "README.md",
+            "RELEASE.md",
+            "docs/parity-checklist.md",
+            "docs/physical-evidence-v5.md",
+            "docs/supply-chain.md",
+            "native/macos/README.md",
+            "tools/physical-transport-peer-ios/README.md",
+        ):
+            with self.subTest(document=relative):
+                text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+                self.assertEqual(_repeated_pin_values(text), [])
 
 
 class RepositoryRegularFileReaderTests(unittest.TestCase):

@@ -7,25 +7,39 @@ network download of cores, Go toolchains, libbox, or Xcode products, and Cargo
 
 ## Verified pins
 
-The machine-readable values live in
-[`scripts/dependency_pins.env`](../scripts/dependency_pins.env).
+[`scripts/dependency_pins.env`](../scripts/dependency_pins.env) is the
+authoritative store of pinned values; this document names pin keys, never their
+values. [`scripts/pinned_build_inputs.json`](../scripts/pinned_build_inputs.json)
+is the policy those values must satisfy: each key's value format, the tracked
+files hashed against their digest pins, the required libbox build tags and their
+reasons, and the pin references each release script must keep. The verifier
+also fixes the set of pin keys, so a pin cannot vanish from both files.
 
-| Input | Pin | Verification |
+A few consumers cannot read the pin file and keep a copy that a test or a
+release-time check compares with it: `rust-toolchain.toml` and the CI
+workflow's Rust and Python versions, the updater signing launcher's fixed Tauri
+toolchain metadata, and the publication source plans. Until they get their own
+toolchain pin, the `packetEvidenceEndpoint` and `physicalCollectorModule`
+policy entries and the endpoint build recipe also bind `GO_VERSION`. Otherwise
+a pinned value appears only in the pin file and in the sources that consume it
+(patches, `go.mod` files, lock files).
+
+| Input | Pin keys | Verification |
 |---|---|---|
-| Rust | `1.98.1` | `rust-toolchain.toml`, exact six-component `rustup-component-file-tree-v2` surface, and compiler/version identity |
-| Node.js | `26.8.2` | official darwin-arm64 archive SHA-256 |
-| Go | `1.27.2` | official darwin-arm64 archive SHA-256 |
-| XcodeGen | `2.46.0` (`8445e778451c7e44237b90281bde622d764b0084`) | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
-| Tauri CLI | `2.12.0` | official crate SHA-256, unchanged published lock digest, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
-| gomobile/gobind | `v0.1.13` (`9f03b8f25789099c5c8abef4a02085da783ba923`) | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
-| govulncheck | `v1.6.0` | embedded Go module identity and module checksum |
-| cargo-deny | `0.20.2` | Rust `1.98.1` locked source install, version identity, and target-aware policy run |
-| sing-box/libbox | `v1.14.2`, `af6e64c3b69e6132ebaee0e1a3d24e93903f6709` | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, endpoint-conflict, profile-probe and SOCKS-lifecycle patches, with individual and combined SHA-256 values |
-| iPhone Packet LAN peer (test-only) | signed thin-arm64 app tree `9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7` | source-tree identity, signed executable/profile/entitlements/certificate pins, dual-hash physical-device selection, CoreDevice receipt validation, and exact install/process/uninstall ownership |
-| Apple provider reference | `2b1763a80f2c1dee1ab3ac62d84dbda7dc5178f4` | Git commit identity; reference only |
-| deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
+| Rust | `RUST_VERSION`, `RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256` | `rust-toolchain.toml`, exact six-component `rustup-component-file-tree-v2` surface, and compiler/version identity |
+| Node.js | `NODE_VERSION`, `NODE_DARWIN_ARM64_SHA256` | official darwin-arm64 archive SHA-256 |
+| Go | `GO_VERSION`, `GO_DARWIN_ARM64_SHA256` | official darwin-arm64 archive SHA-256 |
+| XcodeGen | `XCODEGEN_VERSION`, `XCODEGEN_COMMIT` and the other `XCODEGEN_*` pins | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
+| Tauri CLI | `TAURI_CLI_VERSION` and the other `TAURI_*` pins | official crate SHA-256, unchanged published lock digest, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
+| gomobile/gobind | `GOMOBILE_VERSION`, `GOMOBILE_COMMIT`, `GOMOBILE_MODULE_SUM` | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
+| govulncheck | `GOVULNCHECK_VERSION`, `GOVULNCHECK_MODULE_SUM` | embedded Go module identity and module checksum |
+| cargo-deny | `CARGO_DENY_VERSION` | locked source install with the pinned Rust, version identity, and target-aware policy run |
+| sing-box/libbox | `SING_BOX_VERSION`, `SING_BOX_COMMIT` and the other `SING_BOX_*` and `LIBBOX_*` pins | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, endpoint-conflict, profile-probe and SOCKS-lifecycle patches, with individual and combined SHA-256 values |
+| iPhone Packet LAN peer (test-only) | signed thin-arm64 app tree `identity.artifact.app_tree_sha256` in `scripts/physical_capture/ios_packet_lan_peer_identity.json` | source-tree identity, signed executable/profile/entitlements/certificate pins, dual-hash physical-device selection, CoreDevice receipt validation, and exact install/process/uninstall ownership |
+| Apple provider reference | `SING_BOX_APPLE_REFERENCE_COMMIT` | Git commit identity; reference only |
+| deployment | `MACOS_DEPLOYMENT_TARGET`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
-This table reflects the active 0.5.0 development pins after the September refresh;
+The pin file holds the active 0.5.0 development values;
 frozen 0.4.0 source and candidate receipts retain their original sources and toolchain.
 Each signed application's own receipts remain authoritative. Earlier July and August reviews are historical records, not the
 current version inventory. The exact XcodeGen, sing-box, and gomobile tags resolve
@@ -51,7 +65,7 @@ application build, and immediately before final artifact sealing, with the same
 Rust SDK deployment is an explicit prerequisite to consuming the closed release
 environment. Release-Mac operations set `CFW_RELEASE_RUST_TOOLCHAIN=private` and
 use the effective account's
-`~/.cfm-release-tooling/rust-toolchains/1.98.1-aarch64-apple-darwin`;
+`~/.cfm-release-tooling/rust-toolchains/$RUST_VERSION-aarch64-apple-darwin`;
 `global` preserves the existing CI location under `~/.rustup/toolchains`.
 The selector controls deployment independently of the production or unsigned
 validation role. Only an unset bootstrap input defaults to `global`; sealed
@@ -61,7 +75,7 @@ SDK nor fall back between roots.
 Both locations must pass the unchanged `rustup-component-file-tree-v2` contract:
 Cargo, Clippy, rustc, arm64 standard libraries and rustfmt, their component
 manifests, metadata, modes and complete file inventory remain bound to
-`472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae`.
+`RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256`.
 Additional components in the user's shared SDK are not silently excluded from
 that hash; private selection keeps them outside the selected release SDK.
 Frozen 40043 source still admits only its original global launcher layout;
@@ -78,7 +92,7 @@ Network access is isolated to explicit preparation:
 2. `scripts/install_pinned_tauri_cli.sh` builds the checksum-bound Tauri source
    with an isolated Cargo home and target directory. Its sealed payload retains
    only the thin arm64 executable and clean official crate source (including the
-   unchanged published lock and licenses) under `target/toolchains/tauri-cli-2.12.0`; release
+   unchanged published lock and licenses) under `target/toolchains/tauri-cli-$TAURI_CLI_VERSION`; release
    scripts call that exact binary and never resolve `cargo tauri` from an
    ambient Cargo home. Cargo's three root-level runtime tracking/lock files are
    validated and removed only from the private offline cache snapshot before
@@ -107,18 +121,18 @@ Network access is isolated to explicit preparation:
    `ZERO_AR_DATE=1`. The archive setting removes the wall-clock timestamp from
    Apple's `__.SYMDEF` member, so independent builds from identical inputs are
    byte-for-byte reproducible. The script refuses a different or unexpectedly
-   modified checkout and invokes the pinned gomobile binder for `macos/arm64`
-   only.
+   modified checkout and invokes the pinned gomobile binder for the
+   `LIBBOX_APPLE_PLATFORM` target only.
 8. `scripts/verify_pinned_source_contract.py`, the P0 source gate run by the
-   build-script boundary, validates the complete static pinned-input contract
-   in `scripts/pinned_build_inputs.json` without invoking a toolchain or
-   requiring generated output; the verification itself lives in
+   build-script boundary, checks every value in `scripts/dependency_pins.env`
+   against the policy in `scripts/pinned_build_inputs.json` without invoking a
+   toolchain or requiring generated output; the verification itself lives in
    `scripts/verify_pinned_build_inputs.py`. Every input it reads is opened
    through a repository-rooted, no-follow descriptor chain that rejects
    symlinks, hard links, non-regular files, foreign ownership, group- or
    other-writable modes, and any before/after metadata change.
-   The pinned manifest carries dependency and policy values only; it does not
-   re-attest individual release scripts. The exact Git commit bound by the
+   The policy repeats no pin value apart from the `GO_VERSION` bindings
+   named above, and it does not re-attest individual release scripts. The exact Git commit bound by the
    hosted CI receipt and the candidate freeze's clean-tree `repositoryCommit`
    and release-source digest `releaseSourceSha256` identify every tracked
    release source. Developer ID signing with designated-requirement checks,
@@ -182,20 +196,18 @@ The offline build command is equivalent to:
 
 ```sh
 gomobile bind \
-  -target macos/arm64 \
-  -macosversion 15.0 \
+  -target "$LIBBOX_APPLE_PLATFORM" \
+  -macosversion "$MACOS_DEPLOYMENT_TARGET" \
   -libname box \
-  -tags-not-macos with_low_memory \
+  -tags-not-macos="$LIBBOX_NON_MACOS_TAGS" \
   -tags "$LIBBOX_BUILD_TAGS" \
   ./experimental/libbox
 ```
 
-The recorded tags enable the pinned upstream transports, including the
-WireGuard userspace stack:
-
-```text
-with_quic,with_utls,with_clash_api,with_wireguard,with_gvisor,badlinkname,tfogo_checklinkname0,grpcnotrace
-```
+`LIBBOX_BUILD_TAGS` enables the pinned upstream transports, including the
+WireGuard userspace stack. The `libboxBuildTags` policy in
+`scripts/pinned_build_inputs.json` lists every required tag with its reason;
+the pinned list must be exactly that set.
 
 WireGuard uses the userspace stack (`system=false`); NetworkExtension remains
 the only owner of system tunnel interfaces. The security dependency patch also
@@ -210,11 +222,12 @@ patched source. `scripts/test_advanced_protocols.sh` exercises these paths with
 real local protocol peers and the race detector; its Reality target reports
 the key exchange each connection negotiated.
 
-`with_low_memory` is the upstream non-macOS-only tag and is not applied to the
-macOS slice.
+`LIBBOX_NON_MACOS_TAGS` holds the upstream non-macOS-only tags; they are not
+applied to the macOS slice.
 
-The direct binder invocation adds the explicit `-macosversion 15.0` release
-requirement, which the upstream wrapper does not expose. The product tag set is
+The direct binder invocation adds the explicit `-macosversion` release
+requirement from `MACOS_DEPLOYMENT_TARGET`, which the upstream wrapper does not
+expose. The product tag set is
 intentionally smaller than the upstream Apple client: the unsupported Naive,
 Tailscale and DHCP surfaces are not compiled, so their transitive archives and
 warning-prone Cronet payload are absent rather than suppressed. WireGuard and
@@ -229,8 +242,9 @@ instead of `experimental/clashapi` and its registered constructor fails every
 `box.New` call with `clash api is not included in this build`. The tag is also
 what makes the application-owned, loopback-bound `experimental.clash_api` block
 in the projection (`crates/cfw-singbox-config/src/controller.rs`) reachable.
-`scripts/verify_pinned_build_inputs.py` pins the tag list and fails closed if
-that block exists without the tag.
+`scripts/verify_pinned_build_inputs.py` requires the pinned tag list to be
+exactly the policy's required tags and fails closed if that block exists without
+the tag.
 
 ## Artifact identity
 

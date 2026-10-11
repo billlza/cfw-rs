@@ -1,38 +1,78 @@
 {
-  "schema": "cfw-pinned-build-inputs-v1",
-  "description": "Design-pinned libbox and toolchain build inputs for macos15-network-extension-migration (Requirement 5.1). This manifest is the offline source of truth; verify_pinned_build_inputs.py binds it to scripts/dependency_pins.env, the tracked patch files, the native dependency lock, and the offline build scripts.",
-  "dependencyPinsPath": "scripts/dependency_pins.env",
-  "nativeLockPath": "native/macos/Dependencies.lock.json",
-  "tools": {
-    "PYTHON_VERSION": "3.14.7",
-    "RUST_VERSION": "1.98.1",
-    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": "7957b1cc6ab87becb2f906cdc6ffd4fdd711ee892cb55ff4b5875e8cfa41be3a",
-    "CARGO_AUDIT_VERSION": "0.22.2",
-    "CARGO_DENY_VERSION": "0.20.2",
-    "XCODEGEN_VERSION": "2.46.0",
-    "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
-    "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
-    "XCODEGEN_PACKAGE_RESOLVED_SHA256": "c71eacb628f5fb50d8cd266b5fbc1bbe8df48b880fc91570ca79f5f6deaab961",
-    "NODE_VERSION": "26.8.2",
-    "GO_VERSION": "1.27.2",
-    "GOMOBILE_VERSION": "v0.1.13",
-    "GOVULNCHECK_VERSION": "v1.6.0",
-    "TAURI_CLI_VERSION": "2.12.0",
-    "SING_BOX_VERSION": "v1.14.2",
-    "NPM_VERSION": "12.0.2",
-    "NPM_ARCHIVE_SHA256": "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1",
-    "GO_RELEASE_TOOLS_GO_MOD_SHA256": "808284de3c00d0852b13577ac25b8c75d2b43e98337e1a0c4330ffffb8f0bbb1",
-    "GO_RELEASE_TOOLS_GO_SUM_SHA256": "6c37e1d4a75699211d3a482cf561098b84427252f2c059244f7f29b0fb1d0906",
-    "XCODE_VERSION": "27.0",
-    "XCODE_BUILD_VERSION": "27A266a",
-    "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
-    "XCODEGEN_DEPENDENCY_PATCH_PATH": "scripts/xcodegen-2.46.0-dependency-refresh.patch",
-    "XCODEGEN_DEPENDENCY_PATCH_SHA256": "65b93afd828b7b1ce5723ce30c175a5e74f48879dc6768915e64e0632d5d5693",
-    "XCODEGEN_AEXML_COMMIT": "db806756c989760b35108146381535aec231092b",
-    "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "357362479c2c2f0dc7359705b4668f0eb6e67e8ad80eeedc37f711a7a373e80b",
-    "XCODEGEN_AEXML_PATCH_PATH": "scripts/aexml-4.7.0-supported-watchos.patch",
-    "XCODEGEN_AEXML_PATCH_SHA256": "f83bc62e8060728b37a40ac7443b319c46284ea4735f8c21f545d4089389b5d4",
-    "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "d3fe435823e4966f3da18bdae02c4e6ea3ec9ffecc6453d0aa4e11cc4df2c1b6"
+  "schema": "cfw-pinned-build-inputs-v2",
+  "description": "Release build-input policy. scripts/dependency_pins.env is the authoritative store of pinned versions, digests, commits and paths; this policy names the format of every pin key and the rules verify_pinned_build_inputs.py applies to those values: tracked files hashed against their digest pins, required libbox build tags and their reasons, and the pin references each release script must keep. It repeats no pin value, except that packetEvidenceEndpoint and physicalCollectorModule still bind GO_VERSION and the endpoint build recipe until they get their own toolchain pin.",
+  "pinFormats": {
+    "MACOS_DEPLOYMENT_TARGET": "apple-version",
+    "XCODE_VERSION": "apple-version",
+    "XCODE_BUILD_VERSION": "apple-build",
+    "XCODEGEN_VERSION": "version",
+    "XCODEGEN_COMMIT": "git-commit",
+    "XCODEGEN_SOURCE_SHA256": "sha256",
+    "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "sha256",
+    "XCODEGEN_PACKAGE_RESOLVED_SHA256": "sha256",
+    "XCODEGEN_DEPENDENCY_PATCH_PATH": "repository-path",
+    "XCODEGEN_DEPENDENCY_PATCH_SHA256": "sha256",
+    "XCODEGEN_AEXML_COMMIT": "git-commit",
+    "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "sha256",
+    "XCODEGEN_AEXML_PATCH_PATH": "repository-path",
+    "XCODEGEN_AEXML_PATCH_SHA256": "sha256",
+    "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "sha256",
+    "XCODEGEN_PATCH_PATH": "repository-path",
+    "XCODEGEN_PATCH_SHA256": "sha256",
+    "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": "sha256",
+    "PYTHON_VERSION": "version",
+    "RUST_VERSION": "version",
+    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": "sha256",
+    "CARGO_AUDIT_VERSION": "version",
+    "CARGO_DENY_VERSION": "version",
+    "TAURI_CLI_VERSION": "version",
+    "TAURI_CLI_CRATE_SHA256": "sha256",
+    "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": "sha256",
+    "TAURI_CLI_SPIN_VERSION": "version",
+    "TAURI_CLI_SPIN_CRATE_SHA256": "sha256",
+    "TAURI_CARGO_CACHE_CONTRACT_SHA256": "sha256",
+    "SHELLCHECK_VERSION": "version",
+    "SHELLCHECK_DARWIN_ARM64_SHA256": "sha256",
+    "NODE_VERSION": "version",
+    "NODE_DARWIN_ARM64_SHA256": "sha256",
+    "NPM_VERSION": "version",
+    "NPM_ARCHIVE_SHA256": "sha256",
+    "GO_VERSION": "version",
+    "GO_DARWIN_ARM64_SHA256": "sha256",
+    "GOMOBILE_VERSION": "go-module-version",
+    "GOMOBILE_COMMIT": "git-commit",
+    "GOMOBILE_MODULE_SUM": "go-module-sum",
+    "GOVULNCHECK_VERSION": "go-module-version",
+    "GOVULNCHECK_MODULE_SUM": "go-module-sum",
+    "SING_BOX_VERSION": "go-module-version",
+    "SING_BOX_COMMIT": "git-commit",
+    "SING_BOX_UPSTREAM_GO_MOD_SHA256": "sha256",
+    "SING_BOX_UPSTREAM_GO_SUM_SHA256": "sha256",
+    "SING_BOX_SECURITY_PATCH_PATH": "repository-path",
+    "SING_BOX_SECURITY_PATCH_SHA256": "sha256",
+    "SING_BOX_RAW_PACKET_PATCH_PATH": "repository-path",
+    "SING_BOX_RAW_PACKET_PATCH_SHA256": "sha256",
+    "SING_BOX_DNS_FAILOVER_PATCH_PATH": "repository-path",
+    "SING_BOX_DNS_FAILOVER_PATCH_SHA256": "sha256",
+    "SING_BOX_PROFILE_PROBE_PATCH_PATH": "repository-path",
+    "SING_BOX_PROFILE_PROBE_PATCH_SHA256": "sha256",
+    "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH": "repository-path",
+    "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256": "sha256",
+    "SING_BOX_PATCHED_DIFF_SHA256": "sha256",
+    "SING_BOX_COMBINED_DIFF_SHA256": "sha256",
+    "SING_BOX_PATCHED_GO_MOD_SHA256": "sha256",
+    "SING_BOX_PATCHED_GO_SUM_SHA256": "sha256",
+    "SING_BOX_ANDROID_REFERENCE_COMMIT": "git-commit",
+    "SING_BOX_APPLE_REFERENCE_COMMIT": "git-commit",
+    "LIBBOX_APPLE_PLATFORM": "gomobile-target",
+    "LIBBOX_BUILD_TAGS": "go-build-tags",
+    "LIBBOX_NON_MACOS_TAGS": "go-build-tags",
+    "LIBBOX_MODULE_CACHE_CONTRACT_PATH": "repository-path",
+    "LIBBOX_MODULE_CACHE_CONTRACT_SHA256": "sha256",
+    "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH": "repository-path",
+    "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256": "sha256",
+    "GO_RELEASE_TOOLS_GO_MOD_SHA256": "sha256",
+    "GO_RELEASE_TOOLS_GO_SUM_SHA256": "sha256"
   },
   "packetEvidenceEndpoint": {
     "goVersionKey": "GO_VERSION",
@@ -54,8 +94,7 @@
       "-buildvcs=false",
       "-trimpath",
       "-ldflags='-s -w -buildid='",
-      "-o ../../target/packet-evidence-endpoint-linux-amd64",
-      "f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb"
+      "-o ../../target/packet-evidence-endpoint-linux-amd64"
     ],
     "sourceFiles": [
       {
@@ -88,7 +127,7 @@
       },
       {
         "path": "tools/packet-evidence-endpoint/README.md",
-        "sha256": "ff9260e9b39b689480f7900999d2fd406546d252d8ccbc4aed878eeac0eb36cf"
+        "sha256": "e1aecab943a38235253cbd28876e3c99a8ea08791cf8db9f1665faeba329602f"
       },
       {
         "path": "scripts/physical_capture/packet_endpoints.json",
@@ -115,9 +154,6 @@
   "xcodegen": {
     "patchPathKey": "XCODEGEN_PATCH_PATH",
     "patchSha256Key": "XCODEGEN_PATCH_SHA256",
-    "patchSha256": "bf307dea2cbbbfe2df1cd66b98b684a6497d4321d0b4115402dc200a06fb762e",
-    "patchedSettingsBuilderSha256Key": "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
-    "patchedSettingsBuilderSha256": "33169eab011775361f0e8fd8f9a51f4f2199916eabe033961467734b8624e482",
     "bootstrapPath": "scripts/bootstrap_release_toolchain.sh",
     "requiredBootstrapFragments": [
       "$XCODEGEN_PATCH_PATH",
@@ -140,8 +176,6 @@
       "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256"
     ]
   },
-  "gomobileCommitKey": "GOMOBILE_COMMIT",
-  "gomobileCommit": "9f03b8f25789099c5c8abef4a02085da783ba923",
   "cargoDeny": {
     "ciWorkflowPath": ".github/workflows/ci.yml",
     "requiredCiFragments": [
@@ -152,17 +186,8 @@
     ]
   },
   "tauriCli": {
-    "crateSha256Key": "TAURI_CLI_CRATE_SHA256",
-    "crateSha256": "2e238d6e852e23a0c914ff8623544ed01b4c1cb67e3e48357a5e97fb966a0bcb",
-    "upstreamCargoLockSha256Key": "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
-    "upstreamCargoLockSha256": "792031ed27ead83bd06bbf564a3c814f33a8c7ee81a8729f8d7c17cd041b0515",
-    "spinVersionKey": "TAURI_CLI_SPIN_VERSION",
-    "spinVersion": "0.9.9",
-    "spinCrateSha256Key": "TAURI_CLI_SPIN_CRATE_SHA256",
-    "spinCrateSha256": "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e",
     "cacheContractPath": "scripts/tauri_cargo_cache_contract.py",
     "cacheContractSha256Key": "TAURI_CARGO_CACHE_CONTRACT_SHA256",
-    "cacheContractSha256": "25d57ed8856960d32edf748f59ff13b65eebc23b7b426e4b662afc5e1aa7521b",
     "ciWorkflowPath": ".github/workflows/ci.yml",
     "requiredCiFragment": "install-tauri-cli",
     "installerPath": "scripts/install_pinned_tauri_cli.sh",
@@ -239,71 +264,42 @@
       "cannot scan $operation log for warnings"
     ]
   },
-  "singBoxCommitKey": "SING_BOX_COMMIT",
-  "singBoxCommit": "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
   "patches": [
     {
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
-      "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "726b19209feb93ca17aae1c9df185c7f570ed40f8b6ef5fb9ab1e22bca2b89bb"
+      "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256"
     },
     {
       "name": "sing-box raw packet tun patch",
       "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
-      "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
-      "sha256": "d3aa03dcf3e3e0421bd1b5062dcf8ca60f62252afabd8d15013ed3e4bda25950"
+      "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256"
     },
     {
       "name": "sing-box DNS failover patch",
       "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
-      "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-      "sha256": "503b5ad3f5a3b1a43920cbb9415c4bc7159d990f47c761f20ec5533a5881ce0b"
+      "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256"
     },
     {
       "name": "sing-box endpoint conflict patch",
       "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
-      "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-      "sha256": "d3815c6cc2af12565422c96c1cc0ad41be1792edf796d11efdf98598c8344d49"
+      "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"
     },
     {
       "name": "sing-box profile probe patch",
       "pathKey": "SING_BOX_PROFILE_PROBE_PATCH_PATH",
-      "sha256Key": "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
-      "sha256": "fc9d376b27c9cb506ddba1969d1ee51c49b01e7b877fdc201d54c80b73f2e80a"
+      "sha256Key": "SING_BOX_PROFILE_PROBE_PATCH_SHA256"
     },
     {
       "name": "sing-box SOCKS lifecycle patch",
       "pathKey": "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
-      "sha256Key": "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
-      "sha256": "6522a046fade01547102e6ff43fa12ae5a25250139c803011a606b7fd8fd9821"
+      "sha256Key": "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256"
     }
   ],
-  "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "7df19ccb32d1fa411c6142ba03e713285b1c04cc842ff8f33445f4fd5e6cecb0",
-  "sourceContract": {
-    "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
-    "patchedDiffSha256": "2c78150feac03f4830a80532e71de38f2f67a2146bab25db743af68993cc820e",
-    "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
-    "patchedGoModSha256": "fddb025d97126d97d81c61584d7d7139064e17a02bb8d1f8a1b9dde7b1bbe583",
-    "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
-    "patchedGoSumSha256": "57130bbf9ac29f13665060e73dea74619cc1ead0214a3fadb658dedee6ac6e4d"
-  },
   "libboxModuleCacheContract": {
     "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
-    "path": "scripts/libbox_module_cache_contract.bash",
-    "sha256Key": "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
-    "sha256": "c8390c0c251bfe81aa84306a8a9764130c300f608d0f161fd726958fb9b877a2"
+    "sha256Key": "LIBBOX_MODULE_CACHE_CONTRACT_SHA256"
   },
-  "verifiedGoModuleInputKeys": [
-    "GOMOBILE_MODULE_SUM",
-    "GOVULNCHECK_MODULE_SUM",
-    "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
-    "SING_BOX_UPSTREAM_GO_MOD_SHA256",
-    "SING_BOX_UPSTREAM_GO_SUM_SHA256",
-    "SING_BOX_PATCHED_GO_MOD_SHA256",
-    "SING_BOX_PATCHED_GO_SUM_SHA256"
-  ],
   "rejectedPatchDigests": [
     "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac",
     "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde",
@@ -312,7 +308,6 @@
   ],
   "libboxBuildTags": {
     "pinKey": "LIBBOX_BUILD_TAGS",
-    "value": "with_quic,with_utls,with_clash_api,with_wireguard,with_gvisor,badlinkname,tfogo_checklinkname0,grpcnotrace",
     "required": [
       {
         "tag": "with_wireguard",

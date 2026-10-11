@@ -119,15 +119,7 @@ if [[ -z "$swift_identity" ]]; then
 fi
 
 "$python_bin" -I -S -B -W error - \
-  "$repo_root/native/macos/Dependencies.lock.json" \
-  "$repo_root/apps/cfw-tauri-shell/package.json" \
-  "$repo_root/apps/cfw-tauri-shell/tauri.conf.json" \
-  "$GO_VERSION" \
-  "$GOMOBILE_VERSION" \
-  "$SING_BOX_VERSION" \
-  "$SING_BOX_COMMIT" \
-  "$SING_BOX_ANDROID_REFERENCE_COMMIT" \
-  "$SING_BOX_APPLE_REFERENCE_COMMIT" \
+  "$repo_root" \
   "$SING_BOX_SECURITY_PATCH_PATH" \
   "$SING_BOX_SECURITY_PATCH_SHA256" \
   "$SING_BOX_RAW_PACKET_PATCH_PATH" \
@@ -140,26 +132,15 @@ fi
   "$SING_BOX_PROFILE_PROBE_PATCH_SHA256" \
   "$SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH" \
   "$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256" \
-  "$SING_BOX_PATCHED_DIFF_SHA256" \
-  "$SING_BOX_COMBINED_DIFF_SHA256" \
-  "$SING_BOX_PATCHED_GO_MOD_SHA256" \
-  "$SING_BOX_PATCHED_GO_SUM_SHA256" \
-  "$NODE_VERSION" <<'PY'
+  "$NODE_VERSION" \
+  "$MACOS_DEPLOYMENT_TARGET" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
 (
-    native_lock_path,
-    package_path,
-    tauri_path,
-    go_version,
-    gomobile_version,
-    sing_box_version,
-    sing_box_commit,
-    android_commit,
-    apple_commit,
+    repository_root_path,
     security_patch_path,
     security_patch_sha256,
     raw_packet_patch_path,
@@ -172,50 +153,13 @@ from pathlib import Path
     profile_probe_patch_sha256,
     socks_lifecycle_patch_path,
     socks_lifecycle_patch_sha256,
-    patched_diff_sha256,
-    combined_diff_sha256,
-    patched_go_mod_sha256,
-    patched_go_sum_sha256,
     node_version,
+    deployment_target,
 ) = sys.argv[1:]
 
-native_lock = json.loads(Path(native_lock_path).read_text(encoding="utf-8"))
-expected_native = {
-    "go": go_version,
-    "gomobile": gomobile_version,
-    "singBox": {
-        "tag": sing_box_version,
-        "commit": sing_box_commit,
-        "androidReferenceCommit": android_commit,
-        "securityPatch": {
-            "path": security_patch_path,
-            "sha256": security_patch_sha256,
-            "patchedDiffSha256": patched_diff_sha256,
-            "patchedGoModSha256": patched_go_mod_sha256,
-            "patchedGoSumSha256": patched_go_sum_sha256,
-        },
-        "rawPacketPatch": {
-            "path": raw_packet_patch_path,
-            "sha256": raw_packet_patch_sha256,
-        },
-        "dnsFailoverPatch": {
-            "path": dns_failover_patch_path,
-            "sha256": dns_failover_patch_sha256,
-        },
-        "endpointConflictPatch": {
-            "path": endpoint_conflict_patch_path,
-            "sha256": endpoint_conflict_patch_sha256,
-        },
-        "profileProbePatch": {"path": profile_probe_patch_path, "sha256": profile_probe_patch_sha256},
-        "socksLifecyclePatch": {"path": socks_lifecycle_patch_path, "sha256": socks_lifecycle_patch_sha256},
-        "combinedDiffSha256": combined_diff_sha256,
-    },
-    "singBoxForAppleReference": {"commit": apple_commit},
-}
-if native_lock != expected_native:
-    raise SystemExit("error: native dependency lock differs from release pins")
-
-repository_root = Path(native_lock_path).resolve().parents[2]
+repository_root = Path(repository_root_path)
+package_path = repository_root / "apps/cfw-tauri-shell/package.json"
+tauri_path = repository_root / "apps/cfw-tauri-shell/tauri.conf.json"
 
 
 def verify_repository_patch(relative_path: str, expected_sha256: str, description: str) -> None:
@@ -265,8 +209,8 @@ if package.get("engines", {}).get("node") != expected_node_range:
 tauri = json.loads(Path(tauri_path).read_text(encoding="utf-8"))
 if tauri.get("app", {}).get("withGlobalTauri") is not False:
     raise SystemExit("error: global Tauri JavaScript injection must be disabled")
-if tauri.get("bundle", {}).get("macOS", {}).get("minimumSystemVersion") != "15.0":
-    raise SystemExit("error: Tauri deployment target must be macOS 15.0")
+if tauri.get("bundle", {}).get("macOS", {}).get("minimumSystemVersion") != deployment_target:
+    raise SystemExit("error: Tauri deployment target differs from MACOS_DEPLOYMENT_TARGET")
 if tauri.get("bundle", {}).get("createUpdaterArtifacts") is not False:
     raise SystemExit(
         "error: Tauri automatic updater artifacts must remain disabled; the reviewed release script owns packaging"

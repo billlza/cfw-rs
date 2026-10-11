@@ -95,8 +95,8 @@ TOCTOU-visible mutation fails the entire physical level.
   fixed GCE metadata resolver configuration, capture sudoers rule and local
   strict known-hosts file; the Linux/amd64 artifact, systemd unit and those
   files' digests are the `packetEvidenceEndpoint` values in
-  `scripts/pinned_build_inputs.json`.
-  `scripts/pinned_build_inputs.json` and its offline verifier bind those bytes,
+  `scripts/pinned_build_inputs.json`; this document does not repeat them. That
+  policy and its offline verifier bind those bytes,
   fixed TCP/UDP port 44333, UDP-only DNS port 53, CGO-disabled Linux/amd64
   build, source, tests, unit, resolver, installer, sudoers, endpoint identity
   policy and known-hosts file; the generated target binary is not tracked.

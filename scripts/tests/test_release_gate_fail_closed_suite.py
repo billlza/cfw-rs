@@ -17,8 +17,8 @@ it fills the integration/example gaps this task names:
   tree: the shipped tree passes, and a single injected fallback or insecure
   override anywhere in the scanned graph fails closed (Requirements 1.2, 7.3);
 * pinned toolchain and patch mismatches are rejected when the real pinned inputs
-  are copied and a single tool version or patch byte is changed (Requirement
-  5.1);
+  are copied and a single tool pin is malformed or a patch byte is changed
+  (Requirement 5.1);
 * evidence promotion negatives are rejected -- over-promotion, a skipped
   predecessor, a masked/skipped probe status, and a lower-level report reused
   for a higher level (Requirements 4.1, 7.5);
@@ -46,6 +46,7 @@ from scripts.evidence_manifest import (
     EvidenceManifestError,
     validate_evidence_manifest,
 )
+from scripts.publication.graph_model import load_pins
 from scripts.release_secret_material_blocker import (
     SecretMaterialReleaseBlock,
     evaluate_workspace,
@@ -219,10 +220,8 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
 _PINNED_INPUTS = (
     "scripts/pinned_build_inputs.json",
     "scripts/dependency_pins.env",
-    "native/macos/Dependencies.lock.json",
     "scripts/build_libbox.sh",
     "scripts/libbox_source_contract.sh",
-    "scripts/libbox_module_cache_contract.bash",
     "scripts/build_native_products.sh",
     "scripts/build_unsigned_candidate.sh",
     "scripts/build_signed_candidate.sh",
@@ -265,29 +264,33 @@ _PINNED_INPUTS = (
     "scripts/install_pinned_tauri_cli.sh",
     "scripts/tauri_cargo_cache_contract.py",
     "scripts/tauri-cli-2.11.4-dependency-refresh.patch",
-    "scripts/xcodegen-2.46.0-installed-resources.patch",
     "crates/cfw-release-verifier/src/main.rs",
     ".github/workflows/ci.yml",
-    "native/macos/patches/sing-box-v1.14.2-security-dependencies.patch",
-    "native/macos/patches/sing-box-v1.14.2-raw-packet-tun.patch",
-    "native/macos/patches/sing-box-v1.14.2-dns-failover.patch",
-    "native/macos/patches/sing-box-v1.14.2-endpoint-conflict.patch",
-    "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
-    "native/macos/patches/sing-box-v1.14.2-socks-lifecycle.patch",
     # Sources the pinned libbox build tags are bound to: the controller block and
     # the projection that injects it require `with_clash_api` in the artifact.
     "crates/cfw-singbox-config/src/controller.rs",
     "crates/cfw-singbox-config/src/projection.rs",
 )
-_SECURITY_PATCH = "native/macos/patches/sing-box-v1.14.2-security-dependencies.patch"
 _PINS_ENV = "scripts/dependency_pins.env"
+
+
+def _shipped_pins() -> dict[str, str]:
+    return load_pins(REPO_ROOT / _PINS_ENV)
 
 
 def _copy_pinned_tree(destination: Path) -> Path:
     manifest = json.loads(
         (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
     )
-    for relative in _PINNED_INPUTS:
+    pins = _shipped_pins()
+    # Every tracked file a path pin names (the sing-box and XcodeGen patches, the
+    # libbox module-cache contract) is copied from the path the pin holds.
+    pinned_files = tuple(
+        pins[key]
+        for key, value_format in manifest["pinFormats"].items()
+        if value_format == "repository-path"
+    )
+    for relative in (*_PINNED_INPUTS, *pinned_files):
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise AssertionError("pinned fixture input path is not repository-relative")
@@ -340,23 +343,26 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
             root = _copy_pinned_tree(Path(tmp))
             verify_pinned(root)
 
-    def test_drifted_toolchain_version_fails_closed(self) -> None:
+    def test_malformed_toolchain_version_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
             env_path = root / _PINS_ENV
+            go_version = _shipped_pins()["GO_VERSION"]
             env_path.write_text(
                 env_path.read_text(encoding="utf-8").replace(
-                    "GO_VERSION=1.27.2", "GO_VERSION=1.26.4"
+                    f"GO_VERSION={go_version}\n", f"GO_VERSION={go_version}.0\n"
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(PinnedInputError, "GO_VERSION"):
+            with self.assertRaisesRegex(
+                PinnedInputError, "GO_VERSION is not a version value"
+            ):
                 verify_pinned(root)
 
     def test_tampered_patch_byte_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
-            patch_path = root / _SECURITY_PATCH
+            patch_path = root / _shipped_pins()["SING_BOX_SECURITY_PATCH_PATH"]
             patch_path.write_bytes(patch_path.read_bytes() + b"\n# tamper\n")
             with self.assertRaisesRegex(PinnedInputError, "file digest"):
                 verify_pinned(root)
@@ -364,7 +370,7 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
     def test_missing_patch_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
-            (root / _SECURITY_PATCH).unlink()
+            (root / _shipped_pins()["SING_BOX_SECURITY_PATCH_PATH"]).unlink()
             with self.assertRaisesRegex(
                 PinnedInputError, "missing, a symlink, or has an unsafe path"
             ):
@@ -378,12 +384,10 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
         # pins must therefore be rejected statically.
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
-            for relative in (_PINS_ENV, "scripts/pinned_build_inputs.json"):
-                path = root / relative
-                path.write_text(
-                    path.read_text(encoding="utf-8").replace(",with_clash_api", ""),
-                    encoding="utf-8",
-                )
+            path = root / _PINS_ENV
+            pinned = path.read_text(encoding="utf-8")
+            self.assertIn(",with_clash_api", pinned)
+            path.write_text(pinned.replace(",with_clash_api", ""), encoding="utf-8")
             with self.assertRaisesRegex(PinnedInputError, "with_clash_api"):
                 verify_pinned(root)
 

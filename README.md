@@ -149,25 +149,28 @@ bootstrap pair. The pinned source patch gives both roles one bounded fallback
 for rejected responses or transport errors. Each resolver is attempted at most
 once, cancellation never triggers fallback, and two failures preserve both
 causes. A source-built libbox carrying that patch and physical capture proof
-remain release blockers; upstream sing-box 1.14.2 without the patch must not be
-described as providing this failover.
+remain release blockers; the pinned upstream sing-box release without the patch
+must not be described as providing this failover.
 
 There is no private-API or old-helper fallback if one of these gates fails.
 
 ## Pinned toolchain and dependencies
 
-Release inputs are recorded in
-[`scripts/dependency_pins.env`](./scripts/dependency_pins.env). Important pins:
+[`scripts/dependency_pins.env`](./scripts/dependency_pins.env) is the
+authoritative store of pinned release input values, and documentation names pin
+keys instead of repeating values;
+[`scripts/pinned_build_inputs.json`](./scripts/pinned_build_inputs.json)
+declares each pin's format and the checks that bind it. The few verified copies
+that remain are listed in [`docs/supply-chain.md`](./docs/supply-chain.md).
+Important pins:
 
-- Rust 1.98.1
-- Node.js 26.8.2
-- Go 1.27.2
-- SagerNet gomobile v0.1.13
-- cargo-deny 0.20.2
-- sing-box/libbox v1.14.2 at
-  `af6e64c3b69e6132ebaee0e1a3d24e93903f6709`
-- Apple provider reference at
-  `2b1763a80f2c1dee1ab3ac62d84dbda7dc5178f4`
+- Rust `RUST_VERSION`
+- Node.js `NODE_VERSION`
+- Go `GO_VERSION`
+- SagerNet gomobile `GOMOBILE_VERSION`
+- cargo-deny `CARGO_DENY_VERSION`
+- sing-box/libbox `SING_BOX_VERSION` at `SING_BOX_COMMIT`
+- Apple provider reference at `SING_BOX_APPLE_REFERENCE_COMMIT`
 
 The Apple provider repository is semantic reference material only. In
 particular, code that obtains a packet-flow file descriptor through KVC is not

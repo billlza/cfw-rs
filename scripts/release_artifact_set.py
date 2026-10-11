@@ -1070,7 +1070,7 @@ def _release_toolchain_surface_pin(repository: Path) -> str:
     try:
         return pinned_toolchain_contract(repository)[1]
     except ReleaseRustToolchainError as error:
-        raise ArtifactSetError("Rust toolchain surface pin is not manifest-bound") from error
+        raise ArtifactSetError("Rust toolchain surface pin is invalid") from error
 
 
 def _pinned_rust_toolchain_root(toolchain: str) -> Path:

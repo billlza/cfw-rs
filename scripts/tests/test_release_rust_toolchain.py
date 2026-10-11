@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import shutil
@@ -69,17 +68,6 @@ class RustToolchainFixture:
         (self.repository / "scripts/dependency_pins.env").write_text(
             f"RUST_VERSION={CHANNEL}\n"
             f"RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256={digest}\n",
-            encoding="utf-8",
-        )
-        (self.repository / "scripts/pinned_build_inputs.json").write_text(
-            json.dumps(
-                {
-                    "tools": {
-                        "RUST_VERSION": CHANNEL,
-                        "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": digest,
-                    }
-                }
-            ),
             encoding="utf-8",
         )
 

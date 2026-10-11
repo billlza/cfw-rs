@@ -120,7 +120,8 @@ Generate the Xcode project with the repository-pinned XcodeGen and compile the
 unsigned device build:
 
 ```sh
-target/toolchains/xcodegen-2.46.0/bin/xcodegen generate \
+source scripts/dependency_pins.env
+"target/toolchains/xcodegen-$XCODEGEN_VERSION/bin/xcodegen" generate \
   --spec tools/physical-transport-peer-ios/project.yml \
   --project tools/physical-transport-peer-ios
 xcodebuild \

@@ -41,8 +41,9 @@ target/toolchains/go-1.27.2/bin/go \
   .
 ```
 
-The reviewed Linux/amd64 artifact from those exact inputs has SHA-256
-`f1589e0594a40df34b5062f07b6c30e6306b5753b01781f39c483fa9af7e78eb`.
+The reviewed Linux/amd64 artifact from those exact inputs has the SHA-256
+recorded as `packetEvidenceEndpoint.binarySha256` in
+`scripts/pinned_build_inputs.json`.
 
 The reviewed endpoint policy must bind the resulting SHA-256, each GCE
 instance identity, the exact external IPv4/IPv6 addresses, the SSH host-key
@@ -62,10 +63,10 @@ upgrades and the unneeded telemetry manager, checks service health, and only
 then deletes its staging files. Run it only after separately verifying the five
 staged file digests.
 
-The installer, service unit, resolver configuration, capture sudoers,
+The binary, installer, service unit, resolver configuration, capture sudoers,
 strict known-hosts and endpoint policy SHA-256 values are the
 `packetEvidenceEndpoint` values in `scripts/pinned_build_inputs.json`; this
-README repeats only the binary digest its build recipe must state. A Go
+README repeats none of them. A Go
 toolchain change rebinds the binary and therefore the installer and policy;
 the instances then run the earlier binary until the installation transaction
 is rerun, which physical assurance collection requires.

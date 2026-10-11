@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.hash_native_build_inputs import INPUTS, build_digest
+
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 
 class NativeBuildInputHashTests(unittest.TestCase):
@@ -28,6 +31,16 @@ class NativeBuildInputHashTests(unittest.TestCase):
                 "changed", encoding="utf-8"
             )
             self.assertNotEqual(first, build_digest(repository))
+
+    def test_host_build_script_hashes_the_same_inputs(self) -> None:
+        # build.rs recomputes this digest to admit the native products, so both
+        # sides must list the same native build inputs.
+        source = (REPOSITORY / "apps/cfw-tauri-shell/build.rs").read_text(
+            encoding="utf-8"
+        )
+        function = source[source.index("fn native_build_inputs_digest(") :]
+        block = function[function.index("for relative in [") : function.index("] {")]
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', block)), INPUTS)
 
     def test_symlink_input_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -229,27 +229,6 @@ def _text(path: Path, maximum: int, label: str) -> str:
         raise ReleaseRustToolchainError(f"{label} is not UTF-8") from error
 
 
-def _strict_json(path: Path) -> dict[str, Any]:
-    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ReleaseRustToolchainError("pinned input manifest repeats a field")
-            result[key] = value
-        return result
-
-    try:
-        value = json.loads(
-            _text(path, MAX_MANIFEST_BYTES, "pinned input manifest"),
-            object_pairs_hook=reject_duplicates,
-        )
-    except json.JSONDecodeError as error:
-        raise ReleaseRustToolchainError("pinned input manifest is invalid JSON") from error
-    if not isinstance(value, dict):
-        raise ReleaseRustToolchainError("pinned input manifest is not an object")
-    return value
-
-
 def _pins(repository: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw in _text(
@@ -302,9 +281,6 @@ def pinned_toolchain_contract(repository: Path) -> tuple[str, str]:
     digest = pins.get(SURFACE_PIN)
     if pins.get("RUST_VERSION") != channel or not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
         raise ReleaseRustToolchainError("Rust toolchain pins differ from the declaration")
-    tools = _strict_json(repository / "scripts/pinned_build_inputs.json").get("tools")
-    if not isinstance(tools, dict) or tools.get("RUST_VERSION") != channel or tools.get(SURFACE_PIN) != digest:
-        raise ReleaseRustToolchainError("Rust toolchain pins are not manifest-bound")
     return channel, digest
 
 

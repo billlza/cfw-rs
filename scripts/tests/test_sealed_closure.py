@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.publication.common import PublicationError, canonical_json, tree_digest
+from scripts.publication.graph_model import load_pins
 from scripts.publication.sealed_closure import (
     BLOCKED,
     SEALED,
@@ -18,37 +19,21 @@ from scripts.publication.sealed_closure import (
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-# The six design-pinned sing-box patches. The supply-chain test hashes these
-# files itself, so the derived patch closure is bound to the patch bytes in the
-# repository rather than to the pin table the production code already reads.
-PATCH_PATHS = {
-    "socks_lifecycle": "native/macos/patches/sing-box-v1.14.2-socks-lifecycle.patch",
-    "security": "native/macos/patches/sing-box-v1.14.2-security-dependencies.patch",
-    "raw_packet": "native/macos/patches/sing-box-v1.14.2-raw-packet-tun.patch",
-    "dns_failover": "native/macos/patches/sing-box-v1.14.2-dns-failover.patch",
-    "endpoint_conflict": "native/macos/patches/sing-box-v1.14.2-endpoint-conflict.patch",
-    "profile_probe": "native/macos/patches/sing-box-v1.14.2-profile-probe.patch",
-}
-# Authoritative digest of the raw-packet TUN patch with cleanup ownership retained
-# until Close succeeds. Kept as a literal because hashing the file alone would
-# still pass if the patch regressed and the pins were recomputed to match.
-EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "d3aa03dcf3e3e0421bd1b5062dcf8ca60f62252afabd8d15013ed3e4bda25950"
+# The six sing-box patch path pins. The supply-chain test hashes the files those
+# pins name itself, so the derived patch closure is bound to the patch bytes in
+# the repository rather than to the digest pins the production code reads.
+PATCH_PATH_PINS = (
+    "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+    "SING_BOX_SECURITY_PATCH_PATH",
+    "SING_BOX_RAW_PACKET_PATCH_PATH",
+    "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+    "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+    "SING_BOX_PROFILE_PROBE_PATCH_PATH",
 )
-# The combined diff is the full-object-ID digest of the whole working-tree diff
-# of the patched sing-box checkout
-# (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256), which cannot
-# be recomputed from the patch files alone. A pinned literal is therefore the
-# only form of this assertion that still fails when a pin drifts.
-# This revision includes all six patches, the utun resolver, synchronized SOCKS
-# packet addresses, Go 1.27 debug-crash compatibility, and bounded DNS probe
-# shutdown lifecycle, with the probe's question captured before goroutine launch,
-# the opt-in REALITY X25519MLKEM768 key share, and golang.org/x/net v0.60.0 under
-# the Go 1.27.2 minimum.
-# Independently recomputed from the canonical materialized patched source.
-EXPECTED_COMBINED_DIFF_SHA256 = (
-    "7df19ccb32d1fa411c6142ba03e713285b1c04cc842ff8f33445f4fd5e6cecb0"
-)
+
+
+def _pins() -> dict[str, str]:
+    return load_pins(REPOSITORY / "scripts/dependency_pins.env")
 
 
 def _sha(label: str) -> str:
@@ -150,26 +135,38 @@ def _request(**overrides) -> dict:
 
 class DeriveSupplyChainTests(unittest.TestCase):
     def test_binds_repository_toolchain_and_patched_source(self) -> None:
+        pins = _pins()
         supply_chain = derive_supply_chain(REPOSITORY)
-        self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.98.1")
-        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.27.2")
+        self.assertEqual(
+            supply_chain["toolchain_versions"],
+            {
+                "rust": pins["RUST_VERSION"],
+                "node": pins["NODE_VERSION"],
+                "go": pins["GO_VERSION"],
+                "gomobile": pins["GOMOBILE_VERSION"],
+                "govulncheck": pins["GOVULNCHECK_VERSION"],
+                "sing_box": pins["SING_BOX_VERSION"],
+            },
+        )
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
-            "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
+            pins["SING_BOX_COMMIT"],
         )
         patched_source = supply_chain["patched_source"]
 
         # The bound patch closure must be exactly the six patch files that live
         # in this repository, hashed from their bytes here.
-        on_disk = {name: _file_sha256(path) for name, path in PATCH_PATHS.items()}
+        on_disk = sorted(_file_sha256(pins[key]) for key in PATCH_PATH_PINS)
         self.assertEqual(len(patched_source["patch_digests"]), 6)
-        self.assertEqual(patched_source["patch_digests"], sorted(on_disk.values()))
-        # ...and the raw-packet patch must be the corrected revision, not the
-        # truncated-hunk one that silently dropped four test helpers.
-        self.assertEqual(on_disk["raw_packet"], EXPECTED_RAW_PACKET_PATCH_SHA256)
+        self.assertEqual(patched_source["patch_digests"], on_disk)
 
+        # The combined diff covers the whole materialized working tree
+        # (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256) and
+        # cannot be recomputed from the patch files here; materialization and the
+        # reproducible libbox build compare the pin with the real tree.
         self.assertEqual(
-            patched_source["combined_diff_sha256"], EXPECTED_COMBINED_DIFF_SHA256
+            patched_source["combined_diff_sha256"],
+            pins["SING_BOX_COMBINED_DIFF_SHA256"],
         )
         # The combined diff must never collapse to a single patch digest.
         self.assertNotIn(

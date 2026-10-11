@@ -242,7 +242,11 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
    resolver contract required by the closed product projection.
 4. The endpoint-conflict patch (`SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH`) reports only exact mixed-listener
    and controller `EADDRINUSE` failures as structured conflicts while preserving
-   ordinary startup and cleanup failures.
+   ordinary startup and cleanup failures. On macOS it marks loopback TCP
+   listeners with `SO_REUSESHAREUID`, so connections a root-owned tunnel engine
+   leaves behind do not keep the port from the user's proxy agent, and it
+   refuses `reuse_addr` on a loopback listener before binding; a live listener
+   still holds its port exclusively.
 5. The profile-probe patch (`SING_BOX_PROFILE_PROBE_PATCH_PATH`) adds bounded, isolated profile
    probes that originate application requests only: no inbounds, controller,
    system interface, routing policy, persistent cache, or background URL tests,

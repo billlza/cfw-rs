@@ -7,10 +7,12 @@ pub(crate) use runtime_settings::change_runtime_preferences;
 pub mod packet_evidence;
 
 /// A start that finds its own loopback endpoint in use right after the
-/// coordinator stopped the previous runtime is usually seeing that listener
-/// still closing. The same endpoint is tried once more after this pause
-/// before the endpoint cursor moves on, so an automatic port stays put across
-/// mode switches.
+/// coordinator stopped the previous runtime tries the same endpoint once more
+/// after this pause before the endpoint cursor moves on. Connections a stopped
+/// root-owned tunnel engine leaves in TIME_WAIT do not cause such a conflict:
+/// the engine's loopback listeners share their port across users (the
+/// endpoint-conflict sing-box patch), so the user agent rebinds the same port
+/// and an automatic port stays put across mode switches.
 pub(crate) const ENDPOINT_CONFLICT_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(500);
 

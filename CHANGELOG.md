@@ -24,6 +24,14 @@
 
 ### Reliability
 
+- Keep the automatic proxy and controller ports, 7890 and 9090 by default,
+  when switching from TUN to System Proxy or Local Proxy. The tunnel's engine
+  runs as root, and the connections it had just closed kept those ports
+  reserved against the user's proxy agent for about thirty seconds, so the
+  switch failed several times and then moved to 7891 and 9091 without saying
+  so, breaking shells and tools set to the old port. The engine's loopback
+  listeners now let the agent take the same port back at once, while a port
+  that is still being listened on stays refused.
 - Read the process table on macOS 27, where `ps` prints the `nobody` user's
   uid as `-2`. Starting the core, saving runtime settings and recovering
   background services no longer fail on such a row.

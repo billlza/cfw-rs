@@ -314,70 +314,45 @@ The release operator must have:
   qualification.
 
 `verify_release_environment.sh` rejects `.key`, `.pem`, or `.p8` material under
-the repository workspace. Git ignore rules are not a key-management boundary:
+the repository workspace, apart from the managed caches described under
+[Release-worktree preparation](#release-worktree-preparation). Git ignore rules are not a key-management boundary:
 the active updater key must live in an access-controlled external secret store
 or hardware-backed workflow. If a workspace copy may have escaped through a
 backup or shared archive, rotate the key and publish an explicit updater trust
 migration before release.
 
-## Release-worktree cache scope and recovery
+## Release-worktree preparation
 
-The path/name-only secret-material gate authenticates nested managed caches
-against their original `cfm-release-worktree-cache-scope-v1.json` receipts in
-the main repository's Git worktree registry. An operating-system device-number
-reassignment can make these receipts stale after a reboot even when the
-worktree, marker, target and administrative directory retain their inodes.
-The gate does not silently renew that authority.
-
-After confirming a device-only reassignment, explicitly recover each affected
-live build through the closed production Python boundary:
-
-```bash
-./scripts/authorize_release_worktree.sh --recover-after-reboot FIVE_DIGIT_BUILD
-./scripts/verify_release_environment.sh
-```
-
-Recovery requires the same canonical path, build, detached Git HEAD, reciprocal
-registration and all four original inodes. Device remapping must be one-to-one;
-directory replacement, filesystem splitting/merging, unsafe metadata and
-incomplete original enrollment are rejected. A v1 receipt does not contain a
-historical volume UUID, so this is an explicit operator authorization, not proof
-that a reboot caused the difference.
-
-The original receipt, worktree and candidates are never rewritten or removed.
-A new canonical `cfm-release-worktree-cache-recovery-v1-*.json` record retains
-the original and recovered scopes in Git's administrative directory. Readers
-look up only the exact current device tuple, never fall back to another record,
-and revalidate both receipts before pruning a managed cache. Source files,
-candidate trees and unexpected target children remain in the secret scan.
-
-Repeating the same command is idempotent. A complete matching pending file or
-interrupted hard-link publication can be resumed under the existing scope
-lock, with file and directory durability rechecked. A partial or contradictory
-record is preserved and fails closed; it must not be deleted or overwritten to
-force success. Further device renumbering requires another explicit recovery.
-Cache recovery does not renew a frozen candidate's release evidence, resolve
-notarization, consume a build number or establish publication readiness.
+The artifact checkout is a detached Git worktree at the fixed path
+`target/release-worktrees/$CFW_GA_BUILD` of the operator checkout
+(`CFW_GA_BUILD` is the active GA build of `scripts/release_identity.env`; see
+[the GA release sequence](#single-ga-release-sequence)). Create its untracked
+`target` directory with mode `0700` before copying the managed dependency
+inputs into it. The path/name-only secret-material gate excludes the managed
+`debug`, `native-dependencies`, `release-build-cache`, `sources`, `toolchains`
+and `ui-build` children of every `target/release-worktrees/<five-digit
+build>/target`, including retained retired worktrees, by path and name, exactly
+as it excludes them from the operator checkout's own `target`. Source files,
+candidate trees and every other target child remain in the secret scan. A
+managed name that is not a real directory owned by the workspace owner fails
+closed, and so does an alias into an excluded cache. The gate keeps no record
+of the worktree, so neither a reboot nor a recreated worktree needs a recovery
+step. Cache-scope receipt, recovery, pending and lock files that earlier tools
+wrote into the operator's `.git/worktrees/<name>/` entries are no longer read
+by this revision; leave them in place, because the release tools of older
+frozen commits still read them.
 
 Before candidate freeze, a source correction may require a new detached HEAD.
-Neither enrollment nor reboot recovery can rebind an existing cache receipt.
 After proving that no candidate freeze or external transaction started, retain
 the complete failed preparation with `git worktree move` in a new private
-history path outside the main workspace. Preserve its source, generated inputs,
-attempt logs and original receipt; the receipt remains in the original main
-Git administrative directory and does not authorize the moved history path.
-Recreate the fixed `target/release-worktrees/$CFW_GA_BUILD` path at the
-verified new commit, create an empty `target` with mode `0700`, and run
-`scripts/authorize_release_worktree.sh "$CFW_GA_BUILD"` from the main checkout
-before copying and revalidating managed dependency inputs (`CFW_GA_BUILD` is
-the active GA build of `scripts/release_identity.env`; see
-[the GA release sequence](#single-ga-release-sequence)). Never edit the old
-receipt or copy it into the new registration. Git may give the new
-administrative directory a numeric suffix (for example `400491`); scope
-identity comes from the reciprocal worktree path and receipt, not this suffix.
+history path outside the main workspace. Preserve its source, generated inputs
+and attempt logs. Recreate the fixed `target/release-worktrees/$CFW_GA_BUILD`
+path at the verified new commit, create its `target` with mode `0700`, then
+copy and revalidate the managed dependency inputs. Git may give the new administrative directory a numeric
+suffix (for example `400491`); nothing depends on that suffix.
 This is another preparation attempt using the same active GA build, not
 candidate retirement or a new build allocation.
-These reversible checkout, enrollment, input-copy and environment-preflight
+These reversible checkout, input-copy and environment-preflight
 steps, followed by the candidate build, may run in parallel with hosted CI for
 the same source commit. Required local source/build admission checks still run
 before candidate freeze and signing. The successful exact-source hosted receipt
@@ -1412,9 +1387,8 @@ never adopted.
    `<operator>/target/release-worktrees/$CFW_GA_BUILD`, the DMG verifier
    receipt's own arguments name its absolute path, and verification compares
    them with the current artifact path. That checkout is also a Git worktree
-   registered with the operator checkout by absolute path, with a cache-scope
-   receipt bound to that canonical path (see
-   [Release-worktree cache scope and recovery](#release-worktree-cache-scope-and-recovery)).
+   registered with the operator checkout by absolute path (see
+   [Release-worktree preparation](#release-worktree-preparation)).
    Do not move or re-clone the operator checkout in that window. (For build
    50028 the frozen commit was `d686a85`.)
 

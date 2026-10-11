@@ -1389,8 +1389,7 @@ never adopted.
    them with the current artifact path. That checkout is also a Git worktree
    registered with the operator checkout by absolute path (see
    [Release-worktree preparation](#release-worktree-preparation)).
-   Do not move or re-clone the operator checkout in that window. (For build
-   50028 the frozen commit was `d686a85`.)
+   Do not move or re-clone the operator checkout in that window.
 
    The DNS check observes the product's tunnel leg on the Packet Tunnel
    `utun`, which tcpdump opens as `link-type RAW (Raw IP)`. The Packet Tunnel

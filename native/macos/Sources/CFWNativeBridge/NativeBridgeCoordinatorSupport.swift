@@ -256,10 +256,12 @@ extension NativeBridgeCoordinator {
             .systemProxyConfigurationFailed
           case "proxy-engine-creation-failed", "proxy-engine-start-failed", "proxy-engine-crashed":
             .systemProxyRuntimeFailed
+          case NativeBridgeErrorCode.engineStartTimedOut.rawValue: .engineStartTimedOut
           case "system-proxy-preferences-failed": .systemProxyPreferencesFailed
           case "proxy-ownership-journal-failed": .systemProxyJournalFailed
           case "proxy-engine-lease-failed": .systemProxyAuthorityFailed
-          case "proxy-cleanup-failed", "system-proxy-ownership-conflict", "proxy-recovery-blocked":
+          case "proxy-cleanup-failed", "proxy-engine-unclosable", "system-proxy-ownership-conflict",
+            "proxy-recovery-blocked":
             .cleanupUnproven
           default: nil
           }
@@ -325,6 +327,14 @@ extension NativeBridgeCoordinator {
       case .providerFailure(let failure):
         if failure.code == NativeBridgeErrorCode.ticketExpired.rawValue {
           return .failure(.ticketExpired, failure.message)
+        }
+        if failure.code == NativeBridgeErrorCode.engineStartTimedOut.rawValue {
+          return .failure(
+            .engineStartTimedOut, NativeBridgeErrorCode.engineStartTimedOut.stableMessage)
+        }
+        if failure.code == TunnelStartupFailure.engineUnclosable.code {
+          return .failure(
+            .cleanupUnproven, NativeBridgeErrorCode.cleanupUnproven.stableMessage)
         }
         return .failure(
           endpointConflictCode(failure, allowsMixed: false)

@@ -1,4 +1,5 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWPacketTransport
 import CFWSharedProtocol
 import Foundation
@@ -19,9 +20,12 @@ public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case packetPumpSetup(String)
   case packetPump(PacketPumpError)
   case engineStart(String)
+  /// libbox did not finish starting by the start deadline and was interrupted.
+  case engineStartTimedOut
   case controllerEndpointConflict(port: UInt16)
   case mixedEndpointConflict(port: UInt16)
-  case engineStop(String)
+  /// libbox could not close the engine, so the extension is spent.
+  case engineUnclosable(LibboxInstanceUnclosable)
   case networkSettings(String)
 }
 
@@ -54,12 +58,14 @@ extension PacketTunnelProviderError: LocalizedError {
       return "Packet pump failed: \(error)"
     case .engineStart:
       return "Packet tunnel engine start failed."
+    case .engineStartTimedOut:
+      return TunnelStartupFailure.engineStartTimedOut.message
     case .mixedEndpointConflict(let port):
       return "The Packet Tunnel mixed endpoint could not bind to port \(port)."
     case .controllerEndpointConflict(let port):
       return "The Packet Tunnel controller endpoint could not bind to port \(port)."
-    case .engineStop:
-      return "Packet tunnel engine stop failed."
+    case .engineUnclosable:
+      return TunnelStartupFailure.engineUnclosable.message
     case .networkSettings:
       return "Packet tunnel network settings failed."
     }
@@ -148,6 +154,12 @@ extension PacketTunnelProviderError {
           "Packet tunnel engine startup failed.",
           true
         )
+      case .engineStartTimedOut:
+        (
+          TunnelStartupFailure.engineStartTimedOut.code,
+          TunnelStartupFailure.engineStartTimedOut.message,
+          TunnelStartupFailure.engineStartTimedOut.isRetryable
+        )
       case .mixedEndpointConflict(let port):
         (
           "mixed-endpoint-in-use",
@@ -160,11 +172,11 @@ extension PacketTunnelProviderError {
           "The Packet Tunnel controller endpoint could not bind to port \(port).",
           false
         )
-      case .engineStop:
+      case .engineUnclosable:
         (
-          "tunnel-engine-stop-failed",
-          "Packet tunnel engine stop failed.",
-          true
+          TunnelStartupFailure.engineUnclosable.code,
+          TunnelStartupFailure.engineUnclosable.message,
+          TunnelStartupFailure.engineUnclosable.isRetryable
         )
       case .networkSettings:
         (
@@ -212,10 +224,11 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     super.init()
     let lifecycle = PacketTunnelSessionLifecycle(
       engineFactory: engineFactory,
-      dependencies: makeSessionDependencies()
-    ) { [weak self] error in
-      self?.cancelTunnelWithError(error)
-    }
+      dependencies: makeSessionDependencies(),
+      cancelTunnel: { [weak self] error in
+        self?.cancelTunnelWithError(error)
+      },
+      endProcess: { Self.endProcess(after: $0) })
     sessionLifecycle = lifecycle
     // The Provider redeems the opaque ticket only through the authenticated,
     // bounded Global Authority channel. No configuration/credential fallback
@@ -293,11 +306,31 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     )
   }
 
+  /// The Host's readiness wait sees a failed start only as a disconnected
+  /// tunnel. Causes it must act on travel with the start's lineage.
   static func platformStartError(
     _ error: Error?, configuration: ConfigurationDescriptor
   ) -> Error? {
-    guard error as? PacketTunnelProviderError == .expiredStartTicket else { return error }
-    return TunnelStartupFailure.ticketExpiredError(configuration: configuration)
+    switch error as? PacketTunnelProviderError {
+    case .expiredStartTicket:
+      return TunnelStartupFailure.ticketExpiredError(configuration: configuration)
+    case .engineStartTimedOut:
+      return TunnelStartupFailure.engineStartTimedOutError(configuration: configuration)
+    case .engineUnclosable:
+      return TunnelStartupFailure.engineUnclosableError(configuration: configuration)
+    default:
+      return error
+    }
+  }
+
+  /// libbox could not close the tunnel's runtime, and only the extension's
+  /// process ending releases what that close left open. Network Extension
+  /// removes the tunnel's routes, DNS and proxy settings with the session and
+  /// launches the extension again for the next start. `_exit` skips atexit
+  /// handlers while libbox's threads still run.
+  private static func endProcess(after failure: LibboxInstanceUnclosable) {
+    logger.fault("libbox could not close the tunnel runtime; ending the extension")
+    _exit(EX_SOFTWARE)
   }
 
   public override func stopTunnel(

@@ -32,3 +32,21 @@ Network-path changes mark observations stale and trigger coordinator recovery.
 They are not treated as UI-only refresh events. Loading, approval, failure,
 awaiting confirmation, cleaning, manual cleanup required, and Off remain
 distinct user-visible states.
+
+When an engine cannot be closed, after a failed start or at a stop, the app
+reports that global cleanup could not be proven. The ProxyAgent or the tunnel
+extension then ends itself, so macOS releases the ports and connections the
+engine still held. The ProxyAgent first restores the system proxy settings it
+changed; if it cannot, it keeps running and tries again when System Proxy is
+turned off again or, if the app was quit in the meantime, after the Mac
+restarts. Neither System Proxy nor Tunnel can be turned on again until the Mac
+restarts.
+
+The GeoIP Database row lists the selected profile's GEOIP countries and, when
+Settings › Engine › Mainland China direct is on, names that switch first.
+Before the runtime settings are first read, and after a reload of them fails,
+the switch's state is unknown: the row then lists only the countries, or says
+unavailable when there are none, instead of reporting that no country rules
+exist. While the selected profile's saved policy is loading or cannot be read,
+its countries are unknown: the row names only the switch when it is known to be
+on, and otherwise says unavailable.

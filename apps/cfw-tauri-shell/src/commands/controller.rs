@@ -373,20 +373,19 @@ pub(super) async fn probe_saved_nodes(
         if profile_id.as_deref() != Some(stored.record.id.as_str()) {
             return Err("selected profile changed before the latency test".into());
         }
-        let projected = stored
+        let settings = engine.engine_settings()?;
+        let probe = stored
             .profile
-            .project(
+            .project_proxy_probe(
                 &stored.record.id,
                 cfw_singbox_config::ProjectionMode::SystemProxy,
-                &engine.engine_settings()?,
+                &settings,
             )
             .map_err(|error| error.to_string())?;
         let request = cfw_engine_api::ProfileDelayTestRequest {
-            audience: projected.credential_audience().clone(),
-            config_json: projected
-                .proxy_probe_json()
-                .map_err(|error| error.to_string())?,
-            credential_slots: projected.credential_slots().to_vec(),
+            audience: probe.credential_audience().clone(),
+            config_json: probe.as_json().to_owned(),
+            credential_slots: probe.credential_slots().to_vec(),
             proxies,
             timeout_ms: timeout,
             target_url: Some(policy.url),

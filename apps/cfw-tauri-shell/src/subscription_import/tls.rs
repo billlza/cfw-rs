@@ -2,19 +2,40 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 /// Mihomo fingerprints hash the DER certificate, not its public key. Keep that
 /// distinction in the model; accepting a pin never disables name/time checks.
+/// Mihomo removes only `:` separators.
 pub(super) fn certificate_fingerprint(value: &str) -> Result<String, String> {
-    let compact = value.replace(':', "");
-    if compact.len() != 64 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("TLS certificate fingerprint must be a SHA256 hex value".into());
-    }
-    let mut bytes = Vec::with_capacity(32);
-    for offset in (0..64).step_by(2) {
-        bytes.push(
-            u8::from_str_radix(&compact[offset..offset + 2], 16)
-                .map_err(|_| "invalid TLS certificate fingerprint")?,
-        );
-    }
-    Ok(STANDARD.encode(bytes))
+    certificate_sha256_from_hex(value, &[':'], "TLS certificate fingerprint")
+}
+
+/// A Hysteria 2 link's `pinSHA256`: the SHA-256 of the server's DER leaf
+/// certificate. The reference client lowercases the value and removes every
+/// `:` and `-` before comparing, so both separators are accepted anywhere.
+pub(super) fn hysteria2_pin_sha256(value: &str) -> Result<String, String> {
+    certificate_sha256_from_hex(value, &[':', '-'], "Hysteria2 pinSHA256")
+}
+
+/// Canonical base64 for `tls.certificate_sha256` from exactly 64 hex digits
+/// of either case once `separators` are removed. Nothing else is skipped, and
+/// the error never repeats the value.
+fn certificate_sha256_from_hex(
+    value: &str,
+    separators: &[char],
+    label: &str,
+) -> Result<String, String> {
+    let nibbles = value
+        .chars()
+        .filter(|character| !separators.contains(character))
+        .map(|character| character.to_digit(16))
+        .collect::<Option<Vec<_>>>()
+        .filter(|nibbles| nibbles.len() == 64)
+        .ok_or_else(|| format!("{label} must be a SHA256 hex value"))?;
+    let digest = nibbles
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[high, low]| u8::try_from((high << 4) | low).expect("two hex digits are one byte"))
+        .collect::<Vec<_>>();
+    Ok(STANDARD.encode(digest))
 }
 
 #[cfg(test)]
@@ -23,6 +44,90 @@ mod tests {
     use crate::subscription_import::import_subscription_document;
     use cfw_singbox_config::{EngineSettings, ProjectionMode};
     use serde_json::Value;
+    /// The 32 bytes 0x00..=0x1f: no symmetry, so a byte-order or
+    /// nibble-order mistake cannot pass.
+    const ASCENDING_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const ASCENDING_BASE64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    /// Each pair of hex digits, joined by the separators in turn.
+    fn separated(hex: &str, separators: &[char]) -> String {
+        let mut text = String::new();
+        for (index, pair) in hex.as_bytes().chunks(2).enumerate() {
+            if index > 0 {
+                text.push(separators[(index - 1) % separators.len()]);
+            }
+            text.push_str(std::str::from_utf8(pair).unwrap());
+        }
+        text
+    }
+
+    #[test]
+    fn certificate_pins_share_one_hex_normalizer_with_per_format_separators() {
+        let upper = ASCENDING_HEX.to_ascii_uppercase();
+        let mixed = ASCENDING_HEX
+            .chars()
+            .enumerate()
+            .map(|(index, digit)| {
+                if index % 3 == 0 {
+                    digit.to_ascii_uppercase()
+                } else {
+                    digit
+                }
+            })
+            .collect::<String>();
+        for spelling in [
+            ASCENDING_HEX.to_owned(),
+            upper.clone(),
+            mixed,
+            separated(&upper, &[':']),
+            separated(ASCENDING_HEX, &['-']),
+            separated(ASCENDING_HEX, &[':', '-']),
+            // The reference client removes every separator, wherever it is.
+            format!("-:{ASCENDING_HEX}:-"),
+            format!("{}:{}", &ASCENDING_HEX[..3], &ASCENDING_HEX[3..]),
+        ] {
+            assert_eq!(
+                hysteria2_pin_sha256(&spelling).as_deref(),
+                Ok(ASCENDING_BASE64),
+                "{spelling}"
+            );
+        }
+        // Clash keeps Mihomo's colon-only syntax and its message.
+        for spelling in [ASCENDING_HEX.to_owned(), separated(&upper, &[':'])] {
+            assert_eq!(
+                certificate_fingerprint(&spelling).as_deref(),
+                Ok(ASCENDING_BASE64),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            certificate_fingerprint(&separated(ASCENDING_HEX, &['-'])),
+            Err("TLS certificate fingerprint must be a SHA256 hex value".to_owned())
+        );
+        let malformed = [
+            String::new(),
+            "::--".into(),
+            ASCENDING_HEX[..63].into(),
+            format!("{ASCENDING_HEX}0"),
+            format!("g{}", &ASCENDING_HEX[1..]),
+            format!(" {ASCENDING_HEX}"),
+            format!("{ASCENDING_HEX}\t"),
+            format!("0x{}", &ASCENDING_HEX[2..]),
+            ASCENDING_BASE64.into(),
+            separated(ASCENDING_HEX, &['.']),
+            separated(ASCENDING_HEX, &[' ']),
+            format!("{ASCENDING_HEX},{ASCENDING_HEX}"),
+            "\u{ff10}".repeat(64),
+        ];
+        for value in malformed {
+            assert_eq!(
+                hysteria2_pin_sha256(&value),
+                Err("Hysteria2 pinSHA256 must be a SHA256 hex value".to_owned()),
+                "{value:?}"
+            );
+        }
+    }
+
     #[test]
     fn clash_certificate_hash_keeps_its_identity_kind_in_projection() {
         let hex = "ab".repeat(32);

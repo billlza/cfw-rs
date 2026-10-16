@@ -106,6 +106,7 @@ function renderSettings() {
         renderSettingValue(t("Engine state"), t("{state} · desired {desiredMode}", { state: engineStateLabel(engine), desiredMode: engine.desiredMode }), engine.availabilityReason ?? t("Live state of the Authority-mediated engine.")),
         renderSettingValue(t("Log level"), projection.logLevel ?? "info", REASONS.logLevel),
         renderToggle("allowLan", t("Allow LAN"), REASONS.allowLan, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
+        renderToggle("mainlandChinaDirect", t("Mainland China direct"), REASONS.mainlandChinaDirect, { reason: state.runtimeSettingsError, disabled: state.engineMutationBusy }),
         renderToggle("mixin", t("Mixin"), "", { reason: REASONS.mixin }),
       ])}
 

@@ -1110,10 +1110,38 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn('"--print-entry"', launcher)
         self.assertIn('"bin/cargo-tauri"', launcher)
         self.assertIn("_parse_verified_signer_entry", launcher)
-        self.assertIn(
-            f'"cacheContractSha256={_pins()["TAURI_CARGO_CACHE_CONTRACT_SHA256"]}"',
-            launcher,
+        # Hosted CI's signer lane substitutes its own Xcode for xcodeVersion
+        # and xcodeBuild, and elsewhere the signer integration test skips
+        # without an installed tree, so this is the only check that always
+        # compares the launcher's copy with the contract's production list. An
+        # empty environment keeps the production pins: the contract adopts
+        # another Xcode only from CFW_UNSIGNED_VALIDATION_* variables.
+        pinned_metadata = next(
+            ast.literal_eval(statement.value)
+            for statement in ast.parse(launcher).body
+            if isinstance(statement, ast.Assign)
+            and [getattr(target, "id", None) for target in statement.targets]
+            == ["PINNED_TAURI_METADATA"]
         )
+        contract_metadata = subprocess.run(
+            [
+                "/usr/bin/env",
+                "-i",
+                "/bin/bash",
+                "-c",
+                'set -euo pipefail; source "$1"; source "$2"; '
+                'cfw_verify_release_toolchain_manifest() { shift 3; printf "%s\\n" "$@"; }; '
+                'cfw_verify_tauri_toolchain_tree "$3" "$3/target/toolchains"',
+                "launcher-contract",
+                str(PINS),
+                str(CONTRACT),
+                str(REPOSITORY),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.decode("utf-8")
+        self.assertEqual(pinned_metadata, tuple(contract_metadata.splitlines()))
         self.assertIn(
             'repository / "target/toolchains" / f"tauri-cli-{TAURI_CLI_VERSION}"',
             launcher,

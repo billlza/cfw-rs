@@ -1,16 +1,26 @@
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index 5e8c79987cfb09531537f24e2d38026085f300ca..b3188c91c5daae877a571259001643c1edceb06b 100644
+index 5e8c79987cfb09531537f24e2d38026085f300ca..5f14aba4edaaa394267da73426fd9db7fdae2005 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
 @@ -23,0 +24 @@ import (
 +	E "github.com/sagernet/sing/common/exceptions"
-@@ -259 +259,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -160 +161,3 @@ func (s *StartedService) interruptStart() {
+-	if s.serviceStatus.Status == ServiceStatus_STARTING && s.instance != nil {
++	if s.serviceStatus.Status == ServiceStatus_STARTING {
++		// A start still building its instance has nothing to cancel yet. It
++		// checks this flag when it adopts the instance and then never runs it.
+@@ -162 +165,3 @@ func (s *StartedService) interruptStart() {
+-		s.instance.cancel()
++		if s.instance != nil {
++			s.instance.cancel()
++		}
+@@ -259 +263,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		s.instance = nil
-@@ -262,2 +262 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -262,2 +266 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		_ = oldInstance.Close()
 -		runtimeDebug.FreeOSMemory()
 +		closeErr := oldInstance.Close()
-@@ -264,0 +264,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -264,0 +268,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 +		if closeErr != nil {
 +			err := E.Cause(closeErr, "close previous service")
 +			s.updateStatusError(err)
@@ -18,13 +28,20 @@ index 5e8c79987cfb09531537f24e2d38026085f300ca..b3188c91c5daae877a571259001643c1
 +			return err
 +		}
 +		s.instance = nil
-@@ -286 +292,2 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -282,0 +293 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
++	interruptedWhileBuilding := s.startInterrupted
+@@ -284 +295,3 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+-	err = instance.Start()
++	if !interruptedWhileBuilding {
++		err = instance.Start()
++	}
+@@ -286 +299,2 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -	if s.startInterrupted {
 +	if s.startInterrupted || err != nil {
 +		interrupted := s.startInterrupted
-@@ -288 +294,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -288 +301,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		s.instance = nil
-@@ -290,7 +296,12 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -290,7 +303,12 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		_ = instance.Close()
 -		runtimeDebug.FreeOSMemory()
 -		return nil
@@ -44,24 +61,24 @@ index 5e8c79987cfb09531537f24e2d38026085f300ca..b3188c91c5daae877a571259001643c1
 +			s.serviceAccess.Unlock()
 +			return err
 +		}
-@@ -298 +308,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -298 +315,0 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		_ = instance.Close()
-@@ -300 +310 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -300 +317 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 -		return err
 +		return nil
-@@ -319,0 +330,6 @@ func (s *StartedService) Close() {
+@@ -319,0 +337,6 @@ func (s *StartedService) Close() {
 +func (s *StartedService) RuntimeStatus() (ServiceStatus_Type, string) {
 +	s.serviceAccess.RLock()
 +	defer s.serviceAccess.RUnlock()
 +	return s.serviceStatus.Status, s.serviceStatus.ErrorMessage
 +}
 +
-@@ -326 +342 @@ func (s *StartedService) CloseService() error {
+@@ -326 +349 @@ func (s *StartedService) CloseService() error {
 -	if instance == nil && s.serviceStatus.Status != ServiceStatus_STARTING && s.serviceStatus.Status != ServiceStatus_STARTED {
 +	if instance == nil && s.serviceStatus.Status != ServiceStatus_STARTING && s.serviceStatus.Status != ServiceStatus_STARTED && s.serviceStatus.Status != ServiceStatus_FATAL {
-@@ -330 +345,0 @@ func (s *StartedService) CloseService() error {
+@@ -330 +352,0 @@ func (s *StartedService) CloseService() error {
 -	s.instance = nil
-@@ -334 +349,6 @@ func (s *StartedService) CloseService() error {
+@@ -334 +356,6 @@ func (s *StartedService) CloseService() error {
 -		_ = instance.Close()
 +		if err := instance.Close(); err != nil {
 +			s.serviceAccess.Lock()
@@ -69,26 +86,31 @@ index 5e8c79987cfb09531537f24e2d38026085f300ca..b3188c91c5daae877a571259001643c1
 +			s.serviceAccess.Unlock()
 +			return err
 +		}
-@@ -336,0 +357 @@ func (s *StartedService) CloseService() error {
+@@ -336,0 +364 @@ func (s *StartedService) CloseService() error {
 +	s.instance = nil
-@@ -1494 +1515 @@ func (s *StartedService) StartNetworkQualityTest(
+@@ -1494 +1522 @@ func (s *StartedService) StartNetworkQualityTest(
 -	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
 +	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", nil, adapter.DNSQueryOptions{}, 0)
-@@ -1540 +1561 @@ func (s *StartedService) StartSTUNTest(
+@@ -1540 +1568 @@ func (s *StartedService) StartSTUNTest(
 -	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
 +	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", nil, adapter.DNSQueryOptions{}, 0)
 diff --git a/daemon/started_service_test.go b/daemon/started_service_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..87038bf836fc6f830caecafee22004e4c8b42577
+index 0000000000000000000000000000000000000000..773842fc5cb521722fc9a1bcbd3e3e32b5bc9842
 --- /dev/null
 +++ b/daemon/started_service_test.go
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,215 @@
 +package daemon
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"errors"
++	"fmt"
++	"net"
++	"sync/atomic"
 +	"testing"
++	"time"
 +
 +	box "github.com/sagernet/sing-box"
 +	"github.com/sagernet/sing-box/adapter/certificate"
@@ -163,6 +185,115 @@ index 0000000000000000000000000000000000000000..87038bf836fc6f830caecafee22004e4
 +	defer startedService.serviceAccess.RUnlock()
 +	if startedService.instance != instance || startedService.serviceStatus.Status != ServiceStatus_FATAL {
 +		t.Fatal("failed replacement cleanup released previous instance ownership")
++	}
++}
++
++// An interrupt that arrives while the instance is still being built, when
++// there is nothing to cancel yet, still ends the start: the start never runs
++// the instance, so its remote rule set is never downloaded.
++func TestInterruptWhileTheInstanceIsBuiltEndsTheStart(t *testing.T) {
++	stalled, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen: %v", err)
++	}
++	defer stalled.Close()
++	finished := make(chan struct{})
++	defer close(finished)
++	var accepted atomic.Int32
++	go func() {
++		for {
++			connection, err := stalled.Accept()
++			if err != nil {
++				return
++			}
++			accepted.Add(1)
++			go func() {
++				<-finished
++				connection.Close()
++			}()
++		}
++	}()
++	startedService := NewStartedService(ServiceOptions{
++		Context: testServiceContext(),
++	})
++	defer startedService.Close()
++
++	started := make(chan error, 1)
++	go func() {
++		started <- startedService.StartOrReloadService(context.Background(), slowToBuildConfig(t, stalled.Addr().String()), nil)
++	}()
++	waitForStatus(t, startedService, ServiceStatus_STARTING)
++	closed := make(chan error, 1)
++	go func() {
++		closed <- startedService.CloseService()
++	}()
++
++	select {
++	case err := <-started:
++		if err != nil {
++			t.Fatalf("interrupted start: %v", err)
++		}
++	case <-time.After(time.Minute):
++		t.Fatal("an interrupt while the instance was being built did not end the start")
++	}
++	select {
++	case err := <-closed:
++		if err != nil {
++			t.Fatalf("close interrupted start: %v", err)
++		}
++	case <-time.After(time.Minute):
++		t.Fatal("close did not return after the interrupted start")
++	}
++	if accepted.Load() != 0 {
++		t.Fatal("the interrupted start still ran its instance")
++	}
++	if status, message := startedService.RuntimeStatus(); status != ServiceStatus_IDLE || message != "" {
++		t.Fatalf("unexpected status after the interrupt: %v %q", status, message)
++	}
++}
++
++// slowToBuildConfig takes long enough to build, about a second, that an
++// interrupt reliably lands before the instance exists. Its one remote rule set downloads from
++// ruleSetAddress when the instance runs.
++func slowToBuildConfig(t *testing.T, ruleSetAddress string) string {
++	t.Helper()
++	rules := make([]map[string]any, 0, 40_001)
++	for index := range 40_000 {
++		rules = append(rules, map[string]any{
++			"domain_suffix": []string{fmt.Sprintf("d%d.interrupt-test.invalid", index)},
++			"action":        "reject",
++		})
++	}
++	rules = append(rules, map[string]any{"rule_set": []string{"stalled"}, "action": "reject"})
++	content, err := json.Marshal(map[string]any{
++		"route": map[string]any{
++			"rule_set": []any{map[string]any{
++				"type":   "remote",
++				"tag":    "stalled",
++				"format": "binary",
++				"url":    "http://" + ruleSetAddress + "/stalled.srs",
++			}},
++			"rules": rules,
++		},
++	})
++	if err != nil {
++		t.Fatalf("encode config: %v", err)
++	}
++	return string(content)
++}
++
++func waitForStatus(t *testing.T, service *StartedService, want ServiceStatus_Type) {
++	t.Helper()
++	deadline := time.Now().Add(time.Minute)
++	for {
++		status, _ := service.RuntimeStatus()
++		if status == want {
++			return
++		}
++		if time.Now().After(deadline) {
++			t.Fatalf("status stayed %v, want %v", status, want)
++		}
++		time.Sleep(time.Millisecond)
 +	}
 +}
 +

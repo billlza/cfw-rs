@@ -315,8 +315,8 @@ def _license_closure(record: dict[str, Any]) -> dict[str, Any]:
                 else "the installed Xcode license is a non-SPDX Apple EULA"
             ),
             "closure_action": (
-                "review the exact hashed Xcode 27.0 License.rtf/PDF once for build and "
-                "application-distribution rights; record LicenseRef-Apple-Xcode-27.0 "
+                "review the exact hashed Xcode 27.1 License.rtf/PDF once for build and "
+                "application-distribution rights; record LicenseRef-Apple-Xcode-27.1 "
                 "with a human-legal-review rationale bound to those files"
             ),
             "legal_question": (
@@ -337,9 +337,10 @@ def _license_closure(record: dict[str, Any]) -> dict[str, Any]:
 
 # A plan names its source either as a fixed ``reference`` or as a
 # ``reference_template`` formatted with the component seed's version. The Go
-# toolchain seed carries GO_VERSION only after the native collector matched it
-# against the toolchain's `go version` output, so a Go bump edits only the pin
-# file.
+# and Xcode toolchain seeds carry GO_VERSION and XCODE_VERSION only after the
+# native collector matched them against the toolchain's `go version` and
+# `xcodebuild -version` output, so a Go or Xcode bump leaves these plans
+# unchanged.
 _SOURCE_CLOSURE_PLANS = {
     "@esbuild/darwin-arm64": {
         "classification": "shared-official-tag-source",
@@ -449,7 +450,7 @@ _SOURCE_CLOSURE_PLANS = {
     "xcode": {
         "classification": "apple-proprietary-source-not-redistributable",
         "upstream": "Apple Developer distribution",
-        "reference": "Xcode 27.0 exact build from dependency_pins.env",
+        "reference_template": "Xcode {version} exact build from dependency_pins.env",
         "closure_action": (
             "record an explicit nonredistributable external prerequisite bound to Xcode "
             "version/build, executable SHA-256, code signature, and hashed License.rtf/PDF"

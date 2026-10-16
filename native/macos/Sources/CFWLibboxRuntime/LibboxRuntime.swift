@@ -90,12 +90,13 @@ public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case setupFailed(String)
   case serverCreationFailed(String)
   case serviceStartFailed(String)
-  case serviceStartCleanupFailed(start: String, cleanup: String)
+  /// The start did not finish by its owner's deadline (`EngineStartBudget`):
+  /// it was interrupted then, or too little time was left to begin it.
+  case serviceStartTimedOut
   case invalidRuntimeEndpoints
   case invalidEndpointConflict(kind: Int32, port: Int32)
   case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case serviceNotRunning(state: Int32, message: String)
-  case serviceStopFailed(String)
 }
 
 extension LibboxRuntimeError: LocalizedError {
@@ -141,8 +142,10 @@ extension LibboxRuntimeError: LocalizedError {
       return "libbox service creation failed: \(message)"
     case .serviceStartFailed(let message):
       return "libbox service startup failed: \(message)"
-    case .serviceStartCleanupFailed(let start, let cleanup):
-      return "libbox startup failed (\(start)); cleanup also failed (\(cleanup))."
+    case .serviceStartTimedOut:
+      let seconds = EngineStartBudget.ownerLibboxStart.components.seconds
+      return
+        "libbox service startup did not finish within the \(seconds) seconds an engine start may take."
     case .invalidRuntimeEndpoints:
       return
         "The libbox configuration does not contain the exact application-owned loopback endpoints."
@@ -153,9 +156,24 @@ extension LibboxRuntimeError: LocalizedError {
       return "The libbox \(role.rawValue) endpoint could not bind to port \(port)."
     case .serviceNotRunning(let state, let message):
       return "libbox runtime state is \(state): \(message)"
-    case .serviceStopFailed(let message):
-      return "libbox service stop failed: \(message)"
     }
+  }
+}
+
+/// libbox could not close a service instance. libbox closes an instance once
+/// (`Box.Close` reports `os.ErrClosed` from then on), so whatever that close left
+/// open stays in this process until the process ends. The runtime that throws it
+/// is spent: it never starts, closes or reports idle again. Its memberwise
+/// initializer and its close text are internal, so only the runtime makes one.
+public struct LibboxInstanceUnclosable: Error, Equatable, Sendable {
+  /// What the close reported. libbox's text can name outbounds, servers and
+  /// paths, so it never leaves this process: do not log or send it.
+  let closeFailure: String
+}
+
+extension LibboxInstanceUnclosable: LocalizedError {
+  public var errorDescription: String? {
+    "libbox could not close its service instance: \(closeFailure)"
   }
 }
 
@@ -346,13 +364,25 @@ public struct LibboxRuntimeDirectories: Equatable, Sendable {
 
 public protocol LibboxServiceRuntime: AnyObject {
   /// Takes ownership of packetFileDescriptor on every path when one is supplied.
-  func start(configuration: Data, packetFileDescriptor: Int32?) throws
+  /// A start still running at `deadline` is interrupted, and one with too little
+  /// time left is not begun. Either fails with
+  /// `LibboxRuntimeError.serviceStartTimedOut` unless the start already failed
+  /// for its own reason, which it keeps. A failed start whose service cannot be
+  /// closed fails with `LibboxInstanceUnclosable` instead, and the runtime is
+  /// spent.
+  func start(configuration: Data, packetFileDescriptor: Int32?, deadline: EngineStartDeadline)
+    throws
   func startReceipt(
     configuration: Data,
     packetFileDescriptor: Int32?,
-    role: LibboxRuntimeRole
+    role: LibboxRuntimeRole,
+    deadline: EngineStartDeadline
   ) throws -> LibboxRuntimeStartReceipt
-  func stop() throws
+  /// Closes the running service. Closing can fail only when libbox cannot close
+  /// the instance, which leaves the runtime spent: every later stop throws the
+  /// same failure without touching libbox again, because libbox closes an
+  /// instance once. Callers never call it while a start is running.
+  func stop() throws(LibboxInstanceUnclosable)
   func healthCheck() throws
   func resetNetwork()
 }
@@ -361,9 +391,11 @@ extension LibboxServiceRuntime {
   public func startReceipt(
     configuration: Data,
     packetFileDescriptor: Int32?,
-    role: LibboxRuntimeRole
+    role: LibboxRuntimeRole,
+    deadline: EngineStartDeadline
   ) throws -> LibboxRuntimeStartReceipt {
-    try start(configuration: configuration, packetFileDescriptor: packetFileDescriptor)
+    try start(
+      configuration: configuration, packetFileDescriptor: packetFileDescriptor, deadline: deadline)
     return try LibboxRuntimeStartReceipt.parse(
       configuration: configuration,
       role: role

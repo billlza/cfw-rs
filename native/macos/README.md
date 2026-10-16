@@ -98,7 +98,16 @@ heartbeat/event channel, and stop on revocation or disconnection. Cooperative
 stop is ordered as Authority `beginStop`, owner teardown and stopped
 attestation, Host observation of the OS-facing Off boundary, then Authority
 `completeStop`. Failures remain Stopping or Quarantined rather than fabricating
-Off or transferring the lease.
+Off or transferring the lease. An owner whose libbox instance cannot be closed
+(libbox closes an instance once) reports that, never attests stopped, and ends
+its process so the kernel releases what the close left open. The ProxyAgent
+ends only after it has restored the System Proxy settings it owns, and retries
+that restore at each later stop while it fails. Without a stopped attestation
+the Authority quarantines the stop once its deadline passes, and stays
+Quarantined until it restarts. A stop the Host retries after the ProxyAgent
+ended reaches a successor with no record of it; the Host then leaves the
+outcome to Authority completion, which succeeds only if the ended owner had
+attested stopped.
 
 The loopback controller capability belongs to one Host process. After a Host
 crash or replacement, startup never adopts a still-active native owner: it

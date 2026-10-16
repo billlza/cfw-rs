@@ -54,7 +54,6 @@ class PublicationSourcePlanPinTests(unittest.TestCase):
             _SOURCE_CLOSURE_PLANS["tauri-cli"]["upstream"],
             f"https://crates.io/crates/tauri-cli/{pins['TAURI_CLI_VERSION']}",
         )
-        self.assertIn(pins["XCODE_VERSION"], _SOURCE_CLOSURE_PLANS["xcode"]["reference"])
 
     def test_go_source_reference_names_the_collected_toolchain_version(self) -> None:
         # The Go toolchain seed's version is the collected `go version`, which
@@ -64,6 +63,18 @@ class PublicationSourcePlanPinTests(unittest.TestCase):
             with self.subTest(version=version):
                 plan = _source_closure(_toolchain_seed("go", version))
                 self.assertEqual(plan["reference"], f"go{version}.darwin-arm64")
+                self.assertNotIn("reference_template", plan)
+
+    def test_xcode_source_reference_names_the_collected_toolchain_version(self) -> None:
+        # The Xcode toolchain seed's version is XCODE_VERSION, which the native
+        # collector requires `xcodebuild -version` to report; the reference
+        # follows it, so an Xcode bump leaves the plan unchanged.
+        for version in (_pins()["XCODE_VERSION"], "99.9"):
+            with self.subTest(version=version):
+                plan = _source_closure(_toolchain_seed("xcode", version))
+                self.assertEqual(
+                    plan["reference"], f"Xcode {version} exact build from dependency_pins.env"
+                )
                 self.assertNotIn("reference_template", plan)
 
     def test_each_plan_names_its_source_once(self) -> None:
@@ -78,7 +89,7 @@ class PublicationSourcePlanPinTests(unittest.TestCase):
                 for component, plan in _SOURCE_CLOSURE_PLANS.items()
                 if "reference_template" in plan
             },
-            {"go"},
+            {"go", "xcode"},
         )
 
 

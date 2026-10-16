@@ -789,5 +789,9 @@
   "{action} is unavailable: the selected profile “{name}” is invalid: {error}": "{action} is unavailable: the selected profile “{name}” is invalid: {error}",
   "the selected profile “{name}” is invalid: {error}": "the selected profile “{name}” is invalid: {error}",
   "Subscription URL": "Subscription URL",
-  "Credential cleanup is unavailable: {error}": "Credential cleanup is unavailable: {error}"
+  "Credential cleanup is unavailable: {error}": "Credential cleanup is unavailable: {error}",
+  "Mainland China direct": "Mainland China direct",
+  "Mainland China direct · {countries}": "Mainland China direct · {countries}",
+  "In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes.": "In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes.",
+  "Mainland China direct is on. For a profile routed through a proxy, the switch's rules apply in Rule mode after the listed rules, before the final route (MATCH).": "Mainland China direct is on. For a profile routed through a proxy, the switch's rules apply in Rule mode after the listed rules, before the final route (MATCH)."
 }

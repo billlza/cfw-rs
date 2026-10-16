@@ -73,30 +73,76 @@ public struct NetworkExtensionOperationFailure: Codable, Equatable, Sendable {
 }
 
 /// Schedules a callback deadline independently of the caller task. Production
-/// uses a monotonic dispatch deadline; tests inject a manual scheduler so timeout
-/// and late-callback races do not depend on wall-clock sleeps.
+/// arms a strict dispatch timer on the uptime clock, so a deadline counts only
+/// time the Mac is awake; tests inject a manual scheduler so timeout and
+/// late-callback races do not depend on wall-clock sleeps. A strict timer asks
+/// the system to keep to its leeway instead of deferring it to batch wakeups,
+/// so every wait cancels its deadline once its result arrived and only a
+/// deadline that expires costs a CPU wakeup; the bridge budget's nesting
+/// assumes that requested lateness.
 package struct CallbackDeadlineScheduler: Sendable {
-  private let scheduleBody: @Sendable (@escaping @Sendable () -> Void) -> Void
+  /// Cancels a scheduled deadline. Cancelling after it fired does nothing.
+  package typealias Cancel = @Sendable () -> Void
+
+  /// How a production deadline arms its dispatch timer.
+  struct TimerArming: Equatable, Sendable {
+    /// Seconds from arming until the deadline.
+    let delay: Double
+    let leeway: DispatchTimeInterval
+
+    /// Asks the system to keep to the leeway, on a best-effort basis, instead
+    /// of applying its larger default to save power.
+    var flags: DispatchSource.TimerFlags { .strict }
+  }
+
+  /// The largest leeway a production deadline requests, which the system keeps
+  /// on a best-effort basis. Dispatch's default leeway is a tenth of the wait:
+  /// an 18-second start reply could fire almost two seconds late, and a silent
+  /// owner's rollback would overrun the bridge budget.
+  package static let maximumLeeway: Duration = .milliseconds(100)
+
+  private let scheduleBody: @Sendable (@escaping @Sendable () -> Void) -> Cancel
 
   package init(timeout: Duration) {
-    precondition(timeout > .zero, "Callback deadline must be positive")
-    let components = timeout.components
-    let seconds =
-      Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
-    precondition(seconds.isFinite && seconds > 0, "Callback deadline must be finite")
+    let arming = Self.arming(for: timeout)
     scheduleBody = { action in
-      DispatchQueue.global(qos: .utility).asyncAfter(
-        deadline: .now() + seconds,
-        execute: action
-      )
+      let timer = DispatchSource.makeTimerSource(flags: arming.flags, queue: .global(qos: .utility))
+      // The handler keeps its timer alive until the one firing; cancelling the
+      // timer, there or through the returned handle, releases the handler and
+      // with it the timer.
+      timer.setEventHandler {
+        timer.cancel()
+        action()
+      }
+      // DispatchTime is the uptime clock, which stops while the Mac sleeps.
+      let fireAt: DispatchTime = .now() + arming.delay
+      timer.schedule(deadline: fireAt, leeway: arming.leeway)
+      timer.resume()
+      return { timer.cancel() }
     }
   }
 
-  init(schedule: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void) {
+  init(schedule: @escaping @Sendable (@escaping @Sendable () -> Void) -> Cancel) {
     scheduleBody = schedule
   }
 
-  func schedule(_ action: @escaping @Sendable () -> Void) {
+  /// A strict timer that fires `timeout` after it is armed and requests a
+  /// leeway of a tenth of the wait, never more than `maximumLeeway`.
+  static func arming(for timeout: Duration) -> TimerArming {
+    precondition(timeout > .zero, "Callback deadline must be positive")
+    let components = timeout.components
+    let delay =
+      Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+    precondition(delay.isFinite && delay > 0, "Callback deadline must be finite")
+    let leeway = min(timeout / 10, maximumLeeway).components
+    return TimerArming(
+      delay: delay,
+      leeway: .nanoseconds(
+        Int(leeway.seconds) * 1_000_000_000 + Int(leeway.attoseconds / 1_000_000_000)))
+  }
+
+  /// Arms the deadline. The caller cancels it once its wait has a result.
+  func schedule(_ action: @escaping @Sendable () -> Void) -> Cancel {
     scheduleBody(action)
   }
 }
@@ -163,6 +209,8 @@ package func awaitBoundedCallback<Value: Sendable>(
     ) -> Void
 ) async throws -> Value {
   let gate = CallbackContinuationGate<Value>()
+  var cancelDeadline: CallbackDeadlineScheduler.Cancel?
+  defer { cancelDeadline?() }
   return try await withTaskCancellationHandler {
     try await withCheckedThrowingContinuation { continuation in
       gate.install(continuation)
@@ -170,7 +218,7 @@ package func awaitBoundedCallback<Value: Sendable>(
         gate.finish(.failure(CancellationError()))
         return
       }
-      deadline.schedule {
+      cancelDeadline = deadline.schedule {
         gate.finish(.failure(timeoutError))
       }
       guard gate.beginOperation() else { return }
@@ -656,6 +704,8 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
       queue: .main
     )
     let waitID = UUID()
+    var cancelDeadline: CallbackDeadlineScheduler.Cancel?
+    defer { cancelDeadline?() }
     return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
         guard !Task.isCancelled else {
@@ -679,7 +729,7 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
         }
         guard action != .completed else { return }
 
-        requestDeadline.schedule {
+        cancelDeadline = requestDeadline.schedule {
           self.continuationGate.finishWaitKeepingRequest(
             waitID: waitID,
             result: .failure(AppleNetworkError.systemExtensionInstallationTimedOut)
@@ -1436,6 +1486,8 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
       timeoutError: .preferenceSaveTimedOut,
       failureError: AppleNetworkError.preferenceSaveFailed
     )
+    var cancelDeadline: CallbackDeadlineScheduler.Cancel?
+    defer { cancelDeadline?() }
     do {
       let _: Void = try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { continuation in
@@ -1444,7 +1496,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
             wait.cancel()
             return
           }
-          (deadline ?? callbackDeadline).schedule { wait.timeout() }
+          cancelDeadline = (deadline ?? callbackDeadline).schedule { wait.timeout() }
           guard wait.beginSubmission() else { return }
           manager.saveToPreferences { error in
             wait.finish(error)
@@ -1506,6 +1558,8 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     _ wait: PreferenceSaveWait,
     submission: @escaping @Sendable (@escaping @Sendable (Error?) -> Void) -> Void
   ) async throws {
+    var cancelDeadline: CallbackDeadlineScheduler.Cancel?
+    defer { cancelDeadline?() }
     try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
         wait.install(continuation)
@@ -1513,7 +1567,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
           wait.cancel()
           return
         }
-        callbackDeadline.schedule { wait.timeout() }
+        cancelDeadline = callbackDeadline.schedule { wait.timeout() }
         guard wait.beginSubmission() else { return }
         submission { error in wait.finish(error) }
       }

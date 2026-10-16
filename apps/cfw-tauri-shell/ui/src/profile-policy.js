@@ -36,7 +36,7 @@ export function savedProfilePolicy(profile) {
   }
   const rules = (document.route?.rules ?? []).map((rule, index) => ({
     index: String(index + 1),
-    type: rule.type === "geo_ip" ? "GEOIP" : rule.type.replaceAll("_", "-").toUpperCase(),
+    type: { geo_ip: "GEOIP", geo_site: "GEOSITE" }[rule.type] ?? rule.type.replaceAll("_", "-").toUpperCase(),
     payload: rule.value,
     proxy: rule.outbound,
     hits: "—",

@@ -228,6 +228,7 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         | NativeBridgeErrorCode::SystemExtensionValidationFailed
         | NativeBridgeErrorCode::SystemProxyConfigurationFailed
         | NativeBridgeErrorCode::SystemProxyRuntimeFailed
+        | NativeBridgeErrorCode::EngineStartTimedOut
         | NativeBridgeErrorCode::SystemProxyPreferencesFailed
         | NativeBridgeErrorCode::SystemProxyJournalFailed
         | NativeBridgeErrorCode::SystemProxyAuthorityFailed

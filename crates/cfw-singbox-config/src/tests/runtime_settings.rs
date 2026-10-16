@@ -232,3 +232,71 @@ fn manual_ipv6_dns_choices_override_imports_and_survive_serialization() {
     };
     assert!(!profile.effective_ipv6_dns_enabled(&disabled_capture));
 }
+
+#[test]
+fn mainland_china_direct_is_absent_when_off_and_round_trips_when_on() {
+    let default = serde_json::to_value(EngineSettings::default()).unwrap();
+    assert!(default.get("mainland_china_direct").is_none());
+    let on = EngineSettings {
+        mainland_china_direct: true,
+        ..EngineSettings::default()
+    };
+    let value = serde_json::to_value(&on).unwrap();
+    assert_eq!(value["mainland_china_direct"], json!(true));
+    assert_eq!(serde_json::from_value::<EngineSettings>(value).unwrap(), on);
+
+    // Stored preferences written before the switch existed keep their bytes.
+    let legacy = serde_json::to_string(&RuntimePreferences::default()).unwrap();
+    assert!(!legacy.contains("mainland"), "{legacy}");
+    let parsed: RuntimePreferences = serde_json::from_str(&legacy).unwrap();
+    assert!(!parsed.mainland_china_direct);
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), legacy);
+    let on = RuntimePreferences {
+        mainland_china_direct: true,
+        ..RuntimePreferences::default()
+    };
+    let text = serde_json::to_string(&on).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "{},\"mainland_china_direct\":true}}",
+            legacy.strip_suffix('}').unwrap()
+        )
+    );
+    assert_eq!(
+        serde_json::from_str::<RuntimePreferences>(&text).unwrap(),
+        on
+    );
+    for malformed in ["\"true\"", "1", "null"] {
+        let document = text.replace(":true}", &format!(":{malformed}}}"));
+        assert!(
+            serde_json::from_str::<RuntimePreferences>(&document).is_err(),
+            "{document}"
+        );
+    }
+    // An unknown key is refused, which is what makes a downgrade fail closed.
+    assert!(
+        serde_json::from_str::<RuntimePreferences>(&legacy.replacen('{', "{\"unknown\":1,", 1))
+            .is_err()
+    );
+}
+
+#[test]
+fn apply_to_always_assigns_mainland_china_direct() {
+    let on = RuntimePreferences {
+        mainland_china_direct: true,
+        ..RuntimePreferences::default()
+    };
+    assert!(
+        on.apply_to(EngineSettings::default())
+            .unwrap()
+            .mainland_china_direct
+    );
+    let applied = RuntimePreferences::default()
+        .apply_to(EngineSettings {
+            mainland_china_direct: true,
+            ..EngineSettings::default()
+        })
+        .unwrap();
+    assert!(!applied.mainland_china_direct);
+}

@@ -5,6 +5,7 @@ import Darwin
 import Foundation
 import Testing
 
+@testable import CFWLibboxRuntime
 @testable import CFWPacketTunnel
 
 private enum FixtureError: Error { case forced }
@@ -155,32 +156,42 @@ private final class FakeEngine: PacketEngine, @unchecked Sendable {
   private var ownedDescriptor: Int32 = -1
   private var startCountValue = 0
   private var stopCountValue = 0
-  private var stopFailuresRemaining = 0
+  private var stopFailure: LibboxInstanceUnclosable?
+  private var startDeadlines: [EngineStartDeadline] = []
 
   var startCount: Int { lock.withLock { startCountValue } }
   var stopCount: Int { lock.withLock { stopCountValue } }
+  var deadlines: [EngineStartDeadline] { lock.withLock { startDeadlines } }
 
-  func failNextStop() {
-    lock.withLock { stopFailuresRemaining += 1 }
+  /// Makes this and every later stop throw `failure`, as an engine whose
+  /// libbox instance could not be closed does.
+  func failStops(with failure: LibboxInstanceUnclosable) {
+    lock.withLock { stopFailure = failure }
   }
 
   deinit { closeOwned() }
 
-  func start(configuration: Data, packetFileDescriptor: Int32) throws {
+  func start(configuration: Data, packetFileDescriptor: Int32, deadline: EngineStartDeadline)
+    throws
+  {
     lock.withLock {
       startCountValue += 1
+      startDeadlines.append(deadline)
       ownedDescriptor = packetFileDescriptor
     }
   }
 
-  func stop() throws {
-    try lock.withLock {
+  func stop() throws(LibboxInstanceUnclosable) {
+    let failure = lock.withLock { () -> LibboxInstanceUnclosable? in
       stopCountValue += 1
-      if stopFailuresRemaining > 0 {
-        stopFailuresRemaining -= 1
-        throw FixtureError.forced
+      if let stopFailure {
+        return stopFailure
       }
       closeOwnedLocked()
+      return nil
+    }
+    if let failure {
+      throw failure
     }
   }
 
@@ -197,6 +208,70 @@ private final class FakeEngine: PacketEngine, @unchecked Sendable {
 private struct FakeEngineFactory: PacketEngineFactory {
   let engine: FakeEngine
   func makeEngine() throws -> any PacketEngine { engine }
+}
+
+/// A runtime whose failed start libbox could not close: the start throws the
+/// close failure, and so does every stop.
+private final class UnclosablePacketRuntime: LibboxServiceRuntime, @unchecked Sendable {
+  private let lock = NSLock()
+  private let closeFailure: LibboxInstanceUnclosable
+  private var stopCountValue = 0
+
+  init(closeFailure: LibboxInstanceUnclosable) {
+    self.closeFailure = closeFailure
+  }
+
+  var stopCount: Int { lock.withLock { stopCountValue } }
+
+  func start(configuration: Data, packetFileDescriptor: Int32?, deadline: EngineStartDeadline)
+    throws
+  {
+    // The runtime owns the descriptor on every path, failures included.
+    if let packetFileDescriptor {
+      Darwin.close(packetFileDescriptor)
+    }
+    throw closeFailure
+  }
+
+  func stop() throws(LibboxInstanceUnclosable) {
+    lock.withLock { stopCountValue += 1 }
+    throw closeFailure
+  }
+
+  func healthCheck() throws {}
+  func resetNetwork() {}
+}
+
+private struct UnclosablePacketRuntimeFactory: LibboxServiceRuntimeFactory {
+  let runtime: UnclosablePacketRuntime
+
+  func makeRuntime(role: LibboxRuntimeRole) throws -> any LibboxServiceRuntime { runtime }
+}
+
+/// What happened, in order: completions the test records and ended processes.
+private final class EventLog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [String] = []
+
+  func record(_ event: String) {
+    lock.withLock { events.append(event) }
+  }
+
+  var values: [String] { lock.withLock { events } }
+}
+
+private final class ProcessEndRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private let semaphore = DispatchSemaphore(value: 0)
+  private var failures: [LibboxInstanceUnclosable] = []
+
+  func record(_ failure: LibboxInstanceUnclosable) {
+    lock.withLock { failures.append(failure) }
+    semaphore.signal()
+  }
+
+  func wait() -> Bool { semaphore.wait(timeout: .now() + 2) == .success }
+  var values: [LibboxInstanceUnclosable] { lock.withLock { failures } }
 }
 
 private final class FakePump: PacketPumping, @unchecked Sendable {
@@ -352,19 +427,24 @@ private struct CoordinatorFixture {
   let revocation: TunnelRevocationChannel
   let revocationFailures: StopFailureRecorder
   let revocationCompletions: CompletionSignal
+  let processEnds: ProcessEndRecorder
+  let events: EventLog
 }
 
 private func makeCoordinator(
   authority: any EngineOwnerAuthorityClient,
   clockValue: UInt64 = 12_345,
   revocation: TunnelRevocationChannel = TunnelRevocationChannel(),
-  failPreparation: Bool = false
+  failPreparation: Bool = false,
+  runtimeFactory: (any LibboxServiceRuntimeFactory)? = nil
 ) throws -> CoordinatorFixture {
   let descriptor = try tunnelDescriptor()
   let engine = FakeEngine()
   let pump = FakePump()
   let revocationFailures = StopFailureRecorder()
   let revocationCompletions = CompletionSignal()
+  let processEnds = ProcessEndRecorder()
+  let events = EventLog()
   let dependencies = PacketTunnelSessionDependencies(
     prepareConfiguration: { receivedDescriptor, configuration, _ in
       if failPreparation { throw FixtureError.forced }
@@ -376,10 +456,17 @@ private func makeCoordinator(
     makePump: { _, _ in pump },
     applyNetworkSettings: { _, completion in completion(nil) }
   )
+  let engineFactory: any PacketEngineFactory =
+    runtimeFactory.map { LibboxPacketEngineFactory(runtimeFactory: $0) }
+    ?? FakeEngineFactory(engine: engine)
   let lifecycle = PacketTunnelSessionLifecycle(
-    engineFactory: FakeEngineFactory(engine: engine),
+    engineFactory: engineFactory,
     dependencies: dependencies,
-    cancelTunnel: { _ in }
+    cancelTunnel: { _ in },
+    endProcess: { failure in
+      events.record("end")
+      processEnds.record(failure)
+    }
   )
   let coordinator = TunnelTicketStartCoordinator(
     authority: authority,
@@ -391,7 +478,7 @@ private func makeCoordinator(
   return CoordinatorFixture(
     coordinator: coordinator, descriptor: descriptor, engine: engine, pump: pump,
     revocation: revocation, revocationFailures: revocationFailures,
-    revocationCompletions: revocationCompletions)
+    revocationCompletions: revocationCompletions, processEnds: processEnds, events: events)
 }
 
 private func makeTicket() throws -> StartTicket {
@@ -406,12 +493,13 @@ private func stopSucceeded(
   return false
 }
 
-private func isLocalEngineStopFailure(
+private func unclosableStopFailure(
   _ result: Result<Void, PacketTunnelStopError>?
-) -> Bool {
-  guard let result else { return false }
-  if case .failure(.localRuntime(.engineStop(_))) = result { return true }
-  return false
+) -> LibboxInstanceUnclosable? {
+  guard let result, case .failure(.localRuntime(.engineUnclosable(let failure))) = result else {
+    return nil
+  }
+  return failure
 }
 
 private func isAttestationStopFailure(
@@ -659,6 +747,65 @@ struct TicketOnlyStartupTests {
     #expect(PacketTunnelProvider.platformStartError(nil, configuration: descriptor) == nil)
   }
 
+  @Test func providerReportsAStartTimeoutToTheHostWithItsLineage() throws {
+    let descriptor = try tunnelDescriptor()
+    #expect(
+      PacketTunnelProviderError.engineStartTimedOut.engineFailure
+        == TunnelStartupFailure.engineStartTimedOut)
+    let timedOut =
+      try #require(
+        PacketTunnelProvider.platformStartError(
+          PacketTunnelProviderError.engineStartTimedOut, configuration: descriptor)) as NSError
+    #expect(
+      TunnelStartupFailure.matchingFailure(timedOut, configuration: descriptor)
+        == TunnelStartupFailure.engineStartTimedOut)
+    // Other engine failures keep reaching the Host through its readiness wait.
+    let failed =
+      try #require(
+        PacketTunnelProvider.platformStartError(
+          PacketTunnelProviderError.engineStart("libbox failed"), configuration: descriptor))
+      as NSError
+    #expect(TunnelStartupFailure.matchingFailure(failed, configuration: descriptor) == nil)
+  }
+
+  @Test func providerReportsAnUnclosableEngineToTheHostWithItsLineage() throws {
+    let descriptor = try tunnelDescriptor()
+    let unclosable = PacketTunnelProviderError.engineUnclosable(
+      LibboxInstanceUnclosable(closeFailure: "secret close detail"))
+    #expect(unclosable.engineFailure == TunnelStartupFailure.engineUnclosable)
+    let reported =
+      try #require(PacketTunnelProvider.platformStartError(unclosable, configuration: descriptor))
+      as NSError
+    #expect(
+      TunnelStartupFailure.matchingFailure(reported, configuration: descriptor)
+        == TunnelStartupFailure.engineUnclosable)
+    #expect(!reported.localizedDescription.contains("secret"))
+  }
+
+  @Test func libboxDeadlineIsFixedWhenMacOSDeliversTheStartNotAfterRedemption() throws {
+    let redeemGate = BlockingCallGate()
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient(redeemGate: redeemGate) { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+    let receivedBefore = ContinuousClock.now
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    let receivedAfter = ContinuousClock.now
+    #expect(redeemGate.waitUntilEntered())
+    // A slow redemption must spend the libbox start's time, not extend it.
+    Thread.sleep(forTimeInterval: 0.3)
+    redeemGate.release()
+    #expect(start.wait())
+    #expect(start.values == [nil])
+    let deadline = try #require(fixture.engine.deadlines.first)
+    #expect(fixture.engine.deadlines.count == 1)
+    #expect(deadline.instant >= receivedBefore.advanced(by: EngineStartBudget.ownerLibboxStart))
+    #expect(deadline.instant <= receivedAfter.advanced(by: EngineStartBudget.ownerLibboxStart))
+  }
+
   @Test func redeemedMismatchWithDescriptorFailsClosed() throws {
     // Build a redeemed operation whose digests do not match the provider descriptor.
     let otherDescriptor = try ConfigurationDescriptor(
@@ -835,7 +982,7 @@ struct TicketOnlyStartupTests {
     #expect(fixture.engine.stopCount == 1)
   }
 
-  @Test func engineStopFailureDoesNotAttestOrReleaseTheActiveContext() throws {
+  @Test func unclosableEngineNeverAttestsStoppedAndEndsTheProcessOnce() throws {
     let fixtureData = try makeRedeemedFixture(
       descriptor: try tunnelDescriptor(), withSecretSlot: false)
     let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
@@ -848,11 +995,17 @@ struct TicketOnlyStartupTests {
     #expect(start.wait())
     #expect(start.values == [nil])
 
-    fixture.engine.failNextStop()
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    fixture.engine.failStops(with: closeFailure)
     let failedStop = StopResultRecorder()
-    fixture.coordinator.stop { failedStop.record($0) }
+    fixture.coordinator.stop { result in
+      fixture.events.record("stop")
+      failedStop.record(result)
+    }
     #expect(failedStop.wait())
-    #expect(isLocalEngineStopFailure(failedStop.values.first))
+    #expect(fixture.processEnds.wait())
+    #expect(unclosableStopFailure(failedStop.values.first) == closeFailure)
+    #expect(fixture.events.values == ["stop", "end"])
     #expect(authority.stoppedAttemptCount == 0)
     #expect(authority.stoppedAttestations.isEmpty)
     #expect(fixture.engine.stopCount == 1)
@@ -866,13 +1019,41 @@ struct TicketOnlyStartupTests {
     #expect(blockedStart.values == [.lifecycleConflict])
     #expect(authority.redeemCount == 1)
 
+    // A retry reaches neither libbox nor the Authority, and ends nothing again.
     let retry = StopResultRecorder()
     fixture.coordinator.stop { retry.record($0) }
     #expect(retry.wait())
-    #expect(stopSucceeded(retry.values.first))
-    #expect(authority.stoppedAttestations.count == 1)
-    #expect(fixture.engine.stopCount == 2)
-    #expect(fixture.pump.stopCount == 1)
+    #expect(unclosableStopFailure(retry.values.first) == closeFailure)
+    #expect(authority.stoppedAttemptCount == 0)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.processEnds.values == [closeFailure])
+  }
+
+  @Test func unclosableRuntimeFailsTheStartWithoutAttestingThenEndsTheProcess() throws {
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close failed service")
+    let runtime = UnclosablePacketRuntime(closeFailure: closeFailure)
+    let fixture = try makeCoordinator(
+      authority: authority, runtimeFactory: UnclosablePacketRuntimeFactory(runtime: runtime))
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { error in
+      fixture.events.record("start")
+      start.record(error)
+    }
+    #expect(start.wait())
+    #expect(fixture.processEnds.wait())
+
+    #expect(start.values == [.engineUnclosable(closeFailure)])
+    #expect(fixture.events.values == ["start", "end"])
+    #expect(fixture.processEnds.values == [closeFailure])
+    #expect(authority.readyAttestations.isEmpty)
+    #expect(authority.stoppedAttemptCount == 0)
+    #expect(runtime.stopCount == 1)
   }
 
   @Test func stoppedAttestationFailureKeepsContextForAnExactRetry() throws {
@@ -913,7 +1094,7 @@ struct TicketOnlyStartupTests {
     #expect(fixture.pump.stopCount == 1)
   }
 
-  @Test func revocationStopFailureIsReportedAndRetainedForRetry() throws {
+  @Test func unclosableEngineDuringRevocationIsReportedAndEndsTheProcessOnce() throws {
     let fixtureData = try makeRedeemedFixture(
       descriptor: try tunnelDescriptor(), withSecretSlot: false)
     let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
@@ -924,14 +1105,13 @@ struct TicketOnlyStartupTests {
       ticket: try makeTicket(), descriptor: fixture.descriptor
     ) { start.record($0) }
     #expect(start.wait())
-    fixture.engine.failNextStop()
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    fixture.engine.failStops(with: closeFailure)
 
     fixture.revocation.revoke()
     #expect(fixture.revocationFailures.wait())
-    #expect(fixture.revocationFailures.errors.count == 1)
-    if let failure = fixture.revocationFailures.errors.first {
-      #expect(isLocalEngineStopFailure(.failure(failure)))
-    }
+    #expect(fixture.processEnds.wait())
+    #expect(fixture.revocationFailures.errors == [.localRuntime(.engineUnclosable(closeFailure))])
     #expect(authority.stoppedAttemptCount == 0)
     #expect(authority.stoppedAttestations.isEmpty)
 
@@ -945,8 +1125,10 @@ struct TicketOnlyStartupTests {
     let retry = StopResultRecorder()
     fixture.coordinator.stop { retry.record($0) }
     #expect(retry.wait())
-    #expect(stopSucceeded(retry.values.first))
-    #expect(authority.stoppedAttestations.count == 1)
+    #expect(unclosableStopFailure(retry.values.first) == closeFailure)
+    #expect(authority.stoppedAttemptCount == 0)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.processEnds.values == [closeFailure])
   }
 
   @Test func successfulRevocationStopsAuthorityAndCompletesTheOSSession() throws {

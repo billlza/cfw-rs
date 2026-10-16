@@ -976,6 +976,10 @@ pub enum BackendErrorKind {
     SystemExtensionValidationFailed,
     SystemProxyConfigurationFailed,
     SystemProxyRuntimeFailed,
+    /// An engine owner interrupted a libbox start that ran past its deadline,
+    /// usually because rule datasets were still downloading. The owner proved
+    /// Stopped first, so nothing is left to reconcile.
+    EngineStartTimedOut,
     SystemProxyPreferencesFailed,
     SystemProxyJournalFailed,
     SystemProxyAuthorityFailed,
@@ -1093,6 +1097,7 @@ impl BackendErrorKind {
             | Self::SystemExtensionValidationFailed
             | Self::SystemProxyConfigurationFailed
             | Self::SystemProxyRuntimeFailed
+            | Self::EngineStartTimedOut
             | Self::SystemProxyPreferencesFailed
             | Self::SystemProxyJournalFailed
             | Self::SystemProxyAuthorityFailed
@@ -1149,6 +1154,10 @@ impl BackendErrorKind {
             }
             Self::SystemProxyRuntimeFailed => {
                 "The System Proxy runtime could not be created or started."
+            }
+            Self::EngineStartTimedOut => {
+                "The engine did not finish starting in time and was stopped, usually because rule \
+                 datasets were still downloading. Datasets that finished are kept for the next start."
             }
             Self::SystemProxyPreferencesFailed => {
                 "System Proxy could not read, apply, or verify macOS network preferences."
@@ -2125,6 +2134,30 @@ mod tests {
             assert_eq!(kind.retry_directive(), RetryDirective::Never);
             assert!(!kind.allows_automatic_retry(true));
         }
+    }
+
+    #[test]
+    fn engine_start_timeout_is_a_typed_cause_that_is_never_retried_automatically() {
+        let kind = BackendErrorKind::EngineStartTimedOut;
+        assert_eq!(
+            serde_json::to_value(kind).expect("wire code"),
+            serde_json::Value::String("engine_start_timed_out".into())
+        );
+        assert_eq!(
+            serde_json::from_str::<BackendErrorKind>("\"engine_start_timed_out\"")
+                .expect("known wire code"),
+            kind
+        );
+        assert_eq!(kind.retry_directive(), RetryDirective::Never);
+        assert!(!kind.allows_automatic_retry(true));
+        assert!(!kind.allows_read_only_recheck());
+        // The same text as the Swift NativeBridgeErrorCode.engineStartTimedOut.
+        assert_eq!(
+            kind.stable_message(),
+            "The engine did not finish starting in time and was stopped, usually because \
+             rule datasets were still downloading. Datasets that finished are kept for the \
+             next start."
+        );
     }
 
     #[test]

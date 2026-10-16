@@ -1,0 +1,54 @@
+{
+  "credentials": [
+    {
+      "id": "55ba7c1a-1f3a-5da2-8620-2abc8bf7ae17",
+      "kind": "hysteria2_password",
+      "secret_sha256": "e4adc7dd075ed8cdcaa6265af5810c15be71f3ee1540d53fe34934f107e9c82f"
+    },
+    {
+      "id": "823241ae-813e-5e74-ace4-580d87dfdaaa",
+      "kind": "trojan_password",
+      "secret_sha256": "836dd59da75fa0fd3eb39f552e5a7a1a58a01d2534ddd3b06f5848c7cbde0db7"
+    }
+  ],
+  "digest": "81f84422f3bf95fb7aa104c510f70b63b4a23687090eaf635065e0962b762cb0",
+  "profile": {
+    "outbounds": [
+      {
+        "credential_ref": {
+          "id": "55ba7c1a-1f3a-5da2-8620-2abc8bf7ae17",
+          "kind": "hysteria2_password"
+        },
+        "server": "hy2.example.com",
+        "server_port": 443,
+        "tag": "hy2-pinned",
+        "tls": {
+          "certificate_sha256": [
+            "//////////////////////////////////////////8=",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+          ],
+          "enabled": true,
+          "server_name": "hy2.example.com"
+        },
+        "type": "hysteria2"
+      },
+      {
+        "credential_ref": {
+          "id": "823241ae-813e-5e74-ace4-580d87dfdaaa",
+          "kind": "trojan_password"
+        },
+        "server": "trojan.example.com",
+        "server_port": 443,
+        "tag": "trojan-pinned",
+        "tls": {
+          "certificate_sha256": [
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+          ],
+          "enabled": true,
+          "server_name": "trojan.example.com"
+        },
+        "type": "trojan"
+      }
+    ]
+  }
+}

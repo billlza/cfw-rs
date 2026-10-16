@@ -93,6 +93,8 @@ private final class ControlledAuthorityUnregistration: GlobalAuthorityDaemonServ
     try await barrier.unregister(
       deadline: CallbackDeadlineScheduler { action in
         self.lock.withLock { self.deadlineAction = action }
+        // This deadline fires only when a test expires it.
+        return {}
       }, operation: { finish in self.submit(finish) })
   }
 

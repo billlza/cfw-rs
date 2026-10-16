@@ -87,6 +87,16 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
     }
   }
 
+  /// Carries the command server to the start watchdog's queue. gomobile objects
+  /// may be called from any thread; libbox serializes its own lifecycle.
+  private final class CommandServerBox: @unchecked Sendable {
+    let server: LibboxCommandServer
+
+    init(_ server: LibboxCommandServer) {
+      self.server = server
+    }
+  }
+
   private final class NetworkInterfaceIterator: NSObject,
     LibboxNetworkInterfaceIteratorProtocol
   {
@@ -117,8 +127,13 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
     private var monitorQueue: DispatchQueue?
     private var monitorListener: InterfaceListenerBox?
     private var interfacePolicy = LibboxInterfaceMonitorPolicy()
+    private let monitorCloseFault: (any Error & Sendable)?
 
-    init(role: LibboxRuntimeRole, packetFileDescriptor: Int32?) throws {
+    init(
+      role: LibboxRuntimeRole, packetFileDescriptor: Int32?,
+      monitorCloseFault: (any Error & Sendable)?
+    ) throws {
+      self.monitorCloseFault = monitorCloseFault
       switch (role, packetFileDescriptor) {
       case (.packetTunnel, .some(let descriptor)) where descriptor >= 0:
         self.descriptor = OwnedPacketDescriptor(descriptor)
@@ -158,9 +173,12 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
       }
       let listenerBox = InterfaceListenerBox(listener)
       let monitor = NWPathMonitor()
+      // The engine start blocks below until this queue delivers the first path.
+      // It runs at the QoS of a start the user requested; a lower queue would
+      // make the start wait on lower-priority work (a priority inversion).
       let queue = DispatchQueue(
         label: "com.bill.clashformac.libbox-network-monitor",
-        qos: .utility
+        qos: .userInitiated
       )
       let firstPath = DispatchSemaphore(value: 0)
       let waitingForFirstPath = Mutex(true)
@@ -197,10 +215,14 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
       _ listener: (any LibboxInterfaceUpdateListenerProtocol)?
     ) throws {
       _ = listener
-      guard monitorLock.withLock({ monitor != nil }) else {
-        throw LibboxRuntimeError.networkMonitorUnavailable
-      }
+      // libbox closes the monitor with every instance it closes, also when the
+      // start ended before it started the monitor, or after the first path
+      // never arrived and the start stopped it. Nothing runs then; failing the
+      // close would leave libbox holding an instance it cannot close again.
       stopMonitor()
+      if let monitorCloseFault {
+        throw monitorCloseFault
+      }
     }
 
     func getInterfaces() throws -> any LibboxNetworkInterfaceIteratorProtocol {
@@ -325,12 +347,14 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
 
     init(
       role: LibboxRuntimeRole, packetFileDescriptor: Int32?,
-      processPolicy: LibboxProcessLookupPolicy
+      processPolicy: LibboxProcessLookupPolicy,
+      monitorCloseFault: (any Error & Sendable)?
     ) throws {
       self.role = role
       core = try LibboxPlatformCore(
         role: role,
-        packetFileDescriptor: packetFileDescriptor
+        packetFileDescriptor: packetFileDescriptor,
+        monitorCloseFault: monitorCloseFault
       )
       adapter = CFWLibboxPlatformAdapter(
         packetTunnel: role == .packetTunnel,
@@ -394,17 +418,33 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
       case idle
       case starting
       case active(LibboxCommandServer, LibboxPlatformContext)
-      case failedOwned(LibboxCommandServer, LibboxPlatformContext)
+      /// libbox could not close the instance. The server and platform stay
+      /// referenced so nothing libbox may still use is freed under it.
+      case spent(LibboxInstanceUnclosable, LibboxCommandServer, LibboxPlatformContext)
     }
 
     private let role: LibboxRuntimeRole
     private let directories: LibboxRuntimeDirectories
+    private let interfaceMonitorCloseFault: (any Error & Sendable)?
     private let lock = NSLock()
     private var state = State.idle
 
-    public init(role: LibboxRuntimeRole, directories: LibboxRuntimeDirectories) throws {
+    public convenience init(
+      role: LibboxRuntimeRole, directories: LibboxRuntimeDirectories
+    ) throws {
+      try self.init(role: role, directories: directories, interfaceMonitorCloseFault: nil)
+    }
+
+    /// Every close of libbox's network monitor throws `interfaceMonitorCloseFault`
+    /// when one is given, which makes libbox fail to close an instance the way
+    /// a real close failure does. Only tests pass one.
+    init(
+      role: LibboxRuntimeRole, directories: LibboxRuntimeDirectories,
+      interfaceMonitorCloseFault: (any Error & Sendable)?
+    ) throws {
       self.role = role
       self.directories = directories
+      self.interfaceMonitorCloseFault = interfaceMonitorCloseFault
       try directories.validate()
     }
 
@@ -412,14 +452,16 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
       do {
         try stop()
       } catch {
-        // Lifecycle owners perform the authoritative retry while the runtime
-        // is reachable. This deinitializer is only the last resource boundary,
-        // so report a non-sensitive fault instead of silently discarding it.
+        // Owners stop the runtime themselves and end their process when libbox
+        // cannot close it. This deinitializer is only the last resource
+        // boundary, so report a non-sensitive fault instead of discarding it.
         Self.logger.fault("libbox runtime final cleanup failed")
       }
     }
 
-    public func start(configuration: Data, packetFileDescriptor: Int32?) throws {
+    public func start(
+      configuration: Data, packetFileDescriptor: Int32?, deadline: EngineStartDeadline
+    ) throws {
       let configurationText: String
       let expectedReceipt: LibboxRuntimeStartReceipt
       do {
@@ -436,10 +478,14 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
       }
       do {
         try lock.withLock {
-          guard case .idle = state else {
+          switch state {
+          case .idle:
+            state = .starting
+          case .spent(let failure, _, _):
+            throw failure
+          case .starting, .active:
             throw LibboxRuntimeError.alreadyStarted
           }
-          state = .starting
         }
       } catch {
         if let packetFileDescriptor, packetFileDescriptor >= 0 {
@@ -453,13 +499,15 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
         platform = try LibboxPlatformContext(
           role: role,
           packetFileDescriptor: packetFileDescriptor,
-          processPolicy: expectedReceipt.processPolicy
+          processPolicy: expectedReceipt.processPolicy,
+          monitorCloseFault: interfaceMonitorCloseFault
         )
       } catch {
         lock.withLock { state = .idle }
         throw error
       }
       var server: LibboxCommandServer?
+      var startInterruption: Result<Void, any Error>?
       do {
         try LibboxSetupCoordinator.configure(directories)
         var creationError: NSError?
@@ -481,13 +529,32 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
         let options = LibboxOverrideOptions()
         options.autoRedirect = false
         do {
-          var reportedConflict: LibboxRuntimeStartConflict?
-          try CFWLibboxPlatformAdapter.startOrReloadService(
-            server,
-            configuration: configurationText,
-            options: options,
-            reportedConflict: &reportedConflict)
-          if let reportedConflict {
+          let interruptTarget = CommandServerBox(server)
+          let outcome = LibboxStartWatchdog().run(
+            deadline: deadline,
+            // CloseService interrupts the start, waits for it to return, then
+            // closes the service, reporting idle once that close succeeded.
+            interrupt: { try interruptTarget.server.closeService() },
+            start: { () throws -> LibboxRuntimeStartConflict? in
+              var reportedConflict: LibboxRuntimeStartConflict?
+              try CFWLibboxPlatformAdapter.startOrReloadService(
+                server,
+                configuration: configurationText,
+                options: options,
+                reportedConflict: &reportedConflict)
+              return reportedConflict
+            })
+          switch outcome {
+          case .notStarted:
+            Self.logger.error("libbox start skipped: the start deadline left too little time")
+          case .interrupted:
+            Self.logger.error("libbox start interrupted at the start deadline")
+          case .completed:
+            break
+          }
+          let verdict: LibboxStartVerdict<LibboxRuntimeStartConflict> = outcome.verdict()
+          startInterruption = verdict.interruption
+          if let reportedConflict = try verdict.start.get() {
             let conflict = try LibboxRuntimeEndpointConflict.validated(
               kind: reportedConflict.kind,
               port: reportedConflict.port,
@@ -511,49 +578,66 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
         lock.withLock { state = .active(server, platform) }
       } catch {
         let primary = error
-        if let server {
-          do {
-            try Self.closeServiceIfOwned(server)
-            server.close()
-            platform.closeUntransferredDescriptor()
-            lock.withLock { state = .idle }
-          } catch {
-            lock.withLock { state = .failedOwned(server, platform) }
-            throw LibboxRuntimeError.serviceStartCleanupFailed(
-              start: primary.localizedDescription,
-              cleanup: error.localizedDescription
-            )
-          }
-        } else {
+        guard let server else {
           platform.closeUntransferredDescriptor()
           lock.withLock { state = .idle }
+          throw primary
         }
+        do throws(LibboxInstanceUnclosable) {
+          // A fired interrupt ran CloseService, which fails only when libbox
+          // kept an instance it could not close: CloseService's own close
+          // failed, or the interrupted start's had. libbox closes an instance
+          // once, so asking again could not succeed.
+          if case .failure(let interruptFailure) = startInterruption {
+            throw LibboxInstanceUnclosable(closeFailure: interruptFailure.localizedDescription)
+          }
+          try Self.closeServiceIfOwned(server)
+        } catch {
+          Self.logger.fault(
+            "libbox could not close a service instance after its start \(Self.startFailureKind(primary), privacy: .public)"
+          )
+          lock.withLock { state = .spent(error, server, platform) }
+          throw error
+        }
+        server.close()
+        platform.closeUntransferredDescriptor()
+        lock.withLock { state = .idle }
         throw primary
       }
     }
 
-    public func stop() throws {
-      let owned: (LibboxCommandServer, LibboxPlatformContext)? = try lock.withLock {
-        switch state {
-        case .idle:
-          return nil
-        case .starting:
-          throw LibboxRuntimeError.serviceStopFailed(
-            "startup is still in progress"
-          )
-        case .active(let server, let platform),
-          .failedOwned(let server, let platform):
-          return (server, platform)
-        }
+    /// How a failed start ended, without libbox's text, which can name the
+    /// profile's servers.
+    private static func startFailureKind(_ error: any Error) -> String {
+      switch error as? LibboxRuntimeError {
+      case .serviceStartTimedOut?:
+        "timed out"
+      case .endpointConflict(let role, let port)?:
+        "found its \(role.rawValue) port \(port) in use"
+      default:
+        "failed"
       }
-      guard let (server, platform) = owned else {
+    }
+
+    public func stop() throws(LibboxInstanceUnclosable) {
+      let server: LibboxCommandServer
+      let platform: LibboxPlatformContext
+      switch lock.withLock({ state }) {
+      case .idle:
         return
+      case .starting:
+        preconditionFailure("A libbox runtime was stopped while its start was running.")
+      case .spent(let failure, _, _):
+        throw failure
+      case .active(let activeServer, let activePlatform):
+        (server, platform) = (activeServer, activePlatform)
       }
       do {
         try Self.closeServiceIfOwned(server)
       } catch {
-        lock.withLock { state = .failedOwned(server, platform) }
-        throw LibboxRuntimeError.serviceStopFailed(error.localizedDescription)
+        Self.logger.fault("libbox could not close a running service instance")
+        lock.withLock { state = .spent(error, server, platform) }
+        throw error
       }
       server.close()
       platform.closeUntransferredDescriptor()
@@ -595,18 +679,24 @@ struct LibboxInterfaceMonitorPolicy: Sendable {
       }
     }
 
-    private static func closeServiceIfOwned(_ server: LibboxCommandServer) throws {
+    /// Closes the service unless libbox reports it idle. Every failure means
+    /// libbox could not close the instance, which it closes only once.
+    private static func closeServiceIfOwned(
+      _ server: LibboxCommandServer
+    ) throws(LibboxInstanceUnclosable) {
       guard let status = server.runtimeStatus() else {
-        throw LibboxRuntimeError.serviceStopFailed("missing runtime status")
+        throw LibboxInstanceUnclosable(closeFailure: "libbox reported no runtime status")
       }
       if status.state == LibboxRuntimeStateIdle {
         return
       }
-      try server.closeService()
+      do {
+        try server.closeService()
+      } catch {
+        throw LibboxInstanceUnclosable(closeFailure: error.localizedDescription)
+      }
       guard let stopped = server.runtimeStatus(), stopped.state == LibboxRuntimeStateIdle else {
-        throw LibboxRuntimeError.serviceStopFailed(
-          "libbox did not reach idle after close"
-        )
+        throw LibboxInstanceUnclosable(closeFailure: "libbox did not reach idle after close")
       }
     }
   }

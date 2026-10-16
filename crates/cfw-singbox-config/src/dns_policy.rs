@@ -11,9 +11,10 @@ mod bootstrap;
 mod matcher;
 mod project;
 pub(crate) use bootstrap::{BootstrapDnsServer, validate_bootstrap_pool};
+pub(crate) use matcher::dns_datasets;
 pub(crate) use project::{
-    add_connection_dns_rules, append_evaluated_server, project_profile_dns, resolver_tags,
-    resolver_value,
+    add_connection_dns_rules, append_evaluated_server, append_pool_rules, project_profile_dns,
+    resolver_tags, resolver_value,
 };
 
 pub(crate) const MAX_DNS_RESOLVERS: usize = 8;
@@ -261,12 +262,8 @@ impl ProfileDns {
             {
                 return Err(invalid("DNS fallback filter exceeds 256 entries"));
             }
-            if let Some(code) = &filter.geoip_code
-                && (code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_lowercase()))
-            {
-                return Err(invalid(
-                    "DNS GeoIP code requires a lowercase two-letter country code",
-                ));
+            if let Some(code) = &filter.geoip_code {
+                matcher::validate_geoip_code(code)?;
             }
             for code in &filter.geosite {
                 matcher::validate_geosite(code)?;

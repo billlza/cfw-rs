@@ -2,6 +2,7 @@
 use serde_json::{Value, json};
 
 use super::ProfileDnsServer;
+use crate::datasets::{CountryCode, Dataset, GeositeCode};
 use crate::{ConfigError, profile::ProfileDocument};
 
 pub(crate) struct DnsPolicyProjection {
@@ -56,7 +57,7 @@ fn append_pool(
 
 // A terminal rule for each matched pool prevents failed policy queries from
 // continuing into an unrelated DNS policy or a direct bootstrap resolver.
-fn append_pool_rules(rules: &mut Vec<Value>, tags: &[String], condition: &Value) {
+pub(crate) fn append_pool_rules(rules: &mut Vec<Value>, tags: &[String], condition: &Value) {
     for (index, tag) in tags.iter().enumerate() {
         if index + 1 == tags.len() {
             let mut rule = condition.clone();
@@ -214,7 +215,14 @@ pub(crate) fn project_profile_dns(
                 append_pool_rules(
                     &mut rules,
                     fallback,
-                    &json!({"rule_set":filter.geosite.iter().map(|code| format!("cfw-geosite-{code}")).collect::<Vec<_>>()}),
+                    &json!({"rule_set":filter
+                        .geosite
+                        .iter()
+                        .map(|code| {
+                            Dataset::GeoSite(GeositeCode::parse(code).expect("validated DNS geosite"))
+                                .tag()
+                        })
+                        .collect::<Vec<_>>()}),
                 );
             }
             for domain in &filter.domain {
@@ -250,7 +258,8 @@ pub(crate) fn project_profile_dns(
                 conditions.push(json!({"ip_cidr":filter.ip_cidr,"invert":true}));
             }
             if let Some(country) = &filter.geoip_code {
-                conditions.push(json!({"rule_set":[format!("cfw-geoip-{country}")]}));
+                let country = CountryCode::parse(country).expect("validated DNS GeoIP code");
+                conditions.push(json!({"rule_set":[Dataset::GeoIp(country).tag()]}));
             }
             json!({"type":"logical","mode":"and","rules":conditions})
         });

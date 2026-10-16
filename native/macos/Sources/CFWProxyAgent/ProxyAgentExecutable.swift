@@ -38,6 +38,8 @@ public enum ProxyAgentExecutable {
     let journalStore = try KeychainProxyOwnershipJournalStore(
       keychainAccessGroup: journalKeychainAccessGroup
     )
+    let connections = ProxyAgentConnections()
+    let processExit = ProxyAgentProcessExit(connections: connections)
     let preferences = SCPreferencesSystemProxyPreferences()
     let credentialVault = try CredentialVault(accessGroup: credentialKeychainAccessGroup)
     // Machine-wide Proxy/Tunnel/multi-user exclusion is owned by the Global Authority
@@ -66,7 +68,8 @@ public enum ProxyAgentExecutable {
         engineFactory: LibboxProxyEngineFactory(),
         preferences: preferences,
         journalStore: journalStore,
-        readinessTimeout: 10
+        readinessTimeout: 10,
+        endProcess: { processExit.end(after: $0) }
       )
     )
     // The Authority owner coordinator binds an Authority owner capability before any
@@ -103,7 +106,8 @@ public enum ProxyAgentExecutable {
 
     let delegate = ProxyAgentListenerDelegate(
       identityPolicy: identityPolicy,
-      service: service
+      service: service,
+      connections: connections
     )
     let listener = NSXPCListener(machServiceName: machServiceName)
     identityPolicy.configure(listener)

@@ -1827,6 +1827,81 @@ fn tls_protocol_uri_imports_fail_closed_on_unrepresented_semantics() {
             "disabling TLS certificate verification",
         ),
         (
+            "Hysteria2 empty pin",
+            "hy2://TopSecretValue%21@hy2.example.com:443?pinSHA256=",
+            "Hysteria2 pinSHA256 must be a SHA256 hex value",
+        ),
+        (
+            "Hysteria2 pin without a value",
+            "hy2://TopSecretValue%21@hy2.example.com:443?pinSHA256",
+            "Hysteria2 pinSHA256 must be a SHA256 hex value",
+        ),
+        (
+            "Hysteria2 short pin",
+            "hy2://TopSecretValue%21@hy2.example.com:443?pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1",
+            "Hysteria2 pinSHA256 must be a SHA256 hex value",
+        ),
+        (
+            "Hysteria2 base64 pin",
+            "hy2://TopSecretValue%21@hy2.example.com:443?pinSHA256=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8%3D",
+            "Hysteria2 pinSHA256 must be a SHA256 hex value",
+        ),
+        (
+            "Hysteria2 repeated pin",
+            "hy2://TopSecretValue%21@hy2.example.com:443?pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "repeats query parameter",
+        ),
+        (
+            "Hysteria2 pin key in another case",
+            "hy2://TopSecretValue%21@hy2.example.com:443?pinsha256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "unsupported parameters",
+        ),
+        (
+            "Hysteria2 pin with an unknown parameter",
+            "hy2://TopSecretValue%21@hy2.example.com:443?pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&TopSecretValue123=1",
+            "unsupported parameters",
+        ),
+        (
+            "Hysteria2 insecure with a later false alias",
+            "hy2://TopSecretValue%21@hy2.example.com:443?insecure=1&allowInsecure=0",
+            "disabling TLS certificate verification",
+        ),
+        (
+            "Trojan insecure with a later false alias",
+            "trojan://TopSecretValue%21@trojan.example.com:443?insecure=1&skip-cert-verify=0",
+            "disabling TLS certificate verification",
+        ),
+        (
+            "Hysteria2 insecure beside a malformed pin",
+            "hy2://TopSecretValue%21@hy2.example.com:443?insecure=1&pinSHA256=zz",
+            "Hysteria2 pinSHA256 must be a SHA256 hex value",
+        ),
+        (
+            "Hysteria2 insecure beside an empty pin",
+            "hy2://TopSecretValue%21@hy2.example.com:443?allowInsecure=true&pinSHA256=",
+            "Hysteria2 pinSHA256 must be a SHA256 hex value",
+        ),
+        (
+            "Hysteria2 uTLS is refused before the pin is read",
+            "hy2://TopSecretValue%21@hy2.example.com:443?fp=chrome&pinSHA256=zz",
+            "does not support uTLS",
+        ),
+        (
+            "VLESS pin",
+            "vless://11111111-1111-4111-8111-111111111111@vless.example.com:443?security=tls&sni=vless.example.com&pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "unsupported parameters",
+        ),
+        (
+            "AnyTLS pin",
+            "anytls://TopSecretValue%21@anytls.example.com:443?pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "unsupported parameters",
+        ),
+        (
+            "TUIC pin",
+            "tuic://11111111-1111-4111-8111-111111111111:TopSecretValue%21@tuic.example.com:443?pinSHA256=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "unsupported parameters",
+        ),
+        (
             "AnyTLS unknown parameter",
             "anytls://TopSecretValue%21@anytls.example.com:443?TopSecretValue123=1",
             "unsupported parameters",
@@ -1876,6 +1951,8 @@ fn tls_protocol_uri_imports_fail_closed_on_unrepresented_semantics() {
         assert!(error.contains(expected), "{label}: {error}");
         assert!(!error.contains("TopSecretValue!"), "{label}: {error}");
         assert!(!error.contains("TopSecretValue123"), "{label}: {error}");
+        // Pin digits are not secret, but no error echoes a parameter value.
+        assert!(!error.contains("0001020304"), "{label}: {error}");
     }
 }
 
@@ -2680,4 +2757,537 @@ fn uri_bundle_errors_never_echo_line_content() {
         .expect_err("unrecognized document");
     assert!(!error.contains("TopSecretValue!"), "{error}");
     assert!(error.contains("subscription line 1"), "{error}");
+}
+
+/// Byte-identity goldens for stored imports, captured on the 0.5 line before
+/// Hysteria2 links accepted `pinSHA256` and before every importer emitted its
+/// certificate pins through `TlsParts`. A mismatch writes the actual output to
+/// `target/tmp/import-goldens/` and fails; the goldens are never rewritten
+/// automatically. Secrets appear only as SHA-256 digests.
+mod import_goldens {
+    use std::path::PathBuf;
+
+    use serde_json::{Value, json};
+    use sha2::{Digest as _, Sha256};
+
+    use super::import_with_stable_references;
+
+    const CASES: &[(&str, &str)] = &[
+        (
+            "clash-mooring-shape",
+            r#"proxies:
+  - name: "lon1-reality"
+    type: "vless"
+    server: "45.67.89.10"
+    port: 443
+    uuid: "6d6f6f72-0101-4001-8000-000000010101"
+    flow: "xtls-rprx-vision"
+    packet-encoding: "xudp"
+    tls: true
+    servername: "www.example.com"
+    client-fingerprint: "chrome"
+    reality-opts:
+      public-key: "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0"
+      short-id: "0123456789abcdef"
+  - name: "lon1-hy2"
+    type: "hysteria2"
+    server: "45.67.89.10"
+    port: 61000
+    ports: "61000-62999"
+    hop-interval: 30
+    password: "Hy2PasswordValue1"
+    obfs: "salamander"
+    obfs-password: "ObfsPasswordValue1"
+    sni: "n0123456789abcdef.internal"
+    fingerprint: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+"#,
+        ),
+        (
+            "clash-trojan-colon-fingerprint",
+            "proxies:\n  - name: trojan-pinned\n    type: trojan\n    server: trojan.example.com\n    port: 443\n    password: TrojanPasswordValue1\n    sni: trojan.example.com\n    fingerprint: \"FF:FE:FD:FC:FB:FA:F9:F8:F7:F6:F5:F4:F3:F2:F1:F0:EF:EE:ED:EC:EB:EA:E9:E8:E7:E6:E5:E4:E3:E2:E1:E0\"\n",
+        ),
+        (
+            "sing-box-mooring-shape",
+            r#"{"outbounds":[
+  {"type":"vless","tag":"lon1-reality","server":"45.67.89.10","server_port":443,
+   "uuid":"6d6f6f72-0101-4001-8000-000000010101","flow":"xtls-rprx-vision","packet_encoding":"xudp",
+   "tls":{"enabled":true,"server_name":"www.example.com","utls":{"enabled":true,"fingerprint":"chrome"},
+          "reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}},
+  {"type":"hysteria2","tag":"lon1-hy2","server":"45.67.89.10","server_ports":["61000:62999"],"hop_interval":"30s",
+   "password":"Hy2PasswordValue1","obfs":{"type":"salamander","password":"ObfsPasswordValue1"},
+   "tls":{"enabled":true,"server_name":"n0123456789abcdef.internal",
+          "certificate_public_key_sha256":["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]}}]}"#,
+        ),
+        (
+            "sing-box-der-pins",
+            r#"{"outbounds":[
+  {"type":"hysteria2","tag":"hy2-pinned","server":"hy2.example.com","server_port":443,"password":"Hy2PasswordValue2",
+   "tls":{"enabled":true,"server_name":"hy2.example.com",
+          "certificate_sha256":["//////////////////////////////////////////8=","AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]}},
+  {"type":"trojan","tag":"trojan-pinned","server":"trojan.example.com","server_port":443,"password":"TrojanPasswordValue2",
+   "tls":{"enabled":true,"server_name":"trojan.example.com",
+          "certificate_sha256":["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]}}]}"#,
+        ),
+        (
+            "uri-bundle",
+            "hy2://Hy2PasswordValue3@hy2.example.com:443?sni=hy2.example.com&obfs=salamander&obfs-password=ObfsPasswordValue3#HY2\n\
+hysteria2://Hy2PasswordValue4@hop.example.com:443,5000-5002?sni=hop.example.com&hop-interval=30#HOP\n\
+vless://6d6f6f72-0101-4001-8000-000000010102@vless.example.com:443?security=reality&sni=www.example.com&fp=chrome&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0&sid=0123456789abcdef&flow=xtls-rprx-vision&type=tcp#VLESS\n\
+trojan://TrojanPasswordValue3@trojan.example.com:443?sni=trojan.example.com#TROJAN\n",
+        ),
+    ];
+
+    fn golden_directory() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/subscription_import/goldens")
+    }
+
+    fn actual_directory() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/import-goldens")
+    }
+
+    fn snapshot(document: &str) -> String {
+        let imported = import_with_stable_references(document);
+        let profile: Value =
+            serde_json::from_str(imported.profile.as_json()).expect("stored profile");
+        let credentials = imported
+            .credentials
+            .iter()
+            .map(|credential| {
+                json!({
+                    "id": credential.reference.id(),
+                    "kind": credential.reference.kind(),
+                    "secret_sha256": Sha256::digest(credential.secret.as_bytes())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut text = serde_json::to_string_pretty(&json!({
+            "credentials": credentials,
+            "digest": imported.profile.digest(),
+            "profile": profile,
+        }))
+        .expect("golden text");
+        text.push('\n');
+        text
+    }
+
+    #[test]
+    fn stored_imports_match_the_goldens_captured_before_link_pins() {
+        let mut mismatched = Vec::new();
+        for (name, document) in CASES {
+            let actual = snapshot(document);
+            let path = golden_directory().join(format!("{name}.json"));
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(actual.as_str()) {
+                let output = actual_directory();
+                std::fs::create_dir_all(&output).expect("actual output directory");
+                std::fs::write(output.join(format!("{name}.json")), &actual)
+                    .expect("actual output");
+                mismatched.push(*name);
+            }
+        }
+        let mut stored = std::fs::read_dir(golden_directory())
+            .map(|entries| {
+                entries
+                    .map(|entry| {
+                        entry
+                            .expect("golden entry")
+                            .file_name()
+                            .into_string()
+                            .expect("UTF-8 golden name")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        stored.sort();
+        let mut expected = CASES
+            .iter()
+            .map(|(name, _)| format!("{name}.json"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(stored, expected, "no stray or missing golden");
+        assert!(
+            mismatched.is_empty(),
+            "stored imports differ from the goldens: {mismatched:?}; actual output in {}",
+            actual_directory().display()
+        );
+    }
+}
+
+const ASCENDING_PIN_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const ASCENDING_PIN_BASE64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+#[test]
+fn tls_parts_emit_certificate_sha256_only_when_present() {
+    let parts = || build_tls_parts(true, "pinned.example.com".into(), Vec::new(), None, None);
+    assert_eq!(
+        tls_json(parts()),
+        json!({"enabled":true,"server_name":"pinned.example.com"})
+    );
+    let pinned = tls_json(TlsParts {
+        certificate_sha256: vec!["first".into(), "second".into()],
+        ..parts()
+    });
+    assert_eq!(
+        pinned,
+        json!({"enabled":true,"server_name":"pinned.example.com","certificate_sha256":["first","second"]})
+    );
+}
+
+#[test]
+fn hysteria2_share_links_import_pin_sha256_as_a_certificate_pin() {
+    let upper_colons = ASCENDING_PIN_HEX
+        .to_ascii_uppercase()
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).expect("ASCII hex"))
+        .collect::<Vec<_>>()
+        .join(":");
+    let dashes = upper_colons.to_ascii_lowercase().replace(':', "-");
+    for (label, uri) in [
+        (
+            "hy2 scheme, OpenSSL form",
+            format!(
+                "hy2://TopSecretValue%21@hy2.example.com:443?sni=hy2.example.com&pinSHA256={upper_colons}#HY2"
+            ),
+        ),
+        (
+            "hysteria2 scheme, dashes",
+            format!(
+                "hysteria2://TopSecretValue%21@hy2.example.com:443?sni=hy2.example.com&pinSHA256={dashes}#HY2"
+            ),
+        ),
+        (
+            "percent-encoded colons",
+            format!(
+                "hy2://TopSecretValue%21@hy2.example.com:443?sni=hy2.example.com&pinSHA256={}#HY2",
+                upper_colons.replace(':', "%3A")
+            ),
+        ),
+        (
+            "explicit insecure=0",
+            format!(
+                "hy2://TopSecretValue%21@hy2.example.com:443?sni=hy2.example.com&insecure=0&pinSHA256={ASCENDING_PIN_HEX}#HY2"
+            ),
+        ),
+        (
+            // Upstream pairs insecure=1 with a pin for self-signed servers. CFM
+            // verifies the pin with the name and validity checks and never
+            // emits insecure.
+            "insecure=1 beside a pin",
+            format!(
+                "hy2://TopSecretValue%21@hy2.example.com:443?sni=hy2.example.com&insecure=1&pinSHA256={ASCENDING_PIN_HEX}#HY2"
+            ),
+        ),
+        (
+            "every insecure alias beside a pin",
+            format!(
+                "hy2://TopSecretValue%21@hy2.example.com:443?sni=hy2.example.com&allowInsecure=1&allow_insecure=true&skip-cert-verify=1&pinSHA256={ASCENDING_PIN_HEX}#HY2"
+            ),
+        ),
+    ] {
+        let imported =
+            import_subscription_document(&uri).unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(
+            imported_outbounds(&imported)[0]["tls"],
+            json!({"enabled":true,"server_name":"hy2.example.com","certificate_sha256":[ASCENDING_PIN_BASE64]}),
+            "{label}"
+        );
+        // The pin is profile data: the vault receives only the password.
+        assert_eq!(imported.credentials.len(), 1, "{label}");
+        let runtime: Value = serde_json::from_str(&projected_json(&imported)).expect("runtime");
+        let tls = &runtime["outbounds"][0]["tls"];
+        assert_eq!(
+            tls["certificate_sha256"],
+            json!([ASCENDING_PIN_BASE64]),
+            "{label}"
+        );
+        assert_eq!(tls["server_name"], "hy2.example.com", "{label}");
+        assert!(tls.get("insecure").is_none(), "{label}");
+        assert!(
+            tls.get("certificate_public_key_sha256").is_none(),
+            "{label}"
+        );
+    }
+    let hopping = import_subscription_document(&format!(
+        "hysteria2://TopSecretValue%21@hop.example.com:443,5000-5002?sni=hop.example.com&obfs=salamander&obfs-password=ObfsSecret&hop-interval=30&pinSHA256={ASCENDING_PIN_HEX}#HOP"
+    ))
+    .expect("pinned port-hopping link");
+    let outbound = &imported_outbounds(&hopping)[0];
+    assert_eq!(
+        outbound["tls"]["certificate_sha256"],
+        json!([ASCENDING_PIN_BASE64])
+    );
+    assert_eq!(outbound["server_ports"], json!(["443", "5000:5002"]));
+    assert_eq!(outbound["hop_interval_seconds"], json!(30));
+    assert_eq!(hopping.credentials.len(), 2);
+    let pinned_to = |hex: &str| {
+        import_subscription_document(&format!(
+            "hy2://TopSecretValue%21@hy2.example.com:443?sni=hy2.example.com&pinSHA256={hex}#HY2"
+        ))
+        .expect("pinned link")
+        .profile
+        .digest()
+        .to_owned()
+    };
+    assert_ne!(pinned_to(ASCENDING_PIN_HEX), pinned_to(&"ff".repeat(32)));
+}
+
+#[test]
+fn sing_box_certificate_pins_pass_through_unchanged() {
+    let document = |tls: Value| {
+        json!({"outbounds":[{"type":"hysteria2","tag":"pinned","server":"hy2.example.com","server_port":443,
+            "password":"TopSecretValue!","tls":tls}]})
+        .to_string()
+    };
+    let ones = "//////////////////////////////////////////8=";
+    let imported = import_subscription_document(&document(json!({
+        "enabled":true,"server_name":"hy2.example.com","certificate_sha256":[ones, ASCENDING_PIN_BASE64]
+    })))
+    .expect("two DER pins");
+    assert_eq!(
+        imported_outbounds(&imported)[0]["tls"]["certificate_sha256"],
+        json!([ones, ASCENDING_PIN_BASE64])
+    );
+    let imported = import_subscription_document(&document(json!({
+        "enabled":true,"server_name":"hy2.example.com","certificate_public_key_sha256":[ASCENDING_PIN_BASE64]
+    })))
+    .expect("an SPKI pin");
+    let tls = &imported_outbounds(&imported)[0]["tls"];
+    assert_eq!(
+        tls["certificate_public_key_sha256"],
+        json!([ASCENDING_PIN_BASE64])
+    );
+    assert!(tls.get("certificate_sha256").is_none());
+    let nine = (0..9u8)
+        .map(|byte| base64::engine::general_purpose::STANDARD.encode([byte; 32]))
+        .collect::<Vec<_>>();
+    for (label, tls, expected) in [
+        (
+            "both pin kinds",
+            json!({"enabled":true,"server_name":"hy2.example.com","certificate_sha256":[ones],
+                "certificate_public_key_sha256":[ASCENDING_PIN_BASE64]}),
+            "certificate pinning requires TLS, one pin kind, and no Reality",
+        ),
+        (
+            "nine pins",
+            json!({"enabled":true,"server_name":"hy2.example.com","certificate_sha256":nine}),
+            "TLS pins must be one to eight distinct SHA256 values in canonical base64",
+        ),
+        (
+            "non-canonical base64",
+            json!({"enabled":true,"server_name":"hy2.example.com",
+                "certificate_sha256":["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh9="]}),
+            "TLS pins must be one to eight distinct SHA256 values in canonical base64",
+        ),
+    ] {
+        let error = import_subscription_document(&document(tls)).expect_err(label);
+        assert!(error.contains(expected), "{label}: {error}");
+        assert!(!error.contains("TopSecretValue!"), "{label}: {error}");
+    }
+}
+
+#[test]
+fn clash_geosite_rules_import_as_lowercase_dataset_rules() {
+    let source = r#"
+proxies:
+  - {name: Node A, type: socks5, server: edge.example.com, port: 1080}
+proxy-groups:
+  - {name: PROXY, type: select, proxies: [Node A, DIRECT]}
+rules:
+  - GEOSITE,Geolocation-!CN,PROXY
+  - GEOSITE,CN,DIRECT
+  - GEOSITE,google@!cn,PROXY
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+"#;
+    let imported = import_subscription_document(source).expect("GEOSITE policy");
+    let profile: Value = serde_json::from_str(imported.profile.as_json()).expect("profile");
+    assert_eq!(
+        profile["route"]["rules"],
+        json!([
+            {"type":"geo_site","value":"geolocation-!cn","outbound":"PROXY","no_resolve":false},
+            {"type":"geo_site","value":"cn","outbound":"DIRECT","no_resolve":false},
+            {"type":"geo_site","value":"google@!cn","outbound":"PROXY","no_resolve":false},
+            {"type":"geo_ip","value":"CN","outbound":"DIRECT","no_resolve":false}
+        ])
+    );
+    let runtime: Value = serde_json::from_str(&projected_json(&imported)).expect("runtime");
+    assert_eq!(
+        runtime["route"]["rule_set"]
+            .as_array()
+            .expect("rule sets")
+            .iter()
+            .map(|resource| resource["tag"].clone())
+            .collect::<Vec<_>>(),
+        [
+            json!("cfw-geoip-cn"),
+            json!("cfw-geosite-cn"),
+            json!("cfw-geosite-geolocation-!cn"),
+            json!("cfw-geosite-google@!cn")
+        ]
+    );
+    for (broken, expected) in [
+        ("GEOSITE,CN,DIRECT,no-resolve", "no_resolve is only valid"),
+        (
+            "GEOSITE,../cn,DIRECT",
+            "rule value does not match its declared type",
+        ),
+        (
+            "GEOSITE,a@b@c,DIRECT",
+            "rule value does not match its declared type",
+        ),
+    ] {
+        let error = import_subscription_document(&source.replace("GEOSITE,CN,DIRECT", broken))
+            .expect_err(broken);
+        assert!(error.contains(expected), "{broken}: {error}");
+    }
+}
+
+/// Mihomo verifies a node that carries a `fingerprint` against the pin alone,
+/// whatever `skip-cert-verify` says, so a redundant `skip-cert-verify: true`
+/// beside a pin imports as the pin, as `insecure=1` beside `pinSHA256` does
+/// for share links. Without a usable pin it still fails closed.
+#[test]
+fn clash_skip_cert_verify_beside_a_pin_imports_as_the_pin() {
+    let colons = ASCENDING_PIN_HEX
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).expect("ASCII hex"))
+        .collect::<Vec<_>>()
+        .join(":");
+    let hysteria2 = |extra: &str| {
+        format!(
+            "proxies:\n  - name: node\n    type: hysteria2\n    server: hy2.example.com\n    port: 443\n    password: TopSecretValue!\n    sni: hy2.example.com\n{extra}"
+        )
+    };
+    let trojan = |extra: &str| {
+        format!(
+            "proxies:\n  - name: node\n    type: trojan\n    server: a.example.com\n    port: 443\n    password: TopSecretValue!\n    sni: a.example.com\n{extra}"
+        )
+    };
+    for (label, document, server_name) in [
+        (
+            "hysteria2",
+            hysteria2(&format!(
+                "    skip-cert-verify: true\n    fingerprint: {ASCENDING_PIN_HEX}\n"
+            )),
+            "hy2.example.com",
+        ),
+        (
+            "hysteria2, pin first",
+            hysteria2(&format!(
+                "    fingerprint: \"{colons}\"\n    skip-cert-verify: true\n"
+            )),
+            "hy2.example.com",
+        ),
+        (
+            "trojan",
+            trojan(&format!(
+                "    skip-cert-verify: true\n    fingerprint: {ASCENDING_PIN_HEX}\n"
+            )),
+            "a.example.com",
+        ),
+    ] {
+        let imported = import_subscription_document(&document)
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        let tls = &imported_outbounds(&imported)[0]["tls"];
+        assert_eq!(
+            tls["certificate_sha256"],
+            json!([ASCENDING_PIN_BASE64]),
+            "{label}"
+        );
+        assert_eq!(tls["server_name"], server_name, "{label}");
+        assert!(tls.get("insecure").is_none(), "{label}");
+        let runtime: Value = serde_json::from_str(&projected_json(&imported)).expect("runtime");
+        assert!(
+            runtime["outbounds"][0]["tls"].get("insecure").is_none(),
+            "{label}"
+        );
+    }
+    for (label, document, reason) in [
+        (
+            "no pin",
+            hysteria2("    skip-cert-verify: true\n"),
+            "disabling TLS certificate verification",
+        ),
+        (
+            "an empty pin",
+            hysteria2("    skip-cert-verify: true\n    fingerprint: \"\"\n"),
+            "disabling TLS certificate verification",
+        ),
+        (
+            "a null pin",
+            hysteria2("    skip-cert-verify: true\n    fingerprint: null\n"),
+            "disabling TLS certificate verification",
+        ),
+        (
+            "a malformed pin",
+            hysteria2("    skip-cert-verify: true\n    fingerprint: not-a-pin\n"),
+            "TLS certificate fingerprint must be a SHA256 hex value",
+        ),
+        (
+            "a pin without TLS",
+            format!(
+                "proxies:\n  - name: node\n    type: vmess\n    server: a.example.com\n    port: 443\n    uuid: 11111111-1111-4111-8111-111111111111\n    alterId: 0\n    cipher: auto\n    tls: false\n    skip-cert-verify: true\n    fingerprint: {ASCENDING_PIN_HEX}\n"
+            ),
+            "certificate pin requires TLS",
+        ),
+        (
+            "a type without TLS",
+            format!(
+                "proxies:\n  - name: node\n    type: ss\n    server: a.example.com\n    port: 8388\n    cipher: aes-256-gcm\n    password: TopSecretValue!\n    skip-cert-verify: true\n    fingerprint: {ASCENDING_PIN_HEX}\n"
+            ),
+            "unsupported keys",
+        ),
+    ] {
+        let error = import_subscription_document(&document).expect_err(label);
+        assert!(error.contains(reason), "{label}: {error}");
+        assert!(!error.contains("TopSecretValue!"), "{label}: {error}");
+    }
+}
+
+/// Upstream sing-box verifies a public-key pin whether or not `tls.insecure`
+/// is set, so `insecure: true` beside a pin (either kind) imports as the pin,
+/// as for Clash and share links, and is never stored. Without a pin it still
+/// fails closed.
+#[test]
+fn sing_box_insecure_beside_a_pin_imports_as_the_pin() {
+    let trojan = |tls: &str| {
+        format!(
+            r#"{{"outbounds":[{{"type":"trojan","tag":"T","server":"t.example","server_port":443,"password":"TopSecretValue!","tls":{tls}}}]}}"#
+        )
+    };
+    for pin_key in ["certificate_sha256", "certificate_public_key_sha256"] {
+        let imported = import_subscription_document(&trojan(&format!(
+            r#"{{"enabled":true,"server_name":"t.example","insecure":true,"{pin_key}":["{ASCENDING_PIN_BASE64}"]}}"#
+        )))
+        .unwrap_or_else(|error| panic!("{pin_key}: {error}"));
+        let tls = &imported_outbounds(&imported)[0]["tls"];
+        assert_eq!(tls[pin_key], json!([ASCENDING_PIN_BASE64]), "{pin_key}");
+        assert!(tls.get("insecure").is_none(), "{pin_key}");
+        let runtime: Value = serde_json::from_str(&projected_json(&imported)).expect("runtime");
+        assert!(
+            runtime["outbounds"][0]["tls"].get("insecure").is_none(),
+            "{pin_key}"
+        );
+    }
+    for (label, tls) in [
+        (
+            "no pin",
+            r#"{"enabled":true,"server_name":"t.example","insecure":true}"#,
+        ),
+        (
+            "an empty pin list",
+            r#"{"enabled":true,"server_name":"t.example","insecure":true,"certificate_sha256":[]}"#,
+        ),
+    ] {
+        let error = import_subscription_document(&trojan(tls)).expect_err(label);
+        assert!(
+            error.contains("disabling TLS certificate verification"),
+            "{label}: {error}"
+        );
+        assert!(!error.contains("TopSecretValue!"), "{label}: {error}");
+    }
 }

@@ -434,6 +434,80 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
   }
 }
 
+/// A connection whose sends XPC can order a block after: the block runs once
+/// every message handed to the connection before it has been sent.
+protocol ProxyAgentSendBarrier: AnyObject {
+  func scheduleSendBarrierBlock(_ block: @escaping @Sendable () -> Void)
+}
+
+extension NSXPCConnection: ProxyAgentSendBarrier {}
+
+/// The ProxyAgent's accepted connections, from acceptance until invalidation.
+final class ProxyAgentConnections: @unchecked Sendable {
+  private let lock = NSLock()
+  private var connections: [ObjectIdentifier: NSXPCConnection] = [:]
+
+  /// Tracks `connection` until it is invalidated. Call it before resuming the
+  /// connection.
+  func track(_ connection: NSXPCConnection) {
+    let key = ObjectIdentifier(connection)
+    lock.withLock { connections[key] = connection }
+    connection.invalidationHandler = { [weak self] in
+      self?.forget(key)
+    }
+  }
+
+  var open: [any ProxyAgentSendBarrier] {
+    lock.withLock { Array(connections.values) }
+  }
+
+  private func forget(_ key: ObjectIdentifier) {
+    lock.withLock { _ = connections.removeValue(forKey: key) }
+  }
+}
+
+/// Ends the ProxyAgent after libbox could not close a runtime: only the process
+/// ending releases the listeners, descriptors and goroutines that close left
+/// open. launchd starts the agent again for the Host's next request.
+struct ProxyAgentProcessExit: Sendable {
+  private static let logger = Logger(
+    subsystem: "com.bill.clashformac",
+    category: "proxy-agent-exit"
+  )
+  private let openConnections: @Sendable () -> [any ProxyAgentSendBarrier]
+  private let exit: @Sendable (Int32) -> Void
+
+  /// `_exit` skips atexit handlers while libbox's threads still run.
+  init(connections: ProxyAgentConnections) {
+    self.init(openConnections: { connections.open }, exit: { _exit($0) })
+  }
+
+  init(
+    openConnections: @escaping @Sendable () -> [any ProxyAgentSendBarrier],
+    exit: @escaping @Sendable (Int32) -> Void
+  ) {
+    self.openConnections = openConnections
+    self.exit = exit
+  }
+
+  /// Exits once a send barrier has run on every open connection, so every
+  /// reply already handed to XPC, the failure's own included, has been sent.
+  /// Only the runtime can make a `LibboxInstanceUnclosable`, so nothing else
+  /// can end the agent this way. Its text is never logged.
+  func end(after failure: LibboxInstanceUnclosable) {
+    Self.logger.fault("libbox could not close a System Proxy runtime; ending the ProxyAgent")
+    let sent = DispatchGroup()
+    for connection in openConnections() {
+      sent.enter()
+      connection.scheduleSendBarrierBlock { sent.leave() }
+    }
+    let exit = self.exit
+    sent.notify(queue: .global(qos: .userInitiated)) {
+      exit(EX_SOFTWARE)
+    }
+  }
+}
+
 final class ProxyAgentListenerDelegate: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
   private static let logger = Logger(
     subsystem: "com.bill.clashformac",
@@ -441,10 +515,15 @@ final class ProxyAgentListenerDelegate: NSObject, NSXPCListenerDelegate, @unchec
   )
   private let identityPolicy: CodeIdentityPolicy
   private let service: ProxyAgentService
+  private let connections: ProxyAgentConnections
 
-  init(identityPolicy: CodeIdentityPolicy, service: ProxyAgentService) {
+  init(
+    identityPolicy: CodeIdentityPolicy, service: ProxyAgentService,
+    connections: ProxyAgentConnections
+  ) {
     self.identityPolicy = identityPolicy
     self.service = service
+    self.connections = connections
   }
 
   func listener(
@@ -463,6 +542,7 @@ final class ProxyAgentListenerDelegate: NSObject, NSXPCListenerDelegate, @unchec
 
     connection.exportedInterface = NSXPCInterface(with: CFWProxyAgentXPCProtocol.self)
     connection.exportedObject = service
+    connections.track(connection)
     connection.resume()
     return true
   }

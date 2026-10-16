@@ -102,6 +102,101 @@
 - Import a Clash node's `ech-opts` with an inline base64 `config` as ECH with
   TLS 1.3. A node without one, which Mihomo would look up over DNS, and
   `query-server-name` fail import instead of sending a plaintext ClientHello.
+- Import Clash `GEOSITE` rules, including in classical rule providers, as
+  site-category rule sets named as SagerNet/sing-geosite publishes them
+  (`google@!cn` included). Such profiles were refused before. A profile may
+  name at most 256 distinct GeoIP and GeoSite datasets, and a DNS selector
+  naming a dataset that cannot exist now fails at import instead of at engine
+  start. Profiles saved with GEOSITE rules are rejected by earlier builds.
+  Each GeoIP and GeoSite dataset is downloaded during the first start with the
+  profile, separately for System Proxy and TUN, and that start must finish
+  within about 11 seconds (see the bounded engine start below), so with many
+  datasets or a slow route it may fail; datasets that finished are cached, so
+  a retry downloads only the rest. A GEOSITE name that only Mihomo's MetaCubeX
+  datasets publish imports, but its dataset cannot be downloaded, so every
+  start with the profile fails.
+- A stored profile whose DNS `geosite` selector names a dataset in a form
+  sing-geosite never publishes (for example with `_`, a leading `!`, `-` or
+  `@`, more than one `@`, or an empty or malformed attribute after `@`), which
+  could never download, or that names more than 256
+  distinct GeoIP and GeoSite datasets, now fails validation when it is loaded
+  and is listed as invalid, as above.
+- Add Settings › Engine › Mainland China direct, off by default. In Rule mode
+  it sends mainland China destinations that no profile rule matches DIRECT
+  (GeoSite `cn`, then GeoIP `CN` after a lookup; GeoSite `geolocation-!cn`
+  keeps the profile's final route), and for profiles without their own DNS
+  policy it resolves mainland names through DNS-over-HTTPS in mainland China,
+  dialled directly, while other names use Cloudflare and Google through the
+  proxy. It applies only when the selected route is remote. Its rule sets
+  download through that route during the first start with each profile, which
+  must finish within about 11 seconds; while they cannot be downloaded in time
+  the start fails, the setting is left unchanged, and the app restores the
+  previous core unless the failed engine cannot be closed. In TUN, without
+  fake-IP, mainland traffic is matched by GeoIP after the app's DNS answers.
+  General names the switch in its GeoIP Database row. Earlier builds refuse a
+  settings file saved with it on, so turn it off before installing one.
+- Bound every engine start, System Proxy and TUN alike, at 11 seconds from
+  the moment the ProxyAgent or the tunnel extension receives it. Uncached rule
+  datasets download inside the start and had no time limit of their own: a
+  System Proxy start that downloaded for more than 5 seconds outlasted the
+  app's wait for the ProxyAgent and failed, and past about 10 seconds the
+  rollback could not stop the engine that was still starting, so the network
+  Authority quarantined the start until the Mac restarted. A TUN start
+  that stalled the same way met the same rollback after its 20-second
+  readiness wait. Such a start is now interrupted, even while the engine is
+  still being built from a large profile, and fails with "The engine did not
+  finish starting in time"; datasets that finished are kept, so a retry
+  downloads only the rest, while one that cannot download within the limit on
+  that route never will. The app waits up to 18 seconds for the ProxyAgent's
+  start reply. A TUN start that times out is reported as soon as the
+  extension stops instead of after the 20-second readiness wait, unless macOS
+  took several seconds to launch the extension, as it can on the first start
+  after installation; that start still ends in the readiness timeout. A user
+  switch, sign-out or lost Authority connection during a start still waits for
+  the start to end and can still quarantine it.
+- Let the engine close after a start that failed before it began watching the
+  network, for example because its cache file could not be opened. Closing
+  failed, so the ProxyAgent or the tunnel extension could neither stop nor
+  start the engine again until it was restarted.
+- When libbox cannot close an engine, after a failed or interrupted start or
+  at a stop, the ProxyAgent or the tunnel extension now reports it and ends
+  its process, so macOS releases the listeners, connections and descriptors
+  that close left open. libbox closes an engine only once, so retrying the
+  close could never succeed, and what it left open stayed open while the
+  process ran. The ProxyAgent ends only once it has restored the system proxy
+  settings it changed; while it cannot, it keeps running and tries again at
+  the next Off, or after the Mac restarts if the app was quit meanwhile. The
+  failure is reported as "Global cleanup could not be proven", also by a
+  System Proxy or Local Proxy stop, which reported a rejected configuration,
+  and by a Tunnel start as soon as the extension reports it rather than
+  after the 20-second readiness timeout, unless the extension ends before
+  macOS delivers that report. As before, the network Authority then accepts
+  no start until the Mac restarts.
+- A System Proxy or Local Proxy stop no longer reports a rejected
+  configuration when the ProxyAgent has no record of it, for example because
+  the ProxyAgent ended as above or crashed: the stop completes if the
+  ProxyAgent had confirmed it to the network Authority, and otherwise reports
+  that global cleanup could not be proven.
+- Import a Hysteria2 link's `pinSHA256` certificate pin as the node's
+  `certificate_sha256` pin: 64 hex digits in either case, optionally separated
+  by `:` or `-` as the official client accepts. The pin replaces CA trust for
+  that node but still requires its server name and validity period, and that
+  the certificate permit server authentication. The name, the link's `sni` or
+  else its server address, must be in the certificate's subjectAltName: Go has
+  ignored the Common Name since 1.15, so a certificate made by `openssl req
+  -x509 -subj "/CN=…"` without `-addext subjectAltName` fails with "pinned
+  certificate does not identify the configured server". The `insecure=1` that
+  the official client pairs with a pin is accepted beside it and never stored;
+  without a pin it still fails import. An empty, malformed or repeated
+  `pinSHA256` fails import; such links previously failed with an
+  unsupported-parameter error. The profile stores the existing pin field.
+- Accept a Clash node's `skip-cert-verify: true` beside a non-empty
+  certificate `fingerprint`, and a sing-box node's `tls.insecure: true` beside
+  a certificate or public-key pin. Mihomo, and upstream sing-box for a
+  public-key pin, verify such a node against the pin anyway, so the import
+  keeps the pin as its only trust anchor, with the same name, validity and
+  server-auth checks, and never stores the flag; without a usable pin either
+  flag still fails import.
 - The local protocol checks now run live Hysteria2, TUIC, AnyTLS, VMess,
   Shadowsocks 2022 and VLESS Reality peers, each of which must refuse a wrong
   credential; the Reality check confirms which key exchange was negotiated.
@@ -115,6 +210,12 @@
   They fix the 2026-10-08 Go advisories in HTTP/2, HTTP/1, MIME header and
   TLS ECH handling that the engine's code can reach, and two `html/template`
   advisories in a package it imports without calling the affected code.
+
+### Supply chain
+
+- Build the app, and the release copies of XcodeGen and the Tauri CLI, with
+  Xcode 27.1 (27A9275) instead of Xcode 27.0 (27A266a). Release builds accept
+  only that exact Xcode.
 
 ## 0.4.0 - Unreleased
 

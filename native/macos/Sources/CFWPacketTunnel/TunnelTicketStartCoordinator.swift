@@ -19,7 +19,6 @@ struct SystemProviderMonotonicClock: ProviderMonotonicClock {
 /// never construct `CrossProcessEngineLeaseStore` in its Release start path.
 final class UnleasedEngineOwnership: EngineLeaseHolding, @unchecked Sendable {
   func release() throws {}
-  func markStopFailed() throws {}
 }
 
 final class TunnelRevocationChannel: @unchecked Sendable {
@@ -141,6 +140,9 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
     completion: @escaping @Sendable (Error?) -> Void
   ) {
     let startID = UUID()
+    // The Host's readiness wait is already running. Fixing the libbox deadline
+    // now keeps a slow redemption from pushing the start's end past it.
+    let deadline = EngineStartDeadline(receivedAt: .now)
     let admitted = stateLock.withLock { () -> Bool in
       guard case .idle = phase else { return false }
       phase = .busy
@@ -155,7 +157,7 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
     }
     Task { [self] in
       await performStart(
-        ticket: ticket, descriptor: descriptor,
+        ticket: ticket, descriptor: descriptor, deadline: deadline,
         startID: startID, completion: completion)
     }
   }
@@ -192,6 +194,7 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
   private func performStart(
     ticket: StartTicket,
     descriptor: ConfigurationDescriptor,
+    deadline: EngineStartDeadline,
     startID: UUID,
     completion: @escaping @Sendable (Error?) -> Void
   ) async {
@@ -279,7 +282,8 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
       sessionLifecycle.start(
         descriptor: descriptor,
         configuration: injectedConfiguration,
-        credentialMaterial: injectedCredentials
+        credentialMaterial: injectedCredentials,
+        deadline: deadline
       ) { [self] error in
         if let error {
           finishBoundFailure(mappedStartError(error), completion: completion)
@@ -446,8 +450,7 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
     completions incomingCompletions: [StopCompletion],
     revocationRequested: Bool
   ) {
-    var flightToStart: StopFlight?
-    var existingProof: PacketTunnelStopProof?
+    var attestation: (flight: StopFlight, proof: PacketTunnelStopProof, context: ActiveContext)?
     stateLock.withLock {
       if var current = stopFlight {
         current.completions.append(contentsOf: incomingCompletions)
@@ -466,32 +469,33 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
         completions: incomingCompletions,
         revocationRequested: revocationRequested)
       stopFlight = flight
-      if let context, locallyStoppedLeaseID == context.leaseID {
-        existingProof = locallyStoppedProof
+      if let context, locallyStoppedLeaseID == context.leaseID, let proof = locallyStoppedProof {
+        attestation = (flight, proof, context)
+        return
       }
-      flightToStart = flight
-    }
-    guard let flight = flightToStart else { return }
-    if let proof = existingProof, let context = flight.context {
-      attestStopFlight(flight, proof: proof, context: context)
-      return
-    }
-    sessionLifecycle.stop { [self] result in
-      switch result {
-      case .failure(let error):
-        finishStopFlight(flight.id, result: .failure(error))
-      case .success(let proof):
-        guard let context = flight.context else {
-          finishStopFlight(flight.id, result: .success(()))
-          return
+      // Scheduling while `stateLock` is held is the publish→stop barrier: whoever
+      // appends a completion to this flight queues its next work, ending the
+      // process included, behind the stop that answers that completion.
+      sessionLifecycle.stop { [self] result in
+        switch result {
+        case .failure(let error):
+          finishStopFlight(flight.id, result: .failure(error))
+        case .success(let proof):
+          guard let context = flight.context else {
+            finishStopFlight(flight.id, result: .success(()))
+            return
+          }
+          stateLock.withLock {
+            guard activeContext?.leaseID == context.leaseID else { return }
+            locallyStoppedLeaseID = context.leaseID
+            locallyStoppedProof = proof
+          }
+          attestStopFlight(flight, proof: proof, context: context)
         }
-        stateLock.withLock {
-          guard activeContext?.leaseID == context.leaseID else { return }
-          locallyStoppedLeaseID = context.leaseID
-          locallyStoppedProof = proof
-        }
-        attestStopFlight(flight, proof: proof, context: context)
       }
+    }
+    if let attestation {
+      attestStopFlight(attestation.flight, proof: attestation.proof, context: attestation.context)
     }
   }
 

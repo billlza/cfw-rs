@@ -4,6 +4,8 @@ import Foundation
 
 enum ProxyEngineError: Error, Equatable, Sendable {
   case runtime(String)
+  /// libbox did not finish starting by the start deadline and was interrupted.
+  case startTimedOut
   case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case runtimeReceiptMismatch
   case invalidConfiguration
@@ -27,15 +29,17 @@ protocol ProxyEngine: AnyObject {
   /// Starts the engine without publishing system proxy settings. A successful
   /// return only means startup was accepted; readiness is established solely
   /// by a later mixedListenerReady event. Implementations must clean up any
-  /// partial runtime state before throwing.
+  /// partial runtime state before throwing, and must return by `deadline`.
   func start(
     configuration: Data,
+    deadline: EngineStartDeadline,
     eventHandler: @escaping @Sendable (ProxyEngineEvent) -> Void
   ) throws
 
-  /// Stops the engine. If this throws, the caller must retain the cross-process
-  /// engine lease and retry instead of assuming the listener has terminated.
-  func stop() throws
+  /// Stops the engine. It throws only when libbox could not close its instance;
+  /// the engine is then spent, every later stop throws the same failure, and
+  /// what the close left open is released only when the process ends.
+  func stop() throws(LibboxInstanceUnclosable)
   func healthCheck() throws
 }
 
@@ -90,7 +94,8 @@ private final class LibboxProxyEngine: ProxyEngine, @unchecked Sendable {
   private enum State {
     case idle
     case owned(UUID, @Sendable (ProxyEngineEvent) -> Void)
-    case failedOwned
+    case stopping
+    case spent
   }
 
   private let runtime: any LibboxServiceRuntime
@@ -108,6 +113,7 @@ private final class LibboxProxyEngine: ProxyEngine, @unchecked Sendable {
 
   func start(
     configuration: Data,
+    deadline: EngineStartDeadline,
     eventHandler: @escaping @Sendable (ProxyEngineEvent) -> Void
   ) throws {
     let configurationReceipt = try LibboxRuntimeStartReceipt.parse(
@@ -130,7 +136,8 @@ private final class LibboxProxyEngine: ProxyEngine, @unchecked Sendable {
       let runtimeReceipt = try runtime.startReceipt(
         configuration: configuration,
         packetFileDescriptor: nil,
-        role: .systemProxy
+        role: .systemProxy,
+        deadline: deadline
       )
       guard runtimeReceipt == expectedReceipt else {
         throw ProxyEngineError.runtimeReceiptMismatch
@@ -139,9 +146,13 @@ private final class LibboxProxyEngine: ProxyEngine, @unchecked Sendable {
       if case .endpointConflict(let role, let port) = error {
         throw ProxyEngineError.endpointConflict(role: role, port: port)
       }
+      if error == .serviceStartTimedOut {
+        throw ProxyEngineError.startTimedOut
+      }
       // ProxySessionLifecycle always invokes stop() after a start error. Keep
       // ownership until that explicit barrier succeeds, even if the runtime
-      // already performed an idempotent local cleanup.
+      // already performed an idempotent local cleanup; a runtime that could not
+      // close reports that there.
       throw ProxyEngineError.runtime(error.localizedDescription)
     } catch {
       throw ProxyEngineError.runtime(error.localizedDescription)
@@ -149,10 +160,10 @@ private final class LibboxProxyEngine: ProxyEngine, @unchecked Sendable {
     emitReady(endpoint, sessionID: sessionID)
   }
 
-  func stop() throws {
+  func stop() throws(LibboxInstanceUnclosable) {
     let previousState = lock.withLock { () -> State in
       let previous = state
-      state = .failedOwned
+      state = .stopping
       return previous
     }
     guard !Self.isIdle(previousState) else {
@@ -163,15 +174,15 @@ private final class LibboxProxyEngine: ProxyEngine, @unchecked Sendable {
       try runtime.stop()
       lock.withLock { state = .idle }
     } catch {
-      lock.withLock { state = .failedOwned }
-      throw ProxyEngineError.runtime(error.localizedDescription)
+      lock.withLock { state = .spent }
+      throw error
     }
   }
 
   func healthCheck() throws {
     let ownsRuntime = lock.withLock { () -> Bool in
       switch state {
-      case .owned, .failedOwned:
+      case .owned, .stopping, .spent:
         true
       case .idle:
         false

@@ -91,7 +91,7 @@ impl ProjectedConfig {
     /// A transient, outbound-only view for explicit node latency tests. The
     /// normal projection remains the source of protocol/DNS/credential policy;
     /// listeners, system routes, persistence and autonomous tests are excluded.
-    pub fn proxy_probe_json(&self) -> Result<String, ConfigError> {
+    pub(crate) fn proxy_probe_json(&self) -> Result<String, ConfigError> {
         let mut root: Map<String, Value> = serde_json::from_str(&self.json)?;
         root.retain(|key, _| matches!(key.as_str(), "outbounds" | "endpoints" | "dns"));
         let mut original: Value = serde_json::from_str(&self.json)?;
@@ -152,6 +152,41 @@ impl ProjectedConfig {
     }
 }
 
+/// What an explicit node latency test runs: the outbound-only probe
+/// configuration and the credentials it needs, from one projection
+/// ([`ValidatedSingBoxProfile::project_proxy_probe`]).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProxyProbe {
+    credential_audience: CredentialAudience,
+    credential_slots: Vec<CredentialSlot>,
+    json: String,
+}
+
+impl fmt::Debug for ProxyProbe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProxyProbe")
+            .field("credential_audience", &self.credential_audience)
+            .field("credential_slots", &self.credential_slots)
+            .field("json", &"[REDACTED CONFIG TEMPLATE]")
+            .finish()
+    }
+}
+
+impl ProxyProbe {
+    pub fn credential_audience(&self) -> &CredentialAudience {
+        &self.credential_audience
+    }
+
+    pub fn credential_slots(&self) -> &[CredentialSlot] {
+        &self.credential_slots
+    }
+
+    pub fn as_json(&self) -> &str {
+        &self.json
+    }
+}
+
 impl ValidatedSingBoxProfile {
     /// A manual DNS choice wins over the imported policy without changing
     /// the profile or the Tunnel's IPv6 packet-capture setting.
@@ -163,6 +198,28 @@ impl ValidatedSingBoxProfile {
                     .as_ref()
                     .is_none_or(|policy| policy.ipv6 != Some(false))
             })
+    }
+
+    /// The transient, outbound-only configuration explicit node latency tests
+    /// run, with its credential audience and slots, all from one projection
+    /// made with mainland China direct off: the probe keeps the DNS servers
+    /// and rules but no rule sets, and the switch's DNS rules name rule sets.
+    pub fn project_proxy_probe(
+        &self,
+        profile_id: &str,
+        mode: ProjectionMode,
+        settings: &EngineSettings,
+    ) -> Result<ProxyProbe, ConfigError> {
+        let settings = EngineSettings {
+            mainland_china_direct: false,
+            ..settings.clone()
+        };
+        let projected = self.project(profile_id, mode, &settings)?;
+        Ok(ProxyProbe {
+            json: projected.proxy_probe_json()?,
+            credential_audience: projected.credential_audience,
+            credential_slots: projected.credential_slots,
+        })
     }
 
     pub fn project(
@@ -220,7 +277,25 @@ impl ValidatedSingBoxProfile {
         let direct_outbound = runtime_outbounds.direct_outbound.clone();
         let global_outbound = runtime_outbounds.global_outbound.clone();
         let injected_route_final = runtime_outbounds.injected_route_final.clone();
-        let outbounds = runtime_outbounds.outbounds;
+        // Mainland China direct applies only where it can work: a profile
+        // whose selected route is remote, because its datasets download
+        // through that route and its foreign DNS pool uses it. It never
+        // changes a release evidence projection, whatever that profile routes.
+        let mainland = settings.mainland_china_direct
+            && self.dns_projection == DnsProjection::Ordinary
+            && self.release_packet_evidence_case.is_none()
+            && self.document.selected_route_is_remote();
+        let mainland_dns = mainland && self.document.dns.is_none();
+        let mut outbounds = runtime_outbounds.outbounds;
+        if mainland_dns {
+            // DIRECT dials resolve through the DNS rules, so mainland names
+            // reach the domestic resolvers and other names the proxied pool.
+            for outbound in &mut outbounds {
+                if outbound["type"] == "direct" {
+                    outbound["domain_resolver"] = json!({"policy": "default"});
+                }
+            }
+        }
         let credential_slots = runtime_outbounds.credential_slots;
         let clash_api = settings.clash_api_endpoint()?;
         let mut root = Map::new();
@@ -277,25 +352,24 @@ impl ValidatedSingBoxProfile {
                             projected.default_resolver,
                         )
                     } else {
-                        validate_authenticated_dns_servers(settings)?;
-                        servers.extend(settings.authenticated_dns_servers.iter().enumerate().map(
-                            |(index, address)| {
-                                json!({
-                                    "type": "https",
-                                    "tag": format!("cfw-authenticated-dns-{index}"),
-                                    "server": address.address.to_string(),
-                                    "server_port": 443,
-                                    "path": "/dns-query",
-                                    "detour": selected_outbound.as_str(),
-                                    "connect_timeout": "5s",
-                                    "tls": {
-                                        "enabled": true,
-                                        "server_name": address.server_name.as_str(),
-                                        "min_version": MINIMUM_REMOTE_TLS_VERSION
-                                    }
-                                })
-                            },
-                        ));
+                        let pool = if mainland_dns {
+                            crate::mainland::foreign_resolvers()
+                        } else {
+                            settings.authenticated_dns_servers.clone()
+                        };
+                        validate_authenticated_dns_pool(&pool, settings.enable_ipv6)?;
+                        servers.extend(pool.iter().enumerate().map(|(index, server)| {
+                            doh_server(
+                                &format!("cfw-authenticated-dns-{index}"),
+                                server,
+                                Some(selected_outbound.as_str()),
+                            )
+                        }));
+                        if mainland_dns {
+                            servers.extend(crate::mainland::dns_servers(|tag, server| {
+                                doh_server(tag, server, None)
+                            }));
+                        }
                         (
                             servers,
                             AUTHENTICATED_DNS_PRIMARY_TAG.to_owned(),
@@ -396,7 +470,11 @@ impl ValidatedSingBoxProfile {
                 "servers": dns_servers,
 
                 "rules": profile_dns_rules.unwrap_or_else(|| {
-                    let mut rules = Vec::new();
+                    let mut rules = if mainland_dns {
+                        crate::mainland::dns_rules()
+                    } else {
+                        Vec::new()
+                    };
                     crate::dns_policy::append_evaluated_server(
                         &mut rules, &dns_rule_server, &json!({"domain_regex":".*"}), None,
                     );
@@ -430,7 +508,12 @@ impl ValidatedSingBoxProfile {
             route.insert("final".into(), Value::String(final_tag));
         }
         route.insert("default_domain_resolver".into(), default_domain_resolver);
-        let (mut rules, mut rule_sets) = self.document.project_rules(&selected_outbound);
+        let appended = if mainland {
+            crate::mainland::route_rules(&direct_outbound, &selected_outbound).to_vec()
+        } else {
+            Vec::new()
+        };
+        let (mut rules, mut rule_sets) = self.document.project_rules(&selected_outbound, &appended);
         for resource in profile_dns_rule_sets {
             if !rule_sets
                 .iter()
@@ -530,19 +613,48 @@ impl ValidatedSingBoxProfile {
     }
 }
 
-fn validate_authenticated_dns_servers(settings: &EngineSettings) -> Result<(), ConfigError> {
-    let unique_addresses = settings
-        .authenticated_dns_servers
+/// One application-owned DNS-over-HTTPS server. Without `detour` the
+/// ordinary dialer goes DIRECT.
+fn doh_server(
+    tag: &str,
+    server: &crate::engine_settings::AuthenticatedDnsServer,
+    detour: Option<&str>,
+) -> Value {
+    let mut value = json!({
+        "type": "https",
+        "tag": tag,
+        "server": server.address.to_string(),
+        "server_port": 443,
+        "path": "/dns-query",
+        "connect_timeout": "5s",
+        "tls": {
+            "enabled": true,
+            "server_name": server.server_name.as_str(),
+            "min_version": MINIMUM_REMOTE_TLS_VERSION
+        }
+    });
+    if let Some(detour) = detour {
+        value["detour"] = json!(detour);
+    }
+    value
+}
+
+/// The checks every DNS-over-HTTPS pool the application owns must pass.
+pub(crate) fn validate_authenticated_dns_pool(
+    servers: &[crate::engine_settings::AuthenticatedDnsServer],
+    enable_ipv6: bool,
+) -> Result<(), ConfigError> {
+    let unique_addresses = servers
         .iter()
         .map(|server| server.address)
         .collect::<BTreeSet<_>>();
-    if unique_addresses.len() != settings.authenticated_dns_servers.len() {
+    if unique_addresses.len() != servers.len() {
         return Err(ConfigError::InvalidAuthenticatedDnsServers(
             "the two authenticated DNS endpoints must be distinct".to_owned(),
         ));
     }
-    for server in &settings.authenticated_dns_servers {
-        if !settings.enable_ipv6 && server.address.is_ipv6() {
+    for server in servers {
+        if !enable_ipv6 && server.address.is_ipv6() {
             return Err(ConfigError::InvalidAuthenticatedDnsServers(format!(
                 "authenticated IPv6 endpoint {} is unavailable while IPv6 is disabled",
                 server.address

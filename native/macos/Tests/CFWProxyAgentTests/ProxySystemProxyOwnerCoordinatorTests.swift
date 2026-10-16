@@ -1,9 +1,9 @@
-import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 import Testing
 
 @testable import CFWCredentialTransport
+@testable import CFWLibboxRuntime
 @testable import CFWProxyAgentCore
 
 /// Test harness shorthand. The production coordinator requires one explicit
@@ -55,6 +55,20 @@ private final class CoordinatorRecorder: @unchecked Sendable {
 
   func wait() -> Bool { done.wait(timeout: .now() + 2) == .success }
   var values: [CoordinatorOutcome] { lock.withLock { outcomes } }
+}
+
+private final class ProcessEndRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private let done = DispatchSemaphore(value: 0)
+  private var failures: [LibboxInstanceUnclosable] = []
+
+  func record(_ failure: LibboxInstanceUnclosable) {
+    lock.withLock { failures.append(failure) }
+    done.signal()
+  }
+
+  func wait() -> Bool { done.wait(timeout: .now() + 2) == .success }
+  var values: [LibboxInstanceUnclosable] { lock.withLock { failures } }
 }
 
 private final class SnapshotRecorder: @unchecked Sendable {
@@ -204,38 +218,46 @@ private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
   private var eventHandler: (@Sendable (ProxyEngineEvent) -> Void)?
   private var startCountValue = 0
   private var stopCountValue = 0
-  private var stopFailuresRemaining: Int
+  private var startDeadlines: [EngineStartDeadline] = []
+  private let startFailure: ProxyEngineError?
+  private let closeFailure: LibboxInstanceUnclosable?
   private let stopped = DispatchSemaphore(value: 0)
 
-  init(orderLog: OrderLog, stopFailures: Int = 0) {
+  /// With `startFailure`, every start throws it. With `closeFailure`, every
+  /// stop throws it, as an engine whose libbox instance could not be closed
+  /// does.
+  init(
+    orderLog: OrderLog, startFailure: ProxyEngineError? = nil,
+    closeFailure: LibboxInstanceUnclosable? = nil
+  ) {
     self.orderLog = orderLog
-    self.stopFailuresRemaining = stopFailures
+    self.startFailure = startFailure
+    self.closeFailure = closeFailure
   }
 
   var startCount: Int { lock.withLock { startCountValue } }
   var stopCount: Int { lock.withLock { stopCountValue } }
+  var deadlines: [EngineStartDeadline] { lock.withLock { startDeadlines } }
 
   func start(
     configuration: Data,
+    deadline: EngineStartDeadline,
     eventHandler: @escaping @Sendable (ProxyEngineEvent) -> Void
   ) throws {
     lock.withLock {
       startCountValue += 1
+      startDeadlines.append(deadline)
       self.eventHandler = eventHandler
     }
     orderLog.record("engine.start")
     started.signal()
+    if let startFailure { throw startFailure }
   }
 
-  func stop() throws {
-    let shouldFail = lock.withLock {
-      stopCountValue += 1
-      guard stopFailuresRemaining > 0 else { return false }
-      stopFailuresRemaining -= 1
-      return true
-    }
+  func stop() throws(LibboxInstanceUnclosable) {
+    lock.withLock { stopCountValue += 1 }
     stopped.signal()
-    if shouldFail { throw CoordinatorFixtureError.forced }
+    if let closeFailure { throw closeFailure }
   }
   func healthCheck() throws {}
 
@@ -414,6 +436,7 @@ private struct CoordinatorFixture {
   let lease: LeaseView
   let boundLease: LeaseView
   let orderLog: OrderLog
+  let processEnds: ProcessEndRecorder
 
   func authorization() throws -> ProxyOwnerAuthorization {
     ProxyOwnerAuthorization(
@@ -430,7 +453,8 @@ private func makeFixture(
   bindThrows: AuthorityDomainError? = nil,
   readyThrows: Bool = false,
   effectiveApplied: Bool = true,
-  engineStopFailures: Int = 0,
+  engineStartFailure: ProxyEngineError? = nil,
+  engineCloseFailure: LibboxInstanceUnclosable? = nil,
   preferencesRestoreFailures: Int = 0,
   stoppedAttestationFailures: Int = 0,
   returnMismatchedLease: Bool = false,
@@ -442,7 +466,9 @@ private func makeFixture(
 ) throws -> CoordinatorFixture {
   let orderLog = OrderLog()
   let descriptor = try proxyDescriptor(slot: slot)
-  let engine = FakeProxyEngine(orderLog: orderLog, stopFailures: engineStopFailures)
+  let engine = FakeProxyEngine(
+    orderLog: orderLog, startFailure: engineStartFailure, closeFailure: engineCloseFailure)
+  let processEnds = ProcessEndRecorder()
   let preferences = FakeSystemProxyPreferences(
     orderLog: orderLog,
     restoreFailures: preferencesRestoreFailures)
@@ -466,7 +492,11 @@ private func makeFixture(
       engineFactory: FakeProxyEngineFactory(engine: engine),
       preferences: preferences,
       journalStore: FakeJournalStore(),
-      readinessTimeout: 60))
+      readinessTimeout: 60,
+      endProcess: { failure in
+        orderLog.record("endProcess")
+        processEnds.record(failure)
+      }))
   let coordinator = ProxySystemProxyOwnerCoordinator(
     authority: authority,
     observer: FakeEffectiveSystemProxyObserver(applied: effectiveApplied),
@@ -476,7 +506,8 @@ private func makeFixture(
   return CoordinatorFixture(
     coordinator: coordinator, authority: authority, engine: engine,
     preferences: preferences, revocation: revocation,
-    descriptor: descriptor, lease: lease, boundLease: boundLease, orderLog: orderLog)
+    descriptor: descriptor, lease: lease, boundLease: boundLease, orderLog: orderLog,
+    processEnds: processEnds)
 }
 
 // MARK: - Tests
@@ -689,6 +720,29 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     #expect(runtimeConfiguration.isErasedForTesting)
   }
 
+  @Test func libboxDeadlineIsFixedWhenTheStartArrivesNotAfterTheBind() throws {
+    let bindGate = BlockingCallGate()
+    let fixture = try makeFixture(bindGate: bindGate)
+    let start = CoordinatorRecorder()
+    let receivedBefore = ContinuousClock.now
+    fixture.coordinator.start(
+      configuration: fixture.descriptor, authorization: try fixture.authorization()
+    ) { start.record($0) }
+    let receivedAfter = ContinuousClock.now
+    #expect(bindGate.waitUntilEntered())
+    // A slow Authority bind must spend the libbox start's time, not extend it.
+    Thread.sleep(forTimeInterval: 0.3)
+    bindGate.release()
+    #expect(fixture.engine.waitUntilStarted())
+    let deadline = try #require(fixture.engine.deadlines.first)
+    #expect(fixture.engine.deadlines.count == 1)
+    #expect(deadline.instant >= receivedBefore.advanced(by: EngineStartBudget.ownerLibboxStart))
+    #expect(deadline.instant <= receivedAfter.advanced(by: EngineStartBudget.ownerLibboxStart))
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+  }
+
   @Test func explicitStopDuringBindCancelsStartAndWaitsForExactStoppedProof() throws {
     let bindGate = BlockingCallGate()
     let fixture = try makeFixture(bindGate: bindGate)
@@ -824,8 +878,9 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     #expect(fixture.engine.stopCount == 1)
   }
 
-  @Test func engineCleanupFailureDoesNotAttestOrClearOwnerContext() throws {
-    let fixture = try makeFixture(engineStopFailures: 1)
+  @Test func unclosableEngineNeverAttestsAndEndsTheProcessAfterTheStopReply() throws {
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    let fixture = try makeFixture(engineCloseFailure: closeFailure)
     let start = CoordinatorRecorder()
     fixture.coordinator.start(
       configuration: fixture.descriptor,
@@ -837,26 +892,30 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     #expect(start.values == [.success])
 
     let failedStop = CoordinatorRecorder()
-    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) {
-      failedStop.record($0)
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { result in
+      fixture.orderLog.record("stopReply")
+      failedStop.record(result)
     }
     #expect(failedStop.wait())
-    guard case .failure(.engineStop) = failedStop.values[0] else {
-      Issue.record("Expected the libbox cleanup failure to be reported explicitly")
-      return
-    }
+    #expect(fixture.processEnds.wait())
+    #expect(failedStop.values == [.failure(.engineUnclosable(closeFailure))])
+    #expect(Array(fixture.orderLog.values.suffix(2)) == ["stopReply", "endProcess"])
     #expect(fixture.authority.stoppedAttemptCount == 0)
     #expect(fixture.authority.stoppedAttestations.isEmpty)
 
-    // The failed owner context remains bound. A retry completes the same cleanup
-    // and only then proves stopped to the Authority.
+    // The owner context stays bound; a retry reaches neither libbox nor the
+    // Authority and ends nothing again.
     let retry = CoordinatorRecorder()
     fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { retry.record($0) }
     #expect(retry.wait())
-    #expect(retry.values == [.success])
-    #expect(fixture.engine.stopCount == 2)
-    #expect(fixture.authority.stoppedAttemptCount == 1)
-    #expect(fixture.authority.stoppedAttestations.count == 1)
+    #expect(retry.values == [.failure(.engineUnclosable(closeFailure))])
+    let snapshot = SnapshotRecorder()
+    fixture.coordinator.snapshot { snapshot.record($0) }
+    #expect(snapshot.wait())
+    #expect(snapshot.values.first?.state.failure?.code == "proxy-engine-unclosable")
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.authority.stoppedAttemptCount == 0)
+    #expect(fixture.processEnds.values == [closeFailure])
   }
 
   @Test func preferencesCleanupFailureDoesNotAttestOrClearOwnerContext() throws {
@@ -931,8 +990,74 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     #expect(fixture.authority.stoppedAttestations.count == 1)
   }
 
-  @Test func readinessFailureRetainsOwnerContextWhenCleanupIsUnproven() throws {
-    let fixture = try makeFixture(effectiveApplied: false, engineStopFailures: 1)
+  @Test func readinessFailureWithAnUnclosableEngineReportsUnprovenCleanupThenEnds() throws {
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    let fixture = try makeFixture(effectiveApplied: false, engineCloseFailure: closeFailure)
+    let start = CoordinatorRecorder()
+    fixture.coordinator.start(
+      configuration: fixture.descriptor,
+      authorization: try fixture.authorization()
+    ) { result in
+      fixture.orderLog.record("startReply")
+      start.record(result)
+    }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(fixture.processEnds.wait())
+    guard case .failure(let failure) = start.values[0],
+      failure.engineFailure.code == "proxy-cleanup-failed"
+    else {
+      Issue.record("Expected readiness failure to include the unproven cleanup")
+      return
+    }
+    #expect(Array(fixture.orderLog.values.suffix(2)) == ["startReply", "endProcess"])
+    #expect(fixture.authority.readyAttestations.isEmpty)
+    #expect(fixture.authority.stoppedAttemptCount == 0)
+
+    let retry = CoordinatorRecorder()
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { retry.record($0) }
+    #expect(retry.wait())
+    #expect(retry.values == [.failure(.engineUnclosable(closeFailure))])
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.authority.stoppedAttestations.isEmpty)
+    #expect(fixture.processEnds.values == [closeFailure])
+  }
+
+  /// A start whose engine fails and then cannot be closed is answered by the
+  /// stop the coordinator queues for that failure, not by the failure itself,
+  /// so the process ends only after that later stop handed over the reply.
+  @Test func engineStartFailureWithAnUnclosableEngineRepliesBeforeTheProcessEnds() throws {
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    let fixture = try makeFixture(
+      engineStartFailure: .runtime("libbox could not close its service instance"),
+      engineCloseFailure: closeFailure)
+    let start = CoordinatorRecorder()
+    fixture.coordinator.start(
+      configuration: fixture.descriptor,
+      authorization: try fixture.authorization()
+    ) { result in
+      fixture.orderLog.record("startReply")
+      start.record(result)
+    }
+    #expect(start.wait())
+    #expect(fixture.processEnds.wait())
+    guard case .failure(let failure) = start.values.first,
+      failure.engineFailure.code == "proxy-cleanup-failed"
+    else {
+      Issue.record("Expected the failed start to include the unproven cleanup")
+      return
+    }
+    #expect(Array(fixture.orderLog.values.suffix(2)) == ["startReply", "endProcess"])
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.authority.readyAttestations.isEmpty)
+    #expect(fixture.authority.stoppedAttemptCount == 0)
+    #expect(fixture.processEnds.values == [closeFailure])
+  }
+
+  @Test func revocationOfAnUnclosableOwnerEndsTheProcessOnceWithoutAttesting() throws {
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    let fixture = try makeFixture(engineCloseFailure: closeFailure)
     let start = CoordinatorRecorder()
     fixture.coordinator.start(
       configuration: fixture.descriptor,
@@ -941,19 +1066,17 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     #expect(fixture.engine.waitUntilStarted())
     fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
     #expect(start.wait())
-    guard case .failure(.cleanupFailed) = start.values[0] else {
-      Issue.record("Expected readiness failure to include the unproven cleanup")
-      return
-    }
-    #expect(fixture.authority.readyAttestations.isEmpty)
-    #expect(fixture.authority.stoppedAttemptCount == 0)
 
-    let retry = CoordinatorRecorder()
-    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { retry.record($0) }
-    #expect(retry.wait())
-    #expect(retry.values == [.success])
-    #expect(fixture.engine.stopCount == 2)
-    #expect(fixture.authority.stoppedAttestations.count == 1)
+    fixture.revocation.revoke()
+    fixture.revocation.revoke()
+    #expect(fixture.processEnds.wait())
+    let stop = CoordinatorRecorder()
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.failure(.engineUnclosable(closeFailure))])
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.authority.stoppedAttemptCount == 0)
+    #expect(fixture.processEnds.values == [closeFailure])
   }
 
   @Test func revocationForcesStopAndAttestsStopped() throws {

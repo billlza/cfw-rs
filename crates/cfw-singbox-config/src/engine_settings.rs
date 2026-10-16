@@ -48,7 +48,18 @@ pub struct EngineSettings {
     /// HTTPS resolvers used for all ordinary engine DNS in both modes,
     /// including every hijacked Tunnel query. Their connections are detoured
     /// through the selected outbound and never use the direct bootstrap role.
+    /// While mainland China direct applies, the switch's own foreign pool
+    /// replaces them, and mainland names in Rule mode use its domestic pool,
+    /// dialled directly (see [`Self::mainland_china_direct`]).
     pub authenticated_dns_servers: [AuthenticatedDnsServer; 2],
+    /// Mainland China direct. In Rule mode, traffic that no profile rule
+    /// matches goes DIRECT when it is bound for mainland China (GeoSite `cn`,
+    /// then GeoIP `CN`), and the application's own DNS answers mainland names
+    /// through domestic DNS-over-HTTPS dialled directly. It applies only to a
+    /// profile whose selected route is remote; absent means off, so files
+    /// written before the switch existed keep their bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mainland_china_direct: bool,
 }
 
 impl Default for EngineSettings {
@@ -79,6 +90,7 @@ impl Default for EngineSettings {
                     server_name: "cloudflare-dns.com".to_owned(),
                 },
             ],
+            mainland_china_direct: false,
         }
     }
 }
@@ -189,6 +201,9 @@ pub struct RuntimePreferences {
     pub ipv6_dns_enabled: Option<bool>,
     pub allow_lan: bool,
     pub lan_proxy: Option<LanProxySettings>,
+    /// See [`EngineSettings::mainland_china_direct`]. Absent means off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mainland_china_direct: bool,
 }
 
 impl Default for RuntimePreferences {
@@ -200,6 +215,7 @@ impl Default for RuntimePreferences {
             ipv6_dns_enabled: None,
             allow_lan: false,
             lan_proxy: None,
+            mainland_china_direct: false,
         }
     }
 }
@@ -234,6 +250,7 @@ impl RuntimePreferences {
         settings.tunnel_mtu = self.tunnel_mtu;
         settings.ipv6_dns_enabled = self.ipv6_dns_enabled;
         settings.lan_proxy = self.lan_proxy.clone().filter(|_| self.allow_lan);
+        settings.mainland_china_direct = self.mainland_china_direct;
         settings.validate_listener_settings()?;
         // The endpoint allocator chooses a distinct controller after applying
         // a user-selected mixed port; projection validates the final tuple.

@@ -352,6 +352,14 @@ struct BoundedProxyAgentRequestRegistry: Sendable {
   }
 }
 
+/// The byte arguments of one authorized ProxyAgent start, in XPC argument order.
+struct ProxyAgentStartRequest: Sendable {
+  let capability: Data
+  let context: Data
+  let configuration: Data
+  let request: Data
+}
+
 struct ProxyAgentConnectionDependencies: @unchecked Sendable {
   typealias ConnectionFactory = @Sendable (String) -> NSXPCConnection
   typealias Execute =
@@ -360,11 +368,18 @@ struct ProxyAgentConnectionDependencies: @unchecked Sendable {
       Data,
       @escaping @Sendable (Result<Data, Error>) -> Void
     ) -> Void
+  typealias StartSystemProxy =
+    @Sendable (
+      NSXPCConnection,
+      ProxyAgentStartRequest,
+      @escaping @Sendable (Result<Data, Error>) -> Void
+    ) -> Void
 
   let makeConnection: ConnectionFactory
   let prepareConnection: @Sendable (NSXPCConnection, String) -> Void
   let activateConnection: @Sendable (NSXPCConnection) -> Void
   let execute: Execute
+  let startSystemProxy: StartSystemProxy
 
   static let production = ProxyAgentConnectionDependencies(
     makeConnection: { NSXPCConnection(machServiceName: $0) },
@@ -383,6 +398,30 @@ struct ProxyAgentConnectionDependencies: @unchecked Sendable {
         return
       }
       proxy.execute(request) { data, error in
+        if error != nil {
+          reply(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+        } else if let data {
+          reply(.success(data))
+        } else {
+          reply(.failure(ProxyAgentHostError.malformedResponse))
+        }
+      }
+    },
+    startSystemProxy: { connection, request, reply in
+      guard
+        let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+          reply(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+        }) as? CFWProxyAgentXPCProtocol
+      else {
+        reply(.failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable")))
+        return
+      }
+      proxy.startSystemProxy(
+        request.capability,
+        context: request.context,
+        configuration: request.configuration,
+        request: request.request
+      ) { data, error in
         if error != nil {
           reply(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
         } else if let data {
@@ -440,11 +479,21 @@ public actor AuthenticatedProxyAgentTransport:
   private let currentCodeHash: ServiceCodeHash
   private var buildConstraint = ServiceConnectionBuildConstraint()
   private let serviceController: any ProxyAgentServiceControlling
-  private let replyDeadline: CallbackDeadlineScheduler
+  private let replyTimeout: Duration
+  private let makeReplyDeadline: @Sendable (Duration) -> CallbackDeadlineScheduler
   private let connectionDependencies: ProxyAgentConnectionDependencies
   private let installed40019Dependencies: Installed40019ProxyTransportDependencies
   private var connectionReference: ProxyAgentConnectionReference?
   private var outstandingRequests = BoundedProxyAgentRequestRegistry()
+
+  /// The wait for every ProxyAgent reply except a start, whose Agent replies only
+  /// after its libbox start (`EngineStartBudget.proxyAgentStartReply`).
+  public static let defaultReplyTimeout: Duration = .seconds(5)
+
+  /// Arms one production reply deadline.
+  static let productionReplyDeadline: @Sendable (Duration) -> CallbackDeadlineScheduler = {
+    CallbackDeadlineScheduler(timeout: $0)
+  }
 
   public init(
     machServiceName: String,
@@ -452,30 +501,29 @@ public actor AuthenticatedProxyAgentTransport:
     proxyAgentBundleIdentifier: String,
     currentCodeHash: ServiceCodeHash,
     serviceController: any ProxyAgentServiceControlling = SMProxyAgentServiceController(),
-    replyTimeout: Duration = .seconds(5)
+    replyTimeout: Duration = defaultReplyTimeout
   ) throws {
-    guard !machServiceName.isEmpty, replyTimeout > .zero else {
-      throw ProxyAgentHostError.transportUnavailable("invalid transport configuration")
-    }
-    self.machServiceName = machServiceName
-    self.currentCodeHash = currentCodeHash
-    identity = try CodeIdentityRequirement(
-      expectedTeamIdentifier: teamIdentifier,
-      expectedBundleIdentifier: proxyAgentBundleIdentifier
-    )
-    self.serviceController = serviceController
-    replyDeadline = CallbackDeadlineScheduler(timeout: replyTimeout)
-    installed40019Dependencies = .production
-    connectionDependencies = .production
+    try self.init(
+      machServiceName: machServiceName,
+      teamIdentifier: teamIdentifier,
+      proxyAgentBundleIdentifier: proxyAgentBundleIdentifier,
+      currentCodeHash: currentCodeHash,
+      serviceController: serviceController,
+      replyTimeout: replyTimeout,
+      makeReplyDeadline: Self.productionReplyDeadline)
   }
 
+  /// `makeReplyDeadline` arms the deadline for one reply wait of the given
+  /// length; each wait chooses its own length.
   init(
     machServiceName: String,
     teamIdentifier: String,
     proxyAgentBundleIdentifier: String,
     currentCodeHash: ServiceCodeHash,
     serviceController: any ProxyAgentServiceControlling,
-    replyTimeout: Duration = .seconds(5),
+    replyTimeout: Duration = defaultReplyTimeout,
+    makeReplyDeadline: @escaping @Sendable (Duration) -> CallbackDeadlineScheduler =
+      productionReplyDeadline,
     installed40019Dependencies: Installed40019ProxyTransportDependencies = .production,
     connectionDependencies: ProxyAgentConnectionDependencies = .production
   ) throws {
@@ -489,7 +537,8 @@ public actor AuthenticatedProxyAgentTransport:
       expectedBundleIdentifier: proxyAgentBundleIdentifier
     )
     self.serviceController = serviceController
-    replyDeadline = CallbackDeadlineScheduler(timeout: replyTimeout)
+    self.replyTimeout = replyTimeout
+    self.makeReplyDeadline = makeReplyDeadline
     self.installed40019Dependencies = installed40019Dependencies
     self.connectionDependencies = connectionDependencies
   }
@@ -589,31 +638,19 @@ public actor AuthenticatedProxyAgentTransport:
     requestData: Data,
     requestID: RequestID
   ) async throws {
-    _ = try await awaitProxyAgentResult(requestID: requestID, expectedKind: .accepted) {
-      connection, finish in
-      guard
-        let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
-          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
-        }) as? CFWProxyAgentXPCProtocol
-      else {
-        finish(
-          .failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable")))
-        return
-      }
-      proxy.startSystemProxy(
-        capabilityData,
-        context: contextData,
-        configuration: configurationData,
-        request: requestData
-      ) { data, error in
-        if error != nil {
-          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
-        } else if let data {
-          finish(.success(data))
-        } else {
-          finish(.failure(ProxyAgentHostError.malformedResponse))
-        }
-      }
+    let startRequest = ProxyAgentStartRequest(
+      capability: capabilityData,
+      context: contextData,
+      configuration: configurationData,
+      request: requestData)
+    // The Agent replies only after its libbox start finished or was interrupted,
+    // so a start waits for the start budget instead of the ordinary reply bound.
+    _ = try await awaitProxyAgentResult(
+      requestID: requestID,
+      expectedKind: .accepted,
+      deadline: makeReplyDeadline(EngineStartBudget.proxyAgentStartReply)
+    ) { connection, finish in
+      self.connectionDependencies.startSystemProxy(connection, startRequest, finish)
     }
   }
 
@@ -843,6 +880,7 @@ public actor AuthenticatedProxyAgentTransport:
     requestID: RequestID,
     expectedKind: CommandResultKind,
     requireCurrentBuild: Bool = true,
+    deadline: CallbackDeadlineScheduler? = nil,
     _ operation:
       @escaping @Sendable (
         NSXPCConnection,
@@ -853,6 +891,7 @@ public actor AuthenticatedProxyAgentTransport:
       requestID: requestID,
       expectedKind: expectedKind,
       connect: { try connectedSession(requireCurrentBuild: requireCurrentBuild) },
+      deadline: deadline,
       decode: { data in
         let response = try ProtocolCodec.decodeResponse(data)
         return ProxyAgentDecodedResponse(
@@ -869,6 +908,7 @@ public actor AuthenticatedProxyAgentTransport:
     requestID: RequestID,
     expectedKind: CommandResultKind,
     connect: () throws -> ProxyAgentConnectionReference,
+    deadline: CallbackDeadlineScheduler? = nil,
     decode: @escaping @Sendable (Data) throws -> ProxyAgentDecodedResponse,
     operation:
       @escaping @Sendable (
@@ -878,6 +918,7 @@ public actor AuthenticatedProxyAgentTransport:
   ) async throws -> CommandResult {
     try await awaitProxyAgentResponse(
       connect: connect,
+      deadline: deadline,
       decode: { data in
         let response: ProxyAgentDecodedResponse
         do {
@@ -916,7 +957,7 @@ public actor AuthenticatedProxyAgentTransport:
     defer { reference.lifecycle.release(token: token) }
     do {
       let responseData: Data = try await awaitBoundedCallback(
-        deadline: deadline ?? replyDeadline,
+        deadline: deadline ?? makeReplyDeadline(replyTimeout),
         timeoutError: ProxyAgentHostError.transportTimedOut
       ) { finish in
         guard

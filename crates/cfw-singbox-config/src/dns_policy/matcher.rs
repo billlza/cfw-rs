@@ -1,12 +1,15 @@
 //! DNS domain selectors share dataset identities with route projection. Provider
 //! references expand only domain conditions; address rules cannot select a DNS
 //! server before the answer exists.
+use std::collections::BTreeSet;
+
+use crate::datasets::{CountryCode, Dataset, GeositeCode};
 use crate::{ConfigError, DomainPattern, profile::ProfileDocument, routing::RuleKind};
 use serde_json::{Value, json};
 
 pub(super) enum DnsMatcher {
     Domain(DomainPattern),
-    Geosite(Vec<String>),
+    Geosite(Vec<GeositeCode>),
     Providers(Vec<String>),
 }
 
@@ -37,10 +40,12 @@ impl DnsMatcher {
             ));
         }
         if kind {
-            for value in &values {
-                validate_geosite(value)?;
-            }
-            Ok(Self::Geosite(values))
+            Ok(Self::Geosite(
+                values
+                    .iter()
+                    .map(|value| validate_geosite(value))
+                    .collect::<Result<_, _>>()?,
+            ))
         } else {
             Ok(Self::Providers(values))
         }
@@ -49,9 +54,10 @@ impl DnsMatcher {
     pub(super) fn condition(&self, document: &ProfileDocument) -> Result<Value, ConfigError> {
         match self {
             Self::Domain(pattern) => Ok(pattern.condition()),
-            Self::Geosite(codes) => Ok(
-                json!({"rule_set":codes.iter().map(|code| format!("cfw-geosite-{code}")).collect::<Vec<_>>()}),
-            ),
+            Self::Geosite(codes) => Ok(json!({"rule_set":codes
+                .iter()
+                .map(|code| Dataset::GeoSite(code.clone()).tag())
+                .collect::<Vec<_>>()})),
             Self::Providers(names) => {
                 let mut tags = Vec::new();
                 for name in names {
@@ -91,20 +97,18 @@ impl DnsMatcher {
     }
 }
 
-pub(super) fn validate_geosite(code: &str) -> Result<(), ConfigError> {
-    if code.is_empty()
-        || code.len() > 96
-        || !code.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'-' | b'@' | b'_' | b'!')
+pub(super) fn validate_geosite(code: &str) -> Result<GeositeCode, ConfigError> {
+    GeositeCode::parse(code)
+        .ok_or_else(|| super::invalid("geosite names must be published sing-geosite dataset names"))
+}
+
+/// A DNS policy writes its GeoIP code in lowercase.
+pub(super) fn validate_geoip_code(code: &str) -> Result<CountryCode, ConfigError> {
+    CountryCode::parse(code)
+        .filter(|_| code.bytes().all(|byte| byte.is_ascii_lowercase()))
+        .ok_or_else(|| {
+            super::invalid("DNS GeoIP code requires a lowercase two-letter country code")
         })
-    {
-        return Err(super::invalid(
-            "geosite names require lowercase dataset identifiers",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn ordered_policies(
@@ -138,13 +142,14 @@ pub(super) fn ordered_policies(
     ordered
 }
 
-pub(super) fn dataset_rule_sets(
+/// The rule providers and GeoSite datasets that a validated profile's DNS
+/// selectors name, plus the fallback filter's GeoIP dataset.
+fn dns_dataset_names(
     document: &ProfileDocument,
-    download_outbound: &str,
-) -> Result<Vec<Value>, ConfigError> {
+) -> Result<(BTreeSet<String>, BTreeSet<Dataset>), ConfigError> {
     let dns = document.dns.as_ref().expect("DNS policy");
-    let mut geosite = std::collections::BTreeSet::new();
-    let mut providers = std::collections::BTreeSet::new();
+    let mut datasets = BTreeSet::new();
+    let mut providers = BTreeSet::new();
     let patterns = dns
         .nameserver_policy
         .iter()
@@ -162,14 +167,32 @@ pub(super) fn dataset_rule_sets(
         );
     for pattern in patterns {
         match DnsMatcher::parse(pattern)? {
-            DnsMatcher::Geosite(codes) => geosite.extend(codes),
+            DnsMatcher::Geosite(codes) => datasets.extend(codes.into_iter().map(Dataset::GeoSite)),
             DnsMatcher::Providers(names) => providers.extend(names),
             DnsMatcher::Domain(_) => {}
         }
     }
     if let Some(filter) = &dns.fallback_filter {
-        geosite.extend(filter.geosite.iter().cloned());
+        for code in &filter.geosite {
+            datasets.insert(Dataset::GeoSite(validate_geosite(code)?));
+        }
+        if let Some(code) = &filter.geoip_code {
+            datasets.insert(Dataset::GeoIp(validate_geoip_code(code)?));
+        }
     }
+    Ok((providers, datasets))
+}
+
+/// The downloadable datasets a validated profile's DNS policy references.
+pub(crate) fn dns_datasets(document: &ProfileDocument) -> Result<BTreeSet<Dataset>, ConfigError> {
+    Ok(dns_dataset_names(document)?.1)
+}
+
+pub(super) fn dataset_rule_sets(
+    document: &ProfileDocument,
+    download_outbound: &str,
+) -> Result<Vec<Value>, ConfigError> {
+    let (providers, datasets) = dns_dataset_names(document)?;
     let mut resources = Vec::new();
     for name in providers {
         let (index, provider) = document
@@ -201,15 +224,16 @@ pub(super) fn dataset_rule_sets(
             json!({"type":"inline","tag":format!("cfw-dns-provider-{index}"),"rules":conditions}),
         );
     }
-    for code in geosite {
-        resources.push(json!({"type":"remote","tag":format!("cfw-geosite-{code}"),"format":"binary","url":format!("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{code}.srs"),"download_detour":download_outbound,"update_interval":"1d"}));
-    }
-    if let Some(code) = dns
-        .fallback_filter
-        .as_ref()
-        .and_then(|filter| filter.geoip_code.as_ref())
-    {
-        resources.push(json!({"type":"remote","tag":format!("cfw-geoip-{code}"),"format":"binary","url":format!("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{code}.srs"),"download_detour":download_outbound,"update_interval":"1d"}));
-    }
+    // GeoSite datasets keep their sorted order and the fallback GeoIP comes
+    // last, as before the datasets were shared with routing.
+    let (geoip, geosite): (Vec<_>, Vec<_>) = datasets
+        .into_iter()
+        .partition(|dataset| matches!(dataset, Dataset::GeoIp(_)));
+    resources.extend(
+        geosite
+            .iter()
+            .chain(&geoip)
+            .map(|dataset| dataset.resource(download_outbound)),
+    );
     Ok(resources)
 }

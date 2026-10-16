@@ -510,9 +510,10 @@ class PinnedSignerVerificationTests(unittest.TestCase):
         with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(integration_child.runtime_admission, "require_closed_release_runtime") as admit:
             selected = launcher._signer_toolchain_metadata(runtime, unsigned_validation=True)
         admit.assert_called_once_with(allow_unsigned_validation=True)
-        self.assertEqual(set(selected) - set(launcher.PINNED_TAURI_METADATA), {"xcodeBuild=27A5252f"})
-        self.assertEqual(set(launcher.PINNED_TAURI_METADATA) - set(selected), {"xcodeBuild=27A266a"})
-        self.assertIn("xcodeBuild=27A266a", launcher.PINNED_TAURI_METADATA)
+        apple = ("xcodeVersion=", "xcodeBuild=")
+        self.assertNotEqual(selected, launcher.PINNED_TAURI_METADATA)
+        self.assertEqual([item for item in selected if not item.startswith(apple)], [item for item in launcher.PINNED_TAURI_METADATA if not item.startswith(apple)])
+        self.assertEqual([item for item in selected if item.startswith(apple)], ["xcodeBuild=27A5252f", "xcodeVersion=27.0"])
         with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(integration_child.runtime_admission, "require_closed_release_runtime", side_effect=integration_child.runtime_admission.ReleasePythonRuntimeError("rejected")):
             with self.assertRaisesRegex(launcher.UpdaterSigningLaunchError, "toolchain admission failed"):
                 launcher._signer_toolchain_metadata(runtime, unsigned_validation=True)

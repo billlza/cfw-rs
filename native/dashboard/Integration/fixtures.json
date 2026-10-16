@@ -99,7 +99,8 @@
       "log_level": "info",
       "tunnel_mtu": 1500,
       "ipv6_dns_enabled": true,
-      "lan_proxy": null
+      "lan_proxy": null,
+      "mainland_china_direct": false
     }
   },
   "profiles_snapshot": {

@@ -329,6 +329,7 @@ mod tests {
             BackendErrorKind::SystemExtensionValidationFailed,
             BackendErrorKind::SystemProxyConfigurationFailed,
             BackendErrorKind::SystemProxyRuntimeFailed,
+            BackendErrorKind::EngineStartTimedOut,
             BackendErrorKind::SystemProxyPreferencesFailed,
             BackendErrorKind::SystemProxyJournalFailed,
             BackendErrorKind::SystemProxyAuthorityFailed,
@@ -372,6 +373,10 @@ mod tests {
                 NativeBridgeErrorCode::CredentialVaultCorrupt,
             ),
             ("identity_rejected", NativeBridgeErrorCode::IdentityRejected),
+            (
+                "engine_start_timed_out",
+                NativeBridgeErrorCode::EngineStartTimedOut,
+            ),
         ] {
             let response = serde_json::json!({
                 "schema_version": cfw_engine_api::ENGINE_PROTOCOL_VERSION,

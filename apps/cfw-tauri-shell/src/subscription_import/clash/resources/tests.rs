@@ -274,3 +274,22 @@ fn stored_provider_default_fingerprint_accepts_only_runtime_presets() {
         );
     }
 }
+
+#[test]
+fn classical_rule_providers_accept_geosite_conditions() {
+    let payload = load_single_document("- GEOSITE,CN\n- GEOSITE,Google@!CN\n- GEOIP,CN\n")
+        .expect("YAML sequence");
+    let rules = import_rule_payload(payload, ProviderRuleBehavior::Classical)
+        .expect("classical GEOSITE conditions");
+    assert_eq!(
+        rules
+            .iter()
+            .map(|rule| (rule.kind, rule.value.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (RuleKind::GeoSite, "cn"),
+            (RuleKind::GeoSite, "google@!cn"),
+            (RuleKind::GeoIp, "CN"),
+        ]
+    );
+}

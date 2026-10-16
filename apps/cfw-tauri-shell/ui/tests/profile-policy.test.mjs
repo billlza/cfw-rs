@@ -45,3 +45,16 @@ test("saved node choice overrides the imported default without rewriting the doc
   assert.equal(view.groups[0].now, "REJECT");
   assert.equal(JSON.parse(body).outbounds[2].default, "DIRECT");
 });
+
+test("GEOSITE rules are labelled and are not country rules", () => {
+  const policy = savedProfilePolicy({ id: "p", name: "Profile", body: JSON.stringify({
+    outbounds: [{ type: "socks5", tag: "Node", server: "node.example.com", server_port: 1080 }, { type: "direct", tag: "DIRECT" }],
+    route: { final: "Node", rules: [
+      { type: "geo_site", value: "cn", outbound: "DIRECT" },
+      { type: "geo_ip", value: "CN", outbound: "DIRECT" },
+      { type: "domain_suffix", value: "example.com", outbound: "Node" },
+    ] },
+  }) });
+  assert.deepEqual(policy.rules.map((rule) => rule.type), ["GEOSITE", "GEOIP", "DOMAIN-SUFFIX", "MATCH"]);
+  assert.deepEqual(policy.geoipCountries, ["CN"]);
+});

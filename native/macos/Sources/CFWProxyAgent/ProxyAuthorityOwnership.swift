@@ -62,7 +62,6 @@ final class ProxyOwnerAuthorization: @unchecked Sendable {
 /// but this implementation binds no ports and asserts no cross-process exclusion.
 final class UnleasedProxyOwnership: ProxyEngineLeaseHolding, @unchecked Sendable {
   func release() throws {}
-  func markStopFailed() throws {}
 }
 
 /// Monotonic time source for ProxyAgent attestations. Injected so tests can assert
@@ -216,6 +215,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     let id: UUID
     let descriptor: ConfigurationDescriptor
     let configuration: SensitiveDataBuffer
+    let deadline: EngineStartDeadline
     var cancellation: PendingCancellation?
     var stopCompletions: [StopCompletion] = []
   }
@@ -256,12 +256,17 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
   ) {
     let startID = UUID()
+    // The Host's reply deadline started when it sent this request. Fixing the
+    // libbox deadline now keeps a slow Authority bind from pushing the start's
+    // end past it.
+    let deadline = EngineStartDeadline(receivedAt: .now)
     let admitted = stateLock.withLock { () -> Bool in
       guard pendingStart == nil, activeContext == nil, stopFlight == nil else { return false }
       pendingStart = PendingStart(
         id: startID,
         descriptor: descriptor,
         configuration: configuration,
+        deadline: deadline,
         cancellation: nil)
       return true
     }
@@ -406,7 +411,8 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       // a pending start can proceed.
       lifecycle.start(
         configuration: pending.configuration,
-        descriptor: descriptor
+        descriptor: descriptor,
+        deadline: pending.deadline
       ) { [self] result in
         switch result {
         case .success:
@@ -467,8 +473,9 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     } catch {
       // Exact readiness could not be attested; tear the owned runtime and System
       // Proxy state down and fail closed. A failed cleanup or stopped attestation
-      // retains the owner context so an explicit stop or another revocation can
-      // retry the exact operation instead of manufacturing global Off.
+      // retains the owner context, so global Off is never manufactured: an
+      // explicit stop or another revocation retries the exact operation, and a
+      // runtime libbox could not close fails every retry with the same cause.
       finishFailedStart(
         originalError: Self.authorityFailure(error),
         descriptor: descriptor,
@@ -530,8 +537,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     completions incomingCompletions: [StopCompletion]
   ) {
     var immediate: Result<Void, ProxySessionLifecycleError>?
-    var flightToStart: StopFlight?
-    var useExistingProof = false
+    var flightToAttest: StopFlight?
     stateLock.withLock {
       if let context = activeContext,
         context.descriptor != expectedConfiguration
@@ -553,8 +559,26 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
         id: UUID(), context: context, descriptor: expectedConfiguration,
         completions: incomingCompletions)
       stopFlight = flight
-      useExistingProof = context.map { locallyStoppedLeaseID == $0.leaseID } ?? false
-      flightToStart = flight
+      if let context, locallyStoppedLeaseID == context.leaseID {
+        flightToAttest = flight
+        return
+      }
+      // Scheduling while `stateLock` is held is the publish→stop barrier: whoever
+      // appends a completion to this flight queues its next work, ending the
+      // process included, behind the stop that answers that completion.
+      lifecycle.stop(expectedConfiguration: expectedConfiguration) { [self] result in
+        switch result {
+        case .failure(let error):
+          finishStopFlight(flight.id, result: .failure(error))
+        case .success:
+          guard let context = flight.context else {
+            finishStopFlight(flight.id, result: .success(()))
+            return
+          }
+          markLocallyStopped(context)
+          attestStopFlight(flight)
+        }
+      }
     }
     if let immediate {
       for completion in incomingCompletions {
@@ -562,23 +586,8 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       }
       return
     }
-    guard let flight = flightToStart else { return }
-    if useExistingProof {
-      attestStopFlight(flight)
-      return
-    }
-    lifecycle.stop(expectedConfiguration: expectedConfiguration) { [self] result in
-      switch result {
-      case .failure(let error):
-        finishStopFlight(flight.id, result: .failure(error))
-      case .success:
-        guard let context = flight.context else {
-          finishStopFlight(flight.id, result: .success(()))
-          return
-        }
-        markLocallyStopped(context)
-        attestStopFlight(flight)
-      }
+    if let flightToAttest {
+      attestStopFlight(flightToAttest)
     }
   }
 

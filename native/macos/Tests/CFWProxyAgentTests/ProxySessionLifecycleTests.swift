@@ -1,10 +1,10 @@
 import CFWCredentialTransport
-import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 import Security
 import Testing
 
+@testable import CFWLibboxRuntime
 @testable import CFWProxyAgentCore
 
 private enum ForcedProxyFailure: Error {
@@ -115,6 +115,135 @@ private final class ValidationOnlyProxyOwner: ProxySystemProxyOwning, @unchecked
   #expect(owner.startCount == 0)
 }
 
+/// Holds the send barrier a connection runs once its earlier sends went out.
+private final class HeldSendBarrier: ProxyAgentSendBarrier, @unchecked Sendable {
+  private let lock = NSLock()
+  private var barrier: (@Sendable () -> Void)?
+
+  func scheduleSendBarrierBlock(_ block: @escaping @Sendable () -> Void) {
+    lock.withLock { barrier = block }
+  }
+
+  var isScheduled: Bool { lock.withLock { barrier != nil } }
+
+  func sendPendingMessages() {
+    let barrier = lock.withLock { () -> (@Sendable () -> Void)? in
+      let block = self.barrier
+      self.barrier = nil
+      return block
+    }
+    barrier?()
+  }
+}
+
+private final class ExitRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private let exited = DispatchSemaphore(value: 0)
+  private var statuses: [Int32] = []
+
+  func record(_ status: Int32) {
+    lock.withLock { statuses.append(status) }
+    exited.signal()
+  }
+
+  func wait(for timeout: DispatchTimeInterval = .seconds(1)) -> Bool {
+    exited.wait(timeout: .now() + timeout) == .success
+  }
+
+  var values: [Int32] { lock.withLock { statuses } }
+}
+
+@Test func endingTheAgentExitsOnlyOnceEveryOpenConnectionSentItsReplies() {
+  let first = HeldSendBarrier()
+  let second = HeldSendBarrier()
+  let exits = ExitRecorder()
+  let processExit = ProxyAgentProcessExit(
+    openConnections: { [first, second] }, exit: { exits.record($0) })
+
+  processExit.end(after: LibboxInstanceUnclosable(closeFailure: "close network: monitor"))
+  #expect(first.isScheduled)
+  #expect(second.isScheduled)
+  first.sendPendingMessages()
+  #expect(!exits.wait(for: .milliseconds(200)), "the agent exited before every reply was sent")
+  second.sendPendingMessages()
+  #expect(exits.wait())
+  #expect(exits.values == [EX_SOFTWARE])
+}
+
+@Test func endingTheAgentWithoutAnOpenConnectionExitsAtOnce() {
+  let exits = ExitRecorder()
+  ProxyAgentProcessExit(openConnections: { [] }, exit: { exits.record($0) })
+    .end(after: LibboxInstanceUnclosable(closeFailure: "close network: monitor"))
+  #expect(exits.wait())
+  #expect(exits.values == [EX_SOFTWARE])
+}
+
+@objc private protocol ConnectionProbe {
+  func ping(withReply reply: @escaping @Sendable () -> Void)
+}
+
+private final class ConnectionProbeService: NSObject, ConnectionProbe {
+  func ping(withReply reply: @escaping @Sendable () -> Void) { reply() }
+}
+
+private final class TrackingListenerDelegate: NSObject, NSXPCListenerDelegate {
+  private let connections: ProxyAgentConnections
+  private let service = ConnectionProbeService()
+
+  init(connections: ProxyAgentConnections) {
+    self.connections = connections
+  }
+
+  func listener(
+    _ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection
+  ) -> Bool {
+    connection.exportedInterface = NSXPCInterface(with: ConnectionProbe.self)
+    connection.exportedObject = service
+    connections.track(connection)
+    connection.resume()
+    return true
+  }
+}
+
+/// Ending the ProxyAgent waits for a send barrier on every connection it
+/// tracks. A tracked connection runs one while open and leaves once
+/// invalidated, and libxpc runs a barrier issued on a cancelled connection at
+/// once, so a connection that ends while the agent ends cannot hold it back.
+@Test(.timeLimit(.minutes(1)))
+func trackedConnectionRunsSendBarriersAndLeavesWhenInvalidated() async throws {
+  let connections = ProxyAgentConnections()
+  let delegate = TrackingListenerDelegate(connections: connections)
+  let listener = NSXPCListener.anonymous()
+  listener.delegate = delegate
+  listener.resume()
+  defer { listener.invalidate() }
+  let client = NSXPCConnection(listenerEndpoint: listener.endpoint)
+  client.remoteObjectInterface = NSXPCInterface(with: ConnectionProbe.self)
+  client.resume()
+  let probe = try #require(
+    client.remoteObjectProxyWithErrorHandler { _ in } as? any ConnectionProbe)
+  await withCheckedContinuation { (replied: CheckedContinuation<Void, Never>) in
+    probe.ping { replied.resume() }
+  }
+  let open = connections.open
+  #expect(open.count == 1)
+  let accepted = try #require(open.first)
+  await withCheckedContinuation { (sent: CheckedContinuation<Void, Never>) in
+    accepted.scheduleSendBarrierBlock { sent.resume() }
+  }
+
+  client.invalidate()
+  let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+  while !connections.open.isEmpty, ContinuousClock.now < deadline {
+    try await Task.sleep(for: .milliseconds(10))
+  }
+  #expect(connections.open.isEmpty)
+  await withCheckedContinuation { (ran: CheckedContinuation<Void, Never>) in
+    accepted.scheduleSendBarrierBlock { ran.resume() }
+  }
+  withExtendedLifetime(delegate) {}
+}
+
 /// Test-only adapter that always supplies a fresh one-use in-memory template.
 /// Production has no descriptor-only start overload and cannot read a template
 /// back from disk.
@@ -127,6 +256,7 @@ extension ProxySessionLifecycle {
     start(
       configuration: SensitiveDataBuffer(copying: Data("{}".utf8)),
       descriptor: descriptor,
+      deadline: EngineStartDeadline(receivedAt: .now),
       completionHandler: completionHandler)
   }
 }
@@ -172,7 +302,7 @@ private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
   private var eventHandler: (@Sendable (ProxyEngineEvent) -> Void)?
   private var startCountValue = 0
   private var stopCountValue = 0
-  private var stopFails = false
+  private var stopFailure: LibboxInstanceUnclosable?
 
   var startCount: Int {
     lock.withLock { startCountValue }
@@ -184,6 +314,7 @@ private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
 
   func start(
     configuration: Data,
+    deadline: EngineStartDeadline,
     eventHandler: @escaping @Sendable (ProxyEngineEvent) -> Void
   ) throws {
     lock.withLock {
@@ -193,21 +324,22 @@ private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
     started.signal()
   }
 
-  func stop() throws {
-    try lock.withLock {
+  func stop() throws(LibboxInstanceUnclosable) {
+    let failure = lock.withLock { () -> LibboxInstanceUnclosable? in
       stopCountValue += 1
-      if stopFails {
-        throw ForcedProxyFailure.requested
-      }
+      return stopFailure
+    }
+    if let failure {
+      throw failure
     }
   }
 
   func healthCheck() throws {}
 
-  func setStopFails(_ value: Bool) {
-    lock.withLock {
-      stopFails = value
-    }
+  /// Makes this and every later stop throw `failure`, as an engine whose
+  /// libbox instance could not be closed does.
+  func failStops(with failure: LibboxInstanceUnclosable) {
+    lock.withLock { stopFailure = failure }
   }
 
   func waitUntilStarted() -> Bool {
@@ -235,25 +367,14 @@ private struct FakeProxyEngineFactory: ProxyEngineFactory {
 private final class FakeLease: ProxyEngineLeaseHolding, @unchecked Sendable {
   private let lock = NSLock()
   private var releaseCountValue = 0
-  private var failedStopCountValue = 0
 
   var releaseCount: Int {
     lock.withLock { releaseCountValue }
   }
 
-  var failedStopCount: Int {
-    lock.withLock { failedStopCountValue }
-  }
-
   func release() throws {
     lock.withLock {
       releaseCountValue += 1
-    }
-  }
-
-  func markStopFailed() throws {
-    lock.withLock {
-      failedStopCountValue += 1
     }
   }
 }
@@ -526,12 +647,113 @@ private final class OperationRecorder: @unchecked Sendable {
   }
 }
 
+/// What happened, in order: completions the test records and ended processes.
+private final class EventLog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [String] = []
+
+  func record(_ event: String) {
+    lock.withLock { events.append(event) }
+  }
+
+  var values: [String] {
+    lock.withLock { events }
+  }
+}
+
+private final class EndProcessRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private let ended = DispatchSemaphore(value: 0)
+  private var failures: [LibboxInstanceUnclosable] = []
+
+  func record(_ failure: LibboxInstanceUnclosable) {
+    lock.withLock { failures.append(failure) }
+    ended.signal()
+  }
+
+  func wait() -> Bool {
+    ended.wait(timeout: .now() + 1) == .success
+  }
+
+  var values: [LibboxInstanceUnclosable] {
+    lock.withLock { failures }
+  }
+}
+
 private struct ProxyFixture {
   let lifecycle: ProxySessionLifecycle
   let engine: FakeProxyEngine
   let lease: FakeLease
   let preferences: FakeSystemProxyPreferences
   let journalStore: FakeJournalStore
+  let endRecorder: EndProcessRecorder
+  let events: EventLog
+}
+
+/// A runtime whose start ran past its deadline and was interrupted.
+private final class TimedOutLibboxRuntime: LibboxServiceRuntime, @unchecked Sendable {
+  private let lock = NSLock()
+  private var stopCountValue = 0
+  private var startDeadlines: [EngineStartDeadline] = []
+
+  var stopCount: Int { lock.withLock { stopCountValue } }
+  var deadlines: [EngineStartDeadline] { lock.withLock { startDeadlines } }
+
+  func start(configuration: Data, packetFileDescriptor: Int32?, deadline: EngineStartDeadline)
+    throws
+  {
+    lock.withLock { startDeadlines.append(deadline) }
+    throw LibboxRuntimeError.serviceStartTimedOut
+  }
+
+  func stop() throws(LibboxInstanceUnclosable) { lock.withLock { stopCountValue += 1 } }
+  func healthCheck() throws {}
+  func resetNetwork() {}
+}
+
+/// A runtime whose failed start libbox could not close: the start throws the
+/// close failure, and so does every stop.
+private final class UnclosableLibboxRuntime: LibboxServiceRuntime, @unchecked Sendable {
+  private let lock = NSLock()
+  private let closeFailure: LibboxInstanceUnclosable
+  private var startCountValue = 0
+  private var stopCountValue = 0
+
+  init(closeFailure: LibboxInstanceUnclosable) {
+    self.closeFailure = closeFailure
+  }
+
+  var startCount: Int { lock.withLock { startCountValue } }
+  var stopCount: Int { lock.withLock { stopCountValue } }
+
+  func start(configuration: Data, packetFileDescriptor: Int32?, deadline: EngineStartDeadline)
+    throws
+  {
+    lock.withLock { startCountValue += 1 }
+    throw closeFailure
+  }
+
+  func stop() throws(LibboxInstanceUnclosable) {
+    lock.withLock { stopCountValue += 1 }
+    throw closeFailure
+  }
+
+  func healthCheck() throws {}
+  func resetNetwork() {}
+}
+
+private struct StubLibboxRuntimeFactory: LibboxServiceRuntimeFactory {
+  let runtime: any LibboxServiceRuntime & Sendable
+
+  func makeRuntime(role: LibboxRuntimeRole) throws -> any LibboxServiceRuntime { runtime }
+}
+
+/// The smallest configuration the real engine admits: an app-owned controller
+/// and the System Proxy mixed listener.
+private func receiptConfiguration() -> Data {
+  Data(
+    #"{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9091","secret":"s"}},"inbounds":[{"type":"mixed","tag":"cfw-system-proxy","listen":"127.0.0.1","listen_port":7891}]}"#
+      .utf8)
 }
 
 private func descriptor(generation: UInt64 = 1, slot: ConfigurationSlot = .systemProxy) throws
@@ -566,6 +788,8 @@ private func makeFixture(
 ) -> ProxyFixture {
   let engine = FakeProxyEngine()
   let lease = FakeLease()
+  let endRecorder = EndProcessRecorder()
+  let events = EventLog()
   let lifecycle = ProxySessionLifecycle(
     dependencies: ProxySessionDependencies(
       prepareOwnership: { _ in
@@ -578,7 +802,11 @@ private func makeFixture(
       ),
       preferences: preferences,
       journalStore: journalStore,
-      readinessTimeout: readinessTimeout
+      readinessTimeout: readinessTimeout,
+      endProcess: { failure in
+        events.record("end")
+        endRecorder.record(failure)
+      }
     )
   )
   return ProxyFixture(
@@ -586,7 +814,9 @@ private func makeFixture(
     engine: engine,
     lease: lease,
     preferences: preferences,
-    journalStore: journalStore
+    journalStore: journalStore,
+    endRecorder: endRecorder,
+    events: events
   )
 }
 
@@ -615,7 +845,8 @@ private func recoveryLifecycle(
       engineFactory: FakeProxyEngineFactory(engine: engine, creationFails: false),
       preferences: preferences,
       journalStore: journalStore,
-      readinessTimeout: 60
+      readinessTimeout: 60,
+      endProcess: { _ in Issue.record("every engine in this test closes") }
     )
   )
 }
@@ -652,7 +883,7 @@ struct ProxySessionLifecycleTests {
     #expect(fixture.lifecycle.testingSnapshot().mode == .off)
   }
 
-  @Test func localProxyStopRequiresExactModeAndRetainsOwnershipOnEngineFailure() throws {
+  @Test func localProxyStopRequiresExactModeAndEndsTheProcessWhenItsEngineCannotClose() throws {
     let fixture = makeFixture()
     let configuration = try descriptor(slot: .localProxy)
     let start = OperationRecorder()
@@ -665,19 +896,31 @@ struct ProxySessionLifecycleTests {
     #expect(wrongMode.wait())
     #expect(wrongMode.values == [.failure(.staleStopRequest)])
     #expect(fixture.engine.stopCount == 0)
-    fixture.engine.setStopFails(true)
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    fixture.engine.failStops(with: closeFailure)
     let failedStop = OperationRecorder()
-    fixture.lifecycle.stop(expectedConfiguration: configuration) { failedStop.record($0) }
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { result in
+      fixture.events.record("stop")
+      failedStop.record(result)
+    }
     #expect(failedStop.wait())
+    #expect(fixture.endRecorder.wait())
+    #expect(failedStop.values == [.failure(.engineUnclosable(closeFailure))])
+    #expect(fixture.events.values == ["stop", "end"])
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
     #expect(fixture.lifecycle.testingSnapshot().mode == .localProxy)
     #expect(fixture.lease.releaseCount == 0)
-    fixture.engine.setStopFails(false)
+
+    // libbox closes an instance once, so a retry reports the same cause without
+    // reaching the engine or ending the process again.
     let retry = OperationRecorder()
     fixture.lifecycle.stop(expectedConfiguration: configuration) { retry.record($0) }
     #expect(retry.wait())
-    #expect(retry.values == [.success])
-    #expect(fixture.lease.releaseCount == 1)
+    #expect(retry.values == [.failure(.engineUnclosable(closeFailure))])
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.lease.releaseCount == 0)
+    #expect(fixture.endRecorder.values == [closeFailure])
     #expect(fixture.preferences.applyCount == 0)
     #expect(fixture.preferences.restoreCount == 0)
   }
@@ -903,6 +1146,48 @@ struct ProxySessionLifecycleTests {
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
   }
 
+  @Test func libboxStartTimeoutFailsTheStartCleanlyWithItsOwnCause() throws {
+    let runtime = TimedOutLibboxRuntime()
+    let lease = FakeLease()
+    let preferences = FakeSystemProxyPreferences()
+    let lifecycle = ProxySessionLifecycle(
+      dependencies: ProxySessionDependencies(
+        prepareOwnership: { _ in PreparedProxyOwnership(lease: lease) },
+        resolveConfiguration: { _, _ in receiptConfiguration() },
+        recoverCleanupLease: { _ in lease },
+        engineFactory: LibboxProxyEngineFactory(
+          runtimeFactory: StubLibboxRuntimeFactory(runtime: runtime)),
+        preferences: preferences,
+        journalStore: FakeJournalStore(),
+        readinessTimeout: 60,
+        endProcess: { _ in Issue.record("a runtime that timed out still closes") }))
+    let configuration = try descriptor()
+    let deadline = EngineStartDeadline(receivedAt: .now)
+    let start = OperationRecorder()
+    lifecycle.start(
+      configuration: SensitiveDataBuffer(copying: Data("{}".utf8)),
+      descriptor: configuration,
+      deadline: deadline
+    ) { start.record($0) }
+    #expect(start.wait())
+    #expect(start.values == [.failure(.engineStartTimedOut)])
+    #expect(runtime.deadlines == [deadline])
+    #expect(runtime.stopCount == 1)
+    #expect(lease.releaseCount == 1)
+    #expect(preferences.prepareCount == 0)
+    #expect(preferences.applyCount == 0)
+    #expect(
+      lifecycle.testingSnapshot().state.failure?.code
+        == NativeBridgeErrorCode.engineStartTimedOut.rawValue)
+
+    let stop = OperationRecorder()
+    lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(lifecycle.testingSnapshot().mode == .off)
+    #expect(runtime.stopCount == 1)
+  }
+
   @Test func listenerReadinessTimeoutStopsEngineWithoutPublishingPreferences() throws {
     let fixture = makeFixture(readinessTimeout: 0.01)
     let start = OperationRecorder()
@@ -981,35 +1266,147 @@ struct ProxySessionLifecycleTests {
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
   }
 
-  @Test func engineStopFailureRetainsLeaseUntilAConfirmedRetry() throws {
-    let fixture = makeFixture()
+  @Test func unclosableEngineEndsTheProcessAfterItsSettingsAreRestored() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
     let activeConfiguration = try descriptor()
     let start = OperationRecorder()
     fixture.lifecycle.start(configuration: activeConfiguration) { start.record($0) }
     #expect(fixture.engine.waitUntilStarted())
     fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
     #expect(start.wait())
-    fixture.engine.setStopFails(true)
+    #expect(start.values == [.success])
+    #expect(preferences.currentValue(.httpHost) == .string("127.0.0.1"))
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    fixture.engine.failStops(with: closeFailure)
 
     let failedStop = OperationRecorder()
-    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) {
-      failedStop.record($0)
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { result in
+      fixture.events.record("stop")
+      failedStop.record(result)
     }
     #expect(failedStop.wait())
-    guard case .failure(.engineStop) = failedStop.values[0] else {
-      Issue.record("Expected an explicit engine stop failure")
-      return
-    }
+    #expect(fixture.endRecorder.wait())
+    #expect(failedStop.values == [.failure(.engineUnclosable(closeFailure))])
+    #expect(fixture.events.values == ["stop", "end"])
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    #expect(fixture.journalStore.journal == nil)
     #expect(fixture.lease.releaseCount == 0)
-    #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
+    let failed = fixture.lifecycle.testingSnapshot()
+    #expect(failed.state.kind == .failed)
+    #expect(failed.state.failure?.code == "proxy-engine-unclosable")
 
-    fixture.engine.setStopFails(false)
+    // Nothing the engine reports afterwards revives the session.
+    fixture.engine.emit(.failed(ProxyEngineFailure(code: "crash", message: "Runtime exited.")))
     let retry = OperationRecorder()
     fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { retry.record($0) }
     #expect(retry.wait())
-    #expect(retry.values == [.success])
-    #expect(fixture.engine.stopCount == 2)
-    #expect(fixture.lease.releaseCount == 1)
+    #expect(retry.values == [.failure(.engineUnclosable(closeFailure))])
+    let blockedStart = OperationRecorder()
+    fixture.lifecycle.start(configuration: activeConfiguration) { blockedStart.record($0) }
+    #expect(blockedStart.wait())
+    #expect(blockedStart.values == [.failure(.engineUnclosable(closeFailure))])
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.engine.startCount == 1)
+    #expect(fixture.lease.releaseCount == 0)
+    #expect(preferences.restoreCount == 1)
+    #expect(fixture.endRecorder.values == [closeFailure])
+  }
+
+  @Test func unclosableEngineKeepsTheProcessUntilItsSettingsAreRestored() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let activeConfiguration = try descriptor()
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: activeConfiguration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    fixture.engine.failStops(with: closeFailure)
+    preferences.failNextRestore()
+
+    let failedStop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { result in
+      fixture.events.record("stop")
+      failedStop.record(result)
+    }
+    #expect(failedStop.wait())
+    #expect(failedStop.values == [.failure(.engineUnclosable(closeFailure))])
+    _ = fixture.lifecycle.testingSnapshot()
+    // Only this process holds the authorization to restore the settings
+    // without asking the user again, so it stays until they are restored.
+    #expect(fixture.endRecorder.values.isEmpty)
+    #expect(fixture.journalStore.journal != nil)
+    #expect(preferences.currentValue(.httpHost) == .string("127.0.0.1"))
+
+    let retry = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { result in
+      fixture.events.record("stop")
+      retry.record(result)
+    }
+    #expect(retry.wait())
+    #expect(fixture.endRecorder.wait())
+    #expect(retry.values == [.failure(.engineUnclosable(closeFailure))])
+    #expect(fixture.events.values == ["stop", "stop", "end"])
+    #expect(preferences.restoreCount == 2)
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    #expect(fixture.journalStore.journal == nil)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.lease.releaseCount == 0)
+    #expect(fixture.endRecorder.values == [closeFailure])
+  }
+
+  @Test func unclosableRuntimeFailsTheStartAndLeavesTheAgentSpent() throws {
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close failed service")
+    let runtime = UnclosableLibboxRuntime(closeFailure: closeFailure)
+    let lease = FakeLease()
+    let events = EventLog()
+    let ends = EndProcessRecorder()
+    let lifecycle = ProxySessionLifecycle(
+      dependencies: ProxySessionDependencies(
+        prepareOwnership: { _ in PreparedProxyOwnership(lease: lease) },
+        resolveConfiguration: { _, _ in receiptConfiguration() },
+        recoverCleanupLease: { _ in lease },
+        engineFactory: LibboxProxyEngineFactory(
+          runtimeFactory: StubLibboxRuntimeFactory(runtime: runtime)),
+        preferences: FakeSystemProxyPreferences(),
+        journalStore: FakeJournalStore(),
+        readinessTimeout: 60,
+        endProcess: { failure in
+          events.record("end")
+          ends.record(failure)
+        }))
+    let configuration = try descriptor()
+    let start = OperationRecorder()
+    lifecycle.start(
+      configuration: SensitiveDataBuffer(copying: Data("{}".utf8)),
+      descriptor: configuration,
+      deadline: EngineStartDeadline(receivedAt: .now)
+    ) { result in
+      events.record("start")
+      start.record(result)
+    }
+    #expect(start.wait())
+    #expect(ends.wait())
+    #expect(start.values == [.failure(.engineUnclosable(closeFailure))])
+    #expect(events.values == ["start", "end"])
+    #expect(lifecycle.testingSnapshot().state.failure?.code == "proxy-engine-unclosable")
+    #expect(lease.releaseCount == 0)
+
+    let blockedStart = OperationRecorder()
+    lifecycle.start(configuration: configuration) { blockedStart.record($0) }
+    #expect(blockedStart.wait())
+    #expect(blockedStart.values == [.failure(.engineUnclosable(closeFailure))])
+    let stop = OperationRecorder()
+    lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.failure(.engineUnclosable(closeFailure))])
+    _ = lifecycle.testingSnapshot()
+    #expect(runtime.startCount == 1)
+    #expect(runtime.stopCount == 1)
+    #expect(ends.values == [closeFailure])
   }
 
   @Test func missingLibboxFailsBeforeLeaseOrPreferences() throws {
@@ -1150,7 +1547,8 @@ struct ProxySessionLifecycleTests {
         engineFactory: FakeProxyEngineFactory(engine: engine, creationFails: false),
         preferences: preferences,
         journalStore: unavailableStore,
-        readinessTimeout: 60
+        readinessTimeout: 60,
+        endProcess: { _ in Issue.record("every engine in this test closes") }
       )
     )
     let start = OperationRecorder()

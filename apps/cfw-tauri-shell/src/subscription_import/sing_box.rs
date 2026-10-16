@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::socks5::Network as Socks5Network;
 use super::{
-    ImportedSubscription, OutboundCollector, build_tls_parts, canonical_uuid_credential,
+    ImportedSubscription, OutboundCollector, TlsParts, build_tls_parts, canonical_uuid_credential,
     credential_ref_json, normalize_hysteria2_server_ports,
     normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
     normalize_tuic_udp_relay_mode, normalize_v2ray_packet_encoding, normalize_vless_flow,
@@ -767,7 +767,14 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
     if required && !tls.enabled {
         return Err("sing-box outbound requires enabled TLS".into());
     }
-    if tls.insecure {
+    // Upstream verifies a public-key pin whether or not `insecure` is set,
+    // so beside a pin the flag asks for nothing more: the pin is the node's
+    // only trust anchor, the name, validity and server-auth checks remain,
+    // and the flag is never stored. Without a pin it fails closed.
+    if tls.insecure
+        && tls.certificate_sha256.is_empty()
+        && tls.certificate_public_key_sha256.is_empty()
+    {
         return Err("sing-box outbound requires disabling TLS certificate verification".into());
     }
     if tls.disable_sni {
@@ -808,22 +815,22 @@ fn source_tls(tls: SourceTls, server: &str, required: bool) -> Result<Value, Str
         }
         Some(_) => return Err("disabled sing-box Reality contains active options".into()),
     };
-    let mut value = tls_json(build_tls_parts(
-        true,
-        if tls.server_name.is_empty() {
-            server.to_owned()
-        } else {
-            tls.server_name
-        },
-        tls.alpn.into_vec(),
-        utls,
-        reality,
-    ));
+    let mut value = tls_json(TlsParts {
+        certificate_sha256: tls.certificate_sha256,
+        ..build_tls_parts(
+            true,
+            if tls.server_name.is_empty() {
+                server.to_owned()
+            } else {
+                tls.server_name
+            },
+            tls.alpn.into_vec(),
+            utls,
+            reality,
+        )
+    });
     if !tls.min_version.is_empty() {
         value["min_version"] = json!(tls.min_version);
-    }
-    if !tls.certificate_sha256.is_empty() {
-        value["certificate_sha256"] = json!(tls.certificate_sha256);
     }
     if !tls.certificate_public_key_sha256.is_empty() {
         value["certificate_public_key_sha256"] = json!(tls.certificate_public_key_sha256);

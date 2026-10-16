@@ -789,5 +789,9 @@
   "{action} is unavailable: the selected profile “{name}” is invalid: {error}": "{action}無法使用：所選取的設定檔「{name}」無效：{error}",
   "the selected profile “{name}” is invalid: {error}": "所選取的設定檔「{name}」無效：{error}",
   "Subscription URL": "訂閱 URL",
-  "Credential cleanup is unavailable: {error}": "無法清理憑證：{error}"
+  "Credential cleanup is unavailable: {error}": "無法清理憑證：{error}",
+  "Mainland China direct": "中國大陸直連",
+  "Mainland China direct · {countries}": "中國大陸直連 · {countries}",
+  "In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes.": "規則模式下，未符合任何設定檔規則、且目的地在中國大陸的流量直連，應用程式自身的 DNS 透過中國大陸境內的加密 DNS 解析中國大陸網域。每個設定檔首次啟動時，會透過代理下載中國大陸規則集，下載完成後核心才會啟動；之後在核心執行期間每日更新。不適用於直連的設定檔。變更此項時，現有連線可能重新連線。",
+  "Mainland China direct is on. For a profile routed through a proxy, the switch's rules apply in Rule mode after the listed rules, before the final route (MATCH).": "中國大陸直連已開啟。對經代理路由的設定檔，規則模式下此功能的規則排在所列規則之後、最終路由（MATCH）之前。"
 }

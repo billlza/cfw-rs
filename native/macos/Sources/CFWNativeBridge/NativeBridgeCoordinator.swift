@@ -228,6 +228,25 @@ extension NativeEngineLeaseInspecting {
   }
 }
 
+/// The end of one bounded Host wait for an owner to report readiness, counted
+/// in time the Mac is awake. The owner's own start deadline keeps counting while
+/// the Mac sleeps, so after a sleep the owner still reports its start before
+/// this wait ends.
+struct NativeReadinessDeadline: Sendable {
+  let end: SuspendingClock.Instant
+  let now: @Sendable () -> SuspendingClock.Instant
+
+  /// Ends `length` after `now()`.
+  static func awake(
+    after length: Duration,
+    now: @escaping @Sendable () -> SuspendingClock.Instant = { SuspendingClock.now }
+  ) -> NativeReadinessDeadline {
+    NativeReadinessDeadline(end: now().advanced(by: length), now: now)
+  }
+
+  func hasPassed() -> Bool { now() >= end }
+}
+
 actor NativeBridgeCoordinator {
   let proxy: any ProxyAgentTransporting
   let installed40019Proxy: any Installed40019ProxySnapshotting
@@ -241,6 +260,8 @@ actor NativeBridgeCoordinator {
   let serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving
   let serviceBuildObserver: any CurrentAppServiceBuildObserving
   let systemProxySwitchObserver: any CurrentSystemProxySwitchObserving
+  /// Arms the Host's wait of the given length for Packet Tunnel readiness.
+  let armTunnelReadinessDeadline: @Sendable (Duration) -> NativeReadinessDeadline
   var serviceBuildPollCheckpoint: ServiceBuildRegistrationCheckpoint?
   var serviceBuildUpgradePending = false
   var activeOperation: UUID?
@@ -266,7 +287,10 @@ actor NativeBridgeCoordinator {
       CurrentAppServiceRuntimeObserver(),
     systemProxySwitchObserver: any CurrentSystemProxySwitchObserving =
       CurrentSystemProxySwitchObserver(),
-    serviceBuildObserver: any CurrentAppServiceBuildObserving
+    serviceBuildObserver: any CurrentAppServiceBuildObserving,
+    armTunnelReadinessDeadline: @escaping @Sendable (Duration) -> NativeReadinessDeadline = {
+      .awake(after: $0)
+    }
   ) {
     self.proxy = proxy
     self.installed40019Proxy =
@@ -281,6 +305,7 @@ actor NativeBridgeCoordinator {
     self.serviceRuntimeObserver = serviceRuntimeObserver
     self.serviceBuildObserver = serviceBuildObserver
     self.systemProxySwitchObserver = systemProxySwitchObserver
+    self.armTunnelReadinessDeadline = armTunnelReadinessDeadline
   }
 
   func execute(_ command: NativeBridgeCommand) async throws -> NativeBridgeResult {

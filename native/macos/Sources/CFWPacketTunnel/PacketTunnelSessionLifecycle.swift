@@ -1,4 +1,5 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWPacketTransport
 import CFWSharedProtocol
 import Foundation
@@ -13,7 +14,6 @@ extension PacketPump: PacketPumping {}
 
 protocol EngineLeaseHolding: AnyObject {
   func release() throws
-  func markStopFailed() throws
 }
 
 struct PreparedTunnelConfiguration {
@@ -109,10 +109,14 @@ private final class ProviderStartCompletion: @unchecked Sendable {
 
 final class PacketTunnelSessionLifecycle: @unchecked Sendable {
   typealias CancelTunnel = @Sendable (PacketTunnelProviderError) -> Void
+  /// Ends the extension's process after libbox could not close a runtime. Only
+  /// the process ending releases what that close left open.
+  typealias EndProcess = @Sendable (LibboxInstanceUnclosable) -> Void
 
   private let engineFactory: any PacketEngineFactory
   private let dependencies: PacketTunnelSessionDependencies
   private let cancelTunnel: CancelTunnel
+  private let endProcess: EndProcess
   private let stateQueue = DispatchQueue(label: "com.bill.clashformac.packet-tunnel-state")
   private var engine: (any PacketEngine)?
   private var engineStarted = false
@@ -129,12 +133,16 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     case starting(UUID)
     case active(UUID)
     case failedOwned(UUID)
+    /// libbox could not close the engine. Nothing in this process can release
+    /// what that close left open, so the engine stays referenced and every
+    /// later start and stop fails with the same cause.
+    case spent(LibboxInstanceUnclosable)
 
     var sessionID: UUID? {
       switch self {
       case .starting(let sessionID), .active(let sessionID), .failedOwned(let sessionID):
         return sessionID
-      case .idle:
+      case .idle, .spent:
         return nil
       }
     }
@@ -143,17 +151,22 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
   init(
     engineFactory: any PacketEngineFactory,
     dependencies: PacketTunnelSessionDependencies,
-    cancelTunnel: @escaping CancelTunnel
+    cancelTunnel: @escaping CancelTunnel,
+    endProcess: @escaping EndProcess
   ) {
     self.engineFactory = engineFactory
     self.dependencies = dependencies
     self.cancelTunnel = cancelTunnel
+    self.endProcess = endProcess
   }
 
+  /// `deadline` is when the provider's libbox start must have returned; the
+  /// provider fixed it when macOS delivered the start.
   func start(
     descriptor: ConfigurationDescriptor,
     configuration: Data,
     credentialMaterial: CredentialMaterial = .empty,
+    deadline: EngineStartDeadline,
     completionHandler: @escaping @Sendable (Error?) -> Void
   ) {
     let completion = ProviderStartCompletion(completionHandler)
@@ -162,6 +175,7 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
         descriptor: descriptor,
         configuration: configuration,
         credentialMaterial: credentialMaterial,
+        deadline: deadline,
         completion: completion
       )
     }
@@ -198,10 +212,15 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     descriptor requestedDescriptor: ConfigurationDescriptor,
     configuration configurationTemplate: Data,
     credentialMaterial initialCredentialMaterial: CredentialMaterial,
+    deadline: EngineStartDeadline,
     completion: ProviderStartCompletion
   ) {
     var credentialMaterial = initialCredentialMaterial
     defer { credentialMaterial.erase() }
+    if case .spent(let failure) = lifecycle {
+      completion.finish(PacketTunnelProviderError.engineUnclosable(failure))
+      return
+    }
     guard case .idle = lifecycle else {
       completion.finish(PacketTunnelProviderError.lifecycleConflict)
       return
@@ -277,6 +296,7 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
           self?.networkSettingsCompleted(
             for: sessionID,
             descriptor: descriptor,
+            deadline: deadline,
             error: error
           )
         }
@@ -317,6 +337,7 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
   private func networkSettingsCompleted(
     for sessionID: UUID,
     descriptor: ConfigurationDescriptor,
+    deadline: EngineStartDeadline,
     error: Error?
   ) {
     guard isStarting(sessionID) else {
@@ -354,11 +375,15 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
         try configuration.withErasingData { configurationData in
           try engine.start(
             configuration: configurationData,
-            packetFileDescriptor: engineFileDescriptor
+            packetFileDescriptor: engineFileDescriptor,
+            deadline: deadline
           )
         }
         self.configuration = nil
       } catch let error as PacketEngineError {
+        if error == .startTimedOut {
+          throw PacketTunnelProviderError.engineStartTimedOut
+        }
         if case .mixedEndpointConflict(let port) = error {
           throw PacketTunnelProviderError.mixedEndpointConflict(port: port)
         }
@@ -398,6 +423,10 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
   private func performStop(
     completionHandler: @escaping @Sendable (PacketTunnelStopResult) -> Void
   ) {
+    if case .spent(let failure) = lifecycle {
+      completionHandler(.failure(.localRuntime(.engineUnclosable(failure))))
+      return
+    }
     let hadOwnedRuntime = engine != nil || packetPump != nil || engineLease != nil
     let pendingStart = startCompletion
     startCompletion = nil
@@ -408,7 +437,14 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     }
 
     pendingStart?.finish(PacketTunnelProviderError.startupCancelled)
-    let stopError = releaseOwnedRuntime(originalError: nil)
+    let stopError: PacketTunnelProviderError?
+    do {
+      stopError = try releaseOwnedRuntime(originalError: nil)
+    } catch {
+      becomeSpent(
+        error, startCompletion: nil, stopCompletion: completionHandler, cancelsTunnel: false)
+      return
+    }
     if let stopError {
       lifecycle = .failedOwned(lifecycle.sessionID ?? UUID())
       transitionToFailure(stopError)
@@ -448,7 +484,14 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     }
     let completion = startCompletion
     startCompletion = nil
-    let terminalError = releaseOwnedRuntime(originalError: error) ?? error
+    let terminalError: PacketTunnelProviderError
+    do {
+      terminalError = try releaseOwnedRuntime(originalError: error) ?? error
+    } catch {
+      becomeSpent(
+        error, startCompletion: completion, stopCompletion: nil, cancelsTunnel: cancelTunnel)
+      return
+    }
     if engine != nil || engineLease != nil {
       lifecycle = .failedOwned(sessionID)
     } else {
@@ -461,9 +504,11 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     }
   }
 
+  /// Throws when libbox could not close the engine, which then stays owned
+  /// with the lease.
   private func releaseOwnedRuntime(
     originalError: PacketTunnelProviderError?
-  ) -> PacketTunnelProviderError? {
+  ) throws(LibboxInstanceUnclosable) -> PacketTunnelProviderError? {
     if let packetPump {
       packetPump.stop()
       self.packetPump = nil
@@ -471,21 +516,7 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     configuration?.erase()
     configuration = nil
     if let engine, engineStarted {
-      do {
-        try engine.stop()
-      } catch let engineStopError {
-        do {
-          try engineLease?.markStopFailed()
-        } catch let ownershipError {
-          let context = originalError.map { "; original error: \($0)" } ?? ""
-          return .engineStop(
-            "\(engineStopError.localizedDescription); failed to retain global ownership: "
-              + "\(ownershipError.localizedDescription)\(context)"
-          )
-        }
-        let context = originalError.map { "; original error: \($0)" } ?? ""
-        return .engineStop("\(engineStopError.localizedDescription)\(context)")
-      }
+      try engine.stop()
       self.engine = nil
       engineStarted = false
     } else if engine != nil {
@@ -504,6 +535,32 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
       }
     }
     return originalError
+  }
+
+  /// libbox could not close the engine. The lifecycle keeps the engine and the
+  /// lease so nothing claims that the runtime ended, fails the pending
+  /// completions with the cause, and ends the process after every operation
+  /// already queued, so each completion this failure produced is delivered
+  /// first. Network Extension offers no barrier for its completions, so their
+  /// delivery is best effort.
+  private func becomeSpent(
+    _ failure: LibboxInstanceUnclosable,
+    startCompletion: ProviderStartCompletion?,
+    stopCompletion: (@Sendable (PacketTunnelStopResult) -> Void)?,
+    cancelsTunnel: Bool
+  ) {
+    lifecycle = .spent(failure)
+    let error = PacketTunnelProviderError.engineUnclosable(failure)
+    transitionToFailure(error)
+    startCompletion?.finish(error)
+    stopCompletion?(.failure(.localRuntime(error)))
+    if cancelsTunnel {
+      cancelTunnel(error)
+    }
+    let endProcess = self.endProcess
+    stateQueue.async {
+      endProcess(failure)
+    }
   }
 
   private func transition(kind: EngineStateKind, configuration: ConfigurationDescriptor) {
@@ -546,7 +603,7 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     switch lifecycle {
     case .starting(let activeSessionID), .active(let activeSessionID):
       return activeSessionID == sessionID
-    case .idle, .failedOwned:
+    case .idle, .failedOwned, .spent:
       return false
     }
   }

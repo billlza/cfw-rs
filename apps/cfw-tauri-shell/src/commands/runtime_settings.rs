@@ -26,6 +26,9 @@ pub(crate) struct RuntimeSettingsEffective {
     tunnel_mtu: u16,
     ipv6_dns_enabled: bool,
     lan_proxy: Option<LanProxySettings>,
+    /// The user's choice, always present. Whether it applies to the selected
+    /// profile (its selected route must be remote) is the projection's.
+    mainland_china_direct: bool,
 }
 
 impl RuntimeSettingsEffective {
@@ -37,6 +40,7 @@ impl RuntimeSettingsEffective {
             tunnel_mtu: value.tunnel_mtu,
             ipv6_dns_enabled,
             lan_proxy: value.lan_proxy,
+            mainland_china_direct: value.mainland_china_direct,
         }
     }
 }
@@ -117,5 +121,34 @@ pub(super) fn log_level(value: &str) -> Result<EngineLogLevel, String> {
         "fatal" => Ok(EngineLogLevel::Fatal),
         "silent" => Ok(EngineLogLevel::Silent),
         _ => Err("log level must be trace, debug, info, warn, error, fatal or silent".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_effective_view_always_reports_mainland_china_direct() {
+        let profile = ValidatedSingBoxProfile::direct();
+        let view = |settings: EngineSettings| {
+            serde_json::to_value(RuntimeSettingsEffective::for_profile(settings, &profile))
+                .expect("effective view")
+        };
+        assert_eq!(
+            view(EngineSettings::default())["mainland_china_direct"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            view(EngineSettings {
+                mainland_china_direct: true,
+                ..EngineSettings::default()
+            })["mainland_china_direct"],
+            serde_json::json!(true)
+        );
+        // The stored preferences omit the key while it is off, so the
+        // renderer must accept its absence there.
+        let stored = serde_json::to_value(RuntimePreferences::default()).expect("preferences");
+        assert!(stored.get("mainland_china_direct").is_none());
     }
 }

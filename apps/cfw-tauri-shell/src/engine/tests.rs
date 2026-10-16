@@ -552,6 +552,9 @@ struct EndpointRetryBackend {
     tunnel_failure: BackendErrorKind,
     tunnel_cleanup_error: Option<BackendErrorKind>,
     tunnel_off_proof_error: bool,
+    /// Fails a System Proxy start whose configuration downloads rule sets,
+    /// as libbox does when they cannot be fetched before readiness.
+    rule_set_start_failure: Option<BackendErrorKind>,
     starts: Mutex<Vec<(u64, u16)>>,
     stops: AtomicUsize,
     status: Mutex<NativeEngineStatus>,
@@ -565,6 +568,7 @@ impl EndpointRetryBackend {
             tunnel_failure: BackendErrorKind::TicketExpired,
             tunnel_cleanup_error: None,
             tunnel_off_proof_error: false,
+            rule_set_start_failure: None,
             starts: Mutex::new(Vec::new()),
             stops: AtomicUsize::new(0),
             status: Mutex::new(NativeEngineStatus::Off),
@@ -646,6 +650,16 @@ impl EngineBackend for EndpointRetryBackend {
                 return Err(BackendError::new(
                     BackendErrorKind::MixedEndpointInUse,
                     "injected mixed endpoint conflict",
+                ));
+            }
+            if let Some(kind) = self.rule_set_start_failure
+                && configuration["route"]["rule_set"]
+                    .as_array()
+                    .is_some_and(|rule_sets| !rule_sets.is_empty())
+            {
+                return Err(BackendError::new(
+                    kind,
+                    "initialize rule-set[cfw-geosite-cn]: download failed",
                 ));
             }
             let runtime = RuntimeIdentity {

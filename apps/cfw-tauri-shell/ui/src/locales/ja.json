@@ -789,5 +789,9 @@
   "{action} is unavailable: the selected profile “{name}” is invalid: {error}": "{action} は利用できません。選択中のプロファイル「{name}」は無効です：{error}",
   "the selected profile “{name}” is invalid: {error}": "選択中のプロファイル「{name}」は無効です：{error}",
   "Subscription URL": "サブスクリプション URL",
-  "Credential cleanup is unavailable: {error}": "認証情報のクリーンアップは利用できません：{error}"
+  "Credential cleanup is unavailable: {error}": "認証情報のクリーンアップは利用できません：{error}",
+  "Mainland China direct": "中国本土宛てを直接接続",
+  "Mainland China direct · {countries}": "中国本土宛てを直接接続 · {countries}",
+  "In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes.": "ルールモードでは、プロファイルのルールに一致しない中国本土宛ての通信を直接接続し、アプリ自身の DNS は中国本土のドメインを中国本土の暗号化 DNS で解決します。各プロファイルの初回起動時に中国本土のルールセットをプロキシ経由でダウンロードし、完了してからコアを起動します。その後はコア稼働中に毎日更新します。直接接続するプロファイルには適用されません。変更すると、既存の接続は再接続される場合があります。",
+  "Mainland China direct is on. For a profile routed through a proxy, the switch's rules apply in Rule mode after the listed rules, before the final route (MATCH).": "「中国本土宛てを直接接続」がオンです。プロキシ経由でルーティングするプロファイルでは、ルールモードでこの機能のルールが一覧のルールの後、最終ルート（MATCH）の前に適用されます。"
 }

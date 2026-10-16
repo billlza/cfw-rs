@@ -126,6 +126,7 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case systemExtensionValidationFailed = "system_extension_validation_failed"
   case systemProxyConfigurationFailed = "system_proxy_configuration_failed"
   case systemProxyRuntimeFailed = "system_proxy_runtime_failed"
+  case engineStartTimedOut = "engine_start_timed_out"
   case systemProxyPreferencesFailed = "system_proxy_preferences_failed"
   case systemProxyJournalFailed = "system_proxy_journal_failed"
   case systemProxyAuthorityFailed = "system_proxy_authority_failed"
@@ -183,6 +184,8 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
       "System Proxy could not resolve or validate the selected configuration."
     case .systemProxyRuntimeFailed:
       "The System Proxy runtime could not be created or started."
+    case .engineStartTimedOut:
+      "The engine did not finish starting in time and was stopped, usually because rule datasets were still downloading. Datasets that finished are kept for the next start."
     case .systemProxyPreferencesFailed:
       "System Proxy could not read, apply, or verify macOS network preferences."
     case .systemProxyJournalFailed:

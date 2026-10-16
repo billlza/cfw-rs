@@ -1,3 +1,4 @@
+import CFWAppleNetwork
 import CFWSharedProtocol
 import Foundation
 import Testing
@@ -66,6 +67,40 @@ struct NativeBridgeABIRequestRegistryTests {
       header.contains("#define CFW_NATIVE_BRIDGE_OPERATION_BUDGET_MILLISECONDS 30000u"))
     #expect(
       header.contains("#define CFW_NATIVE_BRIDGE_AUTHORIZATION_BUDGET_MILLISECONDS 300000u"))
+  }
+
+  /// An owner reports every start, a timed-out one included, before the Host
+  /// stops waiting for it, and the Host can still roll back an owner that never
+  /// replies within one bridge call. Each bound includes how late its timer may
+  /// fire.
+  @Test
+  func engineStartBudgetsNestInsideTheBridgeOperationBudget() {
+    let authorityCall = Duration.milliseconds(
+      Int64(AuthorityV1Limits.commandTimeoutMilliseconds))
+    #expect(EngineStartBudget.ownerLibboxStart == .seconds(11))
+    #expect(EngineStartBudget.proxyAgentStartReply == .seconds(18))
+    #expect(EngineStartBudget.tunnelReadiness == .seconds(20))
+    // The latest an owner reports a start: its deadline fires late, the
+    // interrupt closes what the start built, and the owner attests the result.
+    let ownerReport =
+      EngineStartBudget.ownerLibboxStart + EngineStartBudget.deadlineTolerance
+      + EngineStartBudget.interruptAllowance + authorityCall
+    // A second stays to deliver the request, including launching the ProxyAgent,
+    // and its reply.
+    #expect(EngineStartBudget.proxyAgentStartReply - ownerReport >= .seconds(1))
+    // Three seconds stay for macOS to launch the provider and report its stop.
+    #expect(EngineStartBudget.tunnelReadiness - ownerReport >= .seconds(3))
+    // Rolling back a silent ProxyAgent costs one stop reply and one local stop
+    // retry. A second and a half stays for the Host's preparation and its own
+    // Authority calls.
+    let reply = AuthenticatedProxyAgentTransport.defaultReplyTimeout
+    let leeway = CallbackDeadlineScheduler.maximumLeeway
+    #expect(reply == .seconds(5))
+    #expect(leeway == .milliseconds(100))
+    let silentOwnerStart =
+      EngineStartBudget.proxyAgentStartReply + leeway + (reply + leeway) * 2
+    #expect(
+      NativeBridgeABITiming.operationBudget - silentOwnerStart >= .milliseconds(1_500))
   }
 
   @Test

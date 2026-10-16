@@ -28,6 +28,18 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
   const tunnelRetryDisabled = state.engineMutationBusy || !tunnelCapability.available ? " disabled" : "";
   const proxyRetryDisabled = state.engineMutationBusy || !proxyCapability.available ? " disabled" : "";
   const launchAtLogin = launchAtLoginPresentation();
+  // The selected profile's country rules are unknown while its saved policy
+  // is loading (cleared, without an error) or failed to load, and runtime
+  // settings are unknown until read and after a failed reload, which keeps
+  // the previous snapshot beside the error. Unknown values are shown as such,
+  // never as "no rules" or as a stale switch.
+  const countriesKnown = state.savedProfilePolicyError == null
+    && (state.savedProfilePolicy != null || !state.profiles.some((profile) => profile.active));
+  const countries = countriesKnown ? state.savedProfilePolicy?.geoipCountries.join(", ") ?? "" : "";
+  const mainlandChinaDirect = state.runtimeSettingsError == null ? settingsView?.effective.mainland_china_direct : undefined;
+  const countryRules = mainlandChinaDirect === true
+    ? (countries ? t("Mainland China direct · {countries}", { countries }) : t("Mainland China direct"))
+    : countries || (mainlandChinaDirect === false && countriesKnown ? t("No country rules configured") : t("unavailable"));
   const tunnelRecoveryAction = engine.state === "AwaitingApproval"
     ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>${escapeHtml(t("Approve…"))}</button>`
     : engine.state === "Failed" && modeHasTunnel(engine.desiredMode)
@@ -145,8 +157,8 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
         <div class="cfw-row">
           <div class="cfw-row-left">${escapeHtml(t("GeoIP Database"))}</div>
           <div class="cfw-row-right">
-            <span class="cfw-link-value">${escapeHtml(state.savedProfilePolicy?.geoipCountries.join(", ") || t("No country rules configured"))}</span>
-            ${renderRowNote(t("Automatic updates"), REASONS.geoip)}
+            <span class="cfw-link-value">${escapeHtml(countryRules)}</span>
+            ${renderRowNote(t("Automatic updates"), mainlandChinaDirect === true ? REASONS.mainlandChinaDirect : REASONS.geoip)}
           </div>
         </div>
 

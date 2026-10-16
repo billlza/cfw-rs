@@ -252,7 +252,7 @@ const responses = {
   read_runtime_settings_snapshot: {
     settings: { preferred_mixed_port:null, log_level:"info", tunnel_mtu:1500, allow_lan:false, lan_proxy:null },
     revision: null,
-    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null },
+    effective: { mixed_port:7890, log_level:"info", tunnel_mtu:1500, ipv6_dns_enabled:true, lan_proxy:null, mainland_china_direct:false },
   },
   read_settings_snapshot: {
       resolved_locale: "en",
@@ -4994,5 +4994,192 @@ test("a missed observation of a leased core is explained as a recheck instead of
     assert.match(failed, /sing-box · Failed/u);
   } finally {
     await setEngine(OFF_ENGINE);
+  }
+});
+
+test("Settings places the mainland China direct switch after Allow LAN and applies it as one runtime transaction", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const original = structuredClone(responses.read_runtime_settings_snapshot);
+  const hadWrite = Object.hasOwn(responses, "write_runtime_settings_snapshot");
+  const previousWrite = responses.write_runtime_settings_snapshot;
+  const toggle = (html) => html.match(/<input type="checkbox" data-toggle="mainlandChinaDirect"([^>]*)\/>/u)?.[1];
+  try {
+    let html = await renderPage("settings");
+    const order = ["allowLan", "mainlandChinaDirect", "mixin"].map((key) => html.indexOf(`data-toggle="${key}"`));
+    assert.ok(order[0] >= 0 && order[0] < order[1] && order[1] < order[2], `row order ${order}`);
+    assert.ok(html.includes("<b>Mainland China direct</b>"));
+    assert.ok(html.includes("traffic that no profile rule matches goes direct when it is bound for mainland China"));
+    assert.doesNotMatch(toggle(html), /checked|disabled/u);
+
+    let written = null;
+    responses.write_runtime_settings_snapshot = (args) => {
+      written = args;
+      responses.read_runtime_settings_snapshot = { settings: args.settings, revision: "on",
+        effective: { ...original.effective, mainland_china_direct: args.settings.mainland_china_direct } };
+      return structuredClone(responses.read_runtime_settings_snapshot);
+    };
+    const input = interactiveElement("input");
+    input.dataset.toggle = "mainlandChinaDirect";
+    querySelectorAllElements.set("[data-toggle]", [input]);
+    await renderPage("settings");
+    invocationDetails.length = 0;
+    input.checked = true;
+    await input.trigger("change");
+    const commands = invocationDetails.map((entry) => entry.command);
+    assert.deepEqual(commands.filter((command) => command.startsWith("write_")), ["write_runtime_settings_snapshot"]);
+    assert.ok(commands.indexOf("read_runtime_settings_snapshot") < commands.indexOf("write_runtime_settings_snapshot"),
+      "the write is bound to a fresh read");
+    assert.deepEqual(written, { settings: { ...original.settings, mainland_china_direct: true }, revision: null });
+    assert.equal(state.toggles.mainlandChinaDirect, true);
+    html = await renderPage("settings");
+    assert.match(toggle(html), /checked/u);
+
+    // While the runtime settings are unknown the switch is disabled with the reason.
+    state.runtimeSettingsError = "runtime settings unavailable";
+    html = await renderPage("settings");
+    assert.match(toggle(html), /disabled/u);
+    assert.match(toggle(html), /title="runtime settings unavailable"/u);
+  } finally {
+    state.runtimeSettingsError = null;
+    responses.read_runtime_settings_snapshot = original;
+    if (hadWrite) responses.write_runtime_settings_snapshot = previousWrite;
+    else delete responses.write_runtime_settings_snapshot;
+    querySelectorAllElements.delete("[data-toggle]");
+    await emit("cfw://settings-changed", responses.read_settings_snapshot);
+  }
+});
+
+test("an unknown switch is refused instead of reporting a saved change", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const before = structuredClone(state.toggles);
+  for (const key of ["notAToggle", "mixin"]) {
+    const input = interactiveElement("input");
+    input.dataset.toggle = key;
+    querySelectorAllElements.set("[data-toggle]", [input]);
+    await renderPage("settings");
+    invocationDetails.length = 0;
+    const refusals = () => state.logs.filter((entry) => entry.level === "error" && entry.message.startsWith(`${key} refused`)).length;
+    const previousRefusals = refusals();
+    input.checked = true;
+    await input.trigger("change");
+    assert.equal(invocationDetails.some((entry) => entry.command.startsWith("write_")), false, key);
+    assert.equal(state.toggles[key], before[key], key);
+    assert.equal(refusals(), previousRefusals + 1, key);
+  }
+  querySelectorAllElements.delete("[data-toggle]");
+});
+
+test("the General country-rules row shows the switch, never a disguised empty state", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const settings = state.runtimeSettings;
+  const policy = state.savedProfilePolicy;
+  const policyError = state.savedProfilePolicyError;
+  const row = (html) => html.match(/GeoIP Database<\/div>\s*<div class="cfw-row-right">\s*<span class="cfw-link-value">([^<]*)<\/span>/u)?.[1];
+  try {
+    // Each case sets a saved policy, as a successful load does.
+    state.savedProfilePolicyError = null;
+    for (const [direct, countries, expected] of [
+      [true, ["CN", "JP"], "Mainland China direct · CN, JP"],
+      [true, [], "Mainland China direct"],
+      [false, ["CN", "JP"], "CN, JP"],
+      [false, [], "No country rules configured"],
+      [undefined, [], "unavailable"],
+      [undefined, ["JP"], "JP"],
+    ]) {
+      state.runtimeSettings = direct === undefined ? null
+        : { ...settings, effective: { ...settings.effective, mainland_china_direct: direct } };
+      state.savedProfilePolicy = { ...(policy ?? { groups: [], rules: [], nodeLabels: {} }), geoipCountries: countries };
+      assert.equal(row(await renderPage("general")), expected, `${direct} ${countries}`);
+    }
+  } finally {
+    state.savedProfilePolicyError = policyError;
+    state.runtimeSettings = settings;
+    state.savedProfilePolicy = policy;
+  }
+});
+
+test("a failed runtime settings reload leaves the General country-rules row unknown instead of stale", async () => {
+  await setEngine(RUNNING_ENGINE);
+  const settings = state.runtimeSettings;
+  const policy = state.savedProfilePolicy;
+  const policyError = state.savedProfilePolicyError;
+  const originalProfiles = state.profiles;
+  const profiles = originalProfiles.length > 0 ? originalProfiles : [{ id: "11111111-1111-4111-8111-111111111111", name: "Profile", active: false }];
+  const row = (html) => html.match(/GeoIP Database<\/div>\s*<div class="cfw-row-right">\s*<span class="cfw-link-value">([^<]*)<\/span>\s*<small class="cfw-row-note" title="([^"]*)">/u)?.slice(1);
+  try {
+    // The cases below set a saved policy, as a successful load does.
+    state.savedProfilePolicyError = null;
+    // A failed reload keeps the last snapshot that was read and sets the error.
+    state.runtimeSettingsError = "runtime settings unavailable";
+    for (const [direct, countries, expected] of [
+      [true, [], "unavailable"],
+      [true, ["JP"], "JP"],
+      [false, [], "unavailable"],
+    ]) {
+      state.runtimeSettings = { ...settings, effective: { ...settings.effective, mainland_china_direct: direct } };
+      state.savedProfilePolicy = { ...(policy ?? { groups: [], rules: [], nodeLabels: {} }), geoipCountries: countries };
+      const [value, note] = row(await renderPage("general"));
+      assert.equal(value, expected, `${direct} ${countries}`);
+      assert.match(note, /^Country rules use sing-box rule sets/u, `${direct} ${countries}`);
+    }
+    // The profile's rules are unknown too when its saved policy failed to
+    // load: the row never claims there are no country rules then.
+    state.runtimeSettingsError = null;
+    state.savedProfilePolicyError = "saved profile policy unavailable";
+    for (const [direct, stale, expected] of [
+      [false, null, "unavailable"],
+      [true, null, "Mainland China direct"],
+      [false, ["JP"], "unavailable"],
+      [true, ["JP"], "Mainland China direct"],
+    ]) {
+      state.runtimeSettings = { ...settings, effective: { ...settings.effective, mainland_china_direct: direct } };
+      state.savedProfilePolicy = stale && { ...(policy ?? { groups: [], rules: [], nodeLabels: {} }), geoipCountries: stale };
+      const [value] = row(await renderPage("general"));
+      assert.equal(value, expected, `policy error, switch ${direct}, stale ${stale}`);
+    }
+    // While the selected profile's policy is loading it is cleared without an
+    // error; only without a selected profile are there truly no rules.
+    state.savedProfilePolicyError = null;
+    state.savedProfilePolicy = null;
+    for (const [selected, direct, expected] of [
+      [true, false, "unavailable"],
+      [true, true, "Mainland China direct"],
+      [false, false, "No country rules configured"],
+    ]) {
+      state.profiles = profiles.map((profile, index) => ({ ...profile, active: selected && index === 0 }));
+      state.runtimeSettings = { ...settings, effective: { ...settings.effective, mainland_china_direct: direct } };
+      const [value] = row(await renderPage("general"));
+      assert.equal(value, expected, `loading, selected ${selected}, switch ${direct}`);
+    }
+  } finally {
+    state.runtimeSettingsError = null;
+    state.savedProfilePolicyError = policyError;
+    state.runtimeSettings = settings;
+    state.savedProfilePolicy = policy;
+    state.profiles = originalProfiles;
+  }
+});
+
+test("the saved Rules view says when the mainland China direct rules follow the listed rules", async () => {
+  await setEngine(OFF_ENGINE);
+  const settings = state.runtimeSettings;
+  try {
+    for (const direct of [true, false]) {
+      state.runtimeSettings = { ...settings, effective: { ...settings.effective, mainland_china_direct: direct } };
+      const html = await renderPage("rules");
+      assert.equal(html.includes("data-mainland-note"), direct, String(direct));
+      if (direct) assert.ok(html.includes("rules apply in Rule mode after the listed rules, before the final route (MATCH)"));
+    }
+    // After a failed reload the last-read state is stale, so the note does
+    // not claim the switch is on, as the General row does not.
+    state.runtimeSettings = { ...settings, effective: { ...settings.effective, mainland_china_direct: true } };
+    state.runtimeSettingsError = "Runtime settings response is invalid";
+    assert.equal((await renderPage("rules")).includes("data-mainland-note"), false, "stale state after a failed reload");
+    state.runtimeSettingsError = null;
+    await setEngine(RUNNING_ENGINE);
+    assert.equal((await renderPage("rules")).includes("data-mainland-note"), false, "live rules list the switch's own rules");
+  } finally {
+    state.runtimeSettingsError = null;
+    state.runtimeSettings = settings;
   }
 });

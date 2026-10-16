@@ -31,15 +31,55 @@ struct TunnelStartupFailureTests {
     #expect(data.count < 2_048)
   }
 
+  @Test func engineStartTimeoutSurvivesTheNSErrorSecureCodingBoundary() throws {
+    let configuration = try descriptor()
+    let error = TunnelStartupFailure.engineStartTimedOutError(configuration: configuration)
+    let data = try NSKeyedArchiver.archivedData(withRootObject: error, requiringSecureCoding: true)
+    let decoded = try #require(
+      try NSKeyedUnarchiver.unarchivedObject(ofClass: NSError.self, from: data))
+    let failure = try #require(
+      TunnelStartupFailure.matchingFailure(decoded, configuration: configuration))
+    #expect(failure == TunnelStartupFailure.engineStartTimedOut)
+    #expect(failure.code == NativeBridgeErrorCode.engineStartTimedOut.rawValue)
+    #expect(!failure.isRetryable)
+    #expect(failure != TunnelStartupFailure.ticketExpired)
+    #expect(Set(decoded.userInfo.keys) == [NSLocalizedDescriptionKey, "start_context"])
+    #expect(decoded.localizedDescription == failure.message)
+    #expect(data.count < 2_048)
+  }
+
+  @Test func unclosableEngineSurvivesTheNSErrorSecureCodingBoundary() throws {
+    let configuration = try descriptor()
+    let error = TunnelStartupFailure.engineUnclosableError(configuration: configuration)
+    let data = try NSKeyedArchiver.archivedData(withRootObject: error, requiringSecureCoding: true)
+    let decoded = try #require(
+      try NSKeyedUnarchiver.unarchivedObject(ofClass: NSError.self, from: data))
+    let failure = try #require(
+      TunnelStartupFailure.matchingFailure(decoded, configuration: configuration))
+    #expect(failure == TunnelStartupFailure.engineUnclosable)
+    #expect(failure.code == "tunnel-engine-unclosable")
+    #expect(!failure.isRetryable)
+    #expect(failure != TunnelStartupFailure.engineStartTimedOut)
+    #expect(Set(decoded.userInfo.keys) == [NSLocalizedDescriptionKey, "start_context"])
+    #expect(decoded.localizedDescription == failure.message)
+    #expect(data.count < 2_048)
+  }
+
   @Test func identicalConfigurationInAnotherGenerationCannotReuseTheLastError() throws {
     let original = try descriptor()
-    let error = TunnelStartupFailure.ticketExpiredError(configuration: original)
-    for changed in [
-      try descriptor(generation: 2), try descriptor(epoch: 2),
-      try descriptor(installationID: UUID()),
+    for error in [
+      TunnelStartupFailure.ticketExpiredError(configuration: original),
+      TunnelStartupFailure.engineStartTimedOutError(configuration: original),
+      TunnelStartupFailure.engineUnclosableError(configuration: original),
     ] {
-      #expect(original.identitySHA256 == changed.identitySHA256)
-      #expect(TunnelStartupFailure.matchingFailure(error, configuration: changed) == nil)
+      #expect(TunnelStartupFailure.matchingFailure(error, configuration: original) != nil)
+      for changed in [
+        try descriptor(generation: 2), try descriptor(epoch: 2),
+        try descriptor(installationID: UUID()),
+      ] {
+        #expect(original.identitySHA256 == changed.identitySHA256)
+        #expect(TunnelStartupFailure.matchingFailure(error, configuration: changed) == nil)
+      }
     }
   }
 
@@ -50,6 +90,8 @@ struct TunnelStartupFailureTests {
       nil,
       NSError(domain: "unrelated", code: valid.code, userInfo: valid.userInfo),
       NSError(domain: valid.domain, code: 999, userInfo: valid.userInfo),
+      NSError(domain: valid.domain, code: 0, userInfo: valid.userInfo),
+      NSError(domain: valid.domain, code: 4, userInfo: valid.userInfo),
       NSError(domain: valid.domain, code: valid.code),
       NSError(domain: valid.domain, code: valid.code, userInfo: ["start_context": 1]),
     ]

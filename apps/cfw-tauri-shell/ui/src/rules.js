@@ -30,6 +30,7 @@ function renderRules() {
           <p class="label">${escapeHtml(t("Router"))}</p>
           <h3>${escapeHtml(t(live ? "Active rules: {visible} / {total}" : "Saved rules: {visible} / {total}", { visible: filtered.length, total: source.length }))}</h3>
           <p class="muted">${escapeHtml(live ? t("Live rules from the running engine.") : t("Saved profile rules; hit counters become available when the engine reports them."))}</p>
+          ${!live && state.runtimeSettingsError == null && state.runtimeSettings?.effective.mainland_china_direct === true ? `<p class="muted" data-mainland-note>${escapeHtml(t("Mainland China direct is on. For a profile routed through a proxy, the switch's rules apply in Rule mode after the listed rules, before the final route (MATCH)."))}</p>` : ""}
         </div>
         <div class="search-box">
           <input value="${escapeHtml(state.ruleSearch)}" data-rule-search aria-label="${escapeHtml(t("Search rules"))}" placeholder="${escapeHtml(t("Search rules"))}" />

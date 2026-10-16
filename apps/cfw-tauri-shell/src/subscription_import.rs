@@ -106,6 +106,8 @@ struct TlsParts {
     alpn: Vec<String>,
     utls: Option<Value>,
     reality: Option<Value>,
+    /// Canonical base64 SHA-256 values of the server's DER leaf certificate.
+    certificate_sha256: Vec<String>,
 }
 
 pub(crate) fn import_subscription_document(body: &str) -> Result<ImportedSubscription, String> {
@@ -633,6 +635,21 @@ fn consume_certificate_verification_flags(
     query: &mut BTreeMap<String, String>,
     protocol: &str,
 ) -> Result<(), String> {
+    if certificate_verification_disabled(query, protocol)? {
+        return Err(insecure_tls_error(protocol));
+    }
+    Ok(())
+}
+
+/// Consumes every alias of the link's "skip certificate verification" flag and
+/// reports whether any of them is true. Callers other than
+/// `consume_certificate_verification_flags` must still refuse a true value
+/// unless something else authenticates the server.
+fn certificate_verification_disabled(
+    query: &mut BTreeMap<String, String>,
+    protocol: &str,
+) -> Result<bool, String> {
+    let mut disabled = false;
     for key in [
         "insecure",
         "allowInsecure",
@@ -640,17 +657,14 @@ fn consume_certificate_verification_flags(
         "skip-cert-verify",
     ] {
         if let Some(value) = query.remove(key) {
-            match parse_uri_boolean(&value, protocol, key)? {
-                false => {}
-                true => {
-                    return Err(format!(
-                        "{protocol} URI requires disabling TLS certificate verification"
-                    ));
-                }
-            }
+            disabled |= parse_uri_boolean(&value, protocol, key)?;
         }
     }
-    Ok(())
+    Ok(disabled)
+}
+
+fn insecure_tls_error(protocol: &str) -> String {
+    format!("{protocol} URI requires disabling TLS certificate verification")
 }
 
 fn consume_unsupported_enabled_flag(
@@ -1087,6 +1101,7 @@ fn build_tls_parts(
         alpn,
         utls,
         reality,
+        certificate_sha256: Vec::new(),
     }
 }
 
@@ -1094,6 +1109,17 @@ fn tls_json(tls: TlsParts) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("enabled".into(), Value::Bool(tls.enabled));
     object.insert("server_name".into(), Value::String(tls.server_name));
+    if !tls.certificate_sha256.is_empty() {
+        object.insert(
+            "certificate_sha256".into(),
+            Value::Array(
+                tls.certificate_sha256
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
     if !tls.alpn.is_empty() {
         object.insert(
             "alpn".into(),

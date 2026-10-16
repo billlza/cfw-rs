@@ -43,13 +43,18 @@ match the requested projection.
 The profile validator implements a closed typed subset: one to 128 uniquely
 tagged `direct`, `block`, SOCKS5, Shadowsocks, VMess, VLESS (including Reality),
 Trojan, Hysteria2, AnyTLS, TUIC v5 and selector outbounds. Ordered domain, IP,
-process, port, network and country rules can route to declared tags. Country
-rules use app-owned sing-box rule-set downloads. Persistent JSON contains canonical credential references,
+process, port, network, country and site-category (GEOSITE) rules can route to
+declared tags. Country and site-category rules use app-owned sing-box rule-set
+downloads, at most 256 distinct datasets per profile. Settings › Engine ›
+Mainland China direct adds, in Rule mode, direct routes for mainland China
+destinations after a profile's own rules when the selected route is a proxy,
+and, for a profile without its own DNS policy, encrypted DNS in mainland China
+for mainland names; it is off by default. Persistent JSON contains canonical credential references,
 never passwords, UUID values, private keys, or other secrets. TUIC keeps its
 UUID and password in two independently typed references. Projection emits only
-empty credential placeholders and closed injection slots. User-defined
-DNS/services, remote resources inside profiles, scripts, executable paths, raw
-credentials, and unknown fields are rejected. Subscription import is a
+empty credential placeholders and closed injection slots. DNS outside the
+typed `dns` policy, other services, remote resources inside profiles, scripts,
+executable paths, raw credentials, and unknown fields are rejected. Subscription import is a
 boundary conversion into that schema: typed profile JSON passes through;
 restricted upstream sing-box `outbounds` JSON, Clash Meta YAML `proxies`
 lists, Shadowsocks SIP008 JSON, and node-URI bundles (`ss://`, `vmess://`,
@@ -66,7 +71,14 @@ randomized up to a maximum (a Mihomo or URI range such as `15-30`, or sing-box
 also takes gecko obfuscation with optional packet-size bounds and a BBR
 profile, which cannot be combined with an upload rate because that selects
 Brutal. The server certificate must be ECDSA or RSA: the Chrome QUIC hello
-offers no Ed25519 signature. VLESS Vision rejects V2Ray
+offers no Ed25519 signature. A link's `pinSHA256`, like a Clash `fingerprint`,
+pins the SHA-256 of the server certificate's DER encoding; the pin keeps the
+name and validity checks, and a link's `insecure=1`, a Clash node's
+`skip-cert-verify: true` or a sing-box node's `tls.insecure: true` is accepted
+only beside it.
+The node's TLS server name (a link's `sni`, Clash `servername` or `sni`, or
+else the server address) must be in the certificate's subjectAltName, so a
+node whose certificate has only a Common Name imports but fails to connect. VLESS Vision rejects V2Ray
 transport streams and accepts only omitted or XUDP packet encoding. XHTTP and
 unknown transport semantics fail closed. Hysteria2 and TUIC use QUIC TLS and
 reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the
@@ -143,7 +155,9 @@ Tunnel, numeric direct bootstrap servers are referenced only while resolving a
 domain-named proxy endpoint. Every ordinary engine query and route-level
 destination lookup uses certificate-verified DoH detoured through the selected
 outbound; Tunnel additionally hijacks packet-flow port 53 into that same
-authenticated path. This is acyclic because authenticated DoH endpoints are
+authenticated path. While Mainland China direct applies, mainland names in Rule
+mode instead use DoH in mainland China dialled directly, as Settings › Engine
+describes. This is acyclic because authenticated DoH endpoints are
 numeric and the selected outbound's own domain endpoint has an explicit direct
 bootstrap pair. The pinned source patch gives both roles one bounded fallback
 for rejected responses or transport errors. Each resolver is attempted at most

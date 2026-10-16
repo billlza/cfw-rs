@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::ConfigError;
+use crate::datasets::{CountryCode, Dataset, GeositeCode};
 use crate::profile::{ProfileDocument, ProfileOutbound};
 
 const MAX_RULES: usize = 8_192;
@@ -26,6 +27,7 @@ pub enum RuleKind {
     ProcessName,
     ProcessPath,
     GeoIp,
+    GeoSite,
     RuleSet,
 }
 
@@ -202,67 +204,90 @@ impl ProfileDocument {
         result
     }
 
-    pub(crate) fn project_rules(&self, download_outbound: &str) -> (Vec<Value>, Vec<Value>) {
-        let mut rules = Vec::new();
-        let mut countries = BTreeSet::new();
-        if let Some(route) = &self.route {
-            for source_rule in &route.rules {
-                let expanded;
-                let inputs = if source_rule.kind == RuleKind::RuleSet {
-                    let provider = self
-                        .providers
-                        .as_ref()
-                        .and_then(|catalog| {
-                            catalog
-                                .rules
-                                .iter()
-                                .find(|provider| provider.name == source_rule.value)
-                        })
-                        .expect("validated rule provider");
-                    expanded = provider
+    /// Visits every route rule in order, each `RULE-SET` reference replaced
+    /// by its provider's conditions. Only for a validated document.
+    fn visit_expanded_rules(&self, mut visit: impl FnMut(&ProfileRule)) {
+        let Some(route) = &self.route else {
+            return;
+        };
+        for source_rule in &route.rules {
+            if source_rule.kind != RuleKind::RuleSet {
+                visit(source_rule);
+                continue;
+            }
+            let provider = self
+                .providers
+                .as_ref()
+                .and_then(|catalog| {
+                    catalog
                         .rules
                         .iter()
-                        .map(|condition| ProfileRule {
-                            kind: condition.kind,
-                            value: condition.value.clone(),
-                            outbound: source_rule.outbound.clone(),
-                            no_resolve: source_rule.no_resolve
-                                && matches!(condition.kind, RuleKind::IpCidr | RuleKind::GeoIp),
-                        })
-                        .collect::<Vec<_>>();
-                    expanded.as_slice()
-                } else {
-                    std::slice::from_ref(source_rule)
-                };
-                for rule in inputs {
-                    if !rule.no_resolve
-                        && matches!(
-                            rule.kind,
-                            RuleKind::IpCidr | RuleKind::GeoIp | RuleKind::RuleSet
-                        )
-                    {
-                        rules.push(json!({"action": "resolve"}));
-                    }
-                    if rule.kind == RuleKind::GeoIp && rule.value != "LAN" {
-                        countries.insert(rule.value.to_ascii_lowercase());
-                    }
-                    rules.push(rule.project());
-                }
+                        .find(|provider| provider.name == source_rule.value)
+                })
+                .expect("validated rule provider");
+            for condition in &provider.rules {
+                visit(&ProfileRule {
+                    kind: condition.kind,
+                    value: condition.value.clone(),
+                    outbound: source_rule.outbound.clone(),
+                    no_resolve: source_rule.no_resolve
+                        && matches!(condition.kind, RuleKind::IpCidr | RuleKind::GeoIp),
+                });
             }
         }
-        let rule_sets = countries.into_iter().map(|country| json!({
-            "type": "remote",
-            "tag": format!("cfw-geoip-{country}"),
-            "format": "binary",
-            "url": format!("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{country}.srs"),
-            "download_detour": download_outbound,
-            "update_interval": "1d",
-        })).collect();
+    }
+
+    /// The GeoIP and GeoSite datasets the route rules download.
+    pub(crate) fn route_datasets(&self) -> BTreeSet<Dataset> {
+        let mut datasets = BTreeSet::new();
+        self.visit_expanded_rules(|rule| datasets.extend(rule.dataset()));
+        datasets
+    }
+
+    /// The route rules and the rule-set resources they download: the
+    /// profile's own rules first, then `appended`, which the application adds
+    /// after them (mainland China direct).
+    pub(crate) fn project_rules(
+        &self,
+        download_outbound: &str,
+        appended: &[ProfileRule],
+    ) -> (Vec<Value>, Vec<Value>) {
+        let mut rules = Vec::new();
+        let mut datasets = BTreeSet::new();
+        let mut project = |rule: &ProfileRule| {
+            if !rule.no_resolve
+                && matches!(
+                    rule.kind,
+                    RuleKind::IpCidr | RuleKind::GeoIp | RuleKind::RuleSet
+                )
+            {
+                rules.push(json!({"action": "resolve"}));
+            }
+            datasets.extend(rule.dataset());
+            rules.push(rule.project());
+        };
+        self.visit_expanded_rules(&mut project);
+        appended.iter().for_each(project);
+        let rule_sets = datasets
+            .iter()
+            .map(|dataset| dataset.resource(download_outbound))
+            .collect();
         (rules, rule_sets)
     }
 }
 
 impl ProfileRule {
+    /// The dataset a validated GEOIP (other than LAN) or GEOSITE rule names.
+    pub(crate) fn dataset(&self) -> Option<Dataset> {
+        match self.kind {
+            RuleKind::GeoIp if self.value != "LAN" => {
+                CountryCode::parse(&self.value).map(Dataset::GeoIp)
+            }
+            RuleKind::GeoSite => GeositeCode::parse(&self.value).map(Dataset::GeoSite),
+            _ => None,
+        }
+    }
+
     pub(crate) fn validate(&self, path: &str, tags: &BTreeSet<&str>) -> Result<(), ConfigError> {
         if !tags.contains(self.outbound.as_str()) {
             return Err(invalid(path, "rule target must name a declared outbound"));
@@ -317,6 +342,7 @@ impl ProfileRule {
                 .nest_limit(32)
                 .build()
                 .is_ok(),
+            RuleKind::GeoSite => GeositeCode::parse(&self.value).is_some(),
             RuleKind::RuleSet => true,
         };
         if !valid {
@@ -339,11 +365,13 @@ impl ProfileRule {
             RuleKind::ProcessName => "process_name",
             RuleKind::ProcessPath => "process_path",
             RuleKind::GeoIp if self.value == "LAN" => "ip_is_private",
-            RuleKind::GeoIp | RuleKind::RuleSet => "rule_set",
+            RuleKind::GeoIp | RuleKind::GeoSite | RuleKind::RuleSet => "rule_set",
         };
         let value = match self.kind {
             RuleKind::GeoIp if self.value == "LAN" => Value::Bool(true),
-            RuleKind::GeoIp => json!(format!("cfw-geoip-{}", self.value.to_ascii_lowercase())),
+            RuleKind::GeoIp | RuleKind::GeoSite => {
+                json!(self.dataset().expect("validated dataset rule").tag())
+            }
             RuleKind::Port | RuleKind::SourcePort => {
                 json!(self.value.parse::<u16>().expect("validated rule port"))
             }

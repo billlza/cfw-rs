@@ -452,9 +452,18 @@ fn import_rule_payload(
                         "PROCESS-NAME" => RuleKind::ProcessName,
                         "PROCESS-PATH" => RuleKind::ProcessPath,
                         "GEOIP" => RuleKind::GeoIp,
+                        "GEOSITE" => RuleKind::GeoSite,
                         _ => return Err("unsupported classical provider rule".into()),
                     };
-                    (kind, value.trim().into())
+                    // Mihomo matches GEOSITE codes case-insensitively; the
+                    // published dataset names are lowercase.
+                    let value = value.trim();
+                    let value = if kind == RuleKind::GeoSite {
+                        value.to_ascii_lowercase()
+                    } else {
+                        value.to_owned()
+                    };
+                    (kind, value)
                 }
             };
             Ok(ProviderRule { kind, value })

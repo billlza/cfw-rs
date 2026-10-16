@@ -1,0 +1,289 @@
+{
+  "config": {
+    "dns": {
+      "final": "cfw-authenticated-dns-1",
+      "rules": [
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "server": "cfw-authenticated-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        }
+      ],
+      "servers": [
+        {
+          "server": "223.6.6.6",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-0",
+          "type": "udp"
+        },
+        {
+          "server": "119.29.29.29",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-1",
+          "type": "udp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "Node",
+          "path": "/dns-query",
+          "server": "223.5.5.5",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-0",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "dns.alidns.com"
+          },
+          "type": "https"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "Node",
+          "path": "/dns-query",
+          "server": "1.1.1.1",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-1",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "cloudflare-dns.com"
+          },
+          "type": "https"
+        }
+      ],
+      "strategy": "prefer_ipv4"
+    },
+    "experimental": {
+      "cache_file": {
+        "cache_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "enabled": true,
+        "path": "routing-cache.db"
+      },
+      "clash_api": {
+        "external_controller": "127.0.0.1:9090",
+        "secret": "<CLASH-API-SECRET>"
+      }
+    },
+    "inbounds": [
+      {
+        "listen": "127.0.0.1",
+        "listen_port": 7890,
+        "tag": "cfw-system-proxy",
+        "type": "mixed"
+      }
+    ],
+    "log": {
+      "level": "info",
+      "timestamp": true
+    },
+    "outbounds": [
+      {
+        "domain_resolver": {
+          "fallback_server": "cfw-bootstrap-dns-1",
+          "server": "cfw-bootstrap-dns-0"
+        },
+        "server": "proxy.example.com",
+        "server_port": 1080,
+        "tag": "Node",
+        "type": "socks",
+        "version": "5"
+      },
+      {
+        "tag": "DIRECT",
+        "type": "direct"
+      }
+    ],
+    "route": {
+      "default_domain_resolver": {
+        "fallback_server": "cfw-authenticated-dns-1",
+        "server": "cfw-authenticated-dns-0"
+      },
+      "final": "Node",
+      "rule_set": [
+        {
+          "download_detour": "Node",
+          "format": "binary",
+          "tag": "cfw-geoip-cn",
+          "type": "remote",
+          "update_interval": "1d",
+          "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+        },
+        {
+          "download_detour": "Node",
+          "format": "binary",
+          "tag": "cfw-geoip-jp",
+          "type": "remote",
+          "update_interval": "1d",
+          "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-jp.srs"
+        }
+      ],
+      "rules": [
+        {
+          "action": "route",
+          "clash_mode": "Direct",
+          "outbound": "DIRECT"
+        },
+        {
+          "action": "route",
+          "clash_mode": "Global",
+          "outbound": "Node"
+        },
+        {
+          "action": "route",
+          "domain_suffix": "cn.example",
+          "outbound": "DIRECT"
+        },
+        {
+          "action": "resolve"
+        },
+        {
+          "action": "route",
+          "outbound": "DIRECT",
+          "rule_set": "cfw-geoip-cn"
+        },
+        {
+          "action": "resolve"
+        },
+        {
+          "action": "route",
+          "ip_cidr": "198.51.100.0/24",
+          "outbound": "DIRECT"
+        },
+        {
+          "action": "route",
+          "outbound": "Node",
+          "rule_set": "cfw-geoip-jp"
+        }
+      ]
+    }
+  },
+  "credential_slots": [],
+  "direct_ipv4_hosts": "DirectIpv4HostRoutes { release_transport: false }",
+  "mode": "SystemProxy",
+  "probe": {
+    "dns": {
+      "final": "cfw-authenticated-dns-1",
+      "rules": [
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "server": "cfw-authenticated-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        }
+      ],
+      "servers": [
+        {
+          "server": "223.6.6.6",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-0",
+          "type": "udp"
+        },
+        {
+          "server": "119.29.29.29",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-1",
+          "type": "udp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "Node",
+          "path": "/dns-query",
+          "server": "223.5.5.5",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-0",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "dns.alidns.com"
+          },
+          "type": "https"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "Node",
+          "path": "/dns-query",
+          "server": "1.1.1.1",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-1",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "cloudflare-dns.com"
+          },
+          "type": "https"
+        }
+      ],
+      "strategy": "prefer_ipv4"
+    },
+    "outbounds": [
+      {
+        "domain_resolver": {
+          "fallback_server": "cfw-bootstrap-dns-1",
+          "server": "cfw-bootstrap-dns-0"
+        },
+        "server": "proxy.example.com",
+        "server_port": 1080,
+        "tag": "Node",
+        "type": "socks",
+        "version": "5"
+      },
+      {
+        "tag": "DIRECT",
+        "type": "direct"
+      }
+    ],
+    "route": {
+      "default_domain_resolver": {
+        "fallback_server": "cfw-authenticated-dns-1",
+        "server": "cfw-authenticated-dns-0"
+      }
+    }
+  }
+}

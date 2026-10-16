@@ -10,12 +10,12 @@ converts restricted upstream sing-box `outbounds` JSON, Clash Meta YAML
 at the boundary. VMess links may use either traditional base64 JSON or the
 URL-shaped AEAD form; URL-shaped VMess has no legacy `alterId` path.
 Local JSON/YAML/text files and pasted node links use this same conversion
-boundary, not a JSON-only import path. Source input is at most 512 KiB and
+boundary, not a JSON-only import path. Source input is at most 4 MiB and
 must be valid UTF-8; the converted profile retains its independent size limit.
-Everything outside the node list (rules, groups, listeners, DNS) is owned by
-the app's projection and is not carried over. The import page states this
-limit before import; accepting a Clash YAML file does not mean its routing
-behavior was preserved.
+Clash rules, proxy groups, rule providers and the `dns` and `hosts` sections
+that the schema represents are carried into the typed profile; a rule type the
+schema lacks fails the import instead of being dropped. Listeners, scripts and
+engine settings stay owned by the app's projection.
 
 The safe schema is intentionally closed:
 
@@ -23,7 +23,33 @@ The safe schema is intentionally closed:
 - every outbound has a unique `tag` and a typed `direct`, `block`,
   SOCKS5, Shadowsocks, VMess, VLESS/Reality, Trojan, Hysteria2, AnyTLS, or TUIC v5
   shape;
-- top-level `route` is optional and may contain only `final`;
+- top-level `route` is optional: `final` and ordered `rules` of the kinds
+  domain, domain suffix, keyword and regex, IP and source IP CIDR, port and
+  source port, network, process name and path, `geo_ip`, `geo_site` and
+  `rule_set` (a rule provider);
+- a `geo_ip` rule names two uppercase country letters or `LAN`; a `geo_site`
+  rule names a dataset as SagerNet/sing-geosite publishes it: lowercase
+  letters, digits, `-` and `!` starting with a letter or digit, optionally
+  followed by one `@attribute`, which may be negated (`cn`, `geolocation-!cn`,
+  `google@!cn`). Clash `GEOSITE` values are lowercased on import, and
+  `no-resolve` is refused for them, as for domain rules. Every distinct GeoIP
+  and GeoSite dataset is a rule set downloaded during the first start with the
+  profile, separately for System Proxy and TUN, so a profile may name at most
+  256 of them across its rules, the rule providers they use, and its DNS
+  selectors. That first start must finish within 11 seconds of reaching the
+  ProxyAgent or the tunnel extension, so with many datasets or a slow route it
+  may be interrupted and fail with "The engine did not finish starting in
+  time". When macOS takes several seconds to launch the tunnel extension, as it
+  can on the first start after installing it, TUN reports a timeout of its
+  20-second readiness wait instead. A download that fails outright fails the
+  start too: System Proxy then reports that its runtime could not be started,
+  and TUN reports that readiness timeout. If the engine cannot be closed after
+  any of these failures, the start reports instead that global cleanup could not
+  be proven, and neither System Proxy nor TUN starts again until the Mac
+  restarts. Datasets that finished are cached, so a retry downloads only the
+  rest. A GEOSITE name that only Mihomo's MetaCubeX datasets publish, not
+  sing-geosite, imports, but its dataset cannot be downloaded, so every start
+  with the profile fails;
 - `route.final`, when present, must reference a declared outbound tag;
 - remote server endpoints are bounded and typed, while profile-embedded
   subscriptions and remote resources remain disabled;
@@ -86,12 +112,36 @@ The safe schema is intentionally closed:
   runtime pace uploads with Brutal and ignore it. `disable_chrome_parrot` is
   refused; the server certificate must be ECDSA or RSA, since the Chrome QUIC
   hello offers no Ed25519 signature;
+- a server certificate pin is the SHA-256 of the server's DER leaf
+  certificate: Clash `fingerprint`, a Hysteria2 link's `pinSHA256`, or
+  sing-box `tls.certificate_sha256`, while sing-box
+  `tls.certificate_public_key_sha256` pins the public key instead. Clash and
+  link pins are 64 hex digits in either case; Clash allows `:` separators and
+  `pinSHA256` allows `:` or `-`, as the official Hysteria 2 client does. A pin
+  names the leaf certificate: Mihomo also accepts the fingerprint of an issuing
+  certificate in the chain, but such a node imports here and then fails to
+  connect. A link carries one pin. An empty Clash `fingerprint` counts as
+  absent, but an empty, malformed or repeated `pinSHA256` fails the import. A
+  pin replaces CA trust for its node only: the certificate must still be
+  within its validity period, name the node's TLS server name (a link's `sni`,
+  Clash `servername` or `sni`, sing-box `tls.server_name`; its server when none
+  is set) in its subjectAltName, and permit server authentication. The Common
+  Name is ignored, as Go has done since 1.15, so a certificate made by
+  `openssl req -x509 -subj "/CN=…"` without `-addext subjectAltName` fails
+  with "pinned certificate does not identify the configured server". A link's
+  `insecure=1` (or `allowInsecure`, `allow_insecure`, `skip-cert-verify`),
+  which the official client pairs with a pin for self-signed servers, is
+  accepted only beside a valid `pinSHA256`; a Clash node's
+  `skip-cert-verify: true`, which Mihomo ignores beside a `fingerprint`, only
+  beside a non-empty `fingerprint`; and a sing-box node's `tls.insecure: true`,
+  which upstream sing-box ignores beside a public-key pin, only beside a pin.
+  None is ever stored, so verification is never turned off;
 - Shadowsocks 2022 URI import follows SIP002's plain percent-encoded userinfo
   form; Base64 userinfo and legacy whole-link envelopes are rejected for 2022
   methods. Every colon-delimited PSK is canonical standard Base64 and has the
   method's exact 16- or 32-byte decoded length before vault staging;
-- user-defined DNS/services, scripts, executable paths, and unknown fields
-  fail validation.
+- DNS servers or rules outside the typed `dns` policy, other services,
+  scripts, executable paths, and unknown fields fail validation.
 
 This does not represent full sing-box protocol support. After import, the app
 checks the native vault and requests only missing references. All missing
@@ -109,7 +159,8 @@ transaction for local and remote sources. A refused, unknown, or mismatched
 vault result does not expose a partially imported profile. Local canonical
 reference-only JSON retains the explicit manual-provisioning workflow; remote
 reference-only subscriptions must still confirm the existing vault audience.
-The file picker and drag-drop accept `.json`, `.yaml`, `.yml`, and `.txt`.
+The file picker and drag-drop accept `.json`, `.yaml`, `.yml`, `.conf`
+(WireGuard), and `.txt`.
 Excel is not a profile format: use its node link or accompanying YAML/JSON.
 
 Profile cards show the stored display name, source type (`local file` or

@@ -1,0 +1,77 @@
+{
+  "credentials": [
+    {
+      "id": "3aaf8c4e-4672-526f-8f9d-2f75a1af234b",
+      "kind": "vless_uuid",
+      "secret_sha256": "b759f8dd61e90974887644a8efe83cab09d6a56f02394e47ca988123dd741213"
+    },
+    {
+      "id": "9fc18748-9a4b-5b31-903b-734f2a5f2178",
+      "kind": "hysteria2_password",
+      "secret_sha256": "bca5e89ddb16e6a1a8737f9d858792520b5b3743facad45d86a565301bde561c"
+    },
+    {
+      "id": "3c9fd6bc-ab1e-55b3-a75b-a43d7f7d5ef5",
+      "kind": "hysteria2_obfs_password",
+      "secret_sha256": "56928079ebad7bf1fdf1ee8e47f3a8fed9b9728ff8b17ad612257631977ac084"
+    }
+  ],
+  "digest": "ae0735be034ec22cbdf38bd9f42e2e928c486e72d8db15a33b8f7cbf201c3764",
+  "profile": {
+    "outbounds": [
+      {
+        "credential_ref": {
+          "id": "3aaf8c4e-4672-526f-8f9d-2f75a1af234b",
+          "kind": "vless_uuid"
+        },
+        "flow": "xtls-rprx-vision",
+        "packet_encoding": "xudp",
+        "server": "45.67.89.10",
+        "server_port": 443,
+        "tag": "lon1-reality",
+        "tls": {
+          "enabled": true,
+          "reality": {
+            "enabled": true,
+            "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+            "short_id": "0123456789abcdef"
+          },
+          "server_name": "www.example.com",
+          "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+          }
+        },
+        "type": "vless"
+      },
+      {
+        "credential_ref": {
+          "id": "9fc18748-9a4b-5b31-903b-734f2a5f2178",
+          "kind": "hysteria2_password"
+        },
+        "hop_interval_seconds": 30,
+        "obfs": {
+          "credential_ref": {
+            "id": "3c9fd6bc-ab1e-55b3-a75b-a43d7f7d5ef5",
+            "kind": "hysteria2_obfs_password"
+          },
+          "type": "salamander"
+        },
+        "server": "45.67.89.10",
+        "server_port": 61000,
+        "server_ports": [
+          "61000:62999"
+        ],
+        "tag": "lon1-hy2",
+        "tls": {
+          "certificate_sha256": [
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+          ],
+          "enabled": true,
+          "server_name": "n0123456789abcdef.internal"
+        },
+        "type": "hysteria2"
+      }
+    ]
+  }
+}

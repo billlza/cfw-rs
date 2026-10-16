@@ -10,10 +10,12 @@ pub use capacity::{
     MAX_SUBSCRIPTION_SOURCE_BYTES,
 };
 mod credentials;
+mod datasets;
 mod dns_policy;
 mod domain_pattern;
 mod engine_settings;
 mod lan;
+mod mainland;
 pub use engine_settings::{EngineLogLevel, LanProxySettings, RuntimePreferences};
 mod error;
 mod profile;
@@ -46,7 +48,8 @@ pub use error::{ConfigError, ProfileParseError};
 pub use profile::{MAX_OUTBOUNDS, UtlsFingerprint};
 pub use projection::{
     AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, DEFAULT_MIXED_PORT,
-    EngineSettings, ProjectedConfig, ProjectionMode, TUNNEL_ADDRESS_PLAN, TunnelAddressPlan,
+    EngineSettings, ProjectedConfig, ProjectionMode, ProxyProbe, TUNNEL_ADDRESS_PLAN,
+    TunnelAddressPlan,
 };
 pub use release_dns::ReleaseDnsEvidenceCase;
 pub use release_packet::{

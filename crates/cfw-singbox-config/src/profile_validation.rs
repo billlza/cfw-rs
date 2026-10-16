@@ -93,6 +93,19 @@ impl ProfileDocument {
         if let Some(dns) = &self.dns {
             dns.validate(self)?;
         }
+        let mut datasets = self.route_datasets();
+        if self.dns.is_some() {
+            datasets.extend(crate::dns_policy::dns_datasets(self)?);
+        }
+        if datasets.len() > crate::datasets::MAX_GEO_DATASETS {
+            return Err(unsupported_shape(
+                "$",
+                format!(
+                    "profile references more than {} GeoIP and GeoSite datasets",
+                    crate::datasets::MAX_GEO_DATASETS
+                ),
+            ));
+        }
         crate::dns_policy::validate_hosts(&self.hosts)?;
         Ok(())
     }

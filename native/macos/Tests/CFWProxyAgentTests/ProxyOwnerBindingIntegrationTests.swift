@@ -133,6 +133,7 @@ private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
 
   func start(
     configuration: Data,
+    deadline: EngineStartDeadline,
     eventHandler: @escaping @Sendable (ProxyEngineEvent) -> Void
   ) throws {
     lock.withLock {
@@ -143,7 +144,7 @@ private final class FakeProxyEngine: ProxyEngine, @unchecked Sendable {
     started.signal()
   }
 
-  func stop() throws { lock.withLock { stopCountValue += 1 } }
+  func stop() throws(LibboxInstanceUnclosable) { lock.withLock { stopCountValue += 1 } }
   func healthCheck() throws {}
 
   func waitUntilStarted() -> Bool { started.wait(timeout: .now() + 2) == .success }
@@ -318,7 +319,8 @@ private func makeFixture(
       engineFactory: FakeProxyEngineFactory(engine: engine),
       preferences: preferences,
       journalStore: FakeJournalStore(),
-      readinessTimeout: 60))
+      readinessTimeout: 60,
+      endProcess: { _ in Issue.record("every engine in this test closes") }))
   let coordinator = ProxySystemProxyOwnerCoordinator(
     authority: authority,
     observer: observer,

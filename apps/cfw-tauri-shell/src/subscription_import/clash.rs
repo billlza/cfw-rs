@@ -13,7 +13,8 @@
 //!   listed in [`IGNORED_TUNING_KEYS`] (local socket tuning with no effect on
 //!   destination, trust, or framing), or fails the import with the key name.
 //! - Requests this app refuses to honour fail closed instead of being
-//!   silently dropped: `skip-cert-verify: true`, Shadowsocks plugins,
+//!   silently dropped: `skip-cert-verify: true` without a certificate
+//!   `fingerprint` (beside one it asks for nothing more, below), Shadowsocks plugins,
 //!   `udp-over-tcp`, `smux`, and every proxy type outside the
 //!   closed schema. Hysteria2 port hopping accepts only canonical,
 //!   non-overlapping port sets and a `hop-interval` of 5..=3600 seconds,
@@ -30,7 +31,10 @@
 //!   node; the leaf must still be within its validity period, match the
 //!   server name and permit server authentication. An empty value counts as
 //!   absent; any other value that is not 64 hex digits (colons allowed) fails
-//!   the import, as does a pin without TLS or beside `reality-opts`.
+//!   the import, as does a pin without TLS or beside `reality-opts`. Mihomo
+//!   verifies a pinned node against the pin alone, so `skip-cert-verify:
+//!   true` beside a pin is accepted and never emitted, as `insecure=1` beside
+//!   a Hysteria2 link's `pinSHA256` is.
 //! - `servername`/`sni`, `alpn`, and `client-fingerprint` are only mapped
 //!   while TLS is enabled; without TLS they have no wire effect in Clash
 //!   either, so dropping them preserves semantics. `client-fingerprint: none`
@@ -61,7 +65,7 @@ use std::collections::BTreeMap;
 use super::socks5::Network as Socks5Network;
 use super::yaml::{YamlMapping, YamlScalar, YamlValue, load_single_document};
 use super::{
-    ImportedSubscription, OutboundCollector, build_tls_parts, canonical_uuid_credential,
+    ImportedSubscription, OutboundCollector, TlsParts, build_tls_parts, canonical_uuid_credential,
     credential_ref_json, normalize_hysteria2_server_ports,
     normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
     normalize_tuic_udp_relay_mode, normalize_v2ray_http_method, normalize_v2ray_packet_encoding,
@@ -279,9 +283,13 @@ fn convert_wireguard(
 }
 
 /// Fails closed on requests the closed schema cannot honour, independent of
-/// the proxy type.
+/// the proxy type. `skip-cert-verify: true` beside a non-empty `fingerprint`
+/// asks for nothing more than the pin: Mihomo then verifies the node against
+/// the pin alone, and `collect_tls` turns it into the only trust anchor (or
+/// fails the import when it is malformed, without TLS, beside `reality-opts`,
+/// or on a type without TLS, whose leftover keys are refused).
 fn enforce_common_guards(fields: &mut ProxyFields) -> Result<(), String> {
-    if fields.take_bool("skip-cert-verify")?.unwrap_or(false) {
+    if fields.take_bool("skip-cert-verify")?.unwrap_or(false) && !fields.has_text("fingerprint") {
         return Err(format!(
             "{} requires disabling TLS certificate verification, which this app refuses",
             fields.context()
@@ -937,6 +945,14 @@ impl ProxyFields {
     fn take(&mut self, key: &str) -> Option<YamlValue> {
         let index = self.entries.iter().position(|(name, _)| name == key)?;
         Some(self.entries.remove(index).1)
+    }
+
+    /// Whether `key` holds a non-empty scalar, without taking it.
+    fn has_text(&self, key: &str) -> bool {
+        self.entries.iter().any(|(name, value)| {
+            name == key
+                && matches!(value, YamlValue::Scalar(scalar) if !scalar.is_null() && !scalar.text().is_empty())
+        })
     }
 
     fn take_scalar(&mut self, key: &str) -> Result<Option<YamlScalar>, String> {

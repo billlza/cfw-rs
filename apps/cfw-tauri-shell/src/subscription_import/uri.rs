@@ -1,10 +1,12 @@
 //! Protocol-specific share-link conversion; collection and secret binding remain shared.
+use super::tls::hysteria2_pin_sha256;
 use super::{
-    OutboundCollector, build_tls_parts, canonical_uuid_credential,
-    consume_certificate_verification_flags, consume_empty_or_none_parameter,
-    consume_required_tls_marker, consume_tls_marker, consume_unsupported_enabled_flag,
-    credential_ref_json, decode_base64_text, decode_url_component, decoded_fragment_strict,
-    host_string, normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
+    OutboundCollector, TlsParts, build_tls_parts, canonical_uuid_credential,
+    certificate_verification_disabled, consume_certificate_verification_flags,
+    consume_empty_or_none_parameter, consume_required_tls_marker, consume_tls_marker,
+    consume_unsupported_enabled_flag, credential_ref_json, decode_base64_text,
+    decode_url_component, decoded_fragment_strict, host_string, insecure_tls_error,
+    normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
     normalize_tuic_udp_relay_mode, normalize_v2ray_packet_encoding, normalize_vless_flow,
     parse_hysteria2_hop_interval_range, parse_hysteria2_share_url, parse_positive_u32, parse_utls,
     port_from_url, port_from_url_or_default, reject_query_leftovers, required_url_password,
@@ -247,9 +249,20 @@ impl OutboundCollector {
         }
         let mut query = strict_query_map(&url, "Hysteria2")?;
         consume_tls_marker(&mut query, "Hysteria2")?;
-        consume_certificate_verification_flags(&mut query, "Hysteria2")?;
+        let verification_disabled = certificate_verification_disabled(&mut query, "Hysteria2")?;
         if query.remove("fp").is_some() {
             return Err("Hysteria2 does not support uTLS".into());
+        }
+        let certificate_pin = query
+            .remove("pinSHA256")
+            .map(|value| hysteria2_pin_sha256(&value))
+            .transpose()?;
+        // Upstream pairs `insecure=1` with `pinSHA256` for self-signed servers.
+        // CFM never disables verification: the pin replaces CA trust and keeps
+        // the name, validity and server-auth checks, so `insecure` is accepted
+        // only beside a valid pin and is never emitted.
+        if verification_disabled && certificate_pin.is_none() {
+            return Err(insecure_tls_error("Hysteria2"));
         }
         let server = host_string(&url)?;
         let reference = self.push_secret(
@@ -259,13 +272,16 @@ impl OutboundCollector {
         let tag = self.unique_tag(
             decoded_fragment_strict(&url, "Hysteria2")?.unwrap_or_else(|| format!("hy2-{index}")),
         )?;
-        let tls = tls_json(build_tls_parts(
-            true,
-            query.remove("sni").unwrap_or_else(|| server.clone()),
-            split_csv(query.remove("alpn").as_deref().unwrap_or_default()),
-            None,
-            None,
-        ));
+        let tls = tls_json(TlsParts {
+            certificate_sha256: certificate_pin.into_iter().collect(),
+            ..build_tls_parts(
+                true,
+                query.remove("sni").unwrap_or_else(|| server.clone()),
+                split_csv(query.remove("alpn").as_deref().unwrap_or_default()),
+                None,
+                None,
+            )
+        });
         let mut outbound = json!({
             "type": "hysteria2",
             "tag": tag,

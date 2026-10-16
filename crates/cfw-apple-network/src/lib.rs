@@ -31,6 +31,7 @@ pub enum NativeBridgeErrorCode {
     SystemExtensionValidationFailed,
     SystemProxyConfigurationFailed,
     SystemProxyRuntimeFailed,
+    EngineStartTimedOut,
     SystemProxyPreferencesFailed,
     SystemProxyJournalFailed,
     SystemProxyAuthorityFailed,
@@ -88,6 +89,7 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
                 Self::SystemProxyConfigurationFailed
             }
             NativeBridgeErrorCode::SystemProxyRuntimeFailed => Self::SystemProxyRuntimeFailed,
+            NativeBridgeErrorCode::EngineStartTimedOut => Self::EngineStartTimedOut,
             NativeBridgeErrorCode::SystemProxyPreferencesFailed => {
                 Self::SystemProxyPreferencesFailed
             }
@@ -157,6 +159,7 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
                 Self::SystemProxyConfigurationFailed
             }
             BackendErrorKind::SystemProxyRuntimeFailed => Self::SystemProxyRuntimeFailed,
+            BackendErrorKind::EngineStartTimedOut => Self::EngineStartTimedOut,
             BackendErrorKind::SystemProxyPreferencesFailed => Self::SystemProxyPreferencesFailed,
             BackendErrorKind::SystemProxyJournalFailed => Self::SystemProxyJournalFailed,
             BackendErrorKind::SystemProxyAuthorityFailed => Self::SystemProxyAuthorityFailed,

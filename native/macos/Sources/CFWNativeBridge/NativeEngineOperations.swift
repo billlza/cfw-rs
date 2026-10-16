@@ -323,12 +323,12 @@ extension NativeBridgeCoordinator {
     }
     do {
       try Task.checkCancellation()
-      let clock = ContinuousClock()
       // Ticket validity remains ten seconds. Observing the OS's asynchronous
       // disconnect error needs a separate, longer bound so a cold launch that
       // expires its ticket reports that exact cause before cleanup and retry.
-      let deadline = clock.now.advanced(by: .seconds(20))
-      while clock.now < deadline {
+      // The bound also outlasts the provider's interruptible libbox start.
+      let deadline = armTunnelReadinessDeadline(EngineStartBudget.tunnelReadiness)
+      while !deadline.hasPassed() {
         let providerSnapshot: EngineSnapshot
         do {
           providerSnapshot = try await tunnel.snapshot()
@@ -903,6 +903,16 @@ extension NativeBridgeCoordinator {
     if !transaction.ownerStopped {
       do {
         try await stopOwner(transaction)
+      } catch ProxyAgentHostError.agentFailure(let failure)
+        where failure.code == "stale-stop-request"
+      {
+        // The Authority is stopping this lease, so no owner can bind it any
+        // more, and a ProxyAgent with no record of the stop holds no session
+        // for it: its owner has ended, for example after an engine it could
+        // not close, or attested Stopped before it started the engine. No
+        // owner is left to stop. Authority completion decides: it accepts only
+        // an owner that attested Stopped, and otherwise reports unproven
+        // cleanup.
       } catch {
         throw Self.map(error)
       }

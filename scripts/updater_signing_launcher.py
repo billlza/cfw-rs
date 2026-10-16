@@ -45,8 +45,8 @@ PINNED_TAURI_METADATA = (
     "spinVersion=0.9.9",
     "upstreamCargoLockSha256=792031ed27ead83bd06bbf564a3c814f33a8c7ee81a8729f8d7c17cd041b0515",
     "version=2.12.0",
-    "xcodeBuild=27A266a",
-    "xcodeVersion=27.0",
+    "xcodeBuild=27A9275",
+    "xcodeVersion=27.1",
 )
 KEYCHAIN_SERVICE = "com.bill.clashformac.release.updater"
 KEYCHAIN_ACCOUNT = "updater-v2"

@@ -591,3 +591,9 @@ private func removeEngineProtocolTestDirectory(_ root: URL) {
     )
   )
 }
+
+@Test func ownerStartDeadlineIsFixedWhenTheRequestArrives() {
+  let receivedAt = ContinuousClock.now
+  let deadline = EngineStartDeadline(receivedAt: receivedAt)
+  #expect(deadline.instant == receivedAt.advanced(by: EngineStartBudget.ownerLibboxStart))
+}

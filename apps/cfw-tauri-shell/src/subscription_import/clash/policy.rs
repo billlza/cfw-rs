@@ -247,6 +247,7 @@ pub(super) fn import_policy(
                 "PROCESS-NAME" => "process_name",
                 "PROCESS-PATH" => "process_path",
                 "GEOIP" => "geo_ip",
+                "GEOSITE" => "geo_site",
                 "RULE-SET" => "rule_set",
                 _ => {
                     return Err(format!(
@@ -256,7 +257,9 @@ pub(super) fn import_policy(
             };
             rules.push(json!({
                 "type": kind,
-                "value": if parts[0] == "NETWORK" { parts[1].to_ascii_lowercase() } else { parts[1].to_owned() },
+                // Mihomo matches NETWORK values and GEOSITE codes
+                // case-insensitively; the typed values are lowercase.
+                "value": if matches!(parts[0], "NETWORK" | "GEOSITE") { parts[1].to_ascii_lowercase() } else { parts[1].to_owned() },
                 "outbound": resolve_target(parts[2], collector, &mut names)?,
                 "no_resolve": parts.len() == 4,
             }));

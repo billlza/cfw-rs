@@ -2,8 +2,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use super::{
-    ProxyFields, UtlsFingerprint, Value, build_tls_parts, json, parse_utls_fingerprint, tls_json,
-    utls_json,
+    ProxyFields, TlsParts, UtlsFingerprint, Value, build_tls_parts, json, parse_utls_fingerprint,
+    tls_json, utls_json,
 };
 
 const GLOBAL_CLIENT_FINGERPRINT: &str = "global-client-fingerprint";
@@ -249,16 +249,16 @@ impl TlsFields {
             }
             value
         });
-        let mut tls = tls_json(build_tls_parts(
-            true,
-            self.server_name.unwrap_or_else(|| server.to_owned()),
-            self.alpn,
-            fingerprint.map(utls_json),
-            reality,
-        ));
-        if let Some(pin) = self.certificate_pin {
-            tls["certificate_sha256"] = json!([pin]);
-        }
+        let mut tls = tls_json(TlsParts {
+            certificate_sha256: self.certificate_pin.into_iter().collect(),
+            ..build_tls_parts(
+                true,
+                self.server_name.unwrap_or_else(|| server.to_owned()),
+                self.alpn,
+                fingerprint.map(utls_json),
+                reality,
+            )
+        });
         if let Some(lines) = self.ech_config {
             // ECH exists only in TLS 1.3, which the profile states explicitly.
             tls["min_version"] = json!("1.3");

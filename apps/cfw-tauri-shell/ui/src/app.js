@@ -169,6 +169,7 @@ const REASONS = Object.freeze({
   get logLevel() { return t("Changes apply through a validated runtime replacement and are saved for the next launch."); },
   get mixin() { return t("Mixin is unavailable: the engine configuration is projected by the app, and an imported document may only describe routing and outbound policy."); },
   get geoip() { return t("Country rules use sing-box rule sets, downloaded on first start and refreshed daily while the engine runs. An existing Clash Country.mmdb file is not used."); },
+  get mainlandChinaDirect() { return t("In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes."); },
   get restoreDns() { return t("This app never writes host DNS, because the legacy restore value carries no per-service ownership identity. Clear or set custom DNS per service in System Settings › Network › Details › DNS."); },
   get engineNotOff() { return t("Stop the core before credential maintenance or legacy migration."); },
 });
@@ -3201,6 +3202,7 @@ async function applyUiToggle(key, checked) {
 async function applyToggle(key, checked, source) {
   if (key === "allowLan") return runtimeSettingsUI.toggleLAN(checked);
   if (key === "ipv6DNS") return runtimeSettingsUI.toggleIPv6DNS(checked);
+  if (key === "mainlandChinaDirect") return runtimeSettingsUI.toggleMainlandChinaDirect(checked);
   const isEngineMutation = key === "coreRunning" || key === "systemProxy" || key === "tunMode";
   if (PERSISTED_TOGGLES.has(key) && state.settingsUnavailableReason) {
     throw new Error(state.settingsUnavailableReason);
@@ -3247,9 +3249,12 @@ async function applyToggle(key, checked, source) {
     } else if (SESSION_TOGGLES.has(key)) {
       appendLog("info", source, t("{key} changed to {value2} for this session", { key: key, value2: checked ? "on" : "off" }));
       return;
-    } else {
+    } else if (PERSISTED_TOGGLES.has(key)) {
       const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
       applyPersistedSettings(snapshot);
+    } else {
+      // Every switch is dispatched above; an unknown key never reports success.
+      throw new TypeError("Unknown setting switch");
     }
     appendLog("info", source, isEngineMutation
       ? t("{key} request completed; engine {state}", { key: key, state: engineStateLabel(state.engine) })

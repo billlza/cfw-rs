@@ -1,4 +1,5 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWPacketTransport
 import CFWSharedProtocol
 import Darwin
@@ -74,14 +75,16 @@ private final class FakeEngine: PacketEngine, @unchecked Sendable {
 
   deinit { closeOwned() }
 
-  func start(configuration: Data, packetFileDescriptor: Int32) throws {
+  func start(configuration: Data, packetFileDescriptor: Int32, deadline: EngineStartDeadline)
+    throws
+  {
     lock.withLock {
       startCountValue += 1
       ownedDescriptor = packetFileDescriptor
     }
   }
 
-  func stop() throws {
+  func stop() throws(LibboxInstanceUnclosable) {
     lock.withLock {
       stopCountValue += 1
       closeOwnedLocked()
@@ -246,7 +249,8 @@ private func makeCoordinator(clockValue: UInt64 = 5_000) throws -> CoordinatorFi
   let lifecycle = PacketTunnelSessionLifecycle(
     engineFactory: FakeEngineFactory(engine: engine),
     dependencies: dependencies,
-    cancelTunnel: { _ in })
+    cancelTunnel: { _ in },
+    endProcess: { _ in Issue.record("every engine in this test closes") })
   let coordinator = TunnelTicketStartCoordinator(
     authority: authority,
     sessionLifecycle: lifecycle,

@@ -210,6 +210,10 @@
   They fix the 2026-10-08 Go advisories in HTTP/2, HTTP/1, MIME header and
   TLS ECH handling that the engine's code can reach, and two `html/template`
   advisories in a package it imports without calling the affected code.
+- Build with rustls 0.23.46, which fixes the 2026-10-14 rustls advisories
+  RUSTSEC-2026-0346, -0347, -0348 and -0349. They concern custom session
+  stores, Encrypted Client Hello, Brotli certificate compression and
+  post-quantum key exchange, none of which the app's TLS clients use.
 
 ### Supply chain
 

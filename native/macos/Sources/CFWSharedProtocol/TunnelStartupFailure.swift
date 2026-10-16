@@ -15,26 +15,21 @@ public enum TunnelStartupFailure {
 
   public static var ticketExpired: EngineFailure {
     EngineFailure(
-      code: NativeBridgeErrorCode.ticketExpired.rawValue,
-      message: "The Tunnel start ticket expired while macOS was starting the extension.",
-      isRetryable: true)
+      .startTicketExpired,
+      message: "The Tunnel start ticket expired while macOS was starting the extension.")
   }
 
   /// The Provider's libbox start ran past its deadline and was interrupted.
   public static var engineStartTimedOut: EngineFailure {
     EngineFailure(
-      code: NativeBridgeErrorCode.engineStartTimedOut.rawValue,
-      message: "Packet tunnel engine startup did not finish in time and was interrupted.",
-      isRetryable: false)
+      .engineStartTimedOut,
+      message: "Packet tunnel engine startup did not finish in time and was interrupted.")
   }
 
   /// libbox could not close the Provider's runtime, so the Provider ends its
   /// process, and its cleanup cannot be proven.
   public static var engineUnclosable: EngineFailure {
-    EngineFailure(
-      code: "tunnel-engine-unclosable",
-      message: "Packet tunnel could not close its engine.",
-      isRetryable: false)
+    EngineFailure(.engineUnclosable, message: "Packet tunnel could not close its engine.")
   }
 
   public static func ticketExpiredError(configuration: ConfigurationDescriptor) -> NSError {

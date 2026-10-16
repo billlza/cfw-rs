@@ -85,7 +85,7 @@ private func activeSystemProxyCore(
     ownerBinding: binding, retainsCapabilityOrTicket: true)
   let core = GlobalAuthorityServiceCore(
     reducer: reducer, journal: LivenessJournal(),
-    randomness: LivenessRandomness(), clock: clock)
+    randomness: LivenessRandomness(), clock: clock, processTable: EmptyAuthorityProcessTable())
   return ActiveFixture(core: core, installation: installation, ownerUID: ownerUID)
 }
 

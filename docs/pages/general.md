@@ -34,13 +34,22 @@ awaiting confirmation, cleaning, manual cleanup required, and Off remain
 distinct user-visible states.
 
 When an engine cannot be closed, after a failed start or at a stop, the app
-reports that global cleanup could not be proven. The ProxyAgent or the tunnel
-extension then ends itself, so macOS releases the ports and connections the
-engine still held. The ProxyAgent first restores the system proxy settings it
-changed; if it cannot, it keeps running and tries again when System Proxy is
-turned off again or, if the app was quit in the meantime, after the Mac
-restarts. Neither System Proxy nor Tunnel can be turned on again until the Mac
-restarts.
+reports that global cleanup could not be proven. So does a close still
+unfinished 2 seconds into a stop, and an interrupted start still inside the
+engine 5.5 seconds after its deadline. The ProxyAgent or the tunnel extension
+then ends itself, so macOS releases the ports and connections the engine still
+held. The ProxyAgent first restores the system proxy settings it changed, and
+it waits until it has run 11 seconds, so macOS can start it again at once. If
+it cannot restore them, it keeps running and tries again whenever you approve
+the macOS password prompt that turning System Proxy off and quitting the app
+show; after the Mac restarts, quitting the app shows that prompt to restore
+them. The tunnel extension ends once macOS has stopped the tunnel, or 2
+seconds after its report when macOS does not. Neither System Proxy nor Tunnel
+can be turned on again until the network is proven Off. Once the ProxyAgent or
+the extension has ended, turning the mode off proves it, without restarting the
+Mac. Until the network Authority restarts, as it does when the Mac restarts,
+only the app of the user who turned System Proxy on, signed in at the console,
+can prove its settings restored.
 
 The GeoIP Database row lists the selected profile's GEOIP countries and, when
 Settings › Engine › Mainland China direct is on, names that switch first.

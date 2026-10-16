@@ -648,22 +648,36 @@ extension NativeBridgeCoordinator {
       // The final fresh verification below still guards journal removal.
       preferenceCompensated = true
     } else {
-      let authorityContext = pendingStop?.authorityContext
+      let authority = pendingStop?.authority ?? .unordered
       let engineLease = self.engineLease
       do {
         preferenceCompensated = try await tunnel.compensatePendingPreferenceMutation(
           expectedConfiguration: transaction.descriptor,
           revokePreparation: {
-            if let authorityContext {
-              let observed = try await engineLease.beginStop(
-                for: transaction.descriptor)
+            switch authority {
+            case .completed:
+              // The Authority committed Off for this lease, so nothing it
+              // authorized can start any more.
+              return
+            case .ordered(let authorityContext):
+              let observed: NativeAuthorityStopContext
+              do {
+                observed = try await engineLease.beginStop(for: transaction.descriptor)
+              } catch let error as AuthorityDomainError
+                where error.code == .globalAuthorityRecovering
+              {
+                // The Authority released the lease since, so nothing it
+                // authorized can start any more.
+                return
+              }
               guard observed == authorityContext else {
                 throw NativeBridgeExecutionError.failure(
                   .cleanupUnproven,
                   "Authority stop identity changed during preference compensation."
                 )
               }
-            } else {
+            case .unordered, .released:
+              // A Recovering Authority holds no preparation either.
               guard try await engineLease.cancelPreparedStart(for: transaction.descriptor) else {
                 throw NativeBridgeExecutionError.failure(
                   .cleanupUnproven,
@@ -880,15 +894,32 @@ extension NativeBridgeCoordinator {
       )
     }
 
-    if transaction.authorityContext == nil {
+    guard case .unordered = transaction.authority else { return }
+    do {
+      transaction.authority = .ordered(
+        try await engineLease.beginStop(for: transaction.descriptor))
+    } catch let error as AuthorityDomainError where error.code == .globalAuthorityRecovering {
+      // A restarted Authority, or one whose quarantined owner ended, holds no
+      // lease to order. The owner is still stopped, and the Host's own Off
+      // proof ends the stop.
+      transaction.authority = .released
+    } catch let stale as AuthorityDomainError where stale.code == .staleOperation {
+      // An Authority that already reached Off at this stop's generation, for
+      // example when a status query reconciled it after the owner ended, holds
+      // no lease to order either. Off at any other generation leaves the lease
+      // this stop names unaccounted for.
+      let completed: Bool
       do {
-        transaction.authorityContext = try await engineLease.beginStop(
-          for: transaction.descriptor)
+        completed = try await engineLease.hasCompletedStop(transaction.commandContext)
       } catch {
         throw Self.map(error)
       }
-      pendingStop = transaction
+      guard completed else { throw Self.map(stale) }
+      transaction.authority = .released
+    } catch {
+      throw Self.map(error)
     }
+    pendingStop = transaction
   }
 
   private func drivePendingStopToOwnerStopped() async throws {
@@ -904,15 +935,16 @@ extension NativeBridgeCoordinator {
       do {
         try await stopOwner(transaction)
       } catch ProxyAgentHostError.agentFailure(let failure)
-        where failure.code == "stale-stop-request"
+        where ProxyAgentFailure(code: failure.code) == .agent(.stopWithoutSession)
       {
         // The Authority is stopping this lease, so no owner can bind it any
-        // more, and a ProxyAgent with no record of the stop holds no session
-        // for it: its owner has ended, for example after an engine it could
-        // not close, or attested Stopped before it started the engine. No
-        // owner is left to stop. Authority completion decides: it accepts only
-        // an owner that attested Stopped, and otherwise reports unproven
-        // cleanup.
+        // more, and a ProxyAgent with no session and no record of the stop
+        // holds nothing for it: its owner has ended, for example after an
+        // engine it could not close, or attested Stopped before it started the
+        // engine. No owner is left to stop. Authority completion decides: it
+        // accepts only an owner that attested Stopped, and otherwise reports
+        // unproven cleanup. A stale reply instead names a session of another
+        // generation, whose owner has not ended, so it fails the stop below.
       } catch {
         throw Self.map(error)
       }
@@ -929,27 +961,49 @@ extension NativeBridgeCoordinator {
       )
     }
 
-    if !transaction.authorityCompleted {
-      guard let authorityContext = transaction.authorityContext else {
-        throw NativeBridgeExecutionError.failure(
-          .cleanupUnproven,
-          "The Authority stop context was lost before completion."
-        )
-      }
+    switch transaction.authority {
+    case .unordered:
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The Authority stop context was lost before completion."
+      )
+    case .ordered(let authorityContext):
       do {
         try await engineLease.completeStop(authorityContext)
+        transaction.authority = .completed(authorityContext)
+      } catch let error as AuthorityDomainError where error.code == .globalAuthorityRecovering {
+        // The Authority released the lease, as a restart does, once the owner
+        // that never attested this stop ended. Reconciling Off proves the stop.
+        transaction.authority = .released
       } catch {
         throw Self.map(error)
       }
-      transaction.authorityCompleted = true
       pendingStop = transaction
+    case .completed, .released:
+      break
     }
 
+    // A Recovering Authority reaches Off only through this query's
+    // reconciliation, after the Host proved both owners and the OS Off.
     guard case .off = try await queryStatus(enforcePreferenceBarrier: false) else {
       throw NativeBridgeExecutionError.failure(
         .cleanupUnproven,
         "The native stop transaction did not reach the global Off barrier."
       )
+    }
+    if case .released = transaction.authority {
+      let completed: Bool
+      do {
+        completed = try await engineLease.hasCompletedStop(transaction.commandContext)
+      } catch {
+        throw Self.map(error)
+      }
+      guard completed else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "The Authority reached Off for another generation than this stop's."
+        )
+      }
     }
     pendingStop = nil
   }

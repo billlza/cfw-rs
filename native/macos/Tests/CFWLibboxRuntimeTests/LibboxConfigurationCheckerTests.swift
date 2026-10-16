@@ -3,6 +3,22 @@ import Foundation
 import Testing
 
 #if canImport(Libbox)
+  /// Checks `configuration` and expects libbox to read and refuse it, rather
+  /// than to fail to check it or to close what the check built.
+  private func expectRejection(
+    _ configuration: Data, sourceLocation: SourceLocation = #_sourceLocation
+  ) {
+    do {
+      try SourceBuiltLibboxConfigurationChecker().check(configuration: configuration)
+      Issue.record("libbox accepted the configuration", sourceLocation: sourceLocation)
+    } catch LibboxRuntimeError.configurationCheckFailed {
+      // libbox read the configuration and refused it.
+    } catch {
+      Issue.record(
+        "the check failed instead of rejecting: \(error)", sourceLocation: sourceLocation)
+    }
+  }
+
   @Test func linkedRuntimeImplementationIsAvailable() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -51,9 +67,7 @@ import Testing
       }
       """#.utf8
     )
-    #expect(throws: LibboxRuntimeError.self) {
-      try SourceBuiltLibboxConfigurationChecker().check(configuration: configuration)
-    }
+    expectRejection(configuration)
   }
 
   @Test func pinnedLibboxAcceptsProjectedLegacyVMessSelectorShape() throws {
@@ -120,9 +134,7 @@ import Testing
     }
     let checker = SourceBuiltLibboxConfigurationChecker()
     try checker.check(configuration: configuration(fingerprint: "chrome"))
-    #expect(throws: LibboxRuntimeError.self) {
-      try checker.check(configuration: configuration(fingerprint: "firefox"))
-    }
+    try expectRejection(configuration(fingerprint: "firefox"))
   }
 
   @Test func pinnedLibboxAcceptsProjectedHysteria2SingBox114Options() throws {
@@ -146,12 +158,10 @@ import Testing
           "max_packet_size": 1400,
         ],
         extra: ["hop_interval_max": "60s", "bbr_profile": "conservative"]))
-    #expect(throws: LibboxRuntimeError.self) {
-      try checker.check(
-        configuration: configuration(
-          obfs: ["type": "gecko", "password": "mask-secret"],
-          extra: ["bbr_profile": "fast"]))
-    }
+    try expectRejection(
+      configuration(
+        obfs: ["type": "gecko", "password": "mask-secret"],
+        extra: ["bbr_profile": "fast"]))
   }
 
   @Test func pinnedLibboxAcceptsProjectedAnyTLSAndTUICShape() throws {
@@ -298,8 +308,71 @@ import Testing
       """#.utf8
     )
 
-    #expect(throws: LibboxRuntimeError.self) {
-      try SourceBuiltLibboxConfigurationChecker().check(configuration: configuration)
+    expectRejection(configuration)
+  }
+
+  /// A check whose instance does not close fails, so a shape whose close fails
+  /// without a start could never be checked. Every outbound, group and inbound
+  /// shape CFM projects closes, in a runtime configuration with DNS, a remote
+  /// rule set, the cache file and the controller.
+  @Test func pinnedLibboxClosesEveryProjectedShapeAfterItsCheck() throws {
+    let tls = #""tls":{"enabled":true,"server_name":"node.example.com"}"#
+    let uuid = "bf000d23-0752-40b4-affe-68f7707a9661"
+    let outbounds = [
+      "socks":
+        #"{"type":"socks","tag":"p","server":"1.2.3.4","server_port":1080,"username":"u","password":"p"}"#,
+      "http":
+        #"{"type":"http","tag":"p","server":"1.2.3.4","server_port":8080,"username":"u","password":"p","#
+        + tls + "}",
+      "shadowsocks":
+        #"{"type":"shadowsocks","tag":"p","server":"1.2.3.4","server_port":443,"method":"aes-256-gcm","password":"secret"}"#,
+      "trojan":
+        #"{"type":"trojan","tag":"p","server":"1.2.3.4","server_port":443,"password":"secret","#
+        + tls + "}",
+      "vless": #"{"type":"vless","tag":"p","server":"1.2.3.4","server_port":443,"uuid":""#
+        + uuid + #"","# + tls + "}",
+      "vmess": #"{"type":"vmess","tag":"p","server":"1.2.3.4","server_port":443,"uuid":""#
+        + uuid + #"","security":"auto"}"#,
+      "hysteria2":
+        #"{"type":"hysteria2","tag":"p","server":"1.2.3.4","server_port":443,"password":"secret","#
+        + tls + "}",
+      "tuic": #"{"type":"tuic","tag":"p","server":"1.2.3.4","server_port":443,"uuid":""#
+        + uuid + #"","password":"secret","# + tls + "}",
+      "anytls":
+        #"{"type":"anytls","tag":"p","server":"1.2.3.4","server_port":443,"password":"secret","#
+        + tls + "}",
+    ]
+    let groups =
+      #",{"type":"selector","tag":"sel","outbounds":["p","direct"],"default":"p","interrupt_exist_connections":false}"#
+      + #",{"type":"urltest","tag":"auto","outbounds":["p"],"url":"https://www.gstatic.com/generate_204","interval":"5m"}"#
+      + #",{"type":"fallback","tag":"fb","outbounds":["p","direct"],"url":"https://www.gstatic.com/generate_204","interval":"5m"}"#
+      + #",{"type":"loadbalance","tag":"lb","outbounds":["p","direct"],"url":"https://www.gstatic.com/generate_204","interval":"5m"}"#
+    let wireguard =
+      #"{"type":"wireguard","tag":"wg","system":false,"address":["10.0.0.2/32"],"mtu":1408,"private_key":"yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=","peers":[{"address":"1.2.3.4","port":51820,"public_key":"xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=","allowed_ips":["0.0.0.0/0"],"persistent_keepalive_interval":25}]}"#
+    let mixed =
+      #"{"type":"mixed","tag":"cfw-system-proxy","listen":"127.0.0.1","listen_port":7890}"#
+    let tun =
+      #"{"type":"tun","tag":"cfw-tun","address":["172.19.0.1/30","fdfe:dcba:9876::1/126"],"mtu":9000,"auto_route":true,"strict_route":true,"stack":"system"}"#
+    func runtime(
+      _ outbound: String, groups: String = "", endpoints: String = "", inbounds: String = mixed
+    ) -> Data {
+      Data(
+        (#"{"log":{"level":"error"},"dns":{"servers":[{"type":"udp","tag":"dns-direct","server":"1.1.1.1"},{"type":"https","tag":"dns-remote","server":"dns.google","detour":"p"}],"final":"dns-direct"},"inbounds":["#
+          + inbounds + #"],"endpoints":["# + endpoints + #"],"outbounds":["# + outbound
+          + #",{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}"# + groups
+          + #"],"route":{"rule_set":[{"type":"remote","tag":"geoip-cn","format":"binary","url":"https://example.com/geoip-cn.srs","download_detour":"direct"}],"rules":[{"rule_set":["geoip-cn"],"action":"route","outbound":"direct"}],"final":"p"},"experimental":{"cache_file":{"enabled":true,"path":"/nonexistent-cfm-check/cache.db"},"clash_api":{"external_controller":"127.0.0.1:9090","secret":"s"}}}"#)
+          .utf8)
+    }
+    var cases = outbounds.mapValues { runtime($0, groups: groups) }
+    cases["wireguard endpoint"] = runtime(try #require(outbounds["socks"]), endpoints: wireguard)
+    cases["tun inbound"] = runtime(
+      try #require(outbounds["shadowsocks"]), groups: groups, inbounds: tun)
+    cases["tun and mixed inbounds"] = runtime(
+      try #require(outbounds["vless"]), groups: groups, endpoints: wireguard,
+      inbounds: tun + "," + mixed)
+    let checker = SourceBuiltLibboxConfigurationChecker()
+    for (name, configuration) in cases.sorted(by: { $0.key < $1.key }) {
+      #expect(throws: Never.self, "\(name)") { try checker.check(configuration: configuration) }
     }
   }
 #endif

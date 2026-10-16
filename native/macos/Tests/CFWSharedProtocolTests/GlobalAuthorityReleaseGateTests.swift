@@ -26,7 +26,6 @@ import Testing
 }
 
 @Test func authorityFailureMessageIsStableAndRedacted() {
-  #expect(GlobalAuthorityGateError.stableCode == "global-authority-unavailable")
   #expect(
     GlobalAuthorityGateError.stableMessage
       == "Global Authority registration, approval, identity, availability, and protocol compatibility are not proven."

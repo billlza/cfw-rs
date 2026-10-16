@@ -133,7 +133,8 @@ private func serviceObjects() throws -> (
   let journal = ServiceJournal()
   let core = GlobalAuthorityServiceCore(
     reducer: try .unEnrolledOff(), journal: journal,
-    randomness: ServiceRandomness(), clock: ServiceClock())
+    randomness: ServiceRandomness(), clock: ServiceClock(),
+    processTable: EmptyAuthorityProcessTable())
   let peer = try servicePeer()
   let service = AuthenticatedAuthorityPeerService(
     peerID: UUID(), peer: peer, reauthorize: { peer }, core: core,
@@ -169,7 +170,7 @@ func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
   let journal = ServiceJournal()
   let core = GlobalAuthorityServiceCore(
     reducer: try .unEnrolledOff(), journal: journal,
-    randomness: ServiceRandomness(), clock: clock)
+    randomness: ServiceRandomness(), clock: clock, processTable: EmptyAuthorityProcessTable())
   let prepared = try core.prepare(
     fixture.request, configuration: fixture.configuration,
     secretPayload: fixture.secretPayload, peer: servicePeer())
@@ -195,7 +196,7 @@ func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
     reducer: try .unEnrolledOff(),
     journal: ExhaustedServiceJournal(),
     randomness: ServiceRandomness(),
-    clock: ServiceClock())
+    clock: ServiceClock(), processTable: EmptyAuthorityProcessTable())
   let peer = try servicePeer()
 
   do {
@@ -246,7 +247,8 @@ func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
   let journal = ServiceJournal()
   let core = GlobalAuthorityServiceCore(
     reducer: try .unEnrolledOff(), journal: journal,
-    randomness: ServiceRandomness(), clock: ServiceClock())
+    randomness: ServiceRandomness(), clock: ServiceClock(),
+    processTable: EmptyAuthorityProcessTable())
   let peer = try servicePeer()
   let observations = OperationObservationBox()
   let service = AuthenticatedAuthorityPeerService(

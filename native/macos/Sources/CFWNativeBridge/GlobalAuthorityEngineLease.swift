@@ -88,9 +88,7 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
         leaseID: lease.leaseID)
     case .quarantined:
       throw AuthorityDomainError(code: .quarantined)
-    case .recovering:
-      throw AuthorityDomainError(code: .globalAuthorityRecovering)
-    case .off, .preparing, .starting, .active:
+    case .off, .preparing, .starting, .active, .recovering:
       return nil
     }
   }
@@ -100,7 +98,7 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
   ) async throws -> Bool {
     let snapshot = try await authority.snapshot()
     switch try Self.preparedCancellationDisposition(snapshot, descriptor: descriptor) {
-    case .alreadyOff:
+    case .alreadyOff, .released:
       return true
     case .ownerControlled:
       return false
@@ -115,7 +113,7 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
           observed,
           descriptor: descriptor)
         {
-        case .alreadyOff:
+        case .alreadyOff, .released:
           return true
         case .ownerControlled:
           return false
@@ -139,6 +137,9 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
     for descriptor: ConfigurationDescriptor
   ) async throws -> NativeAuthorityStopContext {
     let snapshot = try await authority.snapshot()
+    if snapshot.state == .recovering {
+      throw AuthorityDomainError(code: .globalAuthorityRecovering)
+    }
     guard [.starting, .active, .stopping].contains(snapshot.state),
       let lease = snapshot.leaseView,
       Self.matches(lease.operation, descriptor: descriptor)
@@ -170,6 +171,9 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
     let snapshot = try await authority.snapshot()
     if Self.isCompleted(snapshot, context: context) {
       return
+    }
+    if snapshot.state == .recovering {
+      throw AuthorityDomainError(code: .globalAuthorityRecovering)
     }
     guard snapshot.state == .stopping,
       let lease = snapshot.leaseView,
@@ -227,6 +231,9 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
 
   private enum PreparedCancellationDisposition: Equatable {
     case alreadyOff
+    /// Recovering: the Authority released every lease and admits no start
+    /// until the Host proves Off.
+    case released
     case cancel(LeaseView)
     case ownerControlled
   }
@@ -236,10 +243,12 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
     descriptor: ConfigurationDescriptor
   ) throws -> PreparedCancellationDisposition {
     switch snapshot.state {
-    case .off:
+    case .off, .recovering:
       guard snapshot.leaseView == nil else {
         throw AuthorityDomainError(code: .cleanupUnproven)
       }
+      // A cursor past the failed start belongs to a later start, so this
+      // cleanup is stale.
       if let cursor = snapshot.replayCursor {
         guard cursor.installationID.rawValue == descriptor.installationID else {
           throw AuthorityDomainError(code: .replayRejected)
@@ -251,7 +260,7 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
           throw AuthorityDomainError(code: .replayRejected)
         }
       }
-      return .alreadyOff
+      return snapshot.state == .off ? .alreadyOff : .released
     case .preparing:
       guard let lease = snapshot.leaseView,
         lease.state == .prepared,
@@ -267,8 +276,6 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
         throw AuthorityDomainError(code: .staleOperation)
       }
       return .ownerControlled
-    case .recovering:
-      throw AuthorityDomainError(code: .globalAuthorityRecovering)
     case .quarantined:
       throw AuthorityDomainError(code: .quarantined)
     }

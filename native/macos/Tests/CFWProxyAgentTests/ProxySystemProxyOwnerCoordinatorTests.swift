@@ -1,5 +1,6 @@
 import CFWSharedProtocol
 import Foundation
+import Synchronization
 import Testing
 
 @testable import CFWCredentialTransport
@@ -949,6 +950,49 @@ struct ProxySystemProxyOwnerCoordinatorTests {
     #expect(fixture.preferences.restoreCount == 2)
     #expect(fixture.authority.stoppedAttemptCount == 1)
     #expect(fixture.authority.stoppedAttestations.count == 1)
+  }
+
+  /// The coordinator keeps the owner context of a stop whose restore failed.
+  /// Once the rights the user grants restored the settings, the Host's Off
+  /// attests Stopped to the Authority and leaves the agent Off, without
+  /// restoring again.
+  @Test func settingsRestoredAfterAuthorizationLetTheNextStopAttestStopped() throws {
+    let fixture = try makeFixture(preferencesRestoreFailures: 1)
+    let start = CoordinatorRecorder()
+    fixture.coordinator.start(
+      configuration: fixture.descriptor,
+      authorization: try fixture.authorization()
+    ) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    let failedStop = CoordinatorRecorder()
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) {
+      failedStop.record($0)
+    }
+    #expect(failedStop.wait())
+    #expect(fixture.authority.stoppedAttemptCount == 0)
+
+    let restored = DispatchSemaphore(value: 0)
+    fixture.coordinator.restoreSettingsAfterAuthorization { restored.signal() }
+    #expect(restored.wait(timeout: .now() + 1) == .success)
+    #expect(fixture.preferences.restoreCount == 2)
+
+    let stop = CoordinatorRecorder()
+    fixture.coordinator.stop(expectedConfiguration: fixture.descriptor) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(fixture.preferences.restoreCount == 2)
+    #expect(fixture.authority.stoppedAttestations.count == 1)
+    #expect(fixture.authority.stoppedAttestations.first?.operation == fixture.lease.operation)
+    let snapshot = DispatchSemaphore(value: 0)
+    let observed = Mutex<EngineSnapshot?>(nil)
+    fixture.coordinator.snapshot { value in
+      observed.withLock { $0 = value }
+      snapshot.signal()
+    }
+    #expect(snapshot.wait(timeout: .now() + 1) == .success)
+    #expect(observed.withLock { $0 }?.state.kind == .off)
   }
 
   @Test func stoppedAttestationFailureIsReportedAndRemainsRetryable() throws {

@@ -16,7 +16,10 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case invalidConfigurationSlot
   case lifecycleConflict
   case startupCancelled
+  /// The stop names a generation other than the session this agent holds.
   case staleStopRequest
+  /// This agent holds no session and has no record of the stop's generation.
+  case stopWithoutSession
   case recoveryBlocked(String)
   case authorizationRequired
   case engineLease(String)
@@ -37,36 +40,35 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case cleanupFailed(original: String, cleanup: [String])
 
   var engineFailure: EngineFailure {
-    let code: String
+    EngineFailure(failure, message: safeMessage)
+  }
+
+  var failure: ProxyAgentFailure {
     switch self {
-    case .invalidConfigurationSlot: code = "invalid-configuration-slot"
-    case .lifecycleConflict: code = "proxy-lifecycle-conflict"
-    case .startupCancelled: code = "proxy-startup-cancelled"
-    case .staleStopRequest: code = "stale-stop-request"
-    case .recoveryBlocked: code = "proxy-recovery-blocked"
-    case .authorizationRequired: code = "system-proxy-authorization-required"
-    case .engineLease: code = "proxy-engine-lease-failed"
-    case .authority(let failure): code = "authority-\(failure.rawValue)"
-    case .configuration: code = "proxy-configuration-failed"
-    case .engineCreation: code = "proxy-engine-creation-failed"
-    case .engineStart: code = "proxy-engine-start-failed"
-    case .engineStartTimedOut: code = NativeBridgeErrorCode.engineStartTimedOut.rawValue
+    case .invalidConfigurationSlot: .agent(.invalidConfigurationSlot)
+    case .lifecycleConflict: .agent(.lifecycleConflict)
+    case .startupCancelled: .agent(.startupCancelled)
+    case .staleStopRequest: .agent(.staleStopRequest)
+    case .stopWithoutSession: .agent(.stopWithoutSession)
+    case .recoveryBlocked: .agent(.recoveryBlocked)
+    case .authorizationRequired: .agent(.authorizationRequired)
+    case .engineLease: .agent(.engineLeaseFailed)
+    case .authority(let failure): .authority(failure)
+    case .configuration: .agent(.configurationFailed)
+    case .engineCreation: .agent(.engineCreationFailed)
+    case .engineStart: .agent(.engineStartFailed)
+    case .engineStartTimedOut: .agent(.engineStartTimedOut)
     case .endpointConflict(let role, _):
-      code = role == .mixed ? "mixed-endpoint-in-use" : "controller-endpoint-in-use"
-    case .listenerReadinessTimedOut: code = "proxy-listener-readiness-timeout"
-    case .engineUnclosable: code = "proxy-engine-unclosable"
-    case .engineFailed: code = "proxy-engine-crashed"
-    case .preferences: code = "system-proxy-preferences-failed"
-    case .existingSystemProxy: code = "existing-system-proxy"
-    case .ownershipJournal: code = "proxy-ownership-journal-failed"
-    case .ownershipConflict: code = "system-proxy-ownership-conflict"
-    case .cleanupFailed: code = "proxy-cleanup-failed"
+      role == .mixed ? .agent(.mixedEndpointInUse) : .agent(.controllerEndpointInUse)
+    case .listenerReadinessTimedOut: .agent(.listenerReadinessTimedOut)
+    case .engineUnclosable: .agent(.engineUnclosable)
+    case .engineFailed: .agent(.engineCrashed)
+    case .preferences: .agent(.preferencesFailed)
+    case .existingSystemProxy: .agent(.existingSystemProxy)
+    case .ownershipJournal: .agent(.ownershipJournalFailed)
+    case .ownershipConflict: .agent(.ownershipConflict)
+    case .cleanupFailed: .agent(.cleanupFailed)
     }
-    return EngineFailure(
-      code: code,
-      message: safeMessage,
-      isRetryable: false
-    )
   }
 
   private var safeMessage: String {
@@ -79,6 +81,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy startup was cancelled."
     case .staleStopRequest:
       "System Proxy stop does not match the active generation."
+    case .stopWithoutSession:
+      "System Proxy holds no session for the stopped generation."
     case .recoveryBlocked:
       "System Proxy recovery is blocked until owned settings can be restored safely."
     case .authorizationRequired:
@@ -283,6 +287,35 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
   func testingSnapshot() -> EngineSnapshot {
     stateQueue.sync { currentSnapshot }
+  }
+
+  /// Restores the System Proxy settings this agent still owns but could not
+  /// restore without the network preferences rights the user just granted: a
+  /// launch whose recovery ran before the agent had them, a session whose
+  /// cleanup failed after its engine stopped, or a spent session, which then
+  /// ends the process. A session whose engine runs keeps its settings until it
+  /// stops. The Host asks for the rights before every Off and before quitting,
+  /// so either one completes a restore that failed.
+  func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
+    stateQueue.async { [self] in
+      defer { completionHandler() }
+      guard let session, session.journal != nil else { return }
+      switch lifecycle {
+      case .spent(let failure):
+        let restoreErrors = restoreOwnedPreferences(session)
+        if !restoreErrors.isEmpty {
+          let codes = restoreErrors.map { $0.engineFailure.code }.joined(separator: ",")
+          Self.logger.error(
+            "System Proxy settings were not restored after authorization: \(codes, privacy: .public)"
+          )
+        }
+        endProcessUnlessSettingsRemain(session, failure)
+      case .failed(let sessionID) where sessionID == session.id && session.engine == nil:
+        cleanUpSessionWithoutEngine(session)
+      case .idle, .starting, .active, .failed:
+        return
+      }
+    }
   }
 
   private func beginStart(
@@ -593,7 +626,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         currentSnapshot = .off(sequence: sequence)
         completion.finish(.success(()))
       } else {
-        completion.finish(.failure(.staleStopRequest))
+        completion.finish(.failure(.stopWithoutSession))
       }
       return
     }
@@ -809,32 +842,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         journal: journal
       )
       session = recoverySession
-      var cleanupErrors = acquireCleanupLeaseIfNeeded(recoverySession)
-      if cleanupErrors.isEmpty {
-        cleanupErrors.append(contentsOf: restoreOwnedPreferences(recoverySession))
-      }
-      cleanupErrors.append(contentsOf: releaseLeaseIfFullyClean(recoverySession))
-      if cleanupErrors.isEmpty, recoverySession.journal == nil, recoverySession.lease == nil {
-        session = nil
-        lifecycle = .idle
-        lastStoppedConfiguration = journal.configuration
-        sequence &+= 1
-        currentSnapshot = .off(sequence: sequence)
-      } else {
-        let terminalError = combinedError(
-          original: cleanupErrors.first ?? .recoveryBlocked("Unknown ownership recovery error."),
-          cleanup: Array(cleanupErrors.dropFirst())
-        )
-        lifecycle = .failed(recoverySession.id)
-        recoveryBlock = nil
-        lastFailedConfiguration = journal.configuration
-        sequence &+= 1
-        currentSnapshot = .proxyFailed(
-          terminalError.engineFailure,
-          configuration: journal.configuration,
-          sequence: sequence
-        )
-      }
+      cleanUpSessionWithoutEngine(recoverySession)
     } catch {
       let terminalError = ProxySessionLifecycleError.recoveryBlocked(error.localizedDescription)
       recoveryBlock = terminalError
@@ -842,6 +850,38 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       currentSnapshot = .proxyFailed(
         terminalError.engineFailure,
         configuration: nil,
+        sequence: sequence
+      )
+    }
+  }
+
+  /// Restores what `owned`, a session with no running engine, still owns and
+  /// releases its lease, then publishes Off, or the failure that keeps it.
+  private func cleanUpSessionWithoutEngine(_ owned: Session) {
+    var cleanupErrors = acquireCleanupLeaseIfNeeded(owned)
+    if cleanupErrors.isEmpty {
+      cleanupErrors.append(contentsOf: restoreOwnedPreferences(owned))
+    }
+    cleanupErrors.append(contentsOf: releaseLeaseIfFullyClean(owned))
+    if cleanupErrors.isEmpty, owned.journal == nil, owned.lease == nil {
+      session = nil
+      lifecycle = .idle
+      lastStoppedConfiguration = owned.configuration
+      lastFailedConfiguration = nil
+      sequence &+= 1
+      currentSnapshot = .off(sequence: sequence)
+    } else {
+      let terminalError = combinedError(
+        original: cleanupErrors.first ?? .recoveryBlocked("Unknown ownership recovery error."),
+        cleanup: Array(cleanupErrors.dropFirst())
+      )
+      lifecycle = .failed(owned.id)
+      recoveryBlock = nil
+      lastFailedConfiguration = owned.configuration
+      sequence &+= 1
+      currentSnapshot = .proxyFailed(
+        terminalError.engineFailure,
+        configuration: owned.configuration,
         sequence: sequence
       )
     }

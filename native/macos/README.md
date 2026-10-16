@@ -100,14 +100,31 @@ attestation, Host observation of the OS-facing Off boundary, then Authority
 `completeStop`. Failures remain Stopping or Quarantined rather than fabricating
 Off or transferring the lease. An owner whose libbox instance cannot be closed
 (libbox closes an instance once) reports that, never attests stopped, and ends
-its process so the kernel releases what the close left open. The ProxyAgent
-ends only after it has restored the System Proxy settings it owns, and retries
-that restore at each later stop while it fails. Without a stopped attestation
-the Authority quarantines the stop once its deadline passes, and stays
-Quarantined until it restarts. A stop the Host retries after the ProxyAgent
-ended reaches a successor with no record of it; the Host then leaves the
-outcome to Authority completion, which succeeds only if the ended owner had
-attested stopped.
+its process so the kernel releases what the close left open. A close that has
+not returned within `EngineStopBudget.libboxClose`, and a start still inside
+libbox `EngineStartBudget.interruptLimit` after its deadline fired, count the
+same; the thread stays inside libbox until the process ends. The ProxyAgent
+ends only after it has restored the System Proxy settings it owns, retrying
+that restore at each later stop and after each granted network preferences
+authorization while it fails, and no sooner than 11 seconds after it started,
+so launchd's restart throttle never holds its successor. The tunnel extension
+ends once it answered the stop Network Extension asks for after the failure,
+or 2 seconds after the failure when none comes, and refuses every start in
+that process until then. Network Extension asks for that stop only after it
+received the report; a failure inside a stop it already asked for is reported
+with that stop's answer, the last message before the process ends. Without a
+stopped attestation the Authority quarantines the stop once its deadline
+passes. Once the owner's process, recorded by pid and start time when it
+bound, provably ended, the quarantine becomes the Recovering state a restart
+would rebuild from the quarantine's own journal record, and the Host's
+`reconcileOff` proves Off. For a System Proxy lease only a Host of the former
+owner's user can, since only that user's ProxyAgent can restore the settings
+it applied; an Authority restart does not keep that requirement. Any other
+quarantine stays until the Authority restarts. A stop the Host retries after the
+ProxyAgent ended reaches a successor with no record of it; the Host then leaves
+the outcome to Authority completion, which succeeds only if the ended owner had
+attested stopped, or, once the Authority recovered, to the Off reconciliation
+at that stop's generation.
 
 The loopback controller capability belongs to one Host process. After a Host
 crash or replacement, startup never adopts a still-active native owner: it
@@ -259,9 +276,17 @@ fixed order, each at the path and digest its `SING_BOX_*_PATCH_PATH` and
 5. The profile-probe patch (`SING_BOX_PROFILE_PROBE_PATCH_PATH`) adds bounded, isolated profile
    probes that originate application requests only: no inbounds, controller,
    system interface, routing policy, persistent cache, or background URL tests,
-   and the probe instance is closed before it replies. It also makes ordered
-   failover follow the declared member order and commits a group's per-flow
-   member selection only when the TUN admits that flow.
+   and the probe instance is closed once before it replies, its close failure
+   reported even after a failed start: the probe starts it with the
+   endpoint-conflict patch's `StartWithExternalCleanup`, which leaves a failed
+   start's close to the caller. It adds `CheckConfigClosingInstance`, which
+   checks a configuration as `CheckConfig` does but reports a failed close of
+   the instance it built apart from a rejection, which `CheckConfig` drops; the
+   platform stub's interface monitor, which a check never starts, closes
+   without error. A check's or probe's close that panics fails that close
+   instead of ending the process, and prints the panic as `Box.Start` does. It also makes ordered failover follow the declared member order and
+   commits a group's per-flow member selection only when the TUN admits that
+   flow.
 6. The SOCKS lifecycle patch (`SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH`) keeps the upstream SOCKS protocol
    implementation while giving each setup attempt its own cancellation scope;
    a dial context owns the handshake, not the lifetime of an established

@@ -110,7 +110,9 @@ private final class ProviderStartCompletion: @unchecked Sendable {
 final class PacketTunnelSessionLifecycle: @unchecked Sendable {
   typealias CancelTunnel = @Sendable (PacketTunnelProviderError) -> Void
   /// Ends the extension's process after libbox could not close a runtime. Only
-  /// the process ending releases what that close left open.
+  /// the process ending releases what that close left open. The lifecycle calls
+  /// it before it completes anything with the failure, and it returns at once:
+  /// the process ends only after those completions (`PacketTunnelProcessEnd`).
   typealias EndProcess = @Sendable (LibboxInstanceUnclosable) -> Void
 
   private let engineFactory: any PacketEngineFactory
@@ -538,11 +540,9 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
   }
 
   /// libbox could not close the engine. The lifecycle keeps the engine and the
-  /// lease so nothing claims that the runtime ended, fails the pending
-  /// completions with the cause, and ends the process after every operation
-  /// already queued, so each completion this failure produced is delivered
-  /// first. Network Extension offers no barrier for its completions, so their
-  /// delivery is best effort.
+  /// lease so nothing claims that the runtime ended, arms the process end, and
+  /// then fails the pending completions with the cause. The process ends only
+  /// after them.
   private func becomeSpent(
     _ failure: LibboxInstanceUnclosable,
     startCompletion: ProviderStartCompletion?,
@@ -550,16 +550,13 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     cancelsTunnel: Bool
   ) {
     lifecycle = .spent(failure)
+    endProcess(failure)
     let error = PacketTunnelProviderError.engineUnclosable(failure)
     transitionToFailure(error)
     startCompletion?.finish(error)
     stopCompletion?(.failure(.localRuntime(error)))
     if cancelsTunnel {
       cancelTunnel(error)
-    }
-    let endProcess = self.endProcess
-    stateQueue.async {
-      endProcess(failure)
     }
   }
 

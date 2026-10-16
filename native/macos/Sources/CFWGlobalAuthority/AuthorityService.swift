@@ -1,6 +1,7 @@
 import CFWSharedProtocol
 import Darwin
 import Foundation
+import OSLog
 @preconcurrency import SystemConfiguration
 
 import struct CryptoKit.SHA256
@@ -80,10 +81,13 @@ public struct AuthorityForcedStopOutcome: Sendable {
 }
 
 public final class GlobalAuthorityServiceCore: @unchecked Sendable {
+  private static let logger = Logger(
+    subsystem: "com.bill.clashformac", category: "global-authority")
   private let lock = NSLock()
   private let journal: any AuthorityJournalCommitting
   private let randomness: any AuthorityTicketRandomness
   private let clock: any AuthorityMonotonicClock
+  private let processTable: any AuthorityProcessTable
   private let secrets: TunnelSecretLifecycle
   private var reducer: GlobalAuthorityReducer
   private var proxyCapability: PendingProxyCapability?
@@ -92,17 +96,22 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   private var ownerAuditSessionID: UInt32?
   private var stopDeadlineMonotonic: UInt64?
   private var lastOwnerHeartbeatMonotonic: UInt64?
+  private var boundOwnerProcess: AuthorityOwnerProcess?
+  private var ownerQuarantine: AuthorityOwnerQuarantine?
+  private var recoveredLease: AuthorityRecoveredLease?
 
   public init(
     reducer: GlobalAuthorityReducer,
     journal: any AuthorityJournalCommitting,
     randomness: any AuthorityTicketRandomness = SystemAuthorityTicketRandomness(),
-    clock: any AuthorityMonotonicClock = SystemAuthorityMonotonicClock()
+    clock: any AuthorityMonotonicClock = SystemAuthorityMonotonicClock(),
+    processTable: any AuthorityProcessTable = KernelAuthorityProcessTable()
   ) {
     self.reducer = reducer
     self.journal = journal
     self.randomness = randomness
     self.clock = clock
+    self.processTable = processTable
     lastOwnerHeartbeatMonotonic = reducer.lease?.issuedMonotonic
     secrets = TunnelSecretLifecycle(randomness: randomness, clock: clock)
   }
@@ -155,14 +164,78 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   public func quarantineExpiredStopIfNeeded() throws -> Bool {
     try lock.withLock {
       guard reducer.state == .stopping, !reducer.ownerStopped,
+        reducer.lease != nil,
         let deadline = stopDeadlineMonotonic,
         clock.nowMilliseconds() >= deadline
       else { return false }
-      _ = try resolveOffLocked(
+      let owner = boundOwnerProcess
+      let (resolution, commit) = try resolveOffLocked(
         GlobalOffProof(
           leaseReleased: false, capabilityOrTicketCleared: false,
           secretBufferCleared: false, ownerEndpointCleared: false,
           cleanup: .unknown, managedTunnel: .unknown))
+      if case .quarantined = resolution, let owner {
+        ownerQuarantine = AuthorityOwnerQuarantine(owner: owner, commit: commit)
+      }
+      return true
+    }
+  }
+
+  /// The owner of a quarantined stop may still run whatever it never attested
+  /// stopped, so only a restart, which ends it, used to recover the machine.
+  /// Once the owner's process provably ended nothing is left to wait for: the
+  /// Authority becomes the Recovering state a restart would rebuild from the
+  /// quarantine's own journal record, without writing a record, and the Host
+  /// proves both owners and the OS Off before any start. It keeps one
+  /// requirement a restart does not: only a Host of the user whose System Proxy
+  /// lease it recovered proves Off, since only that user's ProxyAgent can
+  /// restore the settings it applied. An unreadable process table proves
+  /// nothing and is read again on the next evaluation.
+  @discardableResult
+  public func recoverFromEndedOwnerIfNeeded() throws -> Bool {
+    try lock.withLock {
+      // The quarantine's record must still be the Authority's latest, so a
+      // record never outlives the quarantine it describes.
+      guard reducer.state == .quarantined, var quarantine = ownerQuarantine,
+        quarantine.commit.state.revision == reducer.revision
+      else {
+        return false
+      }
+      let entry: KernelProcessIdentity?
+      do {
+        entry = try processTable.lookup(quarantine.owner.processIdentifier)
+      } catch {
+        if !quarantine.reportedUnreadableProcessTable {
+          Self.logger.fault(
+            "The process table could not be read for a quarantined owner, so its quarantine lasts until it can: \(String(describing: error), privacy: .public)"
+          )
+          quarantine.reportedUnreadableProcessTable = true
+          ownerQuarantine = quarantine
+        }
+        return false
+      }
+      guard quarantine.owner.hasEnded(given: entry) else { return false }
+      // A record a restart keeps quarantined stays quarantined here too.
+      let posture = AuthorityJournalRecoveryReducer.restartPosture(
+        for: quarantine.commit.state)
+      guard case .recovering = posture else { return false }
+      reducer = try GlobalAuthorityReducer.reconciled(
+        from: AuthorityJournalRecovery(
+          committedState: quarantine.commit.state, head: quarantine.commit.head,
+          posture: posture))
+      proxyCapability = nil
+      configurationDescriptor = nil
+      boundPeerID = nil
+      ownerAuditSessionID = nil
+      stopDeadlineMonotonic = nil
+      lastOwnerHeartbeatMonotonic = nil
+      boundOwnerProcess = nil
+      ownerQuarantine = nil
+      recoveredLease = quarantine.lease
+      secrets.terminate(.cancellation)
+      Self.logger.notice(
+        "The owner of a quarantined \(quarantine.lease.mode.rawValue, privacy: .public) lease ended; the Authority released the lease as a restart would"
+      )
       return true
     }
   }
@@ -251,25 +324,30 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   /// predicate is proven; any ambiguity retains Quarantined instead of Off.
   @discardableResult
   public func resolveOff(_ proof: GlobalOffProof) throws -> AuthorityOffResolution {
-    try lock.withLock { try resolveOffLocked(proof) }
+    try lock.withLock { try resolveOffLocked(proof).resolution }
   }
 
-  private func resolveOffLocked(_ proof: GlobalOffProof) throws -> AuthorityOffResolution {
+  private func resolveOffLocked(
+    _ proof: GlobalOffProof
+  ) throws -> (resolution: AuthorityOffResolution, commit: AuthorityJournalCommit) {
     var candidate = reducer
     let resolution = try candidate.applyOffProof(
       proof, expectedRevision: reducer.revision)
-    try persist(&candidate)
+    let commit = try persist(&candidate)
     reducer = candidate
     stopDeadlineMonotonic = nil
     lastOwnerHeartbeatMonotonic = nil
+    ownerQuarantine = nil
     if case .off = resolution {
       proxyCapability = nil
       configurationDescriptor = nil
       boundPeerID = nil
       ownerAuditSessionID = nil
+      boundOwnerProcess = nil
+      recoveredLease = nil
     }
     secrets.terminate(.cancellation)
-    return resolution
+    return (resolution, commit)
   }
 
   /// Commits the post-restart recovery barrier to Off only when the exact
@@ -306,6 +384,13 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
         request.replayCursor == replayCursor
       else {
         throw AuthorityDomainError(code: .replayRejected)
+      }
+      // Only the ended owner's own ProxyAgent can restore the System Proxy
+      // settings it applied, so only that user's Host can prove them restored.
+      if let recoveredLease, recoveredLease.mode == .systemProxy,
+        peer.euid != recoveredLease.ownerUID
+      {
+        throw AuthorityDomainError(code: .cleanupUnproven)
       }
 
       let managedTunnel: ManagedTunnelObservation
@@ -376,6 +461,9 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       configurationDescriptor = nil
       boundPeerID = nil
       ownerAuditSessionID = nil
+      boundOwnerProcess = nil
+      ownerQuarantine = nil
+      recoveredLease = nil
       secrets.terminate(.cancellation)
       return receipt
     }
@@ -580,6 +668,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       reducer = candidate
       proxyCapability = nil
       boundPeerID = peerID
+      boundOwnerProcess = ownerProcessLocked(peer, leaseID: request.leaseID)
       lastOwnerHeartbeatMonotonic = clock.nowMilliseconds()
       return try leaseView(candidate.lease)
     }
@@ -628,6 +717,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
         try persist(&candidate)
         reducer = candidate
         boundPeerID = peerID
+        boundOwnerProcess = ownerProcessLocked(peer, leaseID: redemption.leaseID)
         lastOwnerHeartbeatMonotonic = clock.nowMilliseconds()
         return RedeemResult(
           metadata: try RedeemedTunnelMetadata(
@@ -728,6 +818,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       configurationDescriptor = nil
       boundPeerID = nil
       ownerAuditSessionID = nil
+      boundOwnerProcess = nil
       secrets.terminate(.cancellation)
       return try AuthorityAcknowledgement(
         operationID: request.operation.operationID,
@@ -820,6 +911,7 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
     configurationDescriptor = nil
     boundPeerID = nil
     ownerAuditSessionID = nil
+    boundOwnerProcess = nil
     secrets.terminate(.cancellation)
     return revision
   }
@@ -912,33 +1004,61 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
     }
   }
 
+  /// The binding owner's process as the kernel holds it now, while the owner
+  /// waits for the bind reply. Without it the Authority cannot later prove that
+  /// the owner ended, so a quarantine of this lease lasts until restart.
+  private func ownerProcessLocked(
+    _ peer: PeerIdentity, leaseID: AuthorityIdentifier
+  ) -> AuthorityOwnerProcess? {
+    let entry: KernelProcessIdentity?
+    do {
+      entry = try processTable.lookup(peer.pid)
+    } catch {
+      Self.logger.fault(
+        "The binding owner's process could not be read, so a quarantine of its lease lasts until restart: \(String(describing: error), privacy: .public)"
+      )
+      return nil
+    }
+    // A process that ended before the bind was recorded, or a later one of
+    // another user at its pid, is not the owner.
+    guard let entry, entry.effectiveUserIdentifier == peer.euid else {
+      Self.logger.notice(
+        "The binding owner no longer runs at its pid, so a quarantine of its lease lasts until restart"
+      )
+      return nil
+    }
+    return AuthorityOwnerProcess(entry, leaseID: leaseID)
+  }
+
   private func leaseView(_ lease: GlobalLease?) throws -> LeaseView {
     guard let lease else { throw AuthorityDomainError(code: .staleOperation) }
     return try LeaseView(
       leaseID: lease.leaseID, operation: lease.operation,
       state: lease.state, expiryMonotonic: lease.expiryMonotonic)
   }
-  private func persist(_ value: inout GlobalAuthorityReducer) throws {
+  @discardableResult
+  private func persist(_ value: inout GlobalAuthorityReducer) throws -> AuthorityJournalCommit {
     guard let installationID = value.installationID,
       let mutation = value.lastMutation
     else { throw AuthorityDomainError(code: .journalCorrupt) }
     let operation = value.lease?.operation
     let cursor = value.replayCursor
     do {
-      let head = try journal.appendCommitted(
-        AuthorityCommittedState(
-          installationID: installationID,
-          epoch: cursor?.acceptedEpoch ?? 0,
-          generation: cursor?.acceptedGeneration ?? 0,
-          revision: value.revision,
-          transition: journalTransition(mutation),
-          state: value.state,
-          operationID: operation?.operationID,
-          mode: operation?.mode,
-          configSHA256: operation?.configSHA256,
-          leaseID: value.lease?.leaseID,
-          ownerUID: operation?.ownerUID))
+      let state = try AuthorityCommittedState(
+        installationID: installationID,
+        epoch: cursor?.acceptedEpoch ?? 0,
+        generation: cursor?.acceptedGeneration ?? 0,
+        revision: value.revision,
+        transition: journalTransition(mutation),
+        state: value.state,
+        operationID: operation?.operationID,
+        mode: operation?.mode,
+        configSHA256: operation?.configSHA256,
+        leaseID: value.lease?.leaseID,
+        ownerUID: operation?.ownerUID)
+      let head = try journal.appendCommitted(state)
       try value.recordPersistedHead(head)
+      return AuthorityJournalCommit(state: state, head: head)
     } catch AuthorityJournalStorageError.capacityExhausted {
       throw AuthorityDomainError(code: .journalCapacityExhausted)
     } catch {

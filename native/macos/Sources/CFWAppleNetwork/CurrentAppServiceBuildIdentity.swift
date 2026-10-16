@@ -123,7 +123,7 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
   private struct ProcessRecord: Equatable {
     let pid: pid_t
     let path: String
-    let kernel: Installed40019KernelProcessIdentity
+    let kernel: KernelProcessIdentity
   }
 
   private static func processInventory() throws -> [ProcessRecord] {
@@ -155,7 +155,7 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
             bytes: buffer.prefix(Int(named)).map(UInt8.init(bitPattern:)), encoding: .utf8),
           ["CFWProxyAgent", "CFWGlobalAuthority"].contains(name)
         {
-          let kernel = try Installed40019ServiceProcessObserver.kernelProcessIdentity(pid)
+          let kernel = try kernelIdentity(pid)
           if try belongsToServiceScope(name: name, kernel: kernel, invokingUID: geteuid()) {
             throw CurrentAppServiceBuildError.identityUnavailable
           }
@@ -172,8 +172,7 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
         ["CFWProxyAgent", "CFWGlobalAuthority"].contains(
           URL(fileURLWithPath: path).lastPathComponent)
       else { continue }
-      // Reuse the existing read-only kernel PID/start/UID reader, not its legacy authorization policy.
-      let kernel = try Installed40019ServiceProcessObserver.kernelProcessIdentity(pid)
+      let kernel = try kernelIdentity(pid)
       if try belongsToServiceScope(
         name: URL(fileURLWithPath: path).lastPathComponent, kernel: kernel, invokingUID: geteuid())
       {
@@ -183,10 +182,25 @@ public struct CurrentAppServiceBuildObserver: CurrentAppServiceBuildObserving {
     return results.sorted { $0.pid < $1.pid }
   }
 
+  /// The kernel's entry for a listed process. A process that ended after the
+  /// listing, like an entry that cannot be read, makes the inventory unproven.
+  private static func kernelIdentity(
+    _ pid: pid_t
+  ) throws(CurrentAppServiceBuildError) -> KernelProcessIdentity {
+    let identity: KernelProcessIdentity?
+    do {
+      identity = try KernelProcessTable.lookup(pid)
+    } catch {
+      throw .identityUnavailable
+    }
+    guard let identity else { throw .identityUnavailable }
+    return identity
+  }
+
   /// Each logged-in user may have a ProxyAgent. Kernel UID filtering only
   /// selects the processes to observe; it never substitutes for XPC identity.
   static func belongsToServiceScope(
-    name: String, kernel: Installed40019KernelProcessIdentity, invokingUID: uid_t
+    name: String, kernel: KernelProcessIdentity, invokingUID: uid_t
   ) throws -> Bool {
     let expectedUID: uid_t = name == "CFWProxyAgent" ? invokingUID : 0
     guard kernel.realUserIdentifier == expectedUID || kernel.effectiveUserIdentifier == expectedUID

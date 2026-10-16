@@ -123,7 +123,7 @@ private func makeCore(clock: any AuthorityMonotonicClock = MutableExampleClock(1
   let journal = ExampleJournal()
   let core = GlobalAuthorityServiceCore(
     reducer: try .unEnrolledOff(), journal: journal,
-    randomness: ExampleRandomness(), clock: clock)
+    randomness: ExampleRandomness(), clock: clock, processTable: EmptyAuthorityProcessTable())
   return (journal, core)
 }
 

@@ -89,7 +89,7 @@ private func lifecycleCore(
     reducer: try .unEnrolledOff(),
     journal: LifecycleContractJournal(),
     randomness: LifecycleContractRandomness(),
-    clock: clock)
+    clock: clock, processTable: EmptyAuthorityProcessTable())
 }
 
 private func tunnelPrepareRequest(
@@ -209,7 +209,7 @@ struct AuthorityLifecycleContractTests {
       reducer: try .unEnrolledOff(),
       journal: journal,
       randomness: LifecycleContractRandomness(),
-      clock: LifecycleContractClock())
+      clock: LifecycleContractClock(), processTable: EmptyAuthorityProcessTable())
     let active = try activateTunnel(
       core: core,
       installationID: AuthorityIdentifier(UUID()),
@@ -266,7 +266,7 @@ struct AuthorityLifecycleContractTests {
       reducer: try .unEnrolledOff(),
       journal: journal,
       randomness: LifecycleContractRandomness(),
-      clock: clock)
+      clock: clock, processTable: EmptyAuthorityProcessTable())
     let active = try activateTunnel(
       core: core,
       installationID: AuthorityIdentifier(UUID()),
@@ -296,7 +296,7 @@ struct AuthorityLifecycleContractTests {
       reducer: try .unEnrolledOff(),
       journal: journal,
       randomness: LifecycleContractRandomness(),
-      clock: LifecycleContractClock())
+      clock: LifecycleContractClock(), processTable: EmptyAuthorityProcessTable())
     let host = try lifecyclePeer(role: .host)
     let preparedInput = try tunnelPrepareRequest(
       installationID: AuthorityIdentifier(UUID()),
@@ -342,7 +342,7 @@ struct AuthorityLifecycleContractTests {
       reducer: try .unEnrolledOff(),
       journal: journal,
       randomness: LifecycleContractRandomness(),
-      clock: LifecycleContractClock())
+      clock: LifecycleContractClock(), processTable: EmptyAuthorityProcessTable())
     let installationID = AuthorityIdentifier(UUID())
     let host = try lifecyclePeer(role: .host)
     let preparedInput = try tunnelPrepareRequest(
@@ -390,7 +390,8 @@ struct AuthorityLifecycleContractTests {
     let clock = LifecycleContractClock()
     let core = GlobalAuthorityServiceCore(
       reducer: try .unEnrolledOff(), journal: journal,
-      randomness: LifecycleContractRandomness(), clock: clock)
+      randomness: LifecycleContractRandomness(), clock: clock,
+      processTable: EmptyAuthorityProcessTable())
     let installation = AuthorityIdentifier(UUID())
     let active = try activateTunnel(core: core, installationID: installation, generation: 1)
     let stopped = try StoppedAttestation(

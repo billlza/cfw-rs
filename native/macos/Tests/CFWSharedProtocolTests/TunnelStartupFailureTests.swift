@@ -40,7 +40,7 @@ struct TunnelStartupFailureTests {
     let failure = try #require(
       TunnelStartupFailure.matchingFailure(decoded, configuration: configuration))
     #expect(failure == TunnelStartupFailure.engineStartTimedOut)
-    #expect(failure.code == NativeBridgeErrorCode.engineStartTimedOut.rawValue)
+    #expect(failure.code == PacketTunnelFailureCode.engineStartTimedOut.rawValue)
     #expect(!failure.isRetryable)
     #expect(failure != TunnelStartupFailure.ticketExpired)
     #expect(Set(decoded.userInfo.keys) == [NSLocalizedDescriptionKey, "start_context"])
@@ -57,7 +57,7 @@ struct TunnelStartupFailureTests {
     let failure = try #require(
       TunnelStartupFailure.matchingFailure(decoded, configuration: configuration))
     #expect(failure == TunnelStartupFailure.engineUnclosable)
-    #expect(failure.code == "tunnel-engine-unclosable")
+    #expect(failure.code == PacketTunnelFailureCode.engineUnclosable.rawValue)
     #expect(!failure.isRetryable)
     #expect(failure != TunnelStartupFailure.engineStartTimedOut)
     #expect(Set(decoded.userInfo.keys) == [NSLocalizedDescriptionKey, "start_context"])

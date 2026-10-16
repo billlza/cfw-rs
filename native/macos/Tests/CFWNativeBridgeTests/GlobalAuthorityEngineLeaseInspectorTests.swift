@@ -386,6 +386,45 @@ struct GlobalAuthorityEngineLeaseInspectorTests {
     #expect(await authority.counts().complete == 0)
   }
 
+  /// Recovering holds no lease: neither a restarted Authority nor one whose
+  /// quarantined owner ended has a stop to order or complete, or a preparation
+  /// left to cancel. Only reconciliation, after the Host proved Off, leaves it.
+  @Test func recoveringAuthorityHoldsNoLeaseToStopOrCancel() async throws {
+    let fixture = try AuthorityLeaseFixture()
+    let recovering = try fixture.snapshot(state: .recovering, revision: 14, cursor: fixture.cursor)
+    let authority = SequencedAuthorityClient(snapshots: [recovering])
+    let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
+
+    #expect(try await inspector.recoverStoppingLease() == nil)
+    await #expect(throws: AuthorityDomainError(code: .globalAuthorityRecovering)) {
+      _ = try await inspector.beginStop(for: fixture.descriptor)
+    }
+    await #expect(throws: AuthorityDomainError(code: .globalAuthorityRecovering)) {
+      try await inspector.completeStop(
+        NativeAuthorityStopContext(operation: fixture.operation, leaseID: fixture.leaseID))
+    }
+    #expect(try await inspector.cancelPreparedStart(for: fixture.descriptor))
+    #expect(await authority.counts() == (cancel: 0, begin: 0, complete: 0, reconcile: 0))
+  }
+
+  @Test func recoveringCancellationRejectsACursorNewerThanTheFailedStart() async throws {
+    let fixture = try AuthorityLeaseFixture()
+    let newerCursor = try ReplayCursor(
+      installationID: fixture.cursor.installationID,
+      acceptedEpoch: fixture.descriptor.epoch,
+      acceptedGeneration: fixture.descriptor.generation + 1,
+      revision: fixture.cursor.revision + 1,
+      previousRecordSHA256: fixture.cursor.previousRecordSHA256)
+    let recovering = try fixture.snapshot(
+      state: .recovering, revision: newerCursor.revision, cursor: newerCursor)
+    let inspector = GlobalAuthorityEngineLeaseInspector(
+      authority: SequencedAuthorityClient(snapshots: [recovering]))
+
+    await #expect(throws: AuthorityDomainError(code: .replayRejected)) {
+      try await inspector.cancelPreparedStart(for: fixture.descriptor)
+    }
+  }
+
   @Test func restartReconciliationBindsExactCursorAndOwnerOffEvidence() async throws {
     let fixture = try AuthorityLeaseFixture()
     let recovering = try fixture.snapshot(

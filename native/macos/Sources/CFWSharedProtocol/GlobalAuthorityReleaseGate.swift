@@ -12,7 +12,6 @@ public enum GlobalAuthorityProofStatus: String, CaseIterable, Sendable {
 public enum GlobalAuthorityGateError: Error, Equatable, Sendable {
   case proofMissing(GlobalAuthorityProofStatus)
 
-  public static let stableCode = "global-authority-unavailable"
   public static let stableMessage =
     "Global Authority registration, approval, identity, availability, and protocol compatibility are not proven."
 }

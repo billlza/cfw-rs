@@ -18,6 +18,9 @@ protocol ProxySystemProxyOwning: Sendable {
     completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
   )
   func snapshot(completionHandler: @escaping @Sendable (EngineSnapshot) -> Void)
+  /// Restores the System Proxy settings left for want of the network
+  /// preferences rights the user just granted; see `ProxySessionLifecycle`.
+  func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void)
 }
 
 /// One-use Host→ProxyAgent authorization package. The high-entropy capability
@@ -312,6 +315,10 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     requestStop(
       expectedConfiguration: expectedConfiguration,
       completion: completionHandler)
+  }
+
+  func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
+    lifecycle.restoreSettingsAfterAuthorization(completionHandler: completionHandler)
   }
 
   func snapshot(completionHandler: @escaping @Sendable (EngineSnapshot) -> Void) {

@@ -57,7 +57,9 @@ example because the route refuses it, fails the start too: System Proxy then
 reports that its runtime could not be started, and Tunnel reports that readiness
 timeout. If the engine cannot be closed after any of these failures, the start
 reports instead that global cleanup could not be proven, and neither System
-Proxy nor Tunnel starts again until the Mac restarts. In Tunnel mode,
+Proxy nor Tunnel starts again until the network is proven Off; turning the mode
+off proves it once the ProxyAgent or the tunnel extension has ended (see
+General). In Tunnel mode,
 connections stall until that start ends, because macOS already routes traffic
 into the tunnel. Datasets that finished are cached, so the next attempt
 downloads only the rest; a dataset that cannot download within the limit on that

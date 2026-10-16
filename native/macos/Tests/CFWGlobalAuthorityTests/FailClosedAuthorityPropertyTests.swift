@@ -201,7 +201,7 @@ private struct FailClosedAuthorityProperty {
     // Gate 3 — real Authority service handshake rejection path.
     let core = GlobalAuthorityServiceCore(
       reducer: try .unEnrolledOff(), journal: FakeJournal(),
-      randomness: FakeRandomness(), clock: FakeClock())
+      randomness: FakeRandomness(), clock: FakeClock(), processTable: EmptyAuthorityProcessTable())
     guard (try? core.handshake(HandshakeRequest(version: version))) != nil else {
       return StartResult(actions: [], disposition: .failed)
     }

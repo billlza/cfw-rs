@@ -163,15 +163,49 @@
   its process, so macOS releases the listeners, connections and descriptors
   that close left open. libbox closes an engine only once, so retrying the
   close could never succeed, and what it left open stayed open while the
-  process ran. The ProxyAgent ends only once it has restored the system proxy
-  settings it changed; while it cannot, it keeps running and tries again at
-  the next Off, or after the Mac restarts if the app was quit meanwhile. The
-  failure is reported as "Global cleanup could not be proven", also by a
-  System Proxy or Local Proxy stop, which reported a rejected configuration,
-  and by a Tunnel start as soon as the extension reports it rather than
-  after the 20-second readiness timeout, unless the extension ends before
-  macOS delivers that report. As before, the network Authority then accepts
-  no start until the Mac restarts.
+  process ran. A close still unfinished 2 seconds into a stop, and an
+  interrupted start still inside the engine 5.5 seconds after its deadline,
+  count the same: they no longer hold every later reply and stop without
+  end. The ProxyAgent ends only once it has restored the system proxy
+  settings it changed, and no sooner than 11 seconds after it started, so
+  macOS starts its successor at once instead of holding the app's next
+  requests for up to 10 seconds. While it cannot restore them it keeps
+  running, and tries again whenever the macOS password prompt that turning
+  System Proxy off and quitting the app show is approved; after the Mac
+  restarts, that prompt also restores what an earlier ProxyAgent left. The
+  extension ends once it has answered the stop that macOS asks for after
+  receiving its report, or 2 seconds after the report when macOS asks for
+  none, and it refuses every start until then; a failure during a stop macOS
+  asked for is reported with that stop's answer. The failure is reported as
+  "Global cleanup could not be proven", also by a System Proxy or Local Proxy
+  stop, which reported a rejected configuration, and by a Tunnel start as soon
+  as the extension reports it rather than after the 20-second readiness
+  timeout, unless macOS has not received that report when the extension
+  ends. The network Authority then accepts no start until cleanup is
+  proven. Once the ProxyAgent or the extension has ended, it releases the
+  start as its restart would, so turning the mode off proves the network Off
+  again instead of having to wait for the Mac to restart. Until the network
+  Authority restarts, as it does when the Mac restarts, only the app of the
+  user who turned System Proxy on, signed in at the console, can prove its
+  settings restored.
+- A profile check whose engine instance cannot be closed now fails with an
+  error that may be retried, instead of passing while the instance stayed in
+  the ProxyAgent; every proxy, group and inbound the app writes closes. A
+  profile check or latency test whose engine panics while closing fails
+  instead of ending the ProxyAgent.
+- Report owner failures by their own meaning instead of as a rejected
+  configuration when they are no fault of the profile. A network Authority
+  error that the ProxyAgent passed on broke its reply, so the app reported it
+  as unavailable; it now reports the Authority's own error. A failure the app
+  does not know reports an internal error, or unavailable when it may be
+  retried; one whose retry flag contradicts its code, or a stop for another
+  generation than the one the ProxyAgent runs, reports a rejected identity; a
+  start or stop that overlaps another reports busy; an engine slot, process
+  boundary or request the owner cannot take reports an internal error; an
+  invalid tunnel start ticket reports an invalid ticket, a tunnel extension
+  that cannot reach the network Authority reports that, and a tunnel status
+  the app does not know reports unavailable; and a System Proxy listener that
+  never became ready reports a runtime failure.
 - A System Proxy or Local Proxy stop no longer reports a rejected
   configuration when the ProxyAgent has no record of it, for example because
   the ProxyAgent ended as above or crashed: the stop completes if the

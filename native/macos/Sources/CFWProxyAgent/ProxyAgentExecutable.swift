@@ -10,6 +10,7 @@ enum ProxyAgentRuntimeError: Error {
 
 public enum ProxyAgentExecutable {
   public static func run() throws -> Never {
+    let launchedAt = DispatchTime.now()
     let identityPolicy = try CodeIdentityPolicy.fromMainBundle()
     guard
       let machServiceName = Bundle.main.object(
@@ -39,7 +40,7 @@ public enum ProxyAgentExecutable {
       keychainAccessGroup: journalKeychainAccessGroup
     )
     let connections = ProxyAgentConnections()
-    let processExit = ProxyAgentProcessExit(connections: connections)
+    let processExit = ProxyAgentProcessExit(connections: connections, launchedAt: launchedAt)
     let preferences = SCPreferencesSystemProxyPreferences()
     let credentialVault = try CredentialVault(accessGroup: credentialKeychainAccessGroup)
     // Machine-wide Proxy/Tunnel/multi-user exclusion is owned by the Global Authority

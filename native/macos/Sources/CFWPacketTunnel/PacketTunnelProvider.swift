@@ -74,122 +74,59 @@ extension PacketTunnelProviderError: LocalizedError {
 
 extension PacketTunnelProviderError {
   var engineFailure: EngineFailure {
-    let fields: (code: String, message: String, isRetryable: Bool) =
-      switch self {
-      case .providerUnavailable:
-        (
-          "tunnel-provider-unavailable",
-          "Packet tunnel provider lifecycle is unavailable.",
-          true
-        )
-      case .globalAuthorityUnavailable:
-        (
-          GlobalAuthorityGateError.stableCode,
-          GlobalAuthorityGateError.stableMessage,
-          false
-        )
-      case .invalidStartTicket:
-        (
-          "tunnel-start-ticket-invalid",
-          "Packet tunnel start ticket is missing or invalid.",
-          false
-        )
-      case .expiredStartTicket:
-        (
-          TunnelStartupFailure.ticketExpired.code,
-          TunnelStartupFailure.ticketExpired.message,
-          true
-        )
-      case .malformedProviderConfiguration:
-        (
-          "tunnel-provider-configuration-malformed",
-          "Packet tunnel provider configuration is malformed.",
-          false
-        )
-      case .invalidConfigurationSlot:
-        (
-          "tunnel-configuration-slot-invalid",
-          "Packet tunnel received a configuration for another engine slot.",
-          false
-        )
-      case .lifecycleConflict:
-        (
-          "tunnel-lifecycle-conflict",
-          "Packet tunnel already owns a starting, active, or failed runtime.",
-          false
-        )
-      case .startupCancelled:
-        (
-          "tunnel-startup-cancelled",
-          "Packet tunnel startup was cancelled.",
-          false
-        )
-      case .configuration:
-        (
-          "tunnel-configuration-invalid",
-          "Packet tunnel configuration validation failed.",
-          false
-        )
-      case .engineCreation:
-        (
-          "tunnel-engine-creation-failed",
-          "Packet tunnel engine creation failed.",
-          true
-        )
-      case .packetPumpSetup:
-        (
-          "tunnel-packet-pump-setup-failed",
-          "Packet tunnel packet pump setup failed.",
-          true
-        )
-      case .packetPump:
-        (
-          "tunnel-packet-pump-failed",
-          "Packet tunnel packet transport failed.",
-          true
-        )
-      case .engineStart:
-        (
-          "tunnel-engine-start-failed",
-          "Packet tunnel engine startup failed.",
-          true
-        )
-      case .engineStartTimedOut:
-        (
-          TunnelStartupFailure.engineStartTimedOut.code,
-          TunnelStartupFailure.engineStartTimedOut.message,
-          TunnelStartupFailure.engineStartTimedOut.isRetryable
-        )
-      case .mixedEndpointConflict(let port):
-        (
-          "mixed-endpoint-in-use",
-          "The Packet Tunnel mixed endpoint could not bind to port \(port).",
-          false
-        )
-      case .controllerEndpointConflict(let port):
-        (
-          "controller-endpoint-in-use",
-          "The Packet Tunnel controller endpoint could not bind to port \(port).",
-          false
-        )
-      case .engineUnclosable:
-        (
-          TunnelStartupFailure.engineUnclosable.code,
-          TunnelStartupFailure.engineUnclosable.message,
-          TunnelStartupFailure.engineUnclosable.isRetryable
-        )
-      case .networkSettings:
-        (
-          "tunnel-network-settings-failed",
-          "Packet tunnel network settings failed.",
-          true
-        )
-      }
-    return EngineFailure(
-      code: fields.code,
-      message: fields.message,
-      isRetryable: fields.isRetryable
-    )
+    switch self {
+    case .providerUnavailable:
+      EngineFailure(
+        .providerUnavailable, message: "Packet tunnel provider lifecycle is unavailable.")
+    case .globalAuthorityUnavailable:
+      EngineFailure(
+        .globalAuthorityUnavailable, message: GlobalAuthorityGateError.stableMessage)
+    case .invalidStartTicket:
+      EngineFailure(
+        .startTicketInvalid, message: "Packet tunnel start ticket is missing or invalid.")
+    case .expiredStartTicket:
+      TunnelStartupFailure.ticketExpired
+    case .malformedProviderConfiguration:
+      EngineFailure(
+        .providerConfigurationMalformed,
+        message: "Packet tunnel provider configuration is malformed.")
+    case .invalidConfigurationSlot:
+      EngineFailure(
+        .configurationSlotInvalid,
+        message: "Packet tunnel received a configuration for another engine slot.")
+    case .lifecycleConflict:
+      EngineFailure(
+        .lifecycleConflict,
+        message: "Packet tunnel already owns a starting, active, or failed runtime.")
+    case .startupCancelled:
+      EngineFailure(.startupCancelled, message: "Packet tunnel startup was cancelled.")
+    case .configuration:
+      EngineFailure(
+        .configurationInvalid, message: "Packet tunnel configuration validation failed.")
+    case .engineCreation:
+      EngineFailure(.engineCreationFailed, message: "Packet tunnel engine creation failed.")
+    case .packetPumpSetup:
+      EngineFailure(
+        .packetPumpSetupFailed, message: "Packet tunnel packet pump setup failed.")
+    case .packetPump:
+      EngineFailure(.packetPumpFailed, message: "Packet tunnel packet transport failed.")
+    case .engineStart:
+      EngineFailure(.engineStartFailed, message: "Packet tunnel engine startup failed.")
+    case .engineStartTimedOut:
+      TunnelStartupFailure.engineStartTimedOut
+    case .mixedEndpointConflict(let port):
+      EngineFailure(
+        .mixedEndpointInUse,
+        message: "The Packet Tunnel mixed endpoint could not bind to port \(port).")
+    case .controllerEndpointConflict(let port):
+      EngineFailure(
+        .controllerEndpointInUse,
+        message: "The Packet Tunnel controller endpoint could not bind to port \(port).")
+    case .engineUnclosable:
+      TunnelStartupFailure.engineUnclosable
+    case .networkSettings:
+      EngineFailure(.networkSettingsFailed, message: "Packet tunnel network settings failed.")
+    }
   }
 }
 
@@ -228,7 +165,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       cancelTunnel: { [weak self] error in
         self?.cancelTunnelWithError(error)
       },
-      endProcess: { Self.endProcess(after: $0) })
+      endProcess: { PacketTunnelProcessEnd.shared.spent($0) })
     sessionLifecycle = lifecycle
     // The Provider redeems the opaque ticket only through the authenticated,
     // bounded Global Authority channel. No configuration/credential fallback
@@ -297,6 +234,10 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       completionHandler(error)
       return
     }
+    if let refusal = Self.startRefusal(PacketTunnelProcessEnd.shared, configuration: descriptor) {
+      completionHandler(refusal)
+      return
+    }
     startCoordinator.start(
       ticket: ticket,
       descriptor: descriptor,
@@ -323,20 +264,35 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     }
   }
 
-  /// libbox could not close the tunnel's runtime, and only the extension's
-  /// process ending releases what that close left open. Network Extension
-  /// removes the tunnel's routes, DNS and proxy settings with the session and
-  /// launches the extension again for the next start. `_exit` skips atexit
-  /// handlers while libbox's threads still run.
-  private static func endProcess(after failure: LibboxInstanceUnclosable) {
-    logger.fault("libbox could not close the tunnel runtime; ending the extension")
-    _exit(EX_SOFTWARE)
+  /// A provider Network Extension creates in a process whose runtime libbox
+  /// could not close does not start: that process cannot release what the
+  /// close left open. It fails with the start's lineage, as the spent runtime's
+  /// own starts do.
+  static func startRefusal(
+    _ processEnd: PacketTunnelProcessEnd, configuration: ConfigurationDescriptor
+  ) -> Error? {
+    guard processEnd.spentFailure != nil else { return nil }
+    return TunnelStartupFailure.engineUnclosableError(configuration: configuration)
+  }
+
+  /// Answers the stop Network Extension asked for, and only then lets a spent
+  /// extension end.
+  static func stopCompletion(
+    _ platformCompletion: @escaping @Sendable () -> Void,
+    processEnd: PacketTunnelProcessEnd
+  ) -> @Sendable () -> Void {
+    {
+      platformCompletion()
+      processEnd.networkExtensionStopAnswered()
+    }
   }
 
   public override func stopTunnel(
     with reason: NEProviderStopReason,
-    completionHandler: @escaping @Sendable () -> Void
+    completionHandler platformCompletion: @escaping @Sendable () -> Void
   ) {
+    let completionHandler = Self.stopCompletion(
+      platformCompletion, processEnd: PacketTunnelProcessEnd.shared)
     guard let startCoordinator else {
       guard let sessionLifecycle else {
         cancelTunnelWithError(PacketTunnelProviderError.providerUnavailable)
@@ -376,10 +332,8 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         let response = ResponseEnvelope(
           requestID: request.requestID,
           failure: EngineFailure(
-            code: "unsupported-provider-command",
-            message: "The packet tunnel provider accepts snapshot requests only.",
-            isRetryable: false
-          )
+            .unsupportedCommand,
+            message: "The packet tunnel provider accepts snapshot requests only.")
         )
         completion.finish(try ProtocolCodec.encode(response))
         return

@@ -720,7 +720,7 @@ struct TicketOnlyStartupTests {
 
     #expect(start.wait())
     let failure = try #require(start.values.first ?? nil).engineFailure
-    #expect(failure.code == NativeBridgeErrorCode.ticketExpired.rawValue)
+    #expect(failure.code == PacketTunnelFailureCode.startTicketExpired.rawValue)
     #expect(authority.redeemCount == 1)
     #expect(fixture.engine.startCount == 0)
     #expect(fixture.pump.startCount == 0)
@@ -1005,7 +1005,9 @@ struct TicketOnlyStartupTests {
     #expect(failedStop.wait())
     #expect(fixture.processEnds.wait())
     #expect(unclosableStopFailure(failedStop.values.first) == closeFailure)
-    #expect(fixture.events.values == ["stop", "end"])
+    // The process end is armed before the failure completes anything; it
+    // ends the process only once Network Extension received the completions.
+    #expect(fixture.events.values == ["end", "stop"])
     #expect(authority.stoppedAttemptCount == 0)
     #expect(authority.stoppedAttestations.isEmpty)
     #expect(fixture.engine.stopCount == 1)
@@ -1029,7 +1031,7 @@ struct TicketOnlyStartupTests {
     #expect(fixture.processEnds.values == [closeFailure])
   }
 
-  @Test func unclosableRuntimeFailsTheStartWithoutAttestingThenEndsTheProcess() throws {
+  @Test func unclosableRuntimeArmsTheProcessEndAndFailsTheStartWithoutAttesting() throws {
     let fixtureData = try makeRedeemedFixture(
       descriptor: try tunnelDescriptor(), withSecretSlot: false)
     let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
@@ -1049,7 +1051,9 @@ struct TicketOnlyStartupTests {
     #expect(fixture.processEnds.wait())
 
     #expect(start.values == [.engineUnclosable(closeFailure)])
-    #expect(fixture.events.values == ["start", "end"])
+    // The process end is armed before the failure completes anything; it
+    // ends the process only once Network Extension received the completions.
+    #expect(fixture.events.values == ["end", "start"])
     #expect(fixture.processEnds.values == [closeFailure])
     #expect(authority.readyAttestations.isEmpty)
     #expect(authority.stoppedAttemptCount == 0)

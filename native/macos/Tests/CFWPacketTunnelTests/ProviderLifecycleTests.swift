@@ -437,9 +437,12 @@ private func tunnelDescriptor() throws -> ConfigurationDescriptor {
   )
 }
 
+/// `processEnd` receives the failure after it was recorded, as the provider's
+/// process end would.
 private func fixture(
   failingAt stage: StartupFailureStage?,
-  engineStartError: any Error = ForcedFailure.requested
+  engineStartError: any Error = ForcedFailure.requested,
+  processEnd: PacketTunnelProcessEnd? = nil
 ) throws -> ProviderFixture {
   let descriptor = try tunnelDescriptor()
   let configuration = Data("{}".utf8)
@@ -510,6 +513,7 @@ private func fixture(
     endProcess: { failure in
       events.record("end")
       endRecorder.record(failure)
+      processEnd?.spent(failure)
     }
   )
   return ProviderFixture(
@@ -529,27 +533,39 @@ private func fixture(
 
 @Suite(.serialized)
 struct ProviderLifecycleTests {
+  /// Each failure the provider reports, with the code and retry flag the Host
+  /// decides on: a swapped code or flag changes whether the Host asks again.
   @Test func everyProviderFailureProducesAStableEncodableSnapshot() throws {
-    let errors: [PacketTunnelProviderError] = [
-      .providerUnavailable,
-      .invalidStartTicket,
-      .malformedProviderConfiguration,
-      .invalidConfigurationSlot,
-      .lifecycleConflict,
-      .startupCancelled,
-      .configuration("secret configuration detail"),
-      .engineCreation("secret engine detail"),
-      .packetPumpSetup("secret pump setup detail"),
-      .packetPump(.socketWriteFailed(EMSGSIZE)),
-      .engineStart("secret engine start detail"),
-      .engineUnclosable(LibboxInstanceUnclosable(closeFailure: "secret close detail")),
-      .networkSettings("secret network detail"),
+    let errors: [(error: PacketTunnelProviderError, code: String, retryable: Bool)] = [
+      (.providerUnavailable, "tunnel-provider-unavailable", true),
+      (.globalAuthorityUnavailable, "global-authority-unavailable", false),
+      (.invalidStartTicket, "tunnel-start-ticket-invalid", false),
+      (.expiredStartTicket, "tunnel-start-ticket-expired", true),
+      (.malformedProviderConfiguration, "tunnel-provider-configuration-malformed", false),
+      (.invalidConfigurationSlot, "tunnel-configuration-slot-invalid", false),
+      (.lifecycleConflict, "tunnel-lifecycle-conflict", false),
+      (.startupCancelled, "tunnel-startup-cancelled", false),
+      (.configuration("secret configuration detail"), "tunnel-configuration-invalid", false),
+      (.engineCreation("secret engine detail"), "tunnel-engine-creation-failed", true),
+      (.packetPumpSetup("secret pump setup detail"), "tunnel-packet-pump-setup-failed", true),
+      (.packetPump(.socketWriteFailed(EMSGSIZE)), "tunnel-packet-pump-failed", true),
+      (.engineStart("secret engine start detail"), "tunnel-engine-start-failed", true),
+      (.engineStartTimedOut, "tunnel-engine-start-timed-out", false),
+      (.controllerEndpointConflict(port: 9090), "controller-endpoint-in-use", false),
+      (.mixedEndpointConflict(port: 7890), "mixed-endpoint-in-use", false),
+      (
+        .engineUnclosable(LibboxInstanceUnclosable(closeFailure: "secret close detail")),
+        "tunnel-engine-unclosable", false
+      ),
+      (.networkSettings("secret network detail"), "tunnel-network-settings-failed", true),
     ]
     let descriptor = try tunnelDescriptor()
     var codes = Set<String>()
 
-    for error in errors {
+    for (error, code, retryable) in errors {
       let failure = error.engineFailure
+      #expect(failure.code == code, "\(error)")
+      #expect(failure.isRetryable == retryable, "\(error)")
       #expect(codes.insert(failure.code).inserted)
       #expect(!failure.message.contains("secret"))
       let snapshot = EngineSnapshot.tunnelFailed(
@@ -768,7 +784,43 @@ struct ProviderLifecycleTests {
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
   }
 
-  @Test func unclosableEngineIsSpentAndEndsTheProcessAfterTheStopCompletes() throws {
+  /// With the extension's process end armed, the failure's own stop
+  /// completion ends nothing: the extension ends once Network Extension's stop
+  /// was answered after it, and a start in between is refused.
+  @Test func aSpentLifecycleEndsTheExtensionOnlyAfterTheStopWasAnswered() throws {
+    let manual = ManualProcessEnd()
+    let processEnd = manual.processEnd()
+    let fixture = try fixture(failingAt: nil, processEnd: processEnd)
+    let start = StartCompletionRecorder()
+    fixture.lifecycle.start(
+      descriptor: fixture.descriptor,
+      configuration: fixture.configuration,
+      deadline: EngineStartDeadline(receivedAt: .now)
+    ) { start.record($0) }
+    #expect(fixture.settingsGate.waitUntilInstalled())
+    fixture.settingsGate.complete(nil)
+    #expect(start.wait())
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    fixture.engine.failStops(with: closeFailure)
+
+    let failedStop = StopCompletionRecorder()
+    let completion = PacketTunnelProvider.stopCompletion(
+      { fixture.events.record("answered") }, processEnd: processEnd)
+    fixture.lifecycle.stop { result in
+      completion()
+      failedStop.record(result)
+    }
+    #expect(failedStop.wait())
+    #expect(unclosableFailure(failedStop.values.first) == closeFailure)
+    #expect(fixture.events.values == ["end", "answered"])
+    #expect(manual.exits.isEmpty, "the end ran inside the stop's completion")
+    #expect(PacketTunnelProvider.startRefusal(processEnd, configuration: fixture.descriptor) != nil)
+    try #require(manual.deadlines.count == 2)
+    manual.run(1)
+    #expect(manual.exits == [EX_SOFTWARE])
+  }
+
+  @Test func unclosableEngineIsSpentAndArmsTheProcessEndBeforeTheStopCompletes() throws {
     let fixture = try fixture(failingAt: nil)
     let start = StartCompletionRecorder()
     fixture.lifecycle.start(
@@ -790,7 +842,9 @@ struct ProviderLifecycleTests {
     #expect(failedStop.wait())
     #expect(fixture.endRecorder.wait())
     #expect(unclosableFailure(failedStop.values.first) == closeFailure)
-    #expect(fixture.events.values == ["stop", "end"])
+    // The process end is armed before the failure completes anything; it
+    // ends the process only once Network Extension received the completions.
+    #expect(fixture.events.values == ["end", "stop"])
     #expect(fixture.endRecorder.values == [closeFailure])
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 0)
@@ -822,7 +876,7 @@ struct ProviderLifecycleTests {
     #expect(fixture.cancelRecorder.values.isEmpty)
   }
 
-  @Test func unclosableEngineAfterAFailedStartFailsTheStartThenEndsTheProcess() throws {
+  @Test func unclosableEngineAfterAFailedStartArmsTheProcessEndThenFailsTheStart() throws {
     let fixture = try fixture(failingAt: .engineStart)
     let closeFailure = LibboxInstanceUnclosable(closeFailure: "close failed service")
     fixture.engine.failStops(with: closeFailure)
@@ -841,7 +895,9 @@ struct ProviderLifecycleTests {
     #expect(fixture.endRecorder.wait())
 
     #expect(start.values == [.engineUnclosable(closeFailure)])
-    #expect(fixture.events.values == ["start", "end"])
+    // The process end is armed before the failure completes anything; it
+    // ends the process only once Network Extension received the completions.
+    #expect(fixture.events.values == ["end", "start"])
     #expect(fixture.endRecorder.values == [closeFailure])
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 0)
@@ -850,7 +906,7 @@ struct ProviderLifecycleTests {
       fixture.lifecycle.testingSnapshot().state.failure?.code == "tunnel-engine-unclosable")
   }
 
-  @Test func unclosableEngineAfterAPumpFailureCancelsTheTunnelThenEndsTheProcess() throws {
+  @Test func unclosableEngineAfterAPumpFailureArmsTheProcessEndThenCancelsTheTunnel() throws {
     let fixture = try fixture(failingAt: nil)
     let start = StartCompletionRecorder()
     fixture.lifecycle.start(
@@ -872,7 +928,9 @@ struct ProviderLifecycleTests {
     _ = fixture.lifecycle.testingSnapshot()
 
     #expect(fixture.cancelRecorder.values == [.engineUnclosable(closeFailure)])
-    #expect(fixture.events.values == ["cancel", "end"])
+    // The process end is armed before the failure completes anything; it
+    // ends the process only once Network Extension received the completions.
+    #expect(fixture.events.values == ["end", "cancel"])
     #expect(fixture.endRecorder.values == [closeFailure])
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 0)

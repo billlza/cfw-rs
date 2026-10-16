@@ -237,42 +237,7 @@ extension NativeBridgeCoordinator {
       case .authorizationFailed:
         return .failure(.unavailable, error.localizedDescription)
       case .agentFailure(let failure):
-        if failure.code.hasPrefix("authority-"), !failure.isRetryable,
-          let code = AuthorityErrorCode(
-            rawValue: String(failure.code.dropFirst("authority-".count)))
-        {
-          return .failure(code.nativeBridgeCode, code.stableMessage)
-        }
-        if failure.code == "system-proxy-authorization-required" {
-          return .failure(.permissionDenied, failure.message)
-        }
-        if failure.code == "existing-system-proxy" {
-          return .failure(
-            .existingSystemProxy, NativeBridgeErrorCode.existingSystemProxy.stableMessage)
-        }
-        let operationFailure: NativeBridgeErrorCode? =
-          switch failure.code {
-          case "proxy-configuration-failed", "configuration-rejected":
-            .systemProxyConfigurationFailed
-          case "proxy-engine-creation-failed", "proxy-engine-start-failed", "proxy-engine-crashed":
-            .systemProxyRuntimeFailed
-          case NativeBridgeErrorCode.engineStartTimedOut.rawValue: .engineStartTimedOut
-          case "system-proxy-preferences-failed": .systemProxyPreferencesFailed
-          case "proxy-ownership-journal-failed": .systemProxyJournalFailed
-          case "proxy-engine-lease-failed": .systemProxyAuthorityFailed
-          case "proxy-cleanup-failed", "proxy-engine-unclosable", "system-proxy-ownership-conflict",
-            "proxy-recovery-blocked":
-            .cleanupUnproven
-          default: nil
-          }
-        if let operationFailure, !failure.isRetryable {
-          return .failure(operationFailure, operationFailure.stableMessage)
-        }
-        return .failure(
-          endpointConflictCode(failure, allowsMixed: true)
-            ?? (failure.isRetryable ? .unavailable : .configurationRejected),
-          error.localizedDescription
-        )
+        return proxyAgentFailure(failure)
       case .registrationFailed, .malformedResponse, .responseMismatch:
         return .failure(.identityRejected, error.localizedDescription)
       }
@@ -325,22 +290,7 @@ extension NativeBridgeCoordinator {
       case .cleanupUnproven(let message):
         return .failure(.cleanupUnproven, message)
       case .providerFailure(let failure):
-        if failure.code == NativeBridgeErrorCode.ticketExpired.rawValue {
-          return .failure(.ticketExpired, failure.message)
-        }
-        if failure.code == NativeBridgeErrorCode.engineStartTimedOut.rawValue {
-          return .failure(
-            .engineStartTimedOut, NativeBridgeErrorCode.engineStartTimedOut.stableMessage)
-        }
-        if failure.code == TunnelStartupFailure.engineUnclosable.code {
-          return .failure(
-            .cleanupUnproven, NativeBridgeErrorCode.cleanupUnproven.stableMessage)
-        }
-        return .failure(
-          endpointConflictCode(failure, allowsMixed: false)
-            ?? (failure.isRetryable ? .unavailable : .configurationRejected),
-          error.localizedDescription
-        )
+        return packetTunnelFailure(failure)
       case .globalAuthorityUnavailable:
         return .failure(.globalAuthorityUnavailable, GlobalAuthorityGateError.stableMessage)
       case .invalidConfigurationSlot:
@@ -435,17 +385,117 @@ extension NativeBridgeCoordinator {
     return .failure(.internal, "Native bridge failed at an explicit internal boundary.")
   }
 
-  private static func endpointConflictCode(
-    _ failure: EngineFailure,
-    allowsMixed: Bool
-  ) -> NativeBridgeErrorCode? {
-    switch failure.code {
-    case "mixed-endpoint-in-use":
-      !failure.isRetryable && allowsMixed ? .mixedEndpointInUse : .identityRejected
-    case "controller-endpoint-in-use":
-      !failure.isRetryable ? .controllerEndpointInUse : .identityRejected
-    default: nil
+  /// Maps what the ProxyAgent reported. The Host and the ProxyAgent ship in one
+  /// signed app, so a code the Host does not know, or a known code whose retry
+  /// flag contradicts it, is a fault of the two sides, never the user's
+  /// configuration.
+  private static func proxyAgentFailure(_ failure: EngineFailure) -> NativeBridgeExecutionError {
+    guard let reported = ProxyAgentFailure(code: failure.code) else {
+      return unrecognizedOwnerFailure(failure)
     }
+    guard reported.isRetryable == failure.isRetryable else {
+      return .failure(.identityRejected, NativeBridgeErrorCode.identityRejected.stableMessage)
+    }
+    switch reported {
+    case .authority(let authority):
+      return .failure(authority.nativeBridgeCode, authority.stableMessage)
+    case .agent(let agent):
+      let code = nativeCode(forProxyAgent: agent)
+      return .failure(code, code.stableMessage)
+    }
+  }
+
+  private static func nativeCode(forProxyAgent code: ProxyAgentFailureCode) -> NativeBridgeErrorCode
+  {
+    switch code {
+    case .invalidConfigurationSlot, .startRequiresOwnerAuthorization, .missingStopGeneration,
+      .wrongProcessBoundary:
+      .internal
+    case .lifecycleConflict, .startupCancelled:
+      .busy
+    case .staleStopRequest, .stopWithoutSession, .invalidOwnerAuthorization,
+      .invalidRuntimeConfiguration:
+      .identityRejected
+    case .recoveryBlocked, .engineUnclosable, .ownershipConflict, .cleanupFailed:
+      .cleanupUnproven
+    case .authorizationRequired:
+      .permissionDenied
+    case .engineLeaseFailed:
+      .systemProxyAuthorityFailed
+    case .configurationFailed, .configurationRejected:
+      .systemProxyConfigurationFailed
+    case .engineCreationFailed, .engineStartFailed, .engineCrashed, .listenerReadinessTimedOut:
+      .systemProxyRuntimeFailed
+    case .engineStartTimedOut:
+      .engineStartTimedOut
+    case .mixedEndpointInUse:
+      .mixedEndpointInUse
+    case .controllerEndpointInUse:
+      .controllerEndpointInUse
+    case .preferencesFailed:
+      .systemProxyPreferencesFailed
+    case .existingSystemProxy:
+      .existingSystemProxy
+    case .ownershipJournalFailed:
+      .systemProxyJournalFailed
+    case .invalidValidationRequest, .profileProbeInvalid:
+      .configurationRejected
+    case .validatorUnavailable, .validatorFailed, .configurationCheckCleanupFailed,
+      .profileProbeBusy, .profileProbeFailed:
+      .unavailable
+    }
+  }
+
+  /// Maps what the Packet Tunnel provider reported, under the same rules as a
+  /// ProxyAgent failure.
+  private static func packetTunnelFailure(_ failure: EngineFailure) -> NativeBridgeExecutionError {
+    guard let reported = PacketTunnelFailureCode(rawValue: failure.code) else {
+      return unrecognizedOwnerFailure(failure)
+    }
+    guard reported.isRetryable == failure.isRetryable else {
+      return .failure(.identityRejected, NativeBridgeErrorCode.identityRejected.stableMessage)
+    }
+    let code = nativeCode(forPacketTunnel: reported)
+    return .failure(code, code.stableMessage)
+  }
+
+  private static func nativeCode(forPacketTunnel code: PacketTunnelFailureCode)
+    -> NativeBridgeErrorCode
+  {
+    switch code {
+    case .providerUnavailable, .engineCreationFailed, .packetPumpSetupFailed, .packetPumpFailed,
+      .engineStartFailed, .networkSettingsFailed, .unknownConnectionStatus:
+      .unavailable
+    case .globalAuthorityUnavailable:
+      .globalAuthorityUnavailable
+    case .startTicketInvalid:
+      .ticketInvalid
+    case .startTicketExpired:
+      .ticketExpired
+    case .providerConfigurationMalformed, .configurationInvalid:
+      .configurationRejected
+    case .configurationSlotInvalid, .unsupportedCommand:
+      .internal
+    case .lifecycleConflict, .startupCancelled:
+      .busy
+    case .engineStartTimedOut:
+      .engineStartTimedOut
+    // The tunnel's runtime never reports a mixed-endpoint conflict:
+    // LibboxRuntimeEndpointConflict accepts one only for System Proxy.
+    case .mixedEndpointInUse:
+      .identityRejected
+    case .controllerEndpointInUse:
+      .controllerEndpointInUse
+    case .engineUnclosable:
+      .cleanupUnproven
+    }
+  }
+
+  private static func unrecognizedOwnerFailure(
+    _ failure: EngineFailure
+  ) -> NativeBridgeExecutionError {
+    let code: NativeBridgeErrorCode = failure.isRetryable ? .unavailable : .internal
+    return .failure(code, code.stableMessage)
   }
 
   private static func preferenceFailure(
@@ -458,14 +508,5 @@ extension NativeBridgeCoordinator {
       code,
       "Network Extension preference \(operation) failed (\(failure.domain):\(failure.code)): \(failure.diagnostic)"
     )
-  }
-
-  static func publicMessage(_ error: Error) -> String {
-    if let error = error as? NativeBridgeExecutionError {
-      switch error {
-      case .failure(_, let message): return message
-      }
-    }
-    return error.localizedDescription
   }
 }

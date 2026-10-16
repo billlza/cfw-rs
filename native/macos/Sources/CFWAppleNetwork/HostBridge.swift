@@ -914,6 +914,9 @@ private struct ClosureAuthorityPreparationRevoker: AuthorityPreparationRevoking 
 public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperating,
   ManagedTunnelPreferences
 {
+  /// How long a stop waits for macOS to report the tunnel disconnected.
+  package static let tunnelStopWait: Duration = .seconds(5)
+
   private let providerBundleIdentifier: String
   private let installer: any SystemExtensionInstalling
   private let preparer: any TunnelStartPreparing
@@ -1121,8 +1124,10 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     pendingStartedConfiguration = nil
     manager.connection.stopVPNTunnel()
 
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: .seconds(5))
+    // Awake time, as the provider's bound on closing libbox counts it, so a
+    // sleep during the stop cannot end this wait before that bound.
+    let clock = SuspendingClock()
+    let deadline = clock.now.advanced(by: Self.tunnelStopWait)
     while clock.now < deadline {
       switch manager.connection.status {
       case .disconnected, .invalid:
@@ -1181,10 +1186,8 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     @unknown default:
       return .tunnelFailed(
         EngineFailure(
-          code: "unknown-nevpn-status",
-          message: "NetworkExtension returned an unknown VPN status.",
-          isRetryable: false
-        ),
+          .unknownConnectionStatus,
+          message: "NetworkExtension returned an unknown VPN status."),
         configuration: try manager.configurationDescriptor(),
         sequence: 0
       )

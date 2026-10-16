@@ -73,7 +73,10 @@ public struct EngineFailure: Codable, Equatable, Sendable {
   public let message: String
   public let isRetryable: Bool
 
-  public init(code: String, message: String, isRetryable: Bool) {
+  /// A failure under a raw code. Owners report through the typed codes
+  /// (`ProxyAgentFailure`, `PacketTunnelFailureCode`), which fix each code's
+  /// retry flag; this one is for decoding and tests.
+  package init(code: String, message: String, isRetryable: Bool) {
     self.code = code
     self.message = message
     self.isRetryable = isRetryable

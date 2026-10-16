@@ -1,3 +1,4 @@
+import CFWSharedProtocol
 import CryptoKit
 import Darwin
 import Foundation
@@ -15,14 +16,6 @@ package struct Installed40019ServiceProcessIdentity: Equatable, Sendable {
   package let startSeconds: UInt64
   package let startMicroseconds: UInt64
   package let xpcCodeSigningRequirement: String
-}
-
-struct Installed40019KernelProcessIdentity: Equatable, Sendable {
-  let processIdentifier: pid_t
-  let effectiveUserIdentifier: uid_t
-  let realUserIdentifier: uid_t
-  let startSeconds: UInt64
-  let startMicroseconds: UInt64
 }
 
 private enum Installed40019ServiceIdentityError: Error, Equatable, Sendable {
@@ -204,57 +197,15 @@ package struct Installed40019ServiceProcessObserver: Sendable {
 
   static func kernelProcessIdentity(
     _ processIdentifier: pid_t
-  ) throws -> Installed40019KernelProcessIdentity {
-    var processInformation = kinfo_proc()
-    var processInformationSize = MemoryLayout<kinfo_proc>.size
-    var managementInformationBase: [Int32] = [
-      CTL_KERN, KERN_PROC, KERN_PROC_PID, processIdentifier,
-    ]
-    let status = managementInformationBase.withUnsafeMutableBufferPointer { mib in
-      withUnsafeMutablePointer(to: &processInformation) { information in
-        sysctl(
-          mib.baseAddress,
-          u_int(mib.count),
-          information,
-          &processInformationSize,
-          nil,
-          0
-        )
-      }
-    }
-    guard status == 0, processInformationSize == MemoryLayout<kinfo_proc>.size else {
+  ) throws -> KernelProcessIdentity {
+    let identity: KernelProcessIdentity?
+    do {
+      identity = try KernelProcessTable.lookup(processIdentifier)
+    } catch {
       throw Installed40019ServiceIdentityError.rejected
     }
-    return try validatedKernelProcessIdentity(
-      expectedProcessIdentifier: processIdentifier,
-      observedProcessIdentifier: processInformation.kp_proc.p_pid,
-      effectiveUserIdentifier: processInformation.kp_eproc.e_ucred.cr_uid,
-      realUserIdentifier: processInformation.kp_eproc.e_pcred.p_ruid,
-      startSeconds: processInformation.kp_proc.p_starttime.tv_sec,
-      startMicroseconds: processInformation.kp_proc.p_starttime.tv_usec
-    )
-  }
-
-  static func validatedKernelProcessIdentity(
-    expectedProcessIdentifier: pid_t,
-    observedProcessIdentifier: pid_t,
-    effectiveUserIdentifier: uid_t,
-    realUserIdentifier: uid_t,
-    startSeconds: Int,
-    startMicroseconds: Int32
-  ) throws -> Installed40019KernelProcessIdentity {
-    guard observedProcessIdentifier == expectedProcessIdentifier,
-      startSeconds > 0,
-      startMicroseconds >= 0,
-      startMicroseconds < 1_000_000
-    else { throw Installed40019ServiceIdentityError.rejected }
-    return Installed40019KernelProcessIdentity(
-      processIdentifier: observedProcessIdentifier,
-      effectiveUserIdentifier: effectiveUserIdentifier,
-      realUserIdentifier: realUserIdentifier,
-      startSeconds: UInt64(startSeconds),
-      startMicroseconds: UInt64(startMicroseconds)
-    )
+    guard let identity else { throw Installed40019ServiceIdentityError.rejected }
+    return identity
   }
 
   private func validateBundleMetadata(

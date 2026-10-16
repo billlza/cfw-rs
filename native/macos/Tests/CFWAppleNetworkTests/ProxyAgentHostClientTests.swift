@@ -957,26 +957,28 @@ struct ProxyAgentHostClientTests {
     #expect(identity.startMicroseconds < 1_000_000)
   }
 
-  @Test func kernelProcessIdentityRejectsPidAndTimestampAmbiguity() {
-    #expect(throws: (any Error).self) {
-      try Installed40019ServiceProcessObserver.validatedKernelProcessIdentity(
-        expectedProcessIdentifier: 12,
-        observedProcessIdentifier: 13,
-        effectiveUserIdentifier: 0,
-        realUserIdentifier: 0,
-        startSeconds: 1,
-        startMicroseconds: 0
-      )
-    }
-    #expect(throws: (any Error).self) {
-      try Installed40019ServiceProcessObserver.validatedKernelProcessIdentity(
-        expectedProcessIdentifier: 12,
-        observedProcessIdentifier: 12,
-        effectiveUserIdentifier: 0,
-        realUserIdentifier: 0,
-        startSeconds: 1,
-        startMicroseconds: 1_000_000
-      )
+  /// The kernel reader is shared (`KernelProcessTable`, tested with
+  /// CFWSharedProtocol); this observer rejects a pid with no process.
+  /// An ended child is never reported as running: its pid names no process,
+  /// or a later one with another start time.
+  @Test func kernelProcessIdentityRejectsAnEndedProcess() throws {
+    let child = Process()
+    child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    child.arguments = ["60"]
+    try child.run()
+    let pid = child.processIdentifier
+    let running = try Installed40019ServiceProcessObserver.kernelProcessIdentity(pid)
+    child.terminate()
+    child.waitUntilExit()
+    switch Result(catching: { try Installed40019ServiceProcessObserver.kernelProcessIdentity(pid) })
+    {
+    case .failure:
+      break
+    case .success(let later):
+      #expect(
+        later.startSeconds != running.startSeconds
+          || later.startMicroseconds != running.startMicroseconds,
+        "the ended child was reported as running")
     }
   }
 }

@@ -347,12 +347,283 @@ index fcb159fa2efbdeffb8635cead16d77629a948bba..b72e2e067b9a43a18d0537a36e899f9e
 @@ -229 +239 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request)
 -		delay, err := urltest.URLTest(ctx, url, proxy)
 +		delay, err := urltest.URLTestWithStatus(ctx, url, expected, proxy)
+diff --git a/experimental/libbox/config.go b/experimental/libbox/config.go
+index a3f47f5e033a2e06ca7352c5684c5ff2edc37b1d..e22d83f64e9090ad50445a8b4877c4d1be8dcfb9 100644
+--- a/experimental/libbox/config.go
++++ b/experimental/libbox/config.go
+@@ -220,0 +221 @@ func (s *interfaceMonitorStub) Start() error {
++// The stub monitor never starts, so closing it releases nothing and succeeds.
+@@ -222 +223 @@ func (s *interfaceMonitorStub) Close() error {
+-	return os.ErrInvalid
++	return nil
+diff --git a/experimental/libbox/config_check.go b/experimental/libbox/config_check.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d346a547e8cfffb4a5133fd4c3eaaea77ded313
+--- /dev/null
++++ b/experimental/libbox/config_check.go
+@@ -0,0 +1,64 @@
++package libbox
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"runtime/debug"
++
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing/service"
++)
++
++// ConfigurationCheck is the outcome for a configuration libbox accepted:
++// whether the instance built to check it closed, and why not.
++type ConfigurationCheck struct {
++	Closed     bool
++	CloseError string
++}
++
++// CheckConfigClosingInstance checks configContent as CheckConfig does and also
++// reports whether the instance it built closed, which CheckConfig drops. A
++// rejected configuration fails with the rejection; a close that failed is
++// reported apart from it, since libbox accepted the configuration.
++func CheckConfigClosingInstance(configContent string) (*ConfigurationCheck, error) {
++	return checkConfigClosingInstance(baseContext(nil), configContent, (*platformInterfaceStub)(nil))
++}
++
++func checkConfigClosingInstance(ctx context.Context, configContent string, platform adapter.PlatformInterface) (*ConfigurationCheck, error) {
++	options, err := parseConfig(ctx, configContent)
++	if err != nil {
++		return nil, err
++	}
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	ctx = service.ContextWith[adapter.PlatformInterface](ctx, platform)
++	instance, err := box.New(box.Options{
++		Context: ctx,
++		Options: options,
++	})
++	if err != nil {
++		return nil, err
++	}
++	if closeErr := closeRecoveringPanic(instance); closeErr != nil {
++		return &ConfigurationCheck{CloseError: closeErr.Error()}, nil
++	}
++	return &ConfigurationCheck{Closed: true}, nil
++}
++
++// closeRecoveringPanic closes an instance built to check or probe a
++// configuration. A close that panics, which Box.Start also recovers from after
++// a failed start, fails the close instead of ending the process that runs the
++// check or probe; as Box.Start does, the panic and its stack go to standard
++// error.
++func closeRecoveringPanic(instance *box.Box) (err error) {
++	defer func() {
++		if recovered := recover(); recovered != nil {
++			println("panic on close: " + fmt.Sprint(recovered))
++			debug.PrintStack()
++			err = errors.New("close panicked")
++		}
++	}()
++	return instance.Close()
++}
+diff --git a/experimental/libbox/config_check_test.go b/experimental/libbox/config_check_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4561cb5dbe537bfb7c83a82946b7939c588286c1
+--- /dev/null
++++ b/experimental/libbox/config_check_test.go
+@@ -0,0 +1,186 @@
++package libbox
++
++import (
++	"context"
++	"errors"
++	"strings"
++	"sync/atomic"
++	"testing"
++
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter"
++	tun "github.com/sagernet/sing-tun"
++	"github.com/sagernet/sing/common/logger"
++	"github.com/sagernet/sing/service"
++)
++
++// scriptedInterfaceMonitor fails or panics in its start or close as a test
++// asks and counts its closes.
++type scriptedInterfaceMonitor struct {
++	*interfaceMonitorStub
++	startErr    error
++	closeErr    error
++	closePanics bool
++	closes      atomic.Int32
++}
++
++func (m *scriptedInterfaceMonitor) Start() error { return m.startErr }
++
++func (m *scriptedInterfaceMonitor) Close() error {
++	m.closes.Add(1)
++	if m.closePanics {
++		panic("scripted interface monitor panic")
++	}
++	return m.closeErr
++}
++
++// scriptedPlatform hands every instance it is given to the scripted monitor.
++type scriptedPlatform struct {
++	*platformInterfaceStub
++	monitor *scriptedInterfaceMonitor
++}
++
++func (p scriptedPlatform) CreateDefaultInterfaceMonitor(logger.Logger) tun.DefaultInterfaceMonitor {
++	return p.monitor
++}
++
++var errScriptedMonitor = errors.New("scripted interface monitor failure")
++
++func TestCheckConfigClosingInstanceClosesWhatItBuilt(t *testing.T) {
++	check, err := CheckConfigClosingInstance(`{"outbounds":[{"type":"direct","tag":"node"}]}`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if check == nil || !check.Closed || check.CloseError != "" {
++		t.Fatalf("an accepted configuration's instance did not close: %+v", check)
++	}
++}
++
++func TestCheckConfigClosingInstanceRejectsAnInvalidConfiguration(t *testing.T) {
++	check, err := CheckConfigClosingInstance(`{"outbounds":[{"type":"no-such-type","tag":"node"}]}`)
++	if err == nil {
++		t.Fatal("accepted an unknown outbound type")
++	}
++	if check != nil {
++		t.Fatalf("a rejected configuration reported a close: %+v", check)
++	}
++}
++
++// A close that fails is reported apart from the configuration, which libbox
++// accepted.
++func TestCheckConfigClosingInstanceReportsAFailedClose(t *testing.T) {
++	monitor := &scriptedInterfaceMonitor{closeErr: errScriptedMonitor}
++	check, err := checkConfigClosingInstance(
++		baseContext(nil), `{"outbounds":[{"type":"direct","tag":"node"}]}`,
++		scriptedPlatform{monitor: monitor})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if check == nil || check.Closed || !strings.Contains(check.CloseError, errScriptedMonitor.Error()) {
++		t.Fatalf("a failed close was not reported: %+v", check)
++	}
++	if monitor.closes.Load() != 1 {
++		t.Fatalf("the instance closed %d times", monitor.closes.Load())
++	}
++}
++
++// A close that panics fails the check's close instead of ending the process
++// that runs the check.
++func TestCheckConfigClosingInstanceReportsAPanickingClose(t *testing.T) {
++	monitor := &scriptedInterfaceMonitor{closePanics: true}
++	check, err := checkConfigClosingInstance(
++		baseContext(nil), `{"outbounds":[{"type":"direct","tag":"node"}]}`,
++		scriptedPlatform{monitor: monitor})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if check == nil || check.Closed || !strings.Contains(check.CloseError, "close panicked") {
++		t.Fatalf("a panicking close was not reported: %+v", check)
++	}
++	if monitor.closes.Load() != 1 {
++		t.Fatalf("the instance closed %d times", monitor.closes.Load())
++	}
++}
++
++func scriptedProbe(t *testing.T, monitor *scriptedInterfaceMonitor) (context.Context, *box.Box) {
++	t.Helper()
++	ctx := service.ContextWith[adapter.PlatformInterface](profileProbeContext(), scriptedPlatform{monitor: monitor})
++	options, err := profileProbeOptions(ctx, `{"outbounds":[{"type":"direct","tag":"node"}]}`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	instance, err := box.New(box.Options{Context: ctx, Options: options})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return ctx, instance
++}
++
++// A probe whose start fails closes its instance once, and reports only the
++// start's failure when that close succeeded.
++func TestProfileProbeFailedStartClosesOnceAndKeepsItsCause(t *testing.T) {
++	monitor := &scriptedInterfaceMonitor{startErr: errScriptedMonitor}
++	ctx, instance := scriptedProbe(t, monitor)
++	_, err := runProfileProbe(ctx, instance, []string{"node"})
++	if err == nil || !strings.Contains(err.Error(), "profile probe startup failed") {
++		t.Fatalf("a failed start was not reported: %v", err)
++	}
++	if strings.Contains(err.Error(), "cleanup failed") {
++		t.Fatalf("a probe whose instance closed reported a failed cleanup: %v", err)
++	}
++	if monitor.closes.Load() != 1 {
++		t.Fatalf("the instance closed %d times", monitor.closes.Load())
++	}
++}
++
++func TestProfileProbeReportsAFailedCloseAfterAFailedStart(t *testing.T) {
++	monitor := &scriptedInterfaceMonitor{startErr: errScriptedMonitor, closeErr: errScriptedMonitor}
++	ctx, instance := scriptedProbe(t, monitor)
++	_, err := runProfileProbe(ctx, instance, []string{"node"})
++	if err == nil || !strings.Contains(err.Error(), "profile probe startup failed") ||
++		!strings.Contains(err.Error(), "profile probe cleanup failed") {
++		t.Fatalf("a failed start and close were not both reported: %v", err)
++	}
++	if monitor.closes.Load() != 1 {
++		t.Fatalf("the instance closed %d times", monitor.closes.Load())
++	}
++}
++
++func TestProfileProbeReportsAFailedCloseAfterItsResults(t *testing.T) {
++	monitor := &scriptedInterfaceMonitor{closeErr: errScriptedMonitor}
++	ctx, instance := scriptedProbe(t, monitor)
++	response, err := runProfileProbe(ctx, instance, []string{"missing"})
++	if err == nil || !strings.Contains(err.Error(), "profile probe cleanup failed") {
++		t.Fatalf("a failed close was not reported: %v", err)
++	}
++	if response != "" {
++		t.Fatalf("a probe whose instance did not close returned results: %q", response)
++	}
++}
++
++// A close that panics, which Box.Start recovers from after a failed start, is
++// reported as a failed cleanup instead of ending the process the probe runs in.
++func TestProfileProbeReportsAPanickingCloseAfterAFailedStart(t *testing.T) {
++	monitor := &scriptedInterfaceMonitor{startErr: errScriptedMonitor, closePanics: true}
++	ctx, instance := scriptedProbe(t, monitor)
++	_, err := runProfileProbe(ctx, instance, []string{"node"})
++	if err == nil || !strings.Contains(err.Error(), "profile probe startup failed") ||
++		!strings.Contains(err.Error(), "profile probe cleanup failed") {
++		t.Fatalf("a failed start and a panicking close were not both reported: %v", err)
++	}
++	if monitor.closes.Load() != 1 {
++		t.Fatalf("the instance closed %d times", monitor.closes.Load())
++	}
++}
++
++func TestProfileProbeReportsAPanickingCloseAfterItsResults(t *testing.T) {
++	monitor := &scriptedInterfaceMonitor{closePanics: true}
++	ctx, instance := scriptedProbe(t, monitor)
++	response, err := runProfileProbe(ctx, instance, []string{"missing"})
++	if err == nil || !strings.Contains(err.Error(), "profile probe cleanup failed") {
++		t.Fatalf("a panicking close was not reported: %v", err)
++	}
++	if response != "" {
++		t.Fatalf("a probe whose instance did not close returned results: %q", response)
++	}
++}
 diff --git a/experimental/libbox/profile_probe.go b/experimental/libbox/profile_probe.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..0d50e010b078eb1a3c71cab4ee3805b5a2c13868
+index 0000000000000000000000000000000000000000..67ee4fe20cc75d64662f7595b0646000def18183
 --- /dev/null
 +++ b/experimental/libbox/profile_probe.go
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,173 @@
 +package libbox
 +
 +import (
@@ -481,12 +752,14 @@ index 0000000000000000000000000000000000000000..0d50e010b078eb1a3c71cab4ee3805b5
 +
 +func runProfileProbeWithTarget(ctx context.Context, instance *box.Box, names []string, targetURL, expectedStatus string) (response string, err error) {
 +	defer func() {
-+		if closeErr := instance.Close(); closeErr != nil {
++		if closeErr := closeRecoveringPanic(instance); closeErr != nil {
 +			response = ""
 +			err = errors.Join(err, errors.New("profile probe cleanup failed"))
 +		}
 +	}()
-+	if startErr := instance.Start(); startErr != nil {
++	// Box.Start closes a failed start itself and drops that close's error; the
++	// deferred close above reports it instead, and closes the instance once.
++	if startErr := instance.StartWithExternalCleanup(); startErr != nil {
 +		return "", errors.New("profile probe startup failed")
 +	}
 +	results := make([]profileProbeResult, len(names))

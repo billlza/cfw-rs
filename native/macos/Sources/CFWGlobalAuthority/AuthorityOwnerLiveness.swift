@@ -79,6 +79,8 @@ public enum AuthorityLivenessAction: Equatable, Sendable {
   case expiredPreparation
   case forcedStop(AuthorityLivenessTrigger)
   case quarantinedForUnprovenCleanup
+  /// The quarantined owner's process ended, so the Authority became Recovering.
+  case recoveredFromEndedOwner
 }
 
 /// Wires bounded owner heartbeat tracking, the public live-console-user observation,
@@ -142,7 +144,9 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
 
   /// One deterministic liveness tick. Forces a stop when the owner heartbeat is stale,
   /// and escalates an owner that has not attested stopped within the timeout to
-  /// Quarantined (cleanup cannot be proven, so the machine never returns to Off).
+  /// Quarantined: cleanup cannot be proven, so the machine does not return to Off
+  /// while that owner may still run. Once its process provably ended, the
+  /// quarantine becomes Recovering, as a restart would make it.
   @discardableResult
   public func evaluate() throws -> AuthorityLivenessAction {
     switch core.authorityState {
@@ -161,7 +165,9 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
     case .stopping:
       return try core.quarantineExpiredStopIfNeeded()
         ? .quarantinedForUnprovenCleanup : .none
-    case .off, .recovering, .quarantined:
+    case .quarantined:
+      return try core.recoverFromEndedOwnerIfNeeded() ? .recoveredFromEndedOwner : .none
+    case .off, .recovering:
       return .none
     }
   }

@@ -49,7 +49,7 @@ import Testing
 
 extension CurrentAppServiceBuildIdentityTests {
   @Test func otherLoggedInUsersProxyIsNotTheCurrentUsersDuplicate() throws {
-    func process(real: uid_t, effective: uid_t) -> Installed40019KernelProcessIdentity {
+    func process(real: uid_t, effective: uid_t) -> KernelProcessIdentity {
       .init(
         processIdentifier: 42, effectiveUserIdentifier: effective,
         realUserIdentifier: real, startSeconds: 1, startMicroseconds: 0)

@@ -77,7 +77,12 @@ public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case invalidConfigurationSize(Int)
   case invalidConfigurationEncoding
   case invalidConfigurationJSON
-  case configurationCheckFailed(String)
+  case configurationCheckFailed(LibboxDiagnostic)
+  /// libbox accepted the configuration but could not close the instance it
+  /// built to check it.
+  case configurationCheckCleanupFailed(LibboxDiagnostic)
+  /// libbox returned neither a check nor an error, which its API never does.
+  case configurationCheckReturnedNothing
   case unexpectedPacketDescriptor
   case missingPacketDescriptor
   case packetDescriptorAlreadyTransferred
@@ -87,16 +92,16 @@ public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case networkMonitorTimedOut
   case alreadyStarted
   case setupConflict
-  case setupFailed(String)
-  case serverCreationFailed(String)
-  case serviceStartFailed(String)
+  case setupFailed(LibboxDiagnostic)
+  case serverCreationFailed(LibboxDiagnostic)
+  case serviceStartFailed(LibboxDiagnostic)
   /// The start did not finish by its owner's deadline (`EngineStartBudget`):
   /// it was interrupted then, or too little time was left to begin it.
   case serviceStartTimedOut
   case invalidRuntimeEndpoints
   case invalidEndpointConflict(kind: Int32, port: Int32)
   case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
-  case serviceNotRunning(state: Int32, message: String)
+  case serviceNotRunning(state: Int32, message: LibboxDiagnostic)
 }
 
 extension LibboxRuntimeError: LocalizedError {
@@ -116,8 +121,12 @@ extension LibboxRuntimeError: LocalizedError {
       return "The libbox configuration is not UTF-8."
     case .invalidConfigurationJSON:
       return "The libbox configuration is not a JSON object."
-    case .configurationCheckFailed(let message):
-      return "libbox rejected the configuration: \(message)"
+    case .configurationCheckFailed:
+      return "libbox rejected the configuration."
+    case .configurationCheckCleanupFailed:
+      return "libbox could not close the instance it built to check the configuration."
+    case .configurationCheckReturnedNothing:
+      return "libbox returned neither a configuration check nor an error."
     case .unexpectedPacketDescriptor:
       return "System Proxy must not receive a packet-flow descriptor."
     case .missingPacketDescriptor:
@@ -136,12 +145,12 @@ extension LibboxRuntimeError: LocalizedError {
       return "The libbox runtime is already starting or active."
     case .setupConflict:
       return "The process attempted to initialize libbox with different directories."
-    case .setupFailed(let message):
-      return "libbox setup failed: \(message)"
-    case .serverCreationFailed(let message):
-      return "libbox service creation failed: \(message)"
-    case .serviceStartFailed(let message):
-      return "libbox service startup failed: \(message)"
+    case .setupFailed:
+      return "libbox setup failed."
+    case .serverCreationFailed:
+      return "libbox service creation failed."
+    case .serviceStartFailed:
+      return "libbox service startup failed."
     case .serviceStartTimedOut:
       let seconds = EngineStartBudget.ownerLibboxStart.components.seconds
       return
@@ -154,26 +163,72 @@ extension LibboxRuntimeError: LocalizedError {
         "libbox returned an endpoint conflict that does not match the start receipt (kind \(kind), port \(port))."
     case .endpointConflict(let role, let port):
       return "The libbox \(role.rawValue) endpoint could not bind to port \(port)."
-    case .serviceNotRunning(let state, let message):
-      return "libbox runtime state is \(state): \(message)"
+    case .serviceNotRunning(let state, _):
+      return "libbox runtime state is \(state)."
     }
   }
 }
 
+/// Text libbox reported. libbox's errors can name outbounds, servers and paths,
+/// so the text never leaves this process: it prints as a placeholder, reflects
+/// nothing, and only this module and its tests can read it.
+public struct LibboxDiagnostic: Equatable, Sendable, CustomStringConvertible,
+  CustomDebugStringConvertible, CustomReflectable
+{
+  let text: String
+
+  init(_ text: String) {
+    self.text = text
+  }
+
+  public var description: String { "<libbox diagnostic>" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror { Mirror(self, children: []) }
+}
+
 /// libbox could not close a service instance. libbox closes an instance once
 /// (`Box.Close` reports `os.ErrClosed` from then on), so whatever that close left
-/// open stays in this process until the process ends. The runtime that throws it
-/// is spent: it never starts, closes or reports idle again. Its memberwise
-/// initializer and its close text are internal, so only the runtime makes one.
+/// open stays in this process until the process ends. A close, or an
+/// interrupted start, that does not return within its bound counts alike: a
+/// thread stays inside libbox, so nothing it may still use can be released.
+/// The runtime that throws it is spent: it never starts, closes or reports idle
+/// again. Its initializers are internal, so only the runtime makes one.
 public struct LibboxInstanceUnclosable: Error, Equatable, Sendable {
-  /// What the close reported. libbox's text can name outbounds, servers and
-  /// paths, so it never leaves this process: do not log or send it.
-  let closeFailure: String
+  enum Cause: Equatable, Sendable {
+    /// libbox's close reported this failure, which never leaves this process.
+    case closeFailed(LibboxDiagnostic)
+    /// The close had not returned within `EngineStopBudget.libboxClose`.
+    case closeDidNotReturn
+    /// The start its deadline interrupted, or that interrupt, had not returned
+    /// within `EngineStartBudget.interruptLimit`.
+    case interruptDidNotReturn
+  }
+
+  let cause: Cause
+
+  init(closeFailure: String) {
+    cause = .closeFailed(LibboxDiagnostic(closeFailure))
+  }
+
+  init(_ cause: Cause) {
+    self.cause = cause
+  }
 }
 
 extension LibboxInstanceUnclosable: LocalizedError {
   public var errorDescription: String? {
-    "libbox could not close its service instance: \(closeFailure)"
+    "libbox could not close its service instance."
+  }
+}
+
+extension LibboxInstanceUnclosable.Cause {
+  /// What kept the instance open, for logs: never libbox's own text.
+  var kind: String {
+    switch self {
+    case .closeFailed: "close failed"
+    case .closeDidNotReturn: "close did not return"
+    case .interruptDidNotReturn: "interrupt did not return"
+    }
   }
 }
 

@@ -102,6 +102,46 @@ private struct AuthorizationOnlyOwner: ProxySystemProxyOwning {
     Issue.record("Authorization must not query the engine queue")
     completionHandler(.off)
   }
+  func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
+    Issue.record("Authorization that was not granted must not restore settings")
+    completionHandler()
+  }
+}
+
+/// Records, in order, the restore that granted rights start and the reply.
+private final class RestoringOwner: ProxySystemProxyOwning, @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [String] = []
+
+  func record(_ event: String) { lock.withLock { events.append(event) } }
+  var values: [String] { lock.withLock { events } }
+
+  func start(
+    configuration: SensitiveDataBuffer, descriptor: ConfigurationDescriptor,
+    authorization: ProxyOwnerAuthorization,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not start an engine")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  func stop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not stop an engine")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  func snapshot(completionHandler: @escaping @Sendable (EngineSnapshot) -> Void) {
+    Issue.record("Authorization must not query the engine queue")
+    completionHandler(.off)
+  }
+  func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
+    record("restore-started")
+    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) {
+      self.record("restore-finished")
+      completionHandler()
+    }
+  }
 }
 
 private struct AuthorizationJournalStore: ProxyOwnershipJournalStoring {
@@ -143,6 +183,59 @@ func restorationAuthorizationRequiresAPendingJournalWithoutChangingRuntime(
     #expect(recorder.interactionFlags == [true])
   }
   #expect(recorder.createPreferencesCount == 0)
+}
+
+/// Granted rights let the agent restore settings it could not restore before,
+/// and the Host's next request sees the result: the reply waits for it.
+@Test(arguments: [true, false])
+func grantedAuthorizationRestoresLeftoverSettingsBeforeItReplies(
+  restorationOnly: Bool
+) async throws {
+  let recorder = AuthorizationOperationRecorder()
+  let preferences = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(recorder: recorder))
+  let owner = RestoringOwner()
+  let service = ProxyAgentService(
+    lifecycle: owner,
+    configurationChecker: SourceBuiltLibboxConfigurationChecker(),
+    preferences: preferences,
+    journalStore: AuthorizationJournalStore(journal: try proxyJournal(originalProxyEnabled: false)))
+
+  let error = await withCheckedContinuation { continuation in
+    service.authorizeSystemProxy(restorationOnly: restorationOnly) {
+      owner.record("reply")
+      continuation.resume(returning: $0)
+    }
+  }
+  #expect(error == nil)
+  #expect(recorder.interactionFlags == [true])
+  #expect(owner.values == ["restore-started", "restore-finished", "reply"])
+}
+
+/// The Host may ask again as soon as a reply arrives, for example for the
+/// quit-time prompt right after the Off prompt. The finished request no longer
+/// counts as pending then.
+@Test func authorizationAskedFromThePreviousReplyIsAdmitted() async throws {
+  let recorder = AuthorizationOperationRecorder()
+  let preferences = SCPreferencesSystemProxyPreferences(
+    operations: testingOperations(),
+    authorizationOperations: testingAuthorizationOperations(recorder: recorder))
+  let service = ProxyAgentService(
+    lifecycle: RestoringOwner(),
+    configurationChecker: SourceBuiltLibboxConfigurationChecker(),
+    preferences: preferences,
+    journalStore: AuthorizationJournalStore(journal: try proxyJournal(originalProxyEnabled: false)))
+
+  let errors = await withCheckedContinuation { continuation in
+    service.authorizeSystemProxy(restorationOnly: false) { first in
+      service.authorizeSystemProxy(restorationOnly: true) { second in
+        continuation.resume(returning: [first, second])
+      }
+    }
+  }
+  #expect(errors == [nil, nil])
+  #expect(recorder.interactionFlags == [true, true])
 }
 
 private func testingAuthorizationOperations(

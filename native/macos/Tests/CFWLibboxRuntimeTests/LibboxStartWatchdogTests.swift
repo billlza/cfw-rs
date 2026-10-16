@@ -8,77 +8,177 @@ import Testing
 
 private enum WatchdogTestError: Error, Equatable {
   case start
-  case interrupt
 }
 
-/// Records the deadline action instead of arming a timer, so each test decides
-/// when (and whether) the deadline fires.
+private struct CloseTestFailure: LocalizedError {
+  static let text = "watchdog test: the close failed"
+  var errorDescription: String? { Self.text }
+}
+
+private let interruptFailure = LibboxInstanceUnclosable(closeFailure: CloseTestFailure.text)
+
+/// A timer the watchdog armed: the deadline at an instant of the continuous
+/// clock, or the interrupt limit after a duration of awake time.
+private enum ArmedTimer: Equatable {
+  case at(ContinuousClock.Instant)
+  case awake(Duration)
+}
+
+/// Records each timer the watchdog arms instead of arming it, so each test
+/// decides when (and whether) each one fires: first the deadline, then the
+/// interrupt limit that a fired deadline arms.
 private final class ManualStartDeadline: @unchecked Sendable {
   private let lock = NSLock()
-  private var scheduled: [(instant: ContinuousClock.Instant, action: @Sendable () -> Void)] = []
+  private var scheduled: [(timer: ArmedTimer, action: @Sendable () -> Void)] = []
   private var cancellations = 0
 
   var schedule: LibboxStartWatchdog.Schedule {
-    { instant, action in
-      self.lock.withLock { self.scheduled.append((instant, action)) }
-      return { self.lock.withLock { self.cancellations += 1 } }
-    }
+    { instant, action in self.arm(.at(instant), action) }
   }
 
-  var scheduledInstants: [ContinuousClock.Instant] { lock.withLock { scheduled.map(\.instant) } }
+  var afterAwake: LibboxStartWatchdog.AwakeTimer {
+    { duration, action in self.arm(.awake(duration), action) }
+  }
+
+  private func arm(
+    _ timer: ArmedTimer, _ action: @escaping @Sendable () -> Void
+  ) -> LibboxStartWatchdog.Cancel {
+    lock.withLock { scheduled.append((timer, action)) }
+    return { self.lock.withLock { self.cancellations += 1 } }
+  }
+
+  var timers: [ArmedTimer] { lock.withLock { scheduled.map(\.timer) } }
   var cancelCount: Int { lock.withLock { cancellations } }
 
-  func fire() {
-    let action = lock.withLock { scheduled[0].action }
+  /// Runs the action of the `index`-th timer armed, as that timer would.
+  func fire(_ index: Int = 0) {
+    let action = lock.withLock { scheduled[index].action }
     action()
   }
+}
+
+/// The watchdog's clock, moved by hand.
+private final class ManualNow: @unchecked Sendable {
+  private let lock = NSLock()
+  private var instant: ContinuousClock.Instant
+
+  init(_ instant: ContinuousClock.Instant) { self.instant = instant }
+
+  var now: @Sendable () -> ContinuousClock.Instant { { self.lock.withLock { self.instant } } }
 }
 
 private final class InterruptRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var count = 0
-  private let failure: WatchdogTestError?
+  private let failure: LibboxInstanceUnclosable?
 
-  init(failure: WatchdogTestError? = nil) { self.failure = failure }
+  init(failure: LibboxInstanceUnclosable? = nil) { self.failure = failure }
 
   var calls: Int { lock.withLock { count } }
 
-  func interrupt() throws {
+  func interrupt() throws(LibboxInstanceUnclosable) {
     lock.withLock { count += 1 }
     if let failure { throw failure }
+  }
+}
+
+/// Holds a fake libbox call until the test opens it. A call held for thirty
+/// seconds gives up and records that it stalled, so a test that never opens
+/// the gate does not leave a thread behind; tests wait far less for anything
+/// that must happen while a call is held.
+private final class Gate: Sendable {
+  private let entered = DispatchSemaphore(value: 0)
+  private let opened = DispatchSemaphore(value: 0)
+  private let stalled = Atomic<Bool>(false)
+  private let entryCount = Atomic<Int>(0)
+
+  /// The fake call: reports that it entered, then waits for the gate.
+  func pass() {
+    entryCount.add(1, ordering: .sequentiallyConsistent)
+    entered.signal()
+    if opened.wait(timeout: .now() + .seconds(30)) == .timedOut {
+      stalled.store(true, ordering: .sequentiallyConsistent)
+    }
+  }
+
+  func awaitEntry() -> Bool { entered.wait(timeout: .now() + .seconds(10)) == .success }
+  func open() { opened.signal() }
+  var hasStalled: Bool { stalled.load(ordering: .sequentiallyConsistent) }
+  var entries: Int { entryCount.load(ordering: .sequentiallyConsistent) }
+}
+
+/// Runs the watchdog off the test's thread, so a run that does not return
+/// fails the test instead of hanging it.
+private final class BackgroundRun<Value: Sendable>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var outcome: LibboxStartWatchdog.Outcome<Value>?
+  private let returned = DispatchSemaphore(value: 0)
+
+  init(_ run: @escaping @Sendable () -> LibboxStartWatchdog.Outcome<Value>) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let outcome = run()
+      self.lock.withLock { self.outcome = outcome }
+      self.returned.signal()
+    }
+  }
+
+  /// What the run returned, or nil while it has not returned within `timeout`.
+  func awaitOutcome(within timeout: DispatchTimeInterval) -> LibboxStartWatchdog.Outcome<Value>? {
+    if let outcome = lock.withLock({ outcome }) { return outcome }
+    guard returned.wait(timeout: .now() + timeout) == .success else { return nil }
+    return lock.withLock { outcome }
   }
 }
 
 private let now = ContinuousClock.now
 private let deadline = EngineStartDeadline(receivedAt: now)
 
-private func watchdog(_ manual: ManualStartDeadline) -> LibboxStartWatchdog {
-  LibboxStartWatchdog(now: { now }, schedule: manual.schedule)
+private func watchdog(
+  _ manual: ManualStartDeadline, now clock: ManualNow = ManualNow(now)
+) -> LibboxStartWatchdog {
+  LibboxStartWatchdog(now: clock.now, schedule: manual.schedule, afterAwake: manual.afterAwake)
+}
+
+/// Runs the watchdog off the test's thread and returns its outcome, or nil
+/// after recording an issue when it did not return within ten seconds.
+private func bounded<Value: Sendable>(
+  _ run: @escaping @Sendable () -> LibboxStartWatchdog.Outcome<Value>,
+  sourceLocation: SourceLocation = #_sourceLocation
+) -> LibboxStartWatchdog.Outcome<Value>? {
+  let outcome = BackgroundRun(run).awaitOutcome(within: .seconds(10))
+  if outcome == nil {
+    Issue.record("the watchdog run did not return", sourceLocation: sourceLocation)
+  }
+  return outcome
 }
 
 @Test func startThatReturnsBeforeTheDeadlineIsNeverInterrupted() {
   let manual = ManualStartDeadline()
   let interrupts = InterruptRecorder()
-  let outcome = watchdog(manual).run(
-    deadline: deadline, interrupt: { try interrupts.interrupt() }, start: { 7 })
-  guard case .completed(.success(7)) = outcome else {
-    Issue.record("expected an in-time completion, got \(outcome)")
+  let outcome = bounded {
+    watchdog(manual).run(deadline: deadline, interrupt: interrupts.interrupt, start: { 7 })
+  }
+  guard case .completed(.success(7))? = outcome else {
+    Issue.record("expected an in-time completion, got \(String(describing: outcome))")
     return
   }
-  #expect(manual.scheduledInstants == [deadline.instant])
+  #expect(manual.timers == [.at(deadline.instant)])
   #expect(manual.cancelCount == 1)
   manual.fire()
   #expect(interrupts.calls == 0)
+  #expect(manual.timers == [.at(deadline.instant)], "a late deadline armed the limit")
 }
 
 @Test func startErrorBeforeTheDeadlineIsReportedUnchanged() {
   let manual = ManualStartDeadline()
   let interrupts = InterruptRecorder()
-  let outcome: LibboxStartWatchdog.Outcome<Void> = watchdog(manual).run(
-    deadline: deadline, interrupt: { try interrupts.interrupt() },
-    start: { throw WatchdogTestError.start })
-  guard case .completed(.failure(let error)) = outcome else {
-    Issue.record("expected the start error, got \(outcome)")
+  let outcome: LibboxStartWatchdog.Outcome<Int>? = bounded {
+    watchdog(manual).run(
+      deadline: deadline, interrupt: interrupts.interrupt,
+      start: { throw WatchdogTestError.start })
+  }
+  guard case .completed(.failure(let error))? = outcome else {
+    Issue.record("expected the start error, got \(String(describing: outcome))")
     return
   }
   #expect(error as? WatchdogTestError == .start)
@@ -90,15 +190,17 @@ private func watchdog(_ manual: ManualStartDeadline) -> LibboxStartWatchdog {
 @Test func deadlineDuringStartInterruptsOnceAndKeepsWhatTheStartReturned() {
   let manual = ManualStartDeadline()
   let interrupts = InterruptRecorder()
-  let outcome = watchdog(manual).run(
-    deadline: deadline, interrupt: { try interrupts.interrupt() },
-    start: { () -> Int in
-      manual.fire()
-      manual.fire()
-      return 7
-    })
-  guard case .interrupted(start: .success(7), interruption: .success) = outcome else {
-    Issue.record("expected an interrupted start, got \(outcome)")
+  let outcome = bounded {
+    watchdog(manual).run(
+      deadline: deadline, interrupt: interrupts.interrupt,
+      start: { () -> Int in
+        manual.fire()
+        manual.fire()
+        return 7
+      })
+  }
+  guard case .interrupted(start: .success(7), interruption: .success)? = outcome else {
+    Issue.record("expected an interrupted start, got \(String(describing: outcome))")
     return
   }
   #expect(interrupts.calls == 1)
@@ -107,14 +209,17 @@ private func watchdog(_ manual: ManualStartDeadline) -> LibboxStartWatchdog {
 @Test func deadlineDuringAFailingStartKeepsTheStartsOwnError() {
   let manual = ManualStartDeadline()
   let interrupts = InterruptRecorder()
-  let outcome: LibboxStartWatchdog.Outcome<Void> = watchdog(manual).run(
-    deadline: deadline, interrupt: { try interrupts.interrupt() },
-    start: {
-      manual.fire()
-      throw WatchdogTestError.start
-    })
-  guard case .interrupted(start: .failure(let error), interruption: .success) = outcome else {
-    Issue.record("expected the start's own error beside the interrupt, got \(outcome)")
+  let outcome: LibboxStartWatchdog.Outcome<Int>? = bounded {
+    watchdog(manual).run(
+      deadline: deadline, interrupt: interrupts.interrupt,
+      start: {
+        manual.fire()
+        throw WatchdogTestError.start
+      })
+  }
+  guard case .interrupted(start: .failure(let error), interruption: .success)? = outcome else {
+    Issue.record(
+      "expected the start's own error beside the interrupt, got \(String(describing: outcome))")
     return
   }
   #expect(error as? WatchdogTestError == .start)
@@ -123,18 +228,21 @@ private func watchdog(_ manual: ManualStartDeadline) -> LibboxStartWatchdog {
 
 @Test func failedInterruptIsSurfacedToTheCaller() {
   let manual = ManualStartDeadline()
-  let interrupts = InterruptRecorder(failure: .interrupt)
-  let outcome = watchdog(manual).run(
-    deadline: deadline, interrupt: { try interrupts.interrupt() },
-    start: { () -> Int in
-      manual.fire()
-      return 7
-    })
-  guard case .interrupted(start: .success(7), interruption: .failure(let error)) = outcome else {
-    Issue.record("expected the interrupt failure, got \(outcome)")
+  let interrupts = InterruptRecorder(failure: interruptFailure)
+  let outcome = bounded {
+    watchdog(manual).run(
+      deadline: deadline, interrupt: interrupts.interrupt,
+      start: { () -> Int in
+        manual.fire()
+        return 7
+      })
+  }
+  guard case .interrupted(start: .success(7), interruption: .failure(let error))? = outcome
+  else {
+    Issue.record("expected the interrupt failure, got \(String(describing: outcome))")
     return
   }
-  #expect(error as? WatchdogTestError == .interrupt)
+  #expect(error == interruptFailure)
   #expect(interrupts.calls == 1)
 }
 
@@ -150,85 +258,274 @@ private func watchdog(_ manual: ManualStartDeadline) -> LibboxStartWatchdog {
     let interrupts = InterruptRecorder()
     let startCalls = InterruptRecorder()
     let at = deadline.instant.advanced(by: .zero - remaining)
-    let outcome = LibboxStartWatchdog(now: { at }, schedule: manual.schedule).run(
-      deadline: deadline, interrupt: { try interrupts.interrupt() },
-      start: { () -> Int in
-        try startCalls.interrupt()
-        return 7
-      })
+    let outcome = bounded {
+      LibboxStartWatchdog(
+        now: { at }, schedule: manual.schedule, afterAwake: manual.afterAwake
+      ).run(
+        deadline: deadline, interrupt: interrupts.interrupt,
+        start: { () -> Int in
+          try startCalls.interrupt()
+          return 7
+        })
+    }
     switch outcome {
-    case .completed(.success(7)):
+    case .completed(.success(7))?:
       #expect(starts, "started with \(remaining) left")
-      #expect(manual.scheduledInstants == [deadline.instant])
-    case .notStarted:
+      #expect(manual.timers == [.at(deadline.instant)])
+    case .notStarted?:
       #expect(!starts, "refused with \(remaining) left")
-      #expect(manual.scheduledInstants.isEmpty)
+      #expect(manual.timers.isEmpty)
       #expect(startCalls.calls == 0)
     default:
-      Issue.record("unexpected outcome \(outcome) with \(remaining) left")
+      Issue.record("unexpected outcome \(String(describing: outcome)) with \(remaining) left")
     }
     #expect(interrupts.calls == 0)
   }
 }
 
-private final class OutcomeBox: @unchecked Sendable {
-  private let lock = NSLock()
-  private var interrupted = false
-  private var stalled = false
-  func record(_ outcome: LibboxStartWatchdog.Outcome<Int>) {
-    if case .interrupted(start: .success(7), interruption: .success) = outcome {
-      lock.withLock { interrupted = true }
-    }
+@Test func runWaitsForAFiredInterruptThatIsStillRunning() {
+  let manual = ManualStartDeadline()
+  let interrupt = Gate()
+  let subject = watchdog(manual)
+  let run = BackgroundRun {
+    subject.run(
+      deadline: deadline, interrupt: { interrupt.pass() },
+      start: { () -> Int in
+        manual.fire()
+        return 7
+      })
   }
-  /// A wait inside the start or the interrupt gave up instead of being released.
-  func recordStall() { lock.withLock { stalled = true } }
-  var wasInterrupted: Bool { lock.withLock { interrupted } }
-  var hasStalled: Bool { lock.withLock { stalled } }
+  #expect(interrupt.awaitEntry())
+  // The start has returned while the interrupt is still running: no return yet.
+  #expect(run.awaitOutcome(within: .milliseconds(300)) == nil)
+  interrupt.open()
+  guard
+    case .interrupted(start: .success(7), interruption: .success)? =
+      run.awaitOutcome(within: .seconds(5))
+  else {
+    Issue.record("expected the interrupted start once its interrupt returned")
+    return
+  }
+  #expect(!interrupt.hasStalled)
 }
 
-@Test func runDoesNotReturnWhileAFiredInterruptIsStillRunning() {
+/// The deadline may fire late, as when the Mac slept through it: the
+/// interrupt still has the whole limit of awake time from then on.
+@Test func firedDeadlineArmsTheWholeInterruptLimitInAwakeTime() {
   let manual = ManualStartDeadline()
-  let interruptEntered = DispatchSemaphore(value: 0)
-  let releaseInterrupt = DispatchSemaphore(value: 0)
-  let runReturned = DispatchSemaphore(value: 0)
-  let outcome = OutcomeBox()
-  let subject = watchdog(manual)
-  DispatchQueue.global().async {
-    outcome.record(
-      subject.run(
-        deadline: deadline,
-        interrupt: {
-          interruptEntered.signal()
-          if releaseInterrupt.wait(timeout: .now() + .seconds(10)) == .timedOut {
-            outcome.recordStall()
-          }
-        },
-        start: { () -> Int in
-          DispatchQueue.global().async { manual.fire() }
-          if interruptEntered.wait(timeout: .now() + .seconds(10)) == .timedOut {
-            outcome.recordStall()
-          }
-          return 7
-        }))
-    runReturned.signal()
+  let interrupts = InterruptRecorder()
+  let armedBeforeTheDeadline = Mutex<[ArmedTimer]>([])
+  let outcome = bounded {
+    watchdog(manual).run(
+      deadline: deadline, interrupt: interrupts.interrupt,
+      start: { () -> Int in
+        armedBeforeTheDeadline.withLock { $0 = manual.timers }
+        manual.fire()
+        return 7
+      })
   }
-  // The start has returned while the interrupt is still running: no return yet.
-  #expect(runReturned.wait(timeout: .now() + .milliseconds(300)) == .timedOut)
-  releaseInterrupt.signal()
-  #expect(runReturned.wait(timeout: .now() + .seconds(15)) == .success)
-  #expect(outcome.wasInterrupted)
-  #expect(!outcome.hasStalled)
+  guard case .interrupted(start: .success(7), interruption: .success)? = outcome else {
+    Issue.record("expected an interrupted start, got \(String(describing: outcome))")
+    return
+  }
+  #expect(armedBeforeTheDeadline.withLock { $0 } == [.at(deadline.instant)])
+  #expect(manual.timers == [.at(deadline.instant), .awake(EngineStartBudget.interruptLimit)])
+  // The attempt ended, so both of its timers are cancelled.
+  #expect(manual.cancelCount == 2)
+  manual.fire(1)
+  #expect(interrupts.calls == 1)
+}
+
+@Test func startThatNeverReturnsIsAbandonedAtTheInterruptLimit() {
+  let manual = ManualStartDeadline()
+  let start = Gate()
+  let interruptRan = DispatchSemaphore(value: 0)
+  let subject = watchdog(manual)
+  let run = BackgroundRun {
+    subject.run(
+      deadline: deadline, interrupt: { interruptRan.signal() },
+      start: { () -> Int in
+        start.pass()
+        return 7
+      })
+  }
+  #expect(start.awaitEntry())
+  manual.fire()
+  #expect(interruptRan.wait(timeout: .now() + .seconds(10)) == .success)
+  // The interrupt returned, but the start it interrupted is still inside libbox.
+  #expect(run.awaitOutcome(within: .milliseconds(300)) == nil)
+  #expect(manual.timers == [.at(deadline.instant), .awake(EngineStartBudget.interruptLimit)])
+  manual.fire(1)
+  guard case .abandoned? = run.awaitOutcome(within: .seconds(5)) else {
+    Issue.record("a start that never returned was not abandoned at the interrupt limit")
+    start.open()
+    return
+  }
+  start.open()
+}
+
+@Test func interruptThatNeverReturnsIsAbandonedAtTheInterruptLimit() {
+  let manual = ManualStartDeadline()
+  let interrupt = Gate()
+  let subject = watchdog(manual)
+  let run = BackgroundRun {
+    subject.run(
+      deadline: deadline, interrupt: { interrupt.pass() },
+      start: { () -> Int in
+        manual.fire()
+        return 7
+      })
+  }
+  #expect(interrupt.awaitEntry())
+  #expect(run.awaitOutcome(within: .milliseconds(300)) == nil)
+  manual.fire(1)
+  guard case .abandoned? = run.awaitOutcome(within: .seconds(5)) else {
+    Issue.record("an interrupt that never returned was not abandoned at the interrupt limit")
+    interrupt.open()
+    return
+  }
+  interrupt.open()
+}
+
+/// Should the limit pass before the thread that fired the deadline records
+/// its cancel, as a thread stalled that long would see, the attempt was
+/// abandoned and its interrupt never reaches libbox.
+@Test func aLimitThatPassedBeforeTheInterruptRanKeepsLibboxUntouched() {
+  let manual = ManualStartDeadline()
+  let start = Gate()
+  let interrupts = InterruptRecorder()
+  let subject = LibboxStartWatchdog(
+    now: ManualNow(now).now, schedule: manual.schedule,
+    afterAwake: { _, passed in
+      passed()
+      return {}
+    })
+  let run = BackgroundRun {
+    subject.run(
+      deadline: deadline, interrupt: interrupts.interrupt,
+      start: { () -> Int in
+        start.pass()
+        return 7
+      })
+  }
+  #expect(start.awaitEntry())
+  manual.fire()
+  guard case .abandoned? = run.awaitOutcome(within: .seconds(5)) else {
+    Issue.record("the attempt was not abandoned when its limit passed")
+    start.open()
+    return
+  }
+  // An interrupt dispatched anyway would have run by now.
+  Thread.sleep(forTimeInterval: 0.3)
+  #expect(interrupts.calls == 0)
+  start.open()
+}
+
+@Test func returnsAfterAnAbandonmentChangeNothing() {
+  let manual = ManualStartDeadline()
+  let start = Gate()
+  let interrupt = Gate()
+  let startLeft = DispatchSemaphore(value: 0)
+  let interruptLeft = DispatchSemaphore(value: 0)
+  let subject = watchdog(manual)
+  let run = BackgroundRun {
+    subject.run(
+      deadline: deadline,
+      interrupt: {
+        interrupt.pass()
+        interruptLeft.signal()
+      },
+      start: { () -> Int in
+        start.pass()
+        startLeft.signal()
+        return 7
+      })
+  }
+  #expect(start.awaitEntry())
+  manual.fire()
+  #expect(interrupt.awaitEntry())
+  manual.fire(1)
+  guard case .abandoned? = run.awaitOutcome(within: .seconds(5)) else {
+    Issue.record("the start was not abandoned at the interrupt limit")
+    start.open()
+    interrupt.open()
+    return
+  }
+  // libbox returns late from both calls, and both timers fire again: the
+  // abandoned attempt arms nothing more and interrupts nothing again.
+  start.open()
+  interrupt.open()
+  #expect(startLeft.wait(timeout: .now() + .seconds(5)) == .success)
+  #expect(interruptLeft.wait(timeout: .now() + .seconds(5)) == .success)
+  manual.fire()
+  manual.fire(1)
+  #expect(manual.timers.count == 2)
+  #expect(interrupt.entries == 1)
+  #expect(!start.hasStalled)
+  #expect(!interrupt.hasStalled)
+}
+
+@Test func aHungInterruptDoesNotHoldBackAnotherStartsInterrupt() {
+  let hungManual = ManualStartDeadline()
+  let hungInterrupt = Gate()
+  let hungRun = BackgroundRun {
+    watchdog(hungManual).run(
+      deadline: deadline, interrupt: { hungInterrupt.pass() },
+      start: { () -> Int in
+        hungManual.fire()
+        return 7
+      })
+  }
+  #expect(hungInterrupt.awaitEntry())
+
+  // Another start in the same process reaches its deadline while that
+  // interrupt still hangs; its own interrupt runs at once.
+  let manual = ManualStartDeadline()
+  let interruptRan = DispatchSemaphore(value: 0)
+  let run = BackgroundRun {
+    watchdog(manual).run(
+      deadline: deadline, interrupt: { interruptRan.signal() },
+      start: { () -> Bool in
+        manual.fire()
+        return interruptRan.wait(timeout: .now() + .seconds(5)) == .success
+      })
+  }
+  guard
+    case .interrupted(start: .success(true), interruption: .success)? =
+      run.awaitOutcome(within: .seconds(5))
+  else {
+    Issue.record("the second start's interrupt waited behind the hung one")
+    hungInterrupt.open()
+    return
+  }
+  hungManual.fire(1)
+  guard case .abandoned? = hungRun.awaitOutcome(within: .seconds(5)) else {
+    Issue.record("the hung interrupt was not abandoned at the interrupt limit")
+    hungInterrupt.open()
+    return
+  }
+  hungInterrupt.open()
 }
 
 /// Releases two threads at once so the deadline firing and the start returning
-/// genuinely race.
+/// genuinely race. A thread that waits five seconds for the other gives up and
+/// records it, so a lost thread fails the test instead of spinning forever.
 private final class StartingLine: Sendable {
   private let arrivals = Atomic<Int>(0)
+  private let gaveUp = Atomic<Bool>(false)
 
   func arriveAndWait() {
     arrivals.add(1, ordering: .sequentiallyConsistent)
-    while arrivals.load(ordering: .sequentiallyConsistent) < 2 {}
+    let giveUpAt = ContinuousClock.now.advanced(by: .seconds(5))
+    while arrivals.load(ordering: .sequentiallyConsistent) < 2 {
+      if ContinuousClock.now >= giveUpAt {
+        gaveUp.store(true, ordering: .sequentiallyConsistent)
+        return
+      }
+    }
   }
+
+  var hasGivenUp: Bool { gaveUp.load(ordering: .sequentiallyConsistent) }
 }
 
 @Test func completionRacingTheDeadlineHasExactlyOneConsistentOutcome() {
@@ -237,25 +534,28 @@ private final class StartingLine: Sendable {
     let interrupts = InterruptRecorder()
     let fired = DispatchSemaphore(value: 0)
     let line = StartingLine()
-    let outcome = watchdog(manual).run(
-      deadline: deadline, interrupt: { try interrupts.interrupt() },
-      start: { () -> Int in
-        DispatchQueue.global().async {
+    let outcome = bounded {
+      watchdog(manual).run(
+        deadline: deadline, interrupt: interrupts.interrupt,
+        start: { () -> Int in
+          DispatchQueue.global().async {
+            line.arriveAndWait()
+            manual.fire()
+            fired.signal()
+          }
           line.arriveAndWait()
-          manual.fire()
-          fired.signal()
-        }
-        line.arriveAndWait()
-        return 7
-      })
+          return 7
+        })
+    }
     #expect(fired.wait(timeout: .now() + .seconds(5)) == .success)
+    #expect(!line.hasGivenUp)
     switch outcome {
-    case .completed(.success(7)):
+    case .completed(.success(7))?:
       #expect(interrupts.calls == 0)
-    case .interrupted(start: .success(7), interruption: .success):
+    case .interrupted(start: .success(7), interruption: .success)?:
       #expect(interrupts.calls == 1)
     default:
-      Issue.record("unexpected outcome \(outcome)")
+      Issue.record("unexpected outcome \(String(describing: outcome))")
     }
   }
 }
@@ -266,15 +566,18 @@ private final class StartingLine: Sendable {
     receivedAt: ContinuousClock.now.advanced(
       by: LibboxStartWatchdog.minimumStartWindow + .milliseconds(200)
         - EngineStartBudget.ownerLibboxStart))
-  let outcome = LibboxStartWatchdog().run(
-    deadline: soon,
-    interrupt: { interruptRan.signal() },
-    start: { () -> Bool in
-      interruptRan.wait(timeout: .now() + .seconds(10)) == .success
-    })
+  let outcome = bounded {
+    LibboxStartWatchdog().run(
+      deadline: soon,
+      interrupt: { interruptRan.signal() },
+      start: { () -> Bool in
+        interruptRan.wait(timeout: .now() + .seconds(10)) == .success
+      })
+  }
   let lateness = soon.instant.duration(to: .now)
-  guard case .interrupted(start: .success(true), interruption: .success) = outcome else {
-    Issue.record("expected the production deadline to interrupt, got \(outcome)")
+  guard case .interrupted(start: .success(true), interruption: .success)? = outcome else {
+    Issue.record(
+      "expected the production deadline to interrupt, got \(String(describing: outcome))")
     return
   }
   #expect(lateness >= .zero)
@@ -329,6 +632,56 @@ private struct RecordingContinuousClock: Clock {
   #expect(ended == .ended, "cancelling the deadline did not end its sleep")
 }
 
+/// The suspending clock, recording each sleep the watchdog asks it for and
+/// when that sleep ends.
+private struct RecordingSuspendingClock: Clock {
+  typealias Instant = SuspendingClock.Instant
+
+  enum Event: Equatable, Sendable {
+    case began(deadline: Instant, tolerance: Duration?)
+    case ended
+  }
+
+  let events: AsyncStream<Event>.Continuation
+
+  var now: Instant { SuspendingClock.now }
+  var minimumResolution: Duration { SuspendingClock().minimumResolution }
+
+  func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+    events.yield(.began(deadline: deadline, tolerance: tolerance))
+    defer { events.yield(.ended) }
+    try await SuspendingClock().sleep(until: deadline, tolerance: tolerance)
+  }
+}
+
+/// The interrupt limit sleeps the whole limit of awake time from when it is
+/// armed, with the budget's tolerance, and cancelling it ends the sleep.
+@Test func productionInterruptLimitSleepsInAwakeTimeUntilCancelled() async throws {
+  let (events, recorder) = AsyncStream.makeStream(of: RecordingSuspendingClock.Event.self)
+  let afterAwake = LibboxStartWatchdog.sleepingAwake(on: RecordingSuspendingClock(events: recorder))
+  let armedAt = SuspendingClock.now
+  let cancel = afterAwake(EngineStartBudget.interruptLimit) {
+    Issue.record("a cancelled interrupt limit passed")
+  }
+  let giveUp = Task {
+    try await Task.sleep(for: .seconds(5))
+    recorder.finish()
+  }
+  var observed = events.makeAsyncIterator()
+  guard case .began(let until, let tolerance)? = await observed.next() else {
+    Issue.record("the interrupt limit did not sleep")
+    return
+  }
+  #expect(tolerance == EngineStartBudget.deadlineTolerance)
+  let limit = armedAt.duration(to: until)
+  #expect(limit >= EngineStartBudget.interruptLimit)
+  #expect(limit < EngineStartBudget.interruptLimit + .milliseconds(250))
+  cancel()
+  let ended = await observed.next()
+  giveUp.cancel()
+  #expect(ended == .ended, "cancelling the interrupt limit did not end its sleep")
+}
+
 /// What a verdict tells the runtime, in a form tests can compare.
 private enum StartMeaning: Equatable {
   case started
@@ -340,7 +693,7 @@ private enum StartMeaning: Equatable {
 private enum InterruptMeaning: Equatable {
   case notFired
   case closed
-  case failed(WatchdogTestError)
+  case unclosable(LibboxInstanceUnclosable)
 }
 
 private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, InterruptMeaning)? {
@@ -365,8 +718,7 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
   case .success:
     return (start, .closed)
   case .failure(let error):
-    guard let error = error as? WatchdogTestError else { return nil }
-    return (start, .failed(error))
+    return (start, .unclosable(error))
   }
 }
 
@@ -385,9 +737,11 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
       .failed(.start), .closed
     ),
     (
-      .interrupted(start: .success(nil), interruption: .failure(WatchdogTestError.interrupt)),
-      .timedOut, .failed(.interrupt)
+      .interrupted(start: .success(nil), interruption: .failure(interruptFailure)),
+      .timedOut, .unclosable(interruptFailure)
     ),
+    // A thread may still be inside libbox, so the runtime cannot be closed.
+    (.abandoned, .timedOut, .unclosable(LibboxInstanceUnclosable(.interruptDidNotReturn))),
   ]
   for (outcome, start, interruption) in table {
     let verdict: LibboxStartVerdict<Int> = outcome.verdict()
@@ -404,7 +758,46 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
   let timedOut = LibboxRuntimeError.serviceStartTimedOut
   let description = timedOut.localizedDescription
   #expect(description.contains("11 seconds"))
-  #expect(timedOut != .serviceStartFailed(description))
+  #expect(timedOut != .serviceStartFailed(LibboxDiagnostic(description)))
+}
+
+/// An interrupt that lands while libbox waits for its first network path
+/// returns only once that wait, which libbox cannot interrupt, has ended and the
+/// start has closed what it built. The interrupt limit leaves room for both, so
+/// only a start or interrupt that hangs inside libbox is abandoned.
+@Test func interruptLimitCoversTheFirstNetworkPathWaitAndTheClose() {
+  #expect(LibboxInterfaceMonitorTiming.firstPathWait == .seconds(5))
+  #expect(EngineStartBudget.interruptLimit == .milliseconds(5_500))
+  #expect(
+    EngineStartBudget.interruptLimit
+      >= LibboxInterfaceMonitorTiming.firstPathWait + EngineStartBudget.interruptAllowance)
+}
+
+/// Waits in Dispatch keep a duration's fraction of a second.
+@Test func durationsKeepTheirNanosecondsForDispatch() {
+  #expect(Duration.milliseconds(5_500).dispatchTimeInterval == .nanoseconds(5_500_000_000))
+  #expect(Duration.seconds(5).dispatchTimeInterval == .seconds(5))
+  #expect(Duration.nanoseconds(1).dispatchTimeInterval == .nanoseconds(1))
+}
+
+@Test func boundedCloseReportsWhatTheCloseReturned() {
+  #expect(LibboxBoundedClose().bound == EngineStopBudget.libboxClose)
+  let bounded = LibboxBoundedClose(bound: .seconds(10))
+  #expect(bounded.run {} == .closed)
+  #expect(
+    bounded.run { throw CloseTestFailure() } == .failed(LibboxDiagnostic(CloseTestFailure.text)))
+}
+
+@Test func boundedCloseStopsWaitingAtItsBound() {
+  let close = Gate()
+  let bound = Duration.milliseconds(200)
+  let began = ContinuousClock.now
+  let outcome = LibboxBoundedClose(bound: bound).run { close.pass() }
+  let waited = began.duration(to: .now)
+  close.open()
+  #expect(outcome == .didNotReturn)
+  #expect(waited >= bound, "gave up after \(waited)")
+  #expect(waited < bound + .seconds(1), "gave up after \(waited)")
 }
 
 #if canImport(Libbox)
@@ -636,11 +1029,27 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
     }
   }
 
-  /// Every close of libbox's network monitor in a runtime given this fault
-  /// fails with it, so libbox fails to close that runtime's instance.
+  /// Every close of libbox's network monitor in a runtime that throws this
+  /// fault fails with it, so libbox fails to close that runtime's instance.
   private struct LinkedMonitorCloseFault: LocalizedError {
     static let text = "linked test: the network monitor did not close"
     var errorDescription: String? { Self.text }
+  }
+
+  /// Holds every close of libbox's network monitor in a runtime that waits on
+  /// it until the test releases it, so libbox's close of that runtime's
+  /// instance does not return. A close held for a minute gives up, so a test
+  /// that ends early does not leave the thread inside libbox for good.
+  private final class LinkedMonitorCloseStall: Sendable {
+    private let released = DispatchSemaphore(value: 0)
+
+    func hold() {
+      _ = released.wait(timeout: .now() + .seconds(60))
+    }
+
+    func release() {
+      released.signal()
+    }
   }
 
   /// What stopping `runtime` threw, or nil when it stopped.
@@ -683,7 +1092,9 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
   /// begins; and a later start from the kept rule set listens, then stops and
   /// releases its listeners. A runtime whose close fails, at a stop, at the
   /// interrupt or after a start's own failure, is spent instead: it reports
-  /// that close failure from then on and never reaches libbox again.
+  /// that close failure from then on and never reaches libbox again. So is a
+  /// runtime whose close never returns, at a stop once the stop's bound passed
+  /// and at the interrupt once the interrupt limit passed.
   /// libbox takes its directories once per process, so this is the bundle's only
   /// test that starts it.
   @Test func linkedRuntimeBoundsEveryStartAndStaysStartable() throws {
@@ -723,10 +1134,22 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
       "a start that failed early never returned")
     stopIfStarted(runtime, failed)
     guard case .failure(let error) = failed,
-      case .serviceStartFailed? = error as? LibboxRuntimeError
+      case .serviceStartFailed(let diagnostic)? = error as? LibboxRuntimeError
     else {
       Issue.record("expected a start failure whose cleanup succeeded, got \(failed)")
       return
+    }
+    // libbox names the cache path it could not open; however the failure is
+    // printed or described, that text stays inside libbox's own type.
+    #expect(diagnostic.text.contains("blocked-cache"))
+    var dumped = ""
+    dump(error, to: &dumped)
+    for rendering in [
+      String(describing: error), String(reflecting: error), "\(error)", dumped,
+      error.localizedDescription, (error as NSError).description,
+      String(describing: (error as NSError).userInfo),
+    ] {
+      #expect(!rendering.contains("blocked-cache"), "\(rendering)")
     }
 
     // Each stalled start also carries a rule set that downloads at once.
@@ -821,14 +1244,18 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
       ruleSets: [servedSet], cacheFile: cache)
     let stopSpent = try SourceBuiltLibboxServiceRuntime(
       role: .systemProxy, directories: directories,
-      interfaceMonitorCloseFault: LinkedMonitorCloseFault())
+      interfaceMonitorClose: { throw LinkedMonitorCloseFault() })
     try #require(
       boundedStart(stopSpent, servedConfiguration, deadline: EngineStartDeadline(receivedAt: .now)),
       "a start whose close will fail never returned"
     ).get()
     let stopFailure = try #require(
       closeFailure(of: stopSpent), "a close whose network monitor failed reported success")
-    #expect(stopFailure.closeFailure.contains(LinkedMonitorCloseFault.text))
+    guard case .closeFailed(let stopDiagnostic) = stopFailure.cause else {
+      Issue.record("expected the close's own failure, got \(stopFailure.cause)")
+      return
+    }
+    #expect(stopDiagnostic.text.contains(LinkedMonitorCloseFault.text))
     for port in [endpoints.mixedPort, endpoints.controllerPort] {
       #expect(throws: Never.self, "libbox still listens on \(port) after its failed close") {
         _ = try probeLoopbackPort(port)
@@ -844,7 +1271,7 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
     // A stalled start whose close fails when it is interrupted is spent alike.
     let interruptSpent = try SourceBuiltLibboxServiceRuntime(
       role: .systemProxy, directories: directories,
-      interfaceMonitorCloseFault: LinkedMonitorCloseFault())
+      interfaceMonitorClose: { throw LinkedMonitorCloseFault() })
     let spentDeadline = EngineStartDeadline(
       receivedAt: ContinuousClock.now.advanced(
         by: .seconds(3) - EngineStartBudget.ownerLibboxStart))
@@ -866,7 +1293,7 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
     // is spent rather than idle.
     let failedSpent = try SourceBuiltLibboxServiceRuntime(
       role: .systemProxy, directories: directories,
-      interfaceMonitorCloseFault: LinkedMonitorCloseFault())
+      interfaceMonitorClose: { throw LinkedMonitorCloseFault() })
     let ownFailure = try #require(
       boundedStart(
         failedSpent,
@@ -884,5 +1311,107 @@ private func meaning(_ verdict: LibboxStartVerdict<Int>) -> (StartMeaning, Inter
     #expect(
       closeFailure(of: failedSpent) == ownCloseFailure,
       "the failed start did not leave the runtime spent")
+
+    // libbox closes the instance of a start that failed on its own inside that
+    // start, holding its lifecycle lock. A close that never returns there
+    // holds the start and the interrupt alike, so the start is abandoned at
+    // the interrupt limit and leaves the runtime spent.
+    let ownStall = LinkedMonitorCloseStall()
+    defer { ownStall.release() }
+    let ownStalled = try SourceBuiltLibboxServiceRuntime(
+      role: .systemProxy, directories: directories,
+      interfaceMonitorClose: { ownStall.hold() })
+    let ownStallDeadline = EngineStartDeadline(
+      receivedAt: ContinuousClock.now.advanced(
+        by: .seconds(3) - EngineStartBudget.ownerLibboxStart))
+    let ownStalledStart = try #require(
+      boundedStart(
+        ownStalled,
+        try endpoints.configuration(ruleSets: [stalledSet], cacheFile: blockedCache),
+        deadline: ownStallDeadline),
+      "a start that failed early and whose close stalled was not abandoned")
+    let ownStallLateness = ownStallDeadline.instant.duration(to: .now)
+    stopIfStarted(ownStalled, ownStalledStart)
+    guard case .failure(let ownStallError) = ownStalledStart,
+      let ownStallFailure = ownStallError as? LibboxInstanceUnclosable
+    else {
+      Issue.record("expected the failed start's stalled close to spend it, got \(ownStalledStart)")
+      return
+    }
+    #expect(ownStallFailure.cause == .interruptDidNotReturn)
+    #expect(ownStallLateness >= EngineStartBudget.interruptLimit)
+    #expect(
+      ownStallLateness
+        < EngineStartBudget.interruptLimit + EngineStartBudget.deadlineTolerance * 2
+        + .milliseconds(500),
+      "the stalled failed start returned \(ownStallLateness) after its deadline")
+    #expect(stalled.acceptedConnections == 3, "a start that failed early downloaded its rule set")
+    #expect(closeFailure(of: ownStalled) == ownStallFailure)
+
+    // A stalled start whose interrupted close never returns is abandoned at
+    // the interrupt limit. Each stalled close keeps its cache file locked, so
+    // these runtimes use their own.
+    let interruptStall = LinkedMonitorCloseStall()
+    defer { interruptStall.release() }
+    let interruptStalled = try SourceBuiltLibboxServiceRuntime(
+      role: .systemProxy, directories: directories,
+      interfaceMonitorClose: { interruptStall.hold() })
+    let abandonedDeadline = EngineStartDeadline(
+      receivedAt: ContinuousClock.now.advanced(
+        by: .seconds(3) - EngineStartBudget.ownerLibboxStart))
+    let abandoned = try #require(
+      boundedStart(
+        interruptStalled,
+        try endpoints.configuration(
+          ruleSets: [stalledSet], cacheFile: root.appendingPathComponent("interrupt-stall.db")),
+        deadline: abandonedDeadline),
+      "a start whose interrupt never returned was not abandoned")
+    let abandonedLateness = abandonedDeadline.instant.duration(to: .now)
+    stopIfStarted(interruptStalled, abandoned)
+    guard case .failure(let abandonedError) = abandoned,
+      let abandonedFailure = abandonedError as? LibboxInstanceUnclosable
+    else {
+      Issue.record("expected the abandoned start to report the runtime spent, got \(abandoned)")
+      return
+    }
+    #expect(abandonedFailure.cause == .interruptDidNotReturn)
+    #expect(abandonedLateness >= EngineStartBudget.interruptLimit)
+    #expect(
+      abandonedLateness
+        < EngineStartBudget.interruptLimit + EngineStartBudget.deadlineTolerance * 2
+        + .milliseconds(500),
+      "the abandoned start returned \(abandonedLateness) after its deadline")
+    #expect(stalled.acceptedConnections == 4, "the stall was not the rule-set download")
+    #expect(closeFailure(of: interruptStalled) == abandonedFailure)
+
+    // A stop whose close never returns stops waiting at the stop's bound.
+    let stopStall = LinkedMonitorCloseStall()
+    defer { stopStall.release() }
+    let stopStalled = try SourceBuiltLibboxServiceRuntime(
+      role: .systemProxy, directories: directories,
+      interfaceMonitorClose: { stopStall.hold() })
+    try #require(
+      boundedStart(
+        stopStalled,
+        try endpoints.configuration(
+          ruleSets: [servedSet], cacheFile: root.appendingPathComponent("stop-stall.db")),
+        deadline: EngineStartDeadline(receivedAt: .now)),
+      "a start whose close will stall never returned"
+    ).get()
+    let stopBegan = ContinuousClock.now
+    let stalledStop = try #require(
+      closeFailure(of: stopStalled), "a close that never returned reported success")
+    let stopWait = stopBegan.duration(to: .now)
+    #expect(stalledStop.cause == .closeDidNotReturn)
+    #expect(stopWait >= EngineStopBudget.libboxClose)
+    #expect(
+      stopWait < EngineStopBudget.libboxClose + .milliseconds(500),
+      "the stop waited \(stopWait) for a close that never returned")
+    // A later stop reports the same failure at once, without libbox: one that
+    // reached libbox again would wait out the bound again.
+    let laterStopBegan = ContinuousClock.now
+    #expect(closeFailure(of: stopStalled) == stalledStop)
+    let laterStopWait = laterStopBegan.duration(to: .now)
+    #expect(laterStopWait < .milliseconds(500), "a later stop waited \(laterStopWait)")
   }
 #endif

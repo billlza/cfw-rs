@@ -152,7 +152,8 @@ private func makeCore(
   let journal = BoundsJournal()
   let core = GlobalAuthorityServiceCore(
     reducer: reducer, journal: journal,
-    randomness: BoundsRandomness(), clock: BoundsClock())
+    randomness: BoundsRandomness(), clock: BoundsClock(), processTable: EmptyAuthorityProcessTable()
+  )
   return (journal, core)
 }
 

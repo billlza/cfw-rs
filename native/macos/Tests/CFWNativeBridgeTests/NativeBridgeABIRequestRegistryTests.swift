@@ -90,6 +90,15 @@ struct NativeBridgeABIRequestRegistryTests {
     #expect(EngineStartBudget.proxyAgentStartReply - ownerReport >= .seconds(1))
     // Three seconds stay for macOS to launch the provider and report its stop.
     #expect(EngineStartBudget.tunnelReadiness - ownerReport >= .seconds(3))
+    // A start still inside libbox at the interrupt limit, whose timer may fire
+    // late as well, is abandoned. The spent owner reports it without an
+    // Authority attestation, with the same room left.
+    #expect(EngineStartBudget.interruptLimit == .milliseconds(5_500))
+    let abandonedReport =
+      EngineStartBudget.ownerLibboxStart + EngineStartBudget.deadlineTolerance
+      + EngineStartBudget.interruptLimit + EngineStartBudget.deadlineTolerance
+    #expect(EngineStartBudget.proxyAgentStartReply - abandonedReport >= .seconds(1))
+    #expect(EngineStartBudget.tunnelReadiness - abandonedReport >= .seconds(3))
     // Rolling back a silent ProxyAgent costs one stop reply and one local stop
     // retry. A second and a half stays for the Host's preparation and its own
     // Authority calls.
@@ -101,6 +110,25 @@ struct NativeBridgeABIRequestRegistryTests {
       EngineStartBudget.proxyAgentStartReply + leeway + (reply + leeway) * 2
     #expect(
       NativeBridgeABITiming.operationBudget - silentOwnerStart >= .milliseconds(1_500))
+  }
+
+  /// An owner whose libbox close never returns stops waiting for it while the
+  /// Host still waits for the stop: three seconds stay for restoring System
+  /// Proxy settings and delivering the report that the owner is spent. A close
+  /// that returns just within the bound leaves the owner the same time to
+  /// attest its stop before the Authority's stop deadline. The bound and all
+  /// three waits count only awake time, so a sleep keeps them nested.
+  @Test
+  func libboxCloseBoundNestsInsideTheStopWaits() {
+    #expect(EngineStopBudget.libboxClose == .seconds(2))
+    let room = Duration.seconds(3)
+    #expect(
+      AuthenticatedProxyAgentTransport.defaultReplyTimeout - EngineStopBudget.libboxClose >= room)
+    #expect(NetworkExtensionHostBridge.tunnelStopWait == .seconds(5))
+    #expect(NetworkExtensionHostBridge.tunnelStopWait - EngineStopBudget.libboxClose >= room)
+    let stopAttestation = Duration.milliseconds(
+      Int64(AuthorityV1Limits.stopAttestationTimeoutMilliseconds))
+    #expect(stopAttestation - EngineStopBudget.libboxClose >= room)
   }
 
   @Test

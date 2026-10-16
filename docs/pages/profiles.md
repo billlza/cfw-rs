@@ -45,11 +45,12 @@ The safe schema is intentionally closed:
   start too: System Proxy then reports that its runtime could not be started,
   and TUN reports that readiness timeout. If the engine cannot be closed after
   any of these failures, the start reports instead that global cleanup could not
-  be proven, and neither System Proxy nor TUN starts again until the Mac
-  restarts. Datasets that finished are cached, so a retry downloads only the
-  rest. A GEOSITE name that only Mihomo's MetaCubeX datasets publish, not
-  sing-geosite, imports, but its dataset cannot be downloaded, so every start
-  with the profile fails;
+  be proven, and neither System Proxy nor TUN starts again until the network
+  is proven Off; turning the mode off proves it once the ProxyAgent or the
+  tunnel extension has ended. Datasets that finished are cached, so a retry
+  downloads only the rest. A GEOSITE name that only Mihomo's MetaCubeX
+  datasets publish, not sing-geosite, imports, but its dataset cannot be
+  downloaded, so every start with the profile fails;
 - `route.final`, when present, must reference a declared outbound tag;
 - remote server endpoints are bounded and typed, while profile-embedded
   subscriptions and remote resources remain disabled;

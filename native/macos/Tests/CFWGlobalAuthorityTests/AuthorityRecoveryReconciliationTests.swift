@@ -165,7 +165,8 @@ private func reconcileRestartedJournal(
     recovery.posture
       == .recovering(try expectedRecoveryAction(for: expectedInitialState)))
   let reducer = try GlobalAuthorityReducer.reconciled(from: recovery)
-  let core = GlobalAuthorityServiceCore(reducer: reducer, journal: store)
+  let core = GlobalAuthorityServiceCore(
+    reducer: reducer, journal: store, processTable: EmptyAuthorityProcessTable())
   #expect(core.authorityState == .recovering)
   let snapshot = try core.snapshot(peer: recoveryPeer())
   let cursor = try #require(snapshot.replayCursor)
@@ -209,7 +210,8 @@ private func withRecoveredCore<Result>(
   let recovery = store.recover()
   let reducer = try GlobalAuthorityReducer.reconciled(from: recovery)
   let cursor = try #require(reducer.replayCursor)
-  let core = GlobalAuthorityServiceCore(reducer: reducer, journal: store)
+  let core = GlobalAuthorityServiceCore(
+    reducer: reducer, journal: store, processTable: EmptyAuthorityProcessTable())
   return try body(core, cursor, store)
 }
 
@@ -352,7 +354,8 @@ func recoveryReconciliationRejectsEveryMissingExternalProof(state: AuthorityStat
         replayCursor: cursor,
         retainsCapabilityOrTicket: flags.capability,
         retainsSecretBuffer: flags.secret)
-      let core = GlobalAuthorityServiceCore(reducer: reducer, journal: store)
+      let core = GlobalAuthorityServiceCore(
+        reducer: reducer, journal: store, processTable: EmptyAuthorityProcessTable())
       #expect(
         recoveryAuthorityCode {
           try core.reconcileOff(request, peer: recoveryPeer())
@@ -365,7 +368,7 @@ func recoveryReconciliationRejectsEveryMissingExternalProof(state: AuthorityStat
       revision: cursor.revision,
       replayCursor: cursor)
     let quarantinedCore = GlobalAuthorityServiceCore(
-      reducer: quarantined, journal: store)
+      reducer: quarantined, journal: store, processTable: EmptyAuthorityProcessTable())
     #expect(
       recoveryAuthorityCode {
         try quarantinedCore.reconcileOff(request, peer: recoveryPeer())

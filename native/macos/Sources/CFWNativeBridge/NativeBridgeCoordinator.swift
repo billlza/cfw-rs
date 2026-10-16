@@ -112,6 +112,21 @@ struct NativeRecoveredStop: Equatable, Sendable {
   }
 }
 
+/// Where the Global Authority stands in one native stop.
+enum NativeStopAuthorityPhase: Equatable, Sendable {
+  /// The Authority has not been asked to stop the lease yet.
+  case unordered
+  /// The Authority stops the lease the context names.
+  case ordered(NativeAuthorityStopContext)
+  /// The Authority committed Off for that lease.
+  case completed(NativeAuthorityStopContext)
+  /// The Authority holds no lease to stop: it is Recovering, after a restart or
+  /// once the stop's quarantined owner ended, or it already reached Off at this
+  /// stop's generation. The stop ends with the Host's own Off proof, the
+  /// reconciliation a restart needs, at this stop's generation.
+  case released
+}
+
 /// Host-side durable-within-process stop transaction. The exact descriptor and
 /// Authority context are retained across command failures so a retry continues the
 /// unfinished barrier instead of requiring an owner that may already be Off.
@@ -119,9 +134,8 @@ struct NativeStopTransaction: Sendable {
   let owner: NativeStopOwner
   let commandContext: EngineCommandContext
   let descriptor: ConfigurationDescriptor
-  var authorityContext: NativeAuthorityStopContext?
+  var authority: NativeStopAuthorityPhase
   var ownerStopped: Bool
-  var authorityCompleted: Bool
   var preferenceCompensated: Bool
 
   init(
@@ -132,9 +146,8 @@ struct NativeStopTransaction: Sendable {
     self.owner = owner
     self.commandContext = commandContext
     self.descriptor = descriptor
-    authorityContext = nil
+    authority = .unordered
     ownerStopped = false
-    authorityCompleted = false
     preferenceCompensated = false
   }
 }
@@ -177,16 +190,21 @@ protocol NativeEngineLeaseInspecting: Sendable {
   /// result means the Authority is not currently in the recoverable Stopping
   /// state; it never means that global Off has been proven.
   func recoverStoppingLease() async throws -> NativeRecoveredStop?
-  /// Cancels an exact unredeemed preparation. Returns true only when a fresh
-  /// Authority snapshot proves global Off; returns false when the same lease
-  /// has already advanced to an owner-controlled state and must use stop.
+  /// Cancels an exact unredeemed preparation. Returns true only when no
+  /// preparation is left that the Authority could still authorize: a fresh
+  /// snapshot proves global Off, or the Authority is Recovering, which holds no
+  /// lease and admits no start until the Host proves Off. Returns false when the
+  /// same lease has already advanced to an owner-controlled state and must use
+  /// stop.
   func cancelPreparedStart(for descriptor: ConfigurationDescriptor) async throws -> Bool
   /// Durably orders the exact active Global Authority lease to stop before the
-  /// Host asks either native owner to tear down its data plane.
+  /// Host asks either native owner to tear down its data plane. A Recovering
+  /// Authority, which holds no lease, fails with `globalAuthorityRecovering`.
   func beginStop(for descriptor: ConfigurationDescriptor) async throws
     -> NativeAuthorityStopContext
   /// Commits global Off only after the owner has attested its teardown and the
-  /// Host has observed the matching OS-facing endpoint at its Off barrier.
+  /// Host has observed the matching OS-facing endpoint at its Off barrier. A
+  /// Recovering Authority fails with `globalAuthorityRecovering`.
   func completeStop(_ context: NativeAuthorityStopContext) async throws
   /// Reports durable release only for the exact installation/epoch/generation
   /// in the Authority's Off replay cursor; this does not replace OS Off proof.
@@ -315,7 +333,9 @@ actor NativeBridgeCoordinator {
       try await requireCurrentServiceBuilds(allowHandoff: false)
       return .profileDelays(try await testProfileDelays(request))
     }
-    // Proxy authorization only obtains rights and needs no mutation lease.
+    // Proxy authorization obtains rights, with which the ProxyAgent restores
+    // only settings an ended session left, serialized with its own start and
+    // stop; it needs no mutation lease.
     // Registration status only reads SMAppService metadata. It must remain
     // observable when another Host is busy; it cannot attest engine Off or
     // authorize service mutation. All proof, repair and runtime queries below

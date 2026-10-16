@@ -2,6 +2,7 @@ import CFWCredentialTransport
 import CFWSharedProtocol
 import Foundation
 import Security
+import Synchronization
 import Testing
 
 @testable import CFWLibboxRuntime
@@ -66,6 +67,10 @@ private final class ValidationOnlyProxyOwner: ProxySystemProxyOwning, @unchecked
     completionHandler: @escaping @Sendable (EngineSnapshot) -> Void
   ) {
     lifecycle.snapshot(completionHandler: completionHandler)
+  }
+
+  func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
+    lifecycle.restoreSettingsAfterAuthorization(completionHandler: completionHandler)
   }
 }
 
@@ -153,14 +158,53 @@ private final class ExitRecorder: @unchecked Sendable {
   var values: [Int32] { lock.withLock { statuses } }
 }
 
+/// Records each wait the process end asks for instead of waiting, so each test
+/// decides when it ends.
+private final class ManualExitClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var current: DispatchTime
+  private var scheduled: [(deadline: DispatchTime, work: @Sendable () -> Void)] = []
+
+  init(_ start: DispatchTime) { current = start }
+
+  var now: @Sendable () -> DispatchTime { { self.lock.withLock { self.current } } }
+
+  var schedule: ProxyAgentProcessExit.Schedule {
+    { deadline, work in self.lock.withLock { self.scheduled.append((deadline, work)) } }
+  }
+
+  var deadlines: [DispatchTime] { lock.withLock { scheduled.map(\.deadline) } }
+
+  func move(to instant: DispatchTime) { lock.withLock { current = instant } }
+
+  /// Runs the `index`-th scheduled work, as its timer would.
+  func fire(_ index: Int) {
+    let work = lock.withLock { scheduled[index].work }
+    work()
+  }
+}
+
+private let launch = DispatchTime(uptimeNanoseconds: 1_000_000_000_000)
+private let unclosable = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+
+private func processExit(
+  _ clock: ManualExitClock, connections: [HeldSendBarrier], exits: ExitRecorder
+) -> ProxyAgentProcessExit {
+  ProxyAgentProcessExit(
+    openConnections: { connections.map { $0 as any ProxyAgentSendBarrier } },
+    launchedAt: launch, now: clock.now,
+    schedule: clock.schedule, exit: { exits.record($0) })
+}
+
 @Test func endingTheAgentExitsOnlyOnceEveryOpenConnectionSentItsReplies() {
   let first = HeldSendBarrier()
   let second = HeldSendBarrier()
   let exits = ExitRecorder()
-  let processExit = ProxyAgentProcessExit(
-    openConnections: { [first, second] }, exit: { exits.record($0) })
-
-  processExit.end(after: LibboxInstanceUnclosable(closeFailure: "close network: monitor"))
+  let clock = ManualExitClock(launch + .seconds(60))
+  processExit(clock, connections: [first, second], exits: exits).end(after: unclosable)
+  // It has run long enough already, so it sends its replies at once.
+  #expect(clock.deadlines == [launch + .seconds(60)])
+  clock.fire(0)
   #expect(first.isScheduled)
   #expect(second.isScheduled)
   first.sendPendingMessages()
@@ -172,10 +216,64 @@ private final class ExitRecorder: @unchecked Sendable {
 
 @Test func endingTheAgentWithoutAnOpenConnectionExitsAtOnce() {
   let exits = ExitRecorder()
-  ProxyAgentProcessExit(openConnections: { [] }, exit: { exits.record($0) })
-    .end(after: LibboxInstanceUnclosable(closeFailure: "close network: monitor"))
+  let clock = ManualExitClock(launch + .seconds(60))
+  processExit(clock, connections: [], exits: exits).end(after: unclosable)
+  clock.fire(0)
   #expect(exits.wait())
   #expect(exits.values == [EX_SOFTWARE])
+}
+
+/// launchd starts an on-demand agent again no sooner than its restart throttle
+/// after it last started it, and holds every request for it until then, past
+/// the Host's five-second reply wait. A spent agent that started recently keeps
+/// answering until its successor can start at once.
+@Test func aRecentlyStartedAgentEndsOnlyWhenLaunchdWouldStartItAgainAtOnce() {
+  #expect(ProxyAgentProcessExit.launchdRestartThrottle == .seconds(10))
+  #expect(ProxyAgentProcessExit.minimumLifetime == .seconds(11))
+  let exits = ExitRecorder()
+  let clock = ManualExitClock(launch + .seconds(3))
+  processExit(clock, connections: [], exits: exits).end(after: unclosable)
+  #expect(clock.deadlines == [launch + ProxyAgentProcessExit.minimumLifetime])
+  #expect(!exits.wait(for: .milliseconds(100)))
+  clock.move(to: launch + ProxyAgentProcessExit.minimumLifetime)
+  clock.fire(0)
+  #expect(exits.wait())
+  #expect(exits.values == [EX_SOFTWARE])
+}
+
+/// A connection whose earlier sends never go out holds replies its Host has
+/// stopped waiting for, so the agent ends once the limit passed, and only once.
+@Test func aConnectionThatNeverSendsItsRepliesDelaysTheEndOnlyUntilTheLimit() throws {
+  #expect(ProxyAgentProcessExit.sendBarrierLimit == .seconds(5))
+  let stuck = HeldSendBarrier()
+  let exits = ExitRecorder()
+  let ended = launch + .seconds(30)
+  let clock = ManualExitClock(ended)
+  processExit(clock, connections: [stuck], exits: exits).end(after: unclosable)
+  clock.fire(0)
+  #expect(stuck.isScheduled)
+  try #require(clock.deadlines == [ended, ended + ProxyAgentProcessExit.sendBarrierLimit])
+  #expect(!exits.wait(for: .milliseconds(100)))
+  clock.fire(1)
+  #expect(exits.wait())
+  stuck.sendPendingMessages()
+  #expect(!exits.wait(for: .milliseconds(100)), "the agent ended twice")
+  #expect(exits.values == [EX_SOFTWARE])
+}
+
+/// The agent's launchd job sets no restart throttle of its own, so launchd's
+/// default is the one the process end waits out.
+@Test func proxyAgentJobKeepsLaunchdsDefaultRestartThrottle() throws {
+  let plist = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("Config/com.bill.clashformac.proxy-agent.plist")
+  let job = try #require(
+    try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), format: nil)
+      as? [String: Any])
+  #expect(job["Label"] as? String == "com.bill.clashformac.proxy-agent")
+  #expect(job["ThrottleInterval"] == nil)
+  #expect(job["KeepAlive"] == nil, "launchd would restart the ended agent on its own")
+  #expect((job["MachServices"] as? [String: Any])?["com.bill.clashformac.proxy-agent"] != nil)
 }
 
 @objc private protocol ConnectionProbe {
@@ -258,6 +356,195 @@ extension ProxySessionLifecycle {
       descriptor: descriptor,
       deadline: EngineStartDeadline(receivedAt: .now),
       completionHandler: completionHandler)
+  }
+}
+
+/// Every failure the ProxyAgent reports, with the code and retry flag it
+/// crosses XPC with. The Host decides by these alone, for example that a stop
+/// without a session found an owner that ended while a stale stop did not.
+private let lifecycleFailureWire: [(failure: ProxySessionLifecycleError, code: String)] = [
+  (.invalidConfigurationSlot, "invalid-configuration-slot"),
+  (.lifecycleConflict, "proxy-lifecycle-conflict"),
+  (.startupCancelled, "proxy-startup-cancelled"),
+  (.staleStopRequest, "stale-stop-request"),
+  (.stopWithoutSession, "proxy-stop-without-session"),
+  (.recoveryBlocked("detail"), "proxy-recovery-blocked"),
+  (.authorizationRequired, "system-proxy-authorization-required"),
+  (.engineLease("detail"), "proxy-engine-lease-failed"),
+  (.configuration("detail"), "proxy-configuration-failed"),
+  (.engineCreation("detail"), "proxy-engine-creation-failed"),
+  (.engineStart("detail"), "proxy-engine-start-failed"),
+  (.engineStartTimedOut, "proxy-engine-start-timed-out"),
+  (.endpointConflict(role: .mixed, port: 7890), "mixed-endpoint-in-use"),
+  (.endpointConflict(role: .controller, port: 9090), "controller-endpoint-in-use"),
+  (.listenerReadinessTimedOut, "proxy-listener-readiness-timeout"),
+  (.engineUnclosable(LibboxInstanceUnclosable(closeFailure: "detail")), "proxy-engine-unclosable"),
+  (.engineFailed(ProxyEngineFailure(code: "detail", message: "detail")), "proxy-engine-crashed"),
+  (.preferences("detail"), "system-proxy-preferences-failed"),
+  (.existingSystemProxy, "existing-system-proxy"),
+  (.ownershipJournal("detail"), "proxy-ownership-journal-failed"),
+  (.ownershipConflict([]), "system-proxy-ownership-conflict"),
+  (.cleanupFailed(original: "detail", cleanup: ["detail"]), "proxy-cleanup-failed"),
+]
+
+/// The engine protocol admits only lowercase letters, digits and hyphens in a
+/// code, and a reply it cannot encode reaches the Host as a broken connection.
+/// No lifecycle failure says a retry may succeed: each needs a new start or
+/// the user's action.
+@Test func everyLifecycleFailureCrossesXPCUnderItsOwnCode() throws {
+  let failures =
+    lifecycleFailureWire
+    + AuthorityErrorCode.allCases.map { code in
+      (
+        failure: ProxySessionLifecycleError.authority(code),
+        code: "authority-" + code.rawValue.replacingOccurrences(of: "_", with: "-")
+      )
+    }
+  for (failure, code) in failures {
+    let envelope = ResponseEnvelope(requestID: RequestID(), failure: failure.engineFailure)
+    let encoded: Data
+    do {
+      encoded = try ProtocolCodec.encode(envelope)
+    } catch {
+      Issue.record("\(failure) cannot be sent to the Host: \(error)")
+      continue
+    }
+    let received = try #require(try ProtocolCodec.decodeResponse(encoded).failure)
+    #expect(received == failure.engineFailure)
+    #expect(received.code == code, "\(failure)")
+    #expect(!received.isRetryable, "\(failure)")
+  }
+}
+
+/// A stop reaching an agent with no session and no record of the stop's
+/// generation, as after its predecessor ended, is answered under the code the
+/// Host takes for an ended owner.
+@Test func aStopWithoutASessionCrossesXPCAsSuch() throws {
+  let service = ProxyAgentService(
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: SourceBuiltLibboxConfigurationChecker(),
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
+  )
+  let request = RequestEnvelope(
+    command: try NativeCommand(kind: .stop, configuration: descriptor()))
+  let replied = DispatchSemaphore(value: 0)
+  let reply = Mutex<(Data?, NSError?)>((nil, nil))
+  service.execute(try ProtocolCodec.encode(request)) { data, error in
+    reply.withLock { $0 = (data, error) }
+    replied.signal()
+  }
+  #expect(replied.wait(timeout: .now() + 5) == .success)
+  let (data, error) = reply.withLock { $0 }
+  #expect(error == nil)
+  let response = try ProtocolCodec.decodeResponse(try #require(data))
+  #expect(response.requestID == request.requestID)
+  let failure = try #require(response.failure)
+  #expect(failure.code == "proxy-stop-without-session")
+  #expect(!failure.isRetryable)
+}
+
+/// libbox's close text can name servers and paths. However an error that
+/// carries it is printed, described or sent, the text stays inside libbox's
+/// own type.
+@Test func libboxCloseTextNeverReachesTheAgentsErrorsOrReplies() throws {
+  let canary = "close outbound proxy-canary.example:443 at /Users/someone/cache.db"
+  let unclosable = LibboxInstanceUnclosable(closeFailure: canary)
+  let failures: [ProxySessionLifecycleError] = [
+    .engineUnclosable(unclosable),
+    .cleanupFailed(
+      original: String(describing: ProxySessionLifecycleError.engineUnclosable(unclosable)),
+      cleanup: [String(reflecting: ProxySessionLifecycleError.engineUnclosable(unclosable))]),
+  ]
+  for failure in failures {
+    var dumped = ""
+    dump(failure, to: &dumped)
+    for rendering in [
+      String(describing: failure), String(reflecting: failure), "\(failure)", dumped,
+      failure.localizedDescription, (failure as NSError).description,
+      String(describing: (failure as NSError).userInfo),
+      String(
+        decoding: try ProtocolCodec.encode(
+          ResponseEnvelope(requestID: RequestID(), failure: failure.engineFailure)), as: UTF8.self),
+    ] {
+      #expect(!rendering.contains("proxy-canary"), "\(rendering)")
+    }
+  }
+  #expect(!unclosable.localizedDescription.contains("proxy-canary"))
+  #expect(!String(describing: unclosable).contains("proxy-canary"))
+}
+
+private struct CleanupFailingConfigurationChecker: LibboxConfigurationChecking {
+  func check(configuration: Data) throws {
+    throw LibboxRuntimeError.configurationCheckCleanupFailed(
+      LibboxDiagnostic("close network: close interface monitor: proxy-canary"))
+  }
+}
+
+/// libbox accepted the configuration but could not close the instance it built
+/// to check it. That is no rejection of the profile, so the Host may ask again.
+@Test func validationWhoseCheckCouldNotCloseIsRetryableAndNoRejection() throws {
+  let service = ProxyAgentService(
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: CleanupFailingConfigurationChecker(),
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
+  )
+  let request = RequestEnvelope(
+    command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor()))
+  var responseData: Data?
+  var responseError: NSError?
+  service.validateConfiguration(Data("{}".utf8), request: try ProtocolCodec.encode(request)) {
+    data, error in
+    responseData = data
+    responseError = error
+  }
+  #expect(responseError == nil)
+  let data = try #require(responseData)
+  #expect(!String(decoding: data, as: UTF8.self).contains("proxy-canary"))
+  let failure = try #require(try ProtocolCodec.decodeResponse(data).failure)
+  #expect(failure.code == "configuration-check-cleanup-failed")
+  #expect(failure.isRetryable)
+}
+
+/// Only a configuration libbox read and refused is a rejected profile. A check
+/// libbox could not answer, including one that broke libbox's own API by
+/// returning nothing, is no verdict on the profile.
+@Test func everyCheckFailureTellsTheHostWhetherTheProfileWasRejected() {
+  let diagnostic = LibboxDiagnostic("detail")
+  let expected: [(LibboxRuntimeError, ProxyAgentFailureCode)] = [
+    (.invalidConfigurationSize(0), .configurationRejected),
+    (.invalidConfigurationEncoding, .configurationRejected),
+    (.invalidConfigurationJSON, .configurationRejected),
+    (.configurationCheckFailed(diagnostic), .configurationRejected),
+    (.libboxUnavailable, .validatorUnavailable),
+    (.missingBundleSetting("key"), .validatorUnavailable),
+    (.appGroupUnavailable("group"), .validatorUnavailable),
+    (.unsafeRuntimeDirectory("path"), .validatorUnavailable),
+    (.setupConflict, .validatorUnavailable),
+    (.setupFailed(diagnostic), .validatorUnavailable),
+    (.configurationCheckCleanupFailed(diagnostic), .configurationCheckCleanupFailed),
+    (.configurationCheckReturnedNothing, .validatorFailed),
+    (.unexpectedPacketDescriptor, .validatorFailed),
+    (.missingPacketDescriptor, .validatorFailed),
+    (.packetDescriptorAlreadyTransferred, .validatorFailed),
+    (.unsupportedPlatformOperation("operation"), .validatorFailed),
+    (.networkMonitorAlreadyStarted, .validatorFailed),
+    (.networkMonitorUnavailable, .validatorFailed),
+    (.networkMonitorTimedOut, .validatorFailed),
+    (.alreadyStarted, .validatorFailed),
+    (.serverCreationFailed(diagnostic), .validatorFailed),
+    (.serviceStartFailed(diagnostic), .validatorFailed),
+    (.serviceStartTimedOut, .validatorFailed),
+    (.invalidRuntimeEndpoints, .validatorFailed),
+    (.invalidEndpointConflict(kind: 0, port: 0), .validatorFailed),
+    (.endpointConflict(role: .mixed, port: 7890), .validatorFailed),
+    (.serviceNotRunning(state: 0, message: diagnostic), .validatorFailed),
+  ]
+  for (error, code) in expected {
+    let failure = ProxyAgentService.validationFailure(for: error)
+    #expect(failure.code == code.rawValue, "\(error)")
+    #expect(failure.isRetryable == (code != .configurationRejected), "\(error)")
   }
 }
 
@@ -820,6 +1107,13 @@ private func makeFixture(
   )
 }
 
+/// Runs the restore that follows granted rights and waits until it finished.
+private func restoreAfterAuthorization(_ lifecycle: ProxySessionLifecycle) -> Bool {
+  let finished = DispatchSemaphore(value: 0)
+  lifecycle.restoreSettingsAfterAuthorization { finished.signal() }
+  return finished.wait(timeout: .now() + 1) == .success
+}
+
 private func readyEndpoint() throws -> MixedListenerEndpoint {
   try MixedListenerEndpoint(host: "127.0.0.1", port: 7_890)
 }
@@ -1178,7 +1472,7 @@ struct ProxySessionLifecycleTests {
     #expect(preferences.applyCount == 0)
     #expect(
       lifecycle.testingSnapshot().state.failure?.code
-        == NativeBridgeErrorCode.engineStartTimedOut.rawValue)
+        == ProxyAgentFailureCode.engineStartTimedOut.rawValue)
 
     let stop = OperationRecorder()
     lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
@@ -1200,6 +1494,20 @@ struct ProxySessionLifecycleTests {
     #expect(fixture.preferences.applyCount == 0)
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 1)
+  }
+
+  /// A stop that reaches no session says so, so the Host can tell an owner that
+  /// ended, whose successor holds nothing, from one holding another generation.
+  @Test func stopWithoutASessionIsToldApartFromAStaleStop() throws {
+    let fixture = makeFixture()
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: try descriptor(generation: 1)) {
+      stop.record($0)
+    }
+    #expect(stop.wait())
+    #expect(stop.values == [.failure(.stopWithoutSession)])
+    #expect(fixture.engine.stopCount == 0)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
   }
 
   @Test func staleStopDoesNotTouchActiveRuntimeOrPreferences() throws {
@@ -1470,6 +1778,172 @@ struct ProxySessionLifecycleTests {
     #expect(journalStore.journal == nil)
     #expect(fixture.lease.releaseCount == 1)
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
+  }
+
+  /// A launch whose recovery could not restore the settings, for example
+  /// because the agent had no rights yet, restores them once the user grants
+  /// the rights, which the Host asks for before every Off and before quitting.
+  @Test func failedRecoveryRestoresOnceTheUserGrantsTheRights() throws {
+    let configuration = try descriptor()
+    let journal = try FakeSystemProxyPreferences.journal(
+      configuration: configuration,
+      endpoint: readyEndpoint(),
+      originalValues: [.httpHost: .string("original")]
+    ).markingApplied()
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    preferences.failNextRestore()
+    let journalStore = FakeJournalStore(journal: journal)
+    let fixture = makeFixture(preferences: preferences, journalStore: journalStore)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
+
+    #expect(restoreAfterAuthorization(fixture.lifecycle))
+    #expect(preferences.restoreCount == 2)
+    #expect(journalStore.journal == nil)
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
+    // The Host's Off for that generation then succeeds without restoring again.
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(preferences.restoreCount == 2)
+  }
+
+  @Test func restoreThatStillFailsAfterAuthorizationKeepsItsJournal() throws {
+    let configuration = try descriptor()
+    let journal = try FakeSystemProxyPreferences.journal(
+      configuration: configuration,
+      endpoint: readyEndpoint(),
+      originalValues: [.httpHost: .string("original")]
+    ).markingApplied()
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    preferences.failNextRestore()
+    preferences.failNextRestore()
+    let journalStore = FakeJournalStore(journal: journal)
+    let fixture = makeFixture(preferences: preferences, journalStore: journalStore)
+
+    #expect(restoreAfterAuthorization(fixture.lifecycle))
+    #expect(preferences.restoreCount == 2)
+    #expect(journalStore.journal == journal)
+    #expect(fixture.lease.releaseCount == 0)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
+  }
+
+  /// A spent agent whose restore failed restores the settings once the user
+  /// grants the rights again, and then ends.
+  @Test func spentAgentRestoresOnceTheUserGrantsTheRightsThenEnds() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let activeConfiguration = try descriptor()
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: activeConfiguration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    let closeFailure = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
+    fixture.engine.failStops(with: closeFailure)
+    preferences.failNextRestore()
+    let failedStop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { failedStop.record($0) }
+    #expect(failedStop.wait())
+    #expect(fixture.journalStore.journal != nil)
+    #expect(fixture.endRecorder.values.isEmpty)
+
+    #expect(restoreAfterAuthorization(fixture.lifecycle))
+    #expect(fixture.endRecorder.wait())
+    #expect(preferences.restoreCount == 2)
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    #expect(fixture.journalStore.journal == nil)
+    #expect(fixture.endRecorder.values == [closeFailure])
+  }
+
+  /// A stop whose engine stopped but whose restore failed leaves the session
+  /// failed with its journal; the rights the user grants restore the settings,
+  /// and the Host's Off for that generation then succeeds without restoring
+  /// again.
+  @Test func aStopWhoseRestoreFailedRestoresOnceTheUserGrantsTheRights() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let configuration = try descriptor()
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    preferences.failNextRestore()
+    let failedStop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { failedStop.record($0) }
+    #expect(failedStop.wait())
+    #expect(failedStop.values != [.success])
+    #expect(fixture.journalStore.journal != nil)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
+
+    #expect(restoreAfterAuthorization(fixture.lifecycle))
+    #expect(preferences.restoreCount == 2)
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    #expect(fixture.journalStore.journal == nil)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(preferences.restoreCount == 2)
+  }
+
+  /// A spent agent ends only once its settings are restored: rights that still
+  /// do not restore them leave it running with its journal.
+  @Test func aSpentAgentWhoseRestoreStillFailsKeepsRunning() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let configuration = try descriptor()
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    fixture.engine.failStops(
+      with: LibboxInstanceUnclosable(closeFailure: "close network: monitor"))
+    preferences.failNextRestore()
+    preferences.failNextRestore()
+    let failedStop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { failedStop.record($0) }
+    #expect(failedStop.wait())
+
+    #expect(restoreAfterAuthorization(fixture.lifecycle))
+    // Anything the restore queued behind itself has run by now.
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(preferences.restoreCount == 2)
+    #expect(fixture.journalStore.journal != nil)
+    #expect(fixture.endRecorder.values.isEmpty)
+  }
+
+  @Test func grantedRightsWithNothingLeftToRestoreChangeNothing() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    #expect(restoreAfterAuthorization(fixture.lifecycle))
+    #expect(preferences.restoreCount == 0)
+    #expect(fixture.lease.releaseCount == 0)
+    #expect(fixture.lifecycle.testingSnapshot() == .off)
+  }
+
+  /// Granted rights change nothing for a session whose engine runs: its
+  /// settings stay applied until it stops.
+  @Test func grantedRightsLeaveARunningSessionsSettingsApplied() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let activeConfiguration = try descriptor()
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: activeConfiguration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+
+    #expect(restoreAfterAuthorization(fixture.lifecycle))
+    #expect(preferences.restoreCount == 0)
+    #expect(fixture.journalStore.journal != nil)
+    #expect(preferences.currentValue(.httpHost) == .string("127.0.0.1"))
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .proxyActive)
   }
 
   @Test func preparedKeychainJournalRecoversCrashAfterPreferencesApply() throws {

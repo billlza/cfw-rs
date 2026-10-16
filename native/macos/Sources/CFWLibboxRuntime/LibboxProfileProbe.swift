@@ -1,5 +1,6 @@
 import CFWSharedProtocol
 import Foundation
+import OSLog
 
 #if canImport(Libbox)
   import Libbox
@@ -12,7 +13,27 @@ public protocol LibboxProfileProbing: Sendable {
   ) throws -> [ProfileProxyDelay]
 }
 
+/// What CFM's profile-probe patch says about a probe beyond libbox's own text,
+/// which never leaves `LibboxDiagnostic`.
+enum LibboxProfileProbeReport {
+  /// The patch reports a probe instance it could not close, a close that
+  /// panicked included, under this text (`experimental/libbox/profile_probe.go`,
+  /// whose Go tests hold it).
+  static let unclosedInstance = "profile probe cleanup failed"
+
+  /// Whether `report` says the probe's instance could not close, so what it
+  /// built stays in this process.
+  static func leftItsInstanceOpen(_ report: String) -> Bool {
+    report.contains(unclosedInstance)
+  }
+}
+
 public struct SourceBuiltLibboxProfileProbe: LibboxProfileProbing {
+  private static let logger = Logger(
+    subsystem: "com.bill.clashformac",
+    category: "libbox-profile-probe"
+  )
+
   public init() {}
 
   public func test(
@@ -28,14 +49,21 @@ public struct SourceBuiltLibboxProfileProbe: LibboxProfileProbing {
       let response = LibboxTestProfileProxiesWithTarget(
         configurationText, names, Int32(timeoutMS), targetURL, expectedStatus, &error)
       if let error {
-        throw LibboxRuntimeError.serviceStartFailed(error.localizedDescription)
+        let report = error.localizedDescription
+        if LibboxProfileProbeReport.leftItsInstanceOpen(report) {
+          Self.logger.fault(
+            "libbox could not close a profile probe's instance; what it built stays in this process"
+          )
+        }
+        throw LibboxRuntimeError.serviceStartFailed(LibboxDiagnostic(report))
       }
       guard response.utf8.count <= 65536 else {
-        throw LibboxRuntimeError.serviceStartFailed("Invalid latency response")
+        throw LibboxRuntimeError.serviceStartFailed(LibboxDiagnostic("Invalid latency response"))
       }
       let results = try JSONDecoder().decode([ProfileProxyDelay].self, from: Data(response.utf8))
       guard results.map(\.name) == proxies else {
-        throw LibboxRuntimeError.serviceStartFailed("Latency response targets changed")
+        throw LibboxRuntimeError.serviceStartFailed(
+          LibboxDiagnostic("Latency response targets changed"))
       }
       return results
     #else

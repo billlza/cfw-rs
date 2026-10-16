@@ -279,34 +279,37 @@ public enum AuthorityJournalRecoveryReducer {
             committedState: last.state, head: head,
             posture: .quarantined(.trailingData))
         }
-        let action: AuthorityRecoveryAction
-        switch last.state.state {
-        case .active:
-          action = .reattestOwner
-        case .preparing, .starting, .stopping:
-          action = .stopOwner
-        case .off:
-          action = .verifyOff
-        case .quarantined
-        where last.state.transition == .reconcileOff || last.state.transition == .checkpoint:
-          // An incomplete cleanup proof is a durable lifecycle result. On
-          // restart retain its validated cursor and require both owners and
-          // their OS resources to prove Off again before admitting a start.
-          // Journal compaction preserves this same state in its checkpoint.
-          action = .stopOwner
-        case .recovering, .quarantined:
-          return AuthorityJournalRecovery(
-            committedState: last.state, head: head,
-            posture: .quarantined(.invalidState))
-        }
         return AuthorityJournalRecovery(
           committedState: last.state, head: head,
-          posture: .recovering(action))
+          posture: restartPosture(for: last.state))
       } catch let error as AuthorityJournalValidationError {
         return quarantine(error)
       } catch {
         return quarantine(.malformedFrame)
       }
+    }
+  }
+
+  /// What a restart makes of a validated journal whose last record is `state`.
+  static func restartPosture(
+    for state: AuthorityCommittedState
+  ) -> AuthorityRecoveryPosture {
+    switch state.state {
+    case .active:
+      return .recovering(.reattestOwner)
+    case .preparing, .starting, .stopping:
+      return .recovering(.stopOwner)
+    case .off:
+      return .recovering(.verifyOff)
+    case .quarantined
+    where state.transition == .reconcileOff || state.transition == .checkpoint:
+      // An incomplete cleanup proof is a durable lifecycle result. On restart
+      // retain its validated cursor and require both owners and their OS
+      // resources to prove Off again before admitting a start. Journal
+      // compaction preserves this same state in its checkpoint.
+      return .recovering(.stopOwner)
+    case .recovering, .quarantined:
+      return .quarantined(.invalidState)
     }
   }
 

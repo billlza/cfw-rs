@@ -484,10 +484,11 @@ add an ordinary-GA blocker. A concrete correctness or security defect found by
 any check still blocks the affected release behavior.
 
 The durable Authority journal remains bounded without a crash-safe compaction
-protocol, Quarantined has no product repair workflow, and unattended System
-Proxy restoration after Authorization Services rights expire has not been
-proved by source checks alone. These runtime boundaries must be assessed from
-the candidate's actual acceptance evidence, not inferred from unit tests.
+protocol, Quarantined has no product repair workflow beyond releasing a stop
+whose owner process provably ended for the Host to prove Off, and unattended
+System Proxy restoration after Authorization Services rights expire has not
+been proved by source checks alone. These runtime boundaries must be assessed
+from the candidate's actual acceptance evidence, not inferred from unit tests.
 Signing, notarization, stapling, Gatekeeper, installation, and publication are
 separate stages whose status comes from the current candidate's receipts.
 The module-only, unfixable `GO-2026-5932` boundary also needs explicit release

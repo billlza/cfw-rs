@@ -13,17 +13,14 @@ public enum ProfileProbeServiceFailure: Int, Sendable {
     switch self {
     case .busy:
       EngineFailure(
-        code: "profile-probe-busy",
-        message: "The previous latency batch is finishing. Retry shortly.", isRetryable: true)
+        .agent(.profileProbeBusy),
+        message: "The previous latency batch is finishing. Retry shortly.")
     case .invalidRequest:
-      EngineFailure(
-        code: "profile-probe-invalid", message: "The latency request is invalid.",
-        isRetryable: false)
+      EngineFailure(.agent(.profileProbeInvalid), message: "The latency request is invalid.")
     case .executionFailed:
       EngineFailure(
-        code: "profile-probe-failed",
-        message: "The temporary latency runtime could not start or finish its cleanup.",
-        isRetryable: true)
+        .agent(.profileProbeFailed),
+        message: "The temporary latency runtime could not start or finish its cleanup.")
     }
   }
 }

@@ -1135,6 +1135,9 @@ never adopted.
    those two hashes is not detected. The live check in `--verify-prepackage`
    only gates packaging: the DMG and updater sets each require their packaged
    application's tree to equal the sealed one.
+   Build 50029's runtime collection stopped inside such a reopen, most likely
+   at its live stapler check during a network outage
+   (`docs/release/ga-build-50029-retirement.md`).
    The local 26-lane record remains corroborating toolchain evidence and can
    never replace `hosted-ci.json`;
 4. after a signing interruption, inspect the retained attempt through the

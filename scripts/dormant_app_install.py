@@ -249,10 +249,20 @@ INSTALLED_50028_PREDECESSOR: Final = PredecessorProfile(
     build_number="50028",
     tree_sha256="dd8a27dc6c22893e469a34433393b83d5be02edb07455752c39b6c0ffe77786d",
 )
+# Exact installed notarized 0.5.0 GA build 50029, retired before GA runtime
+# acceptance. Its stapled tree is bound by the signed-app manifest, both
+# package seals and the `candidate` of the completed 50028 -> 50029 install
+# and service journals; the next GA install replaces it.
+INSTALLED_50029_PREDECESSOR: Final = PredecessorProfile(
+    product_version="0.5.0",
+    build_number="50029",
+    tree_sha256="aa67685e1cea4c77a90ded3d9a70264912f8e3711b8e7c1d83ebdb9442339483",
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_50025_PREDECESSOR.build_number: INSTALLED_50025_PREDECESSOR,
         INSTALLED_50028_PREDECESSOR.build_number: INSTALLED_50028_PREDECESSOR,
+        INSTALLED_50029_PREDECESSOR.build_number: INSTALLED_50029_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

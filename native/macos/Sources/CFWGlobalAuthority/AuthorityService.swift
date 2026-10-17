@@ -950,9 +950,12 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
       if let lease = reducer.lease {
         switch peer.role {
         case .host:
-          guard peer.euid == lease.operation.ownerUID,
-            peer.auditSessionID == ownerAuditSessionID
-          else {
+          // Another user's Host learns only that a lease it does not hold
+          // exists, and waits for it to end.
+          guard peer.euid == lease.operation.ownerUID else {
+            throw AuthorityDomainError(code: .globalLeaseConflict)
+          }
+          guard peer.auditSessionID == ownerAuditSessionID else {
             throw AuthorityDomainError(code: .globalAuthorityIdentityRejected)
           }
         case .proxyAgent:
@@ -978,6 +981,38 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
   }
 
   public func ownerPeerID() -> UUID? { lock.withLock { boundPeerID } }
+
+  /// Tells a ProxyAgent what the Authority knows of the lease it bound, so an
+  /// owner whose stopped attestation failed learns whether that lease still
+  /// exists. It answers only for the caller's own lease, one the authenticated
+  /// connection's user owns, and only to a ProxyAgent. An Authority that has
+  /// not read its journal yet, or quarantined the journal it read, cannot tell
+  /// and says so instead of claiming the lease absent.
+  public func ownerLeaseStatus(
+    _ request: OwnerLeaseStatusRequest, peer: PeerIdentity
+  ) throws -> OwnerLeaseStatus {
+    guard peer.role == .proxyAgent else {
+      throw AuthorityDomainError(code: .globalAuthorityIdentityRejected)
+    }
+    return try lock.withLock {
+      if let lease = reducer.lease, lease.leaseID == request.leaseID {
+        guard lease.operation.mode.isProxyAgent, lease.operation.ownerUID == peer.euid else {
+          throw AuthorityDomainError(code: .globalAuthorityIdentityRejected)
+        }
+        return reducer.state == .quarantined ? .quarantined : .held
+      }
+      switch reducer.state {
+      case .recovering where reducer.replayCursor == nil:
+        // Recovering without a cursor still waits to read its journal.
+        return .notReady
+      case .quarantined where reducer.lease == nil:
+        // A quarantine without a lease came from a journal it cannot trust.
+        return .notReady
+      default:
+        return .absent
+      }
+    }
+  }
 
   public func recordOwnerHeartbeat(
     peer: PeerIdentity,
@@ -1207,7 +1242,9 @@ public final class AuthorityPeerEventChannel: @unchecked Sendable {
 public final class AuthenticatedAuthorityPeerService: NSObject,
   CFWGlobalAuthorityXPCProtocol, @unchecked Sendable
 {
-  public typealias Reauthorize = @Sendable () throws -> PeerIdentity
+  /// Admits the connection's peer again for one call, with what the call
+  /// needs of the lease when the peer is a ProxyAgent.
+  public typealias Reauthorize = @Sendable (ProxyAgentLeaseRequirement) throws -> PeerIdentity
   public typealias RecordOperationDecision =
     @Sendable (ReleaseObservationAuthenticatedDecision) throws -> Void
 
@@ -1294,7 +1331,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: .redeemTunnelTicket)
-      let peer = try reauthorize()
+      let peer = try reauthorize(.ownedLease)
       let result = try concurrency.withMutation { () -> GlobalAuthorityServiceCore.RedeemResult in
         guard case .redeemTunnelTicket(let value) = envelope.command else {
           throw AuthorityDomainError(code: .invalidMessage)
@@ -1349,7 +1386,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: .beginStop)
-      let peer = try reauthorize()
+      let peer = try reauthorize(.ownedLease)
       guard case .beginStop(let value) = envelope.command else {
         throw AuthorityDomainError(code: .invalidMessage)
       }
@@ -1436,7 +1473,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: .snapshot)
-      let peer = try reauthorize()
+      let peer = try reauthorize(.ownedLease)
       guard case .snapshot = envelope.command else {
         throw AuthorityDomainError(code: .invalidMessage)
       }
@@ -1453,9 +1490,33 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     }
   }
 
+  public func ownerLeaseStatus(
+    _ request: Data, reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let preObservation = core.releaseObservationState()
+    do {
+      let envelope = try decode(request, expected: .ownerLeaseStatus)
+      // An agent asks this once its lease may have ended, so it needs none.
+      let peer = try reauthorize(.ownedLeaseOrNone)
+      guard case .ownerLeaseStatus(let value) = envelope.command else {
+        throw AuthorityDomainError(code: .invalidMessage)
+      }
+      let response = try concurrency.withRead {
+        try self.response(
+          OwnerLeaseStatusResponse(status: self.core.ownerLeaseStatus(value, peer: peer)),
+          envelope: envelope, operationID: nil)
+      }
+      reply(response, nil)
+    } catch {
+      let observationError = recordRejectedOperation(
+        request: request, error: error, preObservation: preObservation)
+      reply(nil, observationError ?? xpcError(error))
+    }
+  }
+
   public func ownerHeartbeat(_ reply: @escaping (NSError?) -> Void) {
     do {
-      let peer = try reauthorize()
+      let peer = try reauthorize(.ownedLease)
       try concurrency.withRead {
         try core.recordOwnerHeartbeat(peer: peer, peerID: peerID)
       }
@@ -1488,7 +1549,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: expected)
-      let peer = try reauthorize()
+      let peer = try reauthorize(.ownedLease)
       reply(try concurrency.withMutation { try body(envelope, peer) }, nil)
     } catch {
       let observationError = recordRejectedOperation(
@@ -1539,6 +1600,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     case .attestStopped: .attestStopped
     case .cancelPrepared: .cancelPrepared
     case .snapshot: .snapshot
+    case .ownerLeaseStatus: .ownerLeaseStatus
     }
   }
 
@@ -1751,7 +1813,7 @@ public final class AuthenticatedGlobalAuthorityListenerDelegate: NSObject,
 {
   public typealias Authorize =
     @Sendable (
-      AuthorityRole, pid_t, uid_t, UInt32, uid_t?
+      AuthorityRole, pid_t, uid_t, UInt32, uid_t?, ProxyAgentLeaseRequirement
     ) throws -> PeerIdentity
 
   private let role: AuthorityRole
@@ -1798,13 +1860,14 @@ public final class AuthenticatedGlobalAuthorityListenerDelegate: NSObject,
             concurrency: concurrency,
             events: events,
             livenessRuntime: livenessRuntime
-          ) { role, pid, euid, auditSessionID, ownerUID in
+          ) { role, pid, euid, auditSessionID, ownerUID, agentLease in
             try authorizer.authorize(
               role: role,
               processIdentifier: pid,
               effectiveUserIdentifier: euid,
               auditSessionIdentifier: auditSessionID,
-              leaseOwnerUID: ownerUID)
+              leaseOwnerUID: ownerUID,
+              agentLease: agentLease)
           }
         )
       })
@@ -1822,7 +1885,9 @@ public final class AuthenticatedGlobalAuthorityListenerDelegate: NSObject,
     var admittedPeer: PeerIdentity?
     let admitted = AuthorityConnectionAdmission.authorizeBeforeExport(
       authorize: {
-        try authorize(role, pid, euid, auditSessionID, core.leaseOwnerUID)
+        // A ProxyAgent whose lease ended may still connect to ask after it;
+        // each call then needs what that call needs.
+        try authorize(role, pid, euid, auditSessionID, core.leaseOwnerUID, .ownedLeaseOrNone)
       },
       export: { admittedPeer = $0 })
     let postObservation = core.releaseObservationState()
@@ -1860,10 +1925,10 @@ public final class AuthenticatedGlobalAuthorityListenerDelegate: NSObject,
     let peerID = UUID()
     let service = AuthenticatedAuthorityPeerService(
       peerID: peerID, peer: peer,
-      reauthorize: { [authorize, core] in
+      reauthorize: { [authorize, core] agentLease in
         try authorize(
           peer.role, peer.pid, peer.euid, peer.auditSessionID,
-          core.leaseOwnerUID)
+          core.leaseOwnerUID, agentLease)
       }, core: core, concurrency: concurrency, events: events,
       liveness: livenessRuntime.supervisor,
       recordOperationDecision: {

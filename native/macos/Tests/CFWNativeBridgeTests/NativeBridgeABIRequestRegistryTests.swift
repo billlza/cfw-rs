@@ -129,6 +129,15 @@ struct NativeBridgeABIRequestRegistryTests {
     let stopAttestation = Duration.milliseconds(
       Int64(AuthorityV1Limits.stopAttestationTimeoutMilliseconds))
     #expect(stopAttestation - EngineStopBudget.libboxClose >= room)
+    // A ProxyAgent whose stopped attestation the Authority refused asks once
+    // whether its lease still exists before it replies. Its close and that
+    // question leave the Host's wait room for the request, the refusal and
+    // the reply.
+    let leaseStatus = AuthorityXPCMethod.ownerLeaseStatus.replyTimeout(
+      within: .milliseconds(Int64(AuthorityV1Limits.commandTimeoutMilliseconds)))
+    #expect(
+      AuthenticatedProxyAgentTransport.defaultReplyTimeout - EngineStopBudget.libboxClose
+        - leaseStatus >= .seconds(2))
   }
 
   @Test

@@ -118,6 +118,7 @@ private final class NativeCleanupEventLog: @unchecked Sendable {
   private let lock = NSLock()
   private var values: [String] = []
   func append(_ value: String) { lock.withLock { values.append(value) } }
+  func removeAll() { lock.withLock { values.removeAll() } }
   var events: [String] { lock.withLock { values } }
 }
 
@@ -198,7 +199,12 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
   private var runtimeFailed = false
   private var failureOmitsDescriptor = false
   private var ended = false
+  private var reported: EngineSnapshot?
   private var stopFailures: [ProxyAgentHostError]
+  private var restoreBeforeStopFailures: [ProxyAgentHostError]
+  private let events: NativeCleanupEventLog?
+  /// The configuration of each restore before a stop, in order.
+  private(set) var restoresBeforeStop: [ConfigurationDescriptor] = []
   private(set) var ensureCalls = 0
   private(set) var snapshotCalls = 0
   private(set) var startCalls = 0
@@ -206,7 +212,9 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
   private(set) var startContexts: [ProxyOwnerContext] = []
   private(set) var startConfigurationDigests: [String] = []
 
-  /// Each stop throws the next of `stopFailures`; once none is left, stops succeed.
+  /// Each stop throws the next of `stopFailures`, and each restore before a
+  /// stop the next of `restoreBeforeStopFailures`; once none is left, they
+  /// succeed.
   init(
     descriptor: ConfigurationDescriptor,
     registrationError: ProxyAgentHostError? = nil,
@@ -215,7 +223,9 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
     snapshotAdmission: NativeFixtureHandshake? = nil,
     snapshotSequence: [EngineSnapshot] = [],
     snapshotErrorAt: Int? = nil,
-    stopFailures: [ProxyAgentHostError] = []
+    stopFailures: [ProxyAgentHostError] = [],
+    restoreBeforeStopFailures: [ProxyAgentHostError] = [],
+    events: NativeCleanupEventLog? = nil
   ) {
     self.descriptor = descriptor
     self.registrationError = registrationError
@@ -225,6 +235,8 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
     self.snapshotSequence = snapshotSequence
     self.snapshotErrorAt = snapshotErrorAt
     self.stopFailures = stopFailures
+    self.restoreBeforeStopFailures = restoreBeforeStopFailures
+    self.events = events
   }
 
   func registrationStatus() -> ProxyAgentRegistrationStatus {
@@ -270,7 +282,14 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
   }
   func stop(configuration: ConfigurationDescriptor) throws {
     stopCalls += 1
+    events?.append("proxy-stop")
     if !stopFailures.isEmpty { throw stopFailures.removeFirst() }
+  }
+
+  func restoreSettingsBeforeStop(configuration: ConfigurationDescriptor) throws {
+    restoresBeforeStop.append(configuration)
+    events?.append("restore-before-stop")
+    if !restoreBeforeStopFailures.isEmpty { throw restoreBeforeStopFailures.removeFirst() }
   }
 
   func snapshot() async throws -> EngineSnapshot {
@@ -283,6 +302,7 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
     if snapshotCalls == snapshotErrorAt {
       throw ProxyAgentHostError.transportUnavailable("Injected snapshot failure")
     }
+    if let reported { return reported }
     if let snapshot = snapshotSequence.first {
       if snapshotSequence.count > 1 { snapshotSequence.removeFirst() }
       return snapshot
@@ -304,6 +324,9 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
   /// The ProxyAgent ended, for example after an engine it could not close; its
   /// successor holds no session.
   func simulateEnded() { ended = true }
+
+  /// Every snapshot reports `snapshot` until it is nil again.
+  func report(_ snapshot: EngineSnapshot?) { reported = snapshot }
 
   func simulateRuntimeFailure(omittingDescriptor: Bool = false) {
     runtimeFailed = true
@@ -346,6 +369,7 @@ private actor FailedStartProxyAgent: ProxyAgentTransporting {
   private var stopped = false
   private(set) var startCalls = 0
   private(set) var stopCalls = 0
+  private(set) var restoresBeforeStop = 0
 
   /// The first `sessionlessStops` stops reply as a ProxyAgent with no record of the stop.
   init(
@@ -376,6 +400,13 @@ private actor FailedStartProxyAgent: ProxyAgentTransporting {
     startCalls += 1
     failed = true
     throw ProxyAgentHostError.agentFailure(failure)
+  }
+
+  func restoreSettingsBeforeStop(configuration: ConfigurationDescriptor) throws {
+    restoresBeforeStop += 1
+    guard configuration == descriptor else {
+      throw ProxyAgentHostError.responseMismatch
+    }
   }
 
   func stop(configuration: ConfigurationDescriptor) throws {
@@ -448,6 +479,7 @@ private actor StartableTunnelHost: TunnelHostBridging {
   private(set) var stopCalls = 0
   private var started = false
   private var failedOwnerPresent = false
+  private var managerReplaced = false
   private var pendingPreferenceDescriptor: ConfigurationDescriptor?
   private var remainingCompensationFailures: Int
   private(set) var compensationCalls = 0
@@ -539,8 +571,21 @@ private actor StartableTunnelHost: TunnelHostBridging {
 
   func stopTunnel(expectedConfiguration: ConfigurationDescriptor) throws {
     stopCalls += 1
+    // As HostBridge: no manager of the stop's configuration is left to stop.
+    if managerReplaced { throw AppleNetworkError.staleStopRequest }
     started = false
     failedOwnerPresent = false
+  }
+
+  /// A later start wrote its own manager over this one, so every stop of this
+  /// configuration is stale; the session this manager ran ended unless
+  /// `sessionRuns`.
+  func replaceManager(sessionRuns: Bool) {
+    managerReplaced = true
+    if !sessionRuns {
+      started = false
+      failedOwnerPresent = false
+    }
   }
 
   func snapshot() throws -> EngineSnapshot {
@@ -680,6 +725,94 @@ private struct FixedEngineLease: NativeEngineLeaseInspecting {
   }
 }
 
+/// Reports the running ProxyAgent as an earlier build than this app's, as in
+/// the window before an update replaces it, or an inspection that fails.
+private struct EarlierProxyBuildObserver: CurrentAppServiceBuildObserving {
+  let fails: Bool
+
+  func inspect() throws -> CurrentAppServiceBuildInspection {
+    if fails { throw CurrentAppServiceBuildError.identityUnavailable }
+    let current = try CurrentAppServiceCodeIdentity(
+      build: 50010, cdHash: Data(repeating: 0x42, count: 20))
+    let earlier = try CurrentAppServiceCodeIdentity(
+      build: 50009, cdHash: Data(repeating: 0x41, count: 20))
+    return .init(
+      proxy: CurrentAppServiceBuildObservation(
+        registration: .enabled, runningCode: earlier, expectedCode: current),
+      authority: CurrentAppServiceBuildObservation(
+        registration: .enabled, runningCode: current, expectedCode: current))
+  }
+}
+
+/// An Authority whose lease another user holds: this Host cannot observe it.
+private struct ConflictingEngineLease: NativeEngineLeaseInspecting {
+  func isAvailable() async throws -> Bool { false }
+  func authorityOwnership() async throws -> AuthorityOwnershipObservation {
+    throw AuthorityDomainError(code: .globalLeaseConflict)
+  }
+  func beginStop(
+    for descriptor: ConfigurationDescriptor
+  ) async throws -> NativeAuthorityStopContext {
+    throw AuthorityDomainError(code: .globalLeaseConflict)
+  }
+  func completeStop(_ context: NativeAuthorityStopContext) async throws {
+    throw AuthorityDomainError(code: .globalLeaseConflict)
+  }
+}
+
+/// The installation, epoch and generation a replay cursor names.
+private struct FakeReplayCursor: Equatable {
+  let installationID: UUID
+  let epoch: UInt64
+  let generation: UInt64
+
+  init(_ context: EngineCommandContext) {
+    installationID = context.installationID
+    epoch = context.configEpoch
+    generation = context.generation
+  }
+
+  init(_ lease: AuthorityLeaseAgreement) {
+    installationID = lease.installationID
+    epoch = lease.epoch
+    generation = lease.generation
+  }
+
+  init(_ root: RootContext) {
+    installationID = root.installationID.rawValue
+    epoch = root.epoch
+    generation = root.generation
+  }
+
+  init(_ descriptor: ConfigurationDescriptor) {
+    installationID = descriptor.installationID
+    epoch = descriptor.epoch
+    generation = descriptor.generation
+  }
+}
+
+/// Moves a recording Authority's replay cursor as each System Proxy
+/// preparation the preparer grants does, so the fake's cursor names the
+/// generation the Authority's would.
+private struct CursorAdvancingSystemProxyStartPreparer: SystemProxyStartPreparing {
+  let preparer: any SystemProxyStartPreparing
+  let lease: RecordingEngineLease
+
+  func prepareSystemProxyStart(
+    configuration: Data,
+    descriptor: ConfigurationDescriptor
+  ) async throws -> HostPreparedSystemProxyStart {
+    let prepared = try await preparer.prepareSystemProxyStart(
+      configuration: configuration, descriptor: descriptor)
+    await lease.prepared(descriptor)
+    return prepared
+  }
+
+  func cancelSystemProxyStart(_ prepared: HostPreparedSystemProxyStart) async throws {
+    try await preparer.cancelSystemProxyStart(prepared)
+  }
+}
+
 private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   private var observation: AuthorityOwnershipObservation
   private var remainingBeginFailures: Int
@@ -691,12 +824,15 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   private let cancelPreparedResult: Bool
   private let cleanupEvents: NativeCleanupEventLog?
   private var stopContext: NativeAuthorityStopContext?
-  private var completedCommandContext: EngineCommandContext?
-  private var recoveredCommandContext: EngineCommandContext?
+  /// The generation the replay cursor names. Preparing a start moves it to
+  /// that start's generation, so an Authority that holds a lease names the
+  /// lease's generation from the start.
+  private var cursor: FakeReplayCursor?
   /// The lease this fake started with reached Off through its own completion
-  /// or reconciliation, so no stop can order it any more.
+  /// or reconciliation, or a later start passed it, so no stop can order it
+  /// any more.
   private var leaseEnded = false
-  private var completedStopFailure: AuthorityDomainError?
+  private var stopResolutionFailure: AuthorityDomainError?
   private(set) var beginCalls = 0
   private(set) var completeCalls = 0
   private(set) var reconcileCalls = 0
@@ -724,7 +860,8 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
     self.completeFailureCommits = completeFailureCommits
     self.cancelPreparedResult = cancelPreparedResult
     self.cleanupEvents = cleanupEvents
-    completedCommandContext = replayContext
+    cursor =
+      replayContext.map(FakeReplayCursor.init(_:)) ?? observation.lease.map(FakeReplayCursor.init)
   }
 
   func isAvailable() -> Bool { observation.state == .off }
@@ -750,9 +887,6 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
     }
     observation = AuthorityOwnershipObservation(state: .off, lease: nil)
     leaseEnded = true
-    if let recoveredCommandContext {
-      completedCommandContext = recoveredCommandContext
-    }
     return observation
   }
 
@@ -762,10 +896,53 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   }
 
   /// The Authority recovers in memory once the quarantined owner ended: it holds
-  /// no lease, and reconciling Off leaves its replay cursor at `context`.
+  /// no lease, and its replay cursor names `context`, which reconciling Off
+  /// keeps.
+  /// The Authority prepared a start of `descriptor`'s generation, which moves
+  /// the replay cursor there and holds a lease that has not ended. Tests set
+  /// the lease the Authority reports themselves. The Authority refuses to
+  /// prepare a generation behind its cursor, so a test that does has a setup
+  /// production cannot reach.
+  func prepared(_ descriptor: ConfigurationDescriptor) {
+    let prepared = FakeReplayCursor(descriptor)
+    if let cursor, cursor.installationID == prepared.installationID,
+      (prepared.epoch, prepared.generation) < (cursor.epoch, cursor.generation)
+    {
+      Issue.record("a prepare moved the replay cursor backwards, which the Authority refuses")
+    }
+    cursor = prepared
+    leaseEnded = false
+  }
+
   func recoverFromEndedOwner(of context: EngineCommandContext) {
     observation = AuthorityOwnershipObservation(state: .recovering, lease: nil)
-    recoveredCommandContext = context
+    cursor = FakeReplayCursor(context)
+  }
+
+  /// The Authority lost its durable store, as a removed and reinstalled one
+  /// does: it is Off and holds no record of any generation.
+  func loseStore() {
+    observation = AuthorityOwnershipObservation(state: .off, lease: nil)
+    cursor = nil
+    leaseEnded = true
+  }
+
+  /// A later start, prepared from a proven Off, moved the replay cursor to
+  /// `cursor`; the Authority now holds `lease` in `state`.
+  func passGeneration(
+    to cursor: EngineCommandContext, state: AuthorityState,
+    lease: AuthorityLeaseAgreement? = nil
+  ) {
+    self.cursor = FakeReplayCursor(cursor)
+    observation = AuthorityOwnershipObservation(state: state, lease: lease)
+    leaseEnded = true
+  }
+
+  private func cursorPasses(
+    installationID: UUID, epoch: UInt64, generation: UInt64
+  ) -> Bool {
+    guard let cursor, cursor.installationID == installationID else { return false }
+    return (cursor.epoch, cursor.generation) > (epoch, generation)
   }
 
   func recoverStoppingLease() -> NativeRecoveredStop? {
@@ -776,7 +953,14 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   func cancelPreparedStart(for descriptor: ConfigurationDescriptor) -> Bool {
     cancelPreparedCalls += 1
     cleanupEvents?.append("cancel-prepared")
-    // Recovering holds no preparation; Off still needs the Host's proof.
+    // A cursor past the start shows its preparation ended; Recovering holds no
+    // preparation; Off still needs the Host's proof.
+    if cursorPasses(
+      installationID: descriptor.installationID, epoch: descriptor.epoch,
+      generation: descriptor.generation)
+    {
+      return true
+    }
     if observation.state == .recovering { return true }
     if cancelPreparedResult {
       observation = AuthorityOwnershipObservation(state: .off, lease: nil)
@@ -829,8 +1013,14 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
     if observation.state == .recovering {
       throw AuthorityDomainError(code: .globalAuthorityRecovering)
     }
-    // A quarantined Authority holds no stop to complete.
-    if observation.state == .quarantined {
+    // A quarantined Authority, or one a later start passed, holds no stop to
+    // complete.
+    let root = context.operation.root
+    if observation.state == .quarantined
+      || cursorPasses(
+        installationID: root.installationID.rawValue, epoch: root.epoch,
+        generation: root.generation)
+    {
       throw AuthorityDomainError(code: .cleanupUnproven)
     }
     if let completeError { throw completeError }
@@ -839,9 +1029,7 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
       if completeFailureCommits {
         observation = AuthorityOwnershipObservation(state: .off, lease: nil)
         leaseEnded = true
-        completedCommandContext = try EngineCommandContext(
-          installationID: context.operation.root.installationID.rawValue,
-          configEpoch: context.operation.root.epoch, generation: context.operation.root.generation)
+        cursor = FakeReplayCursor(context.operation.root)
       }
       throw NativeBridgeExecutionError.failure(
         .unavailable,
@@ -849,22 +1037,32 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
     }
     observation = AuthorityOwnershipObservation(state: .off, lease: nil)
     leaseEnded = true
-    completedCommandContext = try EngineCommandContext(
-      installationID: context.operation.root.installationID.rawValue,
-      configEpoch: context.operation.root.epoch, generation: context.operation.root.generation)
+    cursor = FakeReplayCursor(context.operation.root)
   }
 
-  func hasCompletedStop(_ context: EngineCommandContext) throws -> Bool {
-    if let completedStopFailure {
-      self.completedStopFailure = nil
-      throw completedStopFailure
+  /// As the production inspector reads one snapshot.
+  func stopResolution(_ context: EngineCommandContext) throws -> NativeStopResolution {
+    if let stopResolutionFailure {
+      self.stopResolutionFailure = nil
+      throw stopResolutionFailure
     }
-    return observation.state == .off && completedCommandContext == context
+    let leaseOfStop = observation.lease.map {
+      $0.installationID == context.installationID && $0.epoch == context.configEpoch
+        && $0.generation == context.generation
+    }
+    if cursorPasses(
+      installationID: context.installationID, epoch: context.configEpoch,
+      generation: context.generation), leaseOfStop != true
+    {
+      return .superseded
+    }
+    return observation.state == .off && observation.lease == nil
+      && cursor == FakeReplayCursor(context) ? .completed : .unresolved
   }
 
-  /// The next completed-stop check fails, as an unreachable Authority does.
-  func failNextCompletedStopCheck(with error: AuthorityDomainError) {
-    completedStopFailure = error
+  /// The next stop-resolution check fails, as an unreachable Authority does.
+  func failNextStopResolution(with error: AuthorityDomainError) {
+    stopResolutionFailure = error
   }
 
   func counters() -> (begin: Int, complete: Int) {
@@ -997,6 +1195,15 @@ private func startRequest(
     tunnelOptions: tunnelOptions)
 }
 
+/// The request's installation and epoch at `generation`.
+private func context(
+  _ request: EngineStartRequest, generation: UInt64
+) throws -> EngineCommandContext {
+  try EngineCommandContext(
+    installationID: request.context.installationID,
+    configEpoch: request.context.configEpoch, generation: generation)
+}
+
 private func agreement(
   for descriptor: ConfigurationDescriptor,
   mode: AuthorityMode,
@@ -1051,6 +1258,10 @@ private func makeCoordinator(
   armTunnelReadinessDeadline: (@Sendable (Duration) -> NativeReadinessDeadline)? = nil
 ) -> NativeBridgeCoordinator {
   let engineLease = engineLease ?? FixedEngineLease(observation: observation)
+  let systemProxyPreparer: any SystemProxyStartPreparing =
+    (engineLease as? RecordingEngineLease).map {
+      CursorAdvancingSystemProxyStartPreparer(preparer: systemProxyPreparer, lease: $0)
+    } ?? systemProxyPreparer
   guard let armTunnelReadinessDeadline else {
     return NativeBridgeCoordinator(
       proxy: proxy,
@@ -1128,13 +1339,39 @@ private func failureCode(
   _ coordinator: NativeBridgeCoordinator,
   _ command: NativeBridgeCommand
 ) async -> NativeBridgeErrorCode? {
+  await failure(coordinator, command)?.code
+}
+
+/// A failed start's cleanup receipt is one-use. The preparation the failed
+/// start had left the Authority's cursor at its generation, so a stop repeated
+/// after the receipt is spent proves that generation Off again through the
+/// Authority, instead of using the receipt.
+private func expectRepeatedStopProvesOffAgain(
+  _ coordinator: NativeBridgeCoordinator,
+  _ stop: NativeBridgeCommand,
+  lease: RecordingEngineLease
+) async throws {
+  let recoveries = await lease.recoverCount()
+  guard case .acknowledged = try await coordinator.execute(stop) else {
+    Issue.record("a repeated stop of a generation proven Off was not acknowledged")
+    return
+  }
+  #expect(await lease.recoverCount() == recoveries + 1)
+}
+
+/// The Host's own failure, with the message the bridge response replaces by
+/// its code's stable message.
+private func failure(
+  _ coordinator: NativeBridgeCoordinator,
+  _ command: NativeBridgeCommand
+) async -> (code: NativeBridgeErrorCode, message: String)? {
   do {
     _ = try await coordinator.execute(command)
     Issue.record("expected a fail-closed error but the command succeeded")
     return nil
   } catch let error as NativeBridgeExecutionError {
     switch error {
-    case .failure(let code, _): return code
+    case .failure(let code, let message): return (code, message)
     }
   } catch {
     Issue.record("expected a typed NativeBridgeExecutionError, got \(error)")
@@ -1698,9 +1935,8 @@ struct NativeBridgeStartCommandIntegrationTests {
       let counts = await proxy.counters()
       #expect(counts.start == 1)
       #expect(counts.stop == (fault == .ownerStop ? 2 : 1))
-      #expect(
-        await failureCode(coordinator, .stopSystemProxy(request.context)) == .identityRejected,
-        "the exact cleanup receipt is one-use")
+      try await expectRepeatedStopProvesOffAgain(
+        coordinator, .stopSystemProxy(request.context), lease: lease)
     }
   }
 
@@ -1752,9 +1988,8 @@ struct NativeBridgeStartCommandIntegrationTests {
       #expect(counts.stop == 0)
       let cancelPreparedCount = await lease.cancelPreparedCount()
       #expect(cancelPreparedCount == 2)
-      #expect(
-        await failureCode(coordinator, .stopTunnel(request.context)) == .identityRejected,
-        "the exact Tunnel cleanup receipt is one-use")
+      try await expectRepeatedStopProvesOffAgain(
+        coordinator, .stopTunnel(request.context), lease: lease)
     }
   }
 
@@ -1792,7 +2027,8 @@ struct NativeBridgeStartCommandIntegrationTests {
       Issue.record("exact failed-start cleanup receipt was not acknowledged")
       return
     }
-    #expect(await failureCode(coordinator, .stopTunnel(request.context)) == .identityRejected)
+    try await expectRepeatedStopProvesOffAgain(
+      coordinator, .stopTunnel(request.context), lease: lease)
   }
 
   /// A provider whose libbox start timed out had redeemed its ticket, so the
@@ -2044,6 +2280,48 @@ struct NativeBridgeStartCommandIntegrationTests {
       return
     }
     #expect(await proxy.counters().stop == 2)
+    #expect(await lease.counters() == (begin: 2, complete: 1))
+  }
+
+  /// A rollback whose Authority stop could not be ordered stops its owner
+  /// locally, with no restore first: the owner's own stop restores its
+  /// settings. The stop the user asks for next finds the owner stopped, so it
+  /// restores nothing before the Authority orders the stop either.
+  @Test func aRollbackThatStoppedItsOwnerLocallyRestoresNothingOnItsRetry() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let proxy = FailedStartProxyAgent(
+      descriptor: descriptor, fault: nil,
+      failure: EngineFailure(
+        .agent(.engineStartTimedOut),
+        message: "System Proxy runtime startup did not finish in time and was interrupted."))
+    let preparer = RecordingSystemProxyStartPreparer(
+      cancelError: AuthorityDomainError(code: .compensationConflict))
+    let lease = RecordingEngineLease(
+      observation: AuthorityOwnershipObservation(
+        state: .stopping,
+        lease: agreement(
+          for: descriptor, mode: descriptor.slot.authorityMode, leaseState: .stopping)),
+      beginFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: proxy,
+      tunnel: StartableTunnelHost(descriptor: descriptor),
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      systemProxyPreparer: preparer,
+      engineLease: lease)
+
+    #expect(await failureCode(coordinator, .startSystemProxy(request)) == .cleanupUnproven)
+    #expect(await proxy.counters().stop == 1)
+    #expect(await proxy.restoresBeforeStop == 0)
+
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the retried rollback did not complete")
+      return
+    }
+    #expect(await proxy.restoresBeforeStop == 0)
+    #expect(await proxy.counters().stop == 1)
     #expect(await lease.counters() == (begin: 2, complete: 1))
   }
 
@@ -2431,7 +2709,8 @@ struct NativeBridgeStartCommandIntegrationTests {
       Issue.record("exact compensated Tunnel stop was not acknowledged")
       return
     }
-    #expect(await failureCode(coordinator, .stopTunnel(request.context)) == .identityRejected)
+    try await expectRepeatedStopProvesOffAgain(
+      coordinator, .stopTunnel(request.context), lease: lease)
   }
 
   @Test func firstStatusFailsClosedOnRecoveredPreferenceWriteAheadReceipt()
@@ -2973,20 +3252,19 @@ struct NativeBridgeStartCommandIntegrationTests {
     let proxy = StartableProxyAgent(descriptor: descriptor)
     let preparer = RecordingSystemProxyStartPreparer()
     let tunnel = StartableTunnelHost(descriptor: descriptor)
-    let lease = RecordingEngineLease(
-      observation: AuthorityOwnershipObservation(
-        state: .active,
-        lease: agreement(
-          for: descriptor, mode: .systemProxy,
-          generation: descriptor.generation + 1)))
-    // The lease binds a different generation than the effective owner descriptor:
-    // activation is refused and the already-started owner is rolled back to Off.
+    // The lease binds another configuration than the effective owner
+    // descriptor, at the generation the Host prepared: activation is refused
+    // and the already-started owner is rolled back to Off.
+    let disagreeing = AuthorityOwnershipObservation(
+      state: .active,
+      lease: AuthorityLeaseAgreement(
+        installationID: descriptor.installationID, epoch: descriptor.epoch,
+        generation: descriptor.generation, ownerUID: 501, mode: .systemProxy,
+        configSHA256: try SHA256Digest(hex: String(repeating: "e", count: 64)),
+        identitySHA256: descriptor.identitySHA256, leaseState: .active))
+    let lease = RecordingEngineLease(observation: disagreeing)
     let coordinator = makeCoordinator(
-      proxy: proxy, tunnel: tunnel,
-      observation: AuthorityOwnershipObservation(
-        state: .active,
-        lease: agreement(
-          for: descriptor, mode: .systemProxy, generation: descriptor.generation + 1)),
+      proxy: proxy, tunnel: tunnel, observation: disagreeing,
       systemProxyPreparer: preparer,
       engineLease: lease)
 
@@ -3234,24 +3512,30 @@ struct NativeBridgeStartCommandIntegrationTests {
 
   /// A stop the Authority could not order before it recovered has no lease to
   /// order any more: the owner is still stopped and the Host proves Off itself.
-  @Test func stopUnorderedWhenTheAuthorityRecoveredEndsWithTheHostsOffProof() async throws {
-    let request = try startRequest(tunnelOptions: nil)
-    let descriptor = try request.descriptor(slot: .systemProxy)
+  /// A System Proxy owner already stopped once its settings were restored and
+  /// the ordering failed, so the retry does not ask it again.
+  @Test(arguments: [NativeStartMode.localProxy, .systemProxy])
+  func stopUnorderedWhenTheAuthorityRecoveredEndsWithTheHostsOffProof(
+    mode: NativeStartMode
+  ) async throws {
+    let request = try startRequest(tunnelOptions: nil, mode: mode)
+    let descriptor = try request.descriptor(slot: mode.slot)
     let proxy = StartableProxyAgent(descriptor: descriptor)
     let ownership = AuthorityOwnershipObservation(
-      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+      state: .active, lease: agreement(for: descriptor, mode: mode.slot.authorityMode))
     let lease = RecordingEngineLease(observation: ownership, beginFailures: 1)
     let coordinator = makeCoordinator(
       proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
       systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
-    _ = try await coordinator.execute(.startSystemProxy(request))
-    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .unavailable)
-    #expect((await proxy.counters()).stop == 0)
+    _ = try await coordinator.execute(
+      mode == .localProxy ? .startLocalProxy(request) : .startSystemProxy(request))
+    let stop: NativeBridgeCommand =
+      mode == .localProxy ? .stopLocalProxy(request.context) : .stopSystemProxy(request.context)
+    #expect(await failureCode(coordinator, stop) == .unavailable)
+    #expect((await proxy.counters()).stop == (mode == .systemProxy ? 1 : 0))
 
     await lease.recoverFromEndedOwner(of: request.context)
-    guard
-      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
-    else {
+    guard case .acknowledged = try await coordinator.execute(stop) else {
       Issue.record("an unordered stop did not reach Off once the Authority recovered")
       return
     }
@@ -3264,12 +3548,15 @@ struct NativeBridgeStartCommandIntegrationTests {
   /// stop is left unordered. The owner then ended, the Authority recovered, and
   /// the app's next status query proved Off at this stop's generation. The
   /// stop's retry finds no lease to order and ends with that Off, instead of
-  /// failing, and holding back every start, until the app is relaunched.
-  @Test func stopUnorderedBeforeTheAuthorityReachedOffEndsWithItsGenerationsOff()
-    async throws
-  {
-    let request = try startRequest(tunnelOptions: nil)
-    let descriptor = try request.descriptor(slot: .systemProxy)
+  /// failing, and holding back every start, until the app is relaunched. A
+  /// System Proxy stop restored the settings first, so it asked the owner to
+  /// stop at once; that owner held no session, so the retry asks it again.
+  @Test(arguments: [NativeStartMode.localProxy, .systemProxy])
+  func stopUnorderedBeforeTheAuthorityReachedOffEndsWithItsGenerationsOff(
+    mode: NativeStartMode
+  ) async throws {
+    let request = try startRequest(tunnelOptions: nil, mode: mode)
+    let descriptor = try request.descriptor(slot: mode.slot)
     let proxy = StartableProxyAgent(
       descriptor: descriptor,
       stopFailures: [
@@ -3279,15 +3566,18 @@ struct NativeBridgeStartCommandIntegrationTests {
             message: "System Proxy holds no session for the stopped generation."))
       ])
     let ownership = AuthorityOwnershipObservation(
-      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+      state: .active, lease: agreement(for: descriptor, mode: mode.slot.authorityMode))
     let lease = RecordingEngineLease(observation: ownership)
     let coordinator = makeCoordinator(
       proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
       systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
-    _ = try await coordinator.execute(.startSystemProxy(request))
+    _ = try await coordinator.execute(
+      mode == .localProxy ? .startLocalProxy(request) : .startSystemProxy(request))
+    let stop: NativeBridgeCommand =
+      mode == .localProxy ? .stopLocalProxy(request.context) : .stopSystemProxy(request.context)
     await lease.quarantine()
-    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .staleOperation)
-    #expect((await proxy.counters()).stop == 0)
+    #expect(await failureCode(coordinator, stop) == .staleOperation)
+    #expect((await proxy.counters()).stop == (mode == .systemProxy ? 1 : 0))
 
     await proxy.simulateEnded()
     await lease.recoverFromEndedOwner(of: request.context)
@@ -3297,28 +3587,26 @@ struct NativeBridgeStartCommandIntegrationTests {
     }
     #expect(await lease.reconcileCount() == 1)
 
-    guard
-      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
-    else {
+    guard case .acknowledged = try await coordinator.execute(stop) else {
       Issue.record("the unordered stop did not end with its generation's Off")
       return
     }
-    #expect((await proxy.counters()).stop == 1)
+    #expect((await proxy.counters()).stop == (mode == .systemProxy ? 2 : 1))
     #expect(await lease.counters() == (begin: 2, complete: 0))
     #expect(await lease.reconcileCount() == 1)
     // No stop transaction is left: the same stop is acknowledged from Off.
-    guard
-      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
-    else {
+    guard case .acknowledged = try await coordinator.execute(stop) else {
       Issue.record("a stop transaction outlived its proven Off")
       return
     }
     #expect(await lease.counters() == (begin: 2, complete: 0))
   }
 
-  /// An Authority that reached Off for another generation holds no record of
-  /// this stop's lease, so the unordered stop fails without asking the owner.
-  @Test func stopUnorderedWhenTheAuthorityIsOffForAnotherGenerationFails() async throws {
+  /// A later start passed this stop's generation while the stop waited, so the
+  /// stop's lease ended through a proven Off. The unordered stop stops its own
+  /// owner and ends once that owner is Off, instead of failing, and holding
+  /// back every start, until the app is relaunched.
+  @Test func stopUnorderedEndsOnceTheAuthorityPassedItsGeneration() async throws {
     let request = try startRequest(tunnelOptions: nil)
     let descriptor = try request.descriptor(slot: .systemProxy)
     let proxy = StartableProxyAgent(descriptor: descriptor)
@@ -3333,17 +3621,207 @@ struct NativeBridgeStartCommandIntegrationTests {
     #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .staleOperation)
 
     await proxy.simulateEnded()
-    await lease.recoverFromEndedOwner(
-      of: try EngineCommandContext(
-        installationID: request.context.installationID,
-        configEpoch: request.context.configEpoch,
-        generation: request.context.generation + 1))
+    await lease.recoverFromEndedOwner(of: try context(request, generation: 8))
     guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
       Issue.record("the status query did not reconcile the recovered Authority")
       return
     }
-    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .staleOperation)
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("a stop whose generation the Authority passed did not end")
+      return
+    }
+    #expect((await proxy.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 2, complete: 0))
+    #expect(await lease.reconcileCount() == 1)
+  }
+
+  /// The stop could not be ordered, and a later start passed its generation
+  /// before the retry. Its owner is Off, so the stop ends without reconciling
+  /// or completing anything at the Authority, and the next start is admitted.
+  /// A System Proxy owner already stopped once its settings were restored and
+  /// the ordering failed.
+  @Test(arguments: [NativeStartMode.localProxy, .systemProxy])
+  func anUnorderedStopTheAuthorityPassedEndsAndAdmitsTheNextStart(
+    mode: NativeStartMode
+  ) async throws {
+    let request = try startRequest(tunnelOptions: nil, mode: mode)
+    let descriptor = try request.descriptor(slot: mode.slot)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let preparer = RecordingSystemProxyStartPreparer()
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: mode.slot.authorityMode))
+    let lease = RecordingEngineLease(observation: ownership, beginFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: preparer, engineLease: lease)
+    _ = try await coordinator.execute(
+      mode == .localProxy ? .startLocalProxy(request) : .startSystemProxy(request))
+    let stop: NativeBridgeCommand =
+      mode == .localProxy ? .stopLocalProxy(request.context) : .stopSystemProxy(request.context)
+    #expect(await failureCode(coordinator, stop) == .unavailable)
+    #expect((await proxy.counters()).stop == (mode == .systemProxy ? 1 : 0))
+
+    await lease.passGeneration(to: try context(request, generation: 8), state: .off)
+    guard case .acknowledged = try await coordinator.execute(stop) else {
+      Issue.record("a stop whose generation the Authority passed did not end")
+      return
+    }
+    #expect((await proxy.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 2, complete: 0))
+    #expect(await lease.reconcileCount() == 0)
+    let next = try startRequest(tunnelOptions: nil, mode: mode, generation: 9)
+    _ = await failureCode(
+      coordinator, mode == .localProxy ? .startLocalProxy(next) : .startSystemProxy(next))
+    #expect(await preparer.prepareCalls == 2)
+  }
+
+  /// The stop was ordered, and the owner stopped, but a later start passed the
+  /// generation before the Authority completed the stop. The stop ends with
+  /// its own owner Off, whatever later lease the Authority holds, and the
+  /// status then reports that lease as busy.
+  @Test func anOrderedStopTheAuthorityPassedEndsWhileALaterLeaseIsActive() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let later = try startRequest(tunnelOptions: nil, generation: 8).descriptor(slot: .systemProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(observation: ownership, completeFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startSystemProxy(request))
+    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .unavailable)
+    #expect(await lease.counters() == (begin: 1, complete: 1))
+
+    await lease.passGeneration(
+      to: try context(request, generation: 8), state: .active,
+      lease: agreement(for: later, mode: .systemProxy))
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("an ordered stop whose generation the Authority passed did not end")
+      return
+    }
+    #expect((await proxy.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 1, complete: 2))
+    #expect(await lease.reconcileCount() == 0)
+    #expect(await failureCode(coordinator, .queryStatus) == .busy)
+  }
+
+  /// The Authority passed the stop's generation, but the stop's own owner is
+  /// not Off: it failed at the stop's generation, which leaves cleanup
+  /// unproven, or a later start holds it, which is busy. Either way the stop
+  /// stays pending and holds back starts, and it ends once the owner is Off.
+  @Test(arguments: [false, true])
+  func aStopTheAuthorityPassedWaitsForItsOwnOwner(laterStartHoldsIt: Bool) async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let later = try startRequest(tunnelOptions: nil, generation: 8).descriptor(slot: .systemProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let preparer = RecordingSystemProxyStartPreparer()
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(observation: ownership, completeFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: preparer, engineLease: lease)
+    _ = try await coordinator.execute(.startSystemProxy(request))
+    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .unavailable)
+
+    await lease.passGeneration(to: try context(request, generation: 8), state: .off)
+    await proxy.report(
+      laterStartHoldsIt
+        ? .proxyActive(configuration: later, sequence: 3)
+        : try EngineSnapshot(
+          mode: .systemProxy,
+          state: .failed(
+            EngineFailure(
+              code: "runtime-failed", message: "Runtime stopped unexpectedly.",
+              isRetryable: false)),
+          configuration: descriptor, sequence: 3))
+    #expect(
+      await failureCode(coordinator, .stopSystemProxy(request.context))
+        == (laterStartHoldsIt ? .busy : .cleanupUnproven))
+    #expect(
+      await failureCode(
+        coordinator, .startSystemProxy(try startRequest(tunnelOptions: nil, generation: 9)))
+        == .cleanupUnproven)
+    #expect(await preparer.prepareCalls == 1)
+
+    await proxy.report(nil)
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the stop did not end once its own owner was Off")
+      return
+    }
+    #expect((await proxy.counters()).stop == 1)
+  }
+
+  /// An unordered stop ends only once the Authority settled its lease: Off at
+  /// the stop's generation, or a cursor past it. A quarantined Authority, or
+  /// one that lost its store and holds no record of any generation, settled
+  /// nothing, so the retry fails without asking the owner, and starts stay
+  /// held back. A Local Proxy stop changes nothing before it is ordered, so its
+  /// owner still runs.
+  @Test(arguments: [false, true])
+  func anUnorderedStopTheAuthorityDidNotSettleFails(storeLost: Bool) async throws {
+    let request = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    let descriptor = try request.descriptor(slot: .localProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .localProxy))
+    let lease = RecordingEngineLease(observation: ownership, beginFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startLocalProxy(request))
+    #expect(await failureCode(coordinator, .stopLocalProxy(request.context)) == .unavailable)
+
+    if storeLost {
+      await lease.loseStore()
+    } else {
+      await lease.quarantine()
+    }
+    #expect(await failureCode(coordinator, .stopLocalProxy(request.context)) == .staleOperation)
     #expect((await proxy.counters()).stop == 0)
+    let next = try startRequest(tunnelOptions: nil, mode: .localProxy, generation: 9)
+    #expect(await failureCode(coordinator, .startLocalProxy(next)) == .cleanupUnproven)
+  }
+
+  /// An explicit stop reaches an owner that already ended while a later start
+  /// is stopping at the Authority. That start's lease is not this stop's, so
+  /// the stop ends with its own owner Off before it looks at that lease.
+  @Test func anExplicitStopOfAnEndedOwnerEndsWhileALaterStartIsStopping() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let later = try startRequest(tunnelOptions: nil, generation: 8).descriptor(slot: .systemProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(
+      observation: ownership, recoveredStop: try recoveredStop(for: later))
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startSystemProxy(request))
+
+    await proxy.simulateEnded()
+    await lease.passGeneration(
+      to: try context(request, generation: 8), state: .stopping,
+      lease: agreement(for: later, mode: .systemProxy, leaseState: .stopping))
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the stop of an ended owner did not end")
+      return
+    }
+    #expect((await proxy.counters()).stop == 0)
+    #expect(await lease.recoverCount() == 0)
+    #expect(await lease.counters() == (begin: 0, complete: 0))
   }
 
   /// The Authority quarantines a stop whose owner never attested it once the
@@ -3409,15 +3887,17 @@ struct NativeBridgeStartCommandIntegrationTests {
     #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .unavailable)
 
     await lease.recoverFromEndedOwner(of: request.context)
-    await lease.failNextCompletedStopCheck(
+    await lease.failNextStopResolution(
       with: AuthorityDomainError(code: .globalAuthorityUnavailable))
     #expect(
       await failureCode(coordinator, .stopSystemProxy(request.context))
         == .globalAuthorityUnavailable)
   }
 
-  /// Off reconciled for another generation does not prove this stop.
-  @Test func recoveredStopRequiresTheOffCursorOfItsOwnGeneration() async throws {
+  /// A restarted Authority whose cursor passed this stop's generation needs
+  /// no reconciliation for this stop: its lease ended, and the stop ends with
+  /// its own owner Off.
+  @Test func recoveredStopTheAuthorityPassedEndsWithItsOwnersOff() async throws {
     let request = try startRequest(tunnelOptions: nil)
     let descriptor = try request.descriptor(slot: .systemProxy)
     let proxy = StartableProxyAgent(
@@ -3436,12 +3916,42 @@ struct NativeBridgeStartCommandIntegrationTests {
     _ = try await coordinator.execute(.startSystemProxy(request))
     #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .cleanupUnproven)
 
-    await lease.recoverFromEndedOwner(
-      of: try EngineCommandContext(
-        installationID: request.context.installationID,
-        configEpoch: request.context.configEpoch,
-        generation: request.context.generation + 1))
+    await lease.recoverFromEndedOwner(of: try context(request, generation: 8))
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("a recovered stop whose generation the Authority passed did not end")
+      return
+    }
+    #expect((await proxy.counters()).stop == 2)
+    #expect(await lease.reconcileCount() == 0)
+  }
+
+  /// An Authority never reports Off at an earlier generation than one it
+  /// prepared. Should a recovered one reconcile to such an Off anyway, that
+  /// Off does not prove this stop.
+  @Test func recoveredStopRequiresAnOffCursorAtOrPastItsGeneration() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let proxy = StartableProxyAgent(
+      descriptor: descriptor,
+      stopFailures: [
+        .agentFailure(
+          EngineFailure(
+            .agent(.engineUnclosable), message: "System Proxy could not close its runtime."))
+      ])
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(observation: ownership)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startSystemProxy(request))
     #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .cleanupUnproven)
+
+    await lease.recoverFromEndedOwner(of: try context(request, generation: 6))
+    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .cleanupUnproven)
+    #expect(await lease.reconcileCount() == 1)
   }
 
   /// A ProxyAgent answers a stop as stale when it holds a session of another
@@ -3539,6 +4049,384 @@ struct NativeBridgeStartCommandIntegrationTests {
     }
     #expect((await tunnel.counters()).stop == 1)
     #expect(await lease.counters() == (begin: 1, complete: 2))
+  }
+
+  /// A later start passed this Tunnel stop's generation and wrote its own
+  /// manager, so Network Extension answers the stop as stale. The Authority
+  /// holds no lease of the stop, so nothing of it is left to stop: the stop
+  /// ends once the tunnel is Off.
+  @Test func aReleasedTunnelStopEndsWhenALaterManagerReplacedItsOwn() async throws {
+    let request = try startRequest(tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .tunnel))
+    let lease = RecordingEngineLease(observation: ownership, beginFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor), tunnel: tunnel,
+      observation: ownership, engineLease: lease)
+    _ = try await coordinator.execute(.startTunnel(request))
+    #expect(await failureCode(coordinator, .stopTunnel(request.context)) == .unavailable)
+    #expect((await tunnel.counters()).stop == 0)
+
+    await tunnel.replaceManager(sessionRuns: false)
+    await lease.passGeneration(to: try context(request, generation: 8), state: .off)
+    guard case .acknowledged = try await coordinator.execute(.stopTunnel(request.context)) else {
+      Issue.record("a Tunnel stop whose manager a later start replaced did not end")
+      return
+    }
+    #expect((await tunnel.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 2, complete: 0))
+  }
+
+  /// While the Authority stops this Tunnel stop's lease, a manager of another
+  /// configuration is no answer for it: the stop fails as stale.
+  @Test func anOrderedTunnelStopFailsWhenAnotherManagerAnswersIt() async throws {
+    let request = try startRequest(tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .tunnel))
+    let lease = RecordingEngineLease(observation: ownership)
+    let coordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor), tunnel: tunnel,
+      observation: ownership, engineLease: lease)
+    _ = try await coordinator.execute(.startTunnel(request))
+
+    await tunnel.replaceManager(sessionRuns: true)
+    #expect(await failureCode(coordinator, .stopTunnel(request.context)) == .identityRejected)
+    #expect((await tunnel.counters()).stop == 1)
+    #expect(await lease.counters() == (begin: 1, complete: 0))
+  }
+
+  /// An explicit Tunnel stop whose generation the Authority passed skips the
+  /// status barrier, so it keeps that barrier's rule itself: it ends only once
+  /// no Tunnel preference write awaits reconciliation.
+  @Test func anExplicitTunnelStopTheAuthorityPassedWaitsForThePreferenceJournal()
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let later = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true), generation: 8
+    ).descriptor(slot: .tunnel)
+    let tunnel = StartableTunnelHost(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .tunnel))
+    let lease = RecordingEngineLease(observation: ownership, beginFailures: 1)
+    let coordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor), tunnel: tunnel,
+      observation: ownership, engineLease: lease)
+    _ = try await coordinator.execute(.startTunnel(request))
+    #expect(await failureCode(coordinator, .stopTunnel(request.context)) == .unavailable)
+
+    await tunnel.replaceManager(sessionRuns: false)
+    await tunnel.injectPendingPreferenceMutation(later)
+    await lease.passGeneration(to: try context(request, generation: 8), state: .off)
+    #expect(await failureCode(coordinator, .stopTunnel(request.context)) == .cleanupUnproven)
+    #expect((await tunnel.counters()).stop == 1)
+
+    try await tunnel.finishPreferenceCompensation(expectedConfiguration: later)
+    guard case .acknowledged = try await coordinator.execute(.stopTunnel(request.context)) else {
+      Issue.record("the Tunnel stop did not end once the preference journal settled")
+      return
+    }
+    #expect((await tunnel.counters()).stop == 1)
+  }
+
+  /// The failed start's preferences were not restored before a later start
+  /// passed its generation, whether its stop had been ordered or not. The
+  /// cleanup restores them once, asks the Authority for nothing that later
+  /// start holds, and ends with the tunnel Off.
+  @Test(arguments: [false, true])
+  func tunnelCleanupFinishesOnceTheAuthorityPassedItsGeneration(stopOrdered: Bool)
+    async throws
+  {
+    let request = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+    let descriptor = try request.descriptor(slot: .tunnel)
+    let tunnel = StartableTunnelHost(
+      descriptor: descriptor,
+      startPendingPreferenceDescriptor: descriptor,
+      failedStartSnapshot: TunnelStartupFailure.engineUnclosable,
+      reportsAsynchronousStartFailure: true,
+      compensationFailures: stopOrdered ? 1 : 0)
+    let lease = RecordingEngineLease(
+      observation: AuthorityOwnershipObservation(
+        state: .stopping,
+        lease: agreement(for: descriptor, mode: .tunnel, leaseState: .stopping)),
+      beginFailures: stopOrdered ? 0 : 1)
+    let coordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor), tunnel: tunnel,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      engineLease: lease)
+    #expect(await failureCode(coordinator, .startTunnel(request)) == .cleanupUnproven)
+    #expect(await tunnel.compensationCounts().compensate == 0)
+
+    await lease.passGeneration(to: try context(request, generation: 8), state: .off)
+    guard case .acknowledged = try await coordinator.execute(.stopTunnel(request.context)) else {
+      Issue.record("the failed start's cleanup did not finish once the Authority passed it")
+      return
+    }
+    #expect(await tunnel.compensationCounts() == (compensate: 1, finish: 1))
+    #expect(await lease.reconcileCount() == 0)
+    #expect(await lease.counters().complete == (stopOrdered ? 1 : 0))
+    guard case .status(.off) = try await coordinator.execute(.queryStatus) else {
+      Issue.record("the cleanup did not leave proven Off")
+      return
+    }
+  }
+
+  /// A System Proxy stop has the ProxyAgent give the OS back its settings
+  /// before the Authority orders the stop, and only then. A retry of a stop
+  /// the Authority already ordered does not ask again, whether the owner
+  /// stopped or its stop failed: the owner's own stop restores what is left.
+  @Test(arguments: [false, true])
+  func aSystemProxyStopRestoresItsSettingsBeforeTheAuthorityOrdersIt(ownerStopFails: Bool)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let events = NativeCleanupEventLog()
+    let proxy = StartableProxyAgent(
+      descriptor: descriptor,
+      stopFailures: ownerStopFails
+        ? [.transportUnavailable("The ProxyAgent connection was interrupted.")] : [],
+      events: events)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(
+      observation: ownership, completeFailures: ownerStopFails ? 0 : 1, cleanupEvents: events)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startSystemProxy(request))
+    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .unavailable)
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the System Proxy stop did not end")
+      return
+    }
+    #expect(await proxy.restoresBeforeStop == [descriptor])
+    #expect(
+      events.events
+        == (ownerStopFails
+          ? ["restore-before-stop", "begin-stop", "proxy-stop", "proxy-stop", "complete-stop"]
+          : [
+            "restore-before-stop", "begin-stop", "proxy-stop", "complete-stop", "complete-stop",
+          ]))
+  }
+
+  /// A start whose readiness the Host could not confirm is rolled back. The
+  /// user did not ask for Off, so the rollback restores nothing first: the
+  /// Authority orders the stop, and the owner's own stop restores its
+  /// settings.
+  @Test func aRollbackRestoresNoSettingsBeforeItsStop() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let events = NativeCleanupEventLog()
+    let proxy = StartableProxyAgent(descriptor: descriptor, events: events)
+    // The owner's readiness has not reached the Authority yet, so the Host
+    // cannot confirm the start.
+    let ownership = AuthorityOwnershipObservation(
+      state: .starting,
+      lease: agreement(for: descriptor, mode: .systemProxy, leaseState: .starting))
+    let lease = RecordingEngineLease(observation: ownership, cleanupEvents: events)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    #expect(await failureCode(coordinator, .startSystemProxy(request)) == .busy)
+    #expect(await proxy.restoresBeforeStop.isEmpty)
+    #expect(events.events == ["begin-stop", "proxy-stop", "complete-stop"])
+  }
+
+  /// Ordering a stop the user asked for can fail once the ProxyAgent restored
+  /// its settings. The settings then select no listener, so the owner stops
+  /// at once, and the status no longer reports System Proxy running; the
+  /// retry has the Authority order and complete the stop. A local stop that
+  /// fails too is reported with the ordering failure, and the retry restores
+  /// and stops again.
+  @Test(arguments: [false, true])
+  func aStopWhoseOrderingFailsAfterItsRestoreStopsTheOwnerLocally(localStopFails: Bool)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let events = NativeCleanupEventLog()
+    let proxy = StartableProxyAgent(
+      descriptor: descriptor,
+      stopFailures: localStopFails
+        ? [.transportUnavailable("The ProxyAgent connection was interrupted.")] : [],
+      events: events)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(
+      observation: ownership, beginFailures: 1, cleanupEvents: events)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startSystemProxy(request))
+
+    let stopFailure = await failure(coordinator, .stopSystemProxy(request.context))
+    #expect(stopFailure?.code == .unavailable)
+    #expect(stopFailure?.message.contains("Local stop also failed") == localStopFails)
+    #expect(events.events == ["restore-before-stop", "begin-stop", "proxy-stop"])
+    if !localStopFails,
+      case .status(.systemProxy) = try? await coordinator.execute(.queryStatus)
+    {
+      Issue.record("System Proxy was still reported running after its owner stopped")
+    }
+
+    events.removeAll()
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the retried stop did not end")
+      return
+    }
+    #expect(
+      events.events
+        == (localStopFails
+          ? ["restore-before-stop", "begin-stop", "proxy-stop", "complete-stop"]
+          : ["begin-stop", "complete-stop"]))
+  }
+
+  /// A restore before the stop that fails asks the Authority for nothing:
+  /// System Proxy keeps running, the status still reports it, and the stop
+  /// can be asked again.
+  @Test func aStopWhoseSettingsCannotBeRestoredKeepsSystemProxyRunning() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let proxy = StartableProxyAgent(
+      descriptor: descriptor,
+      restoreBeforeStopFailures: [
+        .agentFailure(
+          EngineFailure(
+            .agent(.preferencesFailed), message: "System Proxy settings were not restored."))
+      ])
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(observation: ownership)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startSystemProxy(request))
+    #expect(
+      await failureCode(coordinator, .stopSystemProxy(request.context))
+        == .systemProxyPreferencesFailed)
+    #expect(await lease.counters() == (begin: 0, complete: 0))
+    #expect((await proxy.counters()).stop == 0)
+    guard case .status(.systemProxy(let runtime)) = try await coordinator.execute(.queryStatus)
+    else {
+      Issue.record("System Proxy was not reported running after its restore failed")
+      return
+    }
+    #expect(runtime.context == request.context)
+
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the retried stop did not end")
+      return
+    }
+    #expect(await proxy.restoresBeforeStop == [descriptor, descriptor])
+    #expect(await lease.counters() == (begin: 1, complete: 1))
+  }
+
+  /// A ProxyAgent of an earlier build cannot restore before its stop, and
+  /// one whose build cannot be told may be one, as a running agent whose
+  /// bundle an install replaced is. Neither is asked: its session stops as
+  /// that build stops it.
+  @Test(arguments: [false, true])
+  func aStopOfAnEarlierProxyAgentBuildNeedsNoRestoreBeforeIt(inspectionFails: Bool)
+    async throws
+  {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let events = NativeCleanupEventLog()
+    let proxy = StartableProxyAgent(descriptor: descriptor, events: events)
+    await proxy.simulateExistingActiveSession()
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(observation: ownership, cleanupEvents: events)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      engineLease: lease,
+      serviceBuildObserver: EarlierProxyBuildObserver(fails: inspectionFails))
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the earlier build's session did not stop")
+      return
+    }
+    #expect(events.events == ["begin-stop", "proxy-stop", "complete-stop"])
+    #expect(await proxy.restoresBeforeStop.isEmpty)
+  }
+
+  /// A stop that restored nothing first changed nothing before its ordering
+  /// failed, so it stops no owner locally either: System Proxy keeps running
+  /// with its settings until the retry. The retry orders the stop and stops
+  /// the owner.
+  @Test func aStopThatRestoredNothingFirstStopsNoOwnerWhenItsOrderingFails() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let events = NativeCleanupEventLog()
+    let proxy = StartableProxyAgent(descriptor: descriptor, events: events)
+    await proxy.simulateExistingActiveSession()
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .systemProxy))
+    let lease = RecordingEngineLease(
+      observation: ownership, beginFailures: 1, cleanupEvents: events)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      engineLease: lease, serviceBuildObserver: EarlierProxyBuildObserver(fails: false))
+    #expect(await failureCode(coordinator, .stopSystemProxy(request.context)) == .unavailable)
+    #expect(events.events == ["begin-stop"])
+
+    guard
+      case .acknowledged = try await coordinator.execute(.stopSystemProxy(request.context))
+    else {
+      Issue.record("the retried stop did not end")
+      return
+    }
+    #expect(events.events == ["begin-stop", "begin-stop", "proxy-stop", "complete-stop"])
+  }
+
+  /// A Local Proxy session applied no System Proxy settings, so its stop
+  /// restores nothing before the Authority orders it.
+  @Test func aLocalProxyStopRestoresNothingBeforeIt() async throws {
+    let request = try startRequest(tunnelOptions: nil, mode: .localProxy)
+    let descriptor = try request.descriptor(slot: .localProxy)
+    let proxy = StartableProxyAgent(descriptor: descriptor)
+    let ownership = AuthorityOwnershipObservation(
+      state: .active, lease: agreement(for: descriptor, mode: .localProxy))
+    let lease = RecordingEngineLease(observation: ownership)
+    let coordinator = makeCoordinator(
+      proxy: proxy, tunnel: StartableTunnelHost(descriptor: descriptor), observation: ownership,
+      systemProxyPreparer: RecordingSystemProxyStartPreparer(), engineLease: lease)
+    _ = try await coordinator.execute(.startLocalProxy(request))
+    guard case .acknowledged = try await coordinator.execute(.stopLocalProxy(request.context))
+    else {
+      Issue.record("the Local Proxy stop did not end")
+      return
+    }
+    #expect(await proxy.restoresBeforeStop.isEmpty)
+    #expect((await proxy.counters()).stop == 1)
+  }
+
+  /// Another user's lease is no state this Host can observe. The status is
+  /// busy, which a later read settles, not a rejected identity, which no read
+  /// settles.
+  @Test func aStatusQueryWaitsOutAnotherUsersLease() async throws {
+    let request = try startRequest(tunnelOptions: nil)
+    let descriptor = try request.descriptor(slot: .systemProxy)
+    let coordinator = makeCoordinator(
+      proxy: StartableProxyAgent(descriptor: descriptor),
+      tunnel: StartableTunnelHost(descriptor: descriptor),
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      engineLease: ConflictingEngineLease())
+    #expect(await failureCode(coordinator, .queryStatus) == .busy)
   }
 }
 

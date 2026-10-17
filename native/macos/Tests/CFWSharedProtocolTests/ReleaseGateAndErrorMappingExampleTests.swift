@@ -333,6 +333,87 @@ private final class ProxyBindReplyRemote: AuthorityRemoteCalling, @unchecked Sen
   func invalidate() async {}
 }
 
+/// Answers an owner's lease status as scripted, or fails every status query
+/// with `failure`, and records what it was asked.
+private final class LeaseStatusRemote: AuthorityRemoteCalling, @unchecked Sendable {
+  private let lock = NSLock()
+  private let status: OwnerLeaseStatus
+  private let failure: AuthorityDomainError?
+  private var askedValue: [AuthorityIdentifier] = []
+  private var methodsValue: [AuthorityXPCMethod] = []
+
+  init(status: OwnerLeaseStatus, failure: AuthorityDomainError? = nil) {
+    self.status = status
+    self.failure = failure
+  }
+
+  var asked: [AuthorityIdentifier] { lock.withLock { askedValue } }
+  var methods: [AuthorityXPCMethod] { lock.withLock { methodsValue } }
+
+  func call(
+    method: AuthorityXPCMethod, request: Data,
+    configuration: Data?, secretPayload: Data?
+  ) async throws -> AuthorityXPCReply {
+    lock.withLock { methodsValue.append(method) }
+    let envelope = try AuthorityV1Codec.decodeRequest(request)
+    if method == .handshake {
+      return AuthorityXPCReply(
+        response: try AuthorityV1Codec.encodeResponse(
+          AuthorityResponseEnvelope(
+            requestID: envelope.requestID, operationID: nil,
+            result: try HandshakeResponse.v1())))
+    }
+    guard method == .ownerLeaseStatus, case .ownerLeaseStatus(let request) = envelope.command
+    else { throw AuthorityDomainError(code: .invalidMessage) }
+    lock.withLock { askedValue.append(request.leaseID) }
+    if let failure { throw failure }
+    return AuthorityXPCReply(
+      response: try AuthorityV1Codec.encodeResponse(
+        AuthorityResponseEnvelope(
+          requestID: envelope.requestID, operationID: nil,
+          result: OwnerLeaseStatusResponse(status: status))))
+  }
+
+  func invalidate() async {}
+}
+
+/// An owner asks after one lease over its own read-only method, and reads the
+/// answer the Authority correlated with its request.
+@Test(arguments: [OwnerLeaseStatus.held, .quarantined, .absent, .notReady])
+func anOwnerAsksAfterItsLeaseOverItsOwnMethod(status: OwnerLeaseStatus) async throws {
+  let remote = LeaseStatusRemote(status: status)
+  let client = BoundedAuthorityXPCClient(remote: remote)
+  let leaseID = AuthorityIdentifier(UUID())
+  #expect(try await client.ownerLeaseStatus(leaseID) == status)
+  #expect(remote.asked == [leaseID])
+  #expect(remote.methods == [.handshake, .ownerLeaseStatus])
+  #expect(AuthorityXPCMethod.ownerLeaseStatus.operationClass == .idempotentReadOnly)
+}
+
+/// The owner asks after its lease within the Host's wait for its stop reply,
+/// so it asks once, within its own bound, even after a failure another
+/// read-only call would retry.
+@Test func anOwnerAsksAfterItsLeaseOnceWithinItsOwnBound() async throws {
+  let timeout = AuthorityDomainError(code: .globalAuthorityTimeout)
+  #expect(timeout.code.allowsAutomaticRetry(for: .idempotentReadOnly))
+  let remote = LeaseStatusRemote(status: .held, failure: timeout)
+  let client = BoundedAuthorityXPCClient(remote: remote)
+  await #expect(throws: timeout) {
+    _ = try await client.ownerLeaseStatus(AuthorityIdentifier(UUID()))
+  }
+  #expect(remote.methods == [.handshake, .ownerLeaseStatus])
+  #expect(!AuthorityXPCMethod.ownerLeaseStatus.retriesAfterRetryableFailure)
+  #expect(AuthorityXPCMethod.snapshot.retriesAfterRetryableFailure)
+
+  let usual = Duration.seconds(5)
+  #expect(AuthorityXPCMethod.ownerLeaseStatus.replyTimeout(within: usual) == .seconds(1))
+  #expect(
+    AuthorityXPCMethod.ownerLeaseStatus.replyTimeout(within: .milliseconds(200))
+      == .milliseconds(200))
+  #expect(AuthorityXPCMethod.attestStopped.replyTimeout(within: usual) == usual)
+  #expect(AuthorityXPCMethod.snapshot.replyTimeout(within: usual) == usual)
+}
+
 @Test func unavailableAuthorityFailsClosedWithoutReachingAnyMutation() async throws {
   let remote = UnavailableAuthorityRemote()
   let client = BoundedAuthorityXPCClient(remote: remote)

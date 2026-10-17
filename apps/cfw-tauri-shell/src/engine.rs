@@ -327,6 +327,23 @@ impl ManagedEngine {
         })
     }
 
+    /// Runs background service `recovery` once macOS granted the rights to
+    /// restore the System Proxy settings an ended session left; see
+    /// `recover_after_settings_restoration`.
+    pub(crate) fn recover_with_restoration_rights<R>(
+        &self,
+        recovery: R,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static + use<R>
+    where
+        R: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let bridge = self.authorization_bridge.clone();
+        recover_after_settings_restoration(
+            move |restoration_only| async move { bridge.authorize_system_proxy(restoration_only).await },
+            recovery,
+        )
+    }
+
     pub(crate) fn require_capability(&self, mode: EngineMode) -> Result<(), String> {
         let available = match mode {
             EngineMode::Off => false,
@@ -682,22 +699,41 @@ where
     result
 }
 
-/// What the page shows when System Proxy authorization does not go through.
-/// macOS asks for consent in its own prompt, so the two outcomes a user can
-/// cause are an unanswered prompt and a cancelled one; both get the way back.
+/// What became of the macOS prompt behind a System Proxy rights request that
+/// did not go through. macOS asks for consent in its own prompt, so these are
+/// the two outcomes a user can cause; every other failure is no answer of the
+/// user's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RightsPromptOutcome {
+    /// No answer came in time: the prompt went unanswered, or, which the Host
+    /// cannot tell apart, the ProxyAgent that shows it did not reply.
+    Unanswered,
+    Refused,
+}
+
+impl RightsPromptOutcome {
+    fn of(code: NativeBridgeErrorCode) -> Option<Self> {
+        match code {
+            NativeBridgeErrorCode::Timeout => Some(Self::Unanswered),
+            NativeBridgeErrorCode::ApprovalDenied | NativeBridgeErrorCode::PermissionDenied => {
+                Some(Self::Refused)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// What the page shows when System Proxy authorization does not go through:
+/// either outcome the user caused gets the way back.
 fn authorization_failure_message(code: NativeBridgeErrorCode, message: &str) -> String {
-    match code {
-        NativeBridgeErrorCode::Timeout => {
-            "System Proxy authorization timed out: macOS did not get \
-             an answer to its prompt. Turn System Proxy on again and approve the prompt."
-                .into()
-        }
-        NativeBridgeErrorCode::ApprovalDenied | NativeBridgeErrorCode::PermissionDenied => {
-            "System Proxy authorization was cancelled or denied. Turn System Proxy on again and \
-             approve the prompt."
-                .into()
-        }
-        _ => format!("System Proxy authorization failed: {code:?}: {message}"),
+    match RightsPromptOutcome::of(code) {
+        Some(RightsPromptOutcome::Unanswered) => "System Proxy authorization timed out: macOS did \
+             not get an answer to its prompt. Turn System Proxy on again and approve the prompt."
+            .into(),
+        Some(RightsPromptOutcome::Refused) => "System Proxy authorization was cancelled or \
+             denied. Turn System Proxy on again and approve the prompt."
+            .into(),
+        None => format!("System Proxy authorization failed: {code:?}: {message}"),
     }
 }
 
@@ -709,6 +745,51 @@ async fn authorize_proxy_transition(
         .authorize_system_proxy(restoration_only)
         .await
         .map_err(|error| authorization_failure_message(error.code, &error.message))
+}
+
+/// Recovers background services once macOS granted the rights to restore the
+/// System Proxy settings an ended session left. `authorize` asks for those
+/// rights alone, restoration only, so with no settings left macOS shows no
+/// prompt. The user's refusal, or a prompt left unanswered, ends the recovery
+/// before it starts, because those settings stay until the user approves.
+/// Any other failure comes from the services this recovery repairs, so the
+/// recovery runs: one that proves Off had no settings left to restore, since
+/// a ProxyAgent holding them never reports Off, and one that fails reports
+/// both causes.
+async fn recover_after_settings_restoration<A>(
+    authorize: impl FnOnce(bool) -> A,
+    recovery: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String>
+where
+    A: std::future::Future<Output = Result<(), cfw_apple_network::NativeBridgeError>>,
+{
+    let unrequested = match authorize(true).await {
+        Ok(()) => None,
+        Err(error) => match RightsPromptOutcome::of(error.code) {
+            Some(RightsPromptOutcome::Unanswered) => {
+                return Err(
+                    "Restoring System Proxy settings timed out: macOS did not get an \
+                     answer to its prompt, or the ProxyAgent did not reply. Recover background \
+                     services again and approve the prompt."
+                        .into(),
+                );
+            }
+            Some(RightsPromptOutcome::Refused) => {
+                return Err(
+                    "Restoring System Proxy settings was cancelled or denied. Recover \
+                     background services again and approve the prompt."
+                        .into(),
+                );
+            }
+            None => Some(format!("{:?}: {}", error.code, error.message)),
+        },
+    };
+    recovery.await.map_err(|error| match unrequested {
+        Some(cause) => format!(
+            "{error}; the rights to restore System Proxy settings could not be requested: {cause}"
+        ),
+        None => error,
+    })
 }
 
 async fn set_mode_with_endpoint_rebind(

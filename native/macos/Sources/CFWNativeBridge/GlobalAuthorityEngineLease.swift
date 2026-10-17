@@ -98,7 +98,7 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
   ) async throws -> Bool {
     let snapshot = try await authority.snapshot()
     switch try Self.preparedCancellationDisposition(snapshot, descriptor: descriptor) {
-    case .alreadyOff, .released:
+    case .alreadyOff, .released, .superseded:
       return true
     case .ownerControlled:
       return false
@@ -113,7 +113,7 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
           observed,
           descriptor: descriptor)
         {
-        case .alreadyOff, .released:
+        case .alreadyOff, .released, .superseded:
           return true
         case .ownerControlled:
           return false
@@ -122,14 +122,12 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
         }
       }
       let observed = try await authority.snapshot()
-      guard
-        try Self.preparedCancellationDisposition(
-          observed,
-          descriptor: descriptor) == .alreadyOff
-      else {
+      switch try Self.preparedCancellationDisposition(observed, descriptor: descriptor) {
+      case .alreadyOff, .superseded:
+        return true
+      case .released, .cancel, .ownerControlled:
         throw AuthorityDomainError(code: .cleanupUnproven)
       }
-      return true
     }
   }
 
@@ -189,14 +187,42 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
         expectedRevision: snapshot.revision))
   }
 
-  func hasCompletedStop(_ context: EngineCommandContext) async throws -> Bool {
-    let snapshot = try await authority.snapshot()
+  func stopResolution(_ context: EngineCommandContext) async throws -> NativeStopResolution {
+    Self.stopResolution(try await authority.snapshot(), context: context)
+  }
+
+  static func stopResolution(
+    _ snapshot: AuthoritySnapshot, context: EngineCommandContext
+  ) -> NativeStopResolution {
+    if hasPassed(
+      snapshot, installationID: context.installationID, epoch: context.configEpoch,
+      generation: context.generation)
+    {
+      return .superseded
+    }
     guard snapshot.state == .off, snapshot.leaseView == nil,
-      let cursor = snapshot.replayCursor
+      let cursor = snapshot.replayCursor,
+      cursor.installationID.rawValue == context.installationID,
+      cursor.acceptedEpoch == context.configEpoch,
+      cursor.acceptedGeneration == context.generation
+    else { return .unresolved }
+    return .completed
+  }
+
+  /// Whether the replay cursor of the same installation passed the generation.
+  /// It advances only through a start prepared from a proven Off, so every
+  /// lease of a passed generation ended; a lease of it still in view would
+  /// contradict the cursor, and proves nothing.
+  private static func hasPassed(
+    _ snapshot: AuthoritySnapshot, installationID: UUID, epoch: UInt64, generation: UInt64
+  ) -> Bool {
+    guard let cursor = snapshot.replayCursor,
+      cursor.installationID.rawValue == installationID,
+      (cursor.acceptedEpoch, cursor.acceptedGeneration) > (epoch, generation)
     else { return false }
-    return cursor.installationID.rawValue == context.installationID
-      && cursor.acceptedEpoch == context.configEpoch
-      && cursor.acceptedGeneration == context.generation
+    guard let root = snapshot.leaseView?.operation.root else { return true }
+    return root.installationID.rawValue != installationID
+      || (root.epoch, root.generation) != (epoch, generation)
   }
 
   /// A completion reply can be lost after the Authority durably commits Off. The
@@ -234,6 +260,8 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
     /// Recovering: the Authority released every lease and admits no start
     /// until the Host proves Off.
     case released
+    /// The Authority passed the start's generation.
+    case superseded
     case cancel(LeaseView)
     case ownerControlled
   }
@@ -242,23 +270,23 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
     _ snapshot: AuthoritySnapshot,
     descriptor: ConfigurationDescriptor
   ) throws -> PreparedCancellationDisposition {
+    // Whatever the Authority holds once it passed the failed start belongs to
+    // a later start, and nothing of this one can start any more.
+    if hasPassed(
+      snapshot, installationID: descriptor.installationID, epoch: descriptor.epoch,
+      generation: descriptor.generation)
+    {
+      return .superseded
+    }
     switch snapshot.state {
     case .off, .recovering:
       guard snapshot.leaseView == nil else {
         throw AuthorityDomainError(code: .cleanupUnproven)
       }
-      // A cursor past the failed start belongs to a later start, so this
-      // cleanup is stale.
-      if let cursor = snapshot.replayCursor {
-        guard cursor.installationID.rawValue == descriptor.installationID else {
-          throw AuthorityDomainError(code: .replayRejected)
-        }
-        guard
-          (cursor.acceptedEpoch, cursor.acceptedGeneration)
-            <= (descriptor.epoch, descriptor.generation)
-        else {
-          throw AuthorityDomainError(code: .replayRejected)
-        }
+      if let cursor = snapshot.replayCursor,
+        cursor.installationID.rawValue != descriptor.installationID
+      {
+        throw AuthorityDomainError(code: .replayRejected)
       }
       return snapshot.state == .off ? .alreadyOff : .released
     case .preparing:

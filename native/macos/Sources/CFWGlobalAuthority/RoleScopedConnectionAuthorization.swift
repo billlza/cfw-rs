@@ -43,7 +43,8 @@ public struct RoleScopedConnectionPeerAuthorizer: Sendable {
     processIdentifier: pid_t,
     effectiveUserIdentifier: uid_t,
     auditSessionIdentifier: UInt32,
-    leaseOwnerUID: uid_t?
+    leaseOwnerUID: uid_t?,
+    agentLease: ProxyAgentLeaseRequirement = .ownedLease
   ) throws -> PeerIdentity {
     try policy.authorizeRoleScopedConnection(
       role: role,
@@ -51,6 +52,7 @@ public struct RoleScopedConnectionPeerAuthorizer: Sendable {
       euid: effectiveUserIdentifier,
       auditSessionID: auditSessionIdentifier,
       liveConsoleUID: consoleResolver.liveConsoleUID(),
-      leaseOwnerUID: leaseOwnerUID)
+      leaseOwnerUID: leaseOwnerUID,
+      agentLease: agentLease)
   }
 }

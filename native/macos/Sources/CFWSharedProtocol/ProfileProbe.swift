@@ -4,6 +4,10 @@ public enum ProfileProbeServiceFailure: Int, Sendable {
   case busy = 1
   case invalidRequest = 2
   case executionFailed = 3
+  /// The probe ran past its reply; it may still be running.
+  case timedOut = 4
+  /// A spent or retired ProxyAgent refuses probes.
+  case agentEnding = 5
 
   public static let domain = "com.bill.clashformac.profile-probe"
 
@@ -21,6 +25,14 @@ public enum ProfileProbeServiceFailure: Int, Sendable {
       EngineFailure(
         .agent(.profileProbeFailed),
         message: "The temporary latency runtime could not start or finish its cleanup.")
+    case .timedOut:
+      EngineFailure(
+        .agent(.profileProbeTimedOut),
+        message: "The latency batch did not finish in time. Retry shortly.")
+    case .agentEnding:
+      EngineFailure(
+        .agent(.agentEnding),
+        message: "The proxy agent is ending; the next one takes the latency batch.")
     }
   }
 }

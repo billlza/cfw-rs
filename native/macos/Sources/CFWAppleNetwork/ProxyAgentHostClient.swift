@@ -166,6 +166,10 @@ public protocol ProxyAgentTransporting: Sendable {
     authorization: HostPreparedSystemProxyStart
   ) async throws
   func stop(configuration: ConfigurationDescriptor) async throws
+  /// Has the ProxyAgent restore the System Proxy settings of the session the
+  /// configuration names while its engine keeps running, before its stop.
+  /// Only the current build understands this, so it needs that build.
+  func restoreSettingsBeforeStop(configuration: ConfigurationDescriptor) async throws
   func snapshot() async throws -> EngineSnapshot
   func validateConfiguration(
     _ configuration: Data,
@@ -490,6 +494,13 @@ public actor AuthenticatedProxyAgentTransport:
   /// after its libbox start (`EngineStartBudget.proxyAgentStartReply`).
   public static let defaultReplyTimeout: Duration = .seconds(5)
 
+  /// The Host's wait for a profile probe: the probe's own timeout plus the
+  /// ordinary reply wait, inside which the ProxyAgent replies by its allowance
+  /// (`ProxyAgentCallBudget.profileProbeReplyAllowance`).
+  public static func profileProbeReplyTimeout(timeoutMS: UInt16) -> Duration {
+    .milliseconds(Int64(timeoutMS)) + defaultReplyTimeout
+  }
+
   /// Arms one production reply deadline.
   static let productionReplyDeadline: @Sendable (Duration) -> CallbackDeadlineScheduler = {
     CallbackDeadlineScheduler(timeout: $0)
@@ -555,7 +566,7 @@ public actor AuthenticatedProxyAgentTransport:
     defer { reference.lifecycle.release(token: token) }
     do {
       let _: Void = try await awaitBoundedCallback(
-        deadline: CallbackDeadlineScheduler(timeout: .seconds(290)),
+        deadline: CallbackDeadlineScheduler(timeout: ProxyAgentRequestBudget.authorizationReply),
         timeoutError: ProxyAgentHostError.transportTimedOut
       ) { finish in
         guard
@@ -657,6 +668,13 @@ public actor AuthenticatedProxyAgentTransport:
   public func stop(configuration: ConfigurationDescriptor) async throws {
     _ = try await execute(
       NativeCommand(kind: .stop, configuration: configuration),
+      expectedKind: .accepted
+    )
+  }
+
+  public func restoreSettingsBeforeStop(configuration: ConfigurationDescriptor) async throws {
+    _ = try await execute(
+      NativeCommand(kind: .restoreSettingsBeforeStop, configuration: configuration),
       expectedKind: .accepted
     )
   }
@@ -778,7 +796,7 @@ public actor AuthenticatedProxyAgentTransport:
     let names = try JSONEncoder().encode(proxies)
     return try await awaitProxyAgentResponse(
       connect: { try connectedSession() },
-      deadline: CallbackDeadlineScheduler(timeout: .milliseconds(Int64(timeoutMS) + 5000)),
+      deadline: makeReplyDeadline(Self.profileProbeReplyTimeout(timeoutMS: timeoutMS)),
       decode: { data in
         guard data.count <= 65536 else { throw ProxyAgentHostError.malformedResponse }
         let results = try JSONDecoder().decode([ProfileProxyDelay].self, from: data)

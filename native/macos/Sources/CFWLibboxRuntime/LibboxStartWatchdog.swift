@@ -353,6 +353,199 @@ private final class LibboxCloseReport: Sendable {
   }
 }
 
+/// What a bounded libbox call answers by its reply deadline.
+public enum LibboxCallReply<Value: Sendable>: Sendable {
+  /// The call returned first.
+  case returned(Result<Value, any Error>)
+  /// The reply deadline passed first; the call keeps running.
+  case stillRunning
+}
+
+/// How a bounded libbox call ended.
+public enum LibboxCallEnd<Value: Sendable>: Sendable {
+  /// The call returned, before or after its reply.
+  case returned(Result<Value, any Error>)
+  /// The call was still inside libbox `ProxyAgentCallBudget.abandonAfterReply`
+  /// after its reply deadline. Its thread stays there, so what it built stays
+  /// in this process.
+  case abandoned(LibboxInstanceUnclosable)
+}
+
+/// Bounds one synchronous libbox call that neither starts nor stops an
+/// engine, a configuration check or a profile probe, by a reply deadline and
+/// the limit after it (`ProxyAgentCallBudget`).
+///
+/// The call runs on its own thread, so one that never returns holds back no
+/// other. `reply` runs once: with the call's result when the call returns
+/// before the deadline, or with `stillRunning` at the deadline. `ended` runs
+/// once, after `reply`: with the result once the call returned, or with an
+/// abandonment when the call is still inside libbox at the limit. A return
+/// after an abandonment goes nowhere.
+public struct LibboxBoundedCall: Sendable {
+  /// Starts one call's work at the given quality.
+  typealias StartCall = @Sendable (DispatchQoS, @escaping @Sendable () -> Void) -> Void
+
+  /// Runs each call on a queue of its own, so one held inside libbox holds
+  /// back no other.
+  static let onItsOwnQueue: StartCall = { qos, work in
+    DispatchQueue(label: "com.bill.clashformac.libbox-call", qos: qos).async(execute: work)
+  }
+
+  private let afterAwake: LibboxStartWatchdog.AwakeTimer
+  private let startCall: StartCall
+
+  /// Both bounds count only time the Mac is awake, as the Host's waits do.
+  public init() {
+    self.init(
+      afterAwake: LibboxStartWatchdog.sleepingAwake(on: SuspendingClock()),
+      startCall: Self.onItsOwnQueue)
+  }
+
+  init(
+    afterAwake: @escaping LibboxStartWatchdog.AwakeTimer, startCall: @escaping StartCall
+  ) {
+    self.afterAwake = afterAwake
+    self.startCall = startCall
+  }
+
+  public func run<Value: Sendable>(
+    replyDeadline: Duration,
+    qos: DispatchQoS,
+    _ call: @escaping @Sendable () throws -> Value,
+    reply: @escaping @Sendable (LibboxCallReply<Value>) -> Void,
+    ended: @escaping @Sendable (LibboxCallEnd<Value>) -> Void
+  ) {
+    let attempt = LibboxBoundedCallAttempt(reply: reply, ended: ended)
+    let afterAwake = afterAwake
+    // The limit counts from the reply at the deadline, so a deadline that
+    // fires late, as after the Mac slept through it, still leaves the call the
+    // whole limit.
+    attempt.keep(
+      cancel: afterAwake(replyDeadline) {
+        attempt.replyDeadlinePassed {
+          afterAwake(ProxyAgentCallBudget.abandonAfterReply) { attempt.limitPassed() }
+        }
+      })
+    startCall(qos) {
+      attempt.returned(Result { try call() })
+    }
+  }
+}
+
+/// One bounded call. Its return, the reply deadline and the limit race
+/// through one mutex, so `reply` and `ended` each run once and in that order.
+private final class LibboxBoundedCallAttempt<Value: Sendable>: Sendable {
+  private enum Phase {
+    case running
+    /// The deadline passed and `stillRunning` is on its way to `reply`; the
+    /// call's result, should it return meanwhile, waits for that reply.
+    case replying(returned: Result<Value, any Error>?)
+    /// `reply` got `stillRunning` and the call still runs.
+    case replied
+    case ended
+  }
+
+  private struct State {
+    var phase = Phase.running
+    var cancelTimer: LibboxStartWatchdog.Cancel?
+  }
+
+  /// What a return does once the mutex decided.
+  private enum ReturnStep {
+    case replyAndEnd(LibboxStartWatchdog.Cancel?)
+    case end(LibboxStartWatchdog.Cancel?)
+    case nothing
+  }
+
+  private let reply: @Sendable (LibboxCallReply<Value>) -> Void
+  private let ended: @Sendable (LibboxCallEnd<Value>) -> Void
+  private let state = Mutex(State())
+
+  init(
+    reply: @escaping @Sendable (LibboxCallReply<Value>) -> Void,
+    ended: @escaping @Sendable (LibboxCallEnd<Value>) -> Void
+  ) {
+    self.reply = reply
+    self.ended = ended
+  }
+
+  /// Keeps the cancel of the timer just armed, or runs it when the call
+  /// already ended.
+  func keep(cancel: @escaping LibboxStartWatchdog.Cancel) {
+    let endedAlready = state.withLock { state -> Bool in
+      guard case .ended = state.phase else {
+        state.cancelTimer = cancel
+        return false
+      }
+      return true
+    }
+    if endedAlready { cancel() }
+  }
+
+  func returned(_ result: Result<Value, any Error>) {
+    let next = state.withLock { state -> ReturnStep in
+      switch state.phase {
+      case .running:
+        state.phase = .ended
+        return .replyAndEnd(state.cancelTimer)
+      case .replying(returned: nil):
+        state.phase = .replying(returned: result)
+        return .nothing
+      case .replying(returned: .some):
+        preconditionFailure("a bounded libbox call returned twice")
+      case .replied:
+        state.phase = .ended
+        return .end(state.cancelTimer)
+      case .ended:
+        return .nothing
+      }
+    }
+    switch next {
+    case .replyAndEnd(let cancel):
+      cancel?()
+      reply(.returned(result))
+      ended(.returned(result))
+    case .end(let cancel):
+      cancel?()
+      ended(.returned(result))
+    case .nothing:
+      return
+    }
+  }
+
+  func replyDeadlinePassed(armLimit: () -> LibboxStartWatchdog.Cancel) {
+    let replies = state.withLock { state -> Bool in
+      guard case .running = state.phase else { return false }
+      state.phase = .replying(returned: nil)
+      return true
+    }
+    guard replies else { return }
+    reply(.stillRunning)
+    let returnedMeanwhile = state.withLock { state -> Result<Value, any Error>? in
+      guard case .replying(let returned) = state.phase else {
+        preconditionFailure("a bounded libbox call left its reply out of order")
+      }
+      state.phase = returned == nil ? .replied : .ended
+      return returned
+    }
+    if let returnedMeanwhile {
+      ended(.returned(returnedMeanwhile))
+      return
+    }
+    keep(cancel: armLimit())
+  }
+
+  func limitPassed() {
+    let abandons = state.withLock { state -> Bool in
+      guard case .replied = state.phase else { return false }
+      state.phase = .ended
+      return true
+    }
+    guard abandons else { return }
+    ended(.abandoned(LibboxInstanceUnclosable(.callDidNotReturn)))
+  }
+}
+
 extension Duration {
   /// This duration as Dispatch counts it, to the nanosecond.
   var dispatchTimeInterval: DispatchTimeInterval {

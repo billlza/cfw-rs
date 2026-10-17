@@ -106,6 +106,17 @@ private struct AuthorizationOnlyOwner: ProxySystemProxyOwning {
     Issue.record("Authorization that was not granted must not restore settings")
     completionHandler()
   }
+  func restoreSettingsBeforeStop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not restore settings before a stop")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  var callsLibbox: Bool { true }
+  func retire(after failure: LibboxInstanceUnclosable) {
+    Issue.record("Authorization must not retire the agent")
+  }
 }
 
 /// Records, in order, the restore that granted rights start and the reply.
@@ -141,6 +152,17 @@ private final class RestoringOwner: ProxySystemProxyOwning, @unchecked Sendable 
       self.record("restore-finished")
       completionHandler()
     }
+  }
+  func restoreSettingsBeforeStop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    Issue.record("Authorization must not restore settings before a stop")
+    completionHandler(.failure(.lifecycleConflict))
+  }
+  var callsLibbox: Bool { true }
+  func retire(after failure: LibboxInstanceUnclosable) {
+    Issue.record("Authorization must not retire the agent")
   }
 }
 

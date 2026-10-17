@@ -21,10 +21,13 @@ enum LibboxProfileProbeReport {
   /// whose Go tests hold it).
   static let unclosedInstance = "profile probe cleanup failed"
 
-  /// Whether `report` says the probe's instance could not close, so what it
-  /// built stays in this process.
-  static func leftItsInstanceOpen(_ report: String) -> Bool {
+  /// The error of a probe libbox failed with `report`. One whose instance
+  /// libbox could not close leaves what it built in this process, which the
+  /// error carries as its unclosed call instance.
+  static func error(for report: String) -> LibboxRuntimeError {
     report.contains(unclosedInstance)
+      ? .profileProbeCleanupFailed(LibboxDiagnostic(report))
+      : .serviceStartFailed(LibboxDiagnostic(report))
   }
 }
 
@@ -49,13 +52,13 @@ public struct SourceBuiltLibboxProfileProbe: LibboxProfileProbing {
       let response = LibboxTestProfileProxiesWithTarget(
         configurationText, names, Int32(timeoutMS), targetURL, expectedStatus, &error)
       if let error {
-        let report = error.localizedDescription
-        if LibboxProfileProbeReport.leftItsInstanceOpen(report) {
+        let failure = LibboxProfileProbeReport.error(for: error.localizedDescription)
+        if failure.unclosedCallInstance != nil {
           Self.logger.fault(
             "libbox could not close a profile probe's instance; what it built stays in this process"
           )
         }
-        throw LibboxRuntimeError.serviceStartFailed(LibboxDiagnostic(report))
+        throw failure
       }
       guard response.utf8.count <= 65536 else {
         throw LibboxRuntimeError.serviceStartFailed(LibboxDiagnostic("Invalid latency response"))

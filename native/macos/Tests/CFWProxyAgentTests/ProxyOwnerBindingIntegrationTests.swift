@@ -45,7 +45,7 @@ private final class CoordinatorRecorder: @unchecked Sendable {
   var values: [CoordinatorOutcome] { lock.withLock { outcomes } }
 }
 
-private final class FakeProxyOwnerAuthorityClient: EngineOwnerAuthorityClient, @unchecked Sendable {
+private final class FakeProxyOwnerAuthorityClient: ProxyOwnerAuthorityClient, @unchecked Sendable {
   private let lock = NSLock()
   private let orderLog: OrderLog
   private let makeLease: @Sendable () throws -> LeaseView
@@ -95,6 +95,12 @@ private final class FakeProxyOwnerAuthorityClient: EngineOwnerAuthorityClient, @
 
   func attestStopped(_ attestation: StoppedAttestation) async throws {
     lock.withLock { stoppedValue.append(attestation) }
+  }
+
+  /// Every attestation here succeeds, so no stop asks after its lease.
+  func ownerLeaseStatus(_ leaseID: AuthorityIdentifier) async throws -> OwnerLeaseStatus {
+    Issue.record("a stop whose attestation succeeded asked after its lease")
+    throw AuthorityDomainError(code: .globalAuthorityUnavailable)
   }
 }
 

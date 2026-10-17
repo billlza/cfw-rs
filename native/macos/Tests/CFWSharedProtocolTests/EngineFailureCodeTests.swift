@@ -43,6 +43,9 @@ private let proxyAgentWireCodes: [ProxyAgentFailureCode: (code: String, retryabl
   .profileProbeBusy: ("profile-probe-busy", true),
   .profileProbeInvalid: ("profile-probe-invalid", false),
   .profileProbeFailed: ("profile-probe-failed", true),
+  .agentEnding: ("proxy-agent-ending", true),
+  .configurationCheckTimedOut: ("configuration-check-timed-out", true),
+  .profileProbeTimedOut: ("profile-probe-timed-out", true),
 ]
 private let packetTunnelWireCodes: [PacketTunnelFailureCode: (code: String, retryable: Bool)] = [
   .providerUnavailable: ("tunnel-provider-unavailable", true),

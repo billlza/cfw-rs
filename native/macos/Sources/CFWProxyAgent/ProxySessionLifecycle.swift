@@ -3,6 +3,7 @@ import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 import OSLog
+import Synchronization
 
 protocol ProxyEngineLeaseHolding: AnyObject {
   func release() throws
@@ -10,6 +11,20 @@ protocol ProxyEngineLeaseHolding: AnyObject {
 
 struct PreparedProxyOwnership {
   let lease: any ProxyEngineLeaseHolding
+}
+
+/// Why the ProxyAgent ends its own process. launchd starts a fresh agent for
+/// the next request.
+enum ProxyAgentEndReason: Equatable, Sendable {
+  /// libbox could not close a runtime: only the process ending releases what
+  /// that close left open.
+  case engineUnclosable(LibboxInstanceUnclosable)
+  /// The Authority quarantined a stop this agent had finished locally. It
+  /// releases the lease once this process ended.
+  case quarantinedStop
+  /// A configuration check or profile probe left in libbox what this process
+  /// cannot release; the agent retired and ended once it was idle.
+  case retired(LibboxInstanceUnclosable)
 }
 
 enum ProxySessionLifecycleError: Error, Equatable, Sendable {
@@ -38,6 +53,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case ownershipJournal(String)
   case ownershipConflict([ProxyOwnershipConflict])
   case cleanupFailed(original: String, cleanup: [String])
+  /// The agent is spent or retired, so it takes no new start.
+  case agentEnding
 
   var engineFailure: EngineFailure {
     EngineFailure(failure, message: safeMessage)
@@ -68,6 +85,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
     case .ownershipJournal: .agent(.ownershipJournalFailed)
     case .ownershipConflict: .agent(.ownershipConflict)
     case .cleanupFailed: .agent(.cleanupFailed)
+    case .agentEnding: .agent(.agentEnding)
     }
   }
 
@@ -117,6 +135,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System proxy settings changed externally and were preserved."
     case .cleanupFailed:
       "System Proxy cleanup did not reach a proven Off state."
+    case .agentEnding:
+      "The proxy agent is ending; the next one takes the request."
     }
   }
 }
@@ -129,9 +149,8 @@ struct ProxySessionDependencies: @unchecked Sendable {
   let preferences: any SystemProxyPreferences
   let journalStore: any ProxyOwnershipJournalStoring
   let readinessTimeout: TimeInterval
-  /// Ends the ProxyAgent process after libbox could not close a runtime. Only
-  /// the process ending releases what that close left open.
-  let endProcess: @Sendable (LibboxInstanceUnclosable) -> Void
+  /// Ends the ProxyAgent process for one of `ProxyAgentEndReason`'s reasons.
+  let endProcess: @Sendable (ProxyAgentEndReason) -> Void
 
   init(
     prepareOwnership: @escaping (ConfigurationDescriptor) throws -> PreparedProxyOwnership,
@@ -144,7 +163,7 @@ struct ProxySessionDependencies: @unchecked Sendable {
     preferences: any SystemProxyPreferences,
     journalStore: any ProxyOwnershipJournalStoring,
     readinessTimeout: TimeInterval,
-    endProcess: @escaping @Sendable (LibboxInstanceUnclosable) -> Void
+    endProcess: @escaping @Sendable (ProxyAgentEndReason) -> Void
   ) {
     self.prepareOwnership = prepareOwnership
     self.resolveConfiguration = resolveConfiguration
@@ -212,6 +231,15 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     case spent(LibboxInstanceUnclosable)
   }
 
+  /// Whether checks and probes may still reach libbox.
+  private enum LibboxAccess {
+    case open
+    /// libbox could not close the session's engine.
+    case spent
+    /// A check or probe left in libbox what this process cannot release.
+    case retired(LibboxInstanceUnclosable)
+  }
+
   private let dependencies: ProxySessionDependencies
   private let stateQueue = DispatchQueue(label: "com.bill.clashformac.proxy-session-state")
   private var lifecycle = Lifecycle.idle
@@ -223,6 +251,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   private var lastStoppedConfiguration: ConfigurationDescriptor?
   private var lastFailedConfiguration: ConfigurationDescriptor?
   private var processEndScheduled = false
+  /// Closed once the agent is spent or retired, so checks and probes never
+  /// reach libbox again. Read without the state queue, which a start can hold
+  /// for its whole deadline.
+  private let libboxAccess = Mutex(LibboxAccess.open)
 
   init(dependencies: ProxySessionDependencies) {
     self.dependencies = dependencies
@@ -263,6 +295,40 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     }
   }
 
+  /// Gives the OS back the System Proxy settings of the session the request
+  /// names while its engine still answers, before the Host asks the Authority
+  /// to stop it. A restore that cannot reach the settings then fails with the
+  /// proxy still running, so the stop stays retryable, instead of the settings
+  /// outliving the listener they select. The session keeps its engine, lease
+  /// and state until its stop, which restores whatever is left as always.
+  /// Settings the user changed since stay the user's, as at a stop, which
+  /// reports them. Another generation's session, or none, has nothing to
+  /// restore here.
+  func restoreSettingsBeforeStop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler:
+      @escaping @Sendable (
+        Result<Void, ProxySessionLifecycleError>
+      ) -> Void
+  ) {
+    let completion = ProxyOperationCompletion(completionHandler)
+    stateQueue.async { [self] in
+      guard let session, session.configuration == expectedConfiguration else {
+        completion.finish(.success(()))
+        return
+      }
+      for error in restoreOwnedPreferences(session) {
+        // Only settings the agent could not write back keep System Proxy
+        // running. A conflict stays the user's, and a journal it could not
+        // remove is left, each for the stop to report, as without this.
+        guard case .preferences = error else { continue }
+        completion.finish(.failure(error))
+        return
+      }
+      completion.finish(.success(()))
+    }
+  }
+
   func snapshot(completionHandler: @escaping @Sendable (EngineSnapshot) -> Void) {
     stateQueue.async { [self] in
       if case .active(let sessionID) = lifecycle,
@@ -287,6 +353,40 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
   func testingSnapshot() -> EngineSnapshot {
     stateQueue.sync { currentSnapshot }
+  }
+
+  /// Whether checks and probes may still reach libbox.
+  var callsLibbox: Bool {
+    guard case .open = libboxAccess.withLock({ $0 }) else { return false }
+    return true
+  }
+
+  /// Whether the agent retired: it takes no new start.
+  var isRetired: Bool { retirement != nil }
+
+  private var retirement: LibboxInstanceUnclosable? {
+    guard case .retired(let failure) = libboxAccess.withLock({ $0 }) else { return nil }
+    return failure
+  }
+
+  /// A check or probe left in libbox what this process cannot release. The
+  /// agent refuses every later check, probe and start at once; a running
+  /// session runs and stops as usual, and `endProcessIfRetired` ends the
+  /// process once its owner is idle. A spent agent ends anyway.
+  func retire(after failure: LibboxInstanceUnclosable) {
+    libboxAccess.withLock {
+      guard case .open = $0 else { return }
+      $0 = .retired(failure)
+    }
+  }
+
+  /// Ends a retired agent that holds no session, so no System Proxy setting it
+  /// applied outlives it; its owner asks once it is idle.
+  func endProcessIfRetired() {
+    stateQueue.async { [self] in
+      guard let retirement, session == nil else { return }
+      scheduleProcessEnd(.retired(retirement))
+    }
   }
 
   /// Restores the System Proxy settings this agent still owns but could not
@@ -339,6 +439,13 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     }
     guard session == nil else {
       completion.finish(.failure(.lifecycleConflict))
+      return
+    }
+    // A start its owner admitted just before the agent retired fails without
+    // a session, so its stop finds the failure and the owner proves Off.
+    if isRetired {
+      failStartWithoutOwnedSession(
+        .agentEnding, configuration: descriptor, completion: completion)
       return
     }
 
@@ -705,6 +812,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     stopCompletion: ProxyOperationCompletion?
   ) {
     lifecycle = .spent(failure)
+    libboxAccess.withLock { $0 = .spent }
     let error = ProxySessionLifecycleError.engineUnclosable(failure)
     let stageCode = stage?.engineFailure.code ?? "stop"
     let cleanupCodes = cleanupErrors.map { $0.engineFailure.code }.joined(separator: ",")
@@ -748,21 +856,34 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     }
   }
 
-  /// Ends the process once its journal is gone. The end runs after every
-  /// operation already queued, so each reply this failure produced has been
-  /// handed to its transport first.
+  /// Ends the process once its journal is gone.
   private func endProcessUnlessSettingsRemain(
     _ session: Session,
     _ failure: LibboxInstanceUnclosable
   ) {
-    guard session.journal == nil, !processEndScheduled else {
-      return
+    guard session.journal == nil else { return }
+    scheduleProcessEnd(.engineUnclosable(failure))
+  }
+
+  /// Ends the process for a stop this agent finished locally but whose stopped
+  /// attestation the Authority refused in a quarantine: the Authority releases
+  /// the lease once this process ended. The agent holds no session then, so
+  /// its System Proxy settings are restored.
+  func endProcessAfterQuarantinedStop() {
+    stateQueue.async { [self] in
+      guard session == nil else { return }
+      scheduleProcessEnd(.quarantinedStop)
     }
+  }
+
+  /// Ends the process for `reason`, once whatever the reason. The end runs
+  /// after every operation already queued, so their replies have been handed
+  /// to their transport first. Runs on the state queue.
+  private func scheduleProcessEnd(_ reason: ProxyAgentEndReason) {
+    guard !processEndScheduled else { return }
     processEndScheduled = true
     let endProcess = dependencies.endProcess
-    stateQueue.async {
-      endProcess(failure)
-    }
+    stateQueue.async { endProcess(reason) }
   }
 
   private func restoreOwnedPreferences(

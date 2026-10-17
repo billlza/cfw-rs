@@ -274,6 +274,10 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     else { throw failure(.invalidMessage, operation) }
 
     let committedRevision = try incrementedRevision()
+    // Only a prepare, which needs a proven Off, moves the cursor's
+    // installation, epoch and generation. A Host takes a cursor past a stop's
+    // generation for proof that the stop's lease ended through that Off
+    // (`GlobalAuthorityEngineLeaseInspector.stopResolution`).
     let previousDigest: SHA256Digest
     if let existingDigest = replayCursor?.previousRecordSHA256 {
       previousDigest = existingDigest

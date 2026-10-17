@@ -12,12 +12,26 @@ public enum AuthorityXPCMethod: Equatable, Sendable {
   case attestStopped
   case cancelPrepared
   case snapshot
+  case ownerLeaseStatus
 
   public var operationClass: AuthorityOperationClass {
     switch self {
-    case .handshake, .snapshot: .idempotentReadOnly
+    case .handshake, .snapshot, .ownerLeaseStatus: .idempotentReadOnly
     default: .mutation
     }
+  }
+
+  /// Whether the client asks again, once, after a failure the error's retry
+  /// directive allows. A ProxyAgent asks for its lease's status within the
+  /// Host's wait for its stop reply, so it asks once.
+  public var retriesAfterRetryableFailure: Bool { self != .ownerLeaseStatus }
+
+  /// The longest the client waits for this call's reply when it waits
+  /// `usual` for the others.
+  public func replyTimeout(within usual: Duration) -> Duration {
+    guard self == .ownerLeaseStatus else { return usual }
+    return min(
+      usual, .milliseconds(Int64(AuthorityV1Limits.ownerLeaseStatusTimeoutMilliseconds)))
   }
 }
 
@@ -68,6 +82,12 @@ public protocol EngineOwnerAuthorityClient: Sendable {
   func redeem(_ ticket: StartTicket) async throws -> RedeemedTunnelStart
   func attestReady(_ attestation: ReadyAttestation) async throws
   func attestStopped(_ attestation: StoppedAttestation) async throws
+}
+
+/// What the ProxyAgent also asks the Authority: whether it still holds the
+/// lease the agent bound, once the agent's stopped attestation failed.
+public protocol ProxyOwnerAuthorityClient: EngineOwnerAuthorityClient {
+  func ownerLeaseStatus(_ leaseID: AuthorityIdentifier) async throws -> OwnerLeaseStatus
 }
 
 public struct RedeemedTunnelMetadata: Codable, Equatable, Sendable {

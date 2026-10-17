@@ -298,6 +298,93 @@ private func stoppedAttestation(_ fixture: PrepareFixture) throws -> StoppedAtte
   #expect(reducer.lease == nil)
 }
 
+/// The installation, epoch and generation the replay cursor names.
+private struct CursorGeneration: Equatable {
+  let installationID: AuthorityIdentifier
+  let epoch: UInt64
+  let generation: UInt64
+
+  init?(_ reducer: GlobalAuthorityReducer) {
+    guard let cursor = reducer.replayCursor else { return nil }
+    installationID = cursor.installationID
+    epoch = cursor.acceptedEpoch
+    generation = cursor.acceptedGeneration
+  }
+
+  init(_ fixture: PrepareFixture) {
+    installationID = fixture.operation.root.installationID
+    epoch = fixture.operation.root.epoch
+    generation = fixture.operation.root.generation
+  }
+}
+
+/// A Host takes a replay cursor past a stop's generation for proof that the
+/// stop's lease ended through a proven Off. That holds because only a prepare
+/// moves the cursor's installation, epoch and generation: every other step of
+/// a lease, a revocation, a quarantine, a recovery and Off keep them.
+@Test func onlyAPrepareMovesTheReplayCursorsGeneration() throws {
+  let installation = AuthorityIdentifier(UUID())
+  var reducer = try GlobalAuthorityReducer.unEnrolledOff()
+
+  let first = try prepareFixture(
+    installationID: installation, epoch: 1, generation: 1, revision: reducer.revision)
+  try reducer.prepare(first.input)
+  #expect(CursorGeneration(reducer) == CursorGeneration(first))
+  try reducer.bindOwner(binding(first))
+  try reducer.attestReady(readyAttestation(first), ownerUID: 501, connectionNonce: reducerNonce)
+  #expect(reducer.state == .active)
+  try reducer.beginStop(
+    BeginStopRequest(
+      operation: first.operation, leaseID: first.leaseID, expectedRevision: reducer.revision))
+  try reducer.attestStopped(
+    stoppedAttestation(first), ownerUID: 501, connectionNonce: reducerNonce)
+  #expect(CursorGeneration(reducer) == CursorGeneration(first))
+  let stopped = reducer.revision
+  #expect(
+    try reducer.applyOffProof(exactOffProof(), expectedRevision: stopped)
+      == .off(revision: stopped + 1))
+  #expect(CursorGeneration(reducer) == CursorGeneration(first))
+
+  let aborted = try prepareFixture(
+    installationID: installation, epoch: 1, generation: 2, revision: reducer.revision)
+  try reducer.prepare(aborted.input)
+  #expect(CursorGeneration(reducer) == CursorGeneration(aborted))
+  try reducer.abortPrepared(operation: aborted.operation, expectedRevision: reducer.revision)
+  let abortedRevision = reducer.revision
+  #expect(
+    try reducer.applyOffProof(exactOffProof(), expectedRevision: abortedRevision)
+      == .off(revision: abortedRevision + 1))
+  #expect(CursorGeneration(reducer) == CursorGeneration(aborted))
+
+  let revoked = try prepareFixture(
+    installationID: installation, epoch: 2, generation: 1, revision: reducer.revision)
+  try reducer.prepare(revoked.input)
+  try reducer.bindOwner(binding(revoked))
+  try reducer.attestReady(
+    readyAttestation(revoked), ownerUID: 501, connectionNonce: reducerNonce)
+  try reducer.revokeForConsoleChange(liveConsoleUID: 502, ownerConnectionNonce: reducerNonce)
+  let ambiguous = GlobalOffProof(
+    leaseReleased: true, capabilityOrTicketCleared: true,
+    secretBufferCleared: true, ownerEndpointCleared: true,
+    cleanup: .systemProxy(listenerClosed: true, systemConfigurationRestored: false),
+    managedTunnel: .disconnected)
+  let revokedRevision = reducer.revision
+  #expect(
+    try reducer.applyOffProof(ambiguous, expectedRevision: revokedRevision)
+      == .quarantined(revision: revokedRevision + 1))
+  #expect(CursorGeneration(reducer) == CursorGeneration(revoked))
+
+  var recovered = try GlobalAuthorityReducer.recovering(
+    revision: reducer.revision, replayCursor: reducer.replayCursor,
+    enrolledInstallationID: installation)
+  #expect(CursorGeneration(recovered) == CursorGeneration(revoked))
+  let recoveredRevision = recovered.revision
+  #expect(
+    try recovered.applyOffProof(exactOffProof(), expectedRevision: recoveredRevision)
+      == .off(revision: recoveredRevision + 1))
+  #expect(CursorGeneration(recovered) == CursorGeneration(revoked))
+}
+
 @Test func recoveryNeverConvertsUnknownCleanupToOff() throws {
   let installation = AuthorityIdentifier(UUID())
   let cursor = try ReplayCursor(

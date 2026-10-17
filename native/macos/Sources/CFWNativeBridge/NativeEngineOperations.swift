@@ -2,8 +2,12 @@ import CFWAppleNetwork
 import CFWCredentialTransport
 import CFWSharedProtocol
 import Foundation
+import OSLog
 
 extension NativeBridgeCoordinator {
+  private static let restorationLog = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-restoration")
+
   func startSystemProxy(_ request: EngineStartRequest) async throws
     -> NativeRuntimeIdentity
   {
@@ -167,7 +171,7 @@ extension NativeBridgeCoordinator {
       return
     }
     if try await prepareExplicitStop(owner, context: context) {
-      try await drivePendingStop()
+      try await drivePendingStop(restoringSettingsFirst: owner == .systemProxy)
     }
   }
 
@@ -418,7 +422,7 @@ extension NativeBridgeCoordinator {
       return
     }
     if try await prepareExplicitStop(.tunnel, context: context) {
-      try await drivePendingStop()
+      try await drivePendingStop(restoringSettingsFirst: false)
     }
   }
 
@@ -462,6 +466,12 @@ extension NativeBridgeCoordinator {
       // Bind the request to that exact completed/stopping generation, then
       // require both the independent OS barrier and the durable Off cursor.
       do {
+        // An Authority that passed this generation since holds nothing of it,
+        // whatever later start it holds now.
+        if try await engineLease.stopResolution(context) == .superseded {
+          try await requireOwnerOffAfterSupersededStop(owner, context: context)
+          return false
+        }
         if let recovered = try await engineLease.recoverStoppingLease() {
           guard recovered.commandContext == context, recovered.owner == owner else {
             throw NativeBridgeExecutionError.failure(
@@ -471,7 +481,7 @@ extension NativeBridgeCoordinator {
         guard case .off = try await queryStatus() else {
           throw AuthorityDomainError(code: .cleanupUnproven)
         }
-        guard try await engineLease.hasCompletedStop(context) else {
+        guard try await engineLease.stopResolution(context) != .unresolved else {
           throw NativeBridgeExecutionError.failure(
             .identityRejected, "The stop request has no matching completed generation.")
         }
@@ -574,7 +584,11 @@ extension NativeBridgeCoordinator {
     }
 
     do {
-      try await drivePendingStop()
+      // A rollback restores nothing first: the owner's own stop restores its
+      // settings once the Authority ordered it, so a failed start's owner never
+      // keeps running because they could not be restored. Restoring first is
+      // for an Off the user asked for.
+      try await drivePendingStop(restoringSettingsFirst: false)
     } catch let error as NativeBridgeExecutionError {
       let localCleanup = await attemptLocalStopAfterOrderingFailure()
       let original = Self.map(originalError).responseFailure.message
@@ -650,6 +664,7 @@ extension NativeBridgeCoordinator {
     } else {
       let authority = pendingStop?.authority ?? .unordered
       let engineLease = self.engineLease
+      let commandContext = transaction.commandContext
       do {
         preferenceCompensated = try await tunnel.compensatePendingPreferenceMutation(
           expectedConfiguration: transaction.descriptor,
@@ -668,6 +683,14 @@ extension NativeBridgeCoordinator {
               {
                 // The Authority released the lease since, so nothing it
                 // authorized can start any more.
+                return
+              } catch let stale as AuthorityDomainError where stale.code == .staleOperation {
+                // The Authority reached Off at this generation or passed it
+                // since, so the lease ended and nothing it authorized can
+                // start any more.
+                guard try await engineLease.stopResolution(commandContext) != .unresolved else {
+                  throw stale
+                }
                 return
               }
               guard observed == authorityContext else {
@@ -707,7 +730,7 @@ extension NativeBridgeCoordinator {
         stoppedTransaction.ownerStopped = true
         pendingStop = stoppedTransaction
       } else {
-        try await drivePendingStopToOwnerStopped()
+        try await drivePendingStopToOwnerStopped(restoringSettingsFirst: false)
       }
       try await completePendingStopAfterOwnerStopped()
     }
@@ -881,8 +904,10 @@ extension NativeBridgeCoordinator {
     }
   }
 
-  private func drivePendingStop() async throws {
-    try await drivePendingStopToOwnerStopped()
+  /// `restoringSettingsFirst` is for a System Proxy stop the user asked for:
+  /// see `restoreSystemProxySettingsBeforeStop`.
+  private func drivePendingStop(restoringSettingsFirst: Bool) async throws {
+    try await drivePendingStopToOwnerStopped(restoringSettingsFirst: restoringSettingsFirst)
     try await completePendingStopAfterOwnerStopped()
   }
 
@@ -905,16 +930,16 @@ extension NativeBridgeCoordinator {
       transaction.authority = .released
     } catch let stale as AuthorityDomainError where stale.code == .staleOperation {
       // An Authority that already reached Off at this stop's generation, for
-      // example when a status query reconciled it after the owner ended, holds
-      // no lease to order either. Off at any other generation leaves the lease
-      // this stop names unaccounted for.
-      let completed: Bool
+      // example when a status query reconciled it after the owner ended, or
+      // that passed the generation since, holds no lease to order either. Any
+      // other state leaves the lease this stop names unaccounted for.
+      let resolution: NativeStopResolution
       do {
-        completed = try await engineLease.hasCompletedStop(transaction.commandContext)
+        resolution = try await engineLease.stopResolution(transaction.commandContext)
       } catch {
         throw Self.map(error)
       }
-      guard completed else { throw Self.map(stale) }
+      guard resolution != .unresolved else { throw Self.map(stale) }
       transaction.authority = .released
     } catch {
       throw Self.map(error)
@@ -922,8 +947,28 @@ extension NativeBridgeCoordinator {
     pendingStop = transaction
   }
 
-  private func drivePendingStopToOwnerStopped() async throws {
-    try await beginPendingStopAtAuthority()
+  private func drivePendingStopToOwnerStopped(restoringSettingsFirst: Bool) async throws {
+    var settingsRestored = false
+    if restoringSettingsFirst, let transaction = pendingStop,
+      transaction.authority == .unordered, transaction.owner == .systemProxy,
+      !transaction.ownerStopped
+    {
+      settingsRestored = try await restoreSystemProxySettingsBeforeStop(transaction.descriptor)
+    }
+    do {
+      try await beginPendingStopAtAuthority()
+    } catch let orderingError where settingsRestored {
+      // The settings no longer select the listener, so a session left running
+      // would serve nothing while the status still reported it. The user asked
+      // for Off: the owner stops now, and the stop stays pending until the
+      // Authority orders and completes it.
+      let ordering = Self.map(orderingError).responseFailure
+      guard let localFailure = await attemptLocalStopAfterOrderingFailure() else {
+        throw NativeBridgeExecutionError.failure(ordering.code, ordering.message)
+      }
+      throw NativeBridgeExecutionError.failure(
+        ordering.code, "\(ordering.message) Local stop also failed: \(localFailure)")
+    }
     guard var transaction = pendingStop else {
       throw NativeBridgeExecutionError.failure(
         .cleanupUnproven,
@@ -945,6 +990,13 @@ extension NativeBridgeCoordinator {
         // accepts only an owner that attested Stopped, and otherwise reports
         // unproven cleanup. A stale reply instead names a session of another
         // generation, whose owner has not ended, so it fails the stop below.
+      } catch AppleNetworkError.staleStopRequest
+        where transaction.owner == .tunnel && transaction.authority == .released
+      {
+        // The Authority holds no lease of this stop, and Network Extension no
+        // manager of its generation: a later start replaced it, or none is
+        // left. Nothing of this stop is left to stop, and completion proves
+        // the tunnel Off.
       } catch {
         throw Self.map(error)
       }
@@ -975,6 +1027,13 @@ extension NativeBridgeCoordinator {
         // The Authority released the lease, as a restart does, once the owner
         // that never attested this stop ended. Reconciling Off proves the stop.
         transaction.authority = .released
+      } catch let error as AuthorityDomainError {
+        // An Authority that passed this stop's generation since ended its
+        // lease through a proven Off, so nothing is left to complete.
+        guard try await stopResolution(transaction) == .superseded else {
+          throw Self.map(error)
+        }
+        transaction.authority = .released
       } catch {
         throw Self.map(error)
       }
@@ -983,6 +1042,16 @@ extension NativeBridgeCoordinator {
       break
     }
 
+    if case .released = transaction.authority,
+      try await stopResolution(transaction) == .superseded
+    {
+      // What the Authority holds now belongs to a later start, so its Off
+      // barrier says nothing of this stop's owner.
+      try await requireOwnerOffAfterSupersededStop(
+        transaction.owner, context: transaction.commandContext)
+      pendingStop = nil
+      return
+    }
     // A Recovering Authority reaches Off only through this query's
     // reconciliation, after the Host proved both owners and the OS Off.
     guard case .off = try await queryStatus(enforcePreferenceBarrier: false) else {
@@ -992,13 +1061,7 @@ extension NativeBridgeCoordinator {
       )
     }
     if case .released = transaction.authority {
-      let completed: Bool
-      do {
-        completed = try await engineLease.hasCompletedStop(transaction.commandContext)
-      } catch {
-        throw Self.map(error)
-      }
-      guard completed else {
+      guard try await stopResolution(transaction) != .unresolved else {
         throw NativeBridgeExecutionError.failure(
           .cleanupUnproven,
           "The Authority reached Off for another generation than this stop's."
@@ -1006,6 +1069,86 @@ extension NativeBridgeCoordinator {
       }
     }
     pendingStop = nil
+  }
+
+  private func stopResolution(
+    _ transaction: NativeStopTransaction
+  ) async throws -> NativeStopResolution {
+    do {
+      return try await engineLease.stopResolution(transaction.commandContext)
+    } catch {
+      throw Self.map(error)
+    }
+  }
+
+  /// Ends a stop whose generation the Authority passed. Its lease ended
+  /// through a proven Off, so one fresh snapshot of the stop's own owner
+  /// showing it Off ends the stop. An explicit Tunnel stop also needs its
+  /// preference journal settled, as the status barrier it replaces does.
+  private func requireOwnerOffAfterSupersededStop(
+    _ owner: NativeStopOwner,
+    context: EngineCommandContext
+  ) async throws {
+    let snapshot: EngineSnapshot
+    do {
+      snapshot = try await ownerSnapshot(owner)
+    } catch {
+      throw Self.map(error)
+    }
+    guard Self.isStableOff(snapshot) else {
+      if let configuration = snapshot.configuration,
+        configuration.installationID == context.installationID,
+        (configuration.epoch, configuration.generation)
+          > (context.configEpoch, context.generation)
+      {
+        throw NativeBridgeExecutionError.failure(
+          .busy, "A later start holds the owner of this stop.")
+      }
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven, "The owner of a stop the Authority passed is not Off.")
+    }
+    guard owner == .tunnel, pendingStartCleanup == nil else { return }
+    let pendingMutation: ConfigurationDescriptor?
+    do {
+      pendingMutation = try await tunnel.pendingPreferenceMutationConfiguration()
+    } catch {
+      throw Self.map(error)
+    }
+    guard pendingMutation == nil else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "A durable Tunnel preference mutation must be recovered before the stop can end.")
+    }
+  }
+
+  /// Has the ProxyAgent give the OS back the System Proxy settings of the
+  /// session the user asked to stop while its engine still answers, before the
+  /// Authority is asked to stop the session. A restore that cannot reach the
+  /// settings then fails the stop with System Proxy still running, and the stop
+  /// stays retryable, instead of the settings outliving the listener they
+  /// select. Returns whether the ProxyAgent restored them. Only a ProxyAgent
+  /// of this app's build can, so one of an earlier build, or one whose build
+  /// cannot be told, is not asked: its session stops as that build stops it,
+  /// restoring the settings as it ends.
+  private func restoreSystemProxySettingsBeforeStop(
+    _ descriptor: ConfigurationDescriptor
+  ) async throws -> Bool {
+    let inspection: CurrentAppServiceBuildInspection
+    do {
+      inspection = try serviceBuildObserver.inspect()
+    } catch {
+      Self.restorationLog.error(
+        "The ProxyAgent build could not be told before a stop, so the stop restores no settings first: \(String(describing: error), privacy: .public)"
+      )
+      return false
+    }
+    guard inspection.proxy.isCurrent else { return false }
+    do {
+      try await proxy.restoreSettingsBeforeStop(configuration: descriptor)
+    } catch {
+      throw Self.map(error)
+    }
+    return true
   }
 
   private func ownerSnapshot(_ owner: NativeStopOwner) async throws -> EngineSnapshot {
@@ -1024,7 +1167,8 @@ extension NativeBridgeCoordinator {
     }
   }
 
-  /// If Authority ordering itself becomes unavailable during a failed start, the
+  /// If Authority ordering itself becomes unavailable during a failed start, or
+  /// after a System Proxy stop the user asked for restored its settings, the
   /// already-started owner must still be asked to tear down. The transaction remains
   /// pending so a later retry can complete the missing Authority barrier exactly.
   private func attemptLocalStopAfterOrderingFailure() async -> String? {

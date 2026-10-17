@@ -86,7 +86,7 @@ private func service(
 ) throws -> AuthenticatedAuthorityPeerService {
   let peer = try boundsPeer(role, ownerUID: ownerUID)
   return AuthenticatedAuthorityPeerService(
-    peerID: UUID(), peer: peer, reauthorize: { peer }, core: core,
+    peerID: UUID(), peer: peer, reauthorize: { _ in peer }, core: core,
     concurrency: AuthorityConcurrencyGate(), events: AuthorityEventHub())
 }
 
@@ -354,7 +354,8 @@ func snapshotWithoutTrustedCursorReportsRecoveryAndStillRejectsStarts(
   #expect(objects.journal.count == 2)
 
   // A Host peer belonging to a different user (UID 999) is refused any snapshot of
-  // the current owner's lease; state is never disclosed across users.
+  // the current owner's lease: it learns only that a conflicting lease exists, and
+  // no state is disclosed across users.
   let intruder = try service(for: objects.core, ownerUID: 999)
   let snapshotEnvelope = try AuthorityV1Codec.encode(
     try AuthorityRequestEnvelope(
@@ -365,6 +366,6 @@ func snapshotWithoutTrustedCursorReportsRecoveryAndStillRejectsStarts(
     observed = authorityError(error)
     disclosed = data
   }
-  #expect(observed == .globalAuthorityIdentityRejected)
+  #expect(observed == .globalLeaseConflict)
   #expect(disclosed == nil)
 }

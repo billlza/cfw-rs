@@ -126,6 +126,7 @@ private actor StubProxyAgent: ProxyAgentTransporting, Installed40019ProxySnapsho
     throw UnusedSystemProxyStartPreparerError.unexpectedInvocation
   }
   func stop(configuration: ConfigurationDescriptor) throws {}
+  func restoreSettingsBeforeStop(configuration: ConfigurationDescriptor) throws {}
   func snapshot() -> EngineSnapshot { observed }
   func snapshotInstalled40019ForMigration() -> EngineSnapshot { observed }
   func validateConfiguration(_ configuration: Data, descriptor: ConfigurationDescriptor) throws {}

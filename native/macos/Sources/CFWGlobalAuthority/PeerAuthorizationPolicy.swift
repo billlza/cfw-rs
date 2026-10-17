@@ -15,6 +15,16 @@ extension GlobalAuthorityAuthorizationError: CustomStringConvertible, LocalizedE
   public var errorDescription: String? { Self.stableCode }
 }
 
+/// What a ProxyAgent's connection or call needs of the lease the Authority
+/// holds. Another user's lease keeps the agent out either way.
+public enum ProxyAgentLeaseRequirement: Sendable {
+  /// The agent's user owns the lease. Every call but one needs it.
+  case ownedLease
+  /// The agent's user owns the lease, or there is none: enough to connect, and
+  /// to ask whether the lease the agent bound still exists once it ended.
+  case ownedLeaseOrNone
+}
+
 /// Validates the live, public Foundation XPC connection attributes after the
 /// role-specific listener has already enforced the exact code-signing and
 /// entitlement requirement from `GlobalAuthorityConnectionContract`.
@@ -32,7 +42,8 @@ public struct GlobalAuthorityPeerPolicy: Sendable {
     euid: uid_t,
     auditSessionID: UInt32,
     liveConsoleUID: uid_t?,
-    leaseOwnerUID: uid_t?
+    leaseOwnerUID: uid_t?,
+    agentLease: ProxyAgentLeaseRequirement = .ownedLease
   ) throws -> PeerIdentity {
     guard pid > 0 else {
       throw GlobalAuthorityAuthorizationError.identityRejected
@@ -43,8 +54,8 @@ public struct GlobalAuthorityPeerPolicy: Sendable {
         validUserSession(auditSessionID)
       else { throw GlobalAuthorityAuthorizationError.identityRejected }
     case .proxyAgent:
-      guard let liveConsoleUID, let leaseOwnerUID,
-        euid == liveConsoleUID, euid == leaseOwnerUID,
+      guard let liveConsoleUID, euid == liveConsoleUID,
+        leaseOwnerUID.map({ $0 == euid }) ?? (agentLease == .ownedLeaseOrNone),
         validUserSession(auditSessionID)
       else { throw GlobalAuthorityAuthorizationError.identityRejected }
     case .provider:

@@ -130,3 +130,30 @@ func signedRootProviderAcceptsSystemAssignedAuditSession(session: UInt32) throws
   #expect(!String(describing: error).contains(secretMarker))
   #expect(!bridged.localizedDescription.contains(secretMarker))
 }
+
+/// A ProxyAgent of the console user may connect without a lease, and ask
+/// whether the lease it bound still exists, once that lease ended. Every
+/// other call needs a lease its user owns, and another user's lease keeps the
+/// agent out either way.
+@Test func aConsoleUsersAgentNeedsNoLeaseOnlyToAskAfterItsLease() throws {
+  let policy = GlobalAuthorityPeerPolicy()
+  let agent = try policy.authorizeRoleScopedConnection(
+    role: .proxyAgent, pid: 43, euid: 501, auditSessionID: 7,
+    liveConsoleUID: 501, leaseOwnerUID: nil, agentLease: .ownedLeaseOrNone)
+  #expect(agent.role == .proxyAgent)
+  #expect(agent.euid == 501)
+  for (leaseOwner, agentLease): (uid_t?, ProxyAgentLeaseRequirement) in [
+    (nil, .ownedLease), (502, .ownedLease), (502, .ownedLeaseOrNone),
+  ] {
+    #expect(throws: GlobalAuthorityAuthorizationError.identityRejected) {
+      try policy.authorizeRoleScopedConnection(
+        role: .proxyAgent, pid: 43, euid: 501, auditSessionID: 7,
+        liveConsoleUID: 501, leaseOwnerUID: leaseOwner, agentLease: agentLease)
+    }
+  }
+  #expect(throws: GlobalAuthorityAuthorizationError.identityRejected) {
+    try policy.authorizeRoleScopedConnection(
+      role: .proxyAgent, pid: 43, euid: 501, auditSessionID: 7,
+      liveConsoleUID: 502, leaseOwnerUID: nil, agentLease: .ownedLeaseOrNone)
+  }
+}

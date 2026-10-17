@@ -137,7 +137,7 @@ private func serviceObjects() throws -> (
     processTable: EmptyAuthorityProcessTable())
   let peer = try servicePeer()
   let service = AuthenticatedAuthorityPeerService(
-    peerID: UUID(), peer: peer, reauthorize: { peer }, core: core,
+    peerID: UUID(), peer: peer, reauthorize: { _ in peer }, core: core,
     concurrency: AuthorityConcurrencyGate(), events: AuthorityEventHub())
   return (journal, core, service)
 }
@@ -252,7 +252,7 @@ func tunnelPreparationSharesTheTicketIssuanceTime(clockStep: UInt64) throws {
   let peer = try servicePeer()
   let observations = OperationObservationBox()
   let service = AuthenticatedAuthorityPeerService(
-    peerID: UUID(), peer: peer, reauthorize: { peer }, core: core,
+    peerID: UUID(), peer: peer, reauthorize: { _ in peer }, core: core,
     concurrency: AuthorityConcurrencyGate(), events: AuthorityEventHub(),
     recordOperationDecision: { observations.append($0) })
   let request = Data("{}".utf8)

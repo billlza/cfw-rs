@@ -72,6 +72,28 @@ private final class ValidationOnlyProxyOwner: ProxySystemProxyOwning, @unchecked
   func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
     lifecycle.restoreSettingsAfterAuthorization(completionHandler: completionHandler)
   }
+
+  func restoreSettingsBeforeStop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    lifecycle.restoreSettingsBeforeStop(
+      expectedConfiguration: expectedConfiguration, completionHandler: completionHandler)
+  }
+
+  var callsLibbox: Bool { lifecycle.callsLibbox }
+
+  private let retired = DispatchSemaphore(value: 0)
+  private var retirementsValue: [LibboxInstanceUnclosable] = []
+  var retirements: [LibboxInstanceUnclosable] { lock.withLock { retirementsValue } }
+
+  func retire(after failure: LibboxInstanceUnclosable) {
+    lock.withLock { retirementsValue.append(failure) }
+    lifecycle.retire(after: failure)
+    retired.signal()
+  }
+
+  func waitUntilRetired() -> Bool { retired.wait(timeout: .now() + 2) == .success }
 }
 
 @Test func proxyStartRejectsMismatchedRuntimeBytesBeforeOwnerBinding() throws {
@@ -187,12 +209,34 @@ private final class ManualExitClock: @unchecked Sendable {
 private let launch = DispatchTime(uptimeNanoseconds: 1_000_000_000_000)
 private let unclosable = LibboxInstanceUnclosable(closeFailure: "close network: monitor")
 
+/// Holds the work the process end runs once every request is answered, so a
+/// test decides when the agent answered them.
+private final class HeldAnswers: @unchecked Sendable {
+  private let lock = NSLock()
+  private var waiting: [@Sendable () -> Void] = []
+
+  var whenAnswered: ProxyAgentProcessExit.WhenAnswered {
+    { work in self.lock.withLock { self.waiting.append(work) } }
+  }
+
+  var isWaiting: Bool { lock.withLock { !waiting.isEmpty } }
+
+  func answerAll() {
+    let ready = lock.withLock { () -> [@Sendable () -> Void] in
+      defer { waiting = [] }
+      return waiting
+    }
+    for work in ready { work() }
+  }
+}
+
 private func processExit(
-  _ clock: ManualExitClock, connections: [HeldSendBarrier], exits: ExitRecorder
+  _ clock: ManualExitClock, connections: [HeldSendBarrier], exits: ExitRecorder,
+  whenAnswered: @escaping ProxyAgentProcessExit.WhenAnswered = { $0() }
 ) -> ProxyAgentProcessExit {
   ProxyAgentProcessExit(
     openConnections: { connections.map { $0 as any ProxyAgentSendBarrier } },
-    launchedAt: launch, now: clock.now,
+    whenAnswered: whenAnswered, launchedAt: launch, now: clock.now,
     schedule: clock.schedule, exit: { exits.record($0) })
 }
 
@@ -201,7 +245,7 @@ private func processExit(
   let second = HeldSendBarrier()
   let exits = ExitRecorder()
   let clock = ManualExitClock(launch + .seconds(60))
-  processExit(clock, connections: [first, second], exits: exits).end(after: unclosable)
+  processExit(clock, connections: [first, second], exits: exits).end(.engineUnclosable(unclosable))
   // It has run long enough already, so it sends its replies at once.
   #expect(clock.deadlines == [launch + .seconds(60)])
   clock.fire(0)
@@ -217,7 +261,7 @@ private func processExit(
 @Test func endingTheAgentWithoutAnOpenConnectionExitsAtOnce() {
   let exits = ExitRecorder()
   let clock = ManualExitClock(launch + .seconds(60))
-  processExit(clock, connections: [], exits: exits).end(after: unclosable)
+  processExit(clock, connections: [], exits: exits).end(.engineUnclosable(unclosable))
   clock.fire(0)
   #expect(exits.wait())
   #expect(exits.values == [EX_SOFTWARE])
@@ -232,7 +276,7 @@ private func processExit(
   #expect(ProxyAgentProcessExit.minimumLifetime == .seconds(11))
   let exits = ExitRecorder()
   let clock = ManualExitClock(launch + .seconds(3))
-  processExit(clock, connections: [], exits: exits).end(after: unclosable)
+  processExit(clock, connections: [], exits: exits).end(.engineUnclosable(unclosable))
   #expect(clock.deadlines == [launch + ProxyAgentProcessExit.minimumLifetime])
   #expect(!exits.wait(for: .milliseconds(100)))
   clock.move(to: launch + ProxyAgentProcessExit.minimumLifetime)
@@ -249,14 +293,65 @@ private func processExit(
   let exits = ExitRecorder()
   let ended = launch + .seconds(30)
   let clock = ManualExitClock(ended)
-  processExit(clock, connections: [stuck], exits: exits).end(after: unclosable)
+  processExit(clock, connections: [stuck], exits: exits).end(.engineUnclosable(unclosable))
   clock.fire(0)
   #expect(stuck.isScheduled)
-  try #require(clock.deadlines == [ended, ended + ProxyAgentProcessExit.sendBarrierLimit])
+  try #require(
+    clock.deadlines == [
+      ended, ended + ProxyAgentProcessExit.unansweredRequestLimit,
+      ended + ProxyAgentProcessExit.sendBarrierLimit,
+    ])
   #expect(!exits.wait(for: .milliseconds(100)))
-  clock.fire(1)
+  clock.fire(2)
   #expect(exits.wait())
   stuck.sendPendingMessages()
+  #expect(!exits.wait(for: .milliseconds(100)), "the agent ended twice")
+  #expect(exits.values == [EX_SOFTWARE])
+}
+
+/// An agent that still owes a Host an answer, as to a rights request the user
+/// is still answering, keeps answering until it gave it; only then do its
+/// connections send their replies and the agent exits.
+@Test func anEndingAgentWaitsForTheAnswersItStillOwes() {
+  let connection = HeldSendBarrier()
+  let answers = HeldAnswers()
+  let exits = ExitRecorder()
+  let clock = ManualExitClock(launch + .seconds(60))
+  processExit(clock, connections: [connection], exits: exits, whenAnswered: answers.whenAnswered)
+    .end(.retired(unclosable))
+  clock.fire(0)
+  #expect(answers.isWaiting)
+  #expect(!connection.isScheduled)
+  #expect(!exits.wait(for: .milliseconds(100)))
+  answers.answerAll()
+  #expect(connection.isScheduled)
+  connection.sendPendingMessages()
+  #expect(exits.wait())
+  #expect(exits.values == [EX_SOFTWARE])
+}
+
+/// No Host waits for an answer longer than for a rights request's, so one
+/// still owed then no longer holds the end, and answering it later sends the
+/// replies no second time.
+@Test func anAnswerStillOwedAtItsLimitHoldsTheEndNoLonger() throws {
+  #expect(ProxyAgentRequestBudget.authorizationReply == .seconds(290))
+  #expect(ProxyAgentProcessExit.unansweredRequestLimit == .seconds(290))
+  let connection = HeldSendBarrier()
+  let answers = HeldAnswers()
+  let exits = ExitRecorder()
+  let ended = launch + .seconds(60)
+  let clock = ManualExitClock(ended)
+  processExit(clock, connections: [connection], exits: exits, whenAnswered: answers.whenAnswered)
+    .end(.quarantinedStop)
+  clock.fire(0)
+  try #require(clock.deadlines == [ended, ended + ProxyAgentProcessExit.unansweredRequestLimit])
+  #expect(!connection.isScheduled)
+  clock.fire(1)
+  #expect(connection.isScheduled)
+  connection.sendPendingMessages()
+  #expect(exits.wait())
+  answers.answerAll()
+  #expect(clock.deadlines.count == 3, "the replies were sent a second time")
   #expect(!exits.wait(for: .milliseconds(100)), "the agent ended twice")
   #expect(exits.values == [EX_SOFTWARE])
 }
@@ -385,11 +480,13 @@ private let lifecycleFailureWire: [(failure: ProxySessionLifecycleError, code: S
   (.ownershipJournal("detail"), "proxy-ownership-journal-failed"),
   (.ownershipConflict([]), "system-proxy-ownership-conflict"),
   (.cleanupFailed(original: "detail", cleanup: ["detail"]), "proxy-cleanup-failed"),
+  (.agentEnding, "proxy-agent-ending"),
 ]
 
 /// The engine protocol admits only lowercase letters, digits and hyphens in a
 /// code, and a reply it cannot encode reaches the Host as a broken connection.
-/// No lifecycle failure says a retry may succeed: each needs a new start or
+/// Only an ending agent's refusal says a retry may succeed, which the agent
+/// macOS starts next takes; every other lifecycle failure needs a new start or
 /// the user's action.
 @Test func everyLifecycleFailureCrossesXPCUnderItsOwnCode() throws {
   let failures =
@@ -412,7 +509,7 @@ private let lifecycleFailureWire: [(failure: ProxySessionLifecycleError, code: S
     let received = try #require(try ProtocolCodec.decodeResponse(encoded).failure)
     #expect(received == failure.engineFailure)
     #expect(received.code == code, "\(failure)")
-    #expect(!received.isRetryable, "\(failure)")
+    #expect(received.isRetryable == (failure == .agentEnding), "\(failure)")
   }
 }
 
@@ -442,6 +539,125 @@ private let lifecycleFailureWire: [(failure: ProxySessionLifecycleError, code: S
   let failure = try #require(response.failure)
   #expect(failure.code == "proxy-stop-without-session")
   #expect(!failure.isRetryable)
+}
+
+/// Holds the first configuration check inside "libbox" until the test opens
+/// it; later checks return at once.
+private final class FirstCheckGate: LibboxConfigurationChecking, @unchecked Sendable {
+  private let lock = NSLock()
+  private var calls = 0
+  private let entered = DispatchSemaphore(value: 0)
+  private let opened = DispatchSemaphore(value: 0)
+
+  func check(configuration: Data) throws {
+    let first = lock.withLock { () -> Bool in
+      calls += 1
+      return calls == 1
+    }
+    guard first else { return }
+    entered.signal()
+    _ = opened.wait(timeout: .now() + .seconds(30))
+  }
+
+  func awaitEntry() -> Bool { entered.wait(timeout: .now() + .seconds(5)) == .success }
+  func open() { opened.signal() }
+}
+
+/// A check or probe that must never reach "libbox".
+private struct UnreachedLibbox: LibboxConfigurationChecking, LibboxProfileProbing {
+  func check(configuration: Data) throws {
+    Issue.record("a configuration check reached libbox")
+  }
+
+  func test(
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
+  ) throws -> [ProfileProxyDelay] {
+    Issue.record("a profile probe reached libbox")
+    return []
+  }
+}
+
+private final class ExportingListenerDelegate: NSObject, NSXPCListenerDelegate {
+  private let service: ProxyAgentService
+
+  init(service: ProxyAgentService) { self.service = service }
+
+  func listener(
+    _ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection
+  ) -> Bool {
+    connection.exportedInterface = NSXPCInterface(with: CFWProxyAgentXPCProtocol.self)
+    connection.exportedObject = service
+    connection.resume()
+    return true
+  }
+}
+
+/// NSXPCConnection hands one connection's messages to its exported object one
+/// at a time. A check inside libbox leaves the connection's queue for its own
+/// thread, so a snapshot sent after it on the same connection still answers.
+@Test func aCheckInsideLibboxHoldsBackNoOtherMessageOnItsConnection() throws {
+  let checker = FirstCheckGate()
+  defer { checker.open() }
+  let service = ProxyAgentService(
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: checker,
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
+  )
+  let delegate = ExportingListenerDelegate(service: service)
+  let listener = NSXPCListener.anonymous()
+  listener.delegate = delegate
+  listener.resume()
+  defer { listener.invalidate() }
+  let client = NSXPCConnection(listenerEndpoint: listener.endpoint)
+  client.remoteObjectInterface = NSXPCInterface(with: CFWProxyAgentXPCProtocol.self)
+  client.resume()
+  defer { client.invalidate() }
+  let agent = try #require(
+    client.remoteObjectProxyWithErrorHandler { _ in } as? any CFWProxyAgentXPCProtocol)
+
+  let checked = DispatchSemaphore(value: 0)
+  agent.validateConfiguration(
+    Data("{}".utf8),
+    request: try ProtocolCodec.encode(
+      RequestEnvelope(
+        command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor())))
+  ) { _, _ in checked.signal() }
+  #expect(checker.awaitEntry())
+  let snapshotted = DispatchSemaphore(value: 0)
+  agent.execute(
+    try ProtocolCodec.encode(RequestEnvelope(command: try NativeCommand(kind: .snapshot)))
+  ) { _, _ in snapshotted.signal() }
+  #expect(snapshotted.wait(timeout: .now() + 2) == .success)
+  checker.open()
+  #expect(checked.wait(timeout: .now() + 5) == .success)
+  withExtendedLifetime(delegate) {}
+}
+
+/// A restore before a stop crosses XPC as an accepted command, which an
+/// agent without a session answers at once.
+@Test func aRestoreBeforeAStopCrossesXPCAsAnAcceptedCommand() throws {
+  let service = ProxyAgentService(
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: SourceBuiltLibboxConfigurationChecker(),
+    preferences: SCPreferencesSystemProxyPreferences(),
+    journalStore: FakeJournalStore()
+  )
+  let request = RequestEnvelope(
+    command: try NativeCommand(kind: .restoreSettingsBeforeStop, configuration: descriptor()))
+  let replied = DispatchSemaphore(value: 0)
+  let reply = Mutex<(Data?, NSError?)>((nil, nil))
+  service.execute(try ProtocolCodec.encode(request)) { data, error in
+    reply.withLock { $0 = (data, error) }
+    replied.signal()
+  }
+  #expect(replied.wait(timeout: .now() + 5) == .success)
+  let (data, error) = reply.withLock { $0 }
+  #expect(error == nil)
+  let response = try ProtocolCodec.decodeResponse(try #require(data))
+  #expect(response.requestID == request.requestID)
+  #expect(response.result == (try CommandResult(kind: .accepted)))
 }
 
 /// libbox's close text can name servers and paths. However an error that
@@ -482,29 +698,280 @@ private struct CleanupFailingConfigurationChecker: LibboxConfigurationChecking {
 }
 
 /// libbox accepted the configuration but could not close the instance it built
-/// to check it. That is no rejection of the profile, so the Host may ask again.
+/// to check it. That is no rejection of the profile, so the Host may ask again,
+/// and since what the check built stays in this process, the agent retires and
+/// the agent macOS starts next answers.
 @Test func validationWhoseCheckCouldNotCloseIsRetryableAndNoRejection() throws {
+  let owner = ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle)
   let service = ProxyAgentService(
-    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    lifecycle: owner,
     configurationChecker: CleanupFailingConfigurationChecker(),
     preferences: SCPreferencesSystemProxyPreferences(),
     journalStore: FakeJournalStore()
   )
   let request = RequestEnvelope(
     command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor()))
-  var responseData: Data?
-  var responseError: NSError?
-  service.validateConfiguration(Data("{}".utf8), request: try ProtocolCodec.encode(request)) {
-    data, error in
-    responseData = data
-    responseError = error
-  }
-  #expect(responseError == nil)
-  let data = try #require(responseData)
+  let (data, error) = try validationReply(service, Data("{}".utf8), request)
+  #expect(error == nil)
   #expect(!String(decoding: data, as: UTF8.self).contains("proxy-canary"))
   let failure = try #require(try ProtocolCodec.decodeResponse(data).failure)
   #expect(failure.code == "configuration-check-cleanup-failed")
   #expect(failure.isRetryable)
+  #expect(owner.waitUntilRetired())
+}
+
+/// Sends one validation request and waits for its reply, which arrives from
+/// the check's own thread.
+private func validationReply(
+  _ service: ProxyAgentService, _ configuration: Data, _ request: RequestEnvelope
+) throws -> (Data, NSError?) {
+  let replied = DispatchSemaphore(value: 0)
+  let reply = Mutex<(Data?, NSError?)>((nil, nil))
+  service.validateConfiguration(configuration, request: try ProtocolCodec.encode(request)) {
+    data, error in
+    reply.withLock { $0 = (data, error) }
+    replied.signal()
+  }
+  #expect(replied.wait(timeout: .now() + 5) == .success)
+  let (data, error) = reply.withLock { $0 }
+  return (try #require(data), error)
+}
+
+/// Runs each bounded call to its end on the caller's thread, with no timer, so
+/// the call's reply and end have both run once the request returns.
+private let inlineBoundedCall = LibboxBoundedCall(
+  afterAwake: { _, _ in {} }, startCall: { _, work in work() })
+
+private struct RefusingChecker: LibboxConfigurationChecking {
+  func check(configuration: Data) throws {
+    throw LibboxRuntimeError.configurationCheckFailed(LibboxDiagnostic("unknown outbound type"))
+  }
+}
+
+private struct AcceptingChecker: LibboxConfigurationChecking {
+  func check(configuration: Data) throws {}
+}
+
+/// A probe that answers each target with a delay, or fails as `failure`.
+private struct AnsweringProbe: LibboxProfileProbing {
+  var failure: LibboxRuntimeError?
+
+  func test(
+    configuration: Data, proxies: [String], timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String
+  ) throws -> [ProfileProxyDelay] {
+    if let failure { throw failure }
+    return try proxies.map { try ProfileProxyDelay(name: $0, delay: 10, errorKind: nil) }
+  }
+}
+
+private func probeRequest(
+  _ service: ProxyAgentService, reply: @escaping (Data?, NSError?) -> Void
+) {
+  service.testProfileProxies(
+    Data("{}".utf8), proxies: Data(#"["p"]"#.utf8), timeoutMS: 500, targetURL: "",
+    expectedStatus: "", withReply: reply)
+}
+
+/// A check libbox refused, or a probe libbox failed, is an ordinary answer: the
+/// agent keeps calling libbox and retires nothing. Only an instance libbox
+/// could not close, or a call it never returned from, retires it.
+@Test func anOrdinaryCheckOrProbeFailureRetiresNothing() throws {
+  let owner = ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle)
+  let service = ProxyAgentService(
+    lifecycle: owner, configurationChecker: RefusingChecker(),
+    preferences: SCPreferencesSystemProxyPreferences(), journalStore: FakeJournalStore(),
+    profileProbe: AnsweringProbe(
+      failure: .serviceStartFailed(LibboxDiagnostic("dial tcp: i/o timeout"))),
+    boundedCall: inlineBoundedCall)
+  let request = RequestEnvelope(
+    command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor()))
+  let (data, error) = try validationReply(service, Data("{}".utf8), request)
+  #expect(error == nil)
+  #expect(try ProtocolCodec.decodeResponse(data).failure?.code == "configuration-rejected")
+  let probeError = Mutex<NSError?>(nil)
+  probeRequest(service) { _, error in probeError.withLock { $0 = error } }
+  #expect(probeError.withLock { $0?.code } == ProfileProbeServiceFailure.executionFailed.rawValue)
+  #expect(owner.retirements.isEmpty)
+  #expect(owner.callsLibbox)
+}
+
+/// A check or probe whose instance libbox could not close retires the agent
+/// before its answer goes out, so a request the Host sends on that answer is
+/// refused already.
+@Test func aCallThatLeftItsInstanceOpenRetiresTheAgentBeforeItsAnswer() throws {
+  let owner = ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle)
+  let service = ProxyAgentService(
+    lifecycle: owner, configurationChecker: CleanupFailingConfigurationChecker(),
+    preferences: SCPreferencesSystemProxyPreferences(), journalStore: FakeJournalStore(),
+    profileProbe: AnsweringProbe(
+      failure: .profileProbeCleanupFailed(LibboxDiagnostic("close: outbound"))),
+    boundedCall: inlineBoundedCall)
+  let atCheckAnswer = Mutex<(callsLibbox: Bool, retirements: Int)?>(nil)
+  service.validateConfiguration(
+    Data("{}".utf8),
+    request: try ProtocolCodec.encode(
+      RequestEnvelope(
+        command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor())))
+  ) { _, _ in
+    atCheckAnswer.withLock { $0 = (owner.callsLibbox, owner.retirements.count) }
+  }
+  let check = try #require(atCheckAnswer.withLock { $0 })
+  #expect(!check.callsLibbox)
+  #expect(check.retirements == 1)
+
+  let probeOwner = ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle)
+  let probeService = ProxyAgentService(
+    lifecycle: probeOwner, configurationChecker: AcceptingChecker(),
+    preferences: SCPreferencesSystemProxyPreferences(), journalStore: FakeJournalStore(),
+    profileProbe: AnsweringProbe(
+      failure: .profileProbeCleanupFailed(LibboxDiagnostic("close: outbound"))),
+    boundedCall: inlineBoundedCall)
+  let atProbeAnswer = Mutex<(callsLibbox: Bool, retirements: Int)?>(nil)
+  probeRequest(probeService) { _, _ in
+    atProbeAnswer.withLock { $0 = (probeOwner.callsLibbox, probeOwner.retirements.count) }
+  }
+  let probe = try #require(atProbeAnswer.withLock { $0 })
+  #expect(!probe.callsLibbox)
+  #expect(probe.retirements == 1)
+}
+
+/// A call that returned frees its slot before its reply, so the next one the
+/// Host sends once that reply arrived is admitted at once, for checks and
+/// probes alike.
+@Test func aCallThatReturnedAdmitsTheNextOneBeforeItsReplyIsOver() throws {
+  let service = ProxyAgentService(
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: AcceptingChecker(),
+    preferences: SCPreferencesSystemProxyPreferences(), journalStore: FakeJournalStore(),
+    profileProbe: AnsweringProbe(), boundedCall: inlineBoundedCall)
+  let check = try ProtocolCodec.encode(
+    RequestEnvelope(
+      command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor())))
+  let nextCheck = Mutex<Data?>(nil)
+  service.validateConfiguration(Data("{}".utf8), request: check) { _, _ in
+    service.validateConfiguration(Data("{}".utf8), request: check) { data, _ in
+      nextCheck.withLock { $0 = data }
+    }
+  }
+  let nextCheckData = try #require(nextCheck.withLock { $0 })
+  #expect(try ProtocolCodec.decodeResponse(nextCheckData).failure == nil)
+
+  let nextProbe = Mutex<(Data?, NSError?)>((nil, nil))
+  probeRequest(service) { _, _ in
+    probeRequest(service) { data, error in nextProbe.withLock { $0 = (data, error) } }
+  }
+  let (probeData, probeError) = nextProbe.withLock { $0 }
+  #expect(probeError == nil)
+  #expect(probeData != nil)
+}
+
+/// Runs the first bounded call on the caller's thread and every later one on
+/// a queue of its own.
+private final class FirstCallInline: @unchecked Sendable {
+  private let lock = NSLock()
+  private var started = 0
+
+  var start: LibboxBoundedCall.StartCall {
+    { qos, work in
+      let first = self.lock.withLock { () -> Bool in
+        self.started += 1
+        return self.started == 1
+      }
+      if first {
+        work()
+      } else {
+        LibboxBoundedCall.onItsOwnQueue(qos, work)
+      }
+    }
+  }
+}
+
+/// Lets the first check return at once and holds the second inside "libbox"
+/// until the test opens it.
+private final class SecondCheckGate: LibboxConfigurationChecking, @unchecked Sendable {
+  private let lock = NSLock()
+  private var calls = 0
+  private let entered = DispatchSemaphore(value: 0)
+  private let opened = DispatchSemaphore(value: 0)
+
+  func check(configuration: Data) throws {
+    let second = lock.withLock { () -> Bool in
+      calls += 1
+      return calls == 2
+    }
+    guard second else { return }
+    entered.signal()
+    _ = opened.wait(timeout: .now() + .seconds(30))
+  }
+
+  func awaitEntry() -> Bool { entered.wait(timeout: .now() + .seconds(5)) == .success }
+  func open() { opened.signal() }
+}
+
+/// A call that returned ends after its reply. By then the next call may hold
+/// the slot, and the late end frees only the slot of its own call, so a third
+/// call still finds the second inside libbox.
+@Test func aReturnedCallsLateEndFreesNoNewerCallsSlot() throws {
+  let checker = SecondCheckGate()
+  defer { checker.open() }
+  let service = ProxyAgentService(
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: checker,
+    preferences: SCPreferencesSystemProxyPreferences(), journalStore: FakeJournalStore(),
+    boundedCall: LibboxBoundedCall(
+      afterAwake: { _, _ in {} }, startCall: FirstCallInline().start))
+  let check = try ProtocolCodec.encode(
+    RequestEnvelope(
+      command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor())))
+  service.validateConfiguration(Data("{}".utf8), request: check) { _, _ in
+    service.validateConfiguration(Data("{}".utf8), request: check) { _, _ in }
+  }
+  #expect(checker.awaitEntry())
+  let third = Mutex<Data?>(nil)
+  service.validateConfiguration(Data("{}".utf8), request: check) { data, _ in
+    third.withLock { $0 = data }
+  }
+  let thirdData = try #require(third.withLock { $0 }, "the third check was admitted")
+  #expect(
+    try ProtocolCodec.decodeResponse(thirdData).failure?.code
+      == "configuration-check-timed-out")
+}
+
+/// Every request counts as unanswered until its reply is handed to XPC, a
+/// check still inside libbox included, and none is once all are answered.
+@Test func everyRequestCountsAsUnansweredUntilItsReply() throws {
+  let checker = FirstCheckGate()
+  defer { checker.open() }
+  let requests = ProxyAgentUnansweredRequests()
+  let service = ProxyAgentService(
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
+    configurationChecker: checker,
+    preferences: SCPreferencesSystemProxyPreferences(), journalStore: FakeJournalStore(),
+    requests: requests)
+  let checked = DispatchSemaphore(value: 0)
+  service.validateConfiguration(
+    Data("{}".utf8),
+    request: try ProtocolCodec.encode(
+      RequestEnvelope(
+        command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor())))
+  ) { _, _ in checked.signal() }
+  #expect(checker.awaitEntry())
+  let none = DispatchSemaphore(value: 0)
+  requests.whenNone { none.signal() }
+  #expect(none.wait(timeout: .now() + .milliseconds(200)) == .timedOut)
+  checker.open()
+  #expect(checked.wait(timeout: .now() + 5) == .success)
+  #expect(none.wait(timeout: .now() + 5) == .success)
+
+  let snapshotted = DispatchSemaphore(value: 0)
+  service.execute(
+    try ProtocolCodec.encode(RequestEnvelope(command: try NativeCommand(kind: .snapshot)))
+  ) { _, _ in snapshotted.signal() }
+  #expect(snapshotted.wait(timeout: .now() + 5) == .success)
+  let noneAgain = DispatchSemaphore(value: 0)
+  requests.whenNone { noneAgain.signal() }
+  #expect(noneAgain.wait(timeout: .now() + 5) == .success)
 }
 
 /// Only a configuration libbox read and refused is a rejected profile. A check
@@ -525,6 +992,7 @@ private struct CleanupFailingConfigurationChecker: LibboxConfigurationChecking {
     (.setupFailed(diagnostic), .validatorUnavailable),
     (.configurationCheckCleanupFailed(diagnostic), .configurationCheckCleanupFailed),
     (.configurationCheckReturnedNothing, .validatorFailed),
+    (.profileProbeCleanupFailed(diagnostic), .validatorFailed),
     (.unexpectedPacketDescriptor, .validatorFailed),
     (.missingPacketDescriptor, .validatorFailed),
     (.packetDescriptorAlreadyTransferred, .validatorFailed),
@@ -562,18 +1030,10 @@ private struct CleanupFailingConfigurationChecker: LibboxConfigurationChecking {
       configuration: descriptor()
     )
   )
-  var responseData: Data?
-  var responseError: NSError?
-  service.validateConfiguration(
-    Data("{\"password\":\"\(secret)\"}".utf8),
-    request: try ProtocolCodec.encode(request)
-  ) { data, error in
-    responseData = data
-    responseError = error
-  }
+  let (data, responseError) = try validationReply(
+    service, Data("{\"password\":\"\(secret)\"}".utf8), request)
 
   #expect(responseError == nil)
-  let data = try #require(responseData)
   #expect(!String(decoding: data, as: UTF8.self).contains(secret))
   let response = try ProtocolCodec.decodeResponse(data)
   #expect(response.failure?.code == "configuration-validator-failed")
@@ -951,9 +1411,9 @@ private final class EventLog: @unchecked Sendable {
 private final class EndProcessRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private let ended = DispatchSemaphore(value: 0)
-  private var failures: [LibboxInstanceUnclosable] = []
+  private var failures: [ProxyAgentEndReason] = []
 
-  func record(_ failure: LibboxInstanceUnclosable) {
+  func record(_ failure: ProxyAgentEndReason) {
     lock.withLock { failures.append(failure) }
     ended.signal()
   }
@@ -962,7 +1422,7 @@ private final class EndProcessRecorder: @unchecked Sendable {
     ended.wait(timeout: .now() + 1) == .success
   }
 
-  var values: [LibboxInstanceUnclosable] {
+  var values: [ProxyAgentEndReason] {
     lock.withLock { failures }
   }
 }
@@ -1214,7 +1674,7 @@ struct ProxySessionLifecycleTests {
     _ = fixture.lifecycle.testingSnapshot()
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 0)
-    #expect(fixture.endRecorder.values == [closeFailure])
+    #expect(fixture.endRecorder.values == [.engineUnclosable(closeFailure)])
     #expect(fixture.preferences.applyCount == 0)
     #expect(fixture.preferences.restoreCount == 0)
   }
@@ -1554,6 +2014,250 @@ struct ProxySessionLifecycleTests {
     #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
   }
 
+  /// Before its stop is ordered, an active session gives the OS back its
+  /// settings while its engine still answers. It keeps its engine, lease and
+  /// active state until the stop, which then has nothing left to restore.
+  @Test func aRestoreBeforeAStopGivesTheSettingsBackWhileTheEngineRuns() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let activeConfiguration = try descriptor()
+    try startActiveSession(fixture, activeConfiguration)
+    #expect(preferences.currentValue(.httpHost) == .string("127.0.0.1"))
+
+    #expect(restoreBeforeStop(fixture, activeConfiguration) == [.success])
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    #expect(fixture.journalStore.journal == nil)
+    #expect(fixture.engine.stopCount == 0)
+    #expect(fixture.lease.releaseCount == 0)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .proxyActive)
+
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(preferences.restoreCount == 1)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.lease.releaseCount == 1)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
+  }
+
+  /// A restore before a stop that cannot reach the settings fails with the
+  /// proxy still running and its settings and journal kept, so the stop can be
+  /// asked again, and a later restore that reaches them gives them back.
+  @Test func aRestoreBeforeAStopThatCannotReachTheSettingsKeepsTheProxyRunning() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let activeConfiguration = try descriptor()
+    try startActiveSession(fixture, activeConfiguration)
+
+    preferences.failNextRestore()
+    guard case .failure(.preferences)? = restoreBeforeStop(fixture, activeConfiguration).first
+    else {
+      Issue.record("a restore that could not reach the settings did not fail")
+      return
+    }
+    #expect(preferences.currentValue(.httpHost) == .string("127.0.0.1"))
+    #expect(fixture.journalStore.journal != nil)
+    #expect(fixture.engine.stopCount == 0)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .proxyActive)
+
+    #expect(restoreBeforeStop(fixture, activeConfiguration) == [.success])
+    #expect(preferences.currentValue(.httpHost) == .string("original"))
+    #expect(fixture.journalStore.journal == nil)
+  }
+
+  /// Settings the user changed since the start stay the user's. The restore
+  /// before the stop gives back the rest and lets the stop go ahead, which
+  /// reports the change as it always did.
+  @Test func aRestoreBeforeAStopLeavesTheUsersChangesForTheStopToReport() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let activeConfiguration = try descriptor()
+    try startActiveSession(fixture, activeConfiguration)
+
+    preferences.setExternalValue(.string("external"), field: .httpHost)
+    #expect(restoreBeforeStop(fixture, activeConfiguration) == [.success])
+    #expect(preferences.currentValue(.httpHost) == .string("external"))
+    #expect(fixture.engine.stopCount == 0)
+
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { stop.record($0) }
+    #expect(stop.wait())
+    guard case .failure(.ownershipConflict)? = stop.values.first else {
+      Issue.record("the stop did not report the user's change")
+      return
+    }
+    #expect(fixture.engine.stopCount == 1)
+  }
+
+  /// Only the session the request names has settings to give back before its
+  /// stop: with no session, one still starting, which applied none yet, or
+  /// another generation's, the restore answers at once and changes nothing.
+  @Test func aRestoreBeforeAStopOfAnotherSessionOrNoneChangesNothing() throws {
+    let preferences = FakeSystemProxyPreferences(values: [.httpHost: .string("original")])
+    let fixture = makeFixture(preferences: preferences)
+    let activeConfiguration = try descriptor()
+    #expect(restoreBeforeStop(fixture, activeConfiguration) == [.success])
+
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: activeConfiguration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    #expect(restoreBeforeStop(fixture, activeConfiguration) == [.success])
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+
+    #expect(restoreBeforeStop(fixture, try descriptor(generation: 2)) == [.success])
+    #expect(preferences.restoreCount == 0)
+    #expect(preferences.currentValue(.httpHost) == .string("127.0.0.1"))
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .proxyActive)
+  }
+
+  private func startActiveSession(
+    _ fixture: ProxyFixture, _ configuration: ConfigurationDescriptor
+  ) throws {
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+    #expect(start.values == [.success])
+  }
+
+  private func restoreBeforeStop(
+    _ fixture: ProxyFixture, _ configuration: ConfigurationDescriptor
+  ) -> [OperationOutcome] {
+    let restore = OperationRecorder()
+    fixture.lifecycle.restoreSettingsBeforeStop(expectedConfiguration: configuration) {
+      restore.record($0)
+    }
+    #expect(restore.wait())
+    return restore.values
+  }
+
+  /// A start its owner admitted just as the agent retired fails without a
+  /// session, and its stop finds that failure, so the owner proves Off.
+  @Test func aStartAsTheAgentRetiresFailsWithoutASession() throws {
+    let fixture = makeFixture()
+    let configuration = try descriptor()
+    fixture.lifecycle.retire(after: LibboxInstanceUnclosable(.callDidNotReturn))
+    #expect(!fixture.lifecycle.callsLibbox)
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: configuration) { start.record($0) }
+    #expect(start.wait())
+    #expect(start.values == [.failure(.agentEnding)])
+    #expect(fixture.engine.startCount == 0)
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .failed)
+
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: configuration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    #expect(fixture.lifecycle.testingSnapshot().state.kind == .off)
+    #expect(fixture.endRecorder.values.isEmpty)
+  }
+
+  /// A retired agent ends only when its owner asks and only once it holds no
+  /// session, so no settings it applied outlive it, and it ends once.
+  @Test func aRetiredAgentEndsOnlyWithoutASessionWhenItsOwnerAsks() throws {
+    let fixture = makeFixture()
+    let activeConfiguration = try descriptor()
+    try startActiveSession(fixture, activeConfiguration)
+    fixture.lifecycle.retire(after: LibboxInstanceUnclosable(.callDidNotReturn))
+    fixture.lifecycle.endProcessIfRetired()
+    // Each read waits for the work queued before it, the end's second hop too.
+    _ = fixture.lifecycle.testingSnapshot()
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(fixture.endRecorder.values.isEmpty)
+
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stop.values == [.success])
+    _ = fixture.lifecycle.testingSnapshot()
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(fixture.endRecorder.values.isEmpty)
+
+    fixture.lifecycle.endProcessIfRetired()
+    fixture.lifecycle.endProcessIfRetired()
+    #expect(fixture.endRecorder.wait())
+    _ = fixture.lifecycle.testingSnapshot()
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(fixture.endRecorder.values == [.retired(LibboxInstanceUnclosable(.callDidNotReturn))])
+  }
+
+  /// libbox may still hold what a spent agent could not close, so the agent
+  /// checks and probes nothing more and answers that it is ending.
+  @Test func aSpentAgentRefusesChecksAndProbes() throws {
+    let fixture = makeFixture()
+    let activeConfiguration = try descriptor()
+    try startActiveSession(fixture, activeConfiguration)
+    fixture.engine.failStops(with: LibboxInstanceUnclosable(closeFailure: "close network: monitor"))
+    let failedStop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { failedStop.record($0) }
+    #expect(failedStop.wait())
+    #expect(!fixture.lifecycle.callsLibbox)
+
+    let service = ProxyAgentService(
+      lifecycle: ValidationOnlyProxyOwner(lifecycle: fixture.lifecycle),
+      configurationChecker: UnreachedLibbox(),
+      preferences: SCPreferencesSystemProxyPreferences(),
+      journalStore: FakeJournalStore(),
+      profileProbe: UnreachedLibbox()
+    )
+    let (data, error) = try validationReply(
+      service, Data("{}".utf8),
+      RequestEnvelope(
+        command: try NativeCommand(kind: .validateConfiguration, configuration: descriptor())))
+    #expect(error == nil)
+    let failure = try #require(try ProtocolCodec.decodeResponse(data).failure)
+    #expect(failure.code == "proxy-agent-ending")
+    #expect(failure.isRetryable)
+
+    let probed = DispatchSemaphore(value: 0)
+    let probeError = Mutex<NSError?>(nil)
+    service.testProfileProxies(
+      Data("{}".utf8), proxies: try JSONEncoder().encode(["p"]), timeoutMS: 500, targetURL: "",
+      expectedStatus: ""
+    ) { _, error in
+      probeError.withLock { $0 = error }
+      probed.signal()
+    }
+    #expect(probed.wait(timeout: .now() + 5) == .success)
+    let refused = try #require(probeError.withLock { $0 })
+    #expect(refused.domain == ProfileProbeServiceFailure.domain)
+    #expect(refused.code == ProfileProbeServiceFailure.agentEnding.rawValue)
+  }
+
+  /// An agent whose stop the Authority quarantined ends only once it holds no
+  /// session, so no System Proxy settings it applied outlive it, and it ends
+  /// once however often it is asked.
+  @Test func aQuarantinedStopEndsOnlyAnAgentWithoutASessionAndOnlyOnce() throws {
+    let fixture = makeFixture()
+    let activeConfiguration = try descriptor()
+    let start = OperationRecorder()
+    fixture.lifecycle.start(configuration: activeConfiguration) { start.record($0) }
+    #expect(fixture.engine.waitUntilStarted())
+    fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
+    #expect(start.wait())
+
+    fixture.lifecycle.endProcessAfterQuarantinedStop()
+    // Each read waits for the work queued before it, the end's second hop too.
+    _ = fixture.lifecycle.testingSnapshot()
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(fixture.endRecorder.values.isEmpty)
+
+    let stop = OperationRecorder()
+    fixture.lifecycle.stop(expectedConfiguration: activeConfiguration) { stop.record($0) }
+    #expect(stop.wait())
+    fixture.lifecycle.endProcessAfterQuarantinedStop()
+    fixture.lifecycle.endProcessAfterQuarantinedStop()
+    #expect(fixture.endRecorder.wait())
+    _ = fixture.lifecycle.testingSnapshot()
+    _ = fixture.lifecycle.testingSnapshot()
+    #expect(fixture.endRecorder.values == [.quarantinedStop])
+  }
+
   @Test func lateReadyCallbackAfterStopCannotApplyPreferences() throws {
     let fixture = makeFixture()
     let activeConfiguration = try descriptor()
@@ -1619,7 +2323,7 @@ struct ProxySessionLifecycleTests {
     #expect(fixture.engine.startCount == 1)
     #expect(fixture.lease.releaseCount == 0)
     #expect(preferences.restoreCount == 1)
-    #expect(fixture.endRecorder.values == [closeFailure])
+    #expect(fixture.endRecorder.values == [.engineUnclosable(closeFailure)])
   }
 
   @Test func unclosableEngineKeepsTheProcessUntilItsSettingsAreRestored() throws {
@@ -1663,7 +2367,7 @@ struct ProxySessionLifecycleTests {
     #expect(fixture.journalStore.journal == nil)
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.lease.releaseCount == 0)
-    #expect(fixture.endRecorder.values == [closeFailure])
+    #expect(fixture.endRecorder.values == [.engineUnclosable(closeFailure)])
   }
 
   @Test func unclosableRuntimeFailsTheStartAndLeavesTheAgentSpent() throws {
@@ -1714,7 +2418,7 @@ struct ProxySessionLifecycleTests {
     _ = lifecycle.testingSnapshot()
     #expect(runtime.startCount == 1)
     #expect(runtime.stopCount == 1)
-    #expect(ends.values == [closeFailure])
+    #expect(ends.values == [.engineUnclosable(closeFailure)])
   }
 
   @Test func missingLibboxFailsBeforeLeaseOrPreferences() throws {
@@ -1854,7 +2558,7 @@ struct ProxySessionLifecycleTests {
     #expect(preferences.restoreCount == 2)
     #expect(preferences.currentValue(.httpHost) == .string("original"))
     #expect(fixture.journalStore.journal == nil)
-    #expect(fixture.endRecorder.values == [closeFailure])
+    #expect(fixture.endRecorder.values == [.engineUnclosable(closeFailure)])
   }
 
   /// A stop whose engine stopped but whose restore failed leaves the session

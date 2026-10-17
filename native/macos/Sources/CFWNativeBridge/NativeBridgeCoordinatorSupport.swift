@@ -441,8 +441,10 @@ extension NativeBridgeCoordinator {
     case .invalidValidationRequest, .profileProbeInvalid:
       .configurationRejected
     case .validatorUnavailable, .validatorFailed, .configurationCheckCleanupFailed,
-      .profileProbeBusy, .profileProbeFailed:
+      .profileProbeBusy, .profileProbeFailed, .agentEnding:
       .unavailable
+    case .configurationCheckTimedOut, .profileProbeTimedOut:
+      .timeout
     }
   }
 

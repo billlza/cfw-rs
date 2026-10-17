@@ -35,8 +35,10 @@ pub(crate) async fn reconcile_startup_services(
     // Recovery may register the current services, so retain the same exclusion
     // against a live legacy runtime or an unfinished maintenance transaction.
     crate::legacy::require_network_start_allowed(retirement)?;
-    let completion = mode_lease
-        .run_to_completion(async move { recovery.await.map_err(|error| error.to_string()) });
+    let completion =
+        mode_lease.run_to_completion(engine.recover_with_restoration_rights(async move {
+            recovery.await.map(drop).map_err(|error| error.to_string())
+        }));
     let (result, mode_lease) = completion
         .await
         .map_err(|_| "background service recovery task ended without a response".to_owned())?;

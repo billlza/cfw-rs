@@ -42,16 +42,21 @@ private func renderings(of error: any Error) -> [String] {
 }
 
 /// The profile-probe patch joins its failures; only its cleanup failure means
-/// the probe's instance stays in the process.
+/// the probe's instance stays in the process, which the probe's error then
+/// carries for the ProxyAgent to retire on.
 @Test func aProbeReportTellsWhetherItsInstanceStayedOpen() {
   #expect(LibboxProfileProbeReport.unclosedInstance == "profile probe cleanup failed")
   for report in [
     "profile probe cleanup failed",
     "profile probe startup failed\nprofile probe cleanup failed",
   ] {
-    #expect(LibboxProfileProbeReport.leftItsInstanceOpen(report), "\(report)")
+    let error = LibboxProfileProbeReport.error(for: report)
+    #expect(error == .profileProbeCleanupFailed(LibboxDiagnostic(report)), "\(report)")
+    #expect(error.unclosedCallInstance != nil, "\(report)")
   }
   for report in ["profile probe startup failed", "dial tcp 1.2.3.4:443: i/o timeout", ""] {
-    #expect(!LibboxProfileProbeReport.leftItsInstanceOpen(report), "\(report)")
+    let error = LibboxProfileProbeReport.error(for: report)
+    #expect(error == .serviceStartFailed(LibboxDiagnostic(report)), "\(report)")
+    #expect(error.unclosedCallInstance == nil, "\(report)")
   }
 }

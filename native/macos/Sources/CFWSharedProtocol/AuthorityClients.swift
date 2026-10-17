@@ -1,6 +1,6 @@
 import Foundation
 
-public actor BoundedAuthorityXPCClient: AuthorityClient, EngineOwnerAuthorityClient {
+public actor BoundedAuthorityXPCClient: AuthorityClient, ProxyOwnerAuthorityClient {
   private let remote: any AuthorityRemoteCalling
   private var negotiated = false
 
@@ -118,6 +118,20 @@ public actor BoundedAuthorityXPCClient: AuthorityClient, EngineOwnerAuthorityCli
     return try correlated(
       AuthoritySnapshot.self, data: reply.response,
       requestID: requestID, operationID: nil)
+  }
+
+  public func ownerLeaseStatus(_ leaseID: AuthorityIdentifier) async throws -> OwnerLeaseStatus {
+    try await ensureHandshake()
+    let requestID = AuthorityIdentifier(UUID())
+    let envelope = try AuthorityRequestEnvelope(
+      requestID: requestID,
+      command: .ownerLeaseStatus(OwnerLeaseStatusRequest(leaseID: leaseID)))
+    let reply = try await perform(
+      method: .ownerLeaseStatus, request: AuthorityV1Codec.encode(envelope))
+    return try correlated(
+      OwnerLeaseStatusResponse.self, data: reply.response,
+      requestID: requestID, operationID: nil
+    ).status
   }
 
   public func bind(
@@ -264,7 +278,7 @@ public actor BoundedAuthorityXPCClient: AuthorityClient, EngineOwnerAuthorityCli
           configuration: configuration, secretPayload: secretPayload)
       } catch {
         let domain = AuthorityXPCErrorContract.domainError(error)
-        guard attempt == 0,
+        guard attempt == 0, method.retriesAfterRetryableFailure,
           domain.code.allowsAutomaticRetry(for: method.operationClass)
         else { throw domain }
         attempt += 1
@@ -296,6 +310,7 @@ public actor BoundedAuthorityXPCClient: AuthorityClient, EngineOwnerAuthorityCli
     case .attestStopped: .attestStopped
     case .cancelPrepared: .cancelPrepared
     case .snapshot: .snapshot
+    case .ownerLeaseStatus: .ownerLeaseStatus
     }
   }
 }
@@ -440,7 +455,7 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
       dispatch(
         method: method, proxy: proxy, request: request,
         configuration: configuration, secretPayload: secretPayload, gate: gate)
-      let timeout = self.timeout
+      let timeout = method.replyTimeout(within: self.timeout)
       Task {
         do {
           try await Task.sleep(for: timeout)
@@ -668,6 +683,8 @@ public final class NSXPCGlobalAuthorityRemote: AuthorityRemoteCalling,
       proxy.cancelPrepared(request, reply: simpleReply)
     case .snapshot:
       proxy.snapshot(request, reply: simpleReply)
+    case .ownerLeaseStatus:
+      proxy.ownerLeaseStatus(request, reply: simpleReply)
     }
   }
 }

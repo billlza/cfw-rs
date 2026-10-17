@@ -16,6 +16,12 @@ public enum AuthorityV1Limits {
   public static let preparationLifetimeMilliseconds: UInt64 = 10_000
   public static let commandTimeoutMilliseconds: UInt64 = 5_000
   public static let stopAttestationTimeoutMilliseconds: UInt64 = 5_000
+  /// How long a ProxyAgent waits, once, for the Authority to say whether it
+  /// still holds the lease the agent bound. The agent asks after its stopped
+  /// attestation failed, within the Host's wait for its stop reply. An
+  /// Authority of an earlier build does not know the question, and its
+  /// connection fails it, which the agent takes as no answer.
+  public static let ownerLeaseStatusTimeoutMilliseconds: UInt64 = 1_000
   public static let ticketBytes = 32
   public static let capabilityBytes = 32
   public static let connectionNonceBytes = 32
@@ -991,6 +997,43 @@ public struct SnapshotRequest: Codable, Equatable, Sendable {
   public init() {}
 }
 
+/// A ProxyAgent's question whether the Authority still holds the lease it
+/// bound. The Authority answers only for the caller's own lease, as the
+/// authenticated connection identifies the caller, never as these bytes do.
+public struct OwnerLeaseStatusRequest: Codable, Equatable, Sendable {
+  public let leaseID: AuthorityIdentifier
+
+  public init(leaseID: AuthorityIdentifier) {
+    self.leaseID = leaseID
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case leaseID = "lease_id"
+  }
+}
+
+/// What the Authority knows of one owner's lease.
+public enum OwnerLeaseStatus: String, Codable, Equatable, Sendable {
+  /// The Authority holds the lease, and its stop can still complete.
+  case held
+  /// The Authority holds the lease in a quarantine: its stop can no longer
+  /// complete, and the Authority releases it once the owner's process ended.
+  case quarantined
+  /// The Authority read its journal and holds no such lease.
+  case absent
+  /// The Authority has not read its journal, or quarantined the journal it
+  /// read, so it cannot tell whether such a lease exists.
+  case notReady = "not_ready"
+}
+
+public struct OwnerLeaseStatusResponse: Codable, Equatable, Sendable {
+  public let status: OwnerLeaseStatus
+
+  public init(status: OwnerLeaseStatus) {
+    self.status = status
+  }
+}
+
 public struct AuthorityAcknowledgement: Codable, Equatable, Sendable {
   public let operationID: AuthorityIdentifier
   public let revision: UInt64
@@ -1019,10 +1062,11 @@ public enum AuthorityCommand: Sendable {
   case attestStopped(StoppedAttestation)
   case cancelPrepared(CancelPreparedRequest)
   case snapshot(SnapshotRequest)
+  case ownerLeaseStatus(OwnerLeaseStatusRequest)
 
   public var isReadOnly: Bool {
     switch self {
-    case .handshake, .snapshot: true
+    case .handshake, .snapshot, .ownerLeaseStatus: true
     default: false
     }
   }
@@ -1329,6 +1373,12 @@ extension CancelPreparedRequest: AuthorityV1WireModel {
   }
 }
 extension SnapshotRequest: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {}
+}
+extension OwnerLeaseStatusRequest: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {}
+}
+extension OwnerLeaseStatusResponse: AuthorityV1WireModel {
   public func validateAuthorityV1() throws {}
 }
 extension AuthorityAcknowledgement: AuthorityV1WireModel {

@@ -171,8 +171,9 @@
   macOS starts its successor at once instead of holding the app's next
   requests for up to 10 seconds. While it cannot restore them it keeps
   running, and tries again whenever the macOS password prompt that turning
-  System Proxy off and quitting the app show is approved; after the Mac
-  restarts, that prompt also restores what an earlier ProxyAgent left. The
+  System Proxy off, quitting the app and recovering background services show
+  is approved; after the Mac restarts, that prompt also restores what an
+  earlier ProxyAgent left. The
   extension ends once it has answered the stop that macOS asks for after
   receiving its report, or 2 seconds after the report when macOS asks for
   none, and it refuses every start until then; a failure during a stop macOS
@@ -187,12 +188,70 @@
   again instead of having to wait for the Mac to restart. Until the network
   Authority restarts, as it does when the Mac restarts, only the app of the
   user who turned System Proxy on, signed in at the console, can prove its
-  settings restored.
+  settings restored. After such a restart another user's app can prove the
+  network Off, but it cannot start the network itself (see Known
+  limitations), and settings the first user's System Proxy left can still
+  point at its closed port until that user approves the prompt again, or an
+  administrator clears them.
 - A profile check whose engine instance cannot be closed now fails with an
   error that may be retried, instead of passing while the instance stayed in
   the ProxyAgent; every proxy, group and inbound the app writes closes. A
   profile check or latency test whose engine panics while closing fails
   instead of ending the ProxyAgent.
+- A profile check or offline latency test that hangs inside the engine no
+  longer holds the ProxyAgent's other replies, nor leaves it unable to check
+  or test until the Mac restarts. A check answers within 3.5 seconds and a
+  latency test within 3.5 seconds beyond its timeout, with an error that may
+  be retried, so a check that takes between 3.5 and 5 seconds, which passed
+  before, now fails with that error, and keeps failing on a Mac that always
+  takes that long for the profile; the largest profile the app writes checked
+  in about a second on the development Mac. One still running 30 seconds
+  later counts as hung, and a check or latency test whose instance could not
+  be closed counts the same: the ProxyAgent then refuses checks, latency
+  tests and starts with an error that may be retried, keeps a running System
+  Proxy until it is turned off, then ends, and macOS starts a fresh one. A
+  ProxyAgent whose engine could not be closed refuses checks and latency
+  tests too.
+- Turning System Proxy off restores the network settings before the engine
+  stops. If macOS does not take them, System Proxy keeps running and can be
+  turned off again, instead of leaving the Mac's proxy settings pointing at
+  127.0.0.1:7890 with nothing listening there, which cut off every app that
+  uses them. Once the settings are restored the engine stops even when the
+  network Authority cannot order the stop yet, and turning System Proxy off
+  again finishes it. A ProxyAgent from before an update, or one whose
+  version the app cannot verify, stops as it did. A stop the system forces,
+  at a user switch, a sign-out or a lost Authority connection, and the
+  clean-up after a failed start still stop the engine even when the settings
+  cannot be restored.
+- Turning System Proxy off after its engine stopped on its own while its
+  settings could not be restored completes once the macOS prompt is approved,
+  instead of failing, and holding back every start, until the user signs out
+  or the Mac restarts.
+- A ProxyAgent that has to end, because its engine could not be closed, its
+  stop was quarantined or a check left the engine stuck, no longer cuts off
+  answers it still owes, such as a password prompt being answered or a
+  check: it ends once every request it received is answered, waiting at most
+  as long as the app waits for that prompt.
+- Recover background services first shows the macOS password prompt when an
+  ended System Proxy left its settings behind, and restores them; cancelling
+  the prompt or leaving it unanswered ends the recovery with a message saying
+  so. With nothing left to restore it shows no prompt.
+- Turning System Proxy off after the network Authority restarted completes
+  instead of failing every time until the app is relaunched: the ProxyAgent
+  asks the Authority about its own lease and, once the Authority says it no
+  longer holds it, finishes the stop as Off. The Authority answers only about
+  the asking ProxyAgent's own lease, checked against the connection's
+  identity, and says it is not ready, rather than that the lease is gone,
+  until it has read its journal. A ProxyAgent whose stop the Authority
+  quarantined ends after its reply, so the Authority can lift the quarantine
+  once it sees that process end, and one whose stop failed for want of the
+  restore rights completes it once the prompt is approved.
+- A stop that waited while another copy of the app started the network again
+  no longer fails, and blocks every start, until the app is relaunched: once
+  the network Authority has moved past that stop's generation, the stop ends
+  as soon as its own engine is Off. While another user's app holds the
+  network, the status reports it busy, which a later read settles, instead of
+  a rejected identity.
 - Report owner failures by their own meaning instead of as a rejected
   configuration when they are no fault of the profile. A network Authority
   error that the ProxyAgent passed on broke its reply, so the app reported it
@@ -254,6 +313,15 @@
 - Build the app, and the release copies of XcodeGen and the Tauri CLI, with
   Xcode 27.1 (27A9275) instead of Xcode 27.0 (27A266a). Release builds accept
   only that exact Xcode.
+
+### Known limitations
+
+- The network Authority stays enrolled to the first installation of the app
+  that asked it to start the network on this Mac, and its replay protection
+  rejects a start from any other installation. The app of another macOS
+  user, or of the same user once the app's engine lineage is gone from that
+  user's Keychain, therefore cannot turn System Proxy, Local Proxy or Tunnel
+  on, also after the Mac restarts.
 
 ## 0.4.0 - Unreleased
 

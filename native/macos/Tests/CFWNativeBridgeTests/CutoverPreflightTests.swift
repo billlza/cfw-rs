@@ -54,6 +54,10 @@ private actor RecordingProxyAgent: ProxyAgentTransporting {
     stopCalls += 1
   }
 
+  func restoreSettingsBeforeStop(configuration: ConfigurationDescriptor) throws {
+    Issue.record("a cutover preflight stops no System Proxy session")
+  }
+
   func snapshot() -> EngineSnapshot { observedSnapshot }
 
   func validateConfiguration(

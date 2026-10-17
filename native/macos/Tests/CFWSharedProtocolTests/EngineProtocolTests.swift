@@ -252,6 +252,35 @@ private func removeEngineProtocolTestDirectory(_ root: URL) {
   #expect(command.configuration == configuration)
 }
 
+/// A restore before a stop names the exact System Proxy configuration whose
+/// settings it gives back, and crosses the engine protocol unchanged.
+@Test func aRestoreBeforeAStopNamesItsSystemProxyConfiguration() throws {
+  let installationID = try #require(
+    UUID(uuidString: "11111111-1111-1111-1111-111111111111")
+  )
+  func configuration(_ slot: ConfigurationSlot) throws -> ConfigurationDescriptor {
+    try ConfigurationDescriptor(
+      slot: slot,
+      tunnelOptions: nil,
+      credentialAudience: try testCredentialAudience(),
+      installationID: installationID,
+      epoch: 1,
+      generation: 1,
+      byteCount: 2,
+      sha256: SHA256Digest(hex: String(repeating: "00", count: 32)))
+  }
+  #expect(throws: ProtocolValidationError.invalidCommand) {
+    try NativeCommand(kind: .restoreSettingsBeforeStop)
+  }
+  #expect(throws: ProtocolValidationError.invalidCommand) {
+    try NativeCommand(kind: .restoreSettingsBeforeStop, configuration: configuration(.localProxy))
+  }
+  let request = RequestEnvelope(
+    command: try NativeCommand(
+      kind: .restoreSettingsBeforeStop, configuration: configuration(.systemProxy)))
+  #expect(try ProtocolCodec.decodeRequest(ProtocolCodec.encode(request)) == request)
+}
+
 @Test func stopCommandRequiresExactConfigurationGeneration() throws {
   #expect(throws: ProtocolValidationError.invalidCommand) {
     try NativeCommand(kind: .stop)

@@ -899,6 +899,245 @@ mod runtime_settings;
 #[path = "tests/ticket_retry.rs"]
 mod ticket_retry;
 
+/// What the recovery asks macOS for, and what macOS answers.
+fn restoration_answer(
+    requests: &Arc<Mutex<Vec<bool>>>,
+    answer: Result<(), cfw_apple_network::NativeBridgeError>,
+) -> impl FnOnce(bool) -> std::future::Ready<Result<(), cfw_apple_network::NativeBridgeError>> {
+    let requests = requests.clone();
+    move |restoration_only| {
+        requests
+            .lock()
+            .expect("restoration requests")
+            .push(restoration_only);
+        std::future::ready(answer)
+    }
+}
+
+#[tokio::test]
+async fn a_declined_settings_restoration_ends_the_recovery_before_it_starts() {
+    use cfw_apple_network::{NativeBridgeError, NativeBridgeErrorCode as Code};
+    for (code, expected) in [
+        (Code::Timeout, "or the ProxyAgent did not reply"),
+        (Code::ApprovalDenied, "cancelled or denied"),
+        (Code::PermissionDenied, "cancelled or denied"),
+    ] {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recoveries = Arc::new(AtomicUsize::new(0));
+        let recovered = recoveries.clone();
+        let outcome = super::recover_after_settings_restoration(
+            restoration_answer(&requests, Err(NativeBridgeError::new(code, "the prompt"))),
+            async move {
+                recovered.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        let message = outcome.expect_err("a declined restoration must end the recovery");
+        assert!(message.contains(expected), "{message}");
+        assert!(
+            message.contains("Recover background services again"),
+            "{message}"
+        );
+        assert_eq!(recoveries.load(Ordering::SeqCst), 0, "{code:?}");
+        assert_eq!(*requests.lock().expect("requests"), vec![true]);
+    }
+}
+
+#[tokio::test]
+async fn a_granted_settings_restoration_runs_the_recovery_and_reports_its_result() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    assert_eq!(
+        super::recover_after_settings_restoration(restoration_answer(&requests, Ok(())), async {
+            Ok(())
+        })
+        .await,
+        Ok(())
+    );
+    assert_eq!(
+        super::recover_after_settings_restoration(restoration_answer(&requests, Ok(())), async {
+            Err("the services are not registered".to_owned())
+        })
+        .await,
+        Err("the services are not registered".to_owned())
+    );
+    // Restoration rights alone: with nothing to restore, macOS shows no prompt.
+    assert_eq!(*requests.lock().expect("requests"), vec![true, true]);
+}
+
+/// Answers every rights request, records whether it asked for restoration
+/// rights alone, and has no other native operation.
+#[derive(Default)]
+struct RestorationRightsBridge {
+    requests: Mutex<Vec<bool>>,
+    absent: cfw_apple_network::MissingNativeBridge,
+}
+
+impl RestorationRightsBridge {
+    fn requests(&self) -> Vec<bool> {
+        self.requests.lock().expect("rights requests").clone()
+    }
+}
+
+impl cfw_apple_network::NativeBridge for RestorationRightsBridge {
+    fn authorize_system_proxy(
+        &self,
+        restoration_only: bool,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+        self.requests
+            .lock()
+            .expect("rights requests")
+            .push(restoration_only);
+        Box::pin(async { Ok(()) })
+    }
+    fn query_status(&self) -> cfw_apple_network::NativeBridgeFuture<'_, NativeEngineStatus> {
+        self.absent.query_status()
+    }
+    fn check_configuration(
+        &self,
+        request: EngineStartRequest,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+        self.absent.check_configuration(request)
+    }
+    fn start_local_proxy(
+        &self,
+        request: EngineStartRequest,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
+        self.absent.start_local_proxy(request)
+    }
+    fn stop_local_proxy(
+        &self,
+        context: EngineCommandContext,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+        self.absent.stop_local_proxy(context)
+    }
+    fn start_system_proxy(
+        &self,
+        request: EngineStartRequest,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
+        self.absent.start_system_proxy(request)
+    }
+    fn stop_system_proxy(
+        &self,
+        context: EngineCommandContext,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+        self.absent.stop_system_proxy(context)
+    }
+    fn install_tunnel(
+        &self,
+        context: EngineCommandContext,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, TunnelInstallOutcome> {
+        self.absent.install_tunnel(context)
+    }
+    fn cancel_tunnel_install(
+        &self,
+        context: EngineCommandContext,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+        self.absent.cancel_tunnel_install(context)
+    }
+    fn authorize_tunnel_configuration(
+        &self,
+        request: EngineStartRequest,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+        self.absent.authorize_tunnel_configuration(request)
+    }
+    fn start_tunnel(
+        &self,
+        request: EngineStartRequest,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
+        self.absent.start_tunnel(request)
+    }
+    fn stop_tunnel(
+        &self,
+        context: EngineCommandContext,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+        self.absent.stop_tunnel(context)
+    }
+    fn preflight_cutover(
+        &self,
+        request: cfw_engine_api::CutoverPreflightRequest,
+    ) -> cfw_apple_network::NativeBridgeFuture<'_, cfw_engine_api::CutoverPreflightOutcome> {
+        self.absent.preflight_cutover(request)
+    }
+}
+
+/// An engine whose rights requests reach `bridge`.
+fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::ManagedEngine {
+    super::ManagedEngine {
+        coordinator: endpoint_retry_coordinator(Arc::new(EndpointRetryBackend::new(0))),
+        capabilities: super::EngineCapabilities {
+            local_proxy: true,
+            system_proxy: true,
+            tunnel: true,
+            provider_management: true,
+        },
+        unavailable_reason: None,
+        preflight_backend: Arc::new(cfw_apple_network::AppleNetworkBackend::new(
+            cfw_apple_network::MissingNativeBridge,
+        )),
+        authorization_bridge: bridge,
+        cutover: super::cutover::CutoverPreparationGate::default(),
+        maintenance: EngineMaintenanceGate::default(),
+        endpoints: Arc::new(std::sync::RwLock::new(endpoint_binding(
+            EngineSettings::default(),
+        ))),
+    }
+}
+
+/// "Recover background services" asks macOS for the rights to restore settings
+/// alone, which shows no prompt when none are left, and runs the recovery once
+/// they are granted.
+#[tokio::test]
+async fn background_recovery_asks_only_for_restoration_rights_then_recovers() {
+    let bridge = Arc::new(RestorationRightsBridge::default());
+    let engine = engine_with_rights_bridge(bridge.clone());
+    let recoveries = Arc::new(AtomicUsize::new(0));
+    let recovered = recoveries.clone();
+    assert_eq!(
+        engine
+            .recover_with_restoration_rights(async move {
+                recovered.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await,
+        Ok(())
+    );
+    assert_eq!(bridge.requests(), vec![true]);
+    assert_eq!(recoveries.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_service_fault_before_the_restoration_leaves_the_recovery_to_repair_it() {
+    use cfw_apple_network::{NativeBridgeError, NativeBridgeErrorCode as Code};
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let fault = || {
+        restoration_answer(
+            &requests,
+            Err(NativeBridgeError::new(
+                Code::Unavailable,
+                "ProxyAgent connection-retired",
+            )),
+        )
+    };
+    assert_eq!(
+        super::recover_after_settings_restoration(fault(), async { Ok(()) }).await,
+        Ok(())
+    );
+    let failed = super::recover_after_settings_restoration(fault(), async {
+        Err("the services are not registered".to_owned())
+    })
+    .await
+    .expect_err("a failed recovery must report its cause");
+    assert!(
+        failed.starts_with("the services are not registered; "),
+        "{failed}"
+    );
+    assert!(
+        failed.contains("Unavailable: ProxyAgent connection-retired"),
+        "{failed}"
+    );
+}
+
 #[test]
 fn system_proxy_authorization_outcomes_tell_the_user_what_to_do() {
     use cfw_apple_network::NativeBridgeErrorCode as Code;

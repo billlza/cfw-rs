@@ -178,7 +178,7 @@ private func reconcileRestartedJournal(
       requestID: requestID, command: .reconcileOff(request)))
   let peer = try recoveryPeer()
   let service = AuthenticatedAuthorityPeerService(
-    peerID: UUID(), peer: peer, reauthorize: { peer }, core: core,
+    peerID: UUID(), peer: peer, reauthorize: { _ in peer }, core: core,
     concurrency: AuthorityConcurrencyGate(), events: AuthorityEventHub())
   var responseData: Data?
   var responseError: NSError?

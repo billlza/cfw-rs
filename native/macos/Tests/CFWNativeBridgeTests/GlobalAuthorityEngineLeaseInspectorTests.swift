@@ -159,32 +159,98 @@ private struct AuthorityLeaseFixture {
 
 @Suite(.serialized)
 struct GlobalAuthorityEngineLeaseInspectorTests {
-  @Test func completedStopRequiresExactOffReplayCursor() async throws {
+  /// A stop's generation is completed by Off at that generation, and passed
+  /// once the replay cursor of the same installation moved beyond it, which it
+  /// does only through a start prepared from a proven Off. One snapshot
+  /// decides, and nothing is mutated.
+  @Test func stopResolutionReadsOneSnapshotOfTheStopsGeneration() async throws {
     let fixture = try AuthorityLeaseFixture()
     let context = try EngineCommandContext(
       installationID: fixture.operation.root.installationID.rawValue,
       configEpoch: fixture.operation.root.epoch, generation: fixture.operation.root.generation)
-    let off = try fixture.snapshot(state: .off, revision: 14, cursor: fixture.cursor(revision: 14))
-    let authority = SequencedAuthorityClient(snapshots: [off])
-    let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
-    #expect(try await inspector.hasCompletedStop(context))
-    for changed in ["installation", "epoch", "generation"] {
-      let other = try EngineCommandContext(
-        installationID: changed == "installation" ? UUID() : context.installationID,
-        configEpoch: changed == "epoch" ? context.configEpoch + 1 : context.configEpoch,
-        generation: changed == "generation" ? context.generation + 1 : context.generation)
-      #expect(try await !inspector.hasCompletedStop(other))
+    func cursor(epoch: UInt64, generation: UInt64, installation: AuthorityIdentifier? = nil)
+      throws -> ReplayCursor
+    {
+      try ReplayCursor(
+        installationID: installation ?? fixture.cursor.installationID, acceptedEpoch: epoch,
+        acceptedGeneration: generation, revision: 20,
+        previousRecordSHA256: fixture.cursor.previousRecordSHA256)
     }
-    for snapshot in [
-      try fixture.snapshot(state: .off, revision: 14),
-      try fixture.snapshot(
-        state: .active, revision: 14, leaseState: .active, cursor: fixture.cursor),
-    ] {
-      let other = GlobalAuthorityEngineLeaseInspector(
-        authority: SequencedAuthorityClient(snapshots: [snapshot]))
-      #expect(try await !other.hasCompletedStop(context))
+    let epoch = fixture.operation.root.epoch
+    let generation = fixture.operation.root.generation
+    let later = try cursor(epoch: epoch, generation: generation + 1)
+    let table: [(String, AuthoritySnapshot, NativeStopResolution)] = [
+      (
+        "Off at the stop's generation",
+        try fixture.snapshot(state: .off, revision: 14, cursor: fixture.cursor(revision: 14)),
+        .completed
+      ),
+      ("Off past it", try fixture.snapshot(state: .off, revision: 20, cursor: later), .superseded),
+      (
+        "Recovering past it", try fixture.snapshot(state: .recovering, revision: 20, cursor: later),
+        .superseded
+      ),
+      (
+        "a later epoch with a smaller generation",
+        try fixture.snapshot(
+          state: .off, revision: 20, cursor: cursor(epoch: epoch + 1, generation: 1)), .superseded
+      ),
+      (
+        "Off before it",
+        try fixture.snapshot(
+          state: .off, revision: 20, cursor: cursor(epoch: epoch, generation: generation - 1)),
+        .unresolved
+      ),
+      (
+        "an earlier epoch with a larger generation",
+        try fixture.snapshot(
+          state: .off, revision: 20, cursor: cursor(epoch: epoch - 1, generation: generation + 5)),
+        .unresolved
+      ),
+      (
+        "another installation",
+        try fixture.snapshot(
+          state: .off, revision: 20,
+          cursor: cursor(
+            epoch: epoch, generation: generation + 1, installation: AuthorityIdentifier(UUID()))),
+        .unresolved
+      ),
+      (
+        "Off at the stop's epoch and generation of another installation",
+        try fixture.snapshot(
+          state: .off, revision: 20,
+          cursor: cursor(
+            epoch: epoch, generation: generation, installation: AuthorityIdentifier(UUID()))),
+        .unresolved
+      ),
+      (
+        "Off at the stop's generation of an earlier epoch",
+        try fixture.snapshot(
+          state: .off, revision: 20, cursor: cursor(epoch: epoch - 1, generation: generation)),
+        .unresolved
+      ),
+      ("no cursor", try fixture.snapshot(state: .off, revision: 14), .unresolved),
+      (
+        "the stop's own lease",
+        try fixture.snapshot(
+          state: .active, revision: 14, leaseState: .active, cursor: fixture.cursor), .unresolved
+      ),
+      (
+        "Recovering at the stop's generation",
+        try fixture.snapshot(state: .recovering, revision: 14, cursor: fixture.cursor), .unresolved
+      ),
+      (
+        "a lease of the stop's generation behind a later cursor",
+        try fixture.snapshot(state: .stopping, revision: 20, leaseState: .stopping, cursor: later),
+        .unresolved
+      ),
+    ]
+    for (name, snapshot, expected) in table {
+      let authority = SequencedAuthorityClient(snapshots: [snapshot])
+      let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
+      #expect(try await inspector.stopResolution(context) == expected, "\(name)")
+      #expect(await authority.counts() == (cancel: 0, begin: 0, complete: 0, reconcile: 0))
     }
-    #expect(await authority.counts() == (cancel: 0, begin: 0, complete: 0, reconcile: 0))
   }
 
   @Test(arguments: [ConfigurationSlot.localProxy, .systemProxy])
@@ -278,7 +344,9 @@ struct GlobalAuthorityEngineLeaseInspectorTests {
     #expect(await authority.counts().cancel == 1)
   }
 
-  @Test func cancellationRejectsAnOffCursorNewerThanTheFailedStart() async throws {
+  /// A cursor past the failed start shows that its preparation ended through a
+  /// proven Off, so nothing of it can start any more and nothing is cancelled.
+  @Test func cancellationOfAStartTheAuthorityPassedIsDone() async throws {
     let fixture = try AuthorityLeaseFixture()
     let newerCursor = try ReplayCursor(
       installationID: fixture.cursor.installationID,
@@ -286,13 +354,67 @@ struct GlobalAuthorityEngineLeaseInspectorTests {
       acceptedGeneration: fixture.descriptor.generation + 1,
       revision: fixture.cursor.revision + 1,
       previousRecordSHA256: fixture.cursor.previousRecordSHA256)
-    let newerOff = try fixture.snapshot(
-      state: .off,
-      revision: newerCursor.revision,
-      cursor: newerCursor)
-    let authority = SequencedAuthorityClient(snapshots: [newerOff])
+    let laterLease = try LeaseView(
+      leaseID: AuthorityIdentifier(UUID()),
+      operation: OperationContext(
+        operationID: AuthorityIdentifier(UUID()),
+        root: RootContext(
+          installationID: fixture.operation.root.installationID,
+          epoch: fixture.descriptor.epoch, generation: fixture.descriptor.generation + 1),
+        mode: fixture.operation.mode, configSHA256: fixture.operation.configSHA256,
+        identitySHA256: fixture.operation.identitySHA256, ownerUID: 501,
+        authorityRevision: newerCursor.revision),
+      state: .active, expiryMonotonic: 20_000)
+    // Whatever the Authority holds past the start belongs to a later one.
+    for passed in [
+      try fixture.snapshot(state: .off, revision: newerCursor.revision, cursor: newerCursor),
+      try AuthoritySnapshot(
+        protocolVersion: AuthorityProtocolVersion(), state: .active,
+        revision: newerCursor.revision + 1, replayCursor: newerCursor, leaseView: laterLease,
+        lastFailure: nil, consoleUID: 501),
+      try fixture.snapshot(
+        state: .quarantined, revision: newerCursor.revision + 1, cursor: newerCursor),
+    ] {
+      let authority = SequencedAuthorityClient(snapshots: [passed])
+      let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
+      #expect(try await inspector.cancelPreparedStart(for: fixture.descriptor), "\(passed.state)")
+      #expect(await authority.counts().cancel == 0, "\(passed.state)")
+    }
+  }
+
+  /// A later start can pass the cancelled start before the confirming read,
+  /// which still shows that nothing of the cancelled start can start.
+  @Test func aCancelledStartALaterStartPassedIsDone() async throws {
+    let fixture = try AuthorityLeaseFixture()
+    let newerCursor = try ReplayCursor(
+      installationID: fixture.cursor.installationID,
+      acceptedEpoch: fixture.descriptor.epoch,
+      acceptedGeneration: fixture.descriptor.generation + 1,
+      revision: fixture.cursor.revision + 2,
+      previousRecordSHA256: fixture.cursor.previousRecordSHA256)
+    let authority = SequencedAuthorityClient(snapshots: [
+      try fixture.snapshot(
+        state: .preparing, revision: 14, leaseState: .prepared, cursor: fixture.cursor),
+      try fixture.snapshot(state: .off, revision: newerCursor.revision, cursor: newerCursor),
+    ])
     let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
 
+    #expect(try await inspector.cancelPreparedStart(for: fixture.descriptor))
+    #expect(await authority.counts().cancel == 1)
+  }
+
+  /// A cursor of another installation proves nothing about this start.
+  @Test func cancellationRejectsACursorOfAnotherInstallation() async throws {
+    let fixture = try AuthorityLeaseFixture()
+    let foreign = try ReplayCursor(
+      installationID: AuthorityIdentifier(UUID()),
+      acceptedEpoch: fixture.descriptor.epoch,
+      acceptedGeneration: fixture.descriptor.generation + 1,
+      revision: fixture.cursor.revision + 1,
+      previousRecordSHA256: fixture.cursor.previousRecordSHA256)
+    let authority = SequencedAuthorityClient(
+      snapshots: [try fixture.snapshot(state: .off, revision: foreign.revision, cursor: foreign)])
+    let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
     await #expect(throws: AuthorityDomainError(code: .replayRejected)) {
       try await inspector.cancelPreparedStart(for: fixture.descriptor)
     }
@@ -407,7 +529,7 @@ struct GlobalAuthorityEngineLeaseInspectorTests {
     #expect(await authority.counts() == (cancel: 0, begin: 0, complete: 0, reconcile: 0))
   }
 
-  @Test func recoveringCancellationRejectsACursorNewerThanTheFailedStart() async throws {
+  @Test func recoveringCancellationOfAStartTheAuthorityPassedIsDone() async throws {
     let fixture = try AuthorityLeaseFixture()
     let newerCursor = try ReplayCursor(
       installationID: fixture.cursor.installationID,
@@ -417,12 +539,11 @@ struct GlobalAuthorityEngineLeaseInspectorTests {
       previousRecordSHA256: fixture.cursor.previousRecordSHA256)
     let recovering = try fixture.snapshot(
       state: .recovering, revision: newerCursor.revision, cursor: newerCursor)
-    let inspector = GlobalAuthorityEngineLeaseInspector(
-      authority: SequencedAuthorityClient(snapshots: [recovering]))
+    let authority = SequencedAuthorityClient(snapshots: [recovering])
+    let inspector = GlobalAuthorityEngineLeaseInspector(authority: authority)
 
-    await #expect(throws: AuthorityDomainError(code: .replayRejected)) {
-      try await inspector.cancelPreparedStart(for: fixture.descriptor)
-    }
+    #expect(try await inspector.cancelPreparedStart(for: fixture.descriptor))
+    #expect(await authority.counts().cancel == 0)
   }
 
   @Test func restartReconciliationBindsExactCursorAndOwnerOffEvidence() async throws {

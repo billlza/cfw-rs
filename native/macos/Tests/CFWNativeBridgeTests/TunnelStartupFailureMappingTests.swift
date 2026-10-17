@@ -73,6 +73,9 @@ struct TunnelStartupFailureMappingTests {
       .profileProbeBusy: .unavailable,
       .profileProbeInvalid: .configurationRejected,
       .profileProbeFailed: .unavailable,
+      .agentEnding: .unavailable,
+      .configurationCheckTimedOut: .timeout,
+      .profileProbeTimedOut: .timeout,
     ]
     #expect(Set(expected.keys) == Set(ProxyAgentFailureCode.allCases))
     for failure in ProxyAgentFailure.allCases {

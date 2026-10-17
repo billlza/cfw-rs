@@ -644,6 +644,9 @@ public enum NativeCommandKind: String, Codable, Sendable {
   case startTunnel
   case validateConfiguration
   case stop
+  /// Restores the System Proxy settings of the session the configuration
+  /// names while its engine keeps running, before the Host orders its stop.
+  case restoreSettingsBeforeStop
   case snapshot
 }
 
@@ -658,11 +661,13 @@ public struct NativeCommand: Codable, Equatable, Sendable {
     let requiresConfiguration =
       kind == .startLocalProxy || kind == .startSystemProxy || kind == .startTunnel
       || kind == .validateConfiguration
-      || kind == .stop
+      || kind == .stop || kind == .restoreSettingsBeforeStop
     guard requiresConfiguration == (configuration != nil) else {
       throw ProtocolValidationError.invalidCommand
     }
-    if kind == .startSystemProxy, configuration?.slot != .systemProxy {
+    if kind == .startSystemProxy || kind == .restoreSettingsBeforeStop,
+      configuration?.slot != .systemProxy
+    {
       throw ProtocolValidationError.invalidCommand
     }
     if kind == .startLocalProxy, configuration?.slot != .localProxy {

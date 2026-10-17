@@ -83,6 +83,8 @@ public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case configurationCheckCleanupFailed(LibboxDiagnostic)
   /// libbox returned neither a check nor an error, which its API never does.
   case configurationCheckReturnedNothing
+  /// libbox could not close the instance it built to test proxy latency.
+  case profileProbeCleanupFailed(LibboxDiagnostic)
   case unexpectedPacketDescriptor
   case missingPacketDescriptor
   case packetDescriptorAlreadyTransferred
@@ -102,6 +104,20 @@ public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case invalidEndpointConflict(kind: Int32, port: Int32)
   case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case serviceNotRunning(state: Int32, message: LibboxDiagnostic)
+}
+
+extension LibboxRuntimeError {
+  /// The instance a configuration check or profile probe built and libbox
+  /// could not close, which stays in this process; nil for any other error.
+  public var unclosedCallInstance: LibboxInstanceUnclosable? {
+    if case .configurationCheckCleanupFailed(let diagnostic) = self {
+      return LibboxInstanceUnclosable(.closeFailed(diagnostic))
+    }
+    if case .profileProbeCleanupFailed(let diagnostic) = self {
+      return LibboxInstanceUnclosable(.closeFailed(diagnostic))
+    }
+    return nil
+  }
 }
 
 extension LibboxRuntimeError: LocalizedError {
@@ -127,6 +143,8 @@ extension LibboxRuntimeError: LocalizedError {
       return "libbox could not close the instance it built to check the configuration."
     case .configurationCheckReturnedNothing:
       return "libbox returned neither a configuration check nor an error."
+    case .profileProbeCleanupFailed:
+      return "libbox could not close the instance it built to test proxy latency."
     case .unexpectedPacketDescriptor:
       return "System Proxy must not receive a packet-flow descriptor."
     case .missingPacketDescriptor:
@@ -202,6 +220,9 @@ public struct LibboxInstanceUnclosable: Error, Equatable, Sendable {
     /// The start its deadline interrupted, or that interrupt, had not returned
     /// within `EngineStartBudget.interruptLimit`.
     case interruptDidNotReturn
+    /// A configuration check or profile probe had not returned
+    /// `ProxyAgentCallBudget.abandonAfterReply` after its reply.
+    case callDidNotReturn
   }
 
   let cause: Cause
@@ -228,6 +249,7 @@ extension LibboxInstanceUnclosable.Cause {
     case .closeFailed: "close failed"
     case .closeDidNotReturn: "close did not return"
     case .interruptDidNotReturn: "interrupt did not return"
+    case .callDidNotReturn: "call did not return"
     }
   }
 }

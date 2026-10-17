@@ -45,12 +45,20 @@ public enum ProxyAgentFailureCode: String, CaseIterable, Sendable {
   case profileProbeBusy = "profile-probe-busy"
   case profileProbeInvalid = "profile-probe-invalid"
   case profileProbeFailed = "profile-probe-failed"
+  /// A spent or retiring ProxyAgent refuses checks, probes and starts; the
+  /// ProxyAgent macOS starts once it ended takes them.
+  case agentEnding = "proxy-agent-ending"
+  /// A configuration check, this one or an earlier one, ran past its reply.
+  case configurationCheckTimedOut = "configuration-check-timed-out"
+  /// A profile probe ran past its reply.
+  case profileProbeTimedOut = "profile-probe-timed-out"
 
   /// Whether the same request may succeed when sent again.
   public var isRetryable: Bool {
     switch self {
     case .validatorUnavailable, .validatorFailed, .configurationCheckCleanupFailed,
-      .profileProbeBusy, .profileProbeFailed:
+      .profileProbeBusy, .profileProbeFailed, .agentEnding, .configurationCheckTimedOut,
+      .profileProbeTimedOut:
       true
     case .invalidConfigurationSlot, .lifecycleConflict, .startupCancelled, .staleStopRequest,
       .stopWithoutSession, .recoveryBlocked, .authorizationRequired, .engineLeaseFailed,

@@ -204,7 +204,13 @@ private packet-flow file descriptors through KVC is forbidden.
 System Proxy is active only after the mixed listener is ready and the intended
 SystemConfiguration values have been applied. Stop restores only fields that
 still equal this product's applied values, so user or administrator changes are
-not overwritten.
+not overwritten. An Off the user asks for restores them while the engine still
+runs, before the Authority orders the stop, and keeps the engine running while
+they cannot be restored, so a failed restore leaves the settings selecting a
+listener that still answers. A stop the Authority forces, a failed start's
+rollback, and the stop of a ProxyAgent the Host cannot verify as its own build
+restore them as the engine stops, and stop the engine even when they cannot be
+restored.
 
 Tunnel is active only when `NEVPNStatus.connected`, the provider reports ready,
 and its generation and configuration digest match current intent. Interface

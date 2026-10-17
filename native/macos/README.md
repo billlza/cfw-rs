@@ -124,7 +124,68 @@ quarantine stays until the Authority restarts. A stop the Host retries after the
 ProxyAgent ended reaches a successor with no record of it; the Host then leaves
 the outcome to Authority completion, which succeeds only if the ended owner had
 attested stopped, or, once the Authority recovered, to the Off reconciliation
-at that stop's generation.
+at that stop's generation. After an Authority restart a Host of whichever user
+is at the console can reconcile Off, while settings the former owner's
+ProxyAgent left can still select its closed listener until that user approves
+the restoration prompt, or an administrator clears them. Only the installation
+the Authority enrolled can start again: the enrollment and the replay cursor
+are durable, the Host's preparers reject a replay cursor of another
+installation, and the reducer rejects a prepare of any installation it did not
+enroll, both as `replayRejected`. So another user's Host can reconcile Off but
+cannot start.
+
+A ProxyAgent whose stopped attestation the Authority refused asks, read-only,
+about its own lease (`ownerLeaseStatus`), once and within
+`AuthorityV1Limits.ownerLeaseStatusTimeoutMilliseconds`, over the connection
+its bind already negotiated, inside the Host's wait for the stop reply; an
+Authority of an earlier build fails the question, which counts as no answer.
+The peer policy admits a ProxyAgent of the console user without a lease only
+to connect, to negotiate the protocol, which tells nothing of the lease, and
+to ask this (`ProxyAgentLeaseRequirement`); every other call needs a lease its
+user owns.
+The Authority answers only for a lease whose owner is the connection's
+authenticated user, and answers not ready, never absent, until it has read its
+journal. Only an absent lease ends the stop locally as
+Off; a quarantined one makes the agent end after its reply, which lets the
+Authority release it. A Host stop whose generation the Authority's replay
+cursor passed ends once that stop's own owner is stable Off, without
+reconciliation: the cursor advances only through a start prepared from a
+proven Off, while a cursor of another installation, an earlier one, or a lease
+of the stop's generation still in view proves nothing. Another user's lease
+answers the Host's snapshot with a lease conflict, which status reports as
+busy.
+
+Before the Host orders a System Proxy stop the user asked for at the
+Authority, the ProxyAgent restores the session's settings while its engine
+still runs (`restoreSettingsBeforeStop`). A restore that cannot reach
+SCPreferences fails the stop before any Authority transition, with System
+Proxy still running; a settings conflict the user caused lets the stop go ahead
+and report it, as before. Once the settings are restored, an ordering failure
+stops the owner locally, as a failed start's rollback does, and the stop stays
+pending for the Authority barrier. Only a ProxyAgent the build inspection
+proves to be this app's build is asked: one of an earlier build, or one whose
+build cannot be told, stops as it did. A failed start's rollback and a
+revocation's stop restore once the Authority ordered the stop, and stop the
+engine even when the restore fails. Once granted rights restore the settings
+of a session whose bound owner still holds its lease, one whose engine failed
+or whose stop failed for want of them, the agent attests that session's stop
+before it answers the rights request, so the Host's Off that follows finds the
+lease stopping and completes it.
+
+Configuration checks and profile probes each run on their own thread
+(`LibboxBoundedCall`), never on the XPC connection's queue. The ProxyAgent
+replies with a retryable timeout `ProxyAgentCallBudget.configurationCheckReply`
+after a check arrived, and `profileProbeReplyAllowance` past a probe's own
+timeout, in awake time; the call keeps running and keeps the next check or
+probe out until it returns; one that returned frees its slot before its
+reply. A call still inside libbox `abandonAfterReply` after its reply, or a
+check or probe whose instance libbox could not close, retires the agent: it
+refuses checks, probes and starts, lets a running session stop as usual, and
+ends once it owns no start and no bound owner context. A spent agent refuses
+checks and probes too. An agent that ends (`ProxyAgentProcessExit`) waits for
+its minimum lifetime, then until every request it received has its reply
+handed to XPC, at most `ProxyAgentRequestBudget.authorizationReply`, the
+Host's longest wait, and then for a send barrier on every connection.
 
 The loopback controller capability belongs to one Host process. After a Host
 crash or replacement, startup never adopts a still-active native owner: it

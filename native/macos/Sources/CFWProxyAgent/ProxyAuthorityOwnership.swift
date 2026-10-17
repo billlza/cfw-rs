@@ -1,6 +1,8 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
+import OSLog
 
 /// The System Proxy owner surface the ProxyAgent XPC service drives. It is
 /// deliberately identical to `ProxySessionLifecycle`'s completion-based API so the
@@ -21,6 +23,19 @@ protocol ProxySystemProxyOwning: Sendable {
   /// Restores the System Proxy settings left for want of the network
   /// preferences rights the user just granted; see `ProxySessionLifecycle`.
   func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void)
+  /// Restores an active session's System Proxy settings before its stop; see
+  /// `ProxySessionLifecycle`.
+  func restoreSettingsBeforeStop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  )
+  /// Whether checks and probes may still reach libbox: not once the agent is
+  /// spent or retired. Answers without waiting on any queue.
+  var callsLibbox: Bool { get }
+  /// A check or probe left in libbox what this process cannot release: the
+  /// agent refuses every later check, probe and start, lets a running session
+  /// stop as usual, and ends once it is idle.
+  func retire(after failure: LibboxInstanceUnclosable)
 }
 
 /// One-use Host→ProxyAgent authorization package. The high-entropy capability
@@ -89,7 +104,7 @@ struct SystemProxyOwnerMonotonicClock: ProxyOwnerMonotonicClock {
 /// reports the Authority as unavailable so no owner binding, attestation, or start
 /// can proceed without a real Global Authority. Mirrors the Provider's fail-closed
 /// `EngineOwnerAuthorityClient`.
-struct FailClosedProxyOwnerAuthorityClient: EngineOwnerAuthorityClient {
+struct FailClosedProxyOwnerAuthorityClient: ProxyOwnerAuthorityClient {
   func bind(
     _ capability: OwnerCapability, context: ProxyOwnerContext
   ) async throws -> LeaseView {
@@ -107,6 +122,10 @@ struct FailClosedProxyOwnerAuthorityClient: EngineOwnerAuthorityClient {
   }
 
   func attestStopped(_ attestation: StoppedAttestation) async throws {
+    throw AuthorityDomainError(code: .globalAuthorityUnavailable)
+  }
+
+  func ownerLeaseStatus(_ leaseID: AuthorityIdentifier) async throws -> OwnerLeaseStatus {
     throw AuthorityDomainError(code: .globalAuthorityUnavailable)
   }
 }
@@ -191,6 +210,7 @@ final class ProxyRevocationChannel: @unchecked Sendable {
 /// observation, and data-plane side effects live behind injected seams so the
 /// coordinator is driven deterministically with fakes.
 final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked Sendable {
+  private static let logger = Logger(subsystem: "com.bill.clashformac", category: "proxy-owner")
   private typealias StopCompletion =
     @Sendable (
       Result<Void, ProxySessionLifecycleError>
@@ -223,7 +243,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     var stopCompletions: [StopCompletion] = []
   }
 
-  private let authority: any EngineOwnerAuthorityClient
+  private let authority: any ProxyOwnerAuthorityClient
   private let observer: any EffectiveSystemProxyObserving
   private let lifecycle: ProxySessionLifecycle
   private let clock: any ProxyOwnerMonotonicClock
@@ -236,7 +256,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
   private var stopFlight: StopFlight?
 
   init(
-    authority: any EngineOwnerAuthorityClient,
+    authority: any ProxyOwnerAuthorityClient,
     observer: any EffectiveSystemProxyObserving,
     lifecycle: ProxySessionLifecycle,
     revocation: ProxyRevocationChannel,
@@ -263,20 +283,25 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     // libbox deadline now keeps a slow Authority bind from pushing the start's
     // end past it.
     let deadline = EngineStartDeadline(receivedAt: .now)
-    let admitted = stateLock.withLock { () -> Bool in
-      guard pendingStart == nil, activeContext == nil, stopFlight == nil else { return false }
+    let refusal = stateLock.withLock { () -> ProxySessionLifecycleError? in
+      guard pendingStart == nil, activeContext == nil, stopFlight == nil else {
+        return .lifecycleConflict
+      }
+      // A retired agent binds no new lease, so the Host cancels the prepared
+      // start and finds this owner Off.
+      guard !lifecycle.isRetired else { return .agentEnding }
       pendingStart = PendingStart(
         id: startID,
         descriptor: descriptor,
         configuration: configuration,
         deadline: deadline,
         cancellation: nil)
-      return true
+      return nil
     }
-    guard admitted else {
+    if let refusal {
       configuration.erase()
       authorization.erase()
-      completionHandler(.failure(.lifecycleConflict))
+      completionHandler(.failure(refusal))
       return
     }
     Task { [self] in
@@ -317,8 +342,56 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       completion: completionHandler)
   }
 
+  /// A session the granted rights restored to Off, one whose engine failed or
+  /// whose stop failed for want of the rights, has nothing left running, yet
+  /// its bound owner still holds the lease, which the Host, finding the owner
+  /// Off, would never stop. The agent stops it as a retried stop would,
+  /// attesting Stopped, before it answers, so the Off that follows the answer
+  /// finds the lease stopping and completes it. An Authority that quarantined
+  /// the stop meanwhile makes the agent end after the answer. A session that
+  /// runs, or settings still not restored, keep their state.
   func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
-    lifecycle.restoreSettingsAfterAuthorization(completionHandler: completionHandler)
+    lifecycle.restoreSettingsAfterAuthorization { [self] in
+      guard let bound = stateLock.withLock({ activeContext }) else {
+        completionHandler()
+        endProcessIfIdle()
+        return
+      }
+      lifecycle.snapshot { [self] snapshot in
+        guard snapshot.state.kind == .off else {
+          completionHandler()
+          return
+        }
+        // A stop already in flight takes this one in.
+        requestStop(
+          expectedConfiguration: bound.descriptor, completions: [{ _ in completionHandler() }])
+      }
+    }
+  }
+
+  var callsLibbox: Bool { lifecycle.callsLibbox }
+
+  func retire(after failure: LibboxInstanceUnclosable) {
+    lifecycle.retire(after: failure)
+    endProcessIfIdle()
+  }
+
+  /// Ends a retired agent once it owns nothing: no start pending and no owner
+  /// context bound, so every attestation an operation owed went out first. A
+  /// stop of no bound context answers on the lifecycle's queue ahead of the
+  /// end. The lifecycle then ends the process once its settings are restored.
+  private func endProcessIfIdle() {
+    guard lifecycle.isRetired else { return }
+    let idle = stateLock.withLock { pendingStart == nil && activeContext == nil }
+    if idle { lifecycle.endProcessIfRetired() }
+  }
+
+  func restoreSettingsBeforeStop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    lifecycle.restoreSettingsBeforeStop(
+      expectedConfiguration: expectedConfiguration, completionHandler: completionHandler)
   }
 
   func snapshot(completionHandler: @escaping @Sendable (EngineSnapshot) -> Void) {
@@ -355,6 +428,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       let deferredStops = finishUnboundStart(startID)
       completion(.failure(Self.authorityFailure(error)))
       completeDeferredStops(deferredStops, with: .success(()))
+      endProcessIfIdle()
       return
     }
     let lease: LeaseView
@@ -375,6 +449,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
       let deferredStops = finishUnboundStart(startID)
       completion(.failure(Self.authorityFailure(error)))
       completeDeferredStops(deferredStops, with: .success(()))
+      endProcessIfIdle()
       return
     }
     let operation = lease.operation
@@ -608,10 +683,36 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
         try await attestProvenStopped(context)
         finishStopFlight(flight.id, result: .success(()))
       } catch {
-        finishStopFlight(
-          flight.id,
-          result: .failure(stoppedAttestationFailure(error)))
+        let failure = stoppedAttestationFailure(error)
+        // A refused attestation does not say why; only the Authority's own
+        // answer about this lease does, and only "absent" settles the stop.
+        switch await leaseStatus(of: context) {
+        case .absent:
+          // The Authority released the lease, after a restart or once it
+          // recovered. The local stop was all that was left; the Host proves Off.
+          finishStopFlight(flight.id, result: .success(()))
+        case .quarantined:
+          // The Authority releases a quarantined lease once its owner's process
+          // ended. The failure's reply goes first.
+          finishStopFlight(flight.id, result: .failure(failure))
+          lifecycle.endProcessAfterQuarantinedStop()
+        case .held, .notReady, nil:
+          finishStopFlight(flight.id, result: .failure(failure))
+        }
       }
+    }
+  }
+
+  /// What the Authority says of this owner's lease, or nil when it gave no
+  /// answer, which proves nothing either way.
+  private func leaseStatus(of context: ActiveContext) async -> OwnerLeaseStatus? {
+    do {
+      return try await authority.ownerLeaseStatus(context.leaseID)
+    } catch {
+      Self.logger.error(
+        "The Authority did not say whether it holds the stopped owner's lease: \(Self.authorityMessage(error), privacy: .public)"
+      )
+      return nil
     }
   }
 
@@ -639,6 +740,7 @@ final class ProxySystemProxyOwnerCoordinator: ProxySystemProxyOwning, @unchecked
     for completion in completions {
       completion(result)
     }
+    endProcessIfIdle()
   }
 
   private func installBoundContext(

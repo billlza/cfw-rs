@@ -130,12 +130,12 @@ private func makeCore(clock: any AuthorityMonotonicClock = MutableExampleClock(1
 private func makeService(
   role: AuthorityRole, ownerUID: UInt32 = 501,
   core: GlobalAuthorityServiceCore,
-  reauthorize: (@Sendable () throws -> PeerIdentity)? = nil
+  reauthorize: AuthenticatedAuthorityPeerService.Reauthorize? = nil
 ) throws -> AuthenticatedAuthorityPeerService {
   let peer = try examplePeer(role, ownerUID: ownerUID)
   return AuthenticatedAuthorityPeerService(
     peerID: UUID(), peer: peer,
-    reauthorize: reauthorize ?? { peer }, core: core,
+    reauthorize: reauthorize ?? { _ in peer }, core: core,
     concurrency: AuthorityConcurrencyGate(), events: AuthorityEventHub())
 }
 
@@ -276,7 +276,7 @@ private func redeemEnvelope(
   let throwingObjects = try makeCore()
   let throwingService = try makeService(
     role: .host, core: throwingObjects.core,
-    reauthorize: { throw GlobalAuthorityAuthorizationError.identityRejected })
+    reauthorize: { _ in throw GlobalAuthorityAuthorizationError.identityRejected })
   var reauthError: AuthorityErrorCode?
   throwingService.prepareStart(
     envelope, configuration: fixture.configuration, secretPayload: fixture.secretPayload

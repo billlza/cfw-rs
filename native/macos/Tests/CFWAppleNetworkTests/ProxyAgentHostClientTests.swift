@@ -324,6 +324,7 @@ private final class ProxyConnectionHarness: @unchecked Sendable {
   private var responses: [Data] = []
   private var startRequests: [ProxyAgentStartRequest] = []
   private var startReplies: [@Sendable (Result<Data, Error>) -> Void] = []
+  private var commands: [NativeCommand] = []
   let entered = ProxyAgentTestLatch()
   let startEntered = ProxyAgentTestLatch()
   let holdFirst: Bool
@@ -337,6 +338,8 @@ private final class ProxyConnectionHarness: @unchecked Sendable {
     pair.0(.success(pair.1))
   }
   var recordedStartRequests: [ProxyAgentStartRequest] { lock.withLock { startRequests } }
+  /// Each command the transport executed, in order.
+  var executedCommands: [NativeCommand] { lock.withLock { commands } }
   func acceptStart(_ index: Int) throws {
     let (request, reply) = lock.withLock { (startRequests[index], startReplies[index]) }
     let envelope = try ProtocolCodec.decodeRequest(request.request)
@@ -373,6 +376,7 @@ private final class ProxyConnectionHarness: @unchecked Sendable {
               requestID: request.requestID,
               result: result))
           let index = self.lock.withLock {
+            self.commands.append(request.command)
             self.callbacks.append(reply)
             self.responses.append(response)
             return self.callbacks.count - 1
@@ -562,6 +566,65 @@ struct ProxyAgentHostClientTests {
       lateness < CallbackDeadlineScheduler.maximumLeeway + .milliseconds(400),
       "the deadline fired \(lateness) after its length")
     cancel()
+  }
+
+  /// The ProxyAgent answers a configuration check and a profile probe inside
+  /// the Host's waits for them: its reply, its timer's tolerance and a second
+  /// for delivering the request and the reply fit, for every probe timeout the
+  /// protocol admits.
+  @Test func theAgentsCheckAndProbeRepliesFitTheHostsWaits() {
+    let delivery = Duration.seconds(1)
+    #expect(
+      ProxyAgentCallBudget.configurationCheckReply + EngineStartBudget.deadlineTolerance
+        + delivery <= AuthenticatedProxyAgentTransport.defaultReplyTimeout)
+    for timeoutMS in [UInt16(100), 101, 500, 1_000, 5_000, 9_999, 10_000] {
+      #expect(
+        .milliseconds(Int64(timeoutMS)) + ProxyAgentCallBudget.profileProbeReplyAllowance
+          + EngineStartBudget.deadlineTolerance + delivery
+          <= AuthenticatedProxyAgentTransport.profileProbeReplyTimeout(timeoutMS: timeoutMS),
+        "\(timeoutMS)")
+    }
+    #expect(
+      AuthenticatedProxyAgentTransport.profileProbeReplyTimeout(timeoutMS: 500)
+        == .milliseconds(5_500))
+  }
+
+  /// The Host waits for a probe as long as that probe's own timeout allows,
+  /// not for the ordinary reply wait.
+  @Test(arguments: [UInt16(100), 10_000])
+  func aProbeWaitsForItsOwnReplyTimeout(timeoutMS: UInt16) async throws {
+    let harness = ProxyConnectionHarness()
+    let deadlines = RecordedReplyDeadlines()
+    let subject = try deadlineTestTransport(harness, deadlines: deadlines)
+    // The harness's connections carry no ProxyAgent interface, so the probe
+    // fails once it waited on its deadline.
+    await #expect(throws: ProxyAgentHostError.self) {
+      _ = try await subject.testProfileProxies(
+        configuration: Data("{}".utf8), proxies: ["p"], timeoutMS: timeoutMS, targetURL: "",
+        expectedStatus: "")
+    }
+    #expect(
+      deadlines.lengths == [
+        AuthenticatedProxyAgentTransport.profileProbeReplyTimeout(timeoutMS: timeoutMS)
+      ])
+  }
+
+  /// A restore before a stop reaches the ProxyAgent as its own command, with
+  /// the stop's exact configuration, over a connection that admits only this
+  /// app's build, which alone understands it.
+  @Test(.timeLimit(.minutes(1)))
+  func aRestoreBeforeAStopIsItsOwnCommandForThisBuildOnly() async throws {
+    let harness = ProxyConnectionHarness()
+    let subject = try connectionTestTransport(harness)
+    let fixture = try proxyStartFixture()
+    _ = try await subject.snapshot()
+    try await subject.restoreSettingsBeforeStop(configuration: fixture.descriptor)
+    let commands = harness.executedCommands
+    #expect(commands.map(\.kind) == [.snapshot, .restoreSettingsBeforeStop])
+    #expect(commands.last?.configuration == fixture.descriptor)
+    let currentBuild = "cdhash H\"" + String(repeating: "42", count: 20) + "\""
+    #expect(harness.requirementValues.first?.contains(currentBuild) == false)
+    #expect(harness.requirementValues.last?.contains(currentBuild) == true)
   }
 
   @Test(.timeLimit(.minutes(1)))

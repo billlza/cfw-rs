@@ -41,15 +41,42 @@ then ends itself, so macOS releases the ports and connections the engine still
 held. The ProxyAgent first restores the system proxy settings it changed, and
 it waits until it has run 11 seconds, so macOS can start it again at once. If
 it cannot restore them, it keeps running and tries again whenever you approve
-the macOS password prompt that turning System Proxy off and quitting the app
-show; after the Mac restarts, quitting the app shows that prompt to restore
-them. The tunnel extension ends once macOS has stopped the tunnel, or 2
-seconds after its report when macOS does not. Neither System Proxy nor Tunnel
+the macOS password prompt that turning System Proxy off, quitting the app and
+Recover background services show; after the Mac restarts, quitting the app
+shows that prompt to restore them. The tunnel extension ends once macOS has
+stopped the tunnel, or 2 seconds after its report when macOS does not.
+Neither System Proxy nor Tunnel
 can be turned on again until the network is proven Off. Once the ProxyAgent or
 the extension has ended, turning the mode off proves it, without restarting the
 Mac. Until the network Authority restarts, as it does when the Mac restarts,
 only the app of the user who turned System Proxy on, signed in at the console,
-can prove its settings restored.
+can prove its settings restored. After such a restart another user's app can
+prove the network Off, but it still cannot turn the network on, as the next
+paragraph explains, and settings the first user's System Proxy left can still
+point at its closed port until that user approves the prompt again, or an
+administrator clears them.
+
+The network Authority stays enrolled to the first installation of the app
+that asked it to start the network on this Mac, and rejects a start from any
+other installation. The app of another macOS user, or of the same user once
+the app's engine lineage is gone from that user's Keychain, therefore cannot
+turn System Proxy, Local Proxy or Tunnel on, also after the Mac restarts. This
+is a known limitation of 0.5.0.
+
+Turning System Proxy off gives macOS its proxy settings back before the engine
+stops. If macOS does not take them, System Proxy keeps running and the switch
+can be turned off again, instead of the Mac pointing at a port nothing listens
+on. A stop the system forces, at a user switch or sign-out, and the clean-up
+after a failed start still stop the engine even when the settings cannot be
+restored.
+
+A profile check answers within 3.5 seconds, and a latency test within 3.5
+seconds beyond its timeout; one that takes longer fails, asking to be retried,
+and keeps failing on a Mac where that profile always takes that long. A check
+or latency test still running 30 seconds later counts as hung: the ProxyAgent
+then refuses checks, latency tests and starts, asking for a retry, keeps a
+running System Proxy until it is turned off, and then ends, and macOS starts a
+fresh one.
 
 The GeoIP Database row lists the selected profile's GEOIP countries and, when
 Settings › Engine › Mainland China direct is on, names that switch first.

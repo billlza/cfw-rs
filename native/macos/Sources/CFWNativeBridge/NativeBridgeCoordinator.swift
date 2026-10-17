@@ -121,9 +121,10 @@ enum NativeStopAuthorityPhase: Equatable, Sendable {
   /// The Authority committed Off for that lease.
   case completed(NativeAuthorityStopContext)
   /// The Authority holds no lease to stop: it is Recovering, after a restart or
-  /// once the stop's quarantined owner ended, or it already reached Off at this
-  /// stop's generation. The stop ends with the Host's own Off proof, the
-  /// reconciliation a restart needs, at this stop's generation.
+  /// once the stop's quarantined owner ended, it already reached Off at this
+  /// stop's generation, or it passed that generation. The stop ends with the
+  /// Host's own Off proof: the reconciliation a restart needs, at this stop's
+  /// generation, or, once the Authority passed it, the stop's own owner Off.
   case released
 }
 
@@ -206,9 +207,23 @@ protocol NativeEngineLeaseInspecting: Sendable {
   /// Host has observed the matching OS-facing endpoint at its Off barrier. A
   /// Recovering Authority fails with `globalAuthorityRecovering`.
   func completeStop(_ context: NativeAuthorityStopContext) async throws
-  /// Reports durable release only for the exact installation/epoch/generation
-  /// in the Authority's Off replay cursor; this does not replace OS Off proof.
-  func hasCompletedStop(_ context: EngineCommandContext) async throws -> Bool
+  /// What one fresh snapshot says of a stop's generation; this does not
+  /// replace the proof that the owner and the OS are Off.
+  func stopResolution(_ context: EngineCommandContext) async throws -> NativeStopResolution
+}
+
+/// What the Global Authority's state says of one stop's generation.
+enum NativeStopResolution: Equatable, Sendable {
+  /// Off, with the replay cursor at the stop's generation: the stop's lease
+  /// ended with this Off.
+  case completed
+  /// The replay cursor of the same installation passed the stop's generation.
+  /// The cursor advances only through a start prepared from a proven Off, so
+  /// the stop's lease ended through a proven Off, and no lease of that
+  /// generation can exist again.
+  case superseded
+  /// Neither: the Authority's state says nothing final of the stop's lease.
+  case unresolved
 }
 
 protocol Installed40019AuthorityOffProving: Sendable {
@@ -240,7 +255,9 @@ extension NativeEngineLeaseInspecting {
   }
 
   func recoverStoppingLease() async throws -> NativeRecoveredStop? { nil }
-  func hasCompletedStop(_ context: EngineCommandContext) async throws -> Bool { false }
+  func stopResolution(_ context: EngineCommandContext) async throws -> NativeStopResolution {
+    .unresolved
+  }
   func cancelPreparedStart(for descriptor: ConfigurationDescriptor) async throws -> Bool {
     false
   }
@@ -505,6 +522,11 @@ actor NativeBridgeCoordinator {
     var ownership: AuthorityOwnershipObservation
     do {
       ownership = try await engineLease.authorityOwnership()
+    } catch let conflict as AuthorityDomainError where conflict.code == .globalLeaseConflict {
+      // Another user's lease, which this Host cannot observe: a later read
+      // succeeds once it ends.
+      throw NativeBridgeExecutionError.failure(
+        .busy, "Another user's connection holds the Global Authority.")
     } catch {
       throw Self.map(error)
     }

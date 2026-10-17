@@ -14,6 +14,7 @@ from scripts.publication.orchestrator import (
     seal_prepackage,
     seal_publication,
 )
+from scripts.release_app_verifier_output import NotarizationCheck
 from scripts.release_executor_source import ExecutorSourceError, capture_executor_source
 from scripts.repository_source_identity import RELEASE_PATHS
 from scripts.tests.test_production_release_orchestrator import StageFixture
@@ -55,6 +56,14 @@ class GAStageExecutorSourceTests(unittest.TestCase):
                 "live_verify_hosted_ci_receipt",
                 return_value={"document": "live-hosted-ci-fixture"},
             ),
+            # The composition fixture reopens no prepackage inputs, so
+            # reaching the release-app verifier would mean a check outside it.
+            *(
+                patch.object(
+                    contract, name, side_effect=AssertionError(f"source fixture reached {name}")
+                )
+                for name in ("_release_environment", "verify_release_app")
+            ),
         ):
             source_patch.start()
             self.addCleanup(source_patch.stop)
@@ -85,9 +94,11 @@ class GAStageExecutorSourceTests(unittest.TestCase):
         repository: Path,
         executor_source: dict[str, str],
         *,
+        notarization: NotarizationCheck,
         expected_live_hosted_ci: dict[str, str] | None = None,
         freeze_verifier: FreezeVerifier | None = None,
     ) -> dict[str, bytes]:
+        self.assertIsInstance(notarization, NotarizationCheck)
         self.assertEqual(repository, self.repository)
         self.assertIs(freeze_verifier, self.expected_freeze_verifier)
         return self.fixture.prepackage_files(executor_source=executor_source)
@@ -159,6 +170,23 @@ class GAStageExecutorSourceTests(unittest.TestCase):
             for call in composition.call_args_list:
                 self.assertIs(call.kwargs["freeze_verifier"], freeze_verifier)
         freeze_verifier.assert_not_called()
+        # Only the prepackage and publication seals check notarization live,
+        # each in its first reopen of the prepackage inputs.
+        live, sealed = NotarizationCheck.LIVE, NotarizationCheck.SEALED
+        self.assertEqual(
+            [call.kwargs["notarization"] for call in self.compose.call_args_list],
+            [
+                live, sealed,  # prepackage seal: composition, confirmation
+                sealed, sealed,  # ga-acceptance seal: composition, confirmation
+                live, sealed, sealed, sealed,  # publication seal: two each
+                sealed, sealed,  # the later read-only verification
+            ],
+        )
+        # Only the prepackage seal's composition compares the live receipt.
+        self.assertEqual(
+            [call.kwargs["expected_live_hosted_ci"] for call in self.compose.call_args_list],
+            [{"document": "live-hosted-ci-fixture"}, *[None] * 9],
+        )
 
         self.assertEqual(prepackage["executor_source"], self.sealer.identity)
         self.assertEqual(acceptance["executor_source"], acceptance_executor.identity)
@@ -216,12 +244,14 @@ class GAStageExecutorSourceTests(unittest.TestCase):
             repository: Path,
             executor_source: dict[str, str],
             *,
+            notarization: NotarizationCheck,
             expected_live_hosted_ci: dict[str, str] | None = None,
             freeze_verifier: FreezeVerifier | None = None,
         ) -> dict[str, bytes]:
             files = self._prepackage_files(
                 repository,
                 executor_source,
+                notarization=notarization,
                 expected_live_hosted_ci=expected_live_hosted_ci,
                 freeze_verifier=freeze_verifier,
             )
@@ -240,12 +270,14 @@ class GAStageExecutorSourceTests(unittest.TestCase):
             repository: Path,
             executor_source: dict[str, str],
             *,
+            notarization: NotarizationCheck,
             expected_live_hosted_ci: dict[str, str] | None = None,
             freeze_verifier: FreezeVerifier | None = None,
         ) -> dict[str, bytes]:
             files = self._prepackage_files(
                 repository,
                 executor_source,
+                notarization=notarization,
                 expected_live_hosted_ci=expected_live_hosted_ci,
                 freeze_verifier=freeze_verifier,
             )

@@ -1063,6 +1063,24 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn("candidate_bundle_verification_paths(", release_verifier)
         self.assertIn('--context "$verification_context"', release_verifier)
 
+    def test_only_the_adapter_requests_sealed_notarization(self) -> None:
+        # Packaging, the gate, the wrapper, the transactions and the installer
+        # keep the live stapler and Gatekeeper checks.
+        holders = sorted(
+            path.relative_to(SCRIPTS).as_posix()
+            for path in SCRIPTS.rglob("*")
+            if path.suffix in {".py", ".sh"}
+            and path.relative_to(SCRIPTS).parts[0] != "tests"
+            and "--sealed-notarization" in path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            holders, ["publication/release_app_verifier.py", "verify_release_app.sh"]
+        )
+        adapter = (SCRIPTS / "publication/release_app_verifier.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(adapter.count('"--sealed-notarization"'), 1)
+
     def test_release_consumers_do_not_use_ambient_tauri(self) -> None:
         for relative in (
             "build_unsigned_candidate.sh",

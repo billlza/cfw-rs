@@ -21,7 +21,7 @@ def _run_verification_command(arguments: argparse.Namespace) -> tuple[str, ...]:
         CandidateFreezeError,
         frozen_candidate_verification_session,
     )
-    from scripts.publication.common import PublicationError
+    from scripts.publication.common import PublicationError, note_lines
     from scripts.publication.durable_file import DurabilityOutcomeUnknown
     from scripts.publication.ga_release_contract import (
         verify_prepackage_authorization,
@@ -78,7 +78,9 @@ def _run_verification_command(arguments: argparse.Namespace) -> tuple[str, ...]:
                 f"{type(session_error).__name__}: {session_error}"
             )
             cleanup_note += "".join(
-                f"\n{note}" for note in getattr(session_error, "__notes__", ())
+                f"\n{line}"
+                for note in getattr(session_error, "__notes__", ())
+                for line in note_lines(note)
             )
             primary.add_note(cleanup_note)
             if publication_path is not None and not publication_existed:
@@ -122,6 +124,7 @@ def main() -> None:
         "seal-release",
         "verify-release",
     }:
+        from scripts.publication.common import failure_diagnostic
         from scripts.release_python_runtime import (
             ReleasePythonRuntimeError,
             require_closed_release_runtime,
@@ -130,7 +133,9 @@ def main() -> None:
         try:
             require_closed_release_runtime()
         except ReleasePythonRuntimeError as error:
-            raise SystemExit(f"error: release artifact set: {error}") from error
+            raise SystemExit(
+                failure_diagnostic(f"error: release artifact set: {error}", error)
+            ) from error
 
     from scripts import release_artifact_set
     from scripts.publication.ga_release_contract import (

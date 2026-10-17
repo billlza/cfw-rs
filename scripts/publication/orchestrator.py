@@ -123,13 +123,17 @@ def seal_prepackage(
     executor: ExecutorSource,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
-    """Atomically authorize package creation for the exact GA application."""
+    """Atomically authorize package creation for the exact GA application.
+
+    Hosted CI and notarization are each checked live once while the stage is
+    composed; the confirmation repeats neither.
+    """
 
     expected = contract.build_expected_stage_files(
         repository,
         "prepackage",
         executor=executor,
-        require_live_hosted_ci=True,
+        live_revalidation=True,
         freeze_verifier=freeze_verifier,
     )
     return _publish_and_confirm_stage(
@@ -143,10 +147,18 @@ def seal_ga_acceptance(
     executor: ExecutorSource,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
-    """Atomically bind exact packages and the completed predecessor migration."""
+    """Atomically bind exact packages and the completed predecessor migration.
+
+    No live hosted-CI or notarization check: the prepackage seal it reopens
+    passed them, and the publication seal repeats them.
+    """
 
     expected = contract.build_expected_stage_files(
-        repository, "ga-acceptance", executor=executor, freeze_verifier=freeze_verifier
+        repository,
+        "ga-acceptance",
+        executor=executor,
+        live_revalidation=False,
+        freeze_verifier=freeze_verifier,
     )
     return _publish_and_confirm_stage(
         repository, "ga-acceptance", expected, freeze_verifier=freeze_verifier
@@ -159,13 +171,17 @@ def seal_publication(
     executor: ExecutorSource,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
-    """Atomically authorize upload after every GA-required stage reopens."""
+    """Atomically authorize upload after every GA-required stage reopens.
+
+    Hosted CI and notarization are each checked live once more while the stage
+    is composed; the confirmation repeats neither.
+    """
 
     expected = contract.build_expected_stage_files(
         repository,
         "publication",
         executor=executor,
-        require_live_hosted_ci=True,
+        live_revalidation=True,
         freeze_verifier=freeze_verifier,
     )
     return _publish_and_confirm_stage(

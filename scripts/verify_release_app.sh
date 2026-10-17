@@ -365,7 +365,8 @@ verify_macho() {
 
 configure_release_verification_context() {
   local context="$1"
-  local before_notarization="$2"
+  local mode="$2"
+  local app="$3"
   case "$context" in
     signing-attempt-work|signing-attempt-publish-ready|canonical-native-content)
       expected_version="0.5.0"
@@ -380,9 +381,25 @@ configure_release_verification_context() {
       die "release application verification context is invalid"
       ;;
   esac
+  case "$mode" in
+    live|pre-notary)
+      ;;
+    sealed)
+      # Skipping the live Apple checks is only for reopening this checkout's
+      # frozen GA application, whose caller binds the sealed notarization
+      # evidence; never for a copy such as the DMG payload or another build.
+      [[ "$context" == "canonical-native-content" ]] ||
+        die "sealed notarization verification requires the canonical-native-content context"
+      [[ "$app" == "$repo_root/target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app" ]] ||
+        die "sealed notarization verification is allowed only for the fixed GA signed app"
+      ;;
+    *)
+      die "release application notarization mode is invalid"
+      ;;
+  esac
   case "$context" in
     signing-attempt-work|signing-attempt-publish-ready)
-      [[ "$before_notarization" == "1" ]] ||
+      [[ "$mode" == "pre-notary" ]] ||
         die "private signing-attempt verification is allowed only before notarization"
       ;;
   esac
@@ -439,6 +456,51 @@ verify_tombstone_provenance() {
     die "legacy tombstone provenance verification failed"
 }
 
+# The final checks and the fixed success lines the transcript parser binds.
+# Live mode asks Apple's ticket service (stapler) and this host's Gatekeeper
+# policy. Sealed mode, used when a sealed stage is reopened, runs neither: it
+# requires the stapled ticket file, whose bytes the caller has bound to the
+# sealed app manifest, and leaves the live checks to the sealing boundaries.
+finish_release_app_verification() {
+  local app="$1"
+  local mode="$2"
+  local build="$3"
+  local stapler_status=0
+  codesign --verify --deep --strict --verbose=4 "$app"
+  case "$mode" in
+    live)
+      xcrun stapler validate "$app" || stapler_status=$?
+      [[ $stapler_status -eq 0 ]] ||
+        die "stapler validate failed with exit status $stapler_status; stapler reports its diagnostic on standard output"
+      cfw_run_release_python_script \
+        "$repo_root" "$repo_root/scripts/gatekeeper_assessment.py" \
+        --target "$app" \
+        --assessment-type execute
+      ;;
+    sealed)
+      require_regular_file "$app/Contents/CodeResources"
+      ;;
+    pre-notary)
+      ;;
+    *)
+      die "release application notarization mode is invalid"
+      ;;
+  esac
+
+  echo "release app verified: $app"
+  echo "identity: $expected_team_id / $expected_app_id / $expected_extension_id / $expected_agent_id"
+  echo "platform: arm64 / macOS $expected_minimum_system+"
+  echo "build number: $build"
+  case "$mode" in
+    sealed)
+      echo "notarization: live Apple checks skipped; the caller binds the sealed evidence"
+      ;;
+    pre-notary)
+      echo "notarization: pre-submission identity gate only"
+      ;;
+  esac
+}
+
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
@@ -449,17 +511,29 @@ done
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "release verification requires Apple Silicon macOS"
 
-pre_notary=0
-if [[ "${1:-}" == "--pre-notary" ]]; then
-  pre_notary=1
-  shift
-fi
+notarization_mode="live"
+case "${1:-}" in
+  --pre-notary)
+    notarization_mode="pre-notary"
+    shift
+    ;;
+  --sealed-notarization)
+    notarization_mode="sealed"
+    shift
+    ;;
+esac
+case "${1:-}" in
+  --pre-notary|--sealed-notarization)
+    die "choose at most one of --pre-notary and --sealed-notarization"
+    ;;
+esac
+readonly notarization_mode
 app_path="${1:-}"
 native_products_root="${2:-}"
 [[ $# == 4 && "$3" == "--context" ]] ||
-  die "usage: scripts/verify_release_app.sh [--pre-notary] APP NATIVE_PRODUCTS --context CONTEXT"
+  die "usage: scripts/verify_release_app.sh [--pre-notary | --sealed-notarization] APP NATIVE_PRODUCTS --context CONTEXT"
 verification_context="$4"
-configure_release_verification_context "$verification_context" "$pre_notary"
+configure_release_verification_context "$verification_context" "$notarization_mode" "$app_path"
 readonly expected_version expected_build_number
 readonly signing_preflight_manifest pre_sign_native_products_root
 [[ "$app_path" == /* ]] || die "application path must be absolute"
@@ -787,19 +861,4 @@ while IFS= read -r -d '' candidate; do
 done <"$macho_candidates"
 [[ $macho_count -gt 0 ]] || die "application bundle contains no Mach-O code"
 
-codesign --verify --deep --strict --verbose=4 "$app_path"
-if [[ $pre_notary -eq 0 ]]; then
-  xcrun stapler validate "$app_path"
-  cfw_run_release_python_script \
-    "$repo_root" "$repo_root/scripts/gatekeeper_assessment.py" \
-    --target "$app_path" \
-    --assessment-type execute
-fi
-
-echo "release app verified: $app_path"
-echo "identity: $expected_team_id / $expected_app_id / $expected_extension_id / $expected_agent_id"
-echo "platform: arm64 / macOS $expected_minimum_system+"
-echo "build number: $build_number"
-if [[ $pre_notary -eq 1 ]]; then
-  echo "notarization: pre-submission identity gate only"
-fi
+finish_release_app_verification "$app_path" "$notarization_mode" "$build_number"

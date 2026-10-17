@@ -38,7 +38,7 @@ from .durable_file import (
     read_private_directory_contents_locked,
 )
 from .graph_model import load_pins
-from .release_app_verifier import verify_release_app
+from .release_app_verifier import NotarizationCheck, verify_release_app
 from .release_environment import release_tool_environment
 from scripts.candidate_artifact_binding import (
     CandidateBindingError,
@@ -326,11 +326,15 @@ def _release_environment(repository: Path) -> dict[str, str]:
 
 
 def _validate_release_application(
-    repository: Path, environment: dict[str, str]
+    repository: Path,
+    environment: dict[str, str],
+    *,
+    notarization: NotarizationCheck,
 ) -> None:
     verify_release_app(
         repository=repository,
         environment=environment,
+        notarization=notarization,
     )
 
 
@@ -455,6 +459,7 @@ def _prepackage_ci_bindings(
 def _verified_prepackage_inputs(
     repository: Path,
     *,
+    notarization: NotarizationCheck,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     repository = _canonical_repository(repository)
@@ -581,7 +586,14 @@ def _verified_prepackage_inputs(
             f"signed application is not exactly v{PRODUCT_VERSION}/{GA_BUILD}"
         )
     environment = _release_environment(repository)
-    _validate_release_application(repository, environment)
+    # The verifier runs between two hashes of the signed application that must
+    # both match its sealed manifest: the manifest validation above and the
+    # rehash below. A change that persists across either hash is refused; one
+    # made and undone while the verifier runs is not. LIVE asks stapler and
+    # Gatekeeper; SEALED asks neither, because the stapled ticket is part of
+    # the hashed tree. A prepackage or publication seal passes LIVE to one
+    # reopen; every other reopen passes SEALED.
+    _validate_release_application(repository, environment, notarization=notarization)
 
     try:
         notarization_publication = validate_published_transaction_receipt(
@@ -772,11 +784,12 @@ def _prepackage_files(
     repository: Path,
     executor_source: dict[str, str],
     *,
+    notarization: NotarizationCheck,
     expected_live_hosted_ci: dict[str, Any] | None = None,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
     bindings, hosted_ci, _legal_documents = _verified_prepackage_inputs(
-        repository, freeze_verifier=freeze_verifier
+        repository, notarization=notarization, freeze_verifier=freeze_verifier
     )
     if expected_live_hosted_ci is not None and hosted_ci != expected_live_hosted_ci:
         raise PublicationError(
@@ -1166,36 +1179,87 @@ def _compose_stage_files(
     stage: str,
     executor_source: dict[str, str],
     *,
-    require_live_hosted_ci: bool = False,
+    live_revalidation: bool,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
-    """Reopen product inputs under one already verified sealing identity."""
+    """Compose a seal's files under one already verified sealing identity.
+
+    ``live_revalidation`` makes the seal check hosted CI and notarization
+    live, once each: the retained hosted-CI receipt against GitHub before
+    anything is reopened, and stapler and Gatekeeper in the seal's first
+    reopen of the prepackage inputs. The prepackage and publication seals pass
+    true; the ga-acceptance seal passes false and makes no live check.
+    """
 
     repository = _canonical_repository(repository)
     if stage not in STAGES:
         raise PublicationError(f"unknown GA release stage: {stage}")
-    live_hosted_ci = (
-        live_verify_hosted_ci_receipt(repository, freeze_verifier=freeze_verifier)
-        if require_live_hosted_ci
-        else None
+    live_hosted_ci = None
+    if live_revalidation:
+        live_hosted_ci = live_verify_hosted_ci_receipt(
+            repository, freeze_verifier=freeze_verifier
+        )
+    return _reopen_stage_files(
+        repository,
+        stage,
+        executor_source,
+        notarization=NotarizationCheck.LIVE if live_revalidation else NotarizationCheck.SEALED,
+        expected_live_hosted_ci=live_hosted_ci,
+        freeze_verifier=freeze_verifier,
     )
+
+
+def _reopen_stage_files(
+    repository: Path,
+    stage: str,
+    executor_source: dict[str, str],
+    *,
+    notarization: NotarizationCheck,
+    expected_live_hosted_ci: dict[str, Any] | None = None,
+    freeze_verifier: FreezeVerifier | None = None,
+) -> dict[str, bytes]:
+    """Reopen product inputs and compose one stage's expected files.
+
+    ``notarization`` is the release-app check of the first reopen of the
+    prepackage inputs: the stage's own inputs, or its prepackage seal. Every
+    later reopen is SEALED, as is every verify_stage, including the
+    artifact-set and GA runtime reopens that go through it.
+    """
+
+    repository = _canonical_repository(repository)
     if stage == "prepackage":
         return _prepackage_files(
             repository,
             executor_source,
-            expected_live_hosted_ci=live_hosted_ci,
+            notarization=notarization,
+            expected_live_hosted_ci=expected_live_hosted_ci,
             freeze_verifier=freeze_verifier,
         )
     if stage == "ga-acceptance":
-        prepackage = _verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
+        prepackage = _verify_stage(
+            repository, "prepackage", notarization=notarization, freeze_verifier=freeze_verifier
+        )
         return _ga_acceptance_files(
             repository, prepackage, executor_source, freeze_verifier=freeze_verifier
         )
-    prepackage = _verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
-    ga_acceptance = _verify_stage(repository, "ga-acceptance", freeze_verifier=freeze_verifier)
-    return _publication_files(
-        repository, prepackage, ga_acceptance, executor_source, freeze_verifier=freeze_verifier
-    )
+    if stage == "publication":
+        prepackage = _verify_stage(
+            repository, "prepackage", notarization=notarization, freeze_verifier=freeze_verifier
+        )
+        ga_acceptance = _verify_stage(
+            repository,
+            "ga-acceptance",
+            notarization=NotarizationCheck.SEALED,
+            freeze_verifier=freeze_verifier,
+        )
+        return _publication_files(
+            repository,
+            prepackage,
+            ga_acceptance,
+            executor_source,
+            freeze_verifier=freeze_verifier,
+        )
+    raise PublicationError(f"unknown GA release stage: {stage}")
 
 
 def _current_stage_executor(repository: Path) -> ExecutorSource:
@@ -1209,11 +1273,14 @@ def build_expected_stage_files(
     stage: str,
     *,
     executor: ExecutorSource,
-    require_live_hosted_ci: bool = False,
+    live_revalidation: bool,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
     """Compose a new seal with the actual clean executor's source identity."""
 
+    # A value other than a boolean must not quietly drop the live checks.
+    if type(live_revalidation) is not bool:
+        raise PublicationError("GA seal live revalidation must be a boolean")
     repository = _canonical_repository(repository)
     if _current_stage_executor(repository) != executor:
         raise PublicationError("GA sealing executor differs from the running source")
@@ -1221,7 +1288,7 @@ def build_expected_stage_files(
         repository,
         stage,
         executor.identity,
-        require_live_hosted_ci=require_live_hosted_ci,
+        live_revalidation=live_revalidation,
         freeze_verifier=freeze_verifier,
     )
     require_executor_unchanged(executor)
@@ -1229,7 +1296,11 @@ def build_expected_stage_files(
 
 
 def _verify_stage(
-    repository: Path, stage: str, *, freeze_verifier: FreezeVerifier | None = None
+    repository: Path,
+    stage: str,
+    *,
+    notarization: NotarizationCheck,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
     if stage not in STAGES:
         raise PublicationError(f"unknown GA release stage: {stage}")
@@ -1243,8 +1314,12 @@ def _verify_stage(
     validate_source_identity(historical, "historical GA sealing executor")
     if historical != executor_source:
         raise PublicationError("GA sealing executor differs from its historical source")
-    expected = _compose_stage_files(
-        repository, stage, executor_source, freeze_verifier=freeze_verifier
+    expected = _reopen_stage_files(
+        repository,
+        stage,
+        executor_source,
+        notarization=notarization,
+        freeze_verifier=freeze_verifier,
     )
     if observed != expected:
         raise PublicationError(f"sealed {stage} stage differs from reopened GA inputs")
@@ -1261,7 +1336,9 @@ def verify_stage(
 
     repository = _canonical_repository(repository)
     verifier = _current_stage_executor(repository)
-    manifest = _verify_stage(repository, stage, freeze_verifier=freeze_verifier)
+    manifest = _verify_stage(
+        repository, stage, notarization=NotarizationCheck.SEALED, freeze_verifier=freeze_verifier
+    )
     require_executor_unchanged(verifier)
     return manifest
 

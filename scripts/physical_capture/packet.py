@@ -51,6 +51,7 @@ from scripts.harness.physical_collector_request import (
 )
 from scripts.harness.packet_capture import (
     PacketCaptureError,
+    RetransmissionPolicy,
     StagedCaptureEndpoint,
     dns_stage_endpoints,
     staged_marker_window,
@@ -2735,6 +2736,7 @@ class _PacketCaseCoordinator:
                 endpoints=endpoints,
                 start_marker=runtime.tokens[0].encode("ascii"),
                 end_marker=runtime.tokens[2].encode("ascii"),
+                retransmissions=RetransmissionPolicy.EXACT,
             )
         except PacketCaptureError as error:
             raise PacketCaptureAdapterError(

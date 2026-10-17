@@ -78,7 +78,7 @@ if __package__:
         production_command_runner,
         publish_exclusive,
     )
-    from .publication.common import PublicationError, copy_regular_new
+    from .publication.common import PublicationError, copy_regular_new, note_lines
     from .publication.ga_release_contract import verify_prepackage_authorization
     from .release_artifact_set import (
         ArtifactSetError,
@@ -135,7 +135,7 @@ else:
         production_command_runner,
         publish_exclusive,
     )
-    from publication.common import PublicationError, copy_regular_new
+    from publication.common import PublicationError, copy_regular_new, note_lines
     from publication.ga_release_contract import verify_prepackage_authorization
     from release_artifact_set import (
         ArtifactSetError,
@@ -2111,7 +2111,9 @@ def main() -> None:
                     f"{type(session_error).__name__}: {session_error}"
                 )
                 cleanup_note += "".join(
-                    f"\n{note}" for note in getattr(session_error, "__notes__", ())
+                    f"\n{line}"
+                    for note in getattr(session_error, "__notes__", ())
+                    for line in note_lines(note)
                 )
                 primary.add_note(cleanup_note)
                 if arguments.command in {"start", "recover"} and not publication_existed:
@@ -2155,7 +2157,11 @@ def main() -> None:
         ValueError,
     ) as error:
         code = error.code if isinstance(error, TransactionError) else "artifact_set_error"
-        notes = "".join(f"\n{note}" for note in getattr(error, "__notes__", ()))
+        notes = "".join(
+            f"\n{line}"
+            for note in getattr(error, "__notes__", ())
+            for line in note_lines(note)
+        )
         raise SystemExit(
             f"error: DMG notarization transaction [{code}]: {error}{notes}"
         ) from error

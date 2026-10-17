@@ -11,11 +11,14 @@ from unittest.mock import patch
 from scripts.publication.bounded_process import BoundedProcessError
 from scripts.publication.common import PublicationError
 from scripts.publication import ga_release_contract, preparer
+from scripts.publication import release_app_verifier
 from scripts.publication.release_app_verifier import verify_release_app
+from scripts.release_app_verifier_output import NotarizationCheck
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
 from scripts.tests.release_app_verifier_fixture import (
     complete_verifier_stderr,
     complete_verifier_stdout,
+    sealed_verifier_stdout,
 )
 
 
@@ -55,10 +58,13 @@ class PublicationReleaseAppVerifierTests(unittest.TestCase):
             completed.stderr.decode("utf-8", errors="replace"),
         )
 
-    def invoke_verifier(self) -> None:
+    def invoke_verifier(
+        self, notarization: NotarizationCheck = NotarizationCheck.LIVE
+    ) -> None:
         return verify_release_app(
             repository=REPOSITORY,
             environment={"PATH": "/usr/bin:/bin"},
+            notarization=notarization,
         )
 
     @patch("scripts.publication.release_app_verifier.run_bounded_process")
@@ -84,6 +90,61 @@ class PublicationReleaseAppVerifierTests(unittest.TestCase):
         )
 
     @patch("scripts.publication.release_app_verifier.run_bounded_process")
+    def test_sealed_check_adds_only_the_sealed_flag(self, runner: object) -> None:
+        runner.return_value = subprocess.CompletedProcess(
+            [], 0, sealed_verifier_stdout(str(APP)), complete_verifier_stderr(str(APP))
+        )
+        self.assertIsNone(self.invoke_verifier(NotarizationCheck.SEALED))
+        runner.assert_called_once_with(
+            [
+                "/bin/bash",
+                "-p",
+                str(REPOSITORY / "scripts/verify_release_app.sh"),
+                "--sealed-notarization",
+                str(APP),
+                str(NATIVE_PRODUCTS),
+                "--context",
+                "canonical-native-content",
+            ],
+            cwd=REPOSITORY,
+            environment={"PATH": "/usr/bin:/bin"},
+            timeout=600,
+            output_limit=384 * 1024,
+        )
+
+    @patch("scripts.publication.release_app_verifier.run_bounded_process")
+    def test_each_check_accepts_only_its_own_transcript(self, runner: object) -> None:
+        for notarization, stdout in (
+            (NotarizationCheck.LIVE, sealed_verifier_stdout(str(APP))),
+            (NotarizationCheck.SEALED, complete_verifier_stdout(str(APP))),
+        ):
+            with self.subTest(notarization=notarization):
+                runner.return_value = subprocess.CompletedProcess(
+                    [], 0, stdout, complete_verifier_stderr(str(APP))
+                )
+                with self.assertRaisesRegex(PublicationError, "output is invalid"):
+                    self.invoke_verifier(notarization)
+
+    @patch("scripts.publication.release_app_verifier.run_bounded_process")
+    def test_notarization_check_is_a_required_typed_keyword(self, runner: object) -> None:
+        self.assertIs(release_app_verifier.NotarizationCheck, NotarizationCheck)
+        with self.assertRaises(TypeError):
+            verify_release_app(
+                repository=REPOSITORY,
+                environment={"PATH": "/usr/bin:/bin"},
+            )
+        for value in ("sealed", None, True):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                PublicationError, "notarization check is invalid"
+            ):
+                verify_release_app(
+                    repository=REPOSITORY,
+                    environment={"PATH": "/usr/bin:/bin"},
+                    notarization=value,
+                )
+        runner.assert_not_called()
+
+    @patch("scripts.publication.release_app_verifier.run_bounded_process")
     def test_untyped_success_stderr_is_rejected(self, runner: object) -> None:
         for stderr in (b"", b"unknown diagnostic\n", b"warning: degraded\n"):
             with self.subTest(stderr=stderr):
@@ -101,13 +162,112 @@ class PublicationReleaseAppVerifierTests(unittest.TestCase):
         with self.assertRaises(PublicationError) as captured:
             self.invoke_verifier()
         self.assertEqual(str(captured.exception), "release app verifier failed with exit code 7")
+        # The output reaches the operator only as escaped notes, standard
+        # output last, never in the message itself.
+        self.assertEqual(
+            captured.exception.__notes__,
+            [
+                "release app verifier stderr (25 bytes) ends with:\n"
+                "\\x1b[2J/private/secret/path",
+                "release app verifier stdout is empty",
+            ],
+        )
+
+    @patch("scripts.publication.release_app_verifier.run_bounded_process")
+    def test_failure_notes_keep_only_the_bounded_end_of_each_stream(
+        self, runner: object
+    ) -> None:
+        limit = release_app_verifier.RELEASE_APP_VERIFIER_DIAGNOSTIC_TAIL_BYTES
+        stdout = (
+            b"head-marker\n"
+            + b"x" * 10_000
+            + b"\nThe validate action failed! Error 68.\n"
+        )
+        stderr = b"y" * 10_000 + b"\ncodesign tail\n"
+        runner.return_value = subprocess.CompletedProcess([], 1, stdout, stderr)
+        with self.assertRaises(PublicationError) as captured:
+            self.invoke_verifier()
+        stderr_note, stdout_note = captured.exception.__notes__
+        self.assertTrue(
+            stderr_note.startswith(
+                f"release app verifier stderr ({len(stderr)} bytes) ends with:\n"
+            )
+        )
+        self.assertTrue(stderr_note.endswith("\ncodesign tail"))
+        self.assertTrue(
+            stdout_note.startswith(
+                f"release app verifier stdout ({len(stdout)} bytes) ends with:\n"
+            )
+        )
+        self.assertTrue(stdout_note.endswith("\nThe validate action failed! Error 68."))
+        self.assertNotIn("head-marker", stdout_note)
+        for note in (stderr_note, stdout_note):
+            self.assertLessEqual(len(note.split("\n", 1)[1]), limit)
+
+    @patch("scripts.publication.release_app_verifier.run_bounded_process")
+    def test_bounded_process_failures_keep_their_output_tails(self, runner: object) -> None:
+        for reason, message in (
+            ("timeout", "timed out"),
+            ("output-limit", "exceeded its fixed bound"),
+            ("descendant", "left a descendant process running"),
+        ):
+            with self.subTest(reason=reason):
+                runner.side_effect = BoundedProcessError(
+                    reason,
+                    "simulated",
+                    stdout=b"partial transcript\n",
+                    stderr=b"\x07stuck\n",
+                )
+                with self.assertRaises(PublicationError) as captured:
+                    self.invoke_verifier()
+                self.assertIn(message, str(captured.exception))
+                self.assertEqual(
+                    captured.exception.__notes__,
+                    [
+                        "release app verifier stderr (7 bytes) ends with:\n\\x07stuck",
+                        "release app verifier stdout (19 bytes) ends with:\n"
+                        "partial transcript",
+                    ],
+                )
+        # A process that never ran, or whose cleanup failed, has no output to
+        # show: those reasons carry none.
+        for failure in (
+            BoundedProcessError("invalid", "simulated"),
+            BoundedProcessError("start", "simulated"),
+            BoundedProcessError("cleanup", "simulated"),
+            OSError("simulated"),
+        ):
+            with self.subTest(failure=failure):
+                runner.side_effect = failure
+                with self.assertRaises(PublicationError) as captured:
+                    self.invoke_verifier()
+                self.assertEqual(getattr(captured.exception, "__notes__", []), [])
+
+    @patch("scripts.publication.release_app_verifier.run_bounded_process")
+    def test_invalid_transcript_keeps_its_output_tails(self, runner: object) -> None:
+        runner.return_value = subprocess.CompletedProcess(
+            [], 0, complete_verifier_stdout(str(APP)), b"unknown diagnostic\n"
+        )
+        with self.assertRaises(PublicationError) as captured:
+            self.invoke_verifier()
+        self.assertIn("output is invalid", str(captured.exception))
+        stderr_note, stdout_note = captured.exception.__notes__
+        self.assertEqual(
+            stderr_note,
+            "release app verifier stderr (19 bytes) ends with:\nunknown diagnostic",
+        )
+        self.assertTrue(stdout_note.startswith("release app verifier stdout ("))
+        self.assertIn(f"release app verified: {APP}", stdout_note)
 
     @patch("scripts.publication.release_app_verifier.run_bounded_process")
     def test_bounded_process_failures_are_typed(self, runner: object) -> None:
         for reason, message in (
             ("timeout", "timed out"),
             ("output-limit", "exceeded its fixed bound"),
+            ("descendant", "left a descendant process running"),
+            ("invalid", "closed process boundary"),
             ("start", "closed process boundary"),
+            ("cleanup", "closed process boundary"),
         ):
             with self.subTest(reason=reason):
                 runner.side_effect = BoundedProcessError(reason, "simulated")
@@ -147,6 +307,7 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
             verifier.assert_called_once_with(
                 repository=repository,
                 environment={"PATH": "/usr/bin:/bin"},
+                notarization=NotarizationCheck.LIVE,
             )
 
     def test_prepare_derives_build_inputs_after_app_verification(self) -> None:
@@ -203,12 +364,22 @@ class PreparerVerifierBoundaryTests(unittest.TestCase):
 class GAReleaseVerifierBoundaryTests(unittest.TestCase):
     def test_prepackage_validation_uses_the_fixed_app_verifier_adapter(self) -> None:
         environment = {"PATH": "/usr/bin:/bin"}
+        for notarization in NotarizationCheck:
+            with self.subTest(notarization=notarization), patch.object(
+                ga_release_contract, "verify_release_app"
+            ) as verifier:
+                ga_release_contract._validate_release_application(
+                    REPOSITORY, environment, notarization=notarization
+                )
+                verifier.assert_called_once_with(
+                    repository=REPOSITORY,
+                    environment=environment,
+                    notarization=notarization,
+                )
         with patch.object(ga_release_contract, "verify_release_app") as verifier:
-            ga_release_contract._validate_release_application(REPOSITORY, environment)
-        verifier.assert_called_once_with(
-            repository=REPOSITORY,
-            environment=environment,
-        )
+            with self.assertRaises(TypeError):
+                ga_release_contract._validate_release_application(REPOSITORY, environment)
+        verifier.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -89,9 +89,19 @@ cfw_run_release_python_script() {
       printf '%s\n' "$1/target/release-worktrees/$fixture_ga_build"
       ;;
     "$1/scripts/production_release_evidence.py")
-      [[ "$#" -eq 4 && "$3" == "verify" && "$4" == "prepackage" ]] || return 1
-      [[ ! -e "$1/scripts/fail-prepackage" ]] || return 1
-      printf '%s\n' "fixed prepackage stage reopened"
+      [[ "$#" -eq 4 && "$3" == "verify" ]] || return 1
+      case "$4" in
+        prepackage) [[ ! -e "$1/scripts/fail-prepackage" ]] || return 1 ;;
+        publication) ;;
+        *) return 1 ;;
+      esac
+      printf '%s\n' "fixed $4 stage reopened"
+      ;;
+    "$1/scripts/release_artifact_set_cli.py")
+      [[ "$#" -eq 7 && "$3" == "verify-release" && "$4" == "--repository" && \
+        "$5" == "$1/target/release-worktrees/$fixture_ga_build" && \
+        "$6" == "--version" && "$7" == "0.5.0" ]] || return 1
+      printf '%s\n' "fixed release sets verified"
       ;;
     "$1/scripts/github_hosted_ci_receipt.py")
       [[ "$1" != */target/release-worktrees/"$fixture_ga_build" ]] || return 1
@@ -117,6 +127,10 @@ fixture_ga_root="$fixture_artifact_root/target/candidates/0.5.0/ga/$fixture_ga_b
 [[ "$1" == "$fixture_ga_root/signed/Clash for Mac.app" ]]
 [[ "$2" == "$fixture_ga_root/signing-output/signed-native-products" ]]
 [[ "$3" == "--context" && "$4" == "canonical-native-content" ]]
+if [[ -e "$fixture_artifact_root/scripts/fail-live-notarization" ]]; then
+  echo "error: stapler validate failed with exit status 68" >&2
+  exit 1
+fi
 printf '%s\n' "fixed application verifier invoked"
 SH
 } >"$gate_artifact/scripts/verify_release_app.sh"
@@ -143,6 +157,38 @@ for hosted_command in --capture-hosted-ci --verify-hosted-ci; do
   [[ ! -s "$fixture_root/hosted-ci.stderr" ]]
   grep -Fxq "current hosted CI executor invoked" "$fixture_root/hosted-ci.stdout"
 done
+
+# Reopening a sealed stage verifies notarization offline, so upload itself
+# runs the live check of the frozen application before the release sets.
+/bin/bash -p "$gate_fixture/scripts/release_publication_gate.sh" --upload-assets 0.5.0 \
+  >"$fixture_root/upload.stdout" 2>"$fixture_root/upload.stderr"
+[[ ! -s "$fixture_root/upload.stderr" ]]
+printf '%s\n' \
+  "current hosted CI executor invoked" \
+  "fixed prepackage stage reopened" \
+  "fixed application verifier invoked" \
+  "fixed publication stage reopened" \
+  "fixed release sets verified" >"$fixture_root/upload.expected"
+if ! cmp -s "$fixture_root/upload.expected" "$fixture_root/upload.stdout"; then
+  echo "error: upload did not check notarization live before the release sets" >&2
+  exit 1
+fi
+touch "$gate_artifact/scripts/fail-live-notarization"
+upload_status=0
+/bin/bash -p "$gate_fixture/scripts/release_publication_gate.sh" --upload-assets 0.5.0 \
+  >"$fixture_root/failed-upload.stdout" 2>"$fixture_root/failed-upload.stderr" ||
+  upload_status=$?
+if [[ "$upload_status" -eq 0 ]]; then
+  echo "error: upload passed although the live notarization check failed" >&2
+  exit 1
+fi
+grep -Fxq "error: stapler validate failed with exit status 68" \
+  "$fixture_root/failed-upload.stderr"
+if grep -Fq "fixed release sets verified" "$fixture_root/failed-upload.stdout"; then
+  echo "error: upload reached the release sets after the live notarization check failed" >&2
+  exit 1
+fi
+/bin/rm "$gate_artifact/scripts/fail-live-notarization"
 
 touch "$gate_fixture/scripts/fail-prepackage"
 if (

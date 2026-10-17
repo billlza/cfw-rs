@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from fractions import Fraction
 import hashlib
 import json
 import re
@@ -12,7 +13,9 @@ from pathlib import Path
 from scripts.harness.packet_capture import (
     DnsResolverLeg,
     PacketCaptureError,
+    RetransmissionPolicy,
     StagedCaptureEndpoint,
+    StageRecordSpan,
     dns_resolver_leg_stage_endpoints,
     dns_stage_endpoints,
     parse_packet_records,
@@ -199,6 +202,7 @@ class DnsRecursionDesiredContractTests(unittest.TestCase):
             end_marker=self.END,
             expect_token=True,
             declared_observation_ms=5000,
+            retransmissions=RetransmissionPolicy.EXACT,
         )
 
     def test_dns_recursion_desired_echo_is_an_exact_authoritative_transaction(
@@ -316,6 +320,7 @@ class DnsResolverLegContractTests(unittest.TestCase):
             end_marker=self.END,
             expect_token=True,
             declared_observation_ms=5000,
+            retransmissions=RetransmissionPolicy.EXACT,
             **options,
         )
 
@@ -328,13 +333,19 @@ class DnsResolverLegContractTests(unittest.TestCase):
             endpoints=endpoints,
             start_marker=self.START,
             end_marker=self.END,
+            retransmissions=RetransmissionPolicy.EXACT,
             **options,
         )
 
     def test_legs_prove_a_single_family_capture_like_the_default(self) -> None:
         capture = self.capture()
         derived = dns_resolver_leg_stage_endpoints(
-            capture, "packet-pcap", family="ipv4", legs=self.LEGS, tokens=self.TOKENS
+            capture,
+            "packet-pcap",
+            family="ipv4",
+            legs=self.LEGS,
+            tokens=self.TOKENS,
+            retransmissions=RetransmissionPolicy.EXACT,
         )
         self.assertEqual(derived, self.endpoints())
         self.assertEqual(
@@ -400,7 +411,12 @@ class DnsResolverLegContractTests(unittest.TestCase):
             with self.subTest(legs=legs):
                 with self.assertRaisesRegex(PacketCaptureError, message):
                     dns_resolver_leg_stage_endpoints(
-                        capture, "packet-pcap", family="ipv4", legs=legs, tokens=self.TOKENS
+                        capture,
+                        "packet-pcap",
+                        family="ipv4",
+                        legs=legs,
+                        tokens=self.TOKENS,
+                        retransmissions=RetransmissionPolicy.EXACT,
                     )
                 with self.assertRaisesRegex(PacketCaptureError, message):
                     self.prove(capture, self.endpoints(), dns_resolver_legs=legs)
@@ -453,7 +469,12 @@ class DnsResolverLegContractTests(unittest.TestCase):
             PacketCaptureError, "start query did not come from its resolver leg's client"
         ):
             dns_resolver_leg_stage_endpoints(
-                capture, "packet-pcap", family="ipv4", legs=self.LEGS, tokens=self.TOKENS
+                capture,
+                "packet-pcap",
+                family="ipv4",
+                legs=self.LEGS,
+                tokens=self.TOKENS,
+                retransmissions=RetransmissionPolicy.EXACT,
             )
         # The assurance derivation binds only the queried resolver.
         self.assertEqual(
@@ -466,6 +487,355 @@ class DnsResolverLegContractTests(unittest.TestCase):
             )[0].local_address,
             "198.18.64.9",
         )
+
+
+def _timed_records(capture: bytes) -> list[tuple[int, bytes]]:
+    """Return each classic pcap record's time in microseconds and its frame."""
+
+    records: list[tuple[int, bytes]] = []
+    offset = 24
+    while offset < len(capture):
+        seconds, micros, captured, _original = struct.unpack_from("<IIII", capture, offset)
+        records.append(
+            (seconds * 1_000_000 + micros, capture[offset + 16 : offset + 16 + captured])
+        )
+        offset += 16 + captured
+    return records
+
+
+def _with_timed_records(capture: bytes, records: list[tuple[int, bytes]]) -> bytes:
+    """Rewrite capture's records, in time order, under its own file header."""
+
+    ordered = sorted(records, key=lambda record: record[0])
+    return capture[:24] + b"".join(
+        struct.pack("<IIII", at // 1_000_000, at % 1_000_000, len(data), len(data)) + data
+        for at, data in ordered
+    )
+
+
+def _with_repeated_record(
+    capture: bytes, index: int, delay_micros: int, *, frame: bytes | None = None
+) -> bytes:
+    """Repeat a classic pcap record delay_micros later, in time order.
+
+    frame, when given, replaces the repeated record's bytes.
+    """
+
+    records = _timed_records(capture)
+    at, original = records[index]
+    return _with_timed_records(
+        capture, [*records, (at + delay_micros, original if frame is None else frame)]
+    )
+
+
+class RetransmissionPolicyContractTests(unittest.TestCase):
+    """Every staged caller states how a stage's repeated packets count.
+
+    GA's time-stopped capture admits identical DNS and TCP retransmissions;
+    every assurance caller keeps EXACT.
+    """
+
+    START = b"rtx-start-012345678"
+    TARGET = b"rtx-target-01234567"
+    END = b"rtx-end-0123456789a"
+    TOKENS = (START, TARGET, END)
+    PORTS = (53001, 53002, 53003)
+    LEGS = (
+        DnsResolverLeg("198.18.64.1", "198.18.64.2"),
+        DnsResolverLeg("2001:2:0:64::1", "2001:2:0:64::2"),
+    )
+    ENDPOINTS = tuple(
+        StagedCaptureEndpoint(stage, "198.18.64.1", port, "198.18.64.2", 53)
+        for stage, port in zip(("start", "target", "end"), PORTS, strict=True)
+    )
+    EPOCH = Fraction(1_785_153_600)
+
+    def capture(self) -> bytes:
+        return pcap_bytes(
+            start_marker=self.START,
+            token=self.TARGET,
+            end_marker=self.END,
+            include_token=True,
+            protocol="dns",
+            family="ipv4",
+            local_address="198.18.64.1",
+            remote_address="198.18.64.2",
+            stage_local_ports=self.PORTS,
+            link_type=101,
+            dns_query_flags=0x0100,
+        )
+
+    def prove(
+        self,
+        capture: bytes,
+        retransmissions: object,
+        *,
+        endpoints: tuple = ENDPOINTS,
+        protocol: str = "dns",
+        legs: tuple | None = LEGS,
+        expect_token: bool = True,
+    ):
+        return validate_staged_capture_tokens(
+            capture,
+            "packet-pcap",
+            protocol=protocol,
+            family="ipv4",
+            endpoints=endpoints,
+            expected_link_type=101,
+            expected_interface_name="utun5",
+            expected_quic_version=None,
+            token=self.TARGET,
+            start_marker=self.START,
+            end_marker=self.END,
+            expect_token=expect_token,
+            declared_observation_ms=5000,
+            retransmissions=retransmissions,
+            dns_resolver_legs=legs,
+        )
+
+    def window(
+        self,
+        capture: bytes,
+        retransmissions: object,
+        *,
+        endpoints: tuple = ENDPOINTS,
+        protocol: str = "dns",
+        legs: tuple | None = LEGS,
+    ):
+        return staged_marker_window(
+            capture,
+            "packet-pcap",
+            protocol=protocol,
+            family="ipv4",
+            endpoints=endpoints,
+            start_marker=self.START,
+            end_marker=self.END,
+            retransmissions=retransmissions,
+            dns_resolver_legs=legs,
+        )
+
+    def derive(self, capture: bytes, retransmissions: object):
+        return dns_resolver_leg_stage_endpoints(
+            capture,
+            "packet-pcap",
+            family="ipv4",
+            legs=self.LEGS,
+            tokens=self.TOKENS,
+            retransmissions=retransmissions,
+        )
+
+    def test_staged_callers_have_no_default_policy(self) -> None:
+        capture = self.capture()
+        common = {
+            "protocol": "dns",
+            "family": "ipv4",
+            "endpoints": self.ENDPOINTS,
+            "start_marker": self.START,
+            "end_marker": self.END,
+            "dns_resolver_legs": self.LEGS,
+        }
+        with self.assertRaisesRegex(TypeError, "'retransmissions'"):
+            validate_staged_capture_tokens(
+                capture,
+                "packet-pcap",
+                **common,
+                expected_link_type=101,
+                expected_interface_name="utun5",
+                expected_quic_version=None,
+                token=self.TARGET,
+                expect_token=True,
+                declared_observation_ms=5000,
+            )
+        with self.assertRaisesRegex(TypeError, "'retransmissions'"):
+            staged_marker_window(capture, "packet-pcap", **common)
+        with self.assertRaisesRegex(TypeError, "'retransmissions'"):
+            dns_resolver_leg_stage_endpoints(
+                capture, "packet-pcap", family="ipv4", legs=self.LEGS, tokens=self.TOKENS
+            )
+
+    def test_policy_must_be_a_retransmission_policy_member(self) -> None:
+        # Another value is the caller's bug, never a packet that fails.
+        capture = self.capture()
+        for value in ("exact", "identical-retransmissions", None, 0):
+            with self.subTest(value=value):
+                for call in (self.prove, self.window, self.derive):
+                    with self.assertRaisesRegex(
+                        TypeError, "retransmission policy is not a RetransmissionPolicy"
+                    ):
+                        call(capture, value)
+
+    def test_identical_retransmissions_cover_dns_legs_and_tcp_expected_tokens(
+        self,
+    ) -> None:
+        # Each refusal is the caller's bug, never a packet that fails.
+        capture = self.capture()
+        identical = RetransmissionPolicy.IDENTICAL_RETRANSMISSIONS
+        scope = "identical retransmissions are defined only for DNS over resolver legs and TCP"
+        for protocol, legs in (("udp", None), ("quic", None), ("dns", None)):
+            with self.subTest(protocol=protocol):
+                with self.assertRaisesRegex(TypeError, scope):
+                    self.prove(capture, identical, protocol=protocol, legs=legs)
+                with self.assertRaisesRegex(TypeError, scope):
+                    self.window(capture, identical, protocol=protocol, legs=legs)
+        with self.assertRaisesRegex(
+            TypeError, "identical retransmissions prove only an expected token"
+        ):
+            self.prove(capture, identical, expect_token=False)
+
+    def test_exact_refuses_the_dns_retransmission_identical_admits(self) -> None:
+        exact = RetransmissionPolicy.EXACT
+        identical = RetransmissionPolicy.IDENTICAL_RETRANSMISSIONS
+        nominal = self.capture()
+        # The target query again 50 ms later, before its answer.
+        retransmitted = _with_repeated_record(nominal, 2, 50_000)
+        with self.assertRaisesRegex(PacketCaptureError, "one exact target query"):
+            self.derive(retransmitted, exact)
+        with self.assertRaisesRegex(
+            PacketCaptureError, "exactly one query and one authoritative response"
+        ):
+            self.prove(retransmitted, exact)
+        self.assertEqual(self.derive(retransmitted, identical), self.ENDPOINTS)
+        self.assertEqual(self.window(retransmitted, identical), self.window(nominal, exact))
+        tolerant = self.prove(retransmitted, identical)
+        strict = self.prove(nominal, exact)
+        fields = (
+            "observation_ms",
+            "started_at",
+            "ended_at",
+            "start_event_started_at",
+            "start_event_ended_at",
+            "target_started_at",
+            "target_ended_at",
+            "end_event_started_at",
+            "end_event_ended_at",
+            "token_occurrences",
+            "dns_response_count",
+            "dns_responses_sha256",
+        )
+        self.assertEqual(
+            [getattr(tolerant, field) for field in fields],
+            [getattr(strict, field) for field in fields],
+        )
+        self.assertEqual((tolerant.total_record_count, strict.total_record_count), (7, 6))
+        tenth = Fraction(1, 10)
+        self.assertEqual(
+            tolerant.stage_record_spans,
+            (
+                StageRecordSpan(self.EPOCH, self.EPOCH + tenth),
+                StageRecordSpan(self.EPOCH + 1, self.EPOCH + 1 + tenth),
+                StageRecordSpan(self.EPOCH + 5, self.EPOCH + 5 + tenth),
+            ),
+        )
+        self.assertIsNone(strict.stage_record_spans)
+
+    def test_identical_dns_endpoints_are_each_stages_first_answered_query(self) -> None:
+        identical = RetransmissionPolicy.IDENTICAL_RETRANSMISSIONS
+        capture = self.capture()
+        start, target, end = self.ENDPOINTS
+        moved_target = StagedCaptureEndpoint("target", "198.18.64.1", 53009, "198.18.64.2", 53)
+        moved_start = StagedCaptureEndpoint("start", "198.18.64.1", 53009, "198.18.64.2", 53)
+        moved_end = StagedCaptureEndpoint("end", "198.18.64.1", 53009, "198.18.64.2", 53)
+        not_first = "staged DNS endpoint is not its stage's first answered query"
+        with self.assertRaisesRegex(PacketCaptureError, not_first):
+            self.prove(capture, identical, endpoints=(start, moved_target, end))
+        with self.assertRaisesRegex(PacketCaptureError, not_first):
+            self.window(capture, identical, endpoints=(moved_start, target, end))
+        with self.assertRaisesRegex(PacketCaptureError, not_first):
+            self.window(capture, identical, endpoints=(start, target, moved_end))
+
+    def test_identical_dns_target_counts_only_inside_the_marker_window(self) -> None:
+        # The window runs from the start answer to the end answer; the
+        # target's first matched pair must lie wholly inside it.
+        identical = RetransmissionPolicy.IDENTICAL_RETRANSMISSIONS
+        capture = self.capture()
+        records = _timed_records(capture)
+        epoch = records[0][0]
+        for label, index, at in (
+            ("target query before the start answer", 2, epoch + 50_000),
+            ("target answer after the end answer", 3, epoch + 5_200_000),
+        ):
+            with self.subTest(label):
+                moved = list(records)
+                moved[index] = (at, moved[index][1])
+                with self.assertRaisesRegex(
+                    PacketCaptureError, "required unique token is absent"
+                ):
+                    self.prove(_with_timed_records(capture, moved), identical)
+
+    def test_identical_dns_event_and_digest_are_each_stages_first_answer(self) -> None:
+        exact = RetransmissionPolicy.EXACT
+        identical = RetransmissionPolicy.IDENTICAL_RETRANSMISSIONS
+        nominal = self.capture()
+        records = _timed_records(nominal)
+        (query_at, query), (answer_at, answer) = records[2], records[3]
+        # The target asked again under another ID 50 ms later, and answered:
+        # the later answer moves neither the target's event nor the digest.
+        reasked_query, reasked_answer = bytearray(query), bytearray(answer)
+        reasked_query[28:30] = reasked_answer[28:30] = (0x7A7A).to_bytes(2, "big")
+        reasked = _with_timed_records(
+            nominal,
+            [
+                *records,
+                (query_at + 50_000, bytes(reasked_query)),
+                (answer_at + 50_000, bytes(reasked_answer)),
+            ],
+        )
+        tolerant = self.prove(reasked, identical)
+        strict = self.prove(nominal, exact)
+        fields = ("target_started_at", "target_ended_at", "dns_responses_sha256")
+        self.assertEqual(
+            [getattr(tolerant, field) for field in fields],
+            [getattr(strict, field) for field in fields],
+        )
+        self.assertEqual(tolerant.total_record_count, 8)
+
+    def test_identical_tcp_retransmission_accounts_for_every_record(self) -> None:
+        exact = RetransmissionPolicy.EXACT
+        identical = RetransmissionPolicy.IDENTICAL_RETRANSMISSIONS
+        ports = (41001, 41002, 41003)
+        capture = pcap_bytes(
+            start_marker=self.START,
+            token=self.TARGET,
+            end_marker=self.END,
+            include_token=True,
+            protocol="tcp",
+            family="ipv4",
+            local_address="198.18.64.1",
+            remote_address="35.194.216.98",
+            stage_local_ports=ports,
+            remote_port=44333,
+            link_type=101,
+        )
+        endpoints = tuple(
+            StagedCaptureEndpoint(stage, "198.18.64.1", port, "35.194.216.98", 44333)
+            for stage, port in zip(("start", "target", "end"), ports, strict=True)
+        )
+        repeated = _with_repeated_record(capture, 1, 300_000)
+        for retransmissions in (exact, identical):
+            with self.subTest(retransmissions=retransmissions):
+                proof = self.prove(
+                    repeated, retransmissions, endpoints=endpoints, protocol="tcp", legs=None
+                )
+                self.assertEqual((proof.token_occurrences, proof.total_record_count), (1, 4))
+        proof = self.prove(
+            repeated, identical, endpoints=endpoints, protocol="tcp", legs=None
+        )
+        self.assertEqual(
+            proof.stage_record_spans[1],
+            StageRecordSpan(self.EPOCH + 1, self.EPOCH + 1 + Fraction(3, 10)),
+        )
+        # EXACT leaves a segment outside the stage flows to its caller's count.
+        foreign = bytearray(_pcap_frames(capture)[0])
+        foreign[20:22] = (41009).to_bytes(2, "big")
+        stray = _with_repeated_record(capture, 0, 300_000, frame=bytes(foreign))
+        self.assertEqual(
+            self.prove(
+                stray, exact, endpoints=endpoints, protocol="tcp", legs=None
+            ).total_record_count,
+            4,
+        )
+        with self.assertRaisesRegex(PacketCaptureError, "not a stage's data segment"):
+            self.prove(stray, identical, endpoints=endpoints, protocol="tcp", legs=None)
 
 
 class PacketEvidenceHarnessTests(unittest.TestCase):
@@ -846,6 +1216,7 @@ class PacketEvidenceHarnessTests(unittest.TestCase):
             end_marker=case["window_end_token"].encode(),
             expect_token=True,
             declared_observation_ms=5_000,
+            retransmissions=RetransmissionPolicy.EXACT,
         )
         self.assertEqual(proof.token_occurrences, 1)
         self.rewrite_capture(case, bytes(capture))
@@ -876,6 +1247,7 @@ class PacketEvidenceHarnessTests(unittest.TestCase):
                 end_marker=case["window_end_token"].encode(),
                 expect_token=True,
                 declared_observation_ms=5_000,
+                retransmissions=RetransmissionPolicy.EXACT,
             )
 
     def test_capture_window_bounds_are_exactly_one_through_thirty_seconds(self) -> None:
@@ -930,6 +1302,7 @@ class PacketEvidenceHarnessTests(unittest.TestCase):
                 end_marker=case["window_end_token"].encode(),
                 expect_token=True,
                 declared_observation_ms=milliseconds,
+                retransmissions=RetransmissionPolicy.EXACT,
             )
 
         with self.assertRaisesRegex(PacketCaptureError, "outside 1s..30s"):

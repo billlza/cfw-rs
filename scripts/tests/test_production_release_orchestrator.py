@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
+from collections import Counter
 from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
+import inspect
 import io
 import os
 from pathlib import Path
@@ -10,12 +13,13 @@ import sys
 import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import DEFAULT, Mock, patch
 
 from scripts import ga_acceptance_journal_export as journal_export
 from scripts import production_release_evidence
 from scripts import candidate_freeze
 from scripts import github_hosted_ci_receipt as hosted_ci_receipt
+from scripts.candidate_artifact_binding import CandidateBindingError
 from scripts.publication import durable_file
 from scripts.publication import ga_release_contract as contract
 from scripts.publication import release_contract
@@ -24,6 +28,11 @@ from scripts.publication.common import (
     canonical_json,
     sha256_bytes,
     sha256_file,
+)
+from scripts.publication.release_app_verifier import verify_release_app
+from scripts.release_app_verifier_output import (
+    NotarizationCheck,
+    parse_release_app_verifier_output,
 )
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 from scripts.release_executor_source import (
@@ -199,6 +208,7 @@ class StageFixture:
         return (
             patch(
                 "scripts.publication.ga_release_contract._prepackage_files",
+                autospec=True,
                 return_value=prepackage,
             ),
             patch(
@@ -219,6 +229,245 @@ class StageFixture:
     def assert_stage(manifest: dict[str, object], stage: str) -> None:
         if manifest.get("stage") != stage:
             raise AssertionError(f"unexpected stage: {manifest}")
+
+
+def write_frozen_prepackage_inputs(fixture: StageFixture) -> SimpleNamespace:
+    """Write the frozen GA files that `_verified_prepackage_inputs` parses itself.
+
+    Its other collaborators are replaced by each test.
+    """
+
+    repository = fixture.repository
+    source = dict(fixture.candidate_source)
+    product_input_path = repository.joinpath(*contract.PRODUCT_INPUT.parts)
+    product_input_path.write_bytes(
+        canonical_json(
+            {
+                "document": "cfm-ga-product-input-v1",
+                "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
+                "schema_version": 1,
+                "source": source,
+                "toolchain": {
+                    name: "f" * 64
+                    for name in (
+                        "cargoWorkspaceSourcesTreeSha256",
+                        "goModuleCacheTreeSha256",
+                        "goToolchainTreeSha256",
+                        "goToolsTreeSha256",
+                        "nodeToolchainTreeSha256",
+                        "tauriToolchainTreeSha256",
+                        "toolchainSha256",
+                        "uiDependenciesTreeSha256",
+                        "xcodegenToolchainTreeSha256",
+                    )
+                },
+            }
+        )
+    )
+    intent_path = repository.joinpath(*contract.CANDIDATE_FREEZE_INTENT.parts)
+    intent_path.parent.mkdir(parents=True)
+    intent = {
+        name: "0" * 64
+        for name in (
+            "allocation_ledger_sha256",
+            "entitlements_tree_sha256",
+            "native_products_tree_sha256",
+            "pre_sign_app_tree_sha256",
+            "pre_sign_tree_sha256",
+            "product_input_sha256",
+            "profiles_tree_sha256",
+            "signing_preflight_sha256",
+            "signing_plan_sha256",
+            "updater_embedded_public_key_sha256",
+            "updater_key_possession_proof_sha256",
+            "updater_tauri_config_sha256",
+        )
+    }
+    intent.update(
+        {
+            "build_number": GA_BUILD,
+            "consumption_state": "candidate_frozen_consumed",
+            "document": "cfm-candidate-freeze-intent-v3",
+            "product_input_document_sha256": sha256_file(product_input_path),
+            "product_version": PRODUCT_VERSION,
+            "schema_version": 3,
+            **source,
+        }
+    )
+    intent_path.write_bytes(canonical_json(intent))
+    frozen = SimpleNamespace(
+        intent_path=intent_path,
+        intent_sha256=sha256_file(intent_path),
+        root=fixture.ga_root,
+    )
+    workflow = repository / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_bytes(b"name: CI\n")
+    bound_source = {
+        "candidate_freeze_intent_sha256": frozen.intent_sha256,
+        "workflow_sha256": sha256_file(workflow),
+        **source,
+    }
+    app_manifest_path = repository.joinpath(*contract.SIGNED_APP_MANIFEST.parts)
+    app_manifest_path.parent.mkdir(parents=True)
+    app_manifest_path.write_bytes(b"{}\n")
+    transformation_bytes = b'{"fixture":"signing transformation"}'
+    transformation_path = repository.joinpath(*contract.SIGNING_TRANSFORMATION.parts)
+    transformation_path.parent.mkdir(parents=True)
+    transformation_path.write_bytes(transformation_bytes)
+    return SimpleNamespace(
+        frozen=frozen,
+        bound_source=bound_source,
+        transformation_bytes=transformation_bytes,
+    )
+
+
+class SealedReopenFixture:
+    """Real prepackage composition over the minimal frozen GA files.
+
+    Below the contract only the evidence validators, hashing and the GitHub
+    and release-app adapters are fixtures, so every composition or reopen of
+    prepackage reaches the real `_validate_release_application`. Each adapter
+    call records its notarization check and the stages sealed at that time.
+    `events` records in order each live hosted-CI check, and for each reopen
+    of the prepackage inputs its freeze proof, the binding of the app tree to
+    its sealed manifest, the verifier run and the rehash of the tree.
+    """
+
+    def __init__(self, fixture: StageFixture) -> None:
+        self.fixture = fixture
+        inputs = write_frozen_prepackage_inputs(fixture)
+        self.frozen = inputs.frozen
+        self.transformation_bytes = inputs.transformation_bytes
+        repository = fixture.repository
+        for relative in (
+            contract.NOTARY_ARCHIVE,
+            contract.NOTARY_LOG,
+            contract.NOTARY_RESULT,
+        ):
+            repository.joinpath(*relative.parts).write_bytes(b"fixture notary evidence\n")
+        repository.joinpath(*contract.GATEKEEPER_EVIDENCE.parts).write_bytes(
+            canonical_json({"fixture": "gatekeeper"})
+        )
+        self.receipt_path = fixture.ga_root / "notarization-receipt.fixture.json"
+        self.receipt_path.write_bytes(b"fixture notarization receipt\n")
+        self.hosted_ci = {
+            "repository": {"id": 12},
+            "run": {"id": 34, "run_attempt": 1},
+            "source": inputs.bound_source,
+            "workflow": {"id": 56, "source": {"sha256": inputs.bound_source["workflow_sha256"]}},
+        }
+        self.calls: list[tuple[NotarizationCheck, tuple[str, ...]]] = []
+        self.events: list[str] = []
+        self.live_failure: PublicationError | None = None
+
+    def freeze_verifier(self, repository: Path) -> SimpleNamespace:
+        self.fixture.assert_repository(repository)
+        self.events.append("freeze")
+        return self.frozen
+
+    def live_hosted_ci(self, *_arguments: object, **_keywords: object) -> object:
+        self.events.append("hosted-ci live")
+        return DEFAULT
+
+    def bind_manifest(self, *_arguments: object, **_keywords: object) -> object:
+        self.events.append("bind manifest")
+        return DEFAULT
+
+    def rehash_app(self, *_arguments: object, **_keywords: object) -> object:
+        self.events.append("rehash app")
+        return DEFAULT
+
+    def verify_release_app(
+        self, *, repository: Path, environment: dict[str, str], notarization: NotarizationCheck
+    ) -> None:
+        self.fixture.assert_repository(repository)
+        if environment != {"PATH": "/usr/bin:/bin"}:
+            raise AssertionError(f"unexpected verifier environment: {environment}")
+        sealed = tuple(
+            stage
+            for stage in STAGES
+            if self.fixture.repository.joinpath(*STAGE_OUTPUTS[stage].parts).exists()
+        )
+        self.calls.append((notarization, sealed))
+        self.events.append(f"verify {notarization.name}")
+        if notarization is NotarizationCheck.LIVE and self.live_failure is not None:
+            raise self.live_failure
+
+    def take_calls(self) -> list[tuple[NotarizationCheck, tuple[str, ...]]]:
+        calls, self.calls = self.calls, []
+        return calls
+
+    def take_events(self) -> list[str]:
+        events, self.events = self.events, []
+        return events
+
+    def patches(self):
+        return (
+            patch.object(
+                contract,
+                "live_verify_hosted_ci_receipt",
+                side_effect=self.live_hosted_ci,
+                return_value=self.hosted_ci,
+            ),
+            patch.object(contract, "validate_hosted_ci_receipt_offline", return_value=self.hosted_ci),
+            patch.object(
+                contract,
+                "validate_candidate_app_manifest",
+                side_effect=self.bind_manifest,
+                return_value={"algorithm": "sha256-tree-v2", "sha256": "a" * 64},
+            ),
+            patch.object(
+                contract,
+                "bundle_build_identity",
+                return_value=SimpleNamespace(
+                    product_version=PRODUCT_VERSION, build_version=GA_BUILD
+                ),
+            ),
+            patch.object(contract, "_release_environment", return_value={"PATH": "/usr/bin:/bin"}),
+            patch.object(contract, "verify_release_app", side_effect=self.verify_release_app),
+            patch.object(
+                contract,
+                "validate_published_transaction_receipt",
+                return_value=SimpleNamespace(
+                    receipt={"fixture": "notarization"},
+                    receipt_path=self.receipt_path,
+                    retained_signed_app=self.fixture.repository / "retained.app",
+                ),
+            ),
+            patch.object(
+                contract,
+                "verify_signing_transformation_receipt",
+                return_value={"fixture": "signing transformation"},
+            ),
+            patch.object(
+                contract,
+                "canonical_signing_transformation_json",
+                return_value=self.transformation_bytes,
+            ),
+            patch.object(contract, "_validate_signing_notarization_binding"),
+            patch.object(contract, "validate_notary_files", return_value={"jobId": "fixture-job"}),
+            patch.object(
+                contract,
+                "validate_gatekeeper_evidence",
+                return_value={"target_signed_app_tree_sha256": "a" * 64},
+            ),
+            patch.object(
+                contract,
+                "_verified_legal_source_closure",
+                return_value=({"tree": {"path": "legal", "sha256": "c" * 64}}, {}),
+            ),
+            patch.object(
+                contract,
+                "build_manifest",
+                side_effect=self.rehash_app,
+                return_value={"sha256": "a" * 64},
+            ),
+            patch.object(
+                contract, "_ga_acceptance_files", side_effect=self.fixture.ga_acceptance_files
+            ),
+            patch.object(contract, "_publication_files", side_effect=self.fixture.publication_files),
+        )
 
 
 class ProductionStageIdentityTests(unittest.TestCase):
@@ -554,9 +803,33 @@ class StageOrderTests(unittest.TestCase):
             patch.object(contract, "_current_stage_executor", return_value=self.fixture.executor),
             patch.object(contract, "require_executor_unchanged"),
             patch.object(contract, "identity_at_commit", return_value=self.fixture.executor.identity),
+            # These compositions reopen no prepackage inputs, so reaching the
+            # release-app verifier would mean a check outside that reopen.
+            *(
+                patch.object(
+                    contract,
+                    name,
+                    side_effect=AssertionError(f"stage-order fixture reached {name}"),
+                )
+                for name in ("_release_environment", "verify_release_app")
+            ),
         ):
             source_patch.start()
             self.addCleanup(source_patch.stop)
+
+    def test_seal_live_revalidation_is_exactly_a_boolean(self) -> None:
+        # A value that is not a boolean must not quietly drop the live checks.
+        for value in (None, 0, 1, "true"):
+            with self.subTest(value=value), patch.object(contract, "_prepackage_files") as compose:
+                with self.assertRaisesRegex(PublicationError, "must be a boolean"):
+                    contract.build_expected_stage_files(
+                        self.fixture.repository,
+                        "prepackage",
+                        executor=self.fixture.executor,
+                        live_revalidation=value,
+                    )
+                compose.assert_not_called()
+        self.live_hosted_ci.assert_not_called()
 
     def test_prepackage_live_checks_once_but_plain_stage_verify_is_offline(self) -> None:
         files = self.fixture.prepackage_files()
@@ -566,16 +839,59 @@ class StageOrderTests(unittest.TestCase):
         ) as compose:
             sealed = seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
             self.assertEqual(self.live_hosted_ci.call_count, 1)
+            # The composing reopen checks notarization live; the confirmation
+            # reopens the same inputs with the sealed check.
             self.assertEqual(
-                compose.call_args_list[0].kwargs,
-                {
-                    "expected_live_hosted_ci": {"document": "live-hosted-ci-fixture"},
-                    "freeze_verifier": None,
-                },
+                [call.kwargs for call in compose.call_args_list],
+                [
+                    {
+                        "notarization": NotarizationCheck.LIVE,
+                        "expected_live_hosted_ci": {"document": "live-hosted-ci-fixture"},
+                        "freeze_verifier": None,
+                    },
+                    {
+                        "notarization": NotarizationCheck.SEALED,
+                        "expected_live_hosted_ci": None,
+                        "freeze_verifier": None,
+                    },
+                ],
             )
             self.live_hosted_ci.reset_mock()
+            compose.reset_mock()
             self.assertEqual(verify_stage(self.fixture.repository, "prepackage"), sealed)
             self.live_hosted_ci.assert_not_called()
+            self.assertEqual(
+                [call.kwargs for call in compose.call_args_list],
+                [
+                    {
+                        "notarization": NotarizationCheck.SEALED,
+                        "expected_live_hosted_ci": None,
+                        "freeze_verifier": None,
+                    }
+                ],
+            )
+
+    def test_ga_acceptance_seal_makes_no_live_check(self) -> None:
+        pre, ga, publication = self.fixture.patches()
+        with pre as compose_prepackage, ga, publication:
+            seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
+            self.live_hosted_ci.reset_mock()
+            compose_prepackage.reset_mock()
+            seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
+        self.live_hosted_ci.assert_not_called()
+        # Its composing and confirming reopens of prepackage are both sealed.
+        self.assertEqual(
+            [call.kwargs for call in compose_prepackage.call_args_list],
+            [
+                {
+                    "notarization": NotarizationCheck.SEALED,
+                    "expected_live_hosted_ci": None,
+                    "freeze_verifier": None,
+                }
+            ]
+            * 2,
+        )
+        self.assertTrue((self.fixture.ga_root / "ga-acceptance/manifest.json").is_file())
 
     def test_prepackage_refuses_without_the_hosted_ci_receipt(self) -> None:
         workflow = self.fixture.repository / hosted_ci_receipt.WORKFLOW_PATH
@@ -674,12 +990,14 @@ class StageOrderTests(unittest.TestCase):
             "fixture retained hosted CI receipt differs from live GitHub state"
         )
         pre, ga, publication = self.fixture.patches()
-        with pre, ga, publication as compose_publication:
+        with pre as compose_prepackage, ga, publication as compose_publication:
             with self.assertRaisesRegex(
                 PublicationError, "differs from live GitHub state"
             ):
                 seal_publication(self.fixture.repository, executor=self.fixture.executor)
         self.live_hosted_ci.assert_called_once()
+        # No reopen, and so no live notarization check, follows the refusal.
+        compose_prepackage.assert_not_called()
         compose_publication.assert_not_called()
         self.assertFalse((self.fixture.ga_root / "publication").exists())
 
@@ -748,6 +1066,626 @@ class StageOrderTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
 
 
+class NotarizationRevalidationMatrixTests(unittest.TestCase):
+    """Only the prepackage and publication seals check notarization live."""
+
+    def setUp(self) -> None:
+        self.fixture = StageFixture()
+        self.addCleanup(self.fixture.cleanup)
+        self.reopen = SealedReopenFixture(self.fixture)
+        for source_patch in (
+            patch.object(contract, "_current_stage_executor", return_value=self.fixture.executor),
+            patch.object(contract, "require_executor_unchanged"),
+            patch.object(contract, "identity_at_commit", return_value=self.fixture.executor.identity),
+            *self.reopen.patches(),
+        ):
+            source_patch.start()
+            self.addCleanup(source_patch.stop)
+        self.repository = self.fixture.repository
+        self.seal = {
+            "prepackage": partial(
+                seal_prepackage, executor=self.fixture.executor,
+                freeze_verifier=self.reopen.freeze_verifier,
+            ),
+            "ga-acceptance": partial(
+                seal_ga_acceptance, executor=self.fixture.executor,
+                freeze_verifier=self.reopen.freeze_verifier,
+            ),
+            "publication": partial(
+                seal_publication, executor=self.fixture.executor,
+                freeze_verifier=self.reopen.freeze_verifier,
+            ),
+        }
+
+    @staticmethod
+    def reopens(*checks: str) -> list[str]:
+        """The events of one reopen of the prepackage inputs per check."""
+
+        return [
+            step
+            for check in checks
+            for step in ("freeze", "bind manifest", f"verify {check}", "rehash app")
+        ]
+
+    def seal_predecessors(self, stage: str) -> list[str]:
+        """Seal every stage before `stage`, clear the records, list the GA root."""
+
+        for earlier in STAGES[: STAGES.index(stage)]:
+            self.seal[earlier](self.repository)
+        self.reopen.take_calls()
+        self.reopen.take_events()
+        return sorted(os.listdir(self.fixture.ga_root))
+
+    def assert_refused(self, stage: str, listing: list[str], message: str) -> BaseException:
+        """Require that sealing `stage` fails with `message` and writes nothing."""
+
+        with self.assertRaisesRegex(PublicationError, message) as refused:
+            self.seal[stage](self.repository)
+        self.assertEqual(sorted(os.listdir(self.fixture.ga_root)), listing)
+        return refused.exception
+
+    def swap_app_until_a_live_check_passes(self) -> None:
+        """Put another app at the fixed path until a live check has passed."""
+
+        sealed_tree = contract.validate_candidate_app_manifest.return_value["sha256"]
+        tree = ["e" * 64]
+        verifier = contract.verify_release_app.side_effect
+
+        def bind_current_tree(*arguments: object, **keywords: object) -> object:
+            bound = self.reopen.bind_manifest(*arguments, **keywords)
+            if tree[0] != sealed_tree:
+                raise CandidateBindingError("fixture app tree differs from its manifest")
+            return bound
+
+        def verify_then_restore(
+            *, repository: Path, environment: dict[str, str], notarization: NotarizationCheck
+        ) -> None:
+            verifier(repository=repository, environment=environment, notarization=notarization)
+            if notarization is NotarizationCheck.LIVE:
+                tree[0] = sealed_tree
+
+        def rehash_current_tree(*arguments: object, **keywords: object) -> dict[str, str]:
+            self.reopen.rehash_app(*arguments, **keywords)
+            return {"sha256": tree[0]}
+
+        contract.validate_candidate_app_manifest.side_effect = bind_current_tree
+        contract.verify_release_app.side_effect = verify_then_restore
+        contract.build_manifest.side_effect = rehash_current_tree
+
+    def change_app_after_the_live_check(self) -> None:
+        """Leave another app at the fixed path once a live check has passed."""
+
+        verifier = contract.verify_release_app.side_effect
+
+        def verify_then_change(
+            *, repository: Path, environment: dict[str, str], notarization: NotarizationCheck
+        ) -> None:
+            verifier(repository=repository, environment=environment, notarization=notarization)
+            if notarization is NotarizationCheck.LIVE:
+                contract.build_manifest.return_value = {"sha256": "e" * 64}
+
+        contract.verify_release_app.side_effect = verify_then_change
+
+    def test_each_seal_and_reopen_selects_its_notarization_check(self) -> None:
+        live, sealed = NotarizationCheck.LIVE, NotarizationCheck.SEALED
+        prepackage = ("prepackage",)
+        acceptance = ("prepackage", "ga-acceptance")
+        complete = ("prepackage", "ga-acceptance", "publication")
+        # The composing reopen is the seal's one live check; the confirmation
+        # after the stage exists is sealed like every other reopen.
+        self.seal["prepackage"](self.repository)
+        self.assertEqual(self.reopen.take_calls(), [(live, ()), (sealed, prepackage)])
+        self.seal["ga-acceptance"](self.repository)
+        self.assertEqual(self.reopen.take_calls(), [(sealed, prepackage), (sealed, acceptance)])
+        # Its first reopen of prepackage is the publication seal's one live
+        # check; its reopen of ga-acceptance and the confirmation are sealed.
+        self.seal["publication"](self.repository)
+        self.assertEqual(
+            self.reopen.take_calls(),
+            [(live, acceptance), (sealed, acceptance), (sealed, complete), (sealed, complete)],
+        )
+        for stage, count in (("prepackage", 1), ("ga-acceptance", 1), ("publication", 2)):
+            verify_stage(self.repository, stage, freeze_verifier=self.reopen.freeze_verifier)
+            self.assertEqual(self.reopen.take_calls(), [(sealed, complete)] * count, stage)
+
+    def test_every_check_runs_between_the_two_hashes_of_the_app(self) -> None:
+        # A check vouches only for the app tree its reopen binds to the sealed
+        # manifest before it and rehashes after it: the live check asks
+        # stapler and Gatekeeper about the tree those equal hashes bracket,
+        # and the sealed check asks neither because the stapled ticket is part
+        # of that tree. Hosted CI is checked live once, before any reopen.
+        self.seal["prepackage"](self.repository)
+        self.assertEqual(
+            self.reopen.take_events(), ["hosted-ci live", *self.reopens("LIVE", "SEALED")]
+        )
+        self.seal["ga-acceptance"](self.repository)
+        self.assertEqual(self.reopen.take_events(), self.reopens("SEALED", "SEALED"))
+        self.seal["publication"](self.repository)
+        self.assertEqual(
+            self.reopen.take_events(),
+            ["hosted-ci live", *self.reopens("LIVE", "SEALED", "SEALED", "SEALED")],
+        )
+        verify_stage(self.repository, "publication", freeze_verifier=self.reopen.freeze_verifier)
+        self.assertEqual(self.reopen.take_events(), self.reopens("SEALED", "SEALED"))
+
+    def test_prepackage_seal_never_vouches_live_for_swapped_bytes(self) -> None:
+        # The other app is gone again once a live check passes, so only a
+        # binding before that check can notice it.
+        listing = self.seal_predecessors("prepackage")
+        self.swap_app_until_a_live_check_passes()
+        self.assert_refused("prepackage", listing, "signed GA app manifest is invalid")
+        self.assertEqual(self.reopen.take_calls(), [])
+        self.assertEqual(self.reopen.take_events(), ["hosted-ci live", "freeze", "bind manifest"])
+
+    def test_publication_seal_never_vouches_live_for_swapped_bytes(self) -> None:
+        listing = self.seal_predecessors("publication")
+        self.swap_app_until_a_live_check_passes()
+        self.assert_refused("publication", listing, "signed GA app manifest is invalid")
+        self.assertEqual(self.reopen.take_calls(), [])
+        self.assertEqual(self.reopen.take_events(), ["hosted-ci live", "freeze", "bind manifest"])
+
+    def test_prepackage_seal_refuses_an_app_changed_after_its_live_check(self) -> None:
+        listing = self.seal_predecessors("prepackage")
+        self.change_app_after_the_live_check()
+        self.assert_refused(
+            "prepackage", listing, "signed GA application changed during prepackage"
+        )
+        self.assertEqual(self.reopen.take_calls(), [(NotarizationCheck.LIVE, ())])
+        self.assertEqual(self.reopen.take_events(), ["hosted-ci live", *self.reopens("LIVE")])
+
+    def test_publication_seal_refuses_an_app_changed_after_its_live_check(self) -> None:
+        listing = self.seal_predecessors("publication")
+        self.change_app_after_the_live_check()
+        self.assert_refused(
+            "publication", listing, "signed GA application changed during prepackage"
+        )
+        self.assertEqual(
+            self.reopen.take_calls(),
+            [(NotarizationCheck.LIVE, ("prepackage", "ga-acceptance"))],
+        )
+        self.assertEqual(self.reopen.take_events(), ["hosted-ci live", *self.reopens("LIVE")])
+
+    def test_prepackage_seal_refuses_when_the_live_check_fails(self) -> None:
+        listing = self.seal_predecessors("prepackage")
+        failure = PublicationError("release app verifier failed with exit code 1")
+        self.reopen.live_failure = failure
+        refused = self.assert_refused("prepackage", listing, "failed with exit code 1")
+        self.assertIs(refused, failure)
+        self.assertEqual(self.reopen.take_calls(), [(NotarizationCheck.LIVE, ())])
+        # The check failed inside the composing reopen, after the binding.
+        self.assertEqual(
+            self.reopen.take_events(), ["hosted-ci live", "freeze", "bind manifest", "verify LIVE"]
+        )
+
+    def test_publication_seal_refuses_when_the_live_check_fails(self) -> None:
+        listing = self.seal_predecessors("publication")
+        failure = PublicationError("release app verifier failed with exit code 1")
+        self.reopen.live_failure = failure
+        refused = self.assert_refused("publication", listing, "failed with exit code 1")
+        self.assertIs(refused, failure)
+        self.assertEqual(
+            self.reopen.take_calls(),
+            [(NotarizationCheck.LIVE, ("prepackage", "ga-acceptance"))],
+        )
+        self.assertEqual(
+            self.reopen.take_events(), ["hosted-ci live", "freeze", "bind manifest", "verify LIVE"]
+        )
+        # The sealed stages still reopen offline after the refusal.
+        verify_stage(self.repository, "ga-acceptance", freeze_verifier=self.reopen.freeze_verifier)
+        self.assertEqual(
+            [check for check, _sealed in self.reopen.take_calls()],
+            [NotarizationCheck.SEALED],
+        )
+
+    def test_reopen_refuses_an_app_that_changed_after_the_sealed_check(self) -> None:
+        self.seal["prepackage"](self.repository)
+        self.reopen.take_calls()
+        contract.build_manifest.return_value = {"sha256": "b" * 64}
+        with self.assertRaisesRegex(
+            PublicationError, "signed GA application changed during prepackage"
+        ):
+            verify_stage(
+                self.repository, "prepackage", freeze_verifier=self.reopen.freeze_verifier
+            )
+        self.assertEqual(
+            [check for check, _sealed in self.reopen.take_calls()],
+            [NotarizationCheck.SEALED],
+        )
+
+
+RELEASE_SCRIPTS = Path(__file__).resolve().parents[1]
+GA_CONTRACT_SOURCE = "publication/ga_release_contract.py"
+CHECK_DEFINITION_SOURCE = "release_app_verifier_output.py"
+# The calls that run the release-app verifier with a check their caller chose.
+VERIFIER_RUNS = frozenset({"_validate_release_application", "verify_release_app"})
+
+
+def _names_notarization_check(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Name) and node.id == "NotarizationCheck") or (
+        isinstance(node, ast.Attribute) and node.attr == "NotarizationCheck"
+    )
+
+
+def _requires_keyword(function: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    arguments = function.args
+    return any(
+        argument.arg == name and default is None
+        for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults)
+    )
+
+
+def _rebinds(function: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    """Whether anything in `function` but its own parameter binds `name`."""
+
+    own = {id(node) for node in ast.walk(function.args) if isinstance(node, ast.arg)}
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name):
+            bound = node.id == name and not isinstance(node.ctx, ast.Load)
+        elif isinstance(node, ast.arg):
+            bound = node.arg == name and id(node) not in own
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound = node is not function and node.name == name
+        elif isinstance(node, ast.alias):
+            bound = (node.asname or node.name.partition(".")[0]) == name
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound = name in node.names
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            bound = node.name == name
+        elif isinstance(node, ast.MatchMapping):
+            bound = node.rest == name
+        else:
+            bound = False
+        if bound:
+            return True
+    return False
+
+
+class NotarizationCheckUses(ast.NodeVisitor):
+    """Where the release-tool sources choose a notarization check or run the verifier.
+
+    `runs` counts each direct call of a name in VERIFIER_RUNS by (source,
+    scope, callee, check). Its check is the member `LIVE` or `SEALED` named
+    in the call; `parameter` when the innermost enclosing function passes on
+    its own required `notarization` keyword and binds that name nowhere else;
+    `unbound` without exactly one explicit `notarization=` keyword or with
+    unpacked arguments; and `other` otherwise. `members` counts each
+    `NotarizationCheck.LIVE` and `.SEALED` by (source, scope, member); a
+    parameter default counts in the scope `<function>.<defaults>`.
+    `violations` lists, outside the module that defines the check, each import
+    alias of these names, each reference to a verifier run that is not a
+    direct call, and each use of the check other than one of its two members,
+    an annotation or the class of an `isinstance` test.
+    """
+
+    def __init__(self) -> None:
+        self.runs: Counter[tuple[str, str, str, str]] = Counter()
+        self.members: Counter[tuple[str, str, str]] = Counter()
+        self.violations: list[tuple[str, int, str]] = []
+        self._source = ""
+        self._scopes: list[tuple[str, ast.AST]] = []
+        self._direct: set[int] = set()
+        self._annotations = 0
+
+    @classmethod
+    def of_release_scripts(cls) -> NotarizationCheckUses:
+        uses = cls()
+        for path in sorted(RELEASE_SCRIPTS.rglob("*.py")):
+            source = path.relative_to(RELEASE_SCRIPTS).as_posix()
+            text = path.read_text(encoding="utf-8")
+            if not source.startswith("tests/") and any(
+                name in text for name in ("NotarizationCheck", *VERIFIER_RUNS)
+            ):
+                uses.scan(source, ast.parse(text, filename=source))
+        return uses
+
+    def scan(self, source: str, tree: ast.AST) -> None:
+        self._source = source
+        self._direct = set()
+        self.visit(tree)
+
+    def _scope(self) -> str:
+        return ".".join(name for name, _node in self._scopes) or "<module>"
+
+    def _visit_annotation(self, node: ast.expr | None) -> None:
+        if node is not None:
+            self._annotations += 1
+            self.visit(node)
+            self._annotations -= 1
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._scopes.append((node.name, node))
+        self.visit(node.args)
+        self._visit_annotation(node.returns)
+        for statement in node.body:
+            self.visit(statement)
+        self._scopes.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for expression in (*node.decorator_list, *node.bases, *node.keywords):
+            self.visit(expression)
+        self._scopes.append((node.name, node))
+        for statement in node.body:
+            self.visit(statement)
+        self._scopes.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._scopes.append(("<lambda>", node))
+        self.visit(node.args)
+        self.visit(node.body)
+        self._scopes.pop()
+
+    def _visit_comprehension(self, node: ast.expr) -> None:
+        self._scopes.append(("<comprehension>", node))
+        self.generic_visit(node)
+        self._scopes.pop()
+
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _visit_comprehension
+
+    def visit_arguments(self, node: ast.arguments) -> None:
+        for argument in (*node.posonlyargs, *node.args, node.vararg, *node.kwonlyargs, node.kwarg):
+            if argument is not None:
+                self._visit_annotation(argument.annotation)
+        self._scopes.append(("<defaults>", node))
+        for default in (*node.defaults, *node.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        self._scopes.pop()
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.target)
+        self._visit_annotation(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+
+    def _check(self, call: ast.Call) -> str:
+        values = [keyword.value for keyword in call.keywords if keyword.arg == "notarization"]
+        if (
+            len(values) != 1
+            or any(keyword.arg is None for keyword in call.keywords)
+            or any(isinstance(argument, ast.Starred) for argument in call.args)
+        ):
+            return "unbound"
+        value = values[0]
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr in {"LIVE", "SEALED"}
+            and _names_notarization_check(value.value)
+        ):
+            return value.attr
+        function = self._scopes[-1][1] if self._scopes else None
+        if (
+            isinstance(value, ast.Name)
+            and value.id == "notarization"
+            and isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _requires_keyword(function, "notarization")
+            and not _rebinds(function, "notarization")
+        ):
+            return "parameter"
+        return "other"
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name):
+            callee = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            callee = node.func.attr
+        else:
+            callee = None
+        if callee in VERIFIER_RUNS:
+            self._direct.add(id(node.func))
+            self.runs[(self._source, self._scope(), callee, self._check(node))] += 1
+        elif callee == "isinstance" and len(node.args) == 2:
+            if _names_notarization_check(node.args[1]):
+                self._direct.add(id(node.args[1]))
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr in {"LIVE", "SEALED"} and _names_notarization_check(node.value):
+            self._direct.add(id(node.value))
+            self.members[(self._source, self._scope(), node.attr)] += 1
+        self._reference(node, node.attr)
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self._reference(node, node.id)
+
+    def _reference(self, node: ast.expr, name: str) -> None:
+        if id(node) in self._direct or self._source == CHECK_DEFINITION_SOURCE:
+            return
+        if name in VERIFIER_RUNS or (name == "NotarizationCheck" and not self._annotations):
+            self.violations.append((self._source, node.lineno, name))
+
+    def visit_alias(self, node: ast.alias) -> None:
+        name = node.name.rpartition(".")[2]
+        if (name == "NotarizationCheck" or name in VERIFIER_RUNS) and node.asname not in (
+            None,
+            name,
+        ):
+            self.violations.append((self._source, node.lineno, name))
+
+
+class SealedNotarizationCallSiteTests(unittest.TestCase):
+    """Only a reopen that hashes the app around the verifier may skip its live checks."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.uses = NotarizationCheckUses.of_release_scripts()
+
+    def test_only_the_bracketed_prepackage_reopen_runs_the_ga_app_verifier(self) -> None:
+        # In the contract the verifier runs only inside the reopen that binds
+        # the app tree to its sealed manifest before it and rehashes it after,
+        # with the check that reopen's caller chose; elsewhere it runs live.
+        self.assertEqual(
+            self.uses.runs,
+            Counter(
+                {
+                    (
+                        GA_CONTRACT_SOURCE,
+                        "_verified_prepackage_inputs",
+                        "_validate_release_application",
+                        "parameter",
+                    ): 1,
+                    (
+                        GA_CONTRACT_SOURCE,
+                        "_validate_release_application",
+                        "verify_release_app",
+                        "parameter",
+                    ): 1,
+                    ("publication/preparer.py", "prepare", "verify_release_app", "LIVE"): 1,
+                }
+            ),
+        )
+
+    def test_only_the_contract_reopens_choose_the_sealed_check(self) -> None:
+        # The contract maps a seal's live revalidation to the check of its
+        # first reopen of prepackage and reopens everything else sealed.
+        self.assertEqual(
+            Counter(
+                {
+                    member: count
+                    for member, count in self.uses.members.items()
+                    if member[0] == GA_CONTRACT_SOURCE
+                }
+            ),
+            Counter(
+                {
+                    (GA_CONTRACT_SOURCE, "_compose_stage_files", "LIVE"): 1,
+                    (GA_CONTRACT_SOURCE, "_compose_stage_files", "SEALED"): 1,
+                    (GA_CONTRACT_SOURCE, "_reopen_stage_files", "SEALED"): 1,
+                    (GA_CONTRACT_SOURCE, "verify_stage", "SEALED"): 1,
+                }
+            ),
+        )
+        # Besides the parser that defines it, only the adapter that turns it
+        # into the verifier's flag names the sealed check.
+        self.assertEqual(
+            Counter(
+                {
+                    member: count
+                    for member, count in self.uses.members.items()
+                    if member[2] == "SEALED"
+                    and member[0] not in {GA_CONTRACT_SOURCE, CHECK_DEFINITION_SOURCE}
+                }
+            ),
+            Counter({("publication/release_app_verifier.py", "verify_release_app", "SEALED"): 1}),
+        )
+        self.assertEqual(self.uses.violations, [])
+
+    def test_reopen_chain_and_verifier_require_their_check_without_a_default(self) -> None:
+        for function, name, annotation in (
+            (contract._reopen_stage_files, "notarization", "NotarizationCheck"),
+            (contract._verify_stage, "notarization", "NotarizationCheck"),
+            (contract._prepackage_files, "notarization", "NotarizationCheck"),
+            (_verified_prepackage_inputs, "notarization", "NotarizationCheck"),
+            (contract._validate_release_application, "notarization", "NotarizationCheck"),
+            (verify_release_app, "notarization", "NotarizationCheck"),
+            (parse_release_app_verifier_output, "notarization", "NotarizationCheck"),
+            (contract._compose_stage_files, "live_revalidation", "bool"),
+            (contract.build_expected_stage_files, "live_revalidation", "bool"),
+        ):
+            with self.subTest(function=function.__name__, parameter=name):
+                parameters = inspect.signature(function).parameters
+                self.assertIs(parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
+                self.assertIs(parameters[name].default, inspect.Parameter.empty)
+                self.assertEqual(parameters[name].annotation, annotation)
+                self.assertNotIn(
+                    inspect.Parameter.VAR_KEYWORD,
+                    {parameter.kind for parameter in parameters.values()},
+                )
+        # No seal and no verification can name a check for its reopens.
+        for function in (
+            seal_prepackage,
+            seal_ga_acceptance,
+            seal_publication,
+            contract.build_expected_stage_files,
+            verify_stage,
+            contract.verify_prepackage_authorization,
+            contract.verify_publication_authorization,
+            derive_runtime_expectation,
+        ):
+            with self.subTest(function=function.__name__):
+                parameters = inspect.signature(function).parameters
+                self.assertNotIn("notarization", parameters)
+                self.assertNotIn(
+                    inspect.Parameter.VAR_KEYWORD,
+                    {parameter.kind for parameter in parameters.values()},
+                )
+
+    def test_the_scan_classifies_each_way_to_choose_or_run_a_check(self) -> None:
+        def scan(source: str) -> NotarizationCheckUses:
+            uses = NotarizationCheckUses()
+            uses.scan("fixture.py", ast.parse(source))
+            return uses
+
+        for source, scope, check in (
+            (
+                "def run(*, notarization):\n    verify_release_app(notarization=notarization)",
+                "run",
+                "parameter",
+            ),
+            (
+                "def run(*, notarization=None):\n    verify_release_app(notarization=notarization)",
+                "run",
+                "other",
+            ),
+            (
+                "def run(*, notarization):\n"
+                "    notarization = NotarizationCheck.LIVE\n"
+                "    verify_release_app(notarization=notarization)",
+                "run",
+                "other",
+            ),
+            (
+                "def run(*, notarization):\n"
+                "    return lambda: verify_release_app(notarization=notarization)",
+                "run.<lambda>",
+                "other",
+            ),
+            ("verify_release_app(**arguments)", "<module>", "unbound"),
+            (
+                "verify_release_app(*arguments, notarization=NotarizationCheck.LIVE)",
+                "<module>",
+                "unbound",
+            ),
+            (
+                "contract._validate_release_application(notarization=NotarizationCheck.SEALED)",
+                "<module>",
+                "SEALED",
+            ),
+        ):
+            with self.subTest(source=source):
+                (run,) = scan(source).runs
+                self.assertEqual((run[1], run[3]), (scope, check))
+        self.assertEqual(
+            scan("def run(*, notarization=NotarizationCheck.SEALED):\n    pass").members,
+            Counter({("fixture.py", "run.<defaults>", "SEALED"): 1}),
+        )
+        direct = scan(
+            "from scripts.release_app_verifier_output import NotarizationCheck\n"
+            "def live(check: NotarizationCheck) -> bool:\n"
+            "    return isinstance(check, NotarizationCheck) and check is NotarizationCheck.LIVE\n"
+        )
+        self.assertEqual(direct.members, Counter({("fixture.py", "live", "LIVE"): 1}))
+        self.assertEqual(direct.violations, [])
+        for source in (
+            "from scripts.release_app_verifier_output import NotarizationCheck as Check",
+            "from scripts.publication.release_app_verifier import verify_release_app as run",
+            "run = partial(verify_release_app, notarization=NotarizationCheck.LIVE)",
+            "run = contract._validate_release_application",
+            "check = NotarizationCheck('sealed')",
+            "check = NotarizationCheck['SEALED']",
+            "check = getattr(NotarizationCheck, 'SEALED')",
+            "checks = [check for check in NotarizationCheck]",
+            "checks = NotarizationCheck.__members__",
+            "Check = NotarizationCheck",
+        ):
+            with self.subTest(source=source):
+                self.assertNotEqual(scan(source).violations, [])
+
+
 class AdapterContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = StageFixture()
@@ -786,18 +1724,29 @@ class AdapterContractTests(unittest.TestCase):
         with patch.object(
             contract, "_verified_prepackage_inputs",
             return_value=(bindings, hosted_ci, {}),
-        ):
-            files = contract._prepackage_files(
-                self.fixture.repository,
-                FIXTURE_EXECUTOR_SOURCE,
-                expected_live_hosted_ci=hosted_ci,
-            )
-            self.assertEqual(set(files), {"hosted-ci.json", "manifest.json"})
-            self.assertEqual(files["hosted-ci.json"], canonical_json(hosted_ci))
+        ) as inputs:
+            for notarization in NotarizationCheck:
+                with self.subTest(notarization=notarization):
+                    inputs.reset_mock()
+                    files = contract._prepackage_files(
+                        self.fixture.repository,
+                        FIXTURE_EXECUTOR_SOURCE,
+                        notarization=notarization,
+                        expected_live_hosted_ci=hosted_ci,
+                    )
+                    # The reopen runs exactly the check its caller chose.
+                    inputs.assert_called_once_with(
+                        self.fixture.repository,
+                        notarization=notarization,
+                        freeze_verifier=None,
+                    )
+                    self.assertEqual(set(files), {"hosted-ci.json", "manifest.json"})
+                    self.assertEqual(files["hosted-ci.json"], canonical_json(hosted_ci))
             with self.assertRaisesRegex(PublicationError, "changed after live"):
                 contract._prepackage_files(
                     self.fixture.repository,
                     FIXTURE_EXECUTOR_SOURCE,
+                    notarization=NotarizationCheck.LIVE,
                     expected_live_hosted_ci={"run": {"id": 35, "run_attempt": 2}},
                 )
 
@@ -871,87 +1820,15 @@ class AdapterContractTests(unittest.TestCase):
 
     def test_prepackage_inputs_refuse_when_any_unconsumed_guard_rejects(self) -> None:
         repository = self.fixture.repository
-        source = dict(self.fixture.candidate_source)
-        product_input_path = repository.joinpath(*contract.PRODUCT_INPUT.parts)
-        product_input_path.write_bytes(
-            canonical_json(
-                {
-                    "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
-                    "schema_version": 1,
-                    "source": source,
-                    "toolchain": {
-                        name: "f" * 64
-                        for name in (
-                            "cargoWorkspaceSourcesTreeSha256",
-                            "goModuleCacheTreeSha256",
-                            "goToolchainTreeSha256",
-                            "goToolsTreeSha256",
-                            "nodeToolchainTreeSha256",
-                            "tauriToolchainTreeSha256",
-                            "toolchainSha256",
-                            "uiDependenciesTreeSha256",
-                            "xcodegenToolchainTreeSha256",
-                        )
-                    },
-                }
-            )
-        )
-        intent_path = repository.joinpath(*contract.CANDIDATE_FREEZE_INTENT.parts)
-        intent_path.parent.mkdir(parents=True)
-        intent = {
-            name: "0" * 64
-            for name in (
-                "allocation_ledger_sha256",
-                "entitlements_tree_sha256",
-                "native_products_tree_sha256",
-                "pre_sign_app_tree_sha256",
-                "pre_sign_tree_sha256",
-                "product_input_sha256",
-                "profiles_tree_sha256",
-                "signing_preflight_sha256",
-                "signing_plan_sha256",
-                "updater_embedded_public_key_sha256",
-                "updater_key_possession_proof_sha256",
-                "updater_tauri_config_sha256",
-            )
-        }
-        intent.update(
-            {
-                "build_number": GA_BUILD,
-                "consumption_state": "candidate_frozen_consumed",
-                "document": "cfm-candidate-freeze-intent-v3",
-                "product_input_document_sha256": sha256_file(product_input_path),
-                "product_version": PRODUCT_VERSION,
-                "schema_version": 3,
-                **source,
-            }
-        )
-        intent_path.write_bytes(canonical_json(intent))
-        frozen = SimpleNamespace(
-            intent_path=intent_path,
-            intent_sha256=sha256_file(intent_path),
-            root=self.fixture.ga_root,
-        )
-        workflow = repository / ".github/workflows/ci.yml"
-        workflow.parent.mkdir(parents=True)
-        workflow.write_bytes(b"name: CI\n")
-        bound_source = {
-            "candidate_freeze_intent_sha256": frozen.intent_sha256,
-            "workflow_sha256": sha256_file(workflow),
-            **source,
-        }
-        app_manifest_path = repository.joinpath(*contract.SIGNED_APP_MANIFEST.parts)
-        app_manifest_path.parent.mkdir(parents=True)
-        app_manifest_path.write_bytes(b"{}\n")
-        transformation_bytes = b'{"fixture":"signing transformation"}'
-        transformation_path = repository.joinpath(*contract.SIGNING_TRANSFORMATION.parts)
-        transformation_path.parent.mkdir(parents=True)
-        transformation_path.write_bytes(transformation_bytes)
+        inputs = write_frozen_prepackage_inputs(self.fixture)
+        frozen = inputs.frozen
+        bound_source = inputs.bound_source
+        transformation_bytes = inputs.transformation_bytes
 
         def run(
             hosted_source: dict[str, str],
             *,
+            notarization: NotarizationCheck,
             release_application_error: PublicationError | None = None,
             signing_binding_error: PublicationError | None = None,
         ) -> tuple[PublicationError, dict[str, Mock]]:
@@ -1002,32 +1879,49 @@ class AdapterContractTests(unittest.TestCase):
                     stack.enter_context(patch.object(contract, name, collaborator))
                 with self.assertRaises(PublicationError) as rejected:
                     _verified_prepackage_inputs(
-                        repository, freeze_verifier=lambda _repository: frozen
+                        repository,
+                        notarization=notarization,
+                        freeze_verifier=lambda _repository: frozen,
                     )
             return rejected.exception, collaborators
 
         # Control: every guard accepts, so the chain reaches the notary evidence.
-        rejected, called = run(bound_source)
-        self.assertEqual(str(rejected), "GA application notarization evidence is invalid")
-        for name in (
-            "_require_hosted_ci_source_binding",
-            "_validate_release_application",
-            "_validate_signing_notarization_binding",
-            "validate_notary_files",
-        ):
-            called[name].assert_called_once()
+        for notarization in NotarizationCheck:
+            with self.subTest(notarization=notarization):
+                rejected, called = run(bound_source, notarization=notarization)
+                self.assertEqual(
+                    str(rejected), "GA application notarization evidence is invalid"
+                )
+                for name in (
+                    "_require_hosted_ci_source_binding",
+                    "_validate_release_application",
+                    "_validate_signing_notarization_binding",
+                    "validate_notary_files",
+                ):
+                    called[name].assert_called_once()
+                # The reopen runs exactly the check its caller selected.
+                called["_validate_release_application"].assert_called_once_with(
+                    repository, {}, notarization=notarization
+                )
 
-        rejected, called = run({**bound_source, "repository_commit": "9" * 40})
+        sealed = NotarizationCheck.SEALED
+        rejected, called = run(
+            {**bound_source, "repository_commit": "9" * 40}, notarization=sealed
+        )
         self.assertEqual(str(rejected), "hosted CI receipt differs from the frozen candidate")
         called["validate_candidate_app_manifest"].assert_not_called()
 
         release_error = PublicationError("fixture release application rejected")
-        rejected, called = run(bound_source, release_application_error=release_error)
+        rejected, called = run(
+            bound_source, notarization=sealed, release_application_error=release_error
+        )
         self.assertIs(rejected, release_error)
         called["validate_published_transaction_receipt"].assert_not_called()
 
         binding_error = PublicationError("fixture signing binding rejected")
-        rejected, called = run(bound_source, signing_binding_error=binding_error)
+        rejected, called = run(
+            bound_source, notarization=sealed, signing_binding_error=binding_error
+        )
         self.assertIs(rejected, binding_error)
         called["validate_notary_files"].assert_not_called()
 

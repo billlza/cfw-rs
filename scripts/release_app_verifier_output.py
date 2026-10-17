@@ -4,13 +4,27 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from enum import Enum
 import os
 import re
+from types import MappingProxyType
 import unicodedata
 
 
 class ReleaseAppVerifierOutputError(ValueError):
     """The verifier output did not match the fixed success contract."""
+
+
+class NotarizationCheck(Enum):
+    """The notarization checks one verifier run performs.
+
+    LIVE asks Apple's ticket service (stapler) and this host's Gatekeeper
+    policy. SEALED, for reopening a sealed stage, skips both; its caller
+    binds the sealed notarization evidence instead.
+    """
+
+    LIVE = "live"
+    SEALED = "sealed"
 
 
 @dataclass(frozen=True)
@@ -46,6 +60,29 @@ _GATEKEEPER_RE = re.compile(
     r"identity-source=(codesign-leaf-authority|spctl-origin), "
     r"authority=Developer ID Application: .+ \(YKUPL7Z869\)"
 )
+_SEALED_NOTARIZATION_LINE = (
+    "notarization: live Apple checks skipped; the caller binds the sealed evidence"
+)
+
+
+@dataclass(frozen=True)
+class _StdoutLayout:
+    """Line positions of one mode's fixed stdout success transcript."""
+
+    line_count: int
+    # First of the script's four closing lines ("release app verified: ...").
+    closing_index: int
+
+
+# Lines 0-7 are the shared structural checks. LIVE then has stapler's two
+# lines and the Gatekeeper line before the closing lines; SEALED has the
+# closing lines and then the fixed sealed-notarization line.
+_STDOUT_LAYOUTS = MappingProxyType(
+    {
+        NotarizationCheck.LIVE: _StdoutLayout(line_count=15, closing_index=11),
+        NotarizationCheck.SEALED: _StdoutLayout(line_count=13, closing_index=8),
+    }
+)
 
 
 def _text(value: bytes, label: str) -> str:
@@ -71,6 +108,7 @@ def _text(value: bytes, label: str) -> str:
 def _app_from_stdout(
     stdout: str,
     *,
+    notarization: NotarizationCheck,
     expected_build_number: str,
     expected_app: str | None,
     expected_app_suffix: str | None,
@@ -81,17 +119,20 @@ def _app_from_stdout(
         )
     if not isinstance(expected_build_number, str) or not expected_build_number.isdigit():
         raise ReleaseAppVerifierOutputError("expected build number is invalid")
+    layout = _STDOUT_LAYOUTS[notarization]
     lines = stdout[:-1].split("\n")
-    if len(lines) != 15:
+    if len(lines) != layout.line_count:
         raise ReleaseAppVerifierOutputError(
-            "verifier stdout does not match the fixed 15-line success transcript"
+            f"verifier stdout does not match the fixed {layout.line_count}-line "
+            f"{notarization.value} success transcript"
         )
+    closing = layout.closing_index
     prefix = "release app verified: "
-    if not lines[11].startswith(prefix):
+    if not lines[closing].startswith(prefix):
         raise ReleaseAppVerifierOutputError(
             "verifier stdout lacks the fixed release-app success line"
         )
-    app = lines[11][len(prefix) :]
+    app = lines[closing][len(prefix) :]
     if not os.path.isabs(app) or os.path.normpath(app) != app:
         raise ReleaseAppVerifierOutputError("verifier stdout names a non-canonical app")
     if expected_app is not None:
@@ -126,13 +167,16 @@ def _app_from_stdout(
         4: f"candidate bundle verified: {app}",
         5: f"identity: 0.5.0 ({expected_build_number}) / arm64 / macOS 15.0+",
         6: "Mach-O objects: 7",
-        8: f"Processing: {app}",
-        9: "The validate action worked!",
-        11: f"release app verified: {app}",
-        12: _IDENTITY_LINE,
-        13: _PLATFORM_LINE,
-        14: f"build number: {expected_build_number}",
+        closing: f"release app verified: {app}",
+        closing + 1: _IDENTITY_LINE,
+        closing + 2: _PLATFORM_LINE,
+        closing + 3: f"build number: {expected_build_number}",
     }
+    if notarization is NotarizationCheck.LIVE:
+        # stapler validate's two lines; the Gatekeeper line follows them.
+        exact_lines.update({8: f"Processing: {app}", 9: "The validate action worked!"})
+    else:
+        exact_lines[closing + 4] = _SEALED_NOTARIZATION_LINE
     if any(lines[index] != expected for index, expected in exact_lines.items()):
         raise ReleaseAppVerifierOutputError(
             "verifier stdout contains a missing or altered success assertion"
@@ -143,14 +187,15 @@ def _app_from_stdout(
         raise ReleaseAppVerifierOutputError(
             "verifier stdout contains an invalid tombstone assertion"
         )
-    gatekeeper = _GATEKEEPER_RE.fullmatch(lines[10])
-    if gatekeeper is None or (gatekeeper.group(1), gatekeeper.group(2)) not in {
-        ("not-reported-by-spctl", "codesign-leaf-authority"),
-        ("reported-by-spctl", "spctl-origin"),
-    }:
-        raise ReleaseAppVerifierOutputError(
-            "verifier stdout contains an invalid Gatekeeper assertion"
-        )
+    if notarization is NotarizationCheck.LIVE:
+        gatekeeper = _GATEKEEPER_RE.fullmatch(lines[10])
+        if gatekeeper is None or (gatekeeper.group(1), gatekeeper.group(2)) not in {
+            ("not-reported-by-spctl", "codesign-leaf-authority"),
+            ("reported-by-spctl", "spctl-origin"),
+        }:
+            raise ReleaseAppVerifierOutputError(
+                "verifier stdout contains an invalid Gatekeeper assertion"
+            )
     return app
 
 
@@ -295,12 +340,22 @@ def parse_release_app_verifier_output(
     stdout: bytes,
     stderr: bytes,
     *,
+    notarization: NotarizationCheck,
     expected_build_number: str,
     expected_app: str | None = None,
     expected_app_suffix: str | None = None,
 ) -> ReleaseAppVerifierOutput:
-    """Validate and decode one successful release-app verifier transcript."""
+    """Validate and decode one successful release-app verifier transcript.
 
+    ``notarization`` names the checks the run was asked for; a transcript
+    of the other mode, or of ``--pre-notary``, is rejected. The codesign
+    stderr contract is the same in both modes.
+    """
+
+    if not isinstance(notarization, NotarizationCheck):
+        raise ReleaseAppVerifierOutputError(
+            "notarization check is not one fixed verifier mode"
+        )
     if (
         not isinstance(stdout, bytes)
         or not isinstance(stderr, bytes)
@@ -313,6 +368,7 @@ def parse_release_app_verifier_output(
     stderr_text = _text(stderr, "verifier stderr")
     app = _app_from_stdout(
         stdout_text,
+        notarization=notarization,
         expected_build_number=expected_build_number,
         expected_app=expected_app,
         expected_app_suffix=expected_app_suffix,
@@ -324,6 +380,7 @@ def parse_release_app_verifier_output(
 __all__ = [
     "RELEASE_APP_VERIFIER_OUTPUT_LIMIT",
     "RELEASE_APP_VERIFIER_TIMEOUT_SECONDS",
+    "NotarizationCheck",
     "ReleaseAppVerifierOutput",
     "ReleaseAppVerifierOutputError",
     "parse_release_app_verifier_output",

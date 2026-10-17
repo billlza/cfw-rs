@@ -82,6 +82,9 @@ verify_release_prepackage_evidence() {
     "$publication_artifact_repository" "$publication_ga_build" "$1" ||
     return 1
   run_production_ga_stage verify prepackage || return 1
+  # The sealed reopen above checks notarization offline; this live check gates
+  # packaging. It needs no hash bracket of its own: the DMG and updater sets
+  # each require their packaged application's tree to equal the sealed one.
   /bin/bash -p \
     "$publication_artifact_repository/scripts/verify_release_app.sh" \
     "$1" \
@@ -111,6 +114,9 @@ verify_release_upload_artifacts() {
     return 1
   }
   run_hosted_ci_receipt verify
+  # Reopening a sealed stage verifies notarization offline, so upload checks
+  # the frozen application's stapled ticket and Gatekeeper live here.
+  verify_release_prepackage_evidence "$publication_ga_root/signed/Clash for Mac.app"
   verify_release_publication_evidence "${@:2}"
   run_release_artifact_set \
     verify-release \

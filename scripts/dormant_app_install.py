@@ -77,6 +77,7 @@ if __package__:
         require_frozen_sources_unchanged,
     )
     from .release_app_verifier_output import (
+        NotarizationCheck,
         ReleaseAppVerifierOutputError,
         parse_release_app_verifier_output,
     )
@@ -116,6 +117,7 @@ else:
         require_frozen_sources_unchanged,
     )
     from release_app_verifier_output import (
+        NotarizationCheck,
         ReleaseAppVerifierOutputError,
         parse_release_app_verifier_output,
     )
@@ -1377,10 +1379,15 @@ def _parse_processes(output: str) -> list[dict[str, Any]]:
     processes: list[dict[str, Any]] = []
     seen: set[int] = set()
     for raw in output.splitlines():
+        # The path runs from its first to its last non-space character, which
+        # a match finds in linear time even across a long run of spaces inside
+        # it; ps prints comm as a process of the same user may set it. A path
+        # of only whitespace is its last character, as the lazy `(.+?)\s*`
+        # this replaced read it in quadratic time.
         match = re.fullmatch(
             r"\s*([1-9][0-9]*)\s+(-?[0-9]+)\s+"
             r"([A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] "
-            r"[0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})\s+(.+?)\s*",
+            r"[0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})\s+(\S(?:.*\S)?|\s)\s*",
             raw,
         )
         if match is None:
@@ -1456,7 +1463,9 @@ def _observation_digest(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
 
 
-def _require_exact_cfw_proxy(output: str) -> None:
+def parse_system_proxy_fields(output: str) -> dict[str, str]:
+    """Return each scalar `scutil --proxy` field; a repeated field is refused."""
+
     observed: dict[str, str] = {}
     for line in output.splitlines():
         match = re.fullmatch(r"\s*([A-Za-z]+)\s+:\s+([^\s]+)\s*", line)
@@ -1466,6 +1475,25 @@ def _require_exact_cfw_proxy(output: str) -> None:
         if key in observed:
             raise InstallError("cfw_proxy_invalid", "system proxy has a duplicate field")
         observed[key] = value
+    return observed
+
+
+def require_system_proxy_observation(proxy: str) -> None:
+    """Require one complete `scutil --proxy` dictionary."""
+
+    if not proxy.strip().startswith("<dictionary> {") or not proxy.rstrip().endswith("}"):
+        raise NetworkObservationError("system proxy observation is malformed")
+
+
+def require_dns_observation(dns: str) -> None:
+    """Require one complete `scutil --dns` observation, which may be empty."""
+
+    if not (dns.startswith("DNS configuration\n") or dns.strip() == "No DNS configuration available"):
+        raise NetworkObservationError("DNS observation is malformed")
+
+
+def _require_exact_cfw_proxy(output: str) -> None:
+    observed = parse_system_proxy_fields(output)
     expected = {
         "HTTPEnable": "1",
         "HTTPPort": CFW_PROXY_PORT,
@@ -1684,10 +1712,8 @@ def capture_cfw_guard(
             raise InstallError("cfw_dns_invalid", "the exact Clash for Windows DNS binding is absent")
     else:
         try:
-            if not proxy.strip().startswith("<dictionary> {") or not proxy.rstrip().endswith("}"):
-                raise NetworkObservationError("system proxy observation is malformed")
-            if not (dns.startswith("DNS configuration\n") or dns.strip() == "No DNS configuration available"):
-                raise NetworkObservationError("DNS observation is malformed")
+            require_system_proxy_observation(proxy)
+            require_dns_observation(dns)
             tun = tunnel_interfaces(interfaces)
             routes4_projection = network_routes(routes4)
             routes6_projection = network_routes(routes6)
@@ -2233,6 +2259,7 @@ def _run_fixed_release_verifier(
             parse_release_app_verifier_output(
                 result.stdout.encode("utf-8"),
                 result.stderr.encode("utf-8"),
+                notarization=NotarizationCheck.LIVE,
                 expected_app=str(app),
                 expected_build_number=BUILD_NUMBER,
             )

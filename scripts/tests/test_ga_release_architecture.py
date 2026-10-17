@@ -203,6 +203,23 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
         )
         output.assert_called_once_with("source contract verified")
 
+    def test_runtime_cli_indents_every_line_of_a_rendered_exit_note(self) -> None:
+        # A note on an already rendered exit, such as the escaped end of a
+        # command's output, is shown under the error, never at the left margin.
+        arguments = [str(Path(ga_runtime_acceptance_cli.__file__)), "self-check"]
+        rendered = SystemExit("error: GA runtime acceptance: fixture refusal")
+        rendered.add_note("output (12 bytes) ends with:\ncaused by OSError: forged")
+        with patch.object(sys, "argv", arguments), patch.object(
+            ga_runtime_acceptance, "main", side_effect=rendered
+        ), self.assertRaises(SystemExit) as raised:
+            ga_runtime_acceptance_cli.main()
+        self.assertEqual(
+            str(raised.exception),
+            "error: GA runtime acceptance: fixture refusal\n"
+            "  output (12 bytes) ends with:\n"
+            "  caused by OSError: forged",
+        )
+
     def test_runtime_cli_production_commands_never_fallback_on_admission(self) -> None:
         for command in ("collect", "recover", "resume-seal", "verify"):
             arguments = [str(Path(ga_runtime_acceptance_cli.__file__)), command]

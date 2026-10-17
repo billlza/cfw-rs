@@ -37,6 +37,7 @@ if __package__:
         DNS_A_ADDRESS,
         DNS_TTL,
         PacketCaptureError,
+        RetransmissionPolicy,
         StagedCaptureEndpoint,
         SUPPORTED_QUIC_VERSIONS,
         timestamp_fraction,
@@ -67,6 +68,7 @@ else:  # pragma: no cover - direct-script import path
         DNS_A_ADDRESS,
         DNS_TTL,
         PacketCaptureError,
+        RetransmissionPolicy,
         StagedCaptureEndpoint,
         SUPPORTED_QUIC_VERSIONS,
         timestamp_fraction,
@@ -2727,6 +2729,7 @@ def _validate(
             end_marker=end_marker,
             expect_token=spec.token_observed,
             declared_observation_ms=observation_ms,
+            retransmissions=RetransmissionPolicy.EXACT,
         )
         expected_packet_count = (
             6 if spec.protocol == "dns" else 3 if spec.token_observed else 2

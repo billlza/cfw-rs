@@ -5,6 +5,7 @@ from __future__ import annotations
 import calendar
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from fractions import Fraction
 import hashlib
 import ipaddress
@@ -54,6 +55,25 @@ class PacketCaptureError(ValueError):
     """A capture is malformed or does not prove its declared network behavior."""
 
 
+class RetransmissionPolicy(Enum):
+    """How staged evidence counts the packets a stage repeats.
+
+    Every staged caller states one. EXACT is the assurance rule: one exact
+    DNS query and answer per token in its stage's own flow. It counts no
+    other record, and TCP reassembly accepts an identical overlapping
+    segment, so a caller that needs an exact packet set compares
+    total_record_count with its own count. IDENTICAL_RETRANSMISSIONS is GA's
+    rule for a capture stopped by time: a DNS stage may repeat its query, on
+    either resolver leg, and its answer, and a TCP stage its data segment,
+    each identically, while every record of the capture must be one of those
+    packets. No such rule is defined for UDP or QUIC evidence, so only EXACT
+    judges it.
+    """
+
+    EXACT = "exact"
+    IDENTICAL_RETRANSMISSIONS = "identical-retransmissions"
+
+
 @dataclass(frozen=True)
 class CaptureInterface:
     interface_id: int
@@ -78,6 +98,14 @@ class ParsedCapture:
 
 
 @dataclass(frozen=True)
+class StageRecordSpan:
+    """The first and last capture record of one stage's evidence."""
+
+    first_at: Fraction
+    last_at: Fraction
+
+
+@dataclass(frozen=True)
 class CaptureProof:
     observation_ms: int
     started_at: Fraction
@@ -99,6 +127,9 @@ class CaptureProof:
     dns_answer_address: str | None
     dns_ttl: int | None
     dns_responses_sha256: str | None
+    # Each stage's (start, target, end) records under IDENTICAL_RETRANSMISSIONS,
+    # first and last; None otherwise.
+    stage_record_spans: tuple[StageRecordSpan, StageRecordSpan, StageRecordSpan] | None
 
 
 @dataclass(frozen=True)
@@ -159,6 +190,23 @@ class DnsMessage:
     question_type: int
     answer_address: str | None
     recursion_desired: bool
+
+
+@dataclass(frozen=True)
+class _DnsExchange:
+    """One DNS token's records under IDENTICAL_RETRANSMISSIONS.
+
+    query and answer are its first matched pair: its earliest answer and the
+    first query of the same leg, client port and ID before it.
+    """
+
+    query: TransportPacket
+    answer: TransportPacket
+    records: tuple[TransportPacket, ...]
+
+    @property
+    def window(self) -> tuple[Fraction, Fraction]:
+        return self.query.timestamp, self.answer.timestamp
 
 
 def _parse_options(
@@ -772,6 +820,181 @@ def _dns_response_for_token(
     return query_packet.timestamp, response_packet.timestamp, response_packet.payload
 
 
+def _identical_retransmissions(
+    retransmissions: RetransmissionPolicy,
+    *,
+    protocol: str,
+    dns_resolver_legs: tuple[DnsResolverLeg, ...] | None,
+) -> bool:
+    """Return whether a staged caller admits identical retransmissions.
+
+    They are defined only for DNS over resolver legs and for TCP. Each
+    refusal here is a caller's bug, never a capture that fails its proof.
+    """
+
+    if type(retransmissions) is not RetransmissionPolicy:
+        raise TypeError("staged capture retransmission policy is not a RetransmissionPolicy")
+    if retransmissions is RetransmissionPolicy.EXACT:
+        return False
+    if protocol == "tcp" or (protocol == "dns" and dns_resolver_legs is not None):
+        return True
+    raise TypeError(
+        "identical retransmissions are defined only for DNS over resolver legs and TCP"
+    )
+
+
+def _dns_leg_messages(
+    transports: list[TransportPacket],
+    legs: dict[str, DnsResolverLeg],
+    question_family: str,
+) -> list[tuple[TransportPacket, DnsMessage]]:
+    """Decode every record as one exact DNS message on a resolver leg.
+
+    A query runs from a leg's client to its resolver's port 53 and an answer
+    runs back. Any other record, or a message that is not an exact query or
+    authoritative answer for question_family, fails.
+    """
+
+    messages: list[tuple[TransportPacket, DnsMessage]] = []
+    for packet in transports:
+        if packet.protocol != "udp" or packet.family not in legs:
+            raise PacketCaptureError("DNS capture record is outside the resolver legs")
+        leg = legs[packet.family]
+        query = (packet.source, packet.destination, packet.destination_port) == (
+            leg.client_address,
+            leg.resolver_address,
+            53,
+        )
+        answer = (packet.source, packet.source_port, packet.destination) == (
+            leg.resolver_address,
+            53,
+            leg.client_address,
+        )
+        if not query and not answer:
+            raise PacketCaptureError("DNS capture record is outside the resolver legs")
+        message = _dns_message(packet.payload, question_family)
+        if message.is_response != answer:
+            raise PacketCaptureError("DNS message direction differs from its resolver leg")
+        messages.append((packet, message))
+    return messages
+
+
+def _dns_exchange(
+    messages: list[tuple[TransportPacket, DnsMessage]], token: bytes
+) -> _DnsExchange:
+    """Return one token's first matched pair and every record that names it.
+
+    The token's queries, and its answers, may differ only in DNS ID, client
+    port and leg. Each answer must answer an earlier query of the token on
+    the same leg, client port and ID, and echo its RD bit.
+    """
+
+    name = f"{token.decode('ascii').lower()}.evidence.test"
+    named = [(packet, message) for packet, message in messages if message.question_name == name]
+    queries = [(packet, message) for packet, message in named if not message.is_response]
+    answers = [packet for packet, message in named if message.is_response]
+    if not queries:
+        raise PacketCaptureError("DNS token has no exact query")
+    first_query, first_message = queries[0]
+    if any(packet.payload[2:] != first_query.payload[2:] for packet, _message in queries):
+        raise PacketCaptureError("DNS token queries differ beyond their ID")
+    if any(packet.payload[2:] != answers[0].payload[2:] for packet in answers):
+        raise PacketCaptureError("DNS token answers differ beyond their ID")
+    pairs: list[tuple[TransportPacket, TransportPacket]] = []
+    for answer, message in named:
+        if not message.is_response:
+            continue
+        asked = [
+            query
+            for query, query_message in queries
+            if query_message.identifier == message.identifier
+            and (query.source, query.source_port, query.destination)
+            == (answer.destination, answer.destination_port, answer.source)
+            and query.timestamp < answer.timestamp
+        ]
+        if not asked:
+            raise PacketCaptureError(
+                "DNS answer does not answer an earlier query of its token"
+            )
+        if message.recursion_desired != first_message.recursion_desired:
+            raise PacketCaptureError("DNS query/response transaction is not causal and exact")
+        pairs.append((asked[0], answer))
+    if not pairs:
+        raise PacketCaptureError("DNS token has no answered query")
+    query, answer = min(pairs, key=lambda pair: pair[1].timestamp)
+    return _DnsExchange(query, answer, tuple(packet for packet, _message in named))
+
+
+def _dns_exchanges(
+    transports: list[TransportPacket],
+    *,
+    legs: dict[str, DnsResolverLeg],
+    question_family: str,
+    tokens: tuple[bytes, bytes, bytes],
+) -> tuple[_DnsExchange, _DnsExchange, _DnsExchange]:
+    """Account for every record as an exact query or answer of one token."""
+
+    messages = _dns_leg_messages(transports, legs, question_family)
+    names = {f"{token.decode('ascii').lower()}.evidence.test" for token in tokens}
+    if any(message.question_name not in names for _packet, message in messages):
+        raise PacketCaptureError("DNS capture record names no evidence token")
+    start, target, end = (_dns_exchange(messages, token) for token in tokens)
+    return start, target, end
+
+
+def _tcp_stage_segments(
+    transports: list[TransportPacket],
+    endpoints: list[StagedCaptureEndpoint],
+    tokens: tuple[bytes, bytes, bytes],
+) -> tuple[tuple[TransportPacket, ...], tuple[TransportPacket, ...], tuple[TransportPacket, ...]]:
+    """Account for every record as one stage's data segment or its repeat.
+
+    A stage writes its token once on its own connection, so its one data
+    segment carries exactly that token from the stage's local endpoint to
+    its remote one, and TCP may send it again at the same sequence number.
+    """
+
+    flows = [
+        (endpoint.local_address, endpoint.local_port, endpoint.remote_address, endpoint.remote_port)
+        for endpoint in endpoints
+    ]
+    segments: tuple[list[TransportPacket], ...] = ([], [], [])
+    for packet in transports:
+        flow = (packet.source, packet.source_port, packet.destination, packet.destination_port)
+        owners = [
+            index
+            for index, (stage_flow, token) in enumerate(zip(flows, tokens, strict=True))
+            if packet.protocol == "tcp" and flow == stage_flow and packet.payload == token
+        ]
+        if not owners:
+            raise PacketCaptureError(
+                "TCP capture record is not a stage's data segment or its repeat"
+            )
+        stage = segments[owners[0]]
+        if stage and packet.sequence != stage[0].sequence:
+            raise PacketCaptureError("TCP stage repeats its data at another sequence number")
+        stage.append(packet)
+    if not all(segments):
+        raise PacketCaptureError("TCP stage has no data segment")
+    start, target, end = (tuple(stage) for stage in segments)
+    return start, target, end
+
+
+def _record_spans(
+    stages: tuple[tuple[TransportPacket, ...], ...],
+) -> tuple[StageRecordSpan, StageRecordSpan, StageRecordSpan]:
+    """Return the first and last record time of each stage's records."""
+
+    start, target, end = (
+        StageRecordSpan(
+            min(packet.timestamp for packet in records),
+            max(packet.timestamp for packet in records),
+        )
+        for records in stages
+    )
+    return start, target, end
+
+
 def _quic_connection_ids(data: bytes) -> tuple[int, bytes, bytes]:
     if len(data) < 7 or not data[0] & 0x40 or not data[0] & 0x80:
         raise PacketCaptureError("QUIC packet lacks a long-header fixed-bit contract")
@@ -1033,6 +1256,7 @@ def validate_capture_tokens(
         dns_answer_address=dns_answer_address,
         dns_ttl=dns_ttl,
         dns_responses_sha256=dns_responses_sha256,
+        stage_record_spans=None,
     )
 
 
@@ -1115,6 +1339,7 @@ def validate_staged_capture_tokens(
     end_marker: bytes,
     expect_token: bool,
     declared_observation_ms: int,
+    retransmissions: RetransmissionPolicy,
     dns_resolver_legs: tuple[DnsResolverLeg, ...] | None = None,
 ) -> CaptureProof:
     """Validate a marker window whose three source-owned sends have own tuples.
@@ -1124,10 +1349,21 @@ def validate_staged_capture_tokens(
     restored state; each token is evaluated against its own exact flow.
     dns_resolver_legs lets each DNS stage use any one of those legs (see
     _stage_transport_families); assurance callers omit it.
+    retransmissions says how a stage's repeated packets count. Under
+    IDENTICAL_RETRANSMISSIONS a DNS stage is every record that names its
+    token, on either leg, and its endpoint must be its first answered
+    query's flow; its first matched pair is its event, so a later repeat
+    moves no window and no response digest.
     """
 
     if tuple(endpoint.stage for endpoint in endpoints) != ("start", "target", "end"):
         raise PacketCaptureError("staged capture endpoints are not start/target/end")
+    identical = _identical_retransmissions(
+        retransmissions, protocol=protocol, dns_resolver_legs=dns_resolver_legs
+    )
+    if identical and not expect_token:
+        # A caller's bug, like the refusals of _identical_retransmissions.
+        raise TypeError("identical retransmissions prove only an expected token")
     capture = parse_packet_capture(data, kind)
     if not capture.interfaces or any(
         interface.link_type != expected_link_type for interface in capture.interfaces
@@ -1172,34 +1408,58 @@ def validate_staged_capture_tokens(
         endpoint.stage: stage_family
         for endpoint, stage_family in zip(normalized, stage_families, strict=True)
     }
+    tokens = (start_marker, token, end_marker)
+    exchanges: tuple[_DnsExchange, _DnsExchange, _DnsExchange] | None = None
+    stage_records: tuple[tuple[TransportPacket, ...], ...] | None = None
     stage_packets: dict[str, list[TransportPacket]] = {}
-    for endpoint in normalized:
-        stage_packets[endpoint.stage] = [
-            packet
-            for packet in transports
-            if packet.family == transport_families[endpoint.stage]
-            and _matches_flow(
-                packet,
-                local_address=endpoint.local_address,
-                local_port=endpoint.local_port,
-                remote_address=endpoint.remote_address,
-                remote_port=endpoint.remote_port,
+    if identical and protocol == "dns":
+        exchanges = _dns_exchanges(
+            transports,
+            legs=_resolver_legs_by_family(dns_resolver_legs),
+            question_family=family,
+            tokens=tokens,
+        )
+        if tuple(normalized) != _query_stage_endpoints(
+            (exchanges[0].query, exchanges[1].query, exchanges[2].query)
+        ):
+            raise PacketCaptureError(
+                "staged DNS endpoint is not its stage's first answered query"
             )
-        ]
-    start_windows = _event_windows_for_token(
-        stage_packets["start"],
-        protocol,
-        transport_families["start"],
-        start_marker,
-        question_family=family,
-    )
-    end_windows = _event_windows_for_token(
-        stage_packets["end"],
-        protocol,
-        transport_families["end"],
-        end_marker,
-        question_family=family,
-    )
+        stage_records = tuple(exchange.records for exchange in exchanges)
+        for endpoint, records in zip(normalized, stage_records, strict=True):
+            stage_packets[endpoint.stage] = list(records)
+        start_windows = [exchanges[0].window]
+        end_windows = [exchanges[2].window]
+    else:
+        if identical:
+            stage_records = _tcp_stage_segments(transports, normalized, tokens)
+        for endpoint in normalized:
+            stage_packets[endpoint.stage] = [
+                packet
+                for packet in transports
+                if packet.family == transport_families[endpoint.stage]
+                and _matches_flow(
+                    packet,
+                    local_address=endpoint.local_address,
+                    local_port=endpoint.local_port,
+                    remote_address=endpoint.remote_address,
+                    remote_port=endpoint.remote_port,
+                )
+            ]
+        start_windows = _event_windows_for_token(
+            stage_packets["start"],
+            protocol,
+            transport_families["start"],
+            start_marker,
+            question_family=family,
+        )
+        end_windows = _event_windows_for_token(
+            stage_packets["end"],
+            protocol,
+            transport_families["end"],
+            end_marker,
+            question_family=family,
+        )
     if len(start_windows) != 1 or len(end_windows) != 1:
         raise PacketCaptureError("capture window markers must each occur exactly once")
     start_event_started_at, start_event_ended_at = start_windows[0]
@@ -1214,18 +1474,27 @@ def validate_staged_capture_tokens(
         raise PacketCaptureError("capture observation window is outside 1s..30s")
     if declared_observation_ms != observation_ms:
         raise PacketCaptureError("declared observation_ms differs from capture timestamps")
-    target_window = [
-        packet
-        for packet in stage_packets["target"]
-        if started_at <= packet.timestamp <= ended_at
-    ]
-    target_windows = _event_windows_for_token(
-        target_window,
-        protocol,
-        transport_families["target"],
-        token,
-        question_family=family,
-    )
+    if exchanges is not None:
+        # The target counts when its first matched pair lies in the window.
+        target_query_at, target_answer_at = exchanges[1].window
+        target_windows = (
+            [exchanges[1].window]
+            if started_at <= target_query_at and target_answer_at <= ended_at
+            else []
+        )
+    else:
+        target_window = [
+            packet
+            for packet in stage_packets["target"]
+            if started_at <= packet.timestamp <= ended_at
+        ]
+        target_windows = _event_windows_for_token(
+            target_window,
+            protocol,
+            transport_families["target"],
+            token,
+            question_family=family,
+        )
     occurrences = len(target_windows)
     if expect_token and occurrences < 1:
         raise PacketCaptureError("required unique token is absent from decoded application data")
@@ -1274,19 +1543,22 @@ def validate_staged_capture_tokens(
     if protocol == "dns":
         if not expect_token:
             raise PacketCaptureError("DNS evidence requires successful resolution proof")
-        response_values = []
-        for stage, evidence_token in (
-            ("start", start_marker),
-            ("target", token),
-            ("end", end_marker),
-        ):
-            _query_at, _response_at, response = _dns_response_for_token(
-                stage_packets[stage],
-                transport_families[stage],
-                evidence_token,
-                question_family=family,
-            )
-            response_values.append(response)
+        if exchanges is not None:
+            response_values = [exchange.answer.payload for exchange in exchanges]
+        else:
+            response_values = []
+            for stage, evidence_token in (
+                ("start", start_marker),
+                ("target", token),
+                ("end", end_marker),
+            ):
+                _query_at, _response_at, response = _dns_response_for_token(
+                    stage_packets[stage],
+                    transport_families[stage],
+                    evidence_token,
+                    question_family=family,
+                )
+                response_values.append(response)
         digest = hashlib.sha256(DNS_RESPONSE_DIGEST_DOMAIN)
         for response in response_values:
             digest.update(len(response).to_bytes(4, "big"))
@@ -1321,6 +1593,7 @@ def validate_staged_capture_tokens(
         dns_answer_address=dns_answer_address,
         dns_ttl=dns_ttl,
         dns_responses_sha256=dns_responses_sha256,
+        stage_record_spans=None if stage_records is None else _record_spans(stage_records),
     )
 
 
@@ -1359,16 +1632,34 @@ def dns_resolver_leg_stage_endpoints(
     family: str,
     legs: tuple[DnsResolverLeg, ...],
     tokens: tuple[bytes, bytes, bytes],
+    retransmissions: RetransmissionPolicy,
 ) -> tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint]:
     """Derive exact client tuples when each stage may query any one leg.
 
     family still fixes the question type. GA captures on the Packet Tunnel
     interface use this: the system resolver may send a stage's query to
     either tunnel DNS peer, so each stage's own query decides its leg, and
-    that query must come from the leg's client.
+    that query must come from the leg's client. Under
+    IDENTICAL_RETRANSMISSIONS every record is first accounted for as
+    validate_staged_capture_tokens does, and a stage's tuple is its first
+    answered query's. GA's time-stopped capture selects that. EXACT, one
+    query per stage, is the rule for a capture stopped by its packet count;
+    no current caller selects it here.
     """
 
+    identical = _identical_retransmissions(
+        retransmissions, protocol="dns", dns_resolver_legs=legs
+    )
     indexed = _resolver_legs_by_family(legs)
+    if identical:
+        parsed = parse_packet_capture(data, kind)
+        start, target, end = _dns_exchanges(
+            [_decode_transport(_decode_network(record)) for record in parsed.records],
+            legs=indexed,
+            question_family=family,
+            tokens=tokens,
+        )
+        return _query_stage_endpoints((start.query, target.query, end.query))
     queries = _dns_stage_queries(
         data,
         kind,
@@ -1425,19 +1716,29 @@ def _dns_stage_queries(
     return queries[0], queries[1], queries[2]
 
 
+def _query_endpoint(stage: str, query: TransportPacket) -> StagedCaptureEndpoint:
+    """Return a stage's client tuple as one of its queries carried it."""
+
+    return StagedCaptureEndpoint(
+        stage=stage,
+        local_address=query.source,
+        local_port=query.source_port,
+        remote_address=query.destination,
+        remote_port=query.destination_port,
+    )
+
+
 def _query_stage_endpoints(
     queries: tuple[TransportPacket, TransportPacket, TransportPacket],
 ) -> tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint]:
-    """Return each stage's client tuple as its single query carried it."""
+    """Return each stage's client tuple as its given query carried it.
+
+    That query is the stage's single query under EXACT and its first answered
+    query under IDENTICAL_RETRANSMISSIONS.
+    """
 
     start, target, end = (
-        StagedCaptureEndpoint(
-            stage=stage,
-            local_address=packet.source,
-            local_port=packet.source_port,
-            remote_address=packet.destination,
-            remote_port=packet.destination_port,
-        )
+        _query_endpoint(stage, packet)
         for stage, packet in zip(("start", "target", "end"), queries, strict=True)
     )
     return start, target, end
@@ -1452,15 +1753,22 @@ def staged_marker_window(
     endpoints: tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint],
     start_marker: bytes,
     end_marker: bytes,
+    retransmissions: RetransmissionPolicy,
     dns_resolver_legs: tuple[DnsResolverLeg, ...] | None = None,
 ) -> tuple[Fraction, Fraction]:
     """Return the exact unique marker timestamps for producer provenance.
 
-    dns_resolver_legs has validate_staged_capture_tokens' meaning.
+    dns_resolver_legs and retransmissions have validate_staged_capture_tokens'
+    meaning. Under IDENTICAL_RETRANSMISSIONS each DNS marker is its token's
+    first answer, every record must be an exact DNS message on a leg, and
+    validation alone judges whether every record names a token.
     """
 
     if tuple(endpoint.stage for endpoint in endpoints) != ("start", "target", "end"):
         raise PacketCaptureError("staged marker endpoints are not ordered")
+    identical = _identical_retransmissions(
+        retransmissions, protocol=protocol, dns_resolver_legs=dns_resolver_legs
+    )
     start_family, _target_family, end_family = _stage_transport_families(
         endpoints,
         protocol=protocol,
@@ -1486,20 +1794,36 @@ def staged_marker_window(
             )
         ]
 
-    starts = _events_for_token(
-        selected(endpoints[0], start_family),
-        protocol,
-        start_family,
-        start_marker,
-        question_family=family,
-    )
-    ends = _events_for_token(
-        selected(endpoints[2], end_family),
-        protocol,
-        end_family,
-        end_marker,
-        question_family=family,
-    )
+    if identical and protocol == "dns":
+        messages = _dns_leg_messages(
+            transports, _resolver_legs_by_family(dns_resolver_legs), family
+        )
+        start = _dns_exchange(messages, start_marker)
+        end = _dns_exchange(messages, end_marker)
+        if (endpoints[0], endpoints[2]) != (
+            _query_endpoint("start", start.query),
+            _query_endpoint("end", end.query),
+        ):
+            raise PacketCaptureError(
+                "staged DNS endpoint is not its stage's first answered query"
+            )
+        starts = [start.answer.timestamp]
+        ends = [end.answer.timestamp]
+    else:
+        starts = _events_for_token(
+            selected(endpoints[0], start_family),
+            protocol,
+            start_family,
+            start_marker,
+            question_family=family,
+        )
+        ends = _events_for_token(
+            selected(endpoints[2], end_family),
+            protocol,
+            end_family,
+            end_marker,
+            question_family=family,
+        )
     if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
         raise PacketCaptureError("staged capture markers are absent, repeated, or reversed")
     return starts[0], ends[0]

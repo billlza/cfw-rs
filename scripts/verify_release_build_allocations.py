@@ -359,6 +359,9 @@ RETIREMENT_NOTE_NAME_RE: Final = re.compile(
 RETIREMENT_CLASSIFICATION_RE: Final = re.compile(
     r"^GA build ([0-9]+) is permanently classified as\s`([a-z_]+)`\.", re.MULTILINE
 )
+# A note drafted before a commit it names exists marks that commit's hash as
+# `@NAME@`; a note in the tree must have every such hash filled in.
+RETIREMENT_NOTE_PLACEHOLDER_RE: Final = re.compile(r"@[A-Z][A-Z0-9_]*@")
 
 
 class ReleaseBuildAllocationError(ValueError):
@@ -614,6 +617,11 @@ def validate_retirement_notes(ledger: ActiveLedger, notes_directory: Path) -> No
             raise ReleaseBuildAllocationError(
                 f"retirement note does not classify GA build {build} exactly once "
                 f"as `{status}`: {note}"
+            )
+        placeholder = RETIREMENT_NOTE_PLACEHOLDER_RE.search(text)
+        if placeholder is not None:
+            raise ReleaseBuildAllocationError(
+                f"retirement note still holds the placeholder {placeholder.group(0)}: {note}"
             )
     try:
         names = sorted(entry.name for entry in notes_directory.iterdir())

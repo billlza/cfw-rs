@@ -4,12 +4,16 @@ import unittest
 
 from scripts.release_app_verifier_output import (
     RELEASE_APP_VERIFIER_OUTPUT_LIMIT,
+    NotarizationCheck,
     ReleaseAppVerifierOutputError,
     parse_release_app_verifier_output,
 )
 from scripts.tests.release_app_verifier_fixture import (
+    SEALED_NOTARIZATION_LINE,
     complete_verifier_stderr,
     complete_verifier_stdout,
+    pre_notary_verifier_stdout,
+    sealed_verifier_stdout,
 )
 from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 
@@ -28,10 +32,17 @@ HOST = APP + "/Contents/MacOS/clash-for-mac"
 
 
 class ReleaseAppVerifierOutputTests(unittest.TestCase):
-    def parse(self, stdout: bytes | None = None, stderr: bytes | None = None) -> None:
+    def parse(
+        self,
+        stdout: bytes | None = None,
+        stderr: bytes | None = None,
+        *,
+        notarization: NotarizationCheck = NotarizationCheck.LIVE,
+    ) -> None:
         parse_release_app_verifier_output(
             complete_verifier_stdout(APP) if stdout is None else stdout,
             complete_verifier_stderr(APP) if stderr is None else stderr,
+            notarization=notarization,
             expected_app_suffix=APP_SUFFIX,
             expected_build_number=GA_BUILD,
         )
@@ -62,10 +73,117 @@ class ReleaseAppVerifierOutputTests(unittest.TestCase):
         parsed = parse_release_app_verifier_output(
             complete_verifier_stdout(APP),
             complete_verifier_stderr(APP),
+            notarization=NotarizationCheck.LIVE,
             expected_app=APP,
             expected_build_number=GA_BUILD,
         )
         self.assertEqual(parsed.app, APP)
+
+    def test_sealed_transcript_is_accepted_only_in_sealed_mode(self) -> None:
+        stdout = sealed_verifier_stdout(APP)
+        self.assertEqual(len(stdout.splitlines()), 13)
+        self.parse(stdout=stdout, notarization=NotarizationCheck.SEALED)
+        parsed = parse_release_app_verifier_output(
+            stdout,
+            complete_verifier_stderr(APP),
+            notarization=NotarizationCheck.SEALED,
+            expected_app=APP,
+            expected_build_number=GA_BUILD,
+        )
+        self.assertEqual(parsed.app, APP)
+        with self.assertRaisesRegex(ReleaseAppVerifierOutputError, "15-line live"):
+            self.parse(stdout=stdout, notarization=NotarizationCheck.LIVE)
+
+    def test_sealed_mode_rejects_the_live_and_pre_notary_transcripts(self) -> None:
+        with self.assertRaisesRegex(ReleaseAppVerifierOutputError, "13-line sealed"):
+            self.parse(
+                stdout=complete_verifier_stdout(APP),
+                notarization=NotarizationCheck.SEALED,
+            )
+        # Same length as the sealed shape; only its final line differs.
+        pre_notary = pre_notary_verifier_stdout(APP)
+        with self.assertRaisesRegex(ReleaseAppVerifierOutputError, "altered success"):
+            self.parse(stdout=pre_notary, notarization=NotarizationCheck.SEALED)
+        with self.assertRaisesRegex(ReleaseAppVerifierOutputError, "15-line live"):
+            self.parse(stdout=pre_notary, notarization=NotarizationCheck.LIVE)
+
+    def test_sealed_transcript_is_one_fixed_success_grammar(self) -> None:
+        stdout = sealed_verifier_stdout(APP)
+        sealed_line = SEALED_NOTARIZATION_LINE.encode("utf-8") + b"\n"
+        closing = f"release app verified: {APP}\n".encode("utf-8")
+        mutations = (
+            stdout + b"fatal: signature invalid\n",
+            stdout.replace(sealed_line, b"", 1),
+            stdout.replace(
+                sealed_line, b"notarization: sealed ticket bytes reopened offline\n", 1
+            ),
+            stdout.replace(sealed_line, b"", 1).replace(closing, sealed_line + closing, 1),
+            stdout.replace(
+                f"build number: {GA_BUILD}\n".encode("utf-8"), b"build number: 1\n", 1
+            ),
+            stdout.replace(b"a" * 64, b"A" * 64, 1),
+            stdout.replace(closing, b"release app verified: /private/tmp/foreign.app\n", 1),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(
+                ReleaseAppVerifierOutputError
+            ):
+                self.parse(stdout=mutation, notarization=NotarizationCheck.SEALED)
+
+    def test_stderr_contract_is_the_same_in_both_modes(self) -> None:
+        stderr = complete_verifier_stderr(APP)
+        authority_pair = (
+            f"{AUTHORITY}: valid on disk\n"
+            f"{AUTHORITY}: satisfies its Designated Requirement\n"
+        ).encode("utf-8")
+        mutations = (
+            b"",
+            stderr + b"unknown diagnostic\n",
+            stderr.replace(authority_pair, b"", 1),
+            stderr.replace(
+                FRAMEWORK_CURRENT.encode("utf-8"), b"/private/tmp/foreign.app", 1
+            ),
+            stderr.replace(
+                f"--validated:{FRAMEWORK_CURRENT}".encode("utf-8"),
+                f"--validated:{PROXY_BUNDLE}".encode("utf-8"),
+                1,
+            ),
+        )
+        transcripts = {
+            NotarizationCheck.LIVE: complete_verifier_stdout(APP),
+            NotarizationCheck.SEALED: sealed_verifier_stdout(APP),
+        }
+        for notarization, stdout in transcripts.items():
+            with self.subTest(notarization=notarization):
+                self.parse(stdout=stdout, stderr=stderr, notarization=notarization)
+        for mutation in mutations:
+            diagnostics = []
+            for notarization, stdout in transcripts.items():
+                with self.subTest(notarization=notarization, mutation=mutation):
+                    with self.assertRaises(ReleaseAppVerifierOutputError) as rejected:
+                        self.parse(stdout=stdout, stderr=mutation, notarization=notarization)
+                    diagnostics.append(str(rejected.exception))
+            self.assertEqual(len(set(diagnostics)), 1, diagnostics)
+
+    def test_notarization_check_is_a_required_typed_keyword(self) -> None:
+        with self.assertRaises(TypeError):
+            parse_release_app_verifier_output(
+                complete_verifier_stdout(APP),
+                complete_verifier_stderr(APP),
+                expected_app=APP,
+                expected_build_number=GA_BUILD,
+            )
+        for value in ("live", "sealed", None, True):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ReleaseAppVerifierOutputError, "notarization check"
+            ):
+                parse_release_app_verifier_output(
+                    complete_verifier_stdout(APP),
+                    complete_verifier_stderr(APP),
+                    notarization=value,
+                    expected_app=APP,
+                    expected_build_number=GA_BUILD,
+                )
 
     def test_reported_gatekeeper_origin_pair_is_accepted(self) -> None:
         stdout = complete_verifier_stdout(APP).replace(
@@ -115,6 +233,7 @@ class ReleaseAppVerifierOutputTests(unittest.TestCase):
             parse_release_app_verifier_output(
                 b"A" * half_plus_one,
                 b"B" * half_plus_one,
+                notarization=NotarizationCheck.LIVE,
                 expected_app=APP,
                 expected_build_number=GA_BUILD,
             )

@@ -18,6 +18,7 @@ from scripts.notarization_transaction import NOTARY_PROFILE, TransactionError
 from scripts.publication.common import PublicationError
 from scripts.publication.durable_file import DurabilityOutcomeUnknown
 from scripts.publication import ga_release_contract as contract
+from scripts.release_python_runtime import ReleasePythonRuntimeError
 from scripts.tests import test_release_artifact_transaction as artifact_fixture
 from scripts.tests.test_release_artifact_transaction import (
     CLOCK,
@@ -136,6 +137,54 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
         self.assertIs(primary.__cause__, original_cause)
         self.assertIn("secondary artifact verifier session cleanup failure", str(raised.exception))
         self.assertIn("private verifier cleanup failed", str(raised.exception))
+        # The operator sees why the command failed, not only its outer message.
+        self.assertIn("caused by ValueError: malformed retained proof", str(raised.exception))
+
+    def test_artifact_cleanup_failure_notes_are_indented_under_their_note(self) -> None:
+        primary = artifacts.ArtifactSetError("signature validation failed")
+        self.close_error = OSError("private verifier cleanup failed")
+        self.close_error.add_note("close detail\ncaused by OSError: forged")
+        with self.assertRaises(SystemExit) as raised:
+            self.run_artifact("verify-dmg", Mock(side_effect=primary))
+        self.assertEqual(
+            str(raised.exception).split("\n"),
+            [
+                "error: release artifact set: signature validation failed",
+                "  secondary artifact verifier session cleanup failure: "
+                "OSError: private verifier cleanup failed",
+                "    close detail",
+                "    caused by OSError: forged",
+            ],
+        )
+        self.assertEqual(self.stdout.getvalue(), "")
+
+    def test_artifact_runtime_admission_refusal_renders_its_cause(self) -> None:
+        refusal = ReleasePythonRuntimeError(
+            "production release Rust toolchain selection is missing or invalid"
+        )
+        refusal.__cause__ = KeyError("CFW_RELEASE_RUST_TOOLCHAIN")
+        execute = Mock(return_value=("must not print",))
+        with (
+            patch.object(sys, "argv", self.artifact_arguments("verify-dmg")),
+            patch(
+                "scripts.release_python_runtime.require_closed_release_runtime",
+                side_effect=refusal,
+            ),
+            patch.object(artifacts, "_execute_command", execute),
+            redirect_stdout(self.stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            artifact_cli.main()
+        self.assertIs(raised.exception.__cause__, refusal)
+        self.assertEqual(
+            str(raised.exception).splitlines(),
+            [
+                "error: release artifact set: "
+                "production release Rust toolchain selection is missing or invalid",
+                "caused by KeyError: 'CFW_RELEASE_RUST_TOOLCHAIN'",
+            ],
+        )
+        execute.assert_not_called()
         self.assertEqual(self.stdout.getvalue(), "")
 
     def test_artifact_session_start_failure_does_not_execute_command(self) -> None:
@@ -355,6 +404,37 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
         self.assertIs(raised.exception.__cause__, primary)
         self.assertIs(primary.__cause__, cause)
         self.assertIn("secondary DMG verifier session cleanup failure", str(raised.exception))
+        self.assertEqual(self.stdout.getvalue(), "")
+
+    def test_dmg_failure_notes_are_indented_under_the_error(self) -> None:
+        # Notes can carry the escaped end of a command's output; none of their
+        # lines may start at the left margin, where the error and causes do.
+        primary = TransactionError(
+            "submission_outcome_unknown", "submission outcome is unknown",
+            terminal_state="outcome_unknown",
+        )
+        primary.add_note("verifier stderr (13 bytes) ends with:\nerror: forged")
+        self.close_error = OSError("verifier cleanup failed")
+        self.close_error.add_note("close detail\ncaused by OSError: forged")
+        with self.assertRaises(SystemExit) as raised:
+            self.run_dmg("start", Mock(side_effect=primary))
+        headline, *lines = str(raised.exception).split("\n")
+        self.assertEqual(
+            headline,
+            "error: DMG notarization transaction [submission_outcome_unknown]: "
+            "submission outcome is unknown",
+        )
+        self.assertEqual(
+            lines,
+            [
+                "  verifier stderr (13 bytes) ends with:",
+                "  error: forged",
+                "  secondary DMG verifier session cleanup failure: "
+                "OSError: verifier cleanup failed",
+                "    close detail",
+                "    caused by OSError: forged",
+            ],
+        )
         self.assertEqual(self.stdout.getvalue(), "")
 
     def test_dmg_new_output_then_primary_and_close_failure_is_unknown(self) -> None:

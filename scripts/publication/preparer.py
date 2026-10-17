@@ -19,7 +19,7 @@ from .common import (
 from .graph_collectors import collect_all
 from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, load_pins, run
 from .license_resolution import resolve_license
-from .release_app_verifier import verify_release_app
+from .release_app_verifier import NotarizationCheck, verify_release_app
 from .release_environment import release_tool_environment
 from .release_contract import (
     PRODUCT_NAME,
@@ -245,6 +245,7 @@ def prepare(
     verify_release_app(
         repository=repository,
         environment=release_environment,
+        notarization=NotarizationCheck.LIVE,
     )
     build_identity = bundle_build_identity(app)
     native_products = release_native_products_root(

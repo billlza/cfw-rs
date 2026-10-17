@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
@@ -27,16 +28,39 @@ def _failure_link(error: BaseException) -> tuple[str, BaseException] | None:
     return None
 
 
+def note_lines(note: object) -> list[str]:
+    """One exception note as an operator diagnostic shows it.
+
+    Every line, split at each line boundary str.splitlines knows, is indented
+    by two spaces, so a note's text, such as the escaped end of a command's
+    output, can never start where an error or one of its causes does.
+    """
+
+    return [f"  {line}" for line in str(note).splitlines()]
+
+
 def failure_diagnostic(headline: str, error: BaseException) -> str:
     """Render one operator diagnostic with its notes and bounded cause chain.
 
     An explicit cause wins; an unsuppressed implicit context is the failure
     that was being handled. A nested SystemExit is an already rendered
     diagnostic, so it is shown once and ends the walk. Only exception types,
-    messages and notes are rendered, never tracebacks or attributes.
+    messages and notes are rendered, never tracebacks or attributes. Every
+    line of every note is indented (``note_lines``), so only the headline and
+    the cause lines start at column 0: a note's text, such as the escaped end
+    of a command's output, cannot read as a cause or as another diagnostic.
     """
 
-    lines = [headline, *getattr(error, "__notes__", ())]
+    lines = [headline]
+    # What was shown, notes unindented, for the SystemExit check below.
+    shown = [headline]
+
+    def add_notes(failure: BaseException) -> None:
+        for note in getattr(failure, "__notes__", ()):
+            shown.append(str(note))
+            lines.extend(note_lines(note))
+
+    add_notes(error)
     seen = {id(error)}
     link = _failure_link(error)
     for _level in range(MAX_FAILURE_CAUSE_LEVELS):
@@ -50,11 +74,13 @@ def failure_diagnostic(headline: str, error: BaseException) -> str:
         seen.add(id(cause))
         message = str(cause)
         if isinstance(cause, SystemExit):
-            if message not in "\n".join(lines):
+            if message not in "\n".join(shown):
                 lines.append(f"{label} {name}: {message}")
             return "\n".join(lines)
-        lines.append(f"{label} {name}: {message}" if message else f"{label} {name}")
-        lines.extend(f"  {note}" for note in getattr(cause, "__notes__", ()))
+        line = f"{label} {name}: {message}" if message else f"{label} {name}"
+        lines.append(line)
+        shown.append(line)
+        add_notes(cause)
         link = _failure_link(cause)
     if link is not None:
         lines.append(f"cause chain truncated after {MAX_FAILURE_CAUSE_LEVELS} levels")
@@ -86,6 +112,57 @@ def bounded_text(value: object, label: str, maximum: int = 4096) -> str:
     ):
         raise PublicationError(f"{label} is not bounded canonical text")
     return value
+
+
+def _inert_character(character: str) -> str:
+    """``character`` as shown in untrusted output: itself, or its escape.
+
+    A newline stays. Every other character of Unicode category C (controls
+    such as ESC, format characters such as the bidirectional overrides and
+    isolates, surrogates, private-use and unassigned code points) and the line
+    and paragraph separators, which the release app verifier's transcript
+    rules refuse, become ``\\xNN``, ``\\uNNNN`` or ``\\UNNNNNNNN``.
+    """
+
+    if character == "\n":
+        return character
+    category = unicodedata.category(character)
+    if not (category.startswith("C") or category in ("Zl", "Zp")):
+        return character
+    code = ord(character)
+    if code <= 0xFF:
+        return f"\\x{code:02x}"
+    if code <= 0xFFFF:
+        return f"\\u{code:04x}"
+    return f"\\U{code:08x}"
+
+
+def escaped_tail(data: bytes, maximum: int = 4096) -> str:
+    """Render the end of untrusted command output as bounded, inert text.
+
+    Only the last ``maximum`` bytes are decoded, as UTF-8 with replacement
+    characters. Control, format, separator, private-use and unassigned
+    characters become escapes (``_inert_character``), so the text can neither
+    drive a terminal nor reorder or hide what it shows, and at most
+    ``maximum`` characters of the escaped end are kept, never part of an
+    escape. A caller whose output may hold secrets screens the whole output
+    before it calls this, as the GA collector withholds any stream in which a
+    credential pattern matches: a cut tail could hold a fragment no pattern
+    matches.
+    """
+
+    if type(maximum) is not int or maximum < 1:
+        raise ValueError("escaped tail bound must be a positive integer")
+    text = bytes(data[-maximum:]).decode("utf-8", errors="replace")
+    pieces: list[str] = []
+    length = 0
+    for character in reversed(text):
+        piece = _inert_character(character)
+        if length + len(piece) > maximum:
+            break
+        pieces.append(piece)
+        length += len(piece)
+    return "".join(reversed(pieces))
 
 
 def require_exact_keys(value: object, expected: set[str], label: str) -> dict[str, Any]:

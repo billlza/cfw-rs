@@ -753,7 +753,8 @@ identity.
 
 `scripts/make_dmg.sh` and `scripts/make_updater_manifest.sh` are post-signing
 steps. They must not modify nested code or rescue a failed signature.
-Both commands first run `scripts/verify_release_app.sh`. That gate requires the
+Both commands first run `scripts/verify_release_app.sh` in its default live
+mode. That gate requires the
 fixed Team ID `YKUPL7Z869`, host `com.bill.clashformac`, Packet Tunnel
 `com.bill.clashformac.packet-tunnel`, ProxyAgent
 `com.bill.clashformac.proxy-agent`, App Group
@@ -1113,6 +1114,27 @@ never adopted.
    `prepackage`, final publication, and upload live-revalidate the v5 receipt;
    ordinary sealed-stage verification performs no network access and instead
    reopens the retained workflow projection against the local clean source.
+   Notarization follows the same split. `scripts/verify_release_app.sh`
+   checks the stapled ticket and Gatekeeper approval live, which needs Apple's
+   services, in publication evidence preparation, in `--verify-prepackage`
+   (which both packaging commands run), in `--upload-assets`, and once in each
+   prepackage and publication seal. A seal makes that check inside its first
+   reopen of the prepackage inputs (for prepackage the reopen that composes
+   the stage, for publication its reopen of the sealed prepackage stage),
+   between the two hashes of the signed app described below. Every other
+   reopen of a sealed stage, including the seal's later reopens and its
+   confirmation, `verify <stage>`, the GA acceptance seal, the artifact-set
+   commands and the GA runtime collector, runs it with
+   `--sealed-notarization` instead: the deep code-signature check still runs
+   and `Contents/CodeResources` must exist, but stapler and Gatekeeper are
+   skipped. That flag is accepted only for the fixed signed app
+   `target/candidates/0.5.0/ga/$CFW_GA_BUILD/signed/Clash for Mac.app` in the
+   canonical native-content context, and every reopen, live or sealed, hashes
+   that app tree, stapled ticket included, against its sealed manifest before
+   the check and again after it; a change made and undone entirely between
+   those two hashes is not detected. The live check in `--verify-prepackage`
+   only gates packaging: the DMG and updater sets each require their packaged
+   application's tree to equal the sealed one.
    The local 26-lane record remains corroborating toolchain evidence and can
    never replace `hosted-ci.json`;
 4. after a signing interruption, inspect the retained attempt through the
@@ -1362,20 +1384,62 @@ never adopted.
    collection starts. Historical journal closure remains required; CFW may
    have restarted or legitimately updated between that history and this
    collection. Every observation within this collection must match its own
-   durable baseline.
+   durable baseline. Its first step, the Gatekeeper assessment of the DMG, is
+   the only check in `collect` that may consult Apple's services. It runs
+   before the app is launched, so a network outage there ends the attempt
+   before its mutation boundary, which `recover` only archives.
+
+   Before `collect` records anything, and again right before it launches the
+   app, it refuses to start while any Clash for Mac Host runs (a copy opened
+   from the DMG included), while a Clash for Mac VPN is not proven
+   disconnected (an extension of another team's also refuses), or while macOS
+   points an HTTP, HTTPS or SOCKS system proxy at a loopback host in the
+   global, a per-interface or a supplemental proxy dictionary. An observation
+   that nests a dictionary anywhere else, or any container in an array other
+   than the supplemental list, is refused as malformed, here and in
+   `recover`. An orphaned Clash for Mac System Proxy or another local proxy
+   tool would otherwise fail the collection only at its end, after the
+   product restores the system proxy. The refusal names each such proxy. Open
+   the installed active GA Clash for Mac, turn System Proxy off in its
+   dashboard and approve the macOS prompt, then quit it with Quit Clash for
+   Mac (⌘Q) in its app menu, or quit the other proxy tool, and run `collect`
+   again. A refusal before anything is recorded needs no `recover`; the
+   refusal right before launch leaves an `aborted_before_mutation` attempt
+   that `recover` archives first. A proxy on any other host passes. While
+   Clash for Windows runs (its app or its core), its own `127.0.0.1:7890`
+   System Proxy is left to the CFW guard, which requires exactly that binding
+   and its unchanged restoration; an orphaned Clash for Mac System Proxy with
+   the same binding cannot be told apart from it then.
+
+   Right before it launches the app, after the DMG proof, `collect` also
+   requires the CFW guard to equal the baseline its intent recorded, judged
+   as the restored guard is at the end: a guard that differs is observed
+   again once a second for up to 30 seconds. A Clash for Windows restart or
+   another tool's change to the system proxy, DNS, routes or utun during the
+   DMG proof would otherwise fail the collection only at its end, after the
+   launch, and need the full `recover`. A guard that still differs ends the
+   attempt with "CFW state changed after the collection baseline, before
+   launch"; its note names the guard keys that differ, never their values,
+   and it leaves an `aborted_before_mutation` attempt. Undo the change, run
+   `recover`, which only archives such an attempt, then `collect` again.
+
    Packet capture needs administrator authorization to open macOS BPF devices.
-   The collector requests it before changing app state, sends credentials only
-   through a private input pipe, and runs tcpdump with `-Z` to drop back to the
-   release account after opening the device. Capture is bounded by the exact
-   test filter, packet count and timeout. An operator restoring a live CFM
-   session must complete this authorization before stopping that session.
-   Start `collect` from an interactive terminal: without a cached sudo ticket
-   it reads the authorization only from a real TTY, and it refuses piped,
-   background or automated input before changing app state. That refusal
-   comes after `collect` has published its collection intent, so it leaves
-   `runtime-collection` with an `aborted_before_mutation` event and a second
-   `collect` refuses it. Run `recover` to archive that attempt, then start a
-   fresh `collect` from a real terminal.
+   The collector requests and proves it before it records anything, sends
+   credentials only through a private input pipe, and runs tcpdump with `-Z`
+   to drop back to the release account after opening the device. Each capture
+   is bounded by its exact test filter, a 32-packet cap and the exercise
+   timeout, and is stopped by time (see the capture rules below). An operator
+   restoring a live CFM session must complete this authorization before
+   stopping that session. Start `collect` from an interactive terminal. There
+   it always asks for the administrator password, even while sudo holds a
+   cached ticket, and proves that password with `sudo -k` before it records
+   anything: a ticket can expire during the DMG proof and the operator waits
+   before the first capture. Without a terminal it reads no password; only an
+   authorization sudo already holds admits the capture, and otherwise it
+   refuses. That refusal, a mistyped password and an interrupt at the
+   password prompt all come before `collect` publishes its collection intent,
+   so they record nothing and need no `recover`: start a fresh `collect` from
+   a real terminal.
 
    Stages may have different executors. The frozen candidate commit seals
    `prepackage`. Runtime collection, GA acceptance and publication may run
@@ -1408,26 +1472,89 @@ never adopted.
    to the other peer. Each stage's token transaction may therefore use either
    tunnel leg, and different stages may use different legs; the evidence
    records the leg family of each stage. A stage's query and its answer must
-   use the same leg with the reversed addresses and ports. On either leg each
-   token still needs exactly one A query and one authoritative answer: libbox
-   forwards the query outside the tunnel to the evidence resolver and relays
-   that resolver's `192.0.2.1` answer, which echoes the client's RD bit. The
-   capture filter admits only DNS between the two addresses of either leg
-   whose first name label has a token's length, stage prefix and first eight
-   digest characters for this collection, so other system DNS and another
-   collection's tokens cannot fill it. On the IPv6 leg it requires UDP as the
-   next header and reads that label at a fixed offset behind the 40-byte IPv6
-   header, so a query behind an IPv6 extension header is not captured; the
-   capture then times out and the collection fails closed. The filter does
-   not check the query type or the rest of the name: a non-A query or a
-   retransmission for a token name, on either leg, still fills a capture
-   slot, and validation then fails closed, which needs `recover` and a fresh
+   use the same leg with the reversed addresses and ports. A stage may repeat
+   its query, on either leg, from any client port and under any DNS ID, and
+   libbox relays an answer to each one it receives: libbox forwards the query
+   outside the tunnel to the evidence resolver and relays that resolver's
+   `192.0.2.1` answer, which echoes the client's RD bit. Every query of a
+   token must be the same exact A query, and every answer the same exact
+   authoritative answer, byte for byte after the DNS ID. Each answer must
+   answer an earlier query of its token on the same leg, client port and ID.
+   An orphan answer, an answer before or at its query's time, a non-exact or
+   conflicting answer, a non-A query for a token name, a message in the wrong
+   direction on its leg, or any record of another name or off both legs fails
+   the check. Each token needs at least one answered query; a query left
+   unanswered, as when macOS asks the other peer again, is allowed. Its first
+   matched pair, the earliest answer and the first query it answers, is the
+   stage's event for the marker windows and the response digest, and the
+   evidence records that pair's leg family. A stage's repeats may arrive
+   after its sender returned, even during a later stage or the settle, and
+   are judged with the rest; none may precede its own sender or follow the
+   capture's end. The capture filter admits only DNS between the two
+   addresses of either leg whose first name label has a token's length, stage
+   prefix and first eight digest characters for this collection, so other
+   system DNS and another collection's tokens cannot reach it. On the IPv6 leg
+   it requires UDP as the next header and reads that label at a fixed offset
+   behind the 40-byte IPv6 header, so a query behind an IPv6 extension header
+   is not captured and its stage fails closed. The filter does not check the
+   query type or the rest of the name: a non-A query for a token name is
+   captured and fails validation, which needs `recover` and a fresh
    `collect`. Every traffic capture runs with a 262144-byte snapshot length,
    the most the evidence parser accepts; tcpdump's default on the utun is
    larger.
+
+   The TCP and UDP checks send each stage's token once, on the stage's own
+   connection or socket. TCP admits a repeat of a stage's data segment only
+   when it is an identical retransmission: the same flow and sequence number,
+   with the token as its whole payload; any other segment fails. No
+   retransmission rule is defined for UDP, so UDP still requires exactly three
+   datagrams.
+
+   Each capture is stopped by time. tcpdump runs with `--immediate-mode` and
+   writes its pcap into an unlinked private file. 1.5 seconds after the end
+   marker's sender returns, the collector lists the process group that the
+   capture's sudo leads (`ps -x -g <sudo pid> -o
+   pid=,ppid=,ruid=,uid=,svuid=,state=,ucomm=`) and finds the one process
+   named `tcpdump` (by its accounting name) that sudo runs, as its child or in
+   its place. The settle starts only while at least 2 seconds of the
+   35-second exercise will remain after it, one each for that listing and for
+   tcpdump's statistics and exit; otherwise the capture fails before the
+   settle with "packet exercise has no time for the capture settle and stop",
+   instead of the deadline passing after the settle and tcpdump being killed
+   without its statistics. `-Z` must have made that tcpdump's real, effective
+   and saved user IDs all the release account's; the collector then sends it
+   alone one SIGINT. sudo, which may keep root, is not signalled, and neither
+   is the process group: a second SIGINT ends tcpdump on macOS without its
+   statistics. If sudo does not run exactly one such tcpdump, the capture
+   fails before any signal, and the error notes the rows of sudo's process
+   group. A tcpdump that has already exited, as its cap stops it, fails as a
+   capture that stopped before the collector stopped it. tcpdump must then
+   exit 0 and report `N packets captured` with N below 32 and equal to the
+   pcap's records, and `0 packets dropped by kernel`. Collection and
+   verification judge these statistics before any packet, so a kernel drop or
+   the cap is reported as such. Collection applies the same packet proof as
+   verification, so a capture that verification would reject fails while the
+   traffic step still holds it, with its bytes and standard error retained as
+   diagnostics. The capture argv, these statistics and the accepted packet
+   set changed without a new runtime evidence schema version; receipts
+   recorded with an earlier argv fail verification.
+
+   If a capture fails with "tcpdump refused the operator's interrupt" or
+   "tcpdump capture process group could not be cleaned up", a root sudo or a
+   tcpdump that never dropped to the release account may still run. Find it
+   with `ps -x -g <sudo pid> -o pid=,ppid=,ruid=,uid=,svuid=,state=,ucomm=`,
+   where the sudo pid is the one in the failed capture's note "<check> tcpdump
+   ran under sudo pid <pid>; …" (for the cleanup failure it appears under its
+   `caused by` line), or the one `ps` shows for the capture's `sudo`, stop it
+   with `sudo kill -INT <pid>`, then run `recover` and a fresh `collect`.
+
    Before collection, the evidence VMs `packet-dns-primary-v040` (DNS
    resolver) and `packet-transport-v040` (TCP/UDP endpoint) must be running
-   and reachable from this Mac's current public address.
+   and reachable from this Mac's current public address. Keep the Mac awake
+   and on mains power for the whole collection, for example under
+   `caffeinate -i`: the collector's timeouts use a clock that stops while the
+   Mac sleeps, but its receipts record wall-clock times, so a step that spans
+   a sleep fails its duration check.
 
    When the collector waits for macOS approval and Tunnel mode, approve the
    System Extension and select Tunnel mode with IPv6 enabled in the installed
@@ -1477,7 +1604,19 @@ never adopted.
    ```
 
    Recovery performs fixed shutdown/Off/CFW checks, archives that failed
-   attempt, and requires a fresh `collect`. If the installed Host is running,
+   attempt, and requires a fresh `collect`. If Clash for Windows was running
+   when the attempt recorded its baseline, the guard must again equal that
+   baseline exactly. Otherwise the baseline digests the whole system, which
+   may have changed for reasons of its own since the attempt, so recovery
+   requires only that no Clash for Mac network state remains: no interface,
+   route or DNS resolver of the Clash for Mac tunnel plan, and a system proxy
+   that either equals the baseline byte for byte or enables no HTTP, HTTPS or
+   SOCKS proxy on a loopback host; the PAC and WPAD switches, which a
+   Tunnel-mode collection does not change, are not compared. Either way it
+   observes again once a second for up to 30 seconds; recovery without Clash
+   for Windows then names each remnant it still finds. Another tool's loopback
+   proxy or tunnel-plan address looks the same, so check before treating one
+   as Clash for Mac's. If the installed Host is running,
    it prints the same quit instruction and waits up to 10 minutes for the
    Host to exit. If that wait ends without the exit, the error says what to
    do: quit it with Quit Clash for Mac (⌘Q) and rerun `recover`. If it does
@@ -1498,7 +1637,11 @@ never adopted.
    before any runtime command. Never recover a successful collection.
 
    `collect` publishes raw evidence only after shutdown, the signed Off proof,
-   the exact CFW restore and the post-restore environment check succeed. If it
+   the exact CFW restore and the post-restore environment check succeed. The
+   restored guard must equal the collection baseline exactly; configd can
+   still be applying the restored proxy, DNS and routes when the Off proof
+   completes, so a guard that differs is observed again once a second for up
+   to 30 seconds before the collection fails. If it
    then reports that raw evidence is published but sealing did not complete,
    or reports an unknown durability outcome while `runtime-evidence` exists,
    keep every tree and run:
@@ -1514,7 +1657,13 @@ never adopted.
    reverifies an identical adapter. Repeating it is safe; a persistent
    failure keeps this stage blocked. Never run `recover` after raw evidence is
    published. Failures print their `caused by` chain, which names the
-   underlying error.
+   underlying error, and for a failed command its exit status and the end of
+   each output stream: at most 4 KiB of each, with control characters
+   escaped. An output in which any credential pattern matches anywhere is not
+   shown at all: its note gives only its size and says it holds
+   credential-like material. Every line of a note is indented by two spaces
+   under the failure it belongs to, so only the error line and the `caused
+   by` lines start at the left margin.
 
    Each collection event, including the `raw_published` marker, and the
    adapter are written whole and synced under a temporary
@@ -1544,8 +1693,13 @@ never adopted.
    ```
 
    `--seal-publication` reopens prepackage and GA acceptance before sealing the
-   distribution set. `--upload-assets` is read-only: it reopens the publication
-   stage and all package bindings, then prints the exact upload allowlist. It
+   distribution set. `--upload-assets` is read-only: it live-revalidates the
+   hosted CI receipt, reopens prepackage and checks the frozen app's stapled
+   ticket and Gatekeeper approval live, so Apple's services must be reachable
+   and Gatekeeper enabled, then reopens the publication stage and all package
+   bindings and prints the exact upload allowlist: the bare paths that its
+   final artifact-set verification prints last. Every earlier line, including
+   the release app verifier's transcript, is a report, not an upload path. It
    does not create a tag, GitHub Release, or upload any file;
 10. retain the private signing, notarization, install, runtime, legal-review,
    and raw-evidence roots. Publish only the allowlisted distribution artifacts
@@ -1785,9 +1939,11 @@ that exact tree digest. The Python `seal-release` operation itself invokes the
 authoritative publication verifier before writing this seal and proves the
 evidence tree did not change across semantic authorization; correctness does
 not depend only on shell call order. The upload gate reruns the semantic publication
-verification and then reopens and recomputes this final seal. Only the paths it
-prints are eligible for upload; the earlier signed-app publication-evidence
-gate or either component seal alone is not upload authorization.
+verification and then reopens and recomputes this final seal. Only the bare
+paths it prints last are eligible for upload, not the reports before them such
+as the release app verifier's transcript; the earlier signed-app
+publication-evidence gate or either component seal alone is not upload
+authorization.
 
 The same atomic distribution directory contains one deterministic public
 publication bundle, its canonical sidecar manifest, and the standalone public

@@ -4,9 +4,11 @@ from dataclasses import asdict, replace
 import errno
 import hashlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import shutil
@@ -2310,6 +2312,67 @@ en0: flags=8863<UP> mtu 1500
     def test_process_parser_rejects_missing_start_time(self) -> None:
         with self.assertRaises(InstallError):
             _parse_processes("36650 501 /Applications/example\n")
+
+    # The former line pattern, whose lazy path `(.+?)\s*` to the end of the
+    # line took quadratic time over a run of whitespace inside the path. It is
+    # the oracle for which lines are accepted and the fields read from them.
+    FORMER_PROCESS_LINE_RE = re.compile(
+        r"\s*([1-9][0-9]*)\s+(-?[0-9]+)\s+"
+        r"([A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] "
+        r"[0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})\s+(.+?)\s*"
+    )
+
+    def test_process_parser_reads_lines_as_the_former_pattern_read_them(self) -> None:
+        # Every path of up to five characters from whitespace, including a
+        # tab and a no-break space, and other characters, after each prefix.
+        prefixes = (
+            "36650 501 Thu Jul 23 15:20:55 2026",
+            "  7    -2 Thu Jul  3 15:20:55 2026",
+            "36650 501 Thu Jul 23 15:20:55 202",
+        )
+        alphabet = (" ", "\t", "\xa0", "a", "/")
+        for prefix in prefixes:
+            for length in range(6):
+                for path in itertools.product(alphabet, repeat=length):
+                    line = prefix + "".join(path)
+                    former = self.FORMER_PROCESS_LINE_RE.fullmatch(line)
+                    if former is None:
+                        with self.assertRaises(InstallError):
+                            _parse_processes(f"{line}\n")
+                        continue
+                    pid, uid, started_at, executable = former.groups()
+                    self.assertEqual(
+                        _parse_processes(f"{line}\n"),
+                        [
+                            {
+                                "pid": int(pid),
+                                "uid": int(uid),
+                                "started_at": started_at,
+                                "path": executable,
+                            }
+                        ],
+                        repr(line),
+                    )
+
+    def test_process_parser_reads_a_long_path_in_linear_time(self) -> None:
+        # ps prints comm as a process of the same user may set it; the former
+        # pattern took about nine seconds for this line.
+        path = "/tmp/a" + " " * 50_000 + "b"
+        started = time.perf_counter()
+        processes = _parse_processes(f"36650 501 Thu Jul 23 15:20:55 2026 {path}  \n")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(
+            processes,
+            [
+                {
+                    "pid": 36650,
+                    "uid": 501,
+                    "started_at": "Thu Jul 23 15:20:55 2026",
+                    "path": path,
+                }
+            ],
+        )
+        self.assertLess(elapsed, 1.0)
 
 
 class BoundedCommandRunnerTests(unittest.TestCase):

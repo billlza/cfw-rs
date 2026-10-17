@@ -999,6 +999,11 @@ class ActiveLedgerRuleTests(unittest.TestCase):
             # A backticked status elsewhere is not the classification sentence.
             (f"GA build {retired} is retired.\n`{FREEZE}`\n", "does not classify"),
             (b"\xff", "unreadable"),
+            # A note drafted before the commit it names exists is not finished.
+            (
+                retirement_note(retired, FREEZE) + "Commit `@TOOLING_COMMIT@` fixes it.\n",
+                "still holds the placeholder @TOOLING_COMMIT@",
+            ),
         )
         original = note.read_bytes()
         for text, message in cases:

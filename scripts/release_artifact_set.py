@@ -50,6 +50,7 @@ if __package__:
         PublicationError,
         canonical_json,
         enumerate_tree,
+        failure_diagnostic,
         open_regular,
         read_regular,
         regular_file_identity,
@@ -114,6 +115,7 @@ else:
         PublicationError,
         canonical_json,
         enumerate_tree,
+        failure_diagnostic,
         open_regular,
         read_regular,
         regular_file_identity,
@@ -4607,7 +4609,8 @@ def main(
         SourceIdentityError,
         ValueError,
     ) as error:
-        notes = "".join(f"\n{note}" for note in getattr(error, "__notes__", ()))
-        raise SystemExit(f"error: release artifact set: {error}{notes}") from error
+        raise SystemExit(
+            failure_diagnostic(f"error: release artifact set: {error}", error)
+        ) from error
     for message in messages:
         print(message)

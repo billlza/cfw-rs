@@ -123,14 +123,16 @@ def main() -> None:
             ) from error
 
     from scripts.candidate_freeze import CandidateFreezeError
-    from scripts.publication.common import PublicationError, failure_diagnostic
+    from scripts.publication.common import PublicationError, failure_diagnostic, note_lines
 
     try:
         message = _run_runtime_command()
     except SystemExit as error:
         notes = getattr(error, "__notes__", ())
         if notes:
-            raise SystemExit(f"{error}\n" + "\n".join(notes)) from error
+            raise SystemExit(
+                "\n".join([str(error), *(line for note in notes for line in note_lines(note))])
+            ) from error
         raise
     except (CandidateFreezeError, OSError, PublicationError, ValueError) as error:
         raise SystemExit(

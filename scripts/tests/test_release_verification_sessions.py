@@ -469,14 +469,16 @@ class ReleaseVerificationSessionTests(unittest.TestCase):
     def test_stage_source_drift_during_postverify_cannot_leave_a_success(self) -> None:
         calls = 0
 
-        def compose(repository, _source, *, freeze_verifier, **_values):
+        def compose(repository, _source, *, notarization, freeze_verifier, **_values):
             nonlocal calls
             calls += 1
             if calls == 2:
                 self.tauri_config.write_bytes(b'{"plugins":{"updater":{"pubkey":"changed"}}}\n')
                 # Exercise the real contract's freeze-error mapping before any
                 # missing fixture package inputs could be read.
-                contract._verified_prepackage_inputs(repository, freeze_verifier=freeze_verifier)
+                contract._verified_prepackage_inputs(
+                    repository, notarization=notarization, freeze_verifier=freeze_verifier
+                )
                 self.fail("changed Tauri source passed prepackage proof validation")
             self._consume(repository, freeze_verifier)
             return self.stage.prepackage_files()

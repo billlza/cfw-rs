@@ -21,6 +21,7 @@ if __package__:
     from ..release_app_verifier_output import (
         RELEASE_APP_VERIFIER_OUTPUT_LIMIT,
         RELEASE_APP_VERIFIER_TIMEOUT_SECONDS,
+        NotarizationCheck,
         ReleaseAppVerifierOutputError,
         parse_release_app_verifier_output,
     )
@@ -55,6 +56,7 @@ else:  # pragma: no cover - direct-script import path
     from release_app_verifier_output import (
         RELEASE_APP_VERIFIER_OUTPUT_LIMIT,
         RELEASE_APP_VERIFIER_TIMEOUT_SECONDS,
+        NotarizationCheck,
         ReleaseAppVerifierOutputError,
         parse_release_app_verifier_output,
     )
@@ -448,6 +450,7 @@ def _identity_observation_command(value: Any) -> dict[str, Any]:
         transcript = parse_release_app_verifier_output(
             stdout_bytes,
             stderr_bytes,
+            notarization=NotarizationCheck.LIVE,
             expected_app_suffix="/" + IDENTITY_FINAL_APP_RELATIVE,
             expected_build_number=IDENTITY_GA_BUILD,
         )

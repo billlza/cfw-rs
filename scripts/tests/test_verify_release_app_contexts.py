@@ -126,15 +126,20 @@ class ReleaseAppVerifierShellTests(unittest.TestCase):
         )
 
     def test_command_line_admits_each_mode_for_the_fixed_app_before_reading_it(self) -> None:
-        # A copy of the verifier and every file it sources while loading, so
-        # its fixed GA paths point into an empty temporary checkout.
+        # A copy of the verifier and every file it loads, so its fixed GA
+        # paths point into an empty temporary checkout. Under the hosted
+        # runner's unsigned-validation Xcode selection, loading also runs
+        # apple_validation_policy.py, which imports these publication modules.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            (root / "scripts").mkdir()
+            (root / "scripts/publication").mkdir(parents=True)
             for name in (
                 "verify_release_app.sh", "dependency_pins.env", "release_identity.env",
                 "libbox_source_contract.sh", "release_toolchain_contract.sh",
                 "release_python_launcher.sh", "apple_validation_policy.sh",
+                "apple_validation_policy.py", "publication/__init__.py",
+                "publication/graph_model.py", "publication/common.py",
+                "publication/bounded_process.py",
             ):
                 shutil.copyfile(REPOSITORY / "scripts" / name, root / "scripts" / name)
             ga_root = root / f"target/candidates/0.5.0/ga/{GA_BUILD}"

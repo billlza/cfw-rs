@@ -124,6 +124,10 @@ fn token() -> Result<OwnedHandle> {
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     let token = token()?;
     let mut desktop = desktop::Desktop::new()?;
+    let trace_loader = std::env::var("CFW_NATIVE_SERVICE_LOADER_TRACE").as_deref() == Ok("1");
+    if trace_loader {
+        loader::token_default_dacl(&token)?;
+    }
     let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
     let mut command = wide(&format!("\"{}\" --client {name} {hex}", image.display()));
     let parent = image.parent().ok_or("missing fixture image parent")?;
@@ -164,7 +168,13 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
             null(),
             null(),
             1,
-            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_NO_WINDOW
+                | EXTENDED_STARTUPINFO_PRESENT
+                | if trace_loader {
+                    DEBUG_ONLY_THIS_PROCESS
+                } else {
+                    0
+                },
             null(),
             null(),
             &startup.StartupInfo,
@@ -176,6 +186,13 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     }
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
+    if trace_loader {
+        let exit = loader::trace(&process, info.dwProcessId)?;
+        // This isolated diagnostic is never evidence of normal client admission.
+        return Err(format!(
+            "diagnostic-only loader trace completed: exit={exit:#x}"
+        ));
+    }
     let waited = cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?;
     if waited != cfw_windows_storage::WaitOutcome::Signaled {

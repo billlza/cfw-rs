@@ -48,7 +48,7 @@ tempfile.workspace = true
 cfw-engine-api = { path = "../cfw-engine-api" }
 cfw-windows-credentials = { path = "../cfw-windows-credentials" }
 tokio = { workspace = true, features = ["rt", "net", "io-util"] }
-windows-sys = { version = "=0.61.2", features = ["Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi", "Win32_System_Diagnostics_Debug"] }
 
 [[test]]
 name = "native_engine"

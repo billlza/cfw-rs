@@ -27,6 +27,7 @@ use windows_sys::Win32::{
 };
 
 mod desktop;
+mod loader;
 mod restricted;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: Duration = Duration::from_secs(15);

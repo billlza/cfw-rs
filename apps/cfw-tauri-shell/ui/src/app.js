@@ -5,6 +5,7 @@ import { createNativeGeneralSwitches } from "./native-general-switches.js";
 import { createNativePromptDialog, promptDialogFrame } from "./native-prompt-dialog.js";
 import { createWindowGlass } from "./window-glass.js";
 import { navIcon } from "./nav-icons.js";
+import { platformPresentation, proxyEnvironmentCommands } from "./platform-presentation.js";
 import { t, setLocale, getLocale, SUPPORTED_LOCALES, LANGUAGE_OPTIONS } from "./i18n.js";
 import {
   PAGES,
@@ -1879,6 +1880,7 @@ function renderGlassOverlays() {
       `);
     } else if (dialog.kind === "product-about") {
       const product = state.payload.product;
+      const presentation = platformPresentation(product.operating_system);
       const version = product.version ?? "—";
       const update = dialog.payload?.update;
       const phase = dialog.payload?.phase ?? (dialog.payload?.checking ? "checking" : "idle");
@@ -1896,13 +1898,13 @@ function renderGlassOverlays() {
           : "";
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
-        <div class="glass-dialog product-about" role="dialog" aria-label="${escapeHtml(t("About Clash for Mac"))}">
+        <div class="glass-dialog product-about" role="dialog" aria-label="${escapeHtml(t("About {product}", { product: product.name }))}">
           <div class="product-about-icon">${renderCatLogo()}</div>
-          <div class="product-about-name">Clash for Mac</div>
+          <div class="product-about-name">${escapeHtml(product.name)}</div>
           <div class="product-about-sub">${escapeHtml(t("Powered by sing-box"))}</div>
           <div class="product-about-meta">
             <div>版本 ${escapeHtml(String(version))}</div>
-            <div>${escapeHtml(String(product.architecture ?? "arm64"))} · macOS ${escapeHtml(String(product.minimum_macos ?? "15.0"))}+</div>
+            <div>${escapeHtml(product.architecture)} · ${presentation.name} ${escapeHtml(product.minimum_os_version)}+</div>
           </div>
           <div class="product-about-status">${escapeHtml(status)}</div>
           ${notes}
@@ -1914,7 +1916,7 @@ function renderGlassOverlays() {
             <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : t("Check for Update")}</button>
             <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>${escapeHtml(t("Close"))}</button>
           </div>
-          <div class="product-about-copy">© Clash for Mac · ${escapeHtml(String(product.license ?? "GPL-3.0-or-later"))}</div>
+          <div class="product-about-copy">© ${escapeHtml(product.name)} · ${escapeHtml(product.license)}</div>
         </div>
       `);
     }
@@ -2548,21 +2550,24 @@ function renderLogs() {
 
 function renderFeedback() {
   const product = state.payload.product;
+  const presentation = platformPresentation(product.operating_system);
   const version = product.version ?? "—";
   const update = state.updateInfo;
   const updateLine = update?.available && update?.version
     ? t("New version available: v{value1} (current v{value2}).", { value1: escapeHtml(String(update.version)), value2: escapeHtml(String(update.current ?? version)) })
-    : t("Current build v{value1} — the menu bar Clash for Mac → Check for Update… also works.", { value1: escapeHtml(String(version)) });
+    : product.operating_system === "macos"
+      ? t("Current build v{value1} — the menu bar Clash for Mac → Check for Update… also works.", { value1: escapeHtml(String(version)) })
+      : t("Current build v{value1} — check for updates from the tray menu.", { value1: escapeHtml(String(version)) });
   const platform = state.platform;
   return `
     <div class="feedback-layout">
       <section class="panel hero-panel">
         <div>
           <p class="label">${escapeHtml(t("About"))}</p>
-          <h3>${escapeHtml(product.name ?? "Clash for Mac")} v${escapeHtml(String(version))}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
-          <p class="muted">${escapeHtml(product.license ?? "GPL-3.0-or-later")} · ${escapeHtml(product.architecture ?? "arm64")} · macOS ${escapeHtml(product.minimum_macos ?? "15.0")} or later</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(String(version))}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
+          <p class="muted">${escapeHtml(product.license)} · ${escapeHtml(product.architecture)} · ${presentation.name} ${escapeHtml(product.minimum_os_version)} or later</p>
         </div>
-        <span class="badge">${escapeHtml(t("ARM64 macOS only"))}</span>
+        <span class="badge">${escapeHtml(product.operating_system === "macos" ? t("ARM64 macOS only") : `${presentation.name} ${product.architecture}`)}</span>
       </section>
 
       <section class="panel">
@@ -3636,14 +3641,10 @@ export async function handleAction(action) {
       renderPage();
       return;
     }
-    const exports = [
-      `export https_proxy=http://127.0.0.1:${port}`,
-      `export http_proxy=http://127.0.0.1:${port}`,
-      `export all_proxy=socks5://127.0.0.1:${port}`,
-    ].join("\n");
     try {
+      const exports = proxyEnvironmentCommands(state.payload.product.operating_system, port);
       await navigator.clipboard.writeText(exports);
-      appendLog("info", "shell", t("Copied proxy export commands for Terminal"));
+      appendLog("info", "shell", t(platformPresentation(state.payload.product.operating_system).copiedProxyCommands));
     } catch (error) {
       appendLog("warning", "clipboard", errorText(error));
     }

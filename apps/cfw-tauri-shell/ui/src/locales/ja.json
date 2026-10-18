@@ -793,5 +793,10 @@
   "Mainland China direct": "中国本土宛てを直接接続",
   "Mainland China direct · {countries}": "中国本土宛てを直接接続 · {countries}",
   "In Rule mode, traffic that no profile rule matches goes direct when it is bound for mainland China, and the app's own DNS answers mainland names through encrypted DNS in mainland China. The first start with each profile downloads the China rule sets through the proxy and waits for them; they then refresh daily while the core runs. It does not apply to a profile that routes directly. Existing connections may reconnect when this changes.": "ルールモードでは、プロファイルのルールに一致しない中国本土宛ての通信を直接接続し、アプリ自身の DNS は中国本土のドメインを中国本土の暗号化 DNS で解決します。各プロファイルの初回起動時に中国本土のルールセットをプロキシ経由でダウンロードし、完了してからコアを起動します。その後はコア稼働中に毎日更新します。直接接続するプロファイルには適用されません。変更すると、既存の接続は再接続される場合があります。",
-  "Mainland China direct is on. For a profile routed through a proxy, the switch's rules apply in Rule mode after the listed rules, before the final route (MATCH).": "「中国本土宛てを直接接続」がオンです。プロキシ経由でルーティングするプロファイルでは、ルールモードでこの機能のルールが一覧のルールの後、最終ルート（MATCH）の前に適用されます。"
+  "Mainland China direct is on. For a profile routed through a proxy, the switch's rules apply in Rule mode after the listed rules, before the final route (MATCH).": "「中国本土宛てを直接接続」がオンです。プロキシ経由でルーティングするプロファイルでは、ルールモードでこの機能のルールが一覧のルールの後、最終ルート（MATCH）の前に適用されます。",
+  "About {product}": "{product} について",
+  "Copied proxy commands for PowerShell": "PowerShell 用のプロキシ設定コマンドをコピーしました",
+  "Copy proxy commands for PowerShell": "PowerShell 用のプロキシ設定コマンドをコピー",
+  "Current build v{value1} — check for updates from the tray menu.": "現在のビルドは v{value1} です。トレイメニューから更新を確認できます。",
+  "Start with Windows": "Windows 起動時に開く"
 }

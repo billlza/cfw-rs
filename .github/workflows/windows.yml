@@ -1,0 +1,88 @@
+name: Windows shared contracts
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-contracts:
+    name: Windows x64 shared Rust and UI contracts
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_UPDATE_NOTIFIER: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify source and read pinned validation tool versions
+        id: pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actualSource = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Cannot inspect the checked out source" }
+          if ($actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          foreach ($name in @("RUST_VERSION", "NODE_VERSION", "NPM_VERSION", "NPM_ARCHIVE_SHA256")) {
+            $pattern = if ($name -eq "NPM_ARCHIVE_SHA256") { "[0-9a-f]{64}" } else { "[0-9]+\.[0-9]+\.[0-9]+" }
+            $values = [regex]::Matches($pins, "(?m)^${name}=($pattern)\r?`$")
+            if ($values.Count -ne 1) { throw "Missing or ambiguous pin: $name" }
+            "$name=$($values[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.pins.outputs.RUST_VERSION }}
+          components: clippy,rustfmt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.pins.outputs.NODE_VERSION }}
+      - name: Prepare the hash-pinned npm distribution
+        env:
+          CFW_NPM_VERSION: ${{ steps.pins.outputs.NPM_VERSION }}
+          CFW_NPM_ARCHIVE_SHA256: ${{ steps.pins.outputs.NPM_ARCHIVE_SHA256 }}
+        run: |
+          $npmRoot = Join-Path $env:RUNNER_TEMP "cfw-npm"
+          New-Item -ItemType Directory -Path $npmRoot -ErrorAction Stop | Out-Null
+          $archive = Join-Path $npmRoot "npm.tgz"
+          Invoke-WebRequest "https://registry.npmjs.org/npm/-/npm-$($env:CFW_NPM_VERSION).tgz" -OutFile $archive
+          $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:CFW_NPM_ARCHIVE_SHA256) { throw "npm archive digest mismatch" }
+          tar -xzf $archive -C $npmRoot
+          if ($LASTEXITCODE -ne 0) { throw "Cannot extract the verified npm distribution" }
+          $npmCli = Join-Path $npmRoot "package/bin/npm-cli.js"
+          $npmVersion = node $npmCli --version
+          if ($LASTEXITCODE -ne 0 -or $npmVersion -cne $env:CFW_NPM_VERSION) { throw "npm version mismatch" }
+          "CFW_NPM_CLI=$npmCli" >> $env:GITHUB_ENV
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check shared Rust contracts on Windows
+        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application --all-targets -- -D warnings
+      - name: Test shared Rust contracts on Windows
+        run: cargo test --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application --all-targets
+      - name: Install locked UI dependencies
+        working-directory: apps/cfw-tauri-shell
+        run: node $env:CFW_NPM_CLI ci --ignore-scripts=false --install-links=true
+      - name: Build and test the shared UI on Windows
+        working-directory: apps/cfw-tauri-shell
+        run: node $env:CFW_NPM_CLI test
+      - name: Record the scope of this validation
+        run: |
+          "Validated the shared Rust packages and the bundled UI contract tests on Windows x64." >> $env:GITHUB_STEP_SUMMARY
+          "This job does not build or launch a Windows application, install a service or TUN driver, or establish desktop, network, signing, or release acceptance." >> $env:GITHUB_STEP_SUMMARY

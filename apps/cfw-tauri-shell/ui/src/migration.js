@@ -1,3 +1,5 @@
+import { platformPresentation } from "./platform-presentation.js";
+
 const CUTOVER_TARGETS = new Set(["system_proxy", "tunnel"]);
 const HANDOFF_FAILURE_CODES = new Set([
   "migration_handoff_admission_failed",
@@ -130,7 +132,7 @@ export function normalizeBootPayload(value) {
     || typeof value.native_ui.window_glass !== "boolean") {
     throw new TypeError("boot native UI capabilities are invalid");
   }
-  if (!exactKeys(value.product, ["architecture", "license", "minimum_macos", "name", "version"])) {
+  if (!exactKeys(value.product, ["architecture", "license", "minimum_os_version", "name", "operating_system", "version"])) {
     throw new TypeError("boot product fields are invalid");
   }
   if (typeof value.migration_handoff !== "boolean") {
@@ -139,6 +141,7 @@ export function normalizeBootPayload(value) {
   const product = Object.fromEntries(
     Object.entries(value.product).map(([key, field]) => [key, boundedProductField(field, `product ${key}`)]),
   );
+  platformPresentation(product.operating_system);
   const migrationHandoffStatus = normalizeMigrationHandoffStatus(value.migration_handoff_status);
   const rendererReady = value.migration_handoff_renderer_ready;
   if (!value.migration_handoff) {

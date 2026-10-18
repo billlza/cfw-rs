@@ -16,6 +16,11 @@ release fallbacks.
 
 ## Architecture
 
+CFW 0.5.0 Windows development starts from the published CFM 0.5.0 source.
+The [parity matrix, architecture decision, validation plan and current status](docs/planning/cfw-0.5.0.md)
+track that work. Shared-source or CI contract coverage does not establish an
+available Windows application or release.
+
 ```text
 Tauri UI
   -> cfw-application::EngineModeCoordinator

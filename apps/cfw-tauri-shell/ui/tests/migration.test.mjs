@@ -30,7 +30,8 @@ function bootPayload({ handoff = false, rendererReady = null } = {}) {
       name: "Clash for Mac",
       version: "0.4.0",
       license: "GPL-3.0-or-later",
-      minimum_macos: "15.0",
+      operating_system: "macos",
+      minimum_os_version: "15.0",
       architecture: "arm64",
     },
     migration_handoff: handoff,
@@ -75,6 +76,28 @@ test("boot payload strictly separates dashboard, challenge and published rendere
     bootPayload({ handoff: true, rendererReady: { state: "unknown" } }),
   ]) {
     assert.throws(() => normalizeBootPayload(invalid), /invalid|requires|cannot/u);
+  }
+});
+
+test("boot identity requires an explicit supported operating system without Apple-only metadata", () => {
+  for (const [operatingSystem, name, minimum, architecture] of [
+    ["macos", "Clash for Mac", "15.0", "arm64"],
+    ["windows", "Clash for Windows", "10.0.26100", "x64"],
+  ]) {
+    const payload = bootPayload();
+    payload.product = {
+      name, version: "0.5.0", license: "GPL-3.0-or-later",
+      operating_system: operatingSystem, minimum_os_version: minimum, architecture,
+    };
+    assert.deepEqual(normalizeBootPayload(payload).product, payload.product);
+    for (const invalid of [undefined, null, "", "linux", "Windows", "macos\n", 1]) {
+      assert.throws(() => normalizeBootPayload({
+        ...payload, product: { ...payload.product, operating_system: invalid },
+      }), /invalid/u);
+    }
+    assert.throws(() => normalizeBootPayload({
+      ...payload, product: { ...payload.product, minimum_macos: "15.0" },
+    }), /invalid/u);
   }
 });
 

@@ -1,0 +1,551 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "product": "Clash for Mac",
+    "version": "0.5.0",
+    "tag": "v0.5.0",
+    "commit": "502adf9fd858218bb1f1cbeba738aa0b4791960d",
+    "published_at": "2026-10-18T09:12:23Z",
+    "release_url": "https://github.com/billlza/cfw-rs/releases/tag/v0.5.0"
+  },
+  "scope": "Immutable source inventory. It does not establish Windows implementation, execution, visual fidelity, or release readiness.",
+  "pages": [
+    {
+      "id": "general",
+      "title": "General",
+      "summary": "Overview, runtime status, mode, system proxy and TUN switches."
+    },
+    {
+      "id": "proxies",
+      "title": "Proxies",
+      "summary": "Proxy groups, selections, delay indicators and quick switching."
+    },
+    {
+      "id": "profiles",
+      "title": "Profiles",
+      "summary": "Subscription import, update, validation and profile lifecycle."
+    },
+    {
+      "id": "providers",
+      "title": "Providers",
+      "summary": "Proxy providers, rule providers, health checks and update actions."
+    },
+    {
+      "id": "logs",
+      "title": "Logs",
+      "summary": "Engine logs and filtered runtime diagnostics."
+    },
+    {
+      "id": "connections",
+      "title": "Connections",
+      "summary": "Live connection list, close-all action and traffic visibility."
+    },
+    {
+      "id": "rules",
+      "title": "Rules",
+      "summary": "Rule matching visibility and router/provider diagnostics."
+    },
+    {
+      "id": "settings",
+      "title": "Settings",
+      "summary": "Shell settings, startup, credentials and diagnostics."
+    },
+    {
+      "id": "feedback",
+      "title": "Feedback",
+      "summary": "About, updates and build references."
+    }
+  ],
+  "commands": [
+    {
+      "name": "acknowledge_migration_handoff_renderer_ready",
+      "family": "lifecycle"
+    },
+    {
+      "name": "engine_snapshot",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "reconcile_startup_services",
+      "family": "lifecycle"
+    },
+    {
+      "name": "boot_payload",
+      "family": "lifecycle"
+    },
+    {
+      "name": "report_dashboard_startup",
+      "family": "lifecycle"
+    },
+    {
+      "name": "reload_dashboard",
+      "family": "lifecycle"
+    },
+    {
+      "name": "quit_app",
+      "family": "lifecycle"
+    },
+    {
+      "name": "read_settings_snapshot",
+      "family": "preferences"
+    },
+    {
+      "name": "read_runtime_settings_snapshot",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "write_runtime_settings_snapshot",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "read_automation_settings",
+      "family": "automation"
+    },
+    {
+      "name": "write_automation_settings",
+      "family": "automation"
+    },
+    {
+      "name": "request_wifi_name_access",
+      "family": "automation"
+    },
+    {
+      "name": "write_settings_snapshot",
+      "family": "preferences"
+    },
+    {
+      "name": "legacy_retirement_status",
+      "family": "legacy_maintenance"
+    },
+    {
+      "name": "begin_migration_handoff",
+      "family": "legacy_maintenance"
+    },
+    {
+      "name": "prepare_legacy_cutover",
+      "family": "legacy_maintenance"
+    },
+    {
+      "name": "disable_service_mode",
+      "family": "legacy_maintenance"
+    },
+    {
+      "name": "recover_legacy_cutover",
+      "family": "legacy_maintenance"
+    },
+    {
+      "name": "set_launch_at_login_enabled",
+      "family": "automation"
+    },
+    {
+      "name": "import_profile_text",
+      "family": "profiles"
+    },
+    {
+      "name": "profiles_snapshot",
+      "family": "profiles"
+    },
+    {
+      "name": "read_profile_source_url",
+      "family": "profiles"
+    },
+    {
+      "name": "profile_credential_requirements",
+      "family": "credentials"
+    },
+    {
+      "name": "profile_credential_presence",
+      "family": "credentials"
+    },
+    {
+      "name": "provision_profile_credentials",
+      "family": "credentials"
+    },
+    {
+      "name": "preview_credential_gc",
+      "family": "credentials"
+    },
+    {
+      "name": "commit_credential_gc",
+      "family": "credentials"
+    },
+    {
+      "name": "cancel_credential_gc",
+      "family": "credentials"
+    },
+    {
+      "name": "select_profile",
+      "family": "profiles"
+    },
+    {
+      "name": "delete_profile",
+      "family": "profiles"
+    },
+    {
+      "name": "check_for_updates",
+      "family": "updates"
+    },
+    {
+      "name": "open_available_update",
+      "family": "updates"
+    },
+    {
+      "name": "prepare_update_install",
+      "family": "updates"
+    },
+    {
+      "name": "cancel_update_install",
+      "family": "updates"
+    },
+    {
+      "name": "commit_update_install",
+      "family": "updates"
+    },
+    {
+      "name": "resolve_update_install",
+      "family": "updates"
+    },
+    {
+      "name": "controller_snapshot",
+      "family": "observation"
+    },
+    {
+      "name": "controller_version",
+      "family": "observation"
+    },
+    {
+      "name": "providers_snapshot",
+      "family": "providers"
+    },
+    {
+      "name": "rules_snapshot",
+      "family": "routing_and_dns"
+    },
+    {
+      "name": "select_proxy",
+      "family": "proxy_selection"
+    },
+    {
+      "name": "test_proxy_delays",
+      "family": "proxy_selection"
+    },
+    {
+      "name": "health_check_proxy_provider",
+      "family": "providers"
+    },
+    {
+      "name": "health_check_all_proxy_providers",
+      "family": "providers"
+    },
+    {
+      "name": "update_proxy_provider",
+      "family": "providers"
+    },
+    {
+      "name": "update_all_providers",
+      "family": "providers"
+    },
+    {
+      "name": "update_all_proxy_providers",
+      "family": "providers"
+    },
+    {
+      "name": "update_rule_provider",
+      "family": "providers"
+    },
+    {
+      "name": "update_all_rule_providers",
+      "family": "providers"
+    },
+    {
+      "name": "start_log_stream",
+      "family": "observation"
+    },
+    {
+      "name": "start_connections_stream",
+      "family": "observation"
+    },
+    {
+      "name": "stop_log_stream",
+      "family": "observation"
+    },
+    {
+      "name": "stop_connections_stream",
+      "family": "observation"
+    },
+    {
+      "name": "close_connection",
+      "family": "observation"
+    },
+    {
+      "name": "close_all_connections",
+      "family": "observation"
+    },
+    {
+      "name": "dns_query",
+      "family": "routing_and_dns"
+    },
+    {
+      "name": "flush_fake_ip_cache",
+      "family": "routing_and_dns"
+    },
+    {
+      "name": "read_profile_text",
+      "family": "profiles"
+    },
+    {
+      "name": "save_profile_text",
+      "family": "profiles"
+    },
+    {
+      "name": "read_runtime_config_text",
+      "family": "profiles"
+    },
+    {
+      "name": "apply_active_profile",
+      "family": "profiles"
+    },
+    {
+      "name": "import_profile_url",
+      "family": "profiles"
+    },
+    {
+      "name": "import_profile_file",
+      "family": "profiles"
+    },
+    {
+      "name": "update_profile",
+      "family": "profiles"
+    },
+    {
+      "name": "update_profile_info",
+      "family": "profiles"
+    },
+    {
+      "name": "profile_qrcode_svg",
+      "family": "profiles"
+    },
+    {
+      "name": "reveal_profile",
+      "family": "profiles"
+    },
+    {
+      "name": "open_profile_externally",
+      "family": "profiles"
+    },
+    {
+      "name": "geoip_database_status",
+      "family": "routing_and_dns"
+    },
+    {
+      "name": "update_geoip_database",
+      "family": "routing_and_dns"
+    },
+    {
+      "name": "preview_legacy_cfw_profile_migration",
+      "family": "profiles"
+    },
+    {
+      "name": "commit_legacy_cfw_profile_migration",
+      "family": "profiles"
+    },
+    {
+      "name": "set_core_enabled",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "set_system_proxy_enabled",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "system_proxy_state",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "set_tun_enabled",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "tun_runtime_state",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "set_proxy_mode",
+      "family": "proxy_selection"
+    },
+    {
+      "name": "set_allow_lan",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "set_bind_address",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "set_log_level",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "set_mixin_enabled",
+      "family": "engine_and_runtime"
+    },
+    {
+      "name": "apply_restore_dns_servers",
+      "family": "routing_and_dns"
+    },
+    {
+      "name": "reset_settings_snapshot",
+      "family": "preferences"
+    },
+    {
+      "name": "current_platform_design",
+      "family": "preferences"
+    },
+    {
+      "name": "open_page",
+      "family": "lifecycle"
+    },
+    {
+      "name": "reveal_home_directory",
+      "family": "preferences"
+    },
+    {
+      "name": "reveal_logs_directory",
+      "family": "preferences"
+    },
+    {
+      "name": "open_login_items_settings",
+      "family": "automation"
+    },
+    {
+      "name": "move_dashboard_to_nearest_monitor",
+      "family": "lifecycle"
+    },
+    {
+      "name": "refresh_tray_menu",
+      "family": "lifecycle"
+    },
+    {
+      "name": "toggle_devtools",
+      "family": "lifecycle"
+    },
+    {
+      "name": "force_quit_app",
+      "family": "lifecycle"
+    },
+    {
+      "name": "parse_deep_links",
+      "family": "lifecycle"
+    },
+    {
+      "name": "network_diagnostics",
+      "family": "observation"
+    },
+    {
+      "name": "present_native_profile_menu",
+      "family": "native_presentation"
+    },
+    {
+      "name": "update_native_profile_menu",
+      "family": "native_presentation"
+    },
+    {
+      "name": "dismiss_native_profile_menu",
+      "family": "native_presentation"
+    },
+    {
+      "name": "present_native_runtime_settings",
+      "family": "native_presentation"
+    },
+    {
+      "name": "update_native_runtime_settings",
+      "family": "native_presentation"
+    },
+    {
+      "name": "dismiss_native_runtime_settings",
+      "family": "native_presentation"
+    },
+    {
+      "name": "sync_native_general_switches",
+      "family": "native_presentation"
+    },
+    {
+      "name": "focus_native_general_switch",
+      "family": "native_presentation"
+    },
+    {
+      "name": "dismiss_native_general_switches",
+      "family": "native_presentation"
+    },
+    {
+      "name": "present_native_prompt_dialog",
+      "family": "native_presentation"
+    },
+    {
+      "name": "update_native_prompt_dialog",
+      "family": "native_presentation"
+    },
+    {
+      "name": "dismiss_native_prompt_dialog",
+      "family": "native_presentation"
+    },
+    {
+      "name": "present_native_window_glass",
+      "family": "native_presentation"
+    },
+    {
+      "name": "update_native_window_glass",
+      "family": "native_presentation"
+    },
+    {
+      "name": "dismiss_native_window_glass",
+      "family": "native_presentation"
+    }
+  ],
+  "files": [
+    {
+      "path": "apps/cfw-tauri-shell/src/main.rs",
+      "sha256": "ec36421ba6237fc66ecfd46d31e48ff6157f9d8e14b040ba35de21eca0e366de"
+    },
+    {
+      "path": "apps/cfw-tauri-shell/src/bootstrap.rs",
+      "sha256": "c30a7388816c2be1fb14e7a7ceacc5c90585275282af2cf80ec82480a003e1f7"
+    },
+    {
+      "path": "apps/cfw-tauri-shell/build.rs",
+      "sha256": "4545db5b3585a4dcbc71c38be8942d296f31106d80d8955077060c97545d520c"
+    },
+    {
+      "path": "apps/cfw-tauri-shell/ui/src/pages.json",
+      "sha256": "555267ce3ac2e309ed338fa5b5385ae1f71db88393f46d41f1e1f071f820fce1"
+    },
+    {
+      "path": "apps/cfw-tauri-shell/ui/src/app.js",
+      "sha256": "4e36492711dda4d23f42d5ecba2d3179a64c455dcbdf869c472f64db03ccc90a"
+    },
+    {
+      "path": "apps/cfw-tauri-shell/ui/src/general.js",
+      "sha256": "55ad6b790bb32c729a6628dfce96df0d7d6e7b34ed598d2bd75cc4aefe2ca529"
+    },
+    {
+      "path": "apps/cfw-tauri-shell/ui/src/settings-view.js",
+      "sha256": "03620e12c11db954de7d4953c6a3ac797c72c5c7f6702660cfc4b45e737e74c8"
+    },
+    {
+      "path": "apps/cfw-tauri-shell/ui/styles.css",
+      "sha256": "44a5764d06c4a5dc8c82d63f1594e72ee647984c7d8f4820baccef20bf432841"
+    },
+    {
+      "path": "crates/cfw-engine-api/src/lib.rs",
+      "sha256": "e4d66a6aeccde8d22a8f2ff0c9e02f53cdc246e4767332ff1b3157d94f21dc3b"
+    },
+    {
+      "path": "crates/cfw-application/src/coordinator.rs",
+      "sha256": "08a022e4aee50c8baeea9f0c01bcc4206a591d4243c3b25d0f81dd371aef1d6c"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "f510ef7158de0ec90abe1bbe9c283fa2322f5c81459c765e17c85b4e99ceb2b4"
+    }
+  ]
+}

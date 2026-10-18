@@ -241,7 +241,8 @@ const responses = {
       name: "Clash for Mac",
       version: "0.4.0",
       license: "GPL-3.0-or-later",
-      minimum_macos: "15.0",
+      operating_system: "macos",
+      minimum_os_version: "15.0",
       architecture: "arm64",
     },
     migration_handoff: false,
@@ -807,12 +808,87 @@ test("overlay-only General dialogs hide native switches and restore fresh geomet
   }
 });
 
+test("General uses host identity and copies platform-appropriate commands without changing the engine", async () => {
+  const original = {
+    product: state.payload.product,
+    projection: state.projection,
+    writeText: navigator.clipboard.writeText,
+    page: state.activePage,
+  };
+  const observedEngine = structuredClone(state.engine);
+  const commandsBefore = invoked.length;
+  const copies = [];
+  navigator.clipboard.writeText = async (value) => { copies.push(value); };
+  try {
+    state.projection = { ...state.projection, mixedPort: 7890 };
+    for (const [operatingSystem, name, expectedLabel, expectedCommands] of [
+      ["macos", "Clash for Mac", "Start with macOS", [
+        "export https_proxy=http://127.0.0.1:7890",
+        "export http_proxy=http://127.0.0.1:7890",
+        "export all_proxy=socks5://127.0.0.1:7890",
+      ].join("\n")],
+      ["windows", "Clash for Windows", "Start with Windows", [
+        '$env:https_proxy = "http://127.0.0.1:7890"',
+        '$env:http_proxy = "http://127.0.0.1:7890"',
+        '$env:all_proxy = "socks5://127.0.0.1:7890"',
+      ].join("\n")],
+    ]) {
+      state.payload.product = { ...original.product, name, operating_system: operatingSystem };
+      const html = await renderPage("general");
+      assert.ok(html.includes(`<span>${name}</span>`));
+      assert.ok(html.includes(expectedLabel));
+      assert.equal((html.match(/class="cfw-row"/gu) ?? []).length, 12);
+      if (operatingSystem === "windows") {
+        assert.doesNotMatch(html, /Clash for Mac|Start with macOS/u);
+        assert.match(html, /PowerShell/u);
+      }
+      await appModule.handleAction("copy-proxy-exports");
+      assert.equal(copies.at(-1), expectedCommands);
+    }
+    const copiedCount = copies.length;
+    state.projection = { ...state.projection, mixedPort: "7890; bad-command" };
+    await appModule.handleAction("copy-proxy-exports");
+    assert.equal(copies.length, copiedCount, "an invalid endpoint must never become clipboard shell code");
+    assert.deepEqual(state.engine, observedEngine);
+    assert.deepEqual(invoked.slice(commandsBefore), [], "rendering and copying do not invoke network commands");
+  } finally {
+    state.payload.product = original.product;
+    state.projection = original.projection;
+    navigator.clipboard.writeText = original.writeText;
+    await renderPage(original.page);
+  }
+});
+
 test("General exposes IPv6 as a direct switch rather than a settings-dialog button", async () => {
   const html = await renderPage("general");
   const row = html.match(/<div class="cfw-row-left">IPv6 DNS<\/div>([\s\S]*?)<div class="cfw-row">/u)?.[1];
   assert.ok(row);
   assert.match(row, /data-toggle="ipv6DNS"/u);
   assert.doesNotMatch(row, /data-action="open-runtime-settings"/u);
+});
+
+test("About and Feedback retain the host's Windows version and architecture", async () => {
+  const original = { product: state.payload.product, dialog: state.glassDialog, page: state.activePage };
+  try {
+    state.payload.product = {
+      ...original.product, name: "Clash for Windows", operating_system: "windows",
+      minimum_os_version: "10.0.26100", architecture: "x64",
+    };
+    state.glassDialog = { kind: "product-about", payload: { phase: "idle" } };
+    await renderPage("general");
+    assert.match(glassRoot.innerHTML, /aria-label="About Clash for Windows"/u);
+    assert.match(glassRoot.innerHTML, /class="product-about-name">Clash for Windows<\/div>/u);
+    assert.ok(glassRoot.innerHTML.includes("x64 · Windows 10.0.26100+"));
+    assert.doesNotMatch(glassRoot.innerHTML, /macOS 15\.0|Clash for Mac/u);
+    state.glassDialog = null;
+    const feedback = await renderPage("feedback");
+    assert.ok(feedback.includes("x64 · Windows 10.0.26100 or later"));
+    assert.doesNotMatch(feedback, /ARM64 macOS only|macOS 15\.0/u);
+  } finally {
+    state.payload.product = original.product;
+    state.glassDialog = original.dialog;
+    await renderPage(original.page);
+  }
 });
 
 test("a refreshed projection updates the inherited IPv6 switch", async () => {

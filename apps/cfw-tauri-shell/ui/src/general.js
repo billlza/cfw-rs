@@ -1,9 +1,11 @@
 import { t } from "./i18n.js";
+import { platformPresentation } from "./platform-presentation.js";
 // General page rendering has no native side effects. Runtime controls use the
 // same transaction commands as the settings page.
 export function createGeneralView({ state, escapeHtml, engineStateLabel, engineToggleCapability, launchAtLoginPresentation, modeHasTunnel, modeHasSystemProxy, renderMigrationBanner, renderRowReason, renderStartupRecoveryNotice, renderObservationRecheckNotice, renderCatLogo, generalIconButton, renderRowNote, renderInlineSwitch, tunnelValueLabel, systemProxyValueLabel, REASONS, RUNTIME_LOG_LEVELS }) {
   return function renderGeneral() {
   const product = state.payload.product;
+  const presentation = platformPresentation(product.operating_system);
   const appVersion = product.version ?? "—";
   const update = state.updateInfo;
   const updateBadge = update?.available && update?.version
@@ -62,7 +64,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
       <section class="cfw-header">
         <div class="cfw-app-mark">${renderCatLogo()}</div>
         <div class="cfw-title">
-          <span>Clash for Mac</span>
+          <span>${escapeHtml(product.name)}</span>
           <small>v${escapeHtml(appVersion)}${updateBadge}</small>
         </div>
         <span class="cfw-slogan" aria-hidden="true">Less Network<br>More Freedom</span>
@@ -80,7 +82,7 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
           <div class="cfw-row-left">
             <span>${escapeHtml(t("Port"))}</span>
             <span class="general-icons">
-              ${generalIconButton("copy-proxy-exports", "terminal", t("Copy proxy export commands for Terminal"))}
+              ${generalIconButton("copy-proxy-exports", "terminal", t(presentation.copyProxyCommands))}
             </span>
           </div>
           <div class="cfw-row-right">
@@ -212,8 +214,8 @@ export function createGeneralView({ state, escapeHtml, engineStateLabel, engineT
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">${escapeHtml(t("Start with macOS"))}</div>
-          <div class="cfw-row-right">${renderInlineSwitch("startAtLogin", t("Start with macOS"), { reason: launchAtLogin.reason, title: launchAtLogin.hint })}</div>
+          <div class="cfw-row-left">${escapeHtml(t(presentation.startAtLogin))}</div>
+          <div class="cfw-row-right">${renderInlineSwitch("startAtLogin", t(presentation.startAtLogin), { reason: launchAtLogin.reason, title: launchAtLogin.hint })}</div>
         </div>
       </section>
     </div>

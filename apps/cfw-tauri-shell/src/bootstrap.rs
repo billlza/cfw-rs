@@ -419,7 +419,8 @@ struct ProductInfo {
     name: &'static str,
     version: &'static str,
     license: &'static str,
-    minimum_macos: &'static str,
+    operating_system: &'static str,
+    minimum_os_version: &'static str,
     architecture: &'static str,
 }
 
@@ -450,7 +451,8 @@ pub(crate) async fn boot_payload(
             name: "Clash for Mac",
             version: env!("CARGO_PKG_VERSION"),
             license: "GPL-3.0-or-later",
-            minimum_macos: "15.0",
+            operating_system: "macos",
+            minimum_os_version: "15.0",
             architecture: "arm64",
         },
         migration_handoff: launch.is_migration_handoff(),

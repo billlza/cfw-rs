@@ -39,6 +39,12 @@ jobs:
           $actualSource = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw "Cannot inspect the checked out source" }
           if ($actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
+          $lineEndings = git ls-files --eol -- contracts/typed-profile-v1.json crates/cfw-singbox-config/src/tests/goldens/direct-tunnel.json
+          if ($LASTEXITCODE -ne 0 -or $lineEndings.Count -ne 2) { throw "Cannot inspect the source contract line endings" }
+          foreach ($entry in $lineEndings) {
+            Write-Output $entry
+            if ($entry -cnotmatch '^i/lf\s+w/lf\s+') { throw "Source contracts must retain LF bytes on Windows" }
+          }
           $pins = Get-Content scripts/dependency_pins.env -Raw
           foreach ($name in @("RUST_VERSION", "NODE_VERSION", "NPM_VERSION", "NPM_ARCHIVE_SHA256")) {
             $pattern = if ($name -eq "NPM_ARCHIVE_SHA256") { "[0-9a-f]{64}" } else { "[0-9]+\.[0-9]+\.[0-9]+" }

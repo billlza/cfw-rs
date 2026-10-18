@@ -163,8 +163,16 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
   修改后的迁移/启动协议文件 13 项通过。固定 Node 的完整前端套件 310 项通过；
   固定 Rust 的格式检查通过。构建日志保存在本工作区 `target/cfw-validation/`。
 - Mac 完整工作区、所有 target/feature 的 Clippy（`-D warnings`）通过；Windows
-  workflow 通过 Actionlint 和所有 PowerShell 步骤的语法解析。Windows CI 尚未执行。
-  以上数字不是 CFW 发布验收。
+  workflow 通过 Actionlint 和所有 PowerShell 步骤的语法解析。
+- 首次 [Windows CI](https://github.com/billlza/cfw-rs/actions/runs/39127804650)
+  在 `e7f4bd5` 完成共享包编译/Clippy，配置包有两项失败：16 份投影 golden 的字节
+  比较，以及 Reality 无效配置用例。后续前端步骤未执行。失败日志保留在
+  `target/cfw-validation/windows-ci-failure.log`。
+- 已在隔离检出目录复现共同机制：`core.autocrlf=true` 将全部 16 份 golden 改为 CRLF，
+  去除该转换后逐字节等于原文件；同样的转换使 Reality 的 LF 字符串替换不再改动输入。
+  新 `.gitattributes` 固定文本源码 LF，严格 golden 比较不变，负例额外断言输入确实变化。
+  修复后同一检出实验的 17 份文件逐字节一致，本地 129 项配置单元测试通过。
+  Windows 修复验证仍待新运行完成；这些结果不证明 Windows 产品可用或达到 GA。
 
 实际验证入口：
 

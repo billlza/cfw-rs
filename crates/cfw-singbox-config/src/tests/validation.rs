@@ -610,6 +610,10 @@ fn reality_requires_enabled_canonical_x25519_public_material() {
             1,
         ),
     ] {
+        assert_ne!(
+            invalid, fixture,
+            "the invalid Reality fixture must differ from the valid input"
+        );
         assert!(ValidatedSingBoxProfile::parse(&invalid).is_err());
     }
 }

@@ -1,0 +1,3 @@
+# Source contracts, snapshots and build-input hashes use the same bytes on every
+# checkout. Binary files retain Git's binary detection and are never normalized.
+* text=auto eol=lf

@@ -28,14 +28,12 @@ file. Every transaction opens its own handle without delete sharing and uses the
 OS shared/exclusive lock. Only contention is retried, at most three seconds;
 other errors remain errors. A transaction retains its lock until dropped.
 
-Directory enumeration opens a literal `.` relative to the already-opened
-directory using `NtCreateFile` and uses a bounded `NtQueryDirectoryFile` buffer.
-Each enumeration has its own file object and cursor,
-including concurrent readers. It validates record lengths and offsets, rejects
+Directory enumeration uses the existing directory handle with a bounded
+`NtQueryDirectoryFile` buffer. A per-handle mutex serializes complete scans and
+each scan restarts its cursor. Cursor contention is bounded to three seconds;
+poisoning and timeout are explicit errors. It validates record lengths and offsets, rejects
 incomplete results, enforces the caller's entry limit and excludes only the
 already-validated storage lock. It never resolves a handle back into a pathname.
-`ReOpenFile` was observed to reject these directory handles on the Windows
-runner; the implementation uses the directory-relative native open directly.
 Missing stores are distinguished from invalid or inaccessible ancestors, which
 must remain errors instead of appearing as an empty repository.
 

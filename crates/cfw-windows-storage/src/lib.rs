@@ -15,7 +15,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -137,6 +137,7 @@ pub struct Snapshot {
 struct DirectoryInner {
     file: File,
     security: Security,
+    enumeration: Mutex<()>,
 }
 
 #[derive(Clone, Copy)]
@@ -180,7 +181,11 @@ impl PrivateDirectory {
         verify_kind(&file, true)?;
         security.verify(&file, ReadPolicy::Private, true)?;
         Ok(Some(Self {
-            inner: Arc::new(DirectoryInner { file, security }),
+            inner: Arc::new(DirectoryInner {
+                file,
+                security,
+                enumeration: Mutex::new(()),
+            }),
         }))
     }
 
@@ -217,7 +222,11 @@ impl PrivateDirectory {
         // Retain it and report uncertainty if its publication cannot be flushed.
         parent.sync_all().map_err(Error::CommitUncertain)?;
         Ok(Self {
-            inner: Arc::new(DirectoryInner { file, security }),
+            inner: Arc::new(DirectoryInner {
+                file,
+                security,
+                enumeration: Mutex::new(()),
+            }),
         })
     }
 

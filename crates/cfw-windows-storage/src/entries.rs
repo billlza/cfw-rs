@@ -9,6 +9,8 @@ use std::mem::{offset_of, size_of};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::AsRawHandle;
 use std::ptr::{null, null_mut};
+use std::sync::{MutexGuard, TryLockError as CursorLockError};
+use std::time::Instant;
 
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_NAMES_INFORMATION, FILE_OPEN, FileNamesInformation, NtQueryDirectoryFile,
@@ -18,21 +20,23 @@ use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 use crate::{
-    Access, EntryKind, Error, LOCK_NAME, MAX_LEAF_UNITS, ReadPolicy, ReadTransaction,
-    WriteTransaction, delete_handle, nt_result, open_relative_units, verify_kind,
+    Access, DirectoryInner, EntryKind, Error, LOCK_NAME, LOCK_POLL, LOCK_WAIT, MAX_LEAF_UNITS,
+    ReadPolicy, ReadTransaction, WriteTransaction, delete_handle, nt_result, open_relative_units,
+    verify_kind,
 };
 
 impl ReadTransaction {
     /// Lists at most `maximum` entries, excluding only the validated storage
-    /// lock. Each call has its own enumeration cursor, including concurrent
-    /// readers of the same directory object.
+    /// lock. A bounded per-handle mutex protects the complete cursor scan.
+    /// Each scan restarts; concurrent readers never consume each other's entries.
     pub fn entry_names(&self, maximum: usize) -> Result<Vec<OsString>, Error> {
-        let directory = reopen_for_enumeration(&self.inner.file)?;
-        verify_kind(&directory, true)
+        let _cursor = acquire_cursor(&self.inner)?;
+        let directory = &self.inner.file;
+        verify_kind(directory, true)
             .map_err(|error| enumeration_error(error, "metadata inspection"))?;
         self.inner
             .security
-            .verify(&directory, ReadPolicy::Private, true)
+            .verify(directory, ReadPolicy::Private, true)
             .map_err(|error| enumeration_error(error, "security inspection"))?;
         let mut buffer = vec![0u32; 16 * 1024];
         let capacity = buffer.len() * size_of::<u32>();
@@ -41,7 +45,7 @@ impl ReadTransaction {
         let mut restart = true;
         loop {
             let mut status_block = IO_STATUS_BLOCK::default();
-            // SAFETY: this synchronous directory handle has a private cursor.
+            // SAFETY: the cursor guard serializes this entire synchronous scan.
             // The DWORD-aligned output buffer stays live for the whole call.
             let status = unsafe {
                 NtQueryDirectoryFile(
@@ -180,19 +184,31 @@ impl WriteTransaction {
     }
 }
 
-fn reopen_for_enumeration(directory: &File) -> Result<File, Error> {
-    // A literal "." opens this directory itself with a new file object/cursor.
-    // It is never user input and does not traverse a parent. ReOpenFile rejected
-    // our directory handles on Windows; DuplicateHandle would share the cursor.
-    open_relative_units(
-        directory,
-        &[u16::from(b'.')],
-        FILE_OPEN,
-        Some(true),
-        Access::Read,
-        None,
-    )
-    .map_err(|error| enumeration_error(error, "handle reopening"))
+fn acquire_cursor(inner: &DirectoryInner) -> Result<MutexGuard<'_, ()>, Error> {
+    let deadline = Instant::now() + LOCK_WAIT;
+    loop {
+        match inner.enumeration.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(CursorLockError::Poisoned(_)) => {
+                return Err(Error::Enumeration {
+                    operation: "cursor acquisition",
+                    source: io::Error::other("directory enumeration state is poisoned"),
+                });
+            }
+            Err(CursorLockError::WouldBlock) => {}
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(Error::Enumeration {
+                operation: "cursor acquisition",
+                source: io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "directory enumeration remained busy for 3 seconds",
+                ),
+            });
+        }
+        std::thread::sleep(LOCK_POLL.min(deadline.saturating_duration_since(now)));
+    }
 }
 
 fn node_kind(file: &File) -> Result<EntryKind, Error> {

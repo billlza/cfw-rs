@@ -489,7 +489,7 @@ fn exclusive_publication_and_failed_replacement_preserve_the_prior_record() {
 }
 
 #[test]
-fn enumeration_is_bounded_and_concurrent_calls_have_independent_cursors() {
+fn enumeration_is_bounded_and_concurrent_readers_receive_complete_lists() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("private");
     let directory = PrivateDirectory::open_or_create(&path).unwrap();

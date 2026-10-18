@@ -442,7 +442,21 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   类型，不能因 TUN 配置校验成功而绕过 Windows 网络权限和恢复实现。
 - 新原生测试在整个检查期间占用代理和控制端口，并要求工作目录没有生成配置/缓存
   文件；误启动监听会产生明确失败。Go 用例补充错误配置脱敏、运行中检查拒绝及
-  实际占用端口反例。Windows 原生结果待本次提交后的 CI，尚未声明接入完整后端。
+  实际占用端口反例。`9e76c49` 的 Windows 引擎 job 完成七项原生集成测试，四模式
+  检查用例通过；同轮共享 job 暴露下述文件锁期限问题，整轮未通过。尚未接入完整后端。
+
+### 2026-10-18：Windows 等待期限的原生反例
+
+- [原生失败](https://github.com/billlza/cfw-rs/actions/runs/39157673412) 中，文件锁仍被
+  另一事务持有，第二次读取返回 Busy，但实际等待不足契约的三秒，原有下界断言失败。
+  代码将一次 `WaitForSingleObject(..., 3000)` 超时直接转换成期限到达；Win32 等待的
+  系统时钟粒度不提供这个严格下界。未跳过该用例或降低三秒断言。
+- 共用保留绝对单调期限的等待函数：只在内核提前报告超时时按剩余时间继续等待，
+  不重新分配完整期限，不修改全局定时器精度；文件锁保持原始排队请求，到期后仍须
+  取消并收尾。mutex 和进程退出等待复用同一语义。
+- 确定性用例覆盖提前超时、亚毫秒余量向上取整、后续正常/abandoned 获取、已到期
+  和原生错误保留；真实文件锁的三秒下界和 mutex 的二十毫秒下界继续验证。
+  Windows cross-target Clippy 已通过，修复后的原生执行待 CI。
 
 ## 官方资料
 
@@ -465,3 +479,4 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [Windows Credential Manager 写入契约](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)
 - [Credential Manager 记录与持久化范围](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw)
 - [Windows 跨会话内核对象命名空间](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
+- [Windows 等待函数与时钟粒度](https://learn.microsoft.com/en-us/windows/win32/sync/wait-functions)

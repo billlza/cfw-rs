@@ -443,8 +443,15 @@ fn contended_lock_has_a_deadline_and_cannot_be_replaced() {
     let started = Instant::now();
     let second = PrivateDirectory::open_existing(&path).unwrap().unwrap();
     assert!(matches!(second.read(), Err(Error::Busy)));
-    assert!(started.elapsed() >= Duration::from_secs(3));
-    assert!(started.elapsed() < Duration::from_secs(6));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "early lock timeout: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "late lock timeout: {elapsed:?}"
+    );
     drop(writer);
     second
         .write()

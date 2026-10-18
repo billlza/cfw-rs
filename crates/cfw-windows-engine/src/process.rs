@@ -15,10 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cfw_windows_storage::PrivateDirectory;
+use cfw_windows_storage::{PrivateDirectory, WaitOutcome, wait_until};
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::{
-    Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
@@ -31,7 +30,7 @@ use windows_sys::Win32::{
             JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
             QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
         },
-        Threading::{CREATE_NO_WINDOW, WaitForSingleObject},
+        Threading::CREATE_NO_WINDOW,
     },
 };
 use zeroize::Zeroizing;
@@ -539,11 +538,10 @@ fn remaining(deadline: Instant) -> Result<Duration, Error> {
 }
 
 fn wait_process(child: &Child, deadline: Instant) -> Result<(), Error> {
-    let wait = remaining(deadline)?.as_millis().clamp(1, 120_000) as u32;
-    match unsafe { WaitForSingleObject(child.as_raw_handle(), wait) } {
-        WAIT_OBJECT_0 => Ok(()),
-        WAIT_TIMEOUT => Err(Error::Timeout),
-        _ => Err(std::io::Error::last_os_error().into()),
+    match wait_until(child, deadline)? {
+        WaitOutcome::Signaled => Ok(()),
+        WaitOutcome::TimedOut => Err(Error::Timeout),
+        WaitOutcome::Abandoned => Err(Error::Protocol("process wait reported abandonment")),
     }
 }
 

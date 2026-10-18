@@ -2,15 +2,14 @@ use std::fs::File;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::null;
+use std::time::Instant;
 
-use windows_sys::Win32::Foundation::{
-    ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
+use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED};
 use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LockFileEx};
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::CreateEventW;
 
-use crate::{Error, LOCK_WAIT};
+use crate::{Error, LOCK_WAIT, WaitOutcome, wait_until};
 
 /// Submit one kernel wait instead of periodically racing a writer that can
 /// release and reacquire between polls. The lock range matches std::fs::File's
@@ -51,9 +50,8 @@ pub(crate) fn acquire(file: File, exclusive: bool) -> Result<File, Error> {
     if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
         return Err(error.into());
     }
-    // SAFETY: the event is owned for this complete synchronous wait.
-    let wait = unsafe { WaitForSingleObject(event.as_raw_handle(), LOCK_WAIT.as_millis() as u32) };
-    if wait == WAIT_OBJECT_0 {
+    let wait = wait_until(&event, Instant::now() + LOCK_WAIT);
+    if matches!(wait, Ok(WaitOutcome::Signaled)) {
         let mut transferred = 0;
         // SAFETY: event completion means the kernel no longer writes to the
         // OVERLAPPED. GetOverlappedResult still checks the operation's outcome.
@@ -64,10 +62,10 @@ pub(crate) fn acquire(file: File, exclusive: bool) -> Result<File, Error> {
         }
         return Ok(file);
     }
-    let failure = if wait == WAIT_TIMEOUT {
-        Error::Busy
-    } else {
-        Error::Io(io::Error::last_os_error())
+    let failure = match wait {
+        Ok(WaitOutcome::TimedOut) => Error::Busy,
+        Err(error) => Error::Io(error),
+        Ok(_) => Error::Io(io::Error::other("file lock event reported abandonment")),
     };
     // Target only this lock request. Cancellation can race successful lock
     // acquisition; the file is dropped on both paths so no late lock survives.

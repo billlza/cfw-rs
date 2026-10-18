@@ -9,8 +9,10 @@ mod entries;
 mod locking;
 mod mutex;
 mod security;
+mod wait;
 pub use mutex::PrivateUserMutex;
 pub use security::require_process_identity;
+pub use wait::{WaitOutcome, wait_until};
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};

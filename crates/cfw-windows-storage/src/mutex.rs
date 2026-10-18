@@ -3,17 +3,16 @@ use std::{
     marker::PhantomData,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     rc::Rc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::{
-    Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Security::SECURITY_ATTRIBUTES,
-    System::Threading::{CreateMutexExW, MUTEX_ALL_ACCESS, ReleaseMutex, WaitForSingleObject},
+    System::Threading::{CreateMutexExW, MUTEX_ALL_ACCESS, ReleaseMutex},
 };
 
-use crate::{Error, security::Security};
+use crate::{Error, WaitOutcome, security::Security, wait_until};
 
 /// Serializes one current-user authority across processes and Windows sessions.
 /// The global kernel name contains the effective SID hash; the owner and DACL
@@ -57,18 +56,15 @@ impl PrivateUserMutex {
         }
         let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
         security.verify_mutex(&handle)?;
-        let result = unsafe {
-            WaitForSingleObject(handle.as_raw_handle(), timeout.as_millis().max(1) as u32)
-        };
+        let result = wait_until(&handle, Instant::now() + timeout)?;
         match result {
-            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self {
+            WaitOutcome::Signaled | WaitOutcome::Abandoned => Ok(Self {
                 handle,
                 acquired: true,
-                abandoned: result == WAIT_ABANDONED,
+                abandoned: result == WaitOutcome::Abandoned,
                 _thread: PhantomData,
             }),
-            WAIT_TIMEOUT => Err(Error::MutexBusy),
-            _ => Err(io::Error::last_os_error().into()),
+            WaitOutcome::TimedOut => Err(Error::MutexBusy),
         }
     }
 
@@ -123,10 +119,12 @@ mod tests {
         assert!(!held.was_abandoned());
         let contender = name.clone();
         assert!(
-            std::thread::spawn(move || matches!(
-                PrivateUserMutex::acquire(&contender, Duration::from_millis(20)),
-                Err(Error::MutexBusy)
-            ))
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let result = PrivateUserMutex::acquire(&contender, Duration::from_millis(20));
+                assert!(started.elapsed() >= Duration::from_millis(20));
+                matches!(result, Err(Error::MutexBusy))
+            })
             .join()
             .unwrap()
         );

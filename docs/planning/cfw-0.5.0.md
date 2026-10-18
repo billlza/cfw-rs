@@ -567,6 +567,11 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   的预读错误可进入下一次请求。改用 Tokio 自带示例的逐连接实例模式，保持一个新的
   监听实例并限定实例数量，不吞掉 233、不清除错误或重试已提交请求。认证断言保留，
   相同字节替换文件的反例额外打印实际失败类型，后续原生执行继续核验。
+- `9ff9fca` 通过前六项服务认证/拒绝场景，随后在夹具构造中完整性客户端时收到
+  `SetTokenInformation` 的拒绝。`CreateRestrictedToken` 保留源句柄访问权限，而夹具
+  未请求后续调整新令牌所需的 `TOKEN_ADJUST_DEFAULT`。现仅补齐夹具句柄权限；
+  原令牌不修改，产品客户端不增加权限，降权子进程仍必须实际验证其完整性和非管理员
+  身份后完成服务认证。
 
 ## 官方资料
 
@@ -606,3 +611,4 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [SCM 配置与下次启动](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw)
 - [实际进程映像查询](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)
 - [服务终止状态之前完成清理](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-setservicestatus)
+- [受限令牌与继承的句柄权限](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)

@@ -22,7 +22,9 @@ fn token() -> Result<OwnedHandle> {
     if unsafe {
         OpenProcessToken(
             GetCurrentProcess(),
-            TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
+            // CreateRestrictedToken preserves these handle access rights.
+            // Only the new token is adjusted to medium integrity below.
+            TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
             &mut original,
         )
     } == 0

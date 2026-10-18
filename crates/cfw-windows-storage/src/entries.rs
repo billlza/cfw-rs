@@ -7,13 +7,13 @@ use std::fs::File;
 use std::io;
 use std::mem::{offset_of, size_of};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::os::windows::io::AsRawHandle;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_NAMES_INFORMATION, FILE_OPEN, FileNamesInformation, NtQueryDirectoryFile,
 };
-use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, STATUS_NO_MORE_FILES};
+use windows_sys::Win32::Foundation::STATUS_NO_MORE_FILES;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -181,24 +181,18 @@ impl WriteTransaction {
 }
 
 fn reopen_for_enumeration(directory: &File) -> Result<File, Error> {
-    // ReOpenFile creates an independent file object for the same opened
-    // directory. DuplicateHandle/try_clone would share its enumeration cursor.
-    let handle = unsafe {
-        ReOpenFile(
-            directory.as_raw_handle(),
-            FILE_GENERIC_READ | FILE_TRAVERSE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(Error::Enumeration {
-            operation: "handle reopening",
-            source: io::Error::last_os_error(),
-        });
-    }
-    // SAFETY: a successful reopen transfers exactly one live owned handle.
-    Ok(unsafe { File::from_raw_handle(handle) })
+    // A literal "." opens this directory itself with a new file object/cursor.
+    // It is never user input and does not traverse a parent. ReOpenFile rejected
+    // our directory handles on Windows; DuplicateHandle would share the cursor.
+    open_relative_units(
+        directory,
+        &[u16::from(b'.')],
+        FILE_OPEN,
+        Some(true),
+        Access::Read,
+        None,
+    )
+    .map_err(|error| enumeration_error(error, "handle reopening"))
 }
 
 fn node_kind(file: &File) -> Result<EntryKind, Error> {

@@ -28,11 +28,16 @@ file. Every transaction opens its own handle without delete sharing and uses the
 OS shared/exclusive lock. Only contention is retried, at most three seconds;
 other errors remain errors. A transaction retains its lock until dropped.
 
-Directory enumeration reopens the same object with `ReOpenFile` and uses a
-bounded `NtQueryDirectoryFile` buffer. Each enumeration has its own cursor,
+Directory enumeration opens a literal `.` relative to the already-opened
+directory using `NtCreateFile` and uses a bounded `NtQueryDirectoryFile` buffer.
+Each enumeration has its own file object and cursor,
 including concurrent readers. It validates record lengths and offsets, rejects
 incomplete results, enforces the caller's entry limit and excludes only the
 already-validated storage lock. It never resolves a handle back into a pathname.
+`ReOpenFile` was observed to reject these directory handles on the Windows
+runner; the implementation uses the directory-relative native open directly.
+Missing stores are distinguished from invalid or inaccessible ancestors, which
+must remain errors instead of appearing as an empty repository.
 
 Application record names are single leaves of at most 250 UTF-16 code units.
 The `.cfw-` prefix and dot-prefixed names ending in `.tmp` are reserved for
@@ -75,6 +80,5 @@ API references:
 - [NtCreateFile and directory-relative names](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)
 - [Handle-relative rename](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
 - [File and directory flush](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
-- [Independent handle reopening](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile)
 - [Handle-relative directory enumeration](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile)
 - [Security information from an opened handle](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)

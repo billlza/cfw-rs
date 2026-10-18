@@ -168,7 +168,13 @@ impl PrivateDirectory {
         let security = Security::current()?;
         let file = match open_directory(path) {
             Ok(file) => file,
-            Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                // ERROR_PATH_NOT_FOUND can also mean a file occupies an
+                // ancestor component. Only a missing directory under a real,
+                // accessible directory may become the application's empty state.
+                validate_missing_ancestors(path)?;
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         verify_kind(&file, true)?;
@@ -500,6 +506,29 @@ fn open_directory(path: &Path) -> Result<File, Error> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .open(path)?)
+}
+
+fn validate_missing_ancestors(path: &Path) -> Result<(), Error> {
+    let mut current = path;
+    loop {
+        let parent = current.parent().ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "storage path root is unavailable",
+            ))
+        })?;
+        let opened = OpenOptions::new()
+            .read(true)
+            .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(parent);
+        match opened {
+            Ok(file) => return verify_kind(&file, true).map(|_| ()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => current = parent,
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn leaf(name: &str) -> Result<Vec<u16>, Error> {

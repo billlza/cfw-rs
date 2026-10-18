@@ -34,6 +34,18 @@ fn profile() -> ValidatedSingBoxProfile {
 }
 
 #[test]
+fn a_non_directory_ancestor_is_not_an_empty_profile_repository() {
+    let (root, repository) = repository("invalid-ancestor");
+    fs::write(&root, b"preserved ancestor").unwrap();
+    assert!(
+        repository.snapshot().is_err(),
+        "an invalid path must not appear empty"
+    );
+    assert_eq!(fs::read(&root).unwrap(), b"preserved ancestor");
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
 fn provider_sources_round_trip_privately_and_participate_in_update_conflict_detection() {
     use std::collections::BTreeMap;
     let value = serde_json::json!({"outbounds":[{"type":"socks5","tag":"node","server":"node.example.com","server_port":1080}],

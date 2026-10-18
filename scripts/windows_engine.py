@@ -63,7 +63,7 @@ def read_pins(repository: Path) -> dict[str, str]:
             key, value = match.groups()
             require(key not in pins, f"duplicate dependency pin: {key}")
             pins[key] = value
-    for key in ("GO_VERSION", "PYTHON_VERSION"):
+    for key in ("GO_VERSION", "PYTHON_VERSION", "RUST_VERSION"):
         require(bool(re.fullmatch(r"\d+\.\d+\.\d+", pins[key])), f"invalid {key}")
     require(bool(re.fullmatch(r"[a-f0-9]{40}", pins["SING_BOX_COMMIT"])), "invalid engine commit")
     require(bool(re.fullmatch(r"v\d+\.\d+\.\d+", pins["SING_BOX_VERSION"])), "invalid engine version")
@@ -243,6 +243,22 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     expected_files = source_files(source)
     output = work / "artifacts"
     output.mkdir()
+    fixture_directory = work / "dns-projections"
+    fixture_environment = {**os.environ, "CFW_DNS_PROJECTED_FIXTURE_DIR": str(fixture_directory)}
+    cargo = shutil.which("cargo")
+    require(cargo is not None, "the pinned Rust toolchain is required for projection fixtures")
+    require(command([cargo, "--version"]).decode().startswith(f"cargo {pins['RUST_VERSION']} "),
+            "Rust tool identity mismatch")
+    print("Generating the actual Rust DNS projections used by the GA integration tests", flush=True)
+    fixture_result = command([cargo, "test", "--locked", "-p", "cfw-singbox-config", "--lib", "tests::dns_policy"],
+                             cwd=repository, env=fixture_environment)
+    (output / "rust-projections.txt").write_bytes(fixture_result)
+    fixture_hashes = {}
+    for name in ("mixed.json", "tunnel.json", "filter.json", "named.json"):
+        path = fixture_directory / name
+        regular_file(path)
+        require(path.stat().st_size > 0, f"missing Rust projection fixture: {name}")
+        fixture_hashes[name] = sha256(path)
     environment = {key: value for key, value in os.environ.items()
                    if not key.upper().startswith(("GO", "CGO"))}
     environment.update({"GOENV": "off", "GOWORK": "off", "GOTOOLCHAIN": "local",
@@ -252,6 +268,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                         "GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org",
                         "GONOSUMDB": "", "GOPRIVATE": "", "GONOPROXY": "",
                         "GOFLAGS": "-mod=readonly"})
+    environment["CFW_DNS_PROJECTED_FIXTURE_DIR"] = str(fixture_directory)
     tags = pins["LIBBOX_BUILD_TAGS"]
     packages = test_packages(repository, pins)
     print("Resolving the locked Windows build and test package closure", flush=True)
@@ -288,6 +305,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     passed_tests = [event for event in test_events if event.get("Action") == "pass" and "Test" in event]
     skipped_tests = [{"package": event["Package"], "test": event["Test"]} for event in test_events
                      if event.get("Action") == "skip" and "Test" in event]
+    require(not skipped_tests, "native engine tests were skipped; inspect the complete Go test event log")
     verify_source(repository, source, pins, patched=True)
     require(source_files(source) == expected_files, "build or tests changed engine source bytes")
     version = command([str(executable), "version"]).decode("utf-8")
@@ -303,6 +321,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "build_tags": tags.split(","), "cgo_enabled": False, "independent_cache_builds_equal": True,
                "test_packages": packages, "tests_passed": len(passed_tests), "tests_skipped": skipped_tests,
                "module_graph_sha256": sha256(output / "module-graph.json"),
+               "rust_version": pins["RUST_VERSION"], "rust_dns_fixture_sha256": fixture_hashes,
                "race_instrumentation": False, "version_output": version,
                "artifact": {"filename": executable.name, "size": executable.stat().st_size, "sha256": sha256(executable)}}
     (output / "build-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

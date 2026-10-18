@@ -34,12 +34,17 @@ jobs:
           $actualSource = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0 -or $actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
           $pins = Get-Content scripts/dependency_pins.env -Raw
-          $versions = [regex]::Matches($pins, '(?m)^PYTHON_VERSION=([0-9]+\.[0-9]+\.[0-9]+)\r?$')
-          if ($versions.Count -ne 1) { throw "Missing or ambiguous Python pin" }
-          "python-version=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          foreach ($name in @('PYTHON_VERSION', 'RUST_VERSION')) {
+            $versions = [regex]::Matches($pins, "(?m)^${name}=([0-9]+\.[0-9]+\.[0-9]+)\r?`$")
+            if ($versions.Count -ne 1) { throw "Missing or ambiguous tool pin: $name" }
+            "$name=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          }
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: ${{ steps.engine-pins.outputs.python-version }}
+          python-version: ${{ steps.engine-pins.outputs.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.engine-pins.outputs.RUST_VERSION }}
       - name: Build and test the exact CFM engine source on Windows
         run: |
           python -m unittest discover -s scripts/tests -p test_windows_engine.py -v

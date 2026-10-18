@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import http.client
 import http.server
@@ -51,13 +52,47 @@ def socks_request(port: int, command: int, destination: tuple[str, int]) -> tupl
         raise
 
 
+class TcpRow(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in
+                ("state", "local_address", "local_port", "remote_address", "remote_port", "pid")]
+
+
+class TcpTable(ctypes.Structure):
+    _fields_ = [("count", ctypes.c_uint32), ("rows", TcpRow * 1)]
+
+
+def listening_processes(port: int) -> set[int]:
+    # Read the authoritative IPv4 listener table. A client-side connect timeout
+    # cannot prove whether a port is closed, and creates needless TCP probes.
+    library = ctypes.WinDLL("iphlpapi.dll", winmode=0x00000800)  # LOAD_LIBRARY_SEARCH_SYSTEM32
+    query = library.GetExtendedTcpTable
+    query.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
+                      ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    query.restype = ctypes.c_uint32
+    size = ctypes.c_uint32(0)
+    status = query(None, ctypes.byref(size), 0, socket.AF_INET, 3, 0)  # TCP_TABLE_OWNER_PID_LISTENER
+    require(status == 122, f"TCP table sizing failed: {status}")
+    for _ in range(3):
+        require(TcpTable.rows.offset <= size.value <= 1024 * 1024, "invalid TCP table size")
+        buffer = ctypes.create_string_buffer(size.value)
+        status = query(buffer, ctypes.byref(size), 0, socket.AF_INET, 3, 0)
+        if status == 122:  # A concurrently changing table can require a larger buffer.
+            continue
+        require(status == 0, f"TCP table query failed: {status}")
+        count = ctypes.c_uint32.from_buffer(buffer).value
+        require(TcpTable.rows.offset + count * ctypes.sizeof(TcpRow) <= len(buffer), "incomplete TCP table")
+        owners = set()
+        for index in range(count):
+            row = TcpRow.from_buffer(buffer, TcpTable.rows.offset + index * ctypes.sizeof(TcpRow))
+            require(row.state == 2, "listener table returned a non-listening endpoint")
+            if socket.ntohs(row.local_port & 0xFFFF) == port:
+                owners.add(row.pid)
+        return owners
+    raise RuntimeError("TCP listener table did not stabilize within three reads")
+
+
 def assert_closed(port: int) -> None:
-    try:
-        connection = socket.create_connection(("127.0.0.1", port), timeout=2)
-    except ConnectionRefusedError:
-        return
-    connection.close()
-    raise RuntimeError(f"test listener on port {port} is still open")
+    require(not listening_processes(port), f"test listener on port {port} is still open")
 
 
 def reserve_port() -> tuple[socket.socket, int]:
@@ -162,6 +197,8 @@ def smoke(artifacts: Path) -> dict[str, object]:
                     time.sleep(0.1)
                 finally:
                     connection.close()
+            require(listening_processes(api_port) == {process.pid}, "controller listener does not belong to the engine child")
+            require(listening_processes(mixed_port) == {process.pid}, "proxy listener does not belong to the engine child")
             connection = http.client.HTTPConnection("127.0.0.1", api_port, timeout=3)
             try:
                 connection.request("GET", "/version")
@@ -209,6 +246,7 @@ def smoke(artifacts: Path) -> dict[str, object]:
                 "engine_sha256": manifest["artifact"]["sha256"], "platform": platform.platform(),
                 "valid_config_check": True, "invalid_config_rejected": True,
                 "authenticated_controller": True, "unauthenticated_controller_rejected": True,
+                "listener_owner_pid_verified": True, "listener_cleanup_observation": "GetExtendedTcpTable",
                 "http_proxy": True, "socks_tcp": True, "socks_udp": True,
                 "forced_termination_listener_cleanup": True, "graceful_shutdown_verified": False,
                 "system_proxy_modified": False, "tun_installed": False, "release_accepted": False}

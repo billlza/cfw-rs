@@ -27,9 +27,16 @@ file. Every transaction opens its own handle without delete sharing and uses the
 OS shared/exclusive lock. Only contention is retried, at most three seconds;
 other errors remain errors. A transaction retains its lock until dropped.
 
+Application record names are single leaves of at most 250 UTF-16 code units.
+Dot-prefixed names are reserved for internal state and rejected by all public
+record operations, including case variants. An application record cannot alias
+a temporary belonging to a different record. Unicode directory and record names
+remain supported within these limits.
+
 Replacement validates existing state, writes a private temporary, flushes its
 contents, renames within the same opened directory and flushes directory
-metadata. Failure after publication is `CommitUncertain`, not an assertion that
+metadata. Creating a private directory also flushes its parent entry. Failure
+after publication is `CommitUncertain`, not an assertion that
 the old value remains. Pre-publication cleanup failures retain both errors.
 The file snapshot identity covers the volume, the complete 128-bit file ID and
 the bytes; equal bytes in a replacement file still invalidate a stale revision.

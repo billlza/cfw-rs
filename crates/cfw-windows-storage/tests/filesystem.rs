@@ -129,6 +129,41 @@ fn internal_temporary_names_cannot_be_used_as_application_records() {
 }
 
 #[test]
+fn unicode_names_and_the_maximum_record_name_round_trip() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("私有目录");
+    let directory = PrivateDirectory::open_or_create(&path).unwrap();
+    let mut transaction = directory.write().unwrap();
+    for name in ["配置.json".to_owned(), "x".repeat(250)] {
+        transaction.replace(&name, b"first", 1024).unwrap();
+        transaction.replace(&name, b"second", 1024).unwrap();
+        assert_eq!(
+            transaction
+                .read(&name, 1024, ReadPolicy::Private)
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"second"
+        );
+        transaction
+            .remove(&name, 1024, ReadPolicy::Private)
+            .unwrap();
+        assert!(
+            transaction
+                .read(&name, 1024, ReadPolicy::Private)
+                .unwrap()
+                .is_none()
+        );
+    }
+    let too_long = "x".repeat(251);
+    assert!(matches!(
+        transaction.replace(&too_long, b"exceeds the name contract", 1024),
+        Err(Error::InvalidName)
+    ));
+    assert!(!path.join(too_long).exists());
+}
+
+#[test]
 fn symlinks_hard_links_and_directory_redirection_are_rejected() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("private");

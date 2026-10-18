@@ -210,11 +210,25 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   在 `3560b6cf5d21da30374c79602951b50671572eaf` 实际确认写入、重命名和删除后
   `FlushFileBuffers` 返回成功。探针保留为独立 OS 契约回归；该结果不是断电恢复证明。
   新后端在目录项改变但刷盘失败时返回 `CommitUncertain`，不能报告旧值必定保留。
-- 新后端的 Windows 原生编译、文件系统集成测试和共享核心测试正在接入 CI，尚未
-  获得本次实现的 Windows 通过结果。Mac 核心已观察到 32 项测试通过，新增平台目录
-  用例及整个工作区的最终回归正在运行。测试不通过时保留失败证据，不跳过用例。
+- [Windows 原生验证](https://github.com/billlza/cfw-rs/actions/runs/39132902329)
+  在 `1fea274` 通过格式、Clippy、329 项 Rust 测试和 310 项前端测试，失败、忽略及
+  跳过均为 0。Rust 包含 30 项共享核心持久化测试及 9 项 Windows 文件系统测试。
+  前一轮 `5fe545e` 的 Windows 编译暴露了新代码对摘要类型格式化接口的误用；修复
+  保持既定 SHA-256 算法和完整小写十六进制输出，没有改动锁定依赖。
+- Mac 本地固定工具链的整个工作区/all-targets/all-features 检查完成：1,143 项 Rust
+  测试通过，失败、忽略、过滤均为 0，其中核心 33 项；主线程集成回执为
+  `main_queue_callback_ms=25 late_engine_installations=0`。全工作区 Clippy、最终
+  核心 Clippy、fmt、metadata 和依赖策略审计通过，编译器/策略 error、warning 为 0。
+  完整日志保留在 `target/cfw-validation/storage-*`；托管 Mac CI 排队不计作通过。
+- 复核发现公开记录名能与内部临时文件重合，下一次替换会将该记录当作遗留临时文件
+  处理。[独立回归](https://github.com/billlza/cfw-rs/actions/runs/39133263100)
+  在 `9095def` 已观察到旧实现接受 `.state.json.tmp` 而失败，原有 9 项原生用例仍通过。
+  修复为公开读、写、删统一拒绝点号开头的内部名称，并预留临时后缀所需长度；保留
+  Unicode 名称，增加最大合法长度的实际读写测试。新建目录也刷盘其父目录项；
+  本次边界修复正在 Windows CI 中验证，不把此前通过记录套用于尚未运行的代码。
 - 新直接依赖复用锁文件已有的 `windows-sys 0.61.2`；注册表包的名称、版本和
-  checksum 集合未变化。依赖策略检查仍需通过。本阶段没有实现 Windows 配置仓库、
+  checksum 集合未变化。Mac 依赖策略检查已通过；Windows 完整发布依赖审计仍待建设。
+  本阶段没有实现 Windows 配置仓库、
   凭据库、引擎宿主、桌面壳、服务或 TUN，也未作可发布声明。
 
 ## 官方资料

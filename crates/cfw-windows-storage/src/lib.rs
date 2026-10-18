@@ -179,6 +179,9 @@ impl PrivateDirectory {
         )?;
         verify_kind(&file, true)?;
         security.verify(&file, ReadPolicy::Private, true)?;
+        // The newly created directory is itself an entry in this parent.
+        // Retain it and report uncertainty if its publication cannot be flushed.
+        parent.sync_all().map_err(Error::CommitUncertain)?;
         Ok(Self {
             inner: Arc::new(DirectoryInner { file, security }),
         })
@@ -240,6 +243,16 @@ impl ReadTransaction {
         maximum: usize,
         policy: ReadPolicy,
     ) -> Result<Option<Snapshot>, Error> {
+        record_name(name)?;
+        self.read_entry(name, maximum, policy)
+    }
+
+    fn read_entry(
+        &self,
+        name: &str,
+        maximum: usize,
+        policy: ReadPolicy,
+    ) -> Result<Option<Snapshot>, Error> {
         let limit = maximum.checked_add(1).ok_or(Error::InvalidLimit)?;
         let mut file =
             match open_relative(&self.inner.file, name, FILE_OPEN, false, Access::Read, None) {
@@ -296,10 +309,7 @@ impl WriteTransaction {
     }
 
     pub fn replace(&mut self, name: &str, bytes: &[u8], maximum: usize) -> Result<(), Error> {
-        leaf(name)?;
-        if name.eq_ignore_ascii_case(LOCK_NAME) {
-            return Err(Error::InvalidName);
-        }
+        record_name(name)?;
         if bytes.len() > maximum {
             return Err(Error::TooLarge {
                 actual: bytes.len() as u64,
@@ -309,10 +319,11 @@ impl WriteTransaction {
         self.read(name, maximum, ReadPolicy::Private)?;
         let temporary = format!(".{name}.tmp");
         if self
-            .read(&temporary, maximum, ReadPolicy::Private)?
+            .read
+            .read_entry(&temporary, maximum, ReadPolicy::Private)?
             .is_some()
         {
-            self.remove(&temporary, maximum, ReadPolicy::Private)?;
+            self.remove_entry(&temporary, maximum, ReadPolicy::Private)?;
         }
         let mut file = open_relative(
             &self.read.inner.file,
@@ -355,9 +366,16 @@ impl WriteTransaction {
     }
 
     pub fn remove(&mut self, name: &str, maximum: usize, policy: ReadPolicy) -> Result<(), Error> {
-        if name.eq_ignore_ascii_case(LOCK_NAME) {
-            return Err(Error::InvalidName);
-        }
+        record_name(name)?;
+        self.remove_entry(name, maximum, policy)
+    }
+
+    fn remove_entry(
+        &mut self,
+        name: &str,
+        maximum: usize,
+        policy: ReadPolicy,
+    ) -> Result<(), Error> {
         let file = open_relative(
             &self.read.inner.file,
             name,
@@ -413,6 +431,17 @@ fn leaf(name: &str) -> Result<Vec<u16>, Error> {
         return Err(Error::InvalidName);
     }
     Ok(encoded)
+}
+
+fn record_name(name: &str) -> Result<(), Error> {
+    let encoded = leaf(name)?;
+    // The dot-prefixed namespace belongs exclusively to locks and temporary
+    // files. Reserving the whole prefix also closes case-insensitive aliases.
+    // Leave room for the temporary's leading dot and trailing ".tmp".
+    if name.starts_with('.') || encoded.len() > MAX_LEAF_UNITS - 5 {
+        return Err(Error::InvalidName);
+    }
+    Ok(())
 }
 
 fn open_relative(

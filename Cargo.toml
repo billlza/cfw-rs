@@ -3,6 +3,7 @@ members = [
   "apps/cfw-tauri-shell",
   "crates/cfw-controller",
   "crates/cfw-core",
+  "crates/cfw-windows-storage",
   "crates/cfw-engine-api",
   "crates/cfw-singbox-config",
   "crates/cfw-application",

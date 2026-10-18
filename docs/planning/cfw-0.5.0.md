@@ -139,10 +139,10 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | --- | --- | --- |
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
-| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 首批 UI 宿主身份和终端命令已修改；Windows 共享层 290 项 Rust/310 项前端测试通过；设置/平台说明、用例与持久化尚未完成 |
+| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | Windows 共享层 290 项 Rust/310 项前端测试已有通过记录；设置、窗口状态和诊断的 Windows 存储已实现，正在运行跨平台回归；配置仓库和完整平台适配尚未完成 |
 | Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 待实现和运行；不得用展示壳代替 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
-| 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；无自托管 runner 已注册 |
+| 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
 | 正式发布 | 无阻塞缺陷、源/包身份一致、授权发布和下载验证 | 未开始 |
 
 每轮更新本表和真实验证记录。保留失败与反例；阻塞一个步骤时推进独立工作。不得用
@@ -196,6 +196,26 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh ui-test
 CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-fmt
 CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 ```
+
+### 2026-10-18：Windows 私有存储边界
+
+- 新 `cfw-windows-storage` 提供 Windows 目录句柄、身份与 DACL 校验、重解析点和
+  硬链接拒绝、有限大小读取、共享/独占锁，以及临时写入后原子替换。新文件只授权
+  当前用户和 LocalSystem；旧迁移文件的额外只读授权与可写授权分开处理。
+- `cfw-core` 的原 Mac 文件系统实现逐字节移到独立模块，Windows 通过同一接口接入
+  设置、窗口状态、运行参数 CAS、诊断和身份绑定迁移。`MacOsAppPaths` 改为
+  `AppPaths` 并更新调用方；Windows 从系统 Known Folder API 取得 LocalAppData，
+  Mac 的既有目录和所有持久化 JSON 格式保持不变。Apple 旧控制会话仍仅用于 Mac。
+- [Windows 目录刷盘探针](https://github.com/billlza/cfw-rs/actions/runs/39130129264)
+  在 `3560b6cf5d21da30374c79602951b50671572eaf` 实际确认写入、重命名和删除后
+  `FlushFileBuffers` 返回成功。探针保留为独立 OS 契约回归；该结果不是断电恢复证明。
+  新后端在目录项改变但刷盘失败时返回 `CommitUncertain`，不能报告旧值必定保留。
+- 新后端的 Windows 原生编译、文件系统集成测试和共享核心测试正在接入 CI，尚未
+  获得本次实现的 Windows 通过结果。Mac 核心已观察到 32 项测试通过，新增平台目录
+  用例及整个工作区的最终回归正在运行。测试不通过时保留失败证据，不跳过用例。
+- 新直接依赖复用锁文件已有的 `windows-sys 0.61.2`；注册表包的名称、版本和
+  checksum 集合未变化。依赖策略检查仍需通过。本阶段没有实现 Windows 配置仓库、
+  凭据库、引擎宿主、桌面壳、服务或 TUN，也未作可发布声明。
 
 ## 官方资料
 

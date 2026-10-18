@@ -1,6 +1,6 @@
 use super::*;
 use cfw_application::ProfileChange;
-use cfw_core::{MacOsAppPaths, SettingsStore};
+use cfw_core::{AppPaths, SettingsStore};
 use cfw_singbox_config::{EngineLogLevel, RuntimePreferences};
 
 #[tokio::test]
@@ -8,7 +8,7 @@ async fn online_settings_publish_the_new_binding_only_after_a_successful_commit(
     for stale_revision in [false, true] {
         let root =
             std::env::temp_dir().join(format!("cfm-runtime-transaction-{}", uuid::Uuid::new_v4()));
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.clone()));
+        let store = SettingsStore::new(AppPaths::from_app_home(root.clone()));
         let previous = store.runtime_settings::<RuntimePreferences>().unwrap();
         let backend = Arc::new(EndpointRetryBackend::new(0));
         let coordinator = endpoint_retry_coordinator(backend.clone());
@@ -129,7 +129,7 @@ async fn a_mainland_switch_whose_rule_sets_cannot_download_restores_the_previous
     ] {
         let root =
             std::env::temp_dir().join(format!("cfm-mainland-transaction-{}", uuid::Uuid::new_v4()));
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.clone()));
+        let store = SettingsStore::new(AppPaths::from_app_home(root.clone()));
         let previous = store.runtime_settings::<RuntimePreferences>().unwrap();
         let mut backend = EndpointRetryBackend::new(0);
         backend.rule_set_start_failure = Some(failure);

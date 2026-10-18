@@ -11,3 +11,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cfw-windows-storage = { path = "../cfw-windows-storage" }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }

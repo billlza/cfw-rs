@@ -92,9 +92,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check shared Rust contracts on Windows
-        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application --all-targets -- -D warnings
+        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage --all-targets -- -D warnings
       - name: Test shared Rust contracts on Windows
-        run: cargo test --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application --all-targets
+        run: cargo test --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage --all-targets
       - name: Install locked UI dependencies
         working-directory: apps/cfw-tauri-shell
         run: node $env:CFW_NPM_CLI ci --ignore-scripts=false --install-links=true
@@ -103,5 +103,5 @@ jobs:
         run: node $env:CFW_NPM_CLI test
       - name: Record the scope of this validation
         run: |
-          "Validated the shared Rust packages and the bundled UI contract tests on Windows x64." >> $env:GITHUB_STEP_SUMMARY
+          "Validated the shared Rust packages, Windows private storage and the bundled UI contract tests on Windows x64." >> $env:GITHUB_STEP_SUMMARY
           "This job does not build or launch a Windows application, install a service or TUN driver, or establish desktop, network, signing, or release acceptance." >> $env:GITHUB_STEP_SUMMARY

@@ -523,11 +523,13 @@ dependencies = [
 name = "cfw-core"
 version = "0.5.0"
 dependencies = [
+ "cfw-windows-storage",
  "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -640,6 +642,16 @@ dependencies = [
  "urlencoding",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "cfw-windows-storage"
+version = "0.5.0"
+dependencies = [
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

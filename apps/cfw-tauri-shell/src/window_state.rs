@@ -339,12 +339,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_blocked_settings_write_never_holds_the_window_event_lock() {
-        use cfw_core::{MacOsAppPaths, SettingsStore, UiPreferences};
+        use cfw_core::{AppPaths, SettingsStore, UiPreferences};
         use std::os::fd::AsRawFd;
         use std::sync::Arc;
 
         let root = tempfile::tempdir().unwrap();
-        let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path().join("app")));
+        let store = SettingsStore::new(AppPaths::from_app_home(root.path().join("app")));
         store.write(&UiPreferences::default()).unwrap();
         let file_lock = std::fs::File::open(&store.paths().app_home).unwrap();
         assert_eq!(

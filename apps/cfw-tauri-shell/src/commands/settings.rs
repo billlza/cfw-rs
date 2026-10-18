@@ -337,7 +337,7 @@ mod tests {
             std::process::id(),
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let store = SettingsStore::new(cfw_core::MacOsAppPaths::from_app_home(root.join("app")));
+        let store = SettingsStore::new(cfw_core::AppPaths::from_app_home(root.join("app")));
         (root, store)
     }
 

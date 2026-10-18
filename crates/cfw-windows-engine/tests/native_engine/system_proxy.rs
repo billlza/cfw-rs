@@ -239,12 +239,27 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
     );
     authority.authorize_system_proxy(false).await.unwrap();
     assert_eq!(authority.snapshot().unwrap(), before);
-    let upstream = reserve();
+    let upstream = private_interface_listener();
     upstream.set_nonblocking(true).unwrap();
-    let source = format!(
-        r#"{{"outbounds":[{{"type":"http","tag":"fixture","server":"127.0.0.1","server_port":{}}}]}}"#,
-        upstream.local_addr().unwrap().port()
+    let upstream_address = upstream.local_addr().unwrap();
+    let source = serde_json::json!({"outbounds":[{
+        "type":"http", "tag":"fixture", "server":upstream_address.ip().to_string(),
+        "server_port":upstream_address.port(),
+    }]})
+    .to_string();
+    // Validate the actual production input before starting a fixture thread.
+    let mixed = reserve();
+    let controller = reserve();
+    let projection = system_projection(
+        mixed.local_addr().unwrap().port(),
+        controller.local_addr().unwrap().port(),
+        &source,
     );
+    let config = PreparedConfig::system_proxy_data_plane(&projection, []).unwrap();
+    drop((mixed, controller));
+    let mut engine =
+        EngineProcess::spawn(executable(), &root.path().join("runtime"), TIMEOUT).unwrap();
+    engine.start(&config, TIMEOUT).unwrap();
     let server = thread::spawn(move || {
         let deadline = Instant::now() + TIMEOUT;
         let mut stream = loop {
@@ -268,18 +283,6 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
         assert!(header(&mut stream).starts_with("GET /cfw-system-proxy "));
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 23\r\nConnection: close\r\n\r\nCFW native system proxy").unwrap();
     });
-    let mixed = reserve();
-    let controller = reserve();
-    let projection = system_projection(
-        mixed.local_addr().unwrap().port(),
-        controller.local_addr().unwrap().port(),
-        &source,
-    );
-    let config = PreparedConfig::system_proxy_data_plane(&projection, []).unwrap();
-    drop((mixed, controller));
-    let mut engine =
-        EngineProcess::spawn(executable(), &root.path().join("runtime"), TIMEOUT).unwrap();
-    engine.start(&config, TIMEOUT).unwrap();
     let context = context();
     let mut foreign = None;
     let result = catch_unwind(AssertUnwindSafe(|| {

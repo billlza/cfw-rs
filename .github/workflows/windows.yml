@@ -101,6 +101,7 @@ jobs:
           name: cfw-engine-windows-failure-logs
           path: |
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.jsonl
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*receipt.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.txt
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.log
           if-no-files-found: error

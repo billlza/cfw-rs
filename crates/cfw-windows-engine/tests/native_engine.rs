@@ -69,6 +69,21 @@ fn reserve() -> TcpListener {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap()
 }
 
+/// Imported proxy endpoints reject loopback IPs. Select this runner's private
+/// interface locally; UDP connect chooses a route without sending a datagram.
+fn private_interface_listener() -> TcpListener {
+    let route = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    route.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).unwrap();
+    let std::net::IpAddr::V4(local) = route.local_addr().unwrap().ip() else {
+        panic!("native proxy fixture requires an IPv4 interface");
+    };
+    assert!(
+        local.is_private(),
+        "native proxy fixture requires a private interface"
+    );
+    TcpListener::bind((local, 0)).unwrap()
+}
+
 fn process_handle(pid: u32) -> OwnedHandle {
     let raw = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
     assert!(!raw.is_null(), "cannot retain test child process identity");

@@ -11,22 +11,10 @@ fn dpapi_material_reaches_the_real_engine_and_authenticates_a_socks_outbound() {
     const USER: &str = "cfw-test-node-user";
     const PASSWORD: &str = "cfw-test-node-password-7293";
     let temporary = tempfile::tempdir().unwrap();
-    // Imported proxy endpoints deliberately reject loopback IPs. Use this
-    // runner's own private interface without weakening that production rule.
-    // UDP connect selects a route locally; no datagram is sent to the address.
-    let route = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-    route.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).unwrap();
-    let std::net::IpAddr::V4(local) = route.local_addr().unwrap().ip() else {
-        panic!("native Windows credential fixture requires an IPv4 interface");
-    };
-    assert!(
-        local.is_private(),
-        "native Windows credential fixture requires a private interface"
-    );
-    let peer = TcpListener::bind((local, 0)).unwrap();
+    let peer = private_interface_listener();
     let address = peer.local_addr().unwrap();
     let source = json!({"outbounds":[{
-        "type":"socks5", "tag":"proxy", "server":local.to_string(), "server_port":address.port(),
+        "type":"socks5", "tag":"proxy", "server":address.ip().to_string(), "server_port":address.port(),
         "authentication":{
             "username_credential_ref":{"id":"11111111-1111-4111-8111-111111111111","kind":"socks5_username"},
             "password_credential_ref":{"id":"22222222-2222-4222-8222-222222222222","kind":"socks5_password"}

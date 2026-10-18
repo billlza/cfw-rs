@@ -54,6 +54,12 @@ jobs:
           path: ${{ runner.temp }}/cfw-windows-engine/artifacts/
           if-no-files-found: error
           retention-days: 14
+      - name: Record failed engine validation
+        if: failure()
+        run: |
+          $failureDirectory = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
+          New-Item -ItemType Directory -Force -Path $failureDirectory -ErrorAction Stop | Out-Null
+          "Windows engine validation failed. The workflow job log contains the failed phase and diagnostic output. Run: $env:GITHUB_RUN_ID" | Set-Content -Path (Join-Path $failureDirectory 'engine-ci-failure.txt') -Encoding utf8NoBOM
       - name: Preserve native engine failure details
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -63,7 +69,7 @@ jobs:
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.jsonl
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.txt
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.log
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 14
       - name: Record the component validation boundary
         run: |

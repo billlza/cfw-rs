@@ -13,6 +13,15 @@ SPEC.loader.exec_module(engine)
 
 
 class WindowsEngineContractTests(unittest.TestCase):
+    def test_module_graph_keeps_checksums_and_versioned_replacements_without_local_paths(self) -> None:
+        graph = engine.module_graph(b'{"Path":"example.invalid/main","Main":true,"Dir":"private-path"}\n{"Path":"example.invalid/dep","Version":"v1.0.0","Sum":"h1:zip","GoModSum":"h1:mod","Replace":{"Path":"example.invalid/replacement","Version":"v1.0.1","Sum":"h1:other","Dir":"another-private-path"}}\n')
+        self.assertEqual(graph[0], {"Path": "example.invalid/main", "Main": True})
+        self.assertEqual(graph[1]["GoModSum"], "h1:mod")
+        self.assertEqual(graph[1]["Replace"], {"Path": "example.invalid/replacement", "Version": "v1.0.1", "Sum": "h1:other"})
+        for invalid in (b'', b'{"Path":"p"}garbage', b'{"Path":"p","Replace":{"Path":"../local"}}'):
+            with self.subTest(invalid=invalid), self.assertRaises((RuntimeError, ValueError)):
+                engine.module_graph(invalid)
+
     def test_existing_mac_patch_and_test_contract_are_used_without_an_alternate_graph(self) -> None:
         pins = engine.read_pins(REPOSITORY)
         packages = engine.test_packages(REPOSITORY, pins)

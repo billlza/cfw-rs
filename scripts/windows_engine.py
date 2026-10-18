@@ -102,6 +102,26 @@ def command(arguments: list[str], *, cwd: Path | None = None,
     return result.stdout
 
 
+def module_graph(data: bytes) -> list[dict[str, object]]:
+    text = data.decode("utf-8")
+    decoder = json.JSONDecoder()
+    result = []
+    while text.strip():
+        text = text.lstrip()
+        module, end = decoder.raw_decode(text)
+        require(isinstance(module, dict) and isinstance(module.get("Path"), str), "invalid Go module metadata")
+        identity = {key: module[key] for key in ("Path", "Version", "Sum", "GoModSum", "Main") if key in module}
+        if "Replace" in module:
+            replacement = module["Replace"]
+            require(isinstance(replacement, dict) and bool(replacement.get("Version")),
+                    "unversioned local module replacement is not admitted")
+            identity["Replace"] = {key: replacement[key] for key in ("Path", "Version", "Sum", "GoModSum") if key in replacement}
+        result.append(identity)
+        text = text[end:]
+    require(bool(result), "empty Go module graph")
+    return result
+
+
 def git(source: Path, *arguments: str, index: Path | None = None) -> bytes:
     executable = shutil.which("git")
     require(executable is not None, "Git is required")
@@ -237,6 +257,11 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     print("Resolving the locked Windows build and test package closure", flush=True)
     command([str(go), "list", "-deps", "-test", "-tags", tags, "./cmd/sing-box", *packages],
             cwd=source, env=environment, timeout=1200)
+    # Package pruning does not necessarily fetch the go.mod metadata needed by
+    # `go mod verify` for the complete selected graph. Resolve it explicitly
+    # before entering the offline build phase, without changing module pins.
+    modules = module_graph(command([str(go), "list", "-m", "-json", "all"], cwd=source, env=environment))
+    (output / "module-graph.json").write_text(json.dumps(modules, indent=2) + "\n", encoding="utf-8")
     verify_source(repository, source, pins, patched=True)
     require(source_files(source) == expected_files, "module resolution changed engine source bytes")
     environment.update({"GOPROXY": "off", "GOSUMDB": "off"})
@@ -252,11 +277,17 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     command([*arguments, "-o", str(second), "./cmd/sing-box"], cwd=source, env=environment, timeout=1200)
     require(sha256(executable) == sha256(second), "Windows engine build is not reproducible across caches")
     print("Running the GA engine test package union on Windows (without race instrumentation)", flush=True)
-    result = subprocess.run([str(go), "test", "-json", "-count=1", "-timeout=5m", "-tags", tags, *packages],
+    # Match the GA engine's Go linker contract; the Mac-only external clang
+    # linker is omitted because this Windows component does not use CGO.
+    result = subprocess.run([str(go), "test", "-json", "-count=1", "-timeout=5m", "-ldflags=-checklinkname=0", "-tags", tags, *packages],
                             cwd=source, env=environment, capture_output=True, timeout=1200)
     (output / "go-tests.jsonl").write_bytes(result.stdout)
     (output / "go-tests.stderr.txt").write_bytes(result.stderr)
     require(result.returncode == 0, "native Windows engine tests failed; inspect go-tests.jsonl and go-tests.stderr.txt")
+    test_events = [json.loads(line) for line in result.stdout.splitlines() if line]
+    passed_tests = [event for event in test_events if event.get("Action") == "pass" and "Test" in event]
+    skipped_tests = [{"package": event["Package"], "test": event["Test"]} for event in test_events
+                     if event.get("Action") == "skip" and "Test" in event]
     verify_source(repository, source, pins, patched=True)
     require(source_files(source) == expected_files, "build or tests changed engine source bytes")
     version = command([str(executable), "version"]).decode("utf-8")
@@ -270,7 +301,9 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "source_files_sha256": hashlib.sha256(json.dumps(expected_files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                "go_version": pins["GO_VERSION"], "go_archive_sha256": pins["GO_WINDOWS_AMD64_SHA256"],
                "build_tags": tags.split(","), "cgo_enabled": False, "independent_cache_builds_equal": True,
-               "test_packages": packages, "race_instrumentation": False, "version_output": version,
+               "test_packages": packages, "tests_passed": len(passed_tests), "tests_skipped": skipped_tests,
+               "module_graph_sha256": sha256(output / "module-graph.json"),
+               "race_instrumentation": False, "version_output": version,
                "artifact": {"filename": executable.name, "size": executable.stat().st_size, "sha256": sha256(executable)}}
     (output / "build-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(receipt, indent=2), flush=True)

@@ -133,7 +133,10 @@ pub fn configure_service_process_observation() -> Result<(), ServicePeerError> {
     let owner_system = unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } != 0;
     let owner_admin = unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0;
     let aces_match = same_aces(expected, actual)?;
-    if !owner_system || control & SE_DACL_PROTECTED == 0 || !aces_match {
+    // Object ownership is distinct from the primary token user. SCM-created
+    // SYSTEM processes may have Administrators as their object owner; that
+    // principal already has full control in the explicit service ACL.
+    if (!owner_system && !owner_admin) || control & SE_DACL_PROTECTED == 0 || !aces_match {
         return Err(ServicePeerError::ObservationSecurityMismatch {
             detail: format!(
                 "owner_system={owner_system}, owner_admin={owner_admin}, control={control:#x}, exact_aces={aces_match}"

@@ -599,6 +599,12 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   原生夹具在开放管道前使用该产品函数，并逐项检查这些拒绝；UI 端认证条件保持不变。
   另修正夹具保留句柄只请求 synchronize、却调用 GetExitCodeProcess 的静态权限错误，
   补上该 API 所需 limited-query；此前尚未执行到正常停止验收，不虚称已观察该错误。
+- `c219bf1` 因进程权限读回拒绝而在开放服务管道前失败。`36f6abd` 补充的实际字段为
+  `owner_system=false, owner_admin=true, control=0x9004, exact_aces=true`：访问条目与
+  保护标志正确，SCM 创建的 SYSTEM 进程对象由 Administrators 所有。对象所有者与
+  主令牌用户不是同一概念；改为接受既有信任边界内的 SYSTEM/Administrators 所有者，
+  同时继续独立要求 SYSTEM/session 0 主身份、逐项精确 ACL 与普通客户端危险权限
+  拒绝。不能把非 SYSTEM 主身份当作等价服务，后续原生全流程继续验证。
 
 ## 官方资料
 

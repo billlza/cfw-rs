@@ -117,8 +117,9 @@ rewrite its security. All observations are rechecked before admitting a result.
 Before publishing the endpoint, the dedicated SYSTEM service calls
 `configure_service_process_observation`. This replaces only its own process
 DACL, retains SYSTEM/Administrators control and grants authenticated users
-`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`. It verifies the actual owner,
-protected DACL and exact ACE readback. The helper rejects a non-SYSTEM primary
+`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`. It verifies a SYSTEM or
+Administrators object owner independently of the required SYSTEM primary user,
+the protected DACL and exact ACE readback. The helper rejects a non-SYSTEM primary
 identity, another session, an AppContainer or restricted identity before mutation.
 It does not grant access to process memory, modification, handle duplication or
 the SYSTEM token. Without these explicit query rights the ordinary UI correctly

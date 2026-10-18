@@ -305,15 +305,20 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
         foreign = Some((replacement.clone(), owned_server.clone()));
         assert!(matches!(
             engine.stop(TIMEOUT),
-            Err(Error::ProxyRestoration(_))
+            Err(Error::ProxyRestoration(error)) if matches!(error.as_ref(), ProxyError::SettingsChanged)
         ));
         assert_eq!(authority.snapshot().unwrap(), replacement);
         // A timeout used to close the private pipes before proxy recovery.
         // Both explicit stop and error cleanup must now retain this owner.
-        assert!(matches!(
-            engine.observe(Duration::from_nanos(1)),
-            Err(Error::CleanupFailed { .. })
-        ));
+        let failure = engine
+            .observe(Duration::from_nanos(1))
+            .expect_err("the observation deadline must expire");
+        let Error::CleanupFailed { operation, cleanup } = failure else {
+            panic!("expired observation did not report blocked cleanup: {failure}");
+        };
+        assert!(matches!(operation.as_ref(), Error::Timeout));
+        assert!(matches!(cleanup.as_ref(), Error::ProxyRestoration(error)
+            if matches!(error.as_ref(), ProxyError::SettingsChanged)));
         assert_eq!(
             unsafe { WaitForSingleObject(process_handle(engine.process_id()).as_raw_handle(), 0) },
             windows_sys::Win32::Foundation::WAIT_TIMEOUT

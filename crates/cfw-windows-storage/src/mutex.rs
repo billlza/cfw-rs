@@ -40,7 +40,7 @@ impl PrivateUserMutex {
             return Err(Error::InvalidMutexParameters);
         }
         let security = Security::for_mutex()?;
-        let identity = format!("{:x}", Sha256::digest(security.principal()?.as_bytes()));
+        let identity = crate::digest_hex(Sha256::digest(security.principal()?.as_bytes()).into());
         let name: Vec<u16> = format!("Global\\CFW.{purpose}.{identity}\0")
             .encode_utf16()
             .collect();

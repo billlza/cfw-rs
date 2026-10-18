@@ -11,7 +11,6 @@ use std::{
 use cfw_engine_api::{EngineGenerationStore, EngineLineage, EngineSessionIdentity};
 use cfw_windows_storage::{PrivateUserMutex, require_process_identity};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use windows_sys::Win32::{
     Foundation::ERROR_NOT_FOUND,
@@ -136,8 +135,8 @@ impl WindowsEngineGenerationStore {
 
     fn lock_name(&self) -> String {
         format!(
-            "engine-lineage-{:x}",
-            Sha256::digest(self.target.as_bytes())
+            "engine-lineage-{}",
+            cfw_singbox_config::sha256_hex(self.target.as_bytes())
         )
     }
 

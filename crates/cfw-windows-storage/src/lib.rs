@@ -133,14 +133,18 @@ impl FileIdentity {
         hash.update(self.volume.to_be_bytes());
         hash.update(self.id);
         hash.update(self.digest);
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut text = String::with_capacity(64);
-        for byte in hash.finalize() {
-            text.push(HEX[usize::from(byte >> 4)] as char);
-            text.push(HEX[usize::from(byte & 15)] as char);
-        }
-        text
+        digest_hex(hash.finalize().into())
     }
+}
+
+fn digest_hex(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(64);
+    for byte in digest {
+        text.push(HEX[usize::from(byte >> 4)] as char);
+        text.push(HEX[usize::from(byte & 15)] as char);
+    }
+    text
 }
 
 pub struct Snapshot {

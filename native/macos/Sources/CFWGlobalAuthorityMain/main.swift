@@ -1,11 +1,11 @@
 import CFWGlobalAuthority
+import Darwin
 import Foundation
 
-let delegate: any NSXPCListenerDelegate
 do {
-  delegate = try AuthenticatedGlobalAuthorityListenerDelegate.production()
+  let delegates = try AuthenticatedGlobalAuthorityListenerDelegate.production()
+  GlobalAuthorityDaemonRuntime.run(delegates: delegates)
 } catch {
-  delegate = FailClosedGlobalAuthorityListenerDelegate()
+  fputs("Global Authority initialization failed.\n", stderr)
+  exit(EXIT_FAILURE)
 }
-
-GlobalAuthorityDaemonRuntime.run(delegate: delegate)

@@ -1,0 +1,261 @@
+{
+  "config": {
+    "dns": {
+      "final": "cfw-authenticated-dns-1",
+      "rules": [
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "server": "cfw-authenticated-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        }
+      ],
+      "servers": [
+        {
+          "server": "223.6.6.6",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-0",
+          "type": "udp"
+        },
+        {
+          "server": "119.29.29.29",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-1",
+          "type": "udp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "path": "/dns-query",
+          "server": "223.5.5.5",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-0",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "dns.alidns.com"
+          },
+          "type": "https"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "path": "/dns-query",
+          "server": "1.1.1.1",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-1",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "cloudflare-dns.com"
+          },
+          "type": "https"
+        }
+      ],
+      "strategy": "prefer_ipv4"
+    },
+    "experimental": {
+      "clash_api": {
+        "external_controller": "127.0.0.1:9090",
+        "secret": "<CLASH-API-SECRET>"
+      }
+    },
+    "inbounds": [
+      {
+        "address": [
+          "198.18.64.1/30",
+          "2001:2:0:64::1/126"
+        ],
+        "auto_route": false,
+        "mtu": 1500,
+        "stack": "system",
+        "tag": "cfw-tunnel",
+        "type": "tun"
+      }
+    ],
+    "log": {
+      "level": "info",
+      "timestamp": true
+    },
+    "outbounds": [
+      {
+        "domain_resolver": {
+          "fallback_server": "cfw-bootstrap-dns-1",
+          "server": "cfw-bootstrap-dns-0"
+        },
+        "method": "aes-256-gcm",
+        "password": "",
+        "server": "ss.example.com",
+        "server_port": 443,
+        "tag": "proxy",
+        "type": "shadowsocks"
+      },
+      {
+        "tag": "cfw-direct",
+        "type": "direct"
+      }
+    ],
+    "route": {
+      "default_domain_resolver": {
+        "fallback_server": "cfw-authenticated-dns-1",
+        "server": "cfw-authenticated-dns-0"
+      },
+      "final": "proxy",
+      "rules": [
+        {
+          "action": "hijack-dns",
+          "port": 53
+        },
+        {
+          "action": "route",
+          "clash_mode": "Direct",
+          "outbound": "cfw-direct"
+        },
+        {
+          "action": "route",
+          "clash_mode": "Global",
+          "outbound": "proxy"
+        }
+      ]
+    }
+  },
+  "credential_slots": [
+    {
+      "json_pointer": "/outbounds/0/password",
+      "outbound_index": 0,
+      "reference": {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "kind": "shadowsocks_password"
+      },
+      "target": "shadowsocks_password"
+    }
+  ],
+  "direct_ipv4_hosts": "DirectIpv4HostRoutes { release_transport: false }",
+  "mode": "Tunnel",
+  "probe": {
+    "dns": {
+      "final": "cfw-authenticated-dns-1",
+      "rules": [
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "server": "cfw-authenticated-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        }
+      ],
+      "servers": [
+        {
+          "server": "223.6.6.6",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-0",
+          "type": "udp"
+        },
+        {
+          "server": "119.29.29.29",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-1",
+          "type": "udp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "path": "/dns-query",
+          "server": "223.5.5.5",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-0",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "dns.alidns.com"
+          },
+          "type": "https"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "path": "/dns-query",
+          "server": "1.1.1.1",
+          "server_port": 443,
+          "tag": "cfw-authenticated-dns-1",
+          "tls": {
+            "enabled": true,
+            "min_version": "1.2",
+            "server_name": "cloudflare-dns.com"
+          },
+          "type": "https"
+        }
+      ],
+      "strategy": "prefer_ipv4"
+    },
+    "outbounds": [
+      {
+        "domain_resolver": {
+          "fallback_server": "cfw-bootstrap-dns-1",
+          "server": "cfw-bootstrap-dns-0"
+        },
+        "method": "aes-256-gcm",
+        "password": "",
+        "server": "ss.example.com",
+        "server_port": 443,
+        "tag": "proxy",
+        "type": "shadowsocks"
+      },
+      {
+        "tag": "cfw-direct",
+        "type": "direct"
+      }
+    ],
+    "route": {
+      "default_domain_resolver": {
+        "fallback_server": "cfw-authenticated-dns-1",
+        "server": "cfw-authenticated-dns-0"
+      }
+    }
+  }
+}

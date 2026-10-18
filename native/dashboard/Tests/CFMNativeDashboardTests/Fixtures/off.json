@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "sequence": 1,
+  "session": 1,
+  "locale": "en",
+  "phase": "off",
+  "core": "inactive",
+  "systemProxy": "inactive",
+  "tunnel": "inactive",
+  "failure": null,
+  "controls": {
+    "core": {
+      "enabled": false,
+      "available": false,
+      "reason": "Native controls require an admitted application session.",
+      "retry": false
+    },
+    "systemProxy": {
+      "enabled": false,
+      "available": false,
+      "reason": "Native controls require an admitted application session.",
+      "retry": false
+    },
+    "tunnel": {
+      "enabled": false,
+      "available": false,
+      "reason": "Native controls require an admitted application session.",
+      "retry": false
+    }
+  },
+  "command": null
+}

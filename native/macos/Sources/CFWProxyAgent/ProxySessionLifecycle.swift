@@ -1,60 +1,92 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
+import OSLog
+import Synchronization
 
 protocol ProxyEngineLeaseHolding: AnyObject {
   func release() throws
-  func markStopFailed() throws
 }
 
-struct PreparedProxyConfiguration {
-  let configuration: Data
+struct PreparedProxyOwnership {
   let lease: any ProxyEngineLeaseHolding
+}
+
+/// Why the ProxyAgent ends its own process. launchd starts a fresh agent for
+/// the next request.
+enum ProxyAgentEndReason: Equatable, Sendable {
+  /// libbox could not close a runtime: only the process ending releases what
+  /// that close left open.
+  case engineUnclosable(LibboxInstanceUnclosable)
+  /// The Authority quarantined a stop this agent had finished locally. It
+  /// releases the lease once this process ended.
+  case quarantinedStop
+  /// A configuration check or profile probe left in libbox what this process
+  /// cannot release; the agent retired and ended once it was idle.
+  case retired(LibboxInstanceUnclosable)
 }
 
 enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case invalidConfigurationSlot
   case lifecycleConflict
   case startupCancelled
+  /// The stop names a generation other than the session this agent holds.
   case staleStopRequest
+  /// This agent holds no session and has no record of the stop's generation.
+  case stopWithoutSession
   case recoveryBlocked(String)
+  case authorizationRequired
   case engineLease(String)
+  case authority(AuthorityErrorCode)
   case configuration(String)
   case engineCreation(String)
   case engineStart(String)
+  case engineStartTimedOut
+  case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case listenerReadinessTimedOut
-  case engineStop(String)
+  /// libbox could not close the runtime, so the ProxyAgent is spent.
+  case engineUnclosable(LibboxInstanceUnclosable)
   case engineFailed(ProxyEngineFailure)
   case preferences(String)
+  case existingSystemProxy
   case ownershipJournal(String)
   case ownershipConflict([ProxyOwnershipConflict])
   case cleanupFailed(original: String, cleanup: [String])
+  /// The agent is spent or retired, so it takes no new start.
+  case agentEnding
 
   var engineFailure: EngineFailure {
-    let code: String
+    EngineFailure(failure, message: safeMessage)
+  }
+
+  var failure: ProxyAgentFailure {
     switch self {
-    case .invalidConfigurationSlot: code = "invalid-configuration-slot"
-    case .lifecycleConflict: code = "proxy-lifecycle-conflict"
-    case .startupCancelled: code = "proxy-startup-cancelled"
-    case .staleStopRequest: code = "stale-stop-request"
-    case .recoveryBlocked: code = "proxy-recovery-blocked"
-    case .engineLease: code = "proxy-engine-lease-failed"
-    case .configuration: code = "proxy-configuration-failed"
-    case .engineCreation: code = "proxy-engine-creation-failed"
-    case .engineStart: code = "proxy-engine-start-failed"
-    case .listenerReadinessTimedOut: code = "proxy-listener-readiness-timeout"
-    case .engineStop: code = "proxy-engine-stop-failed"
-    case .engineFailed: code = "proxy-engine-crashed"
-    case .preferences: code = "system-proxy-preferences-failed"
-    case .ownershipJournal: code = "proxy-ownership-journal-failed"
-    case .ownershipConflict: code = "system-proxy-ownership-conflict"
-    case .cleanupFailed: code = "proxy-cleanup-failed"
+    case .invalidConfigurationSlot: .agent(.invalidConfigurationSlot)
+    case .lifecycleConflict: .agent(.lifecycleConflict)
+    case .startupCancelled: .agent(.startupCancelled)
+    case .staleStopRequest: .agent(.staleStopRequest)
+    case .stopWithoutSession: .agent(.stopWithoutSession)
+    case .recoveryBlocked: .agent(.recoveryBlocked)
+    case .authorizationRequired: .agent(.authorizationRequired)
+    case .engineLease: .agent(.engineLeaseFailed)
+    case .authority(let failure): .authority(failure)
+    case .configuration: .agent(.configurationFailed)
+    case .engineCreation: .agent(.engineCreationFailed)
+    case .engineStart: .agent(.engineStartFailed)
+    case .engineStartTimedOut: .agent(.engineStartTimedOut)
+    case .endpointConflict(let role, _):
+      role == .mixed ? .agent(.mixedEndpointInUse) : .agent(.controllerEndpointInUse)
+    case .listenerReadinessTimedOut: .agent(.listenerReadinessTimedOut)
+    case .engineUnclosable: .agent(.engineUnclosable)
+    case .engineFailed: .agent(.engineCrashed)
+    case .preferences: .agent(.preferencesFailed)
+    case .existingSystemProxy: .agent(.existingSystemProxy)
+    case .ownershipJournal: .agent(.ownershipJournalFailed)
+    case .ownershipConflict: .agent(.ownershipConflict)
+    case .cleanupFailed: .agent(.cleanupFailed)
+    case .agentEnding: .agent(.agentEnding)
     }
-    return EngineFailure(
-      code: code,
-      message: safeMessage,
-      isRetryable: false
-    )
   }
 
   private var safeMessage: String {
@@ -67,45 +99,61 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy startup was cancelled."
     case .staleStopRequest:
       "System Proxy stop does not match the active generation."
+    case .stopWithoutSession:
+      "System Proxy holds no session for the stopped generation."
     case .recoveryBlocked:
       "System Proxy recovery is blocked until owned settings can be restored safely."
+    case .authorizationRequired:
+      "Approve macOS network authorization before starting System Proxy."
     case .engineLease:
       "The machine-wide engine lease operation failed."
+    case .authority(let failure):
+      failure.stableMessage
     case .configuration:
       "System Proxy configuration validation failed."
     case .engineCreation:
       "System Proxy runtime creation failed."
     case .engineStart:
       "System Proxy runtime startup failed."
+    case .engineStartTimedOut:
+      "System Proxy runtime startup did not finish in time and was interrupted."
+    case .endpointConflict(let role, let port):
+      "The System Proxy \(role.rawValue) endpoint could not bind to port \(port)."
     case .listenerReadinessTimedOut:
       "System Proxy listener did not become ready before the bounded timeout."
-    case .engineStop:
-      "System Proxy runtime stop failed."
+    case .engineUnclosable:
+      "System Proxy could not close its runtime."
     case .engineFailed:
       "System Proxy runtime exited unexpectedly."
     case .preferences:
       "System proxy preference transaction failed."
+    case .existingSystemProxy:
+      "Another system proxy is enabled. Existing proxy settings were not changed."
     case .ownershipJournal:
       "System proxy ownership journal operation failed."
     case .ownershipConflict:
       "System proxy settings changed externally and were preserved."
     case .cleanupFailed:
       "System Proxy cleanup did not reach a proven Off state."
+    case .agentEnding:
+      "The proxy agent is ending; the next one takes the request."
     }
   }
 }
 
 struct ProxySessionDependencies: @unchecked Sendable {
-  let prepareConfiguration: (ConfigurationDescriptor) throws -> PreparedProxyConfiguration
+  let prepareOwnership: (ConfigurationDescriptor) throws -> PreparedProxyOwnership
   let resolveConfiguration: (Data, ConfigurationDescriptor) throws -> Data
   let recoverCleanupLease: (ConfigurationDescriptor) throws -> any ProxyEngineLeaseHolding
   let engineFactory: any ProxyEngineFactory
   let preferences: any SystemProxyPreferences
   let journalStore: any ProxyOwnershipJournalStoring
   let readinessTimeout: TimeInterval
+  /// Ends the ProxyAgent process for one of `ProxyAgentEndReason`'s reasons.
+  let endProcess: @Sendable (ProxyAgentEndReason) -> Void
 
   init(
-    prepareConfiguration: @escaping (ConfigurationDescriptor) throws -> PreparedProxyConfiguration,
+    prepareOwnership: @escaping (ConfigurationDescriptor) throws -> PreparedProxyOwnership,
     resolveConfiguration: @escaping (Data, ConfigurationDescriptor) throws -> Data = {
       configuration,
       _ in configuration
@@ -114,15 +162,17 @@ struct ProxySessionDependencies: @unchecked Sendable {
     engineFactory: any ProxyEngineFactory,
     preferences: any SystemProxyPreferences,
     journalStore: any ProxyOwnershipJournalStoring,
-    readinessTimeout: TimeInterval
+    readinessTimeout: TimeInterval,
+    endProcess: @escaping @Sendable (ProxyAgentEndReason) -> Void
   ) {
-    self.prepareConfiguration = prepareConfiguration
+    self.prepareOwnership = prepareOwnership
     self.resolveConfiguration = resolveConfiguration
     self.recoverCleanupLease = recoverCleanupLease
     self.engineFactory = engineFactory
     self.preferences = preferences
     self.journalStore = journalStore
     self.readinessTimeout = readinessTimeout
+    self.endProcess = endProcess
   }
 }
 
@@ -146,6 +196,8 @@ private final class ProxyOperationCompletion: @unchecked Sendable {
 }
 
 final class ProxySessionLifecycle: @unchecked Sendable {
+  private static let logger = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-restoration")
   private final class Session {
     let id: UUID
     let configuration: ConfigurationDescriptor
@@ -173,6 +225,19 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     case starting(UUID)
     case active(UUID)
     case failed(UUID)
+    /// libbox could not close the session's engine. Nothing in this process can
+    /// release what that close left open, so the session stays referenced and
+    /// every later start and stop fails with the same cause.
+    case spent(LibboxInstanceUnclosable)
+  }
+
+  /// Whether checks and probes may still reach libbox.
+  private enum LibboxAccess {
+    case open
+    /// libbox could not close the session's engine.
+    case spent
+    /// A check or probe left in libbox what this process cannot release.
+    case retired(LibboxInstanceUnclosable)
   }
 
   private let dependencies: ProxySessionDependencies
@@ -185,14 +250,23 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   private var recoveryBlock: ProxySessionLifecycleError?
   private var lastStoppedConfiguration: ConfigurationDescriptor?
   private var lastFailedConfiguration: ConfigurationDescriptor?
+  private var processEndScheduled = false
+  /// Closed once the agent is spent or retired, so checks and probes never
+  /// reach libbox again. Read without the state queue, which a start can hold
+  /// for its whole deadline.
+  private let libboxAccess = Mutex(LibboxAccess.open)
 
   init(dependencies: ProxySessionDependencies) {
     self.dependencies = dependencies
     recoverPersistedOwnership()
   }
 
+  /// `deadline` is when the owner's libbox start must have returned; the owner
+  /// fixed it when the start request arrived.
   func start(
-    configuration: ConfigurationDescriptor,
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
+    deadline: EngineStartDeadline,
     completionHandler:
       @escaping @Sendable (
         Result<Void, ProxySessionLifecycleError>
@@ -200,7 +274,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   ) {
     let completion = ProxyOperationCompletion(completionHandler)
     stateQueue.async { [self] in
-      beginStart(configuration: configuration, completion: completion)
+      beginStart(
+        configuration: configuration,
+        descriptor: descriptor,
+        deadline: deadline,
+        completion: completion)
     }
   }
 
@@ -214,6 +292,40 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     let completion = ProxyOperationCompletion(completionHandler)
     stateQueue.async { [self] in
       performStop(expectedConfiguration: expectedConfiguration, completion: completion)
+    }
+  }
+
+  /// Gives the OS back the System Proxy settings of the session the request
+  /// names while its engine still answers, before the Host asks the Authority
+  /// to stop it. A restore that cannot reach the settings then fails with the
+  /// proxy still running, so the stop stays retryable, instead of the settings
+  /// outliving the listener they select. The session keeps its engine, lease
+  /// and state until its stop, which restores whatever is left as always.
+  /// Settings the user changed since stay the user's, as at a stop, which
+  /// reports them. Another generation's session, or none, has nothing to
+  /// restore here.
+  func restoreSettingsBeforeStop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler:
+      @escaping @Sendable (
+        Result<Void, ProxySessionLifecycleError>
+      ) -> Void
+  ) {
+    let completion = ProxyOperationCompletion(completionHandler)
+    stateQueue.async { [self] in
+      guard let session, session.configuration == expectedConfiguration else {
+        completion.finish(.success(()))
+        return
+      }
+      for error in restoreOwnedPreferences(session) {
+        // Only settings the agent could not write back keep System Proxy
+        // running. A conflict stays the user's, and a journal it could not
+        // remove is left, each for the stop to report, as without this.
+        guard case .preferences = error else { continue }
+        completion.finish(.failure(error))
+        return
+      }
+      completion.finish(.success(()))
     }
   }
 
@@ -243,12 +355,82 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     stateQueue.sync { currentSnapshot }
   }
 
+  /// Whether checks and probes may still reach libbox.
+  var callsLibbox: Bool {
+    guard case .open = libboxAccess.withLock({ $0 }) else { return false }
+    return true
+  }
+
+  /// Whether the agent retired: it takes no new start.
+  var isRetired: Bool { retirement != nil }
+
+  private var retirement: LibboxInstanceUnclosable? {
+    guard case .retired(let failure) = libboxAccess.withLock({ $0 }) else { return nil }
+    return failure
+  }
+
+  /// A check or probe left in libbox what this process cannot release. The
+  /// agent refuses every later check, probe and start at once; a running
+  /// session runs and stops as usual, and `endProcessIfRetired` ends the
+  /// process once its owner is idle. A spent agent ends anyway.
+  func retire(after failure: LibboxInstanceUnclosable) {
+    libboxAccess.withLock {
+      guard case .open = $0 else { return }
+      $0 = .retired(failure)
+    }
+  }
+
+  /// Ends a retired agent that holds no session, so no System Proxy setting it
+  /// applied outlives it; its owner asks once it is idle.
+  func endProcessIfRetired() {
+    stateQueue.async { [self] in
+      guard let retirement, session == nil else { return }
+      scheduleProcessEnd(.retired(retirement))
+    }
+  }
+
+  /// Restores the System Proxy settings this agent still owns but could not
+  /// restore without the network preferences rights the user just granted: a
+  /// launch whose recovery ran before the agent had them, a session whose
+  /// cleanup failed after its engine stopped, or a spent session, which then
+  /// ends the process. A session whose engine runs keeps its settings until it
+  /// stops. The Host asks for the rights before every Off and before quitting,
+  /// so either one completes a restore that failed.
+  func restoreSettingsAfterAuthorization(completionHandler: @escaping @Sendable () -> Void) {
+    stateQueue.async { [self] in
+      defer { completionHandler() }
+      guard let session, session.journal != nil else { return }
+      switch lifecycle {
+      case .spent(let failure):
+        let restoreErrors = restoreOwnedPreferences(session)
+        if !restoreErrors.isEmpty {
+          let codes = restoreErrors.map { $0.engineFailure.code }.joined(separator: ",")
+          Self.logger.error(
+            "System Proxy settings were not restored after authorization: \(codes, privacy: .public)"
+          )
+        }
+        endProcessUnlessSettingsRemain(session, failure)
+      case .failed(let sessionID) where sessionID == session.id && session.engine == nil:
+        cleanUpSessionWithoutEngine(session)
+      case .idle, .starting, .active, .failed:
+        return
+      }
+    }
+  }
+
   private func beginStart(
-    configuration: ConfigurationDescriptor,
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
+    deadline: EngineStartDeadline,
     completion: ProxyOperationCompletion
   ) {
-    guard configuration.slot == .systemProxy else {
+    defer { configuration.erase() }
+    guard descriptor.slot.isProxyAgent else {
       completion.finish(.failure(.invalidConfigurationSlot))
+      return
+    }
+    if case .spent(let failure) = lifecycle {
+      completion.finish(.failure(.engineUnclosable(failure)))
       return
     }
     if let recoveryBlock {
@@ -259,22 +441,43 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       completion.finish(.failure(.lifecycleConflict))
       return
     }
+    // A start its owner admitted just before the agent retired fails without
+    // a session, so its stop finds the failure and the owner proves Off.
+    if isRetired {
+      failStartWithoutOwnedSession(
+        .agentEnding, configuration: descriptor, completion: completion)
+      return
+    }
 
     let sessionID = UUID()
     lifecycle = .starting(sessionID)
     startCompletion = completion
     sequence &+= 1
-    currentSnapshot = .proxyStarting(configuration: configuration, sequence: sequence)
+    currentSnapshot = .proxyStarting(configuration: descriptor, sequence: sequence)
     lastStoppedConfiguration = nil
     lastFailedConfiguration = nil
 
-    let prepared: PreparedProxyConfiguration
+    if descriptor.slot == .systemProxy {
+      do {
+        try dependencies.preferences.requireAuthorization()
+      } catch SystemProxyPreferencesError.authorizationDenied {
+        failStartWithoutOwnedSession(
+          .authorizationRequired, configuration: descriptor, completion: completion)
+        return
+      } catch {
+        failStartWithoutOwnedSession(
+          .preferences(error.localizedDescription), configuration: descriptor,
+          completion: completion)
+        return
+      }
+    }
+    let prepared: PreparedProxyOwnership
     do {
-      prepared = try dependencies.prepareConfiguration(configuration)
+      prepared = try dependencies.prepareOwnership(descriptor)
     } catch {
       failStartWithoutOwnedSession(
         .engineLease(error.localizedDescription),
-        configuration: configuration,
+        configuration: descriptor,
         completion: completion
       )
       return
@@ -282,45 +485,57 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
     let startingSession = Session(
       id: sessionID,
-      configuration: configuration,
+      configuration: descriptor,
       engine: nil,
       lease: prepared.lease,
       journal: nil
     )
     session = startingSession
     do {
-      var resolvedConfiguration: Data
-      do {
-        resolvedConfiguration = try dependencies.resolveConfiguration(
-          prepared.configuration,
-          configuration
-        )
-      } catch {
-        throw ProxySessionLifecycleError.configuration(error.localizedDescription)
-      }
-      let sensitiveConfiguration = SensitiveDataBuffer(copying: resolvedConfiguration)
-      resolvedConfiguration.resetBytes(
-        in: resolvedConfiguration.startIndex..<resolvedConfiguration.endIndex
-      )
-      resolvedConfiguration.removeAll(keepingCapacity: false)
-      try sensitiveConfiguration.withErasingData { configurationData in
-        let engine: any ProxyEngine
+      try configuration.withErasingData { template in
+        var resolvedConfiguration: Data
         do {
-          engine = try dependencies.engineFactory.makeEngine(
-            configuration: configurationData
+          resolvedConfiguration = try dependencies.resolveConfiguration(
+            template,
+            descriptor
           )
         } catch {
-          throw ProxySessionLifecycleError.engineCreation(error.localizedDescription)
+          throw ProxySessionLifecycleError.configuration(error.localizedDescription)
         }
-        startingSession.engine = engine
-        do {
-          try engine.start(configuration: configurationData) { [weak self] event in
-            self?.stateQueue.async { [weak self] in
-              self?.handleEngineEvent(event, sessionID: sessionID)
-            }
+        let sensitiveResolvedConfiguration = SensitiveDataBuffer(
+          copying: resolvedConfiguration)
+        resolvedConfiguration.resetBytes(
+          in: resolvedConfiguration.startIndex..<resolvedConfiguration.endIndex
+        )
+        resolvedConfiguration.removeAll(keepingCapacity: false)
+        try sensitiveResolvedConfiguration.withErasingData { runtimeConfiguration in
+          let engine: any ProxyEngine
+          do {
+            engine = try dependencies.engineFactory.makeEngine(
+              configuration: runtimeConfiguration
+            )
+          } catch {
+            throw ProxySessionLifecycleError.engineCreation(error.localizedDescription)
           }
-        } catch {
-          throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          startingSession.engine = engine
+          do {
+            try engine.start(configuration: runtimeConfiguration, deadline: deadline) {
+              [weak self] event in
+              self?.stateQueue.async { [weak self] in
+                self?.handleEngineEvent(event, sessionID: sessionID)
+              }
+            }
+          } catch let error as ProxyEngineError {
+            if case .endpointConflict(let role, let port) = error {
+              throw ProxySessionLifecycleError.endpointConflict(role: role, port: port)
+            }
+            if error == .startTimedOut {
+              throw ProxySessionLifecycleError.engineStartTimedOut
+            }
+            throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          } catch {
+            throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          }
         }
       }
       stateQueue.asyncAfter(deadline: .now() + dependencies.readinessTimeout) { [weak self] in
@@ -337,6 +552,9 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   }
 
   private func handleEngineEvent(_ event: ProxyEngineEvent, sessionID: UUID) {
+    if case .spent = lifecycle {
+      return
+    }
     guard let session, session.id == sessionID else {
       return
     }
@@ -347,7 +565,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       else {
         return
       }
-      activateSystemProxy(session: session, endpoint: endpoint)
+      if session.configuration.slot == .localProxy {
+        completeActivation(session)
+      } else {
+        activateSystemProxy(session: session, endpoint: endpoint)
+      }
     case .failed(let failure):
       guard session.engine != nil else {
         return
@@ -377,6 +599,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
           configuration: session.configuration,
           endpoint: endpoint
         )
+      } catch SystemProxyPreferencesError.existingProxyConfiguration {
+        throw ProxySessionLifecycleError.existingSystemProxy
       } catch {
         throw ProxySessionLifecycleError.preferences(error.localizedDescription)
       }
@@ -389,6 +613,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
       do {
         try dependencies.preferences.apply(preparedJournal)
+      } catch SystemProxyPreferencesError.existingProxyConfiguration {
+        throw ProxySessionLifecycleError.existingSystemProxy
       } catch {
         throw ProxySessionLifecycleError.preferences(error.localizedDescription)
       }
@@ -400,15 +626,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       }
       session.journal = appliedJournal
 
-      lifecycle = .active(session.id)
-      sequence &+= 1
-      currentSnapshot = .proxyActive(
-        configuration: session.configuration,
-        sequence: sequence
-      )
-      let completion = startCompletion
-      startCompletion = nil
-      completion?.finish(.success(()))
+      completeActivation(session)
     } catch let error as ProxySessionLifecycleError {
       failOwnedSession(session, originalError: error)
     } catch {
@@ -417,6 +635,15 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         originalError: .preferences(String(describing: error))
       )
     }
+  }
+
+  private func completeActivation(_ session: Session) {
+    lifecycle = .active(session.id)
+    sequence &+= 1
+    currentSnapshot = .proxyActive(configuration: session.configuration, sequence: sequence)
+    let completion = startCompletion
+    startCompletion = nil
+    completion?.finish(.success(()))
   }
 
   private func handleEngineFailure(
@@ -444,12 +671,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         try engine.stop()
         session.engine = nil
       } catch {
-        cleanupErrors.append(.engineStop(error.localizedDescription))
-        do {
-          try session.lease?.markStopFailed()
-        } catch {
-          cleanupErrors.append(.engineLease(error.localizedDescription))
-        }
+        becomeSpent(
+          error, session: session, stage: originalError, cleanupErrors: cleanupErrors,
+          stopCompletion: nil)
+        return
       }
     }
     cleanupErrors.append(contentsOf: releaseLeaseIfFullyClean(session))
@@ -466,6 +691,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     cleanupErrors: [ProxySessionLifecycleError]
   ) {
     let terminalError = combinedError(original: originalError, cleanup: cleanupErrors)
+    let cleanupCodes = cleanupErrors.map { $0.engineFailure.code }.joined(separator: ",")
+    Self.logger.error(
+      "System Proxy start failed: stage=\(originalError.engineFailure.code, privacy: .public) cleanup=\(cleanupCodes, privacy: .public)"
+    )
     if failedSession.engine == nil, failedSession.journal == nil, failedSession.lease == nil {
       session = nil
       lifecycle = .idle
@@ -488,8 +717,12 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     expectedConfiguration: ConfigurationDescriptor,
     completion: ProxyOperationCompletion
   ) {
-    guard expectedConfiguration.slot == .systemProxy else {
+    guard expectedConfiguration.slot.isProxyAgent else {
       completion.finish(.failure(.invalidConfigurationSlot))
+      return
+    }
+    if case .spent(let failure) = lifecycle {
+      stopWhileSpent(failure, completion: completion)
       return
     }
     guard let session else {
@@ -500,7 +733,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         currentSnapshot = .off(sequence: sequence)
         completion.finish(.success(()))
       } else {
-        completion.finish(.failure(.staleStopRequest))
+        completion.finish(.failure(.stopWithoutSession))
       }
       return
     }
@@ -528,12 +761,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         try engine.stop()
         session.engine = nil
       } catch {
-        cleanupErrors.append(.engineStop(error.localizedDescription))
-        do {
-          try session.lease?.markStopFailed()
-        } catch {
-          cleanupErrors.append(.engineLease(error.localizedDescription))
-        }
+        becomeSpent(
+          error, session: session, stage: nil, cleanupErrors: cleanupErrors,
+          stopCompletion: completion)
+        return
       }
     }
     cleanupErrors.append(contentsOf: releaseLeaseIfFullyClean(session))
@@ -569,6 +800,92 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     completion.finish(.success(()))
   }
 
+  /// libbox could not close the session's engine. The session stays, with its
+  /// engine and lease, so nothing claims that the runtime ended; the pending
+  /// completions fail with the cause, and the process ends once no owned
+  /// system proxy setting still needs it.
+  private func becomeSpent(
+    _ failure: LibboxInstanceUnclosable,
+    session: Session,
+    stage: ProxySessionLifecycleError?,
+    cleanupErrors: [ProxySessionLifecycleError],
+    stopCompletion: ProxyOperationCompletion?
+  ) {
+    lifecycle = .spent(failure)
+    libboxAccess.withLock { $0 = .spent }
+    let error = ProxySessionLifecycleError.engineUnclosable(failure)
+    let stageCode = stage?.engineFailure.code ?? "stop"
+    let cleanupCodes = cleanupErrors.map { $0.engineFailure.code }.joined(separator: ",")
+    Self.logger.fault(
+      "System Proxy runtime could not be closed: stage=\(stageCode, privacy: .public) cleanup=\(cleanupCodes, privacy: .public)"
+    )
+    lastFailedConfiguration = session.configuration
+    sequence &+= 1
+    currentSnapshot = .proxyFailed(
+      error.engineFailure,
+      configuration: session.configuration,
+      sequence: sequence
+    )
+    let pendingStart = startCompletion
+    startCompletion = nil
+    pendingStart?.finish(.failure(error))
+    stopCompletion?.finish(.failure(error))
+    endProcessUnlessSettingsRemain(session, failure)
+  }
+
+  /// A stop cannot reach the engine any more, but owned system proxy settings
+  /// that are still applied can be restored with the authorization this
+  /// process holds; a relaunched ProxyAgent would have to ask for it again.
+  private func stopWhileSpent(
+    _ failure: LibboxInstanceUnclosable,
+    completion: ProxyOperationCompletion
+  ) {
+    var restoreErrors: [ProxySessionLifecycleError] = []
+    if let session, session.journal != nil {
+      restoreErrors = restoreOwnedPreferences(session)
+    }
+    if !restoreErrors.isEmpty {
+      let codes = restoreErrors.map { $0.engineFailure.code }.joined(separator: ",")
+      Self.logger.error(
+        "System Proxy settings were not restored after its runtime could not be closed: \(codes, privacy: .public)"
+      )
+    }
+    completion.finish(.failure(.engineUnclosable(failure)))
+    if let session {
+      endProcessUnlessSettingsRemain(session, failure)
+    }
+  }
+
+  /// Ends the process once its journal is gone.
+  private func endProcessUnlessSettingsRemain(
+    _ session: Session,
+    _ failure: LibboxInstanceUnclosable
+  ) {
+    guard session.journal == nil else { return }
+    scheduleProcessEnd(.engineUnclosable(failure))
+  }
+
+  /// Ends the process for a stop this agent finished locally but whose stopped
+  /// attestation the Authority refused in a quarantine: the Authority releases
+  /// the lease once this process ended. The agent holds no session then, so
+  /// its System Proxy settings are restored.
+  func endProcessAfterQuarantinedStop() {
+    stateQueue.async { [self] in
+      guard session == nil else { return }
+      scheduleProcessEnd(.quarantinedStop)
+    }
+  }
+
+  /// Ends the process for `reason`, once whatever the reason. The end runs
+  /// after every operation already queued, so their replies have been handed
+  /// to their transport first. Runs on the state queue.
+  private func scheduleProcessEnd(_ reason: ProxyAgentEndReason) {
+    guard !processEndScheduled else { return }
+    processEndScheduled = true
+    let endProcess = dependencies.endProcess
+    stateQueue.async { endProcess(reason) }
+  }
+
   private func restoreOwnedPreferences(
     _ session: Session
   ) -> [ProxySessionLifecycleError] {
@@ -579,6 +896,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       let result = try dependencies.preferences.restore(journal)
       guard result.isComplete else {
         return [.ownershipConflict(result.conflicts)]
+      }
+      if !result.preservedExternalChanges.isEmpty {
+        Self.logger.notice(
+          "Preserving \(result.preservedExternalChanges.count, privacy: .public) externally changed proxy fields after verifying that the listener is no longer selected."
+        )
       }
       do {
         try dependencies.journalStore.remove()
@@ -641,32 +963,7 @@ final class ProxySessionLifecycle: @unchecked Sendable {
         journal: journal
       )
       session = recoverySession
-      var cleanupErrors = acquireCleanupLeaseIfNeeded(recoverySession)
-      if cleanupErrors.isEmpty {
-        cleanupErrors.append(contentsOf: restoreOwnedPreferences(recoverySession))
-      }
-      cleanupErrors.append(contentsOf: releaseLeaseIfFullyClean(recoverySession))
-      if cleanupErrors.isEmpty, recoverySession.journal == nil, recoverySession.lease == nil {
-        session = nil
-        lifecycle = .idle
-        lastStoppedConfiguration = journal.configuration
-        sequence &+= 1
-        currentSnapshot = .off(sequence: sequence)
-      } else {
-        let terminalError = combinedError(
-          original: cleanupErrors.first ?? .recoveryBlocked("Unknown ownership recovery error."),
-          cleanup: Array(cleanupErrors.dropFirst())
-        )
-        lifecycle = .failed(recoverySession.id)
-        recoveryBlock = nil
-        lastFailedConfiguration = journal.configuration
-        sequence &+= 1
-        currentSnapshot = .proxyFailed(
-          terminalError.engineFailure,
-          configuration: journal.configuration,
-          sequence: sequence
-        )
-      }
+      cleanUpSessionWithoutEngine(recoverySession)
     } catch {
       let terminalError = ProxySessionLifecycleError.recoveryBlocked(error.localizedDescription)
       recoveryBlock = terminalError
@@ -674,6 +971,38 @@ final class ProxySessionLifecycle: @unchecked Sendable {
       currentSnapshot = .proxyFailed(
         terminalError.engineFailure,
         configuration: nil,
+        sequence: sequence
+      )
+    }
+  }
+
+  /// Restores what `owned`, a session with no running engine, still owns and
+  /// releases its lease, then publishes Off, or the failure that keeps it.
+  private func cleanUpSessionWithoutEngine(_ owned: Session) {
+    var cleanupErrors = acquireCleanupLeaseIfNeeded(owned)
+    if cleanupErrors.isEmpty {
+      cleanupErrors.append(contentsOf: restoreOwnedPreferences(owned))
+    }
+    cleanupErrors.append(contentsOf: releaseLeaseIfFullyClean(owned))
+    if cleanupErrors.isEmpty, owned.journal == nil, owned.lease == nil {
+      session = nil
+      lifecycle = .idle
+      lastStoppedConfiguration = owned.configuration
+      lastFailedConfiguration = nil
+      sequence &+= 1
+      currentSnapshot = .off(sequence: sequence)
+    } else {
+      let terminalError = combinedError(
+        original: cleanupErrors.first ?? .recoveryBlocked("Unknown ownership recovery error."),
+        cleanup: Array(cleanupErrors.dropFirst())
+      )
+      lifecycle = .failed(owned.id)
+      recoveryBlock = nil
+      lastFailedConfiguration = owned.configuration
+      sequence &+= 1
+      currentSnapshot = .proxyFailed(
+        terminalError.engineFailure,
+        configuration: owned.configuration,
         sequence: sequence
       )
     }

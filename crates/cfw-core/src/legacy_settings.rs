@@ -10,6 +10,7 @@ use crate::{
 
 const MAX_LEGACY_SETTINGS_BYTES: usize = 1024 * 1024;
 const MAX_DNS_SERVERS: usize = 32;
+const MAX_LEGACY_PROFILE_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LegacyNetworkState {
@@ -23,12 +24,17 @@ pub struct LegacyNetworkState {
 pub struct LegacySettingsMigration {
     pub preferences: UiPreferences,
     pub network: LegacyNetworkState,
+    /// Exact basename selected by the legacy writer. This is migration
+    /// authority, not a preference that survives the one-way cutover.
+    pub active_profile: Option<String>,
     source_identity: FileIdentity,
 }
 
 impl LegacySettingsMigration {
     pub fn read(paths: &MacOsAppPaths) -> Result<Option<Self>, SettingsStoreError> {
-        let directory = SecureDirectory::open_or_create(&paths.app_home)?;
+        let Some(directory) = SecureDirectory::open_existing(&paths.app_home)? else {
+            return Ok(None);
+        };
         let Some(stored) = directory.read_optional(
             LEGACY_SETTINGS_FILE_NAME,
             MAX_LEGACY_SETTINGS_BYTES,
@@ -43,10 +49,11 @@ impl LegacySettingsMigration {
                 message: format!("legacy settings are not UTF-8: {error}"),
             }
         })?;
-        let (preferences, network) = parse_legacy_settings(text)?;
+        let (preferences, network, active_profile) = parse_legacy_settings(text)?;
         Ok(Some(Self {
             preferences,
             network,
+            active_profile,
             source_identity: stored.identity,
         }))
     }
@@ -73,13 +80,15 @@ enum LegacyKey {
     TunMode,
     MixedPort,
     RestoreDnsServers,
+    ActiveProfile,
 }
 
 fn parse_legacy_settings(
     input: &str,
-) -> Result<(UiPreferences, LegacyNetworkState), SettingsStoreError> {
+) -> Result<(UiPreferences, LegacyNetworkState, Option<String>), SettingsStoreError> {
     let mut preferences = UiPreferences::default();
     let mut network = LegacyNetworkState::default();
+    let mut active_profile = None;
     let mut seen = HashSet::new();
     let mut dns_sequence: Option<(usize, Vec<String>)> = None;
     let mut saw_content = false;
@@ -216,6 +225,21 @@ fn parse_legacy_settings(
                     network.restore_dns_servers = Some(values);
                 }
             }
+            LegacyKey::ActiveProfile => {
+                let value = parse_scalar(raw_value, line_number)?;
+                if value.is_empty()
+                    || value.len() > MAX_LEGACY_PROFILE_ID_BYTES
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                {
+                    return legacy_error(
+                        line_number,
+                        "active_profile must be a bounded basename containing only ASCII letters, digits, '-' or '_'",
+                    );
+                }
+                active_profile = Some(value);
+            }
         }
     }
     finish_dns_sequence(&mut network, dns_sequence)?;
@@ -235,7 +259,7 @@ fn parse_legacy_settings(
             );
         }
     }
-    Ok((preferences, network))
+    Ok((preferences, network, active_profile))
 }
 
 fn split_mapping_entry(line: &str) -> Option<(&str, &str)> {
@@ -263,6 +287,7 @@ fn recognized_key(key: &str) -> Option<LegacyKey> {
         "tun_mode" | "tunMode" => Some(LegacyKey::TunMode),
         "mixed_port" | "mixedPort" => Some(LegacyKey::MixedPort),
         "restore-dns-servers" | "restoreDnsServers" => Some(LegacyKey::RestoreDnsServers),
+        "active_profile" | "activeProfile" => Some(LegacyKey::ActiveProfile),
         _ => None,
     }
 }
@@ -279,6 +304,7 @@ fn canonical_key(key: LegacyKey) -> &'static str {
         LegacyKey::TunMode => "tun_mode",
         LegacyKey::MixedPort => "mixed_port",
         LegacyKey::RestoreDnsServers => "restore-dns-servers",
+        LegacyKey::ActiveProfile => "active_profile",
     }
 }
 

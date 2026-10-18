@@ -1,3 +1,4 @@
+import CFWSharedProtocol
 import Foundation
 import ServiceManagement
 
@@ -6,6 +7,7 @@ public enum GlobalAuthorityRegistrationStatus: Equatable, Sendable {
   case requiresApproval
   case notRegistered
   case notFound
+  case unknown
 }
 
 public enum GlobalAuthorityRegistrationError: Error, Equatable, Sendable {
@@ -21,11 +23,14 @@ public protocol GlobalAuthorityServiceControlling: Sendable {
 
 public protocol GlobalAuthorityDaemonServicing: Sendable {
   var registrationStatus: GlobalAuthorityRegistrationStatus { get }
+  func requireRegistrationReady() throws
   func register() throws
+  func unregister() async throws
 }
 
 public struct SMGlobalAuthorityDaemonService: GlobalAuthorityDaemonServicing {
   public static let plistName = "com.bill.clashformac.global-authority.plist"
+  private let unregistration = ServiceUnregistrationBarrier()
 
   public init() {}
 
@@ -35,12 +40,26 @@ public struct SMGlobalAuthorityDaemonService: GlobalAuthorityDaemonServicing {
     case .requiresApproval: .requiresApproval
     case .notRegistered: .notRegistered
     case .notFound: .notFound
-    @unknown default: .notFound
+    @unknown default: .unknown
     }
   }
 
+  public func requireRegistrationReady() throws {
+    try unregistration.requireRegistrationReady()
+  }
+
   public func register() throws {
-    try SMAppService.daemon(plistName: Self.plistName).register()
+    try unregistration.register {
+      try SMAppService.daemon(plistName: Self.plistName).register()
+    }
+  }
+
+  public func unregister() async throws {
+    try await unregistration.unregister { finish in
+      SMAppService.daemon(plistName: Self.plistName).unregister { error in
+        finish(error.map { .failure($0) } ?? .success(()))
+      }
+    }
   }
 }
 
@@ -56,23 +75,108 @@ public struct SMGlobalAuthorityServiceController: GlobalAuthorityServiceControll
   }
 
   public func ensureRegistered() throws {
+    do { try service.requireRegistrationReady() } catch {
+      throw GlobalAuthorityRegistrationError.registrationFailed
+    }
     switch service.registrationStatus {
     case .enabled:
       return
     case .requiresApproval:
       throw GlobalAuthorityRegistrationError.approvalRequired
-    case .notFound:
-      throw GlobalAuthorityRegistrationError.serviceNotFound
-    case .notRegistered:
-      do { try service.register() } catch {
-        throw GlobalAuthorityRegistrationError.registrationFailed
+    case .notFound, .notRegistered:
+      do {
+        try service.register()
+      } catch {
+        switch service.registrationStatus {
+        case .requiresApproval:
+          throw GlobalAuthorityRegistrationError.approvalRequired
+        case .notFound:
+          throw GlobalAuthorityRegistrationError.serviceNotFound
+        case .enabled, .notRegistered, .unknown:
+          throw GlobalAuthorityRegistrationError.registrationFailed
+        }
       }
       switch service.registrationStatus {
       case .enabled: return
       case .requiresApproval: throw GlobalAuthorityRegistrationError.approvalRequired
       case .notFound: throw GlobalAuthorityRegistrationError.serviceNotFound
-      case .notRegistered: throw GlobalAuthorityRegistrationError.registrationFailed
+      case .notRegistered, .unknown: throw GlobalAuthorityRegistrationError.registrationFailed
       }
+    case .unknown:
+      throw GlobalAuthorityRegistrationError.registrationFailed
+    }
+  }
+}
+
+/// Host-side Authority client boundary that establishes the embedded launchd
+/// daemon registration before any XPC operation. Approval and packaging absence
+/// remain distinct typed Authority errors so the UI can present the existing
+/// System Settings action without treating either state as an empty result.
+public actor RegistrationGatedAuthorityClient: AuthorityClient {
+  private let serviceController: any GlobalAuthorityServiceControlling
+  private let authority: any AuthorityClient
+
+  public init(
+    serviceController: any GlobalAuthorityServiceControlling =
+      SMGlobalAuthorityServiceController(),
+    authority: any AuthorityClient
+  ) {
+    self.serviceController = serviceController
+    self.authority = authority
+  }
+
+  public func prepare(
+    _ request: PrepareStartRequest,
+    configuration: SensitiveBytes,
+    secrets: SensitiveBytes?
+  ) async throws -> PreparedStart {
+    try ensureRegistered()
+    return try await authority.prepare(
+      request, configuration: configuration, secrets: secrets)
+  }
+
+  public func cancelPrepared(
+    _ context: OperationContext,
+    revision: UInt64
+  ) async throws {
+    try ensureRegistered()
+    try await authority.cancelPrepared(context, revision: revision)
+  }
+
+  public func beginStop(_ request: BeginStopRequest) async throws -> StopDirective {
+    try ensureRegistered()
+    return try await authority.beginStop(request)
+  }
+
+  public func completeStop(_ request: CompleteStopRequest) async throws {
+    try ensureRegistered()
+    try await authority.completeStop(request)
+  }
+
+  public func reconcileOff(
+    _ request: ReconcileOffRequest
+  ) async throws -> ReconcileOffReceipt {
+    try ensureRegistered()
+    return try await authority.reconcileOff(request)
+  }
+
+  public func snapshot() async throws -> AuthoritySnapshot {
+    try ensureRegistered()
+    return try await authority.snapshot()
+  }
+
+  private func ensureRegistered() throws {
+    do {
+      try serviceController.ensureRegistered()
+    } catch let error as GlobalAuthorityRegistrationError {
+      switch error {
+      case .approvalRequired:
+        throw AuthorityDomainError(code: .globalAuthorityApprovalRequired)
+      case .serviceNotFound, .registrationFailed:
+        throw AuthorityDomainError(code: .globalAuthorityRegistrationRequired)
+      }
+    } catch {
+      throw AuthorityDomainError(code: .globalAuthorityRegistrationRequired)
     }
   }
 }

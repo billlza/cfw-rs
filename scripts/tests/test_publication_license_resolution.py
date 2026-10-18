@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts.publication import license_resolution
 from scripts.publication.common import PublicationError
 from scripts.publication.graph_model import ComponentSeed
 from scripts.publication.license_resolution import (
+    canonical_spdx_expression,
     resolve_license,
     validate_automatic_resolution,
 )
@@ -30,6 +34,21 @@ ISC_COMMENTED_TEXT = """// Copyright 2026 Fixture Authors.
 
 
 class LicenseResolutionTests(unittest.TestCase):
+    def test_npm_artistic_2_requires_the_actual_complete_license_sections(self) -> None:
+        text = (Path(__file__).parent / "fixtures/npm-12.0.2-LICENSE").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed = self.seed(root, declared_license="Artistic-2.0")
+            license_file = root / "LICENSE"
+            license_file.write_text(text, encoding="utf-8")
+            resolution = resolve_license(seed)
+            self.assertEqual(resolution["status"], "automatic")
+            self.assertEqual(resolution["expression"], "Artistic-2.0")
+            for changed in ("The Artistic License 2.0\n", text.replace("(13)", "", 1), text.replace("(14)", "", 1)):
+                license_file.write_text(changed, encoding="utf-8")
+                with self.subTest(changed=changed[:45]):
+                    self.assertEqual(resolve_license(seed)["status"], "manual-required")
+
     def seed(
         self,
         root: Path,
@@ -60,6 +79,63 @@ class LicenseResolutionTests(unittest.TestCase):
             declared_license=declared_license,
         )
 
+    def donor_table(self, text: str) -> dict[str, tuple[str, str]]:
+        return {"MIT": ("donor-crate", hashlib.sha256(text.encode("utf-8")).hexdigest())}
+
+    def test_cargo_license_donor_is_identified_by_text_not_vendored_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            vendor = Path(directory)
+            root = vendor / "fixture-1.0.0"
+            root.mkdir()
+            seed = self.seed(root)
+            for version in ("3.0.0", "2.0.0"):
+                donor = vendor / f"donor-crate-{version}"
+                donor.mkdir()
+                (donor / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+            with patch.dict(
+                license_resolution._CARGO_LICENSE_DONORS, self.donor_table(MIT_TEXT), clear=True
+            ):
+                resolution = resolve_license(seed)
+                self.assertEqual(validate_automatic_resolution(seed, resolution), resolution)
+            self.assertEqual(resolution["status"], "automatic")
+            self.assertEqual(
+                [(item["path"], item["supports"]) for item in resolution["files"]],
+                [(str((vendor / "donor-crate-2.0.0/LICENSE").resolve(strict=True)), ["MIT"])],
+            )
+
+    def test_cargo_license_donor_requires_exact_text_and_crate_directory(self) -> None:
+        for case in ("changed-text", "lookalike-crate", "linked-file", "linked-directory"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                vendor = Path(directory)
+                root = vendor / "fixture-1.0.0"
+                root.mkdir()
+                seed = self.seed(root)
+                outside = vendor / "outside"
+                outside.mkdir()
+                (outside / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+                if case == "changed-text":
+                    donor = vendor / "donor-crate-1.0.0"
+                    donor.mkdir()
+                    (donor / "LICENSE").write_text(MIT_TEXT + "\nchanged\n", encoding="utf-8")
+                elif case == "lookalike-crate":
+                    donor = vendor / "donor-crate-macros-1.0.0"
+                    donor.mkdir()
+                    (donor / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+                elif case == "linked-file":
+                    donor = vendor / "donor-crate-1.0.0"
+                    donor.mkdir()
+                    (donor / "LICENSE").symlink_to(outside / "LICENSE")
+                else:
+                    (vendor / "donor-crate-1.0.0").symlink_to(outside)
+                with patch.dict(
+                    license_resolution._CARGO_LICENSE_DONORS,
+                    self.donor_table(MIT_TEXT),
+                    clear=True,
+                ):
+                    resolution = resolve_license(seed)
+                self.assertEqual(resolution["status"], "manual-required")
+                self.assertEqual(resolution["files"], [])
+
     def test_declared_spdx_and_source_text_resolve_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,6 +145,23 @@ class LicenseResolutionTests(unittest.TestCase):
             self.assertEqual(resolution["status"], "automatic")
             self.assertEqual(resolution["expression"], "MIT")
             self.assertEqual(validate_automatic_resolution(seed, resolution), resolution)
+
+    def test_repository_license_does_not_escape_into_hidden_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            license_path = root / "LICENSE"
+            license_path.write_text(MIT_TEXT, encoding="utf-8")
+            hidden_worktree = root / ".kilo/worktrees/stale"
+            hidden_worktree.mkdir(parents=True)
+            (hidden_worktree / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+
+            resolution = resolve_license(self.seed(root))
+
+            self.assertEqual(resolution["status"], "automatic")
+            self.assertEqual(
+                [item["path"] for item in resolution["files"]],
+                [str(license_path.resolve(strict=True))],
+            )
 
     def test_automatic_evidence_tampering_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -113,6 +206,18 @@ class LicenseResolutionTests(unittest.TestCase):
             self.assertEqual(resolution["status"], "automatic")
             self.assertEqual(resolution["expression"], "MIT")
 
+    def test_quoted_go_module_path_keeps_exact_identity_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+            seed = self.seed(root, ecosystem="go", declared_license=None)
+            (root / "go.mod").write_text('module "example.com/fixture"\n', encoding="utf-8")
+            self.assertEqual(resolve_license(seed)["status"], "automatic")
+            for declaration in ('"example.com/foreign"', '"example.com/fixture', '"example.com/fixture"\nmodule example.com/fixture'):
+                (root / "go.mod").write_text(f"module {declaration}\n", encoding="utf-8")
+                with self.subTest(declaration=declaration), self.assertRaises(PublicationError):
+                    resolve_license(seed)
+
     def test_commented_isc_text_resolves_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -121,6 +226,70 @@ class LicenseResolutionTests(unittest.TestCase):
             resolution = resolve_license(seed)
             self.assertEqual(resolution["status"], "automatic")
             self.assertEqual(resolution["files"][0]["supports"], ["ISC"])
+
+    def test_spdx_identifiers_exceptions_and_local_license_refs_are_validated(self) -> None:
+        self.assertEqual(
+            canonical_spdx_expression("Apache-2.0 WITH LLVM-exception"),
+            "Apache-2.0 WITH LLVM-exception",
+        )
+        self.assertEqual(
+            canonical_spdx_expression("LicenseRef-Apple-Xcode-EULA-27.0"),
+            "LicenseRef-Apple-Xcode-EULA-27.0",
+        )
+        for invalid in (
+            "MadeUp-1.0",
+            "Apache-2.0 WITH MadeUp-exception",
+            "(Apache-2.0 OR MIT) WITH LLVM-exception",
+            "LicenseRef-Xcode WITH LLVM-exception",
+            "LLVM-exception",
+            "LicenseRef-",
+            "LicenseRef-Xcode+",
+            "DocumentRef-vendor:LicenseRef-Xcode",
+            "NOASSERTION",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(PublicationError):
+                canonical_spdx_expression(invalid)
+
+    def test_manual_review_preserves_compound_expression_and_full_file_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed = self.seed(root, ecosystem="go", declared_license=None)
+            license_files = {
+                "LICENSE-APACHE": "reviewed Apache terms",
+                "LICENSE-BSD": "reviewed BSD terms",
+                "LICENSE-MIT": "reviewed MIT terms",
+            }
+            for name, text in license_files.items():
+                (root / name).write_text(text, encoding="utf-8")
+            required = resolve_license(seed)
+            self.assertEqual(required["status"], "manual-required")
+            supports = {
+                "LICENSE-APACHE": ["Apache-2.0"],
+                "LICENSE-BSD": ["BSD-3-Clause"],
+                "LICENSE-MIT": ["MIT"],
+            }
+            reviewed = {
+                **required,
+                "status": "manual-reviewed",
+                "expression": "BSD-3-Clause AND Apache-2.0 AND MIT",
+                "method": "human-legal-review",
+                "reason": "The three independently bound license texts all apply.",
+                "files": [
+                    {**item, "supports": supports[Path(item["path"]).name]}
+                    for item in required["files"]
+                ],
+            }
+            validated = validate_automatic_resolution(seed, reviewed)
+            self.assertEqual(
+                validated["expression"], "BSD-3-Clause AND Apache-2.0 AND MIT"
+            )
+
+            incomplete = {
+                **reviewed,
+                "files": [item for item in reviewed["files"] if item["supports"] != ["MIT"]],
+            }
+            with self.assertRaisesRegex(PublicationError, "exact expression"):
+                validate_automatic_resolution(seed, incomplete)
 
 
 if __name__ == "__main__":

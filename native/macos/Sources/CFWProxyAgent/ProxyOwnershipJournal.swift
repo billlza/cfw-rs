@@ -233,7 +233,18 @@ struct ProxyOwnershipConflict: Equatable, Sendable {
 
 struct ProxyRestoreResult: Equatable, Sendable {
   let conflicts: [ProxyOwnershipConflict]
+  let preservedExternalChanges: [ProxyOwnershipConflict]
 
+  init(
+    conflicts: [ProxyOwnershipConflict],
+    preservedExternalChanges: [ProxyOwnershipConflict] = []
+  ) {
+    self.conflicts = conflicts
+    self.preservedExternalChanges = preservedExternalChanges
+  }
+
+  /// Cleanup is complete when our settings were restored or a verified external
+  /// replacement no longer uses our listener. External changes remain explicit.
   var isComplete: Bool {
     conflicts.isEmpty
   }

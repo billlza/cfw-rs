@@ -8,14 +8,16 @@ use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
-    EngineCoordinatorError,
+    EngineCoordinatorError, EngineRestartSpec,
     coordinator_actor::{
         Command, CoordinatorRuntime, SetModeCommand, StartupReconciliation, run_coordinator,
     },
+    coordinator_startup::ReconciliationOutcome,
     runtime::validate_lineage,
 };
 
 pub(crate) const COMMAND_QUEUE_CAPACITY: usize = 32;
+const DEFAULT_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(325);
 const DEFAULT_STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_STATUS_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -24,6 +26,8 @@ pub type CoordinatorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoordinatorOptions {
     pub operation_timeout: Duration,
+    /// Bounded user-consent wait, separate from runtime and cleanup deadlines.
+    pub authorization_timeout: Duration,
     pub status_query_timeout: Duration,
     pub status_reconciliation_interval: Duration,
     pub initial_generation: u64,
@@ -33,6 +37,7 @@ impl Default for CoordinatorOptions {
     fn default() -> Self {
         Self {
             operation_timeout: Duration::from_secs(15),
+            authorization_timeout: DEFAULT_AUTHORIZATION_TIMEOUT,
             status_query_timeout: DEFAULT_STATUS_QUERY_TIMEOUT,
             status_reconciliation_interval: DEFAULT_STATUS_RECONCILIATION_INTERVAL,
             initial_generation: 0,
@@ -44,7 +49,7 @@ impl Default for CoordinatorOptions {
 pub struct EngineModeCoordinator {
     commands: mpsc::Sender<Command>,
     snapshots: watch::Receiver<EngineSnapshot>,
-    reconciliation: watch::Receiver<Option<Result<EngineSnapshot, EngineCoordinatorError>>>,
+    reconciliation: watch::Receiver<Option<ReconciliationOutcome>>,
 }
 
 impl EngineModeCoordinator {
@@ -85,12 +90,13 @@ impl EngineModeCoordinator {
             lineage.session,
             CoordinatorOptions {
                 operation_timeout,
+                authorization_timeout: DEFAULT_AUTHORIZATION_TIMEOUT,
                 status_query_timeout: DEFAULT_STATUS_QUERY_TIMEOUT,
                 status_reconciliation_interval: DEFAULT_STATUS_RECONCILIATION_INTERVAL,
                 initial_generation: lineage.generation,
             },
             Some(generation_store),
-            StartupReconciliation::RecoverKnownLineage,
+            StartupReconciliation::CleanupKnownLineage,
         );
         spawn(task);
         Ok(coordinator)
@@ -130,6 +136,7 @@ impl EngineModeCoordinator {
             },
             CoordinatorOptions {
                 operation_timeout,
+                authorization_timeout: DEFAULT_AUTHORIZATION_TIMEOUT,
                 status_query_timeout: DEFAULT_STATUS_QUERY_TIMEOUT,
                 status_reconciliation_interval: DEFAULT_STATUS_RECONCILIATION_INTERVAL,
                 initial_generation: 0,
@@ -152,7 +159,7 @@ impl EngineModeCoordinator {
             session,
             options,
             generation_store,
-            StartupReconciliation::RecoverKnownLineage,
+            StartupReconciliation::CleanupKnownLineage,
         );
         tokio::spawn(task);
         coordinator
@@ -182,6 +189,7 @@ impl EngineModeCoordinator {
             generation: options.initial_generation,
             target: EngineMode::Off,
             error: "native startup reconciliation is pending".into(),
+            recheck_pending: false,
         };
         let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot.clone());
         let (reconciliation_tx, reconciliation_rx) = watch::channel(None);
@@ -213,6 +221,7 @@ impl EngineModeCoordinator {
     pub async fn set_mode(
         &self,
         target: EngineMode,
+        profile_id: String,
         profile: ValidatedSingBoxProfile,
         settings: EngineSettings,
     ) -> Result<EngineSnapshot, EngineCoordinatorError> {
@@ -220,8 +229,37 @@ impl EngineModeCoordinator {
         self.commands
             .try_send(Command::SetMode(Box::new(SetModeCommand {
                 target,
+                profile_id,
                 profile,
                 settings,
+                expected_snapshot: None,
+                response: response_tx,
+            })))
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
+    }
+
+    /// Requests a mode only if the actor still owns the exact observed
+    /// snapshot. This closes the observation-to-apply window for maintenance
+    /// transactions without weakening the ordinary serialized set-mode API.
+    pub async fn set_mode_if_snapshot(
+        &self,
+        expected_snapshot: EngineSnapshot,
+        target: EngineMode,
+        profile_id: String,
+        profile: ValidatedSingBoxProfile,
+        settings: EngineSettings,
+    ) -> Result<EngineSnapshot, EngineCoordinatorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::SetMode(Box::new(SetModeCommand {
+                target,
+                profile_id,
+                profile,
+                settings,
+                expected_snapshot: Some(expected_snapshot),
                 response: response_tx,
             })))
             .map_err(map_send_error)?;
@@ -236,6 +274,7 @@ impl EngineModeCoordinator {
     pub async fn prepare_cutover(
         &self,
         target: EngineMode,
+        profile_id: String,
         profile: ValidatedSingBoxProfile,
         settings: EngineSettings,
     ) -> Result<CutoverPreflightRequest, EngineCoordinatorError> {
@@ -244,6 +283,7 @@ impl EngineModeCoordinator {
             .try_send(Command::PrepareCutover(Box::new(
                 crate::coordinator_actor::PrepareCutoverCommand {
                     target,
+                    profile_id,
                     profile,
                     settings,
                     response: response_tx,
@@ -259,8 +299,139 @@ impl EngineModeCoordinator {
         self.snapshots.borrow().clone()
     }
 
+    /// The typed failure of the latest startup reconciliation, if any.
+    /// Reading this value does not query or mutate native services. A successful
+    /// explicit retry clears it through the existing reconciliation channel.
+    pub fn startup_failure(&self) -> Option<EngineCoordinatorError> {
+        self.reconciliation
+            .borrow()
+            .as_ref()
+            .and_then(|outcome| outcome.result.as_ref().err().cloned())
+    }
+
+    /// Presentation-only eligibility for one explicit startup service recovery.
+    /// The actor rechecks the failure identity and native ownership boundaries.
+    pub fn can_reconcile_startup(&self) -> bool {
+        !self.commands.is_closed()
+            && self
+                .reconciliation
+                .borrow()
+                .as_ref()
+                .is_some_and(|outcome| outcome.recovery.is_some())
+    }
+
+    /// Reobserves the one recoverable startup service failure (an unproven
+    /// cleanup, or a read the services could not answer yet) and settles only
+    /// at Off. It never follows recovery with a start. Accepted work survives
+    /// cancellation of its caller, like other ownership-bearing actor commands.
+    /// Stale/repeated offers are rejected without native I/O.
+    pub fn reconcile_startup(
+        &self,
+    ) -> impl Future<Output = Result<EngineSnapshot, EngineCoordinatorError>> + Send + 'static + use<>
+    {
+        // Capture at the user-action boundary, before a Host operation queue
+        // may await its own permit. Polling later must not adopt a newer offer.
+        let expected_failure = self
+            .reconciliation
+            .borrow()
+            .as_ref()
+            .and_then(|outcome| outcome.recovery.clone());
+        let commands = self.commands.clone();
+        async move {
+            let (response_tx, response_rx) = oneshot::channel();
+            commands
+                .try_send(Command::ReconcileStartup {
+                    expected_failure,
+                    response: response_tx,
+                })
+                .map_err(map_send_error)?;
+            response_rx
+                .await
+                .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
+        }
+    }
+
+    /// Serializes native preparation, candidate validation, runtime replacement
+    /// and the storage commit with status polling and mode changes. Fetch remote
+    /// input before calling this method. The actor reads the current mode when
+    /// it admits the command, so an earlier explicit stop remains stopped.
+    pub async fn change_profile<T, F>(
+        &self,
+        settings: EngineSettings,
+        prepare: F,
+    ) -> Result<T, EngineCoordinatorError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<crate::ProfileChange<T>, EngineCoordinatorError>>
+            + Send
+            + 'static,
+    {
+        let (value_tx, value_rx) = oneshot::channel();
+        let preparation = Box::pin(async move {
+            let candidate = prepare.await?;
+            Ok(crate::ProfileChange {
+                profile_id: candidate.profile_id,
+                profile: candidate.profile,
+                activate: candidate.activate,
+                previous_profile: candidate.previous_profile,
+                commit: Box::new(move || {
+                    let value = (candidate.commit)()?;
+                    let _waiter_dropped = value_tx.send(value);
+                    Ok(())
+                }),
+            })
+        });
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::ChangeProfile(Box::new(
+                crate::coordinator_actor::ChangeProfileCommand {
+                    settings,
+                    prepare: preparation,
+                    response: response_tx,
+                },
+            )))
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)??;
+        value_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<EngineSnapshot> {
         self.snapshots.clone()
+    }
+
+    /// Returns the actor-owned source inputs of the last accepted set-mode
+    /// command. The response is serialized with transitions and is never
+    /// reconstructed from a profile repository or a native status query.
+    pub async fn restart_spec(&self) -> Result<Option<EngineRestartSpec>, EngineCoordinatorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::RestartSpec {
+                response: response_tx,
+            })
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
+    }
+
+    /// Fail-closes the actor after a release-evidence restore cannot be proven.
+    /// Only the existing explicit Off reconciliation may clear this quarantine.
+    pub async fn quarantine_release_evidence_restore(
+        &self,
+    ) -> Result<EngineSnapshot, EngineCoordinatorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::QuarantineReleaseEvidenceRestore {
+                response: response_tx,
+            })
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
     }
 
     /// Waits until the initial native status has either been reconciled or
@@ -268,8 +439,8 @@ impl EngineModeCoordinator {
     pub async fn wait_for_reconciliation(&self) -> Result<EngineSnapshot, EngineCoordinatorError> {
         let mut reconciliation = self.reconciliation.clone();
         loop {
-            if let Some(result) = reconciliation.borrow().clone() {
-                return result;
+            if let Some(outcome) = reconciliation.borrow().clone() {
+                return outcome.result;
             }
             reconciliation
                 .changed()

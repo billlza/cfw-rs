@@ -1,0 +1,4 @@
+module CFWLibboxObjC {
+  header "CFWLibboxObjC.h"
+  export *
+}

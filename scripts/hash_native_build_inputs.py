@@ -15,7 +15,6 @@ INPUTS = (
     "native/macos/Headers",
     "native/macos/Sources",
     "native/macos/SystemExtension",
-    "native/macos/Dependencies.lock.json",
     "native/macos/Package.swift",
     "native/macos/project.yml",
 )

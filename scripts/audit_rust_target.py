@@ -6,7 +6,9 @@ upstream crates.  cargo-audit's target flags filter advisory applicability but
 do not remove packages that Cargo cannot resolve for the selected target.  This
 script derives the reachable package inventory from `cargo metadata
 --filter-platform`, emits a temporary audit-only lockfile, and runs cargo-audit
-with warnings denied.  It never ignores an advisory.
+with warning advisories denied. It never ignores an advisory. Current yanked
+status is owned by the mandatory cargo-deny gate, which uses the same target
+and all-features graph and fails closed on registry or policy diagnostics.
 """
 
 from __future__ import annotations
@@ -18,14 +20,74 @@ import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
+
+if __package__:
+    from .publication.bounded_process import BoundedProcessError, run_bounded_process
+else:
+    from publication.bounded_process import BoundedProcessError, run_bounded_process
 
 
 SUPPORTED_TARGET = "aarch64-apple-darwin"
+METADATA_TIMEOUT_SECONDS = 300
+AUDIT_TIMEOUT_SECONDS = 900
+OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 class AuditContractError(RuntimeError):
     """The Cargo metadata or lockfile does not satisfy the audit contract."""
+
+
+def _diagnostic_tail(stdout: bytes, stderr: bytes) -> str:
+    encoded = (stderr or stdout)[-8192:]
+    return encoded.decode("utf-8", errors="replace").strip()
+
+
+def _bounded(
+    command: Sequence[str],
+    *,
+    repository: Path,
+    environment: Mapping[str, str],
+    timeout: int,
+    label: str,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return run_bounded_process(
+            command,
+            cwd=repository,
+            environment=environment,
+            timeout=timeout,
+            output_limit=OUTPUT_LIMIT_BYTES,
+        )
+    except BoundedProcessError as error:
+        detail = _diagnostic_tail(error.stdout, error.stderr)
+        raise AuditContractError(
+            f"{label} failed its {error.reason} boundary"
+            + (f": {detail}" if detail else "")
+        ) from error
+
+
+def _require_success_without_stderr(
+    result: subprocess.CompletedProcess[bytes], label: str
+) -> None:
+    if result.returncode != 0:
+        detail = _diagnostic_tail(result.stdout, result.stderr)
+        raise AuditContractError(
+            f"{label} failed with status {result.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    if result.stderr:
+        detail = _diagnostic_tail(b"", result.stderr)
+        raise AuditContractError(
+            f"{label} emitted diagnostics" + (f": {detail}" if detail else "")
+        )
+
+
+def _decode_utf8(encoded: bytes, label: str) -> str:
+    try:
+        return encoded.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AuditContractError(f"{label} is not UTF-8") from error
 
 
 def reachable_package_ids(metadata: dict[str, Any]) -> set[str]:
@@ -208,23 +270,40 @@ def parse_audit_result(encoded: str, expected_package_count: int) -> None:
 
 
 def run(repository: Path, no_fetch: bool) -> int:
+    cargo_value = os.environ.get("CFW_RELEASE_CARGO_EXECUTABLE")
+    cargo_audit_value = os.environ.get("CFW_RELEASE_CARGO_AUDIT_EXECUTABLE")
+    if not cargo_value or not cargo_audit_value:
+        raise AuditContractError("closed Cargo and cargo-audit executables are required")
+    cargo = Path(cargo_value)
+    cargo_audit = Path(cargo_audit_value)
+    for executable, label in ((cargo, "Cargo"), (cargo_audit, "cargo-audit")):
+        if (
+            not executable.is_absolute()
+            or not executable.is_file()
+            or executable.is_symlink()
+            or not os.access(executable, os.X_OK)
+        ):
+            raise AuditContractError(f"closed {label} executable is unavailable")
     metadata_command = [
-        "cargo",
+        str(cargo),
         "metadata",
         "--locked",
+        "--all-features",
         "--filter-platform",
         SUPPORTED_TARGET,
         "--format-version",
         "1",
     ]
-    metadata_result = subprocess.run(
+    closed_environment = dict(os.environ)
+    metadata_result = _bounded(
         metadata_command,
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
+        repository=repository,
+        environment=closed_environment,
+        timeout=METADATA_TIMEOUT_SECONDS,
+        label="closed Cargo metadata",
     )
-    metadata = json.loads(metadata_result.stdout)
+    _require_success_without_stderr(metadata_result, "closed Cargo metadata")
+    metadata = json.loads(_decode_utf8(metadata_result.stdout, "closed Cargo metadata"))
     keys = target_package_keys(metadata)
     with (repository / "Cargo.lock").open("rb") as handle:
         lock_data = tomllib.load(handle)
@@ -240,30 +319,32 @@ def run(repository: Path, no_fetch: bool) -> int:
             handle.flush()
             os.fsync(handle.fileno())
         command = [
-            "cargo",
+            str(cargo_audit),
             "audit",
             "--file",
             temporary_path,
             "--deny",
             "warnings",
             "--json",
+            "--quiet",
+            # cargo-deny owns the live yanked-status query for this same graph.
+            # Avoid cargo-audit's duplicate per-package sparse-index path.
+            "--no-yanked",
         ]
         if no_fetch:
             command.append("--no-fetch")
-        audit_result = subprocess.run(
+        audit_result = _bounded(
             command,
-            cwd=repository,
-            check=False,
-            capture_output=True,
-            text=True,
+            repository=repository,
+            environment=closed_environment,
+            timeout=AUDIT_TIMEOUT_SECONDS,
+            label="target cargo-audit",
         )
-        if audit_result.returncode != 0:
-            if audit_result.stdout:
-                print(audit_result.stdout, end="", file=os.sys.stderr)
-            if audit_result.stderr:
-                print(audit_result.stderr, end="", file=os.sys.stderr)
-            return audit_result.returncode
-        parse_audit_result(audit_result.stdout, len(packages))
+        _require_success_without_stderr(audit_result, "target cargo-audit")
+        parse_audit_result(
+            _decode_utf8(audit_result.stdout, "target cargo-audit output"),
+            len(packages),
+        )
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -275,7 +356,8 @@ def run(repository: Path, no_fetch: bool) -> int:
     print(
         "RustSec target audit passed: "
         f"{SUPPORTED_TARGET}, {len(packages)} reachable packages, "
-        "0 vulnerabilities, 0 warnings"
+        "0 vulnerabilities, 0 advisory warnings; "
+        "current yanked status is owned by the mandatory cargo-deny gate"
     )
     return 0
 

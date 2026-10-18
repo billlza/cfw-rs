@@ -12,7 +12,8 @@ public struct CredentialProvisionEntry: Codable, Equatable, Sendable {
     guard !secretBytes.isEmpty,
       secretBytes.count <= 16 * 1_024,
       let value = String(data: secretBytes, encoding: .utf8),
-      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+      reference.kind.admitsSecretSyntax(value)
     else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }
@@ -67,17 +68,20 @@ extension CredentialProvisionEntry: CustomDebugStringConvertible {
 }
 
 public struct CredentialProvisionRequest: Codable, Equatable, Sendable {
-  public let profileID: UUID
+  public let audience: CredentialAudience
   public let requiredReferences: [CredentialReference]
   public private(set) var entries: [CredentialProvisionEntry]
 
   public init(
-    profileID: UUID,
+    audience: CredentialAudience,
     requiredReferences: [CredentialReference],
     entries: [CredentialProvisionEntry]
   ) throws {
     guard requiredReferences.count <= NativeBridgeProtocolConstants.maximumCredentialSlots,
-      entries.count <= NativeBridgeProtocolConstants.maximumCredentialSlots
+      entries.count <= NativeBridgeProtocolConstants.maximumCredentialSlots,
+      requiredReferences.sorted(by: CredentialReference.canonicalPrecedes) == requiredReferences,
+      entries.map(\.reference).sorted(by: CredentialReference.canonicalPrecedes)
+        == entries.map(\.reference)
     else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }
@@ -107,30 +111,21 @@ public struct CredentialProvisionRequest: Codable, Equatable, Sendable {
         throw NativeBridgeProtocolError.invalidCredentialSlot
       }
     }
-    self.profileID = profileID
-    self.requiredReferences = requiredReferences.sorted {
-      $0.id.uuidString < $1.id.uuidString
-    }
+    self.audience = audience
+    self.requiredReferences = requiredReferences
     self.entries = entries
   }
 
   private enum CodingKeys: String, CodingKey {
-    case profileID = "profile_id"
+    case audience
     case requiredReferences = "required_references"
     case entries
   }
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    let profileText = try container.decode(String.self, forKey: .profileID)
-    guard profileText == profileText.lowercased(),
-      let profileID = UUID(uuidString: profileText),
-      profileID.uuidString.lowercased() == profileText
-    else {
-      throw NativeBridgeProtocolError.invalidContext
-    }
     try self.init(
-      profileID: profileID,
+      audience: container.decode(CredentialAudience.self, forKey: .audience),
       requiredReferences: container.decode(
         [CredentialReference].self,
         forKey: .requiredReferences
@@ -141,7 +136,7 @@ public struct CredentialProvisionRequest: Codable, Equatable, Sendable {
 
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
-    try container.encode(profileID.uuidString.lowercased(), forKey: .profileID)
+    try container.encode(audience, forKey: .audience)
     try container.encode(requiredReferences, forKey: .requiredReferences)
     try container.encode(entries, forKey: .entries)
   }
@@ -155,36 +150,44 @@ public struct CredentialProvisionRequest: Codable, Equatable, Sendable {
 }
 
 public struct CredentialPresenceRequest: Codable, Equatable, Sendable {
-  public let profileID: UUID
+  public let audience: CredentialAudience
   public let references: [CredentialReference]
 
-  public init(profileID: UUID, references: [CredentialReference]) throws {
-    guard references.count <= NativeBridgeProtocolConstants.maximumCredentialSlots else {
+  public init(audience: CredentialAudience, references: [CredentialReference]) throws {
+    guard references.count <= NativeBridgeProtocolConstants.maximumCredentialSlots,
+      references.sorted(by: CredentialReference.canonicalPrecedes) == references
+    else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }
     var ids = Set<UUID>()
     guard references.allSatisfy({ ids.insert($0.id).inserted }) else {
       throw NativeBridgeProtocolError.duplicateCredentialPointer
     }
-    self.profileID = profileID
+    self.audience = audience
     self.references = references
   }
 
   private enum CodingKeys: String, CodingKey {
-    case profileID = "profile_id"
+    case audience
     case references
   }
 }
 
 public struct NativeCredentialReceipt: Codable, Equatable, Sendable {
   public let profileID: UUID
+  public let profileDigest: SHA256Digest
 
-  public init(profileID: UUID) {
-    self.profileID = profileID
+  public init(audience: CredentialAudience) {
+    profileID = audience.profileID
+    profileDigest = audience.profileDigest
   }
 
-  private enum CodingKeys: String, CodingKey {
-    case profileID = "profile_id"
+  public init(from decoder: Decoder) throws {
+    self.init(audience: try CredentialAudience(from: decoder))
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    try CredentialAudience(profileID: profileID, profileDigest: profileDigest).encode(to: encoder)
   }
 }
 

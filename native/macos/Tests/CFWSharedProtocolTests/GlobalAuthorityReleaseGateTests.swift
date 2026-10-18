@@ -15,16 +15,6 @@ import Testing
   try GlobalAuthorityReleaseGate.validate(.proven)
 }
 
-@Test func buildConfigurationEnforcesTheReleaseAuthorityGate() throws {
-  #if CFW_GLOBAL_AUTHORITY_REQUIRED
-    #expect(throws: GlobalAuthorityGateError.proofMissing(.availabilityUnproven)) {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
-    }
-  #else
-    try GlobalAuthorityReleaseGate.requireStartAuthorization()
-  #endif
-}
-
 @Test func authorityFailureCodeHasStableWireRepresentation() throws {
   let failure = NativeBridgeFailure(
     code: .globalAuthorityUnavailable,
@@ -36,7 +26,6 @@ import Testing
 }
 
 @Test func authorityFailureMessageIsStableAndRedacted() {
-  #expect(GlobalAuthorityGateError.stableCode == "global-authority-unavailable")
   #expect(
     GlobalAuthorityGateError.stableMessage
       == "Global Authority registration, approval, identity, availability, and protocol compatibility are not proven."

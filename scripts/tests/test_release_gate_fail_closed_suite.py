@@ -3,7 +3,8 @@
 This module consumes the shipped release verifiers as black boxes and drives
 them, as a single integrated suite, over hermetic fixtures. It intentionally
 does not re-cover the per-verifier unit tests (``test_verify_*.py``,
-``test_evidence_manifest.py``, ``test_updater_key_release_blocker.py``); instead
+``test_evidence_manifest.py``, ``test_release_secret_material_blocker.py``);
+instead
 it fills the integration/example gaps this task names:
 
 * migration/build-boundary scans reject a legacy root data plane, a direct
@@ -16,8 +17,8 @@ it fills the integration/example gaps this task names:
   tree: the shipped tree passes, and a single injected fallback or insecure
   override anywhere in the scanned graph fails closed (Requirements 1.2, 7.3);
 * pinned toolchain and patch mismatches are rejected when the real pinned inputs
-  are copied and a single tool version or patch byte is changed (Requirement
-  5.1);
+  are copied and a single tool pin is malformed or a patch byte is changed
+  (Requirement 5.1);
 * evidence promotion negatives are rejected -- over-promotion, a skipped
   predecessor, a masked/skipped probe status, and a lower-level report reused
   for a higher level (Requirements 4.1, 7.5);
@@ -35,8 +36,7 @@ Validates: Requirements 1.2, 4.1, 5.1, 6.5, 7.3, 7.5, 8.1
 from __future__ import annotations
 
 import builtins
-import copy
-import hashlib
+import json
 import shutil
 import tempfile
 import unittest
@@ -46,13 +46,17 @@ from scripts.evidence_manifest import (
     EvidenceManifestError,
     validate_evidence_manifest,
 )
-from scripts.updater_key_release_blocker import (
-    UpdaterKeyReleaseBlock,
+from scripts.publication.graph_model import load_pins
+from scripts.release_secret_material_blocker import (
+    SecretMaterialReleaseBlock,
     evaluate_workspace,
     format_response,
 )
 from scripts.verify_ci_no_masking import CiPolicyError, audit_workflow
-from scripts.verify_pinned_build_inputs import PinnedInputError, verify as verify_pinned
+from scripts.verify_pinned_build_inputs import (
+    PinnedInputError,
+    verify_source_contract as verify_pinned,
+)
 from scripts.verify_production_boundary_removal import (
     ProductionBoundaryViolation,
     scan_source,
@@ -78,7 +82,7 @@ LEGACY_CONSTRUCTS: dict[str, str] = {
     "provider-local lease authority": "let s = CrossProcessEngineLeaseStore(productionPort: 49_373)\n",
     "insecure authority override": "if allowInsecureAuthority { engine.start() }\n",
     "authority-error data-plane fallback": (
-        "do { GlobalAuthorityReleaseGate.requireStartAuthorization() } "
+        "do { authority.redeem(ticket) } "
         "catch { engine.start() }\n"
     ),
 }
@@ -136,11 +140,17 @@ _AUTHORITY_GATE_INPUTS = (
     "native/macos/Package.swift",
     "native/macos/CFWNative.xcodeproj/project.pbxproj",
     "scripts/build_native_products.sh",
+    "native/macos/Sources/CFWNativeBridge/NativeBridgeABI.swift",
     "native/macos/Sources/CFWNativeBridge/NativeEngineOperations.swift",
     "native/macos/Sources/CFWAppleNetwork/HostBridge.swift",
+    "native/macos/Sources/CFWProxyAgent/ProxyAgentExecutable.swift",
+    "native/macos/Sources/CFWProxyAgent/ProxyAuthorityOwnership.swift",
     "native/macos/Sources/CFWProxyAgent/ProxyAgentService.swift",
     "native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift",
+    "native/macos/Sources/CFWPacketTunnel/TunnelTicketStartCoordinator.swift",
     "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityReleaseGate.swift",
+    "native/macos/Sources/CFWSharedProtocol/AuthorityClients.swift",
+    "native/macos/Sources/CFWSharedProtocol/ServiceCodeHash.swift",
     "apps/cfw-tauri-shell/build.rs",
 )
 
@@ -159,6 +169,23 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             verify_authority(_copy_authority_gate_tree(Path(tmp)))
 
+    def test_copied_host_binding_sources_cannot_weaken_current_build_requirement(self) -> None:
+        mutations = (
+            ("AuthorityClients.swift", "buildPolicy = .currentHost(currentHostCodeHash)",
+             "buildPolicy = .protocolPeer", "Host Authority role and build policy"),
+            ("ServiceCodeHash.swift", "requiresCurrentBuild = requiresCurrentBuild || requestingCurrentBuild",
+             "requiresCurrentBuild = requestingCurrentBuild", "Host Authority reconnect code constraint"),
+        )
+        for filename, original, replacement, message in mutations:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                root = _copy_authority_gate_tree(Path(tmp))
+                source = root / "native/macos/Sources/CFWSharedProtocol" / filename
+                text = source.read_text(encoding="utf-8")
+                self.assertEqual(text.count(original), 1)
+                source.write_text(text.replace(original, replacement), encoding="utf-8")
+                with self.assertRaisesRegex(AuthorityGateContractError, message):
+                    verify_authority(root)
+
     def test_injected_data_plane_fallback_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_authority_gate_tree(Path(tmp))
@@ -166,7 +193,7 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
             provider.write_text(
                 provider.read_text(encoding="utf-8")
                 + "\nfunc cfwInjectedFallback() {\n"
-                "  do { GlobalAuthorityReleaseGate.requireStartAuthorization() }\n"
+                "  do { authority.redeem(ticket) }\n"
                 "  catch { engine.start() }\n"
                 "}\n",
                 encoding="utf-8",
@@ -193,20 +220,116 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
 _PINNED_INPUTS = (
     "scripts/pinned_build_inputs.json",
     "scripts/dependency_pins.env",
-    "native/macos/Dependencies.lock.json",
     "scripts/build_libbox.sh",
+    "scripts/libbox_source_contract.sh",
     "scripts/build_native_products.sh",
     "scripts/build_unsigned_candidate.sh",
-    "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-    "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-    "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
+    "scripts/build_signed_candidate.sh",
+    "scripts/gatekeeper_assessment.py",
+    "scripts/notarization_transaction.py",
+    "scripts/dmg_notarization_transaction.py",
+    "scripts/release_artifact_set.py",
+    "scripts/repository_source_identity.py",
+    "scripts/evidence_manifest.py",
+    "scripts/harness/physical_collector_trust_policy.json",
+    "scripts/harness/physical_evidence_aggregator.py",
+    "scripts/harness/physical_machine_identity.py",
+    "scripts/harness/physical_collector_request.py",
+    "scripts/harness/raw_artifacts.py",
+    "scripts/production_release_evidence.py",
+    "scripts/publication/final_candidate.py",
+    "scripts/publication/orchestrator.py",
+    "scripts/publication/sealed_closure.py",
+    "scripts/publication/sealed_manifest.py",
+    "scripts/release_capability_inventory.json",
+    "scripts/release_capability_inventory.py",
+    "scripts/sealed_evidence_manifest.py",
+    "scripts/verify_remote_release.py",
+    "scripts/make_dmg.sh",
+    "scripts/make_updater_manifest.sh",
+    "scripts/release_publication_gate.sh",
+    "scripts/release_workspace_secret_gate.sh",
+    "scripts/release_secret_material_blocker.py",
+    "scripts/release_toolchain_contract.sh",
+    "scripts/updater_signing_launcher.py",
+    "scripts/validate_updater_archive.py",
+    "CHANGELOG.md",
+    "scripts/validate_notary_archive.py",
+    "scripts/tauri_host_skeleton.sh",
+    "scripts/verify_artifact_manifest.py",
+    "scripts/verify_candidate_bundle.py",
+    "scripts/verify_candidate_bundle.sh",
+    "scripts/verify_release_app.sh",
+    "scripts/bootstrap_release_toolchain.sh",
+    "scripts/install_pinned_tauri_cli.sh",
+    "scripts/tauri_cargo_cache_contract.py",
+    "scripts/tauri-cli-2.11.4-dependency-refresh.patch",
+    "crates/cfw-release-verifier/src/main.rs",
+    ".github/workflows/ci.yml",
+    # Sources the pinned libbox build tags are bound to: the controller block and
+    # the projection that injects it require `with_clash_api` in the artifact.
+    "crates/cfw-singbox-config/src/controller.rs",
+    "crates/cfw-singbox-config/src/projection.rs",
 )
-_SECURITY_PATCH = "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch"
 _PINS_ENV = "scripts/dependency_pins.env"
 
 
+def _shipped_pins() -> dict[str, str]:
+    return load_pins(REPO_ROOT / _PINS_ENV)
+
+
 def _copy_pinned_tree(destination: Path) -> Path:
-    for relative in _PINNED_INPUTS:
+    manifest = json.loads(
+        (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
+    )
+    pins = _shipped_pins()
+    # Every tracked file a path pin names (the sing-box and XcodeGen patches, the
+    # libbox module-cache contract) is copied from the path the pin holds.
+    pinned_files = tuple(
+        pins[key]
+        for key, value_format in manifest["pinFormats"].items()
+        if value_format == "repository-path"
+    )
+    for relative in (*_PINNED_INPUTS, *pinned_files):
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise AssertionError("pinned fixture input path is not repository-relative")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    endpoint = manifest.get("packetEvidenceEndpoint")
+    source_files = endpoint.get("sourceFiles") if isinstance(endpoint, dict) else None
+    if not isinstance(source_files, list) or not source_files:
+        raise AssertionError("shipped packet endpoint source closure is unavailable")
+    for entry in source_files:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise AssertionError("shipped packet endpoint source entry is malformed")
+        relative = entry["path"]
+        if not isinstance(relative, str):
+            raise AssertionError("shipped packet endpoint source path is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    collector = manifest.get("physicalCollectorModule")
+    if not isinstance(collector, dict):
+        raise AssertionError("shipped physical collector module binding is unavailable")
+    for key in ("goModPath", "goSumPath"):
+        relative = collector.get(key)
+        if not isinstance(relative, str):
+            raise AssertionError(f"shipped physical collector {key} is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    build_scripts = manifest.get("buildScripts")
+    if not isinstance(build_scripts, dict):
+        raise AssertionError("shipped pinned-input buildScripts is malformed")
+    if any(not isinstance(relative, str) for relative in build_scripts):
+        raise AssertionError("shipped pinned-input buildScripts path is malformed")
+    for relative in sorted(build_scripts):
         source = REPO_ROOT / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -215,27 +338,33 @@ def _copy_pinned_tree(destination: Path) -> Path:
 
 
 class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
-    def test_copied_shipped_pins_pass(self) -> None:
+    def test_copied_shipped_source_pins_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            verify_pinned(_copy_pinned_tree(Path(tmp)))
+            root = _copy_pinned_tree(Path(tmp))
+            verify_pinned(root)
 
-    def test_drifted_toolchain_version_fails_closed(self) -> None:
+    def test_malformed_toolchain_version_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
             env_path = root / _PINS_ENV
+            go_version = _shipped_pins()["GO_VERSION"]
+            # Anchored at the line start: other pins' keys end in GO_VERSION.
+            pin_line = f"\nGO_VERSION={go_version}\n"
+            pins_text = env_path.read_text(encoding="utf-8")
+            self.assertEqual(pins_text.count(pin_line), 1)
             env_path.write_text(
-                env_path.read_text(encoding="utf-8").replace(
-                    "GO_VERSION=1.26.5", "GO_VERSION=1.26.4"
-                ),
+                pins_text.replace(pin_line, f"\nGO_VERSION={go_version}.0\n"),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(PinnedInputError, "GO_VERSION"):
+            with self.assertRaisesRegex(
+                PinnedInputError, "pin GO_VERSION is not a version value"
+            ):
                 verify_pinned(root)
 
     def test_tampered_patch_byte_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
-            patch_path = root / _SECURITY_PATCH
+            patch_path = root / _shipped_pins()["SING_BOX_SECURITY_PATCH_PATH"]
             patch_path.write_bytes(patch_path.read_bytes() + b"\n# tamper\n")
             with self.assertRaisesRegex(PinnedInputError, "file digest"):
                 verify_pinned(root)
@@ -243,8 +372,25 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
     def test_missing_patch_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
-            (root / _SECURITY_PATCH).unlink()
-            with self.assertRaisesRegex(PinnedInputError, "missing or not regular"):
+            (root / _shipped_pins()["SING_BOX_SECURITY_PATCH_PATH"]).unlink()
+            with self.assertRaisesRegex(
+                PinnedInputError, "missing, a symlink, or has an unsafe path"
+            ):
+                verify_pinned(root)
+
+    def test_dropped_engine_start_path_build_tag_fails_closed(self) -> None:
+        # An artifact built without `with_clash_api` cannot start the engine at
+        # all: the patched tree enables the clash API whenever a platform log
+        # writer is installed and the daemon always installs one, so the stub
+        # constructor fails every `box.New`. Dropping the tag from the shipped
+        # pins must therefore be rejected statically.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _copy_pinned_tree(Path(tmp))
+            path = root / _PINS_ENV
+            pinned = path.read_text(encoding="utf-8")
+            self.assertIn(",with_clash_api", pinned)
+            path.write_text(pinned.replace(",with_clash_api", ""), encoding="utf-8")
+            with self.assertRaisesRegex(PinnedInputError, "with_clash_api"):
                 verify_pinned(root)
 
 
@@ -342,12 +488,12 @@ jobs:
     steps:
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: actions/setup-node@v5
         with:
-          node-version: "24.18.0"
+          node-version: "26.8.2"
       - name: Assert toolchain
-        run: test "$(xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'
+        run: test "$(xcodebuild -version)" = $'Xcode 27.0\\nBuild version 27A266a'
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
@@ -357,10 +503,12 @@ jobs:
 """
 _PINS = "\n".join(
     [
-        "RUST_VERSION=1.97.1",
-        "NODE_VERSION=24.18.0",
-        "XCODE_VERSION=26.6",
-        "XCODE_BUILD_VERSION=17F113",
+        "RUST_VERSION=1.98.1",
+        "PYTHON_VERSION=3.14.7",
+        "NODE_VERSION=26.8.2",
+        "XCODE_VERSION=27.0",
+        "XCODE_BUILD_VERSION=27A266a",
+        "MACOS_DEPLOYMENT_TARGET=15.0",
     ]
 )
 
@@ -451,7 +599,7 @@ class UpdaterKeyPathNameOnlyBlocking(unittest.TestCase):
                 self.assertEqual(evaluate_workspace(root), [])
 
     def test_unavailable_workspace_root_fails_closed(self) -> None:
-        with self.assertRaises(UpdaterKeyReleaseBlock):
+        with self.assertRaises(SecretMaterialReleaseBlock):
             evaluate_workspace("/nonexistent/release/workspace/root")
 
 

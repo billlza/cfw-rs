@@ -1,0 +1,1 @@
+{"schema_version":8,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","result":{"kind":"service_maintenance","value":{"action":"recover_installed_40019_global_authority","engine_status":"off","global_authority":"not_registered","off_proof_profile":"installed_40019_recovery_current_authority_v1_1","proxy_agent":"not_registered"}},"failure":null}

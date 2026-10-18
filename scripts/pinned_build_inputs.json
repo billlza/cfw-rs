@@ -1,80 +1,396 @@
 {
-  "schema": "cfw-pinned-build-inputs-v1",
-  "description": "Design-pinned libbox and toolchain build inputs for macos15-network-extension-migration (Requirement 5.1). This manifest is the offline source of truth; verify_pinned_build_inputs.py binds it to scripts/dependency_pins.env, the tracked patch files, the native dependency lock, and the offline build scripts.",
-  "dependencyPinsPath": "scripts/dependency_pins.env",
-  "nativeLockPath": "native/macos/Dependencies.lock.json",
-  "tools": {
-    "RUST_VERSION": "1.97.1",
-    "NODE_VERSION": "24.18.0",
-    "GO_VERSION": "1.26.5",
-    "GOMOBILE_VERSION": "v0.1.12",
-    "GOVULNCHECK_VERSION": "v1.6.0",
-    "SING_BOX_VERSION": "v1.13.14"
+  "schema": "cfw-pinned-build-inputs-v2",
+  "description": "Release build-input policy. scripts/dependency_pins.env is the authoritative store of pinned versions, digests, commits and paths; this policy names the format of every pin key and the rules verify_pinned_build_inputs.py applies to those values: tracked files hashed against their digest pins, required libbox build tags and their reasons, and the pin references each release script must keep. It repeats no pin value.",
+  "pinFormats": {
+    "MACOS_DEPLOYMENT_TARGET": "apple-version",
+    "XCODE_VERSION": "apple-version",
+    "XCODE_BUILD_VERSION": "apple-build",
+    "XCODEGEN_VERSION": "version",
+    "XCODEGEN_COMMIT": "git-commit",
+    "XCODEGEN_SOURCE_SHA256": "sha256",
+    "XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256": "sha256",
+    "XCODEGEN_PACKAGE_RESOLVED_SHA256": "sha256",
+    "XCODEGEN_DEPENDENCY_PATCH_PATH": "repository-path",
+    "XCODEGEN_DEPENDENCY_PATCH_SHA256": "sha256",
+    "XCODEGEN_AEXML_COMMIT": "git-commit",
+    "XCODEGEN_AEXML_UPSTREAM_MANIFEST_SHA256": "sha256",
+    "XCODEGEN_AEXML_PATCH_PATH": "repository-path",
+    "XCODEGEN_AEXML_PATCH_SHA256": "sha256",
+    "XCODEGEN_AEXML_PATCHED_MANIFEST_SHA256": "sha256",
+    "XCODEGEN_PATCH_PATH": "repository-path",
+    "XCODEGEN_PATCH_SHA256": "sha256",
+    "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": "sha256",
+    "PYTHON_VERSION": "version",
+    "RUST_VERSION": "version",
+    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": "sha256",
+    "CARGO_AUDIT_VERSION": "version",
+    "CARGO_DENY_VERSION": "version",
+    "TAURI_CLI_VERSION": "version",
+    "TAURI_CLI_CRATE_SHA256": "sha256",
+    "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": "sha256",
+    "TAURI_CLI_SPIN_VERSION": "version",
+    "TAURI_CLI_SPIN_CRATE_SHA256": "sha256",
+    "TAURI_CARGO_CACHE_CONTRACT_SHA256": "sha256",
+    "SHELLCHECK_VERSION": "version",
+    "SHELLCHECK_DARWIN_ARM64_SHA256": "sha256",
+    "NODE_VERSION": "version",
+    "NODE_DARWIN_ARM64_SHA256": "sha256",
+    "NPM_VERSION": "version",
+    "NPM_ARCHIVE_SHA256": "sha256",
+    "GO_VERSION": "version",
+    "GO_DARWIN_ARM64_SHA256": "sha256",
+    "GOMOBILE_VERSION": "go-module-version",
+    "GOMOBILE_COMMIT": "git-commit",
+    "GOMOBILE_MODULE_SUM": "go-module-sum",
+    "GOVULNCHECK_VERSION": "go-module-version",
+    "GOVULNCHECK_MODULE_SUM": "go-module-sum",
+    "SING_BOX_VERSION": "go-module-version",
+    "SING_BOX_COMMIT": "git-commit",
+    "SING_BOX_UPSTREAM_GO_MOD_SHA256": "sha256",
+    "SING_BOX_UPSTREAM_GO_SUM_SHA256": "sha256",
+    "SING_BOX_SECURITY_PATCH_PATH": "repository-path",
+    "SING_BOX_SECURITY_PATCH_SHA256": "sha256",
+    "SING_BOX_RAW_PACKET_PATCH_PATH": "repository-path",
+    "SING_BOX_RAW_PACKET_PATCH_SHA256": "sha256",
+    "SING_BOX_DNS_FAILOVER_PATCH_PATH": "repository-path",
+    "SING_BOX_DNS_FAILOVER_PATCH_SHA256": "sha256",
+    "SING_BOX_PROFILE_PROBE_PATCH_PATH": "repository-path",
+    "SING_BOX_PROFILE_PROBE_PATCH_SHA256": "sha256",
+    "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH": "repository-path",
+    "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256": "sha256",
+    "SING_BOX_PATCHED_DIFF_SHA256": "sha256",
+    "SING_BOX_COMBINED_DIFF_SHA256": "sha256",
+    "SING_BOX_PATCHED_GO_MOD_SHA256": "sha256",
+    "SING_BOX_PATCHED_GO_SUM_SHA256": "sha256",
+    "SING_BOX_ANDROID_REFERENCE_COMMIT": "git-commit",
+    "SING_BOX_APPLE_REFERENCE_COMMIT": "git-commit",
+    "LIBBOX_APPLE_PLATFORM": "gomobile-target",
+    "LIBBOX_BUILD_TAGS": "go-build-tags",
+    "LIBBOX_NON_MACOS_TAGS": "go-build-tags",
+    "LIBBOX_MODULE_CACHE_CONTRACT_PATH": "repository-path",
+    "LIBBOX_MODULE_CACHE_CONTRACT_SHA256": "sha256",
+    "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH": "repository-path",
+    "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256": "sha256",
+    "GO_RELEASE_TOOLS_GO_MOD_SHA256": "sha256",
+    "GO_RELEASE_TOOLS_GO_SUM_SHA256": "sha256",
+    "PACKET_EVIDENCE_ENDPOINT_GO_VERSION": "version",
+    "PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256": "sha256",
+    "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256": "sha256"
   },
-  "singBoxCommitKey": "SING_BOX_COMMIT",
-  "singBoxCommit": "25a600db24f7680ad9806ce5427bd0ab8afe1114",
+  "packetEvidenceEndpoint": {
+    "goVersionKey": "PACKET_EVIDENCE_ENDPOINT_GO_VERSION",
+    "goArchiveSha256Key": "PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256",
+    "binarySha256Key": "PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256",
+    "goos": "linux",
+    "goarch": "amd64",
+    "cgoEnabled": "0",
+    "transportPort": 44333,
+    "dnsPort": 53,
+    "readmePath": "tools/packet-evidence-endpoint/README.md",
+    "buildRecipe": [
+      "(",
+      "  set -euo pipefail",
+      "  source scripts/dependency_pins.env",
+      "  work=\"$(/usr/bin/mktemp -d \"${TMPDIR:-/tmp}/packet-evidence-endpoint.XXXXXX\")\"",
+      "  trap '/bin/rm -rf \"$work\"' EXIT",
+      "  archive=\"$work/go.darwin-arm64.tar.gz\"",
+      "  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 \\",
+      "    \"https://go.dev/dl/go$PACKET_EVIDENCE_ENDPOINT_GO_VERSION.darwin-arm64.tar.gz\" \\",
+      "    --output \"$archive\"",
+      "  printf '%s  %s\\n' \"$PACKET_EVIDENCE_ENDPOINT_GO_DARWIN_ARM64_SHA256\" \"$archive\" |",
+      "    /usr/bin/shasum -a 256 --check",
+      "  /bin/mkdir \"$work/go\" \"$work/home\"",
+      "  /usr/bin/tar -xzf \"$archive\" -C \"$work/go\" --strip-components 1",
+      "  /bin/mkdir -p target",
+      "  /usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$work/home\" GOTOOLCHAIN=local \\",
+      "    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOCACHE=\"$work/go-build-cache\" \\",
+      "    \"$work/go/bin/go\" -C tools/packet-evidence-endpoint build \\",
+      "    -buildvcs=false -trimpath -ldflags='-s -w -buildid=' \\",
+      "    -o ../../target/packet-evidence-endpoint-linux-amd64 .",
+      "  printf '%s  %s\\n' \"$PACKET_EVIDENCE_ENDPOINT_BINARY_SHA256\" \\",
+      "    target/packet-evidence-endpoint-linux-amd64 | /usr/bin/shasum -a 256 --check",
+      ")"
+    ],
+    "sourceFiles": [
+      {
+        "path": "tools/packet-evidence-endpoint/go.mod",
+        "sha256": "113b5f4cece6be5e745abd88d733077dce31350351d592050b3970e800693837"
+      },
+      {
+        "path": "tools/packet-evidence-endpoint/install-endpoint.sh",
+        "sha256": "331d82561cf88af651bf9bc854946b443655d5a2e6fa498f8f2925bcc767575a"
+      },
+      {
+        "path": "tools/packet-evidence-endpoint/main.go",
+        "sha256": "75f7b1e26cad14cdc4d8cb74536c79a39cda3ed3ceb415dc2d8e14d74e5de805"
+      },
+      {
+        "path": "tools/packet-evidence-endpoint/main_test.go",
+        "sha256": "9eefefcbd8f5af94c59a95ae969d1bc441982d1de4a58873cd7ef8bcf1c078b3"
+      },
+      {
+        "path": "tools/packet-evidence-endpoint/packet-evidence-capture.sudoers",
+        "sha256": "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411"
+      },
+      {
+        "path": "tools/packet-evidence-endpoint/packet-evidence-endpoint.service",
+        "sha256": "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
+      },
+      {
+        "path": "tools/packet-evidence-endpoint/packet-evidence-resolv.conf",
+        "sha256": "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
+      },
+      {
+        "path": "tools/packet-evidence-endpoint/README.md",
+        "sha256": "8e8ce590a3f024bf8e59f6bfaa6e24de7718a2d67cf025ee6d980b619eb2f2e1"
+      },
+      {
+        "path": "scripts/physical_capture/packet_endpoints.json",
+        "sha256": "9b7e1e8d892bc87568bbd122e502e4c0f74a2d9579e398d9d2563372772be19a"
+      },
+      {
+        "path": "scripts/physical_capture/packet_known_hosts",
+        "sha256": "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
+      }
+    ]
+  },
+  "physicalCollectorModule": {
+    "goModPath": "tools/physical-collector/go.mod",
+    "goModSha256": "15a4a62864a708fe87dc6e4624036603ad27ca82a1bcdc3b5f06d678fdde24be",
+    "goSumPath": "tools/physical-collector/go.sum",
+    "goSumSha256": "ca8994a475ecb2b18b3debe1eb422925f3f3fcdd4366b7b1aa9f5ded14cd4e9a",
+    "requiredModuleFragments": [
+      "google.golang.org/grpc v1.83.2",
+      "golang.org/x/text v0.42.0"
+    ]
+  },
+  "xcodegen": {
+    "patchPathKey": "XCODEGEN_PATCH_PATH",
+    "patchSha256Key": "XCODEGEN_PATCH_SHA256",
+    "bootstrapPath": "scripts/bootstrap_release_toolchain.sh",
+    "requiredBootstrapFragments": [
+      "$XCODEGEN_PATCH_PATH",
+      "$XCODEGEN_PATCH_SHA256",
+      "$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+      "GIT_CEILING_DIRECTORIES=\"$toolchain_root\"",
+      "/usr/bin/git -C \"$payload/source\" apply --check \"$xcodegen_patch\"",
+      "/usr/bin/git -C \"$payload/source\" apply --reverse --check \"$xcodegen_patch\"",
+      "USER=cfw-release",
+      "LOGNAME=cfw-release",
+      "/usr/bin/strip -S \"$xcodegen_bin_dir/xcodegen\"",
+      "patchSha256=$XCODEGEN_PATCH_SHA256",
+      "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+      "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
+      "$XCODEGEN_DEPENDENCY_PATCH_PATH",
+      "$XCODEGEN_DEPENDENCY_PATCH_SHA256",
+      "cfw_patch_xcodegen_aexml \"$repo_root\" \"$build_root/checkouts\"",
+      "source \"$repo_root/scripts/xcodegen_dependency_contract.sh\"",
+      "upstreamPackageResolvedSha256=$XCODEGEN_UPSTREAM_PACKAGE_RESOLVED_SHA256",
+      "aexmlPatchSha256=$XCODEGEN_AEXML_PATCH_SHA256"
+    ]
+  },
+  "cargoDeny": {
+    "ciWorkflowPath": ".github/workflows/ci.yml",
+    "requiredCiFragments": [
+      "run_release_ci_gate.sh",
+      "prepare-cargo-workspace-inputs",
+      "bootstrap-policy-tools",
+      "cargo-deny"
+    ]
+  },
+  "tauriCli": {
+    "cacheContractPath": "scripts/tauri_cargo_cache_contract.py",
+    "cacheContractSha256Key": "TAURI_CARGO_CACHE_CONTRACT_SHA256",
+    "ciWorkflowPath": ".github/workflows/ci.yml",
+    "requiredCiFragment": "install-tauri-cli",
+    "installerPath": "scripts/install_pinned_tauri_cli.sh",
+    "requiredInstallerFragments": [
+      "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
+      "$TAURI_CLI_CRATE_SHA256",
+      "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
+      "$TAURI_CLI_SPIN_VERSION",
+      "$TAURI_CLI_SPIN_CRATE_SHA256",
+      "$TAURI_CARGO_CACHE_CONTRACT_SHA256",
+      "readonly cargo_cache_contract=\"$repo_root/scripts/tauri_cargo_cache_contract.py\"",
+      "cfw_run_release_python_script",
+      "\"$repo_root\" \"$cargo_cache_contract\"",
+      "validate-preparation \"$root\"",
+      "normalize-offline \"$root\"",
+      "cargo_bin=\"${CFW_RELEASE_CARGO_EXECUTABLE:-}\"",
+      "rustc_bin=\"${CFW_RELEASE_RUSTC_EXECUTABLE:-}\"",
+      "reject-ambient --repository \"$repo_root\" --release-home \"$HOME\"",
+      "readonly temporary_parent_input=\"${TMPDIR:-}\"",
+      "the temporary directory must use its canonical physical path",
+      "the temporary directory must belong to the release account",
+      "the temporary directory must not be group- or other-writable",
+      "/usr/bin/env -i",
+      "CARGO_HOME=\"$prepared_cargo_home\"",
+      "CARGO_HOME=\"$offline_cargo_home\"",
+      "CARGO_TARGET_DIR=\"$cargo_target\"",
+      "CARGO_HTTP_LOW_SPEED_LIMIT=1",
+      "CARGO_HTTP_MULTIPLEXING=true",
+      "CARGO_HTTP_TIMEOUT=600",
+      "CARGO_NET_RETRY=3",
+      "CARGO_NET_RETRY=0",
+      "CARGO_NET_OFFLINE=true",
+      "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse",
+      "CARGO_TERM_COLOR=never",
+      "RUSTC=\"$rustc_bin\"",
+      "[[ \"$temporary_parent\" != *:* ]]",
+      "staging=\"$(/usr/bin/mktemp -d \"$temporary_parent/cfw-tauri-cli.XXXXXX\")\"",
+      "members = [\"tauri-cli-%s\"]",
+      "resolver = \"2\"",
+      "readonly staging_workspace_manifest=\"$staging/Cargo.toml\"",
+      "readonly staging_workspace_lock=\"$staging/Cargo.lock\"",
+      "render_tauri_workspace_manifest >\"$staging_workspace_manifest\"",
+      "/usr/bin/install -m 0600 \"$cargo_lock\" \"$staging_workspace_lock\"",
+      "verify_tauri_workspace_boundary",
+      "reject_tauri_cargo_configuration",
+      "--additional-working-directory \"$source_root\"",
+      "fetch",
+      "--manifest-path",
+      "install",
+      "--path",
+      "--offline",
+      "--locked",
+      "--target aarch64-apple-darwin",
+      "tauri-cli-$TAURI_CLI_VERSION",
+      "payload=\"$staging/payload/tauri-cli-$TAURI_CLI_VERSION\"",
+      "/usr/bin/ditto --noqtn \"$prepared_cargo_home\" \"$offline_cargo_home\"",
+      "normalize_cargo_offline_cache \"$offline_cargo_home\"",
+      "reject_cargo_warnings \"$fetch_log\" \"Tauri CLI dependency preparation\"",
+      "reject_cargo_warnings \"$install_log\" \"tauri-cli installation\"",
+      "PATH=\"$cargo_install_root/bin:$(dirname \"$cargo_bin\"):/usr/bin:/bin:/usr/sbin:/sbin\"",
+      "/bin/mv \"$source_root\" \"$payload/source\"",
+      "/usr/bin/lipo -archs",
+      "--algorithm sha256-tree-v2",
+      "artifactKind=pinned-tauri-cli-v3",
+      "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256",
+      "cacheNormalization=cargo-runtime-metadata-v1",
+      "dependencyMode=isolated-fetch-offline-locked-v1",
+      "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET",
+      "payloadLayout=bin-and-source-v1",
+      "xcodeBuild=$XCODE_BUILD_VERSION",
+      "xcodeVersion=$XCODE_VERSION",
+      "cfw_verify_release_toolchain_manifest",
+      "cfw_verify_tauri_toolchain_tree",
+      "cannot scan $operation log for warnings"
+    ]
+  },
   "patches": [
     {
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
-      "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439"
+      "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256"
     },
     {
       "name": "sing-box raw packet tun patch",
       "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
-      "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
-      "sha256": "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
+      "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256"
     },
     {
       "name": "sing-box DNS failover patch",
       "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
-      "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-      "sha256": "d52fc83c28b5baa919a4d1590a90f7353daaa3120b6ac39aa8e4476133c602d3"
+      "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256"
+    },
+    {
+      "name": "sing-box endpoint conflict patch",
+      "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+      "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"
+    },
+    {
+      "name": "sing-box profile probe patch",
+      "pathKey": "SING_BOX_PROFILE_PROBE_PATCH_PATH",
+      "sha256Key": "SING_BOX_PROFILE_PROBE_PATCH_SHA256"
+    },
+    {
+      "name": "sing-box SOCKS lifecycle patch",
+      "pathKey": "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+      "sha256Key": "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256"
     }
   ],
-  "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233",
-  "verifiedGoModuleInputKeys": [
-    "GOMOBILE_MODULE_SUM",
-    "GOVULNCHECK_MODULE_SUM",
-    "SING_BOX_UPSTREAM_GO_MOD_SHA256",
-    "SING_BOX_UPSTREAM_GO_SUM_SHA256",
-    "SING_BOX_PATCHED_GO_MOD_SHA256",
-    "SING_BOX_PATCHED_GO_SUM_SHA256"
-  ],
+  "libboxModuleCacheContract": {
+    "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
+    "sha256Key": "LIBBOX_MODULE_CACHE_CONTRACT_SHA256"
+  },
   "rejectedPatchDigests": [
-    "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde"
+    "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac",
+    "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde",
+    "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439",
+    "c618b69baa770e0afc3239f78acfeaaf354e3dc8105e2e61b149d4ede00a93b7"
   ],
+  "libboxBuildTags": {
+    "pinKey": "LIBBOX_BUILD_TAGS",
+    "required": [
+      {
+        "tag": "with_wireguard",
+        "reason": "WireGuard endpoint construction requires the real protocol implementation."
+      },
+      {
+        "tag": "with_gvisor",
+        "reason": "WireGuard uses a userspace stack with system=false so NetworkExtension remains the only owner of system tunnel interfaces."
+      },
+      {
+        "tag": "with_quic",
+        "reason": "QUIC-based outbounds (Hysteria2, TUIC, and QUIC transports) are product features."
+      },
+      {
+        "tag": "with_utls",
+        "reason": "uTLS client fingerprints are required by the supported TLS outbounds."
+      },
+      {
+        "tag": "with_clash_api",
+        "reason": "box.New sets needClashAPI whenever a platform log writer is installed and daemon/instance.go always installs one, so without this tag include/clashapi_stub.go fails every engine start with 'clash api is not included in this build'."
+      },
+      {
+        "tag": "badlinkname",
+        "reason": "The pinned Go toolchain requires the upstream linkname escape hatch used by sing-box."
+      },
+      {
+        "tag": "tfogo_checklinkname0",
+        "reason": "tfo-go requires the matching -checklinkname=0 build configuration."
+      },
+      {
+        "tag": "grpcnotrace",
+        "reason": "Drops the gRPC trace surface that the product never exposes."
+      }
+    ],
+    "engineStartPathBindings": [
+      {
+        "tag": "with_clash_api",
+        "path": "crates/cfw-singbox-config/src/controller.rs",
+        "requiredWhenContains": "\"clash_api\": {",
+        "triggerRequired": true,
+        "reason": "The application-owned experimental.clash_api projection block is only served by the real clash API server, which exists in the artifact only when with_clash_api is pinned."
+      },
+      {
+        "tag": "with_clash_api",
+        "path": "crates/cfw-singbox-config/src/projection.rs",
+        "requiredWhenContains": "root.insert(\"experimental\".into(), clash_api.experimental_value());",
+        "triggerRequired": true,
+        "reason": "Every projected configuration carries the controller block, so every engine start needs the clash API server compiled in."
+      }
+    ]
+  },
   "buildScripts": {
     "scripts/build_libbox.sh": {
       "requirePinReferences": [
         "$GO_VERSION",
         "$GOMOBILE_VERSION",
+        "$GOMOBILE_COMMIT",
+        "$GOMOBILE_MODULE_SUM",
         "$SING_BOX_VERSION",
         "$SING_BOX_COMMIT",
+        "$LIBBOX_BUILD_TAGS",
         "$SING_BOX_COMBINED_DIFF_SHA256",
         "$SING_BOX_SECURITY_PATCH_SHA256",
         "$SING_BOX_RAW_PACKET_PATCH_SHA256",
-        "$SING_BOX_DNS_FAILOVER_PATCH_SHA256"
+        "$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+        "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        "$SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+        "$SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256"
       ],
       "forbidNetworkRecursion": true
     }
-  },
-  "artifactBindings": {
-    "scripts/build_libbox.sh": [
-      "sourceCommit=$SING_BOX_COMMIT",
-      "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
-      "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
-      "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
-    ],
-    "scripts/build_native_products.sh": [
-      "singBoxCommit=$SING_BOX_COMMIT"
-    ],
-    "scripts/build_unsigned_candidate.sh": [
-      "sourceCommit=$SING_BOX_COMMIT",
-      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
-    ]
   }
 }

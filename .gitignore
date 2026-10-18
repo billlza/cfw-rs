@@ -1,6 +1,9 @@
 # Rust build output
 /target
 
+# Physical collector local Go build/test caches
+/tools/physical-collector/target/
+
 # Atomic-write staging files
 **/*.tmp
 

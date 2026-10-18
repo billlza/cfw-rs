@@ -1,0 +1,112 @@
+{
+  "credentials": [
+    {
+      "id": "55ba7c1a-1f3a-5da2-8620-2abc8bf7ae17",
+      "kind": "hysteria2_password",
+      "secret_sha256": "b18fc2ed64fd3e3e7f7488aff214c604759b3fb8feaf68fbb6870fd604a8fac6"
+    },
+    {
+      "id": "f4c7d814-a1e5-543d-9d56-008e5cab7150",
+      "kind": "hysteria2_obfs_password",
+      "secret_sha256": "6695dfd0e0af9e24c65907dc71bba0be493814b12f638923e77ac7d7492661c6"
+    },
+    {
+      "id": "cd7e147f-e81e-5e41-830a-27b6514b1b65",
+      "kind": "hysteria2_password",
+      "secret_sha256": "6509ce0dfea68acb3a4fe77b6a7466312b4e40a1ab50c16d56f4a041dd47dd16"
+    },
+    {
+      "id": "cbcd3f63-8d6f-58f0-900a-c7649c060076",
+      "kind": "vless_uuid",
+      "secret_sha256": "67df0ebfa0658a72e99613e4dfa2b30f609dff4dc009053eb8b2127dc2d93c37"
+    },
+    {
+      "id": "7b5d7a5b-40a2-580b-a95f-1904121fdec1",
+      "kind": "trojan_password",
+      "secret_sha256": "a623097da0146fcfa8600c0a3d3caec892b637f19119868e1ee441b0884b51d4"
+    }
+  ],
+  "digest": "55a7fa82a806d0a85c37c617fd4505a0171bdc2098054cf40332c0c938c6e101",
+  "profile": {
+    "outbounds": [
+      {
+        "credential_ref": {
+          "id": "55ba7c1a-1f3a-5da2-8620-2abc8bf7ae17",
+          "kind": "hysteria2_password"
+        },
+        "obfs": {
+          "credential_ref": {
+            "id": "f4c7d814-a1e5-543d-9d56-008e5cab7150",
+            "kind": "hysteria2_obfs_password"
+          },
+          "type": "salamander"
+        },
+        "server": "hy2.example.com",
+        "server_port": 443,
+        "tag": "HY2",
+        "tls": {
+          "enabled": true,
+          "server_name": "hy2.example.com"
+        },
+        "type": "hysteria2"
+      },
+      {
+        "credential_ref": {
+          "id": "cd7e147f-e81e-5e41-830a-27b6514b1b65",
+          "kind": "hysteria2_password"
+        },
+        "hop_interval_seconds": 30,
+        "server": "hop.example.com",
+        "server_port": 443,
+        "server_ports": [
+          "443",
+          "5000:5002"
+        ],
+        "tag": "HOP",
+        "tls": {
+          "enabled": true,
+          "server_name": "hop.example.com"
+        },
+        "type": "hysteria2"
+      },
+      {
+        "credential_ref": {
+          "id": "cbcd3f63-8d6f-58f0-900a-c7649c060076",
+          "kind": "vless_uuid"
+        },
+        "flow": "xtls-rprx-vision",
+        "server": "vless.example.com",
+        "server_port": 443,
+        "tag": "VLESS",
+        "tls": {
+          "enabled": true,
+          "reality": {
+            "enabled": true,
+            "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+            "short_id": "0123456789abcdef"
+          },
+          "server_name": "www.example.com",
+          "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+          }
+        },
+        "type": "vless"
+      },
+      {
+        "credential_ref": {
+          "id": "7b5d7a5b-40a2-580b-a95f-1904121fdec1",
+          "kind": "trojan_password"
+        },
+        "server": "trojan.example.com",
+        "server_port": 443,
+        "tag": "TROJAN",
+        "tls": {
+          "enabled": true,
+          "server_name": "trojan.example.com"
+        },
+        "type": "trojan"
+      }
+    ]
+  }
+}

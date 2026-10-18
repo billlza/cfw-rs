@@ -4,20 +4,130 @@ import CFWCredentialVault
 import CFWSharedProtocol
 import Foundation
 @preconcurrency import Security
+@preconcurrency import SystemExtensions
 
 extension NativeBridgeCoordinator {
-  func beginMutation() throws {
-    guard activeMutation == nil else {
+  func beginOperation() throws -> UUID {
+    guard activeOperation == nil else {
       throw NativeBridgeExecutionError.failure(
         .busy,
-        "Another native engine mutation is already in progress."
+        "Another native engine operation is already in progress."
       )
     }
-    activeMutation = UUID()
+    let operationID = UUID()
+    activeOperation = operationID
+    return operationID
   }
 
-  func endMutation() {
-    activeMutation = nil
+  func beginMutation() async throws -> UUID {
+    let mutationID = try beginOperation()
+    do {
+      try await recoverStartupPreferenceMutationIfNeeded()
+      return mutationID
+    } catch {
+      endMutation(mutationID)
+      throw Self.map(error)
+    }
+  }
+
+  /// Clears only the operation that acquired the coordinator. A stale completion
+  /// can never release a newer read or mutation after an await/retry boundary.
+  func endOperation(_ operationID: UUID) {
+    guard activeOperation == operationID else { return }
+    activeOperation = nil
+  }
+
+  func endMutation(_ mutationID: UUID) { endOperation(mutationID) }
+
+  private func recoverStartupPreferenceMutationIfNeeded() async throws {
+    guard !startupPreferenceRecoveryComplete else { return }
+    let descriptor = try await tunnel.pendingPreferenceMutationConfiguration()
+    guard let descriptor else {
+      startupPreferenceRecoveryComplete = true
+      return
+    }
+    let context = try EngineCommandContext(
+      installationID: descriptor.installationID,
+      configEpoch: descriptor.epoch,
+      generation: descriptor.generation
+    )
+    let recoveredTransaction = NativeStopTransaction(
+      owner: .tunnel,
+      commandContext: context,
+      descriptor: descriptor
+    )
+    if let pendingStartCleanup {
+      guard pendingStartCleanup.owner == recoveredTransaction.owner,
+        pendingStartCleanup.commandContext == recoveredTransaction.commandContext,
+        pendingStartCleanup.descriptor == recoveredTransaction.descriptor,
+        pendingFailedStartOff == nil,
+        completedStartCleanup == nil
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Startup Tunnel preference recovery conflicts with another cleanup transaction."
+        )
+      }
+    } else {
+      guard pendingStop == nil, pendingFailedStartOff == nil,
+        completedStartCleanup == nil
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Startup Tunnel preference recovery conflicts with another cleanup transaction."
+        )
+      }
+      pendingStartCleanup = recoveredTransaction
+    }
+    try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
+    startupPreferenceRecoveryComplete = true
+  }
+
+  func awaitTunnelInstallation(
+    context: EngineCommandContext
+  ) async throws -> SystemExtensionInstallResult {
+    if let pendingTunnelInstallation {
+      guard pendingTunnelInstallation.context == context else {
+        throw NativeBridgeExecutionError.failure(
+          .busy,
+          "A different System Extension installation generation is still pending."
+        )
+      }
+      guard pendingTunnelInstallation.state == .retryable else {
+        throw NativeBridgeExecutionError.failure(
+          .busy,
+          "The pending System Extension installation requires exact cancellation before retry."
+        )
+      }
+    }
+    pendingTunnelInstallation = NativePendingTunnelInstallation(
+      context: context,
+      state: .waiting
+    )
+
+    do {
+      let result = try await tunnel.installTunnel()
+      switch result {
+      case .completed:
+        pendingTunnelInstallation = nil
+      case .awaitingApproval:
+        pendingTunnelInstallation?.state = .retryable
+      case .requiresRestart:
+        pendingTunnelInstallation?.state = .terminalReceipt
+      }
+      return result
+    } catch {
+      pendingTunnelInstallation?.state =
+        Self.isRetryableInstallationWaitError(error)
+        ? .retryable : .terminalReceipt
+      throw error
+    }
+  }
+
+  static func isRetryableInstallationWaitError(_ error: Error) -> Bool {
+    if error is CancellationError { return true }
+    guard let error = error as? AppleNetworkError else { return false }
+    return error == .systemExtensionInstallationTimedOut
   }
 
   static func observe<Value: Sendable>(
@@ -52,7 +162,7 @@ extension NativeBridgeCoordinator {
     if snapshot.state.kind == .off, snapshot.mode == .off, snapshot.configuration == nil {
       return nil
     }
-    let expectedState: EngineStateKind = expectedMode == .systemProxy ? .proxyActive : .tunnelActive
+    let expectedState: EngineStateKind = expectedMode == .tunnel ? .tunnelActive : .proxyActive
     if snapshot.state.kind == expectedState, snapshot.mode == expectedMode,
       let configuration = snapshot.configuration
     {
@@ -100,6 +210,7 @@ extension NativeBridgeCoordinator {
   }
 
   static func map(_ error: Error) -> NativeBridgeExecutionError {
+    if let error = error as? ServiceBuildHandoffFailure { return error.failure }
     if let error = error as? NativeBridgeExecutionError {
       return error
     }
@@ -112,16 +223,21 @@ extension NativeBridgeCoordinator {
     if let error = error as? ProxyAgentHostError {
       switch error {
       case .registrationRequiresApproval:
-        return .failure(.permissionDenied, error.localizedDescription)
+        return .failure(.proxyAgentApprovalRequired, error.localizedDescription)
       case .registrationUnavailable, .transportUnavailable:
         return .failure(.unavailable, error.localizedDescription)
       case .transportTimedOut:
         return .failure(.timeout, error.localizedDescription)
+      case .transportCapacityExceeded:
+        return .failure(.busy, error.localizedDescription)
+      case .authorizationDenied:
+        return .failure(.permissionDenied, error.localizedDescription)
+      case .authorizationPending:
+        return .failure(.busy, error.localizedDescription)
+      case .authorizationFailed:
+        return .failure(.unavailable, error.localizedDescription)
       case .agentFailure(let failure):
-        return .failure(
-          failure.isRetryable ? .unavailable : .configurationRejected,
-          error.localizedDescription
-        )
+        return proxyAgentFailure(failure)
       case .registrationFailed, .malformedResponse, .responseMismatch:
         return .failure(.identityRejected, error.localizedDescription)
       }
@@ -131,8 +247,38 @@ extension NativeBridgeCoordinator {
     }
     if let error = error as? AppleNetworkError {
       switch error {
-      case .installationAlreadyInProgress:
+      case .installationAlreadyInProgress, .systemExtensionRequestCapacityExceeded:
         return .failure(.busy, error.localizedDescription)
+      case .systemExtensionInstallationTimedOut:
+        return .failure(
+          .timeout,
+          "System Extension activation did not reach a callback before its internal deadline."
+        )
+      case .preferenceLoadTimedOut:
+        return .failure(
+          .timeout,
+          "Network Extension preferences did not load before the internal deadline."
+        )
+      case .preferenceSaveTimedOut:
+        return .failure(
+          .timeout,
+          "Network Extension preferences did not save before the internal deadline."
+        )
+      case .preferenceRemoveTimedOut:
+        return .failure(
+          .timeout,
+          "Network Extension preferences did not remove before the internal deadline."
+        )
+      case .preferenceMutationUncertain:
+        return .failure(
+          .busy,
+          "A prior Network Extension preference write is awaiting exact reconciliation."
+        )
+      case .preferenceMutationJournalUnavailable:
+        return .failure(
+          .cleanupUnproven,
+          "The durable Tunnel preference mutation journal is unavailable."
+        )
       case .systemExtensionStateTransportTimedOut, .providerMessageTimedOut,
         .tunnelStopTimedOut:
         return .failure(.timeout, error.localizedDescription)
@@ -144,20 +290,40 @@ extension NativeBridgeCoordinator {
       case .cleanupUnproven(let message):
         return .failure(.cleanupUnproven, message)
       case .providerFailure(let failure):
-        return .failure(
-          failure.isRetryable ? .unavailable : .configurationRejected,
-          error.localizedDescription
-        )
+        return packetTunnelFailure(failure)
       case .globalAuthorityUnavailable:
         return .failure(.globalAuthorityUnavailable, GlobalAuthorityGateError.stableMessage)
       case .invalidConfigurationSlot:
         return .failure(.configurationRejected, error.localizedDescription)
-      case .systemExtensionInstallationFailed(let code, let message):
-        return .failure(.approvalDenied, "System Extension activation failed (\(code)): \(message)")
+      case .systemExtensionInstallationFailed(let domain, let code, let message):
+        if domain == OSSystemExtensionErrorDomain,
+          [
+            OSSystemExtensionError.validationFailed.rawValue,
+            OSSystemExtensionError.codeSignatureInvalid.rawValue,
+            OSSystemExtensionError.missingEntitlement.rawValue,
+          ].contains(code)
+        {
+          return .failure(
+            .systemExtensionValidationFailed,
+            NativeBridgeErrorCode.systemExtensionValidationFailed.stableMessage)
+        }
+        let mappedCode: NativeBridgeErrorCode =
+          domain == OSSystemExtensionErrorDomain
+            && code == OSSystemExtensionError.authorizationRequired.rawValue
+          ? .approvalDenied : .unavailable
+        return .failure(
+          mappedCode,
+          "System Extension activation failed (\(domain):\(code)): \(message)"
+        )
       case .duplicateTunnelManagers:
         return .failure(.busy, error.localizedDescription)
-      case .preferenceLoadFailed, .preferenceSaveFailed,
-        .systemExtensionStateTransportFailed, .tunnelStartFailed,
+      case .preferenceLoadFailed(let failure):
+        return preferenceFailure(failure, operation: "load")
+      case .preferenceSaveFailed(let failure):
+        return preferenceFailure(failure, operation: "save")
+      case .preferenceRemoveFailed(let failure):
+        return preferenceFailure(failure, operation: "remove")
+      case .systemExtensionStateTransportFailed, .tunnelStartFailed,
         .tunnelStartCleanupFailed, .providerDidNotRespond, .providerMessageFailed,
         .unknownSystemExtensionResult:
         return .failure(.unavailable, error.localizedDescription)
@@ -177,7 +343,12 @@ extension NativeBridgeCoordinator {
           "Credential cleanup confirmation expired; preview again without deleting anything."
         )
       case .corrupt:
-        return .failure(.identityRejected, "Credential vault data is corrupt.")
+        return .failure(.credentialVaultCorrupt, "Credential vault data is corrupt.")
+      case .unsupportedSchemaVersion:
+        return .failure(
+          .credentialMigrationRequired,
+          "Credential vault schema is unsupported; clear and reprovision credentials."
+        )
       case .missingVault:
         return .failure(.credentialVaultMissing, "Credential vault does not exist.")
       case .keychain(let status):
@@ -187,8 +358,10 @@ extension NativeBridgeCoordinator {
         return .failure(code, "Credential Keychain operation failed with status \(status).")
       case .invalidAccessGroup:
         return .failure(.identityRejected, "Credential Keychain access group is invalid.")
-      case .invalidProfileIdentifier, .kindMismatch, .duplicateReference,
-        .unexpectedCredential, .capacityExceeded:
+      case .capacityExceeded:
+        return .failure(.resourceExhausted, "Credential vault capacity is exhausted.")
+      case .invalidProfileIdentifier, .invalidProfileDigest, .kindMismatch, .duplicateReference,
+        .unexpectedCredential:
         return .failure(.configurationRejected, "Credential request is invalid.")
       }
     }
@@ -212,12 +385,130 @@ extension NativeBridgeCoordinator {
     return .failure(.internal, "Native bridge failed at an explicit internal boundary.")
   }
 
-  static func publicMessage(_ error: Error) -> String {
-    if let error = error as? NativeBridgeExecutionError {
-      switch error {
-      case .failure(_, let message): return message
-      }
+  /// Maps what the ProxyAgent reported. The Host and the ProxyAgent ship in one
+  /// signed app, so a code the Host does not know, or a known code whose retry
+  /// flag contradicts it, is a fault of the two sides, never the user's
+  /// configuration.
+  private static func proxyAgentFailure(_ failure: EngineFailure) -> NativeBridgeExecutionError {
+    guard let reported = ProxyAgentFailure(code: failure.code) else {
+      return unrecognizedOwnerFailure(failure)
     }
-    return error.localizedDescription
+    guard reported.isRetryable == failure.isRetryable else {
+      return .failure(.identityRejected, NativeBridgeErrorCode.identityRejected.stableMessage)
+    }
+    switch reported {
+    case .authority(let authority):
+      return .failure(authority.nativeBridgeCode, authority.stableMessage)
+    case .agent(let agent):
+      let code = nativeCode(forProxyAgent: agent)
+      return .failure(code, code.stableMessage)
+    }
+  }
+
+  private static func nativeCode(forProxyAgent code: ProxyAgentFailureCode) -> NativeBridgeErrorCode
+  {
+    switch code {
+    case .invalidConfigurationSlot, .startRequiresOwnerAuthorization, .missingStopGeneration,
+      .wrongProcessBoundary:
+      .internal
+    case .lifecycleConflict, .startupCancelled:
+      .busy
+    case .staleStopRequest, .stopWithoutSession, .invalidOwnerAuthorization,
+      .invalidRuntimeConfiguration:
+      .identityRejected
+    case .recoveryBlocked, .engineUnclosable, .ownershipConflict, .cleanupFailed:
+      .cleanupUnproven
+    case .authorizationRequired:
+      .permissionDenied
+    case .engineLeaseFailed:
+      .systemProxyAuthorityFailed
+    case .configurationFailed, .configurationRejected:
+      .systemProxyConfigurationFailed
+    case .engineCreationFailed, .engineStartFailed, .engineCrashed, .listenerReadinessTimedOut:
+      .systemProxyRuntimeFailed
+    case .engineStartTimedOut:
+      .engineStartTimedOut
+    case .mixedEndpointInUse:
+      .mixedEndpointInUse
+    case .controllerEndpointInUse:
+      .controllerEndpointInUse
+    case .preferencesFailed:
+      .systemProxyPreferencesFailed
+    case .existingSystemProxy:
+      .existingSystemProxy
+    case .ownershipJournalFailed:
+      .systemProxyJournalFailed
+    case .invalidValidationRequest, .profileProbeInvalid:
+      .configurationRejected
+    case .validatorUnavailable, .validatorFailed, .configurationCheckCleanupFailed,
+      .profileProbeBusy, .profileProbeFailed, .agentEnding:
+      .unavailable
+    case .configurationCheckTimedOut, .profileProbeTimedOut:
+      .timeout
+    }
+  }
+
+  /// Maps what the Packet Tunnel provider reported, under the same rules as a
+  /// ProxyAgent failure.
+  private static func packetTunnelFailure(_ failure: EngineFailure) -> NativeBridgeExecutionError {
+    guard let reported = PacketTunnelFailureCode(rawValue: failure.code) else {
+      return unrecognizedOwnerFailure(failure)
+    }
+    guard reported.isRetryable == failure.isRetryable else {
+      return .failure(.identityRejected, NativeBridgeErrorCode.identityRejected.stableMessage)
+    }
+    let code = nativeCode(forPacketTunnel: reported)
+    return .failure(code, code.stableMessage)
+  }
+
+  private static func nativeCode(forPacketTunnel code: PacketTunnelFailureCode)
+    -> NativeBridgeErrorCode
+  {
+    switch code {
+    case .providerUnavailable, .engineCreationFailed, .packetPumpSetupFailed, .packetPumpFailed,
+      .engineStartFailed, .networkSettingsFailed, .unknownConnectionStatus:
+      .unavailable
+    case .globalAuthorityUnavailable:
+      .globalAuthorityUnavailable
+    case .startTicketInvalid:
+      .ticketInvalid
+    case .startTicketExpired:
+      .ticketExpired
+    case .providerConfigurationMalformed, .configurationInvalid:
+      .configurationRejected
+    case .configurationSlotInvalid, .unsupportedCommand:
+      .internal
+    case .lifecycleConflict, .startupCancelled:
+      .busy
+    case .engineStartTimedOut:
+      .engineStartTimedOut
+    // The tunnel's runtime never reports a mixed-endpoint conflict:
+    // LibboxRuntimeEndpointConflict accepts one only for System Proxy.
+    case .mixedEndpointInUse:
+      .identityRejected
+    case .controllerEndpointInUse:
+      .controllerEndpointInUse
+    case .engineUnclosable:
+      .cleanupUnproven
+    }
+  }
+
+  private static func unrecognizedOwnerFailure(
+    _ failure: EngineFailure
+  ) -> NativeBridgeExecutionError {
+    let code: NativeBridgeErrorCode = failure.isRetryable ? .unavailable : .internal
+    return .failure(code, code.stableMessage)
+  }
+
+  private static func preferenceFailure(
+    _ failure: NetworkExtensionOperationFailure,
+    operation: String
+  ) -> NativeBridgeExecutionError {
+    let code: NativeBridgeErrorCode =
+      failure.disposition == .permissionDenied ? .permissionDenied : .unavailable
+    return .failure(
+      code,
+      "Network Extension preference \(operation) failed (\(failure.domain):\(failure.code)): \(failure.diagnostic)"
+    )
   }
 }

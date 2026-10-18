@@ -250,6 +250,7 @@ private func descriptor(
   try ConfigurationDescriptor(
     slot: tunnel ? .tunnel : .systemProxy,
     tunnelOptions: tunnel ? try TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500) : nil,
+    credentialAudience: try appleCredentialAudience(),
     installationID: installationID,
     epoch: epoch,
     generation: generation,

@@ -10,10 +10,13 @@ public struct CutoverPreflightRequest: Codable, Equatable, Sendable {
     systemProxyRequest: EngineStartRequest,
     tunnelRequest: EngineStartRequest
   ) throws {
-    guard target != .off,
+    guard target == .systemProxy || target == .tunnel,
+      systemProxyRequest.mode == .systemProxy,
+      tunnelRequest.mode.slot == .tunnel,
       systemProxyRequest.tunnelOptions == nil,
       tunnelRequest.tunnelOptions != nil,
-      systemProxyRequest.context == tunnelRequest.context
+      systemProxyRequest.context == tunnelRequest.context,
+      systemProxyRequest.credentialAudience == tunnelRequest.credentialAudience
     else {
       throw NativeBridgeProtocolError.invalidCommand
     }
@@ -54,6 +57,7 @@ public struct CutoverPreflightAttestation: Codable, Equatable, Sendable {
   public let context: EngineCommandContext
   public let systemProxyConfigDigest: SHA256Digest
   public let tunnelConfigDigest: SHA256Digest
+  public let credentialAudience: CredentialAudience
   public let credentialReferences: [CredentialReference]
   public let validForMillis: UInt32
 
@@ -63,20 +67,28 @@ public struct CutoverPreflightAttestation: Codable, Equatable, Sendable {
     context: EngineCommandContext,
     systemProxyConfigDigest: SHA256Digest,
     tunnelConfigDigest: SHA256Digest,
+    credentialAudience: CredentialAudience,
     credentialReferences: [CredentialReference],
     validForMillis: UInt32
   ) throws {
-    guard target != .off, validForMillis > 0,
+    guard target == .systemProxy || target == .tunnel, validForMillis > 0,
       validForMillis <= Self.maximumValidityMilliseconds
     else {
       throw NativeBridgeProtocolError.invalidCommand
     }
-    try CredentialGarbageCollectionRequest.validateCanonicalReferences(credentialReferences)
+    guard credentialReferences.count <= NativeBridgeProtocolConstants.maximumCredentialSlots,
+      credentialReferences.sorted(by: CredentialReference.canonicalPrecedes)
+        == credentialReferences,
+      Set(credentialReferences.map(\.id)).count == credentialReferences.count
+    else {
+      throw NativeBridgeProtocolError.invalidCredentialSlot
+    }
     self.attestationID = attestationID
     self.target = target
     self.context = context
     self.systemProxyConfigDigest = systemProxyConfigDigest
     self.tunnelConfigDigest = tunnelConfigDigest
+    self.credentialAudience = credentialAudience
     self.credentialReferences = credentialReferences
     self.validForMillis = validForMillis
   }
@@ -87,6 +99,7 @@ public struct CutoverPreflightAttestation: Codable, Equatable, Sendable {
     case context
     case systemProxyConfigDigest = "system_proxy_config_digest"
     case tunnelConfigDigest = "tunnel_config_digest"
+    case credentialAudience = "credential_audience"
     case credentialReferences = "credential_references"
     case validForMillis = "valid_for_millis"
   }
@@ -109,6 +122,10 @@ public struct CutoverPreflightAttestation: Codable, Equatable, Sendable {
         forKey: .systemProxyConfigDigest
       ),
       tunnelConfigDigest: container.decode(SHA256Digest.self, forKey: .tunnelConfigDigest),
+      credentialAudience: container.decode(
+        CredentialAudience.self,
+        forKey: .credentialAudience
+      ),
       credentialReferences: container.decode(
         [CredentialReference].self,
         forKey: .credentialReferences
@@ -124,6 +141,7 @@ public struct CutoverPreflightAttestation: Codable, Equatable, Sendable {
     try container.encode(context, forKey: .context)
     try container.encode(systemProxyConfigDigest, forKey: .systemProxyConfigDigest)
     try container.encode(tunnelConfigDigest, forKey: .tunnelConfigDigest)
+    try container.encode(credentialAudience, forKey: .credentialAudience)
     try container.encode(credentialReferences, forKey: .credentialReferences)
     try container.encode(validForMillis, forKey: .validForMillis)
   }
@@ -134,7 +152,8 @@ public enum CutoverPreflightOutcome: Equatable, Sendable {
     target: EngineMode,
     context: EngineCommandContext,
     systemProxyConfigDigest: SHA256Digest,
-    tunnelConfigDigest: SHA256Digest
+    tunnelConfigDigest: SHA256Digest,
+    credentialAudience: CredentialAudience
   )
   case ready(CutoverPreflightAttestation)
 }
@@ -146,6 +165,7 @@ extension CutoverPreflightOutcome: Codable {
     case context
     case systemProxyConfigDigest = "system_proxy_config_digest"
     case tunnelConfigDigest = "tunnel_config_digest"
+    case credentialAudience = "credential_audience"
     case attestation
   }
 
@@ -168,6 +188,10 @@ extension CutoverPreflightOutcome: Codable {
         tunnelConfigDigest: try container.decode(
           SHA256Digest.self,
           forKey: .tunnelConfigDigest
+        ),
+        credentialAudience: try container.decode(
+          CredentialAudience.self,
+          forKey: .credentialAudience
         )
       )
     case .ready:
@@ -184,13 +208,15 @@ extension CutoverPreflightOutcome: Codable {
       let target,
       let context,
       let systemProxyConfigDigest,
-      let tunnelConfigDigest
+      let tunnelConfigDigest,
+      let credentialAudience
     ):
       try container.encode(Status.awaitingApproval, forKey: .status)
       try container.encode(target, forKey: .target)
       try container.encode(context, forKey: .context)
       try container.encode(systemProxyConfigDigest, forKey: .systemProxyConfigDigest)
       try container.encode(tunnelConfigDigest, forKey: .tunnelConfigDigest)
+      try container.encode(credentialAudience, forKey: .credentialAudience)
     case .ready(let attestation):
       try container.encode(Status.ready, forKey: .status)
       try container.encode(attestation, forKey: .attestation)

@@ -1,0 +1,12 @@
+{
+  "archiveSha256": "34976cb5eaeef4fd5547304405a305f794d8ddff95676733996971173273839a",
+  "archiveSize": 30062052,
+  "events": [
+    {"document":"cfw-notarization-event-v1","exit_code":null,"failure_code":null,"intent_sha256":"fd7472abe80c110161d8d5c418372bc68694fb49e9bcea635b6c5b766ffc0bd4","previous_event_sha256":null,"recorded_at":"2026-07-28T17:39:50Z","schema_version":1,"sequence":1,"state":"prepared","submission_id":null},
+    {"document":"cfw-notarization-event-v1","exit_code":null,"failure_code":null,"intent_sha256":"fd7472abe80c110161d8d5c418372bc68694fb49e9bcea635b6c5b766ffc0bd4","previous_event_sha256":"17230348094bf28632d2d476cc07de1328cb68168bf6e6e78dbff0c1160fe461","recorded_at":"2026-07-28T17:39:54Z","schema_version":1,"sequence":2,"state":"pre_submission_policy_compatibility_applied","submission_id":null},
+    {"document":"cfw-notarization-event-v1","exit_code":null,"failure_code":null,"intent_sha256":"fd7472abe80c110161d8d5c418372bc68694fb49e9bcea635b6c5b766ffc0bd4","previous_event_sha256":"ee1f32a475907d4df0a18b4b3e15c8141d29dea61e881d0271349c696e131065","recorded_at":"2026-07-28T17:40:01Z","schema_version":1,"sequence":3,"state":"submitting","submission_id":null},
+    {"document":"cfw-notarization-event-v1","exit_code":null,"failure_code":"invalid_notary_response","intent_sha256":"fd7472abe80c110161d8d5c418372bc68694fb49e9bcea635b6c5b766ffc0bd4","previous_event_sha256":"af1a861a20ae8e4ceb80b3eaf0505e933c969e279bacfcecd8bdabd7293007d4","recorded_at":"2026-07-28T17:40:13Z","schema_version":1,"sequence":4,"state":"outcome_unknown","submission_id":null}
+  ],
+  "intent": {"archive_name":"Clash.for.Mac_0.4.0_40001_notary.zip","archive_sha256":"34976cb5eaeef4fd5547304405a305f794d8ddff95676733996971173273839a","archive_size":30062052,"attempt_id":"c9ce03ab-a64a-4dea-97c6-df1eefcaa8a1","build_number":"40001","document":"cfw-notarization-attempt-v1","lane":"validation","pre_staple_app_tree_sha256":"3aee7c561dd6bfee4a54e64ec3c1995f8948496157c907b0b4cec7932d9494af","prepared_at":"2026-07-28T17:39:50Z","release_source_sha256":"2cc0a657434d45b4fd7e1bc61b366393c84637c6f200e2b40f2585d20f852696","repository_commit":"9d3ab6615a667040182eb874d7d20f167a13e3a4","schema_version":1,"team_id":"YKUPL7Z869","version":"0.4.0"},
+  "intentSha256": "fd7472abe80c110161d8d5c418372bc68694fb49e9bcea635b6c5b766ffc0bd4"
+}

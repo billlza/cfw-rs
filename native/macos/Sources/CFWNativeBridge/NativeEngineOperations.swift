@@ -2,104 +2,189 @@ import CFWAppleNetwork
 import CFWCredentialTransport
 import CFWSharedProtocol
 import Foundation
+import OSLog
 
 extension NativeBridgeCoordinator {
+  private static let restorationLog = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-restoration")
+
   func startSystemProxy(_ request: EngineStartRequest) async throws
     -> NativeRuntimeIdentity
   {
-    do {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
-    } catch {
-      throw Self.map(error)
-    }
-    try beginMutation()
-    defer { endMutation() }
-    guard request.tunnelOptions == nil else {
+    try await startProxy(request, expectedMode: .systemProxy)
+  }
+
+  func startLocalProxy(_ request: EngineStartRequest) async throws -> NativeRuntimeIdentity {
+    try await startProxy(request, expectedMode: .localProxy)
+  }
+
+  private func startProxy(_ request: EngineStartRequest, expectedMode: NativeStartMode) async throws
+    -> NativeRuntimeIdentity
+  {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try Task.checkCancellation()
+    try requireNoPendingStopBeforeStart()
+    guard request.mode == expectedMode, expectedMode.slot.isProxyAgent,
+      request.tunnelOptions == nil
+    else {
       throw NativeBridgeExecutionError.failure(
         .configurationRejected,
-        "System Proxy start contains Tunnel network options."
+        "Proxy start mode does not match the requested entry point."
       )
     }
-    try preflightCredentials(request)
     do {
       try await proxy.ensureRegistered()
     } catch {
       throw Self.map(error)
     }
-    let descriptor = try request.descriptor(slot: .systemProxy)
+    try Task.checkCancellation()
+    let descriptor = try request.descriptor(slot: expectedMode.slot)
+    let owner = NativeStopOwner(mode: descriptor.slot.authorityMode)
     var configuration = Data(request.configJSON.utf8)
     defer {
       configuration.resetBytes(in: configuration.startIndex..<configuration.endIndex)
       configuration.removeAll(keepingCapacity: false)
     }
+    let prepared: HostPreparedSystemProxyStart
     do {
-      try configurationStore.persist(configuration, descriptor: descriptor)
+      prepared = try await systemProxyPreparer.prepareSystemProxyStart(
+        configuration: configuration,
+        descriptor: descriptor)
     } catch {
-      throw Self.map(error)
+      let failure = Self.map(error)
+      // Preparation can fail after Authority has recorded the attempt but before
+      // its authorization reply reaches us. Keep the exact failed generation
+      // until both the owner and independent Authority observation prove Off.
+      try await proveFailedStartOff(
+        NativeStopTransaction(
+          owner: owner, commandContext: request.context, descriptor: descriptor))
+      throw failure
     }
     do {
-      try await proxy.start(configuration: descriptor)
+      try Task.checkCancellation()
+      try preflightCredentials(request)
     } catch {
-      throw Self.map(error)
+      try await cancelSystemProxyPreparation(
+        prepared,
+        after: error,
+        context: "credential preflight failed",
+        owner: owner,
+        descriptor: descriptor,
+        commandContext: request.context)
     }
-    let status = try await queryStatus()
-    guard case .systemProxy(let runtime) = status,
-      runtime.context == request.context,
-      runtime.configDigest == request.configDigest.hex,
-      runtime.ready
-    else {
+    do {
+      try await proxy.start(
+        configuration: configuration,
+        descriptor: descriptor,
+        authorization: prepared)
+    } catch {
+      let originalError = error
+      do {
+        try await systemProxyPreparer.cancelSystemProxyStart(prepared)
+      } catch {
+        try await rollbackStartedOwner(
+          owner,
+          descriptor: descriptor,
+          commandContext: request.context,
+          after: originalError,
+          cancellationFailure: error)
+      }
+      let transaction = NativeStopTransaction(
+        owner: owner,
+        commandContext: request.context,
+        descriptor: descriptor)
+      try await proveFailedStartOff(transaction)
+      throw Self.map(originalError)
+    }
+    do {
+      try Task.checkCancellation()
+      let status = try await queryStatus()
+      let runtime: NativeRuntimeIdentity
+      switch (expectedMode, status) {
+      case (.localProxy, .localProxy(let identity)), (.systemProxy, .systemProxy(let identity)):
+        runtime = identity
+      default:
+        throw NativeBridgeExecutionError.failure(
+          .identityRejected, "ProxyAgent reported the wrong mode.")
+      }
+      guard runtime.context == request.context,
+        runtime.configDigest == request.configDigest.hex,
+        runtime.ready
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .identityRejected,
+          "ProxyAgent did not return readiness for the exact start request."
+        )
+      }
+      try Task.checkCancellation()
+      return runtime
+    } catch {
+      try await rollbackStartedOwner(
+        owner,
+        descriptor: descriptor,
+        commandContext: request.context,
+        after: error)
+    }
+  }
+
+  private func cancelSystemProxyPreparation(
+    _ prepared: HostPreparedSystemProxyStart,
+    after originalError: Error,
+    context: String,
+    owner: NativeStopOwner,
+    descriptor: ConfigurationDescriptor,
+    commandContext: EngineCommandContext
+  ) async throws -> Never {
+    do {
+      try await systemProxyPreparer.cancelSystemProxyStart(prepared)
+    } catch {
       throw NativeBridgeExecutionError.failure(
-        .identityRejected,
-        "ProxyAgent did not return readiness for the exact start request."
+        .cleanupUnproven,
+        "System Proxy \(context) and Authority cancellation is unproven: \(Self.map(error).responseFailure.message)"
       )
     }
-    return runtime
+    try await proveFailedStartOff(
+      NativeStopTransaction(
+        owner: owner,
+        commandContext: commandContext,
+        descriptor: descriptor)
+    )
+    throw Self.map(originalError)
   }
 
   func stopSystemProxy(_ context: EngineCommandContext) async throws {
-    try beginMutation()
-    defer { endMutation() }
-    let snapshot: EngineSnapshot
-    do {
-      snapshot = try await proxy.snapshot()
-    } catch {
-      throw Self.map(error)
+    try await stopProxy(context, owner: .systemProxy)
+  }
+
+  func stopLocalProxy(_ context: EngineCommandContext) async throws {
+    try await stopProxy(context, owner: .localProxy)
+  }
+
+  private func stopProxy(_ context: EngineCommandContext, owner: NativeStopOwner) async throws {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    if try await acknowledgeCompletedStartCleanup(owner, context: context) {
+      return
     }
-    guard let descriptor = try Self.activeDescriptor(snapshot, expectedMode: .systemProxy),
-      Self.matches(descriptor, context: context)
-    else {
-      throw NativeBridgeExecutionError.failure(
-        .identityRejected,
-        "ProxyAgent stop does not match the active generation."
-      )
+    if try await resumePendingFailedStartOff(owner, context: context) {
+      return
     }
-    do {
-      try await proxy.stop(configuration: descriptor)
-    } catch {
-      throw Self.map(error)
-    }
-    guard case .off = try await queryStatus() else {
-      throw NativeBridgeExecutionError.failure(
-        .unavailable,
-        "ProxyAgent stop did not reach the global Off barrier."
-      )
+    if try await prepareExplicitStop(owner, context: context) {
+      try await drivePendingStop(restoringSettingsFirst: owner == .systemProxy)
     }
   }
 
   func installTunnel(_ context: EngineCommandContext) async throws
     -> NativeTunnelInstallOutcome
   {
-    try beginMutation()
-    defer { endMutation() }
-    guard pendingInstallationContext == nil else {
-      throw NativeBridgeExecutionError.failure(
-        .busy,
-        "A prior System Extension installation request is still pending."
-      )
-    }
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try Task.checkCancellation()
     let result: SystemExtensionInstallResult
     do {
-      result = try await tunnel.installTunnel()
+      result = try await awaitTunnelInstallation(context: context)
+      try Task.checkCancellation()
     } catch {
       throw Self.map(error)
     }
@@ -107,7 +192,6 @@ extension NativeBridgeCoordinator {
     case .completed:
       return .ready
     case .awaitingApproval:
-      pendingInstallationContext = context
       return .awaitingApproval
     case .requiresRestart:
       throw NativeBridgeExecutionError.failure(
@@ -118,46 +202,92 @@ extension NativeBridgeCoordinator {
   }
 
   func cancelTunnelInstall(_ context: EngineCommandContext) async throws {
-    try beginMutation()
-    defer { endMutation() }
-    guard pendingInstallationContext == context else {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    guard pendingTunnelInstallation?.context == context else {
       throw NativeBridgeExecutionError.failure(
         .identityRejected,
         "Tunnel installation cancellation does not match the pending generation."
       )
     }
     await tunnel.cancelTunnelInstallationWait()
-    pendingInstallationContext = nil
+    pendingTunnelInstallation = nil
   }
 
-  func startTunnel(_ request: EngineStartRequest) async throws -> NativeRuntimeIdentity {
+  func authorizeTunnelConfiguration(_ request: EngineStartRequest) async throws {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try requireNoPendingStopBeforeStart()
+    let descriptor = try request.descriptor(slot: .tunnel)
     do {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
+      try await proxy.ensureRegistered()
+      let ownership = try await engineLease.authorityOwnership()
+      guard ownership.state == .off, ownership.lease == nil,
+        try await proxy.snapshot().state.kind == .off
+      else {
+        throw NativeBridgeExecutionError.failure(.busy, "VPN authorization requires global Off.")
+      }
     } catch {
       throw Self.map(error)
     }
-    try beginMutation()
-    defer { endMutation() }
+    do {
+      try await tunnel.authorizeTunnelConfiguration(descriptor)
+      try Task.checkCancellation()
+    } catch {
+      let original = error
+      pendingStartCleanup = NativeStopTransaction(
+        owner: .tunnel, commandContext: request.context, descriptor: descriptor)
+      do {
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
+        try await proveFailedStartOff(
+          NativeStopTransaction(
+            owner: .tunnel, commandContext: request.context, descriptor: descriptor))
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "VPN configuration authorization failed and its preference cleanup is unproven.")
+      }
+      throw Self.map(original)
+    }
+  }
+
+  func startTunnel(_ request: EngineStartRequest) async throws -> NativeRuntimeIdentity {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try Task.checkCancellation()
+    try requireNoPendingStopBeforeStart()
     guard request.tunnelOptions != nil else {
       throw NativeBridgeExecutionError.failure(
         .configurationRejected,
         "Tunnel start omits required network options."
       )
     }
+    // Exact global ownership requires the signed ProxyAgent to be observable even
+    // for Tunnel mode; an unregistered Agent cannot prove that no persisted System
+    // Proxy ownership remains. Approval errors are surfaced before Tunnel mutation.
+    do {
+      try await proxy.ensureRegistered()
+    } catch {
+      throw Self.map(error)
+    }
+    try Task.checkCancellation()
     var credentialMaterial: CredentialMaterial
     do {
-      credentialMaterial = try credentialVault.resolve(slots: request.credentialSlots)
+      credentialMaterial = try credentialVault.resolve(
+        audience: request.credentialAudience,
+        slots: request.credentialSlots
+      )
     } catch {
       throw Self.map(error)
     }
     defer { credentialMaterial.erase() }
     var credentialPayload: Data?
-    if !request.credentialSlots.isEmpty {
-      do {
-        credentialPayload = try EphemeralCredentialCodec.encode(credentialMaterial)
-      } catch {
-        throw Self.map(error)
-      }
+    do {
+      let encoded = try credentialMaterial.authorityPayload(for: request.credentialSlots)
+      defer { encoded?.erase() }
+      credentialPayload = try encoded?.withUnsafeBytes { Data($0) }
+    } catch {
+      throw Self.map(error)
     }
     defer {
       if var payload = credentialPayload {
@@ -167,6 +297,7 @@ extension NativeBridgeCoordinator {
       }
     }
     let descriptor = try request.descriptor(slot: .tunnel)
+    try Task.checkCancellation()
     do {
       try await tunnel.startTunnel(
         configuration: Data(request.configJSON.utf8),
@@ -174,77 +305,881 @@ extension NativeBridgeCoordinator {
         credentialPayload: credentialPayload
       )
     } catch {
-      throw Self.map(error)
-    }
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: .seconds(10))
-    while clock.now < deadline {
-      let providerSnapshot: EngineSnapshot
+      let originalError = error
+      pendingStartCleanup = NativeStopTransaction(
+        owner: .tunnel,
+        commandContext: request.context,
+        descriptor: descriptor)
       do {
-        providerSnapshot = try await tunnel.snapshot()
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
       } catch {
-        throw Self.map(error)
-      }
-      if providerSnapshot.state.kind == .tunnelActive {
-        let status = try await queryStatus()
-        guard case .tunnel(let runtime) = status else {
-          throw NativeBridgeExecutionError.failure(
-            .identityRejected,
-            "Packet Tunnel provider was ready without matching global ownership."
-          )
-        }
-        guard runtime.context == request.context,
-          runtime.configDigest == request.configDigest.hex,
-          runtime.ready
-        else {
-          throw NativeBridgeExecutionError.failure(
-            .identityRejected,
-            "Packet Tunnel readiness does not match the exact start request."
-          )
-        }
-        return runtime
-      }
-      if providerSnapshot.state.kind == .failed {
         throw NativeBridgeExecutionError.failure(
-          .unavailable,
-          "Packet Tunnel entered a failed state before readiness attestation."
+          .cleanupUnproven,
+          "Tunnel start failed and exact preparation cleanup remains unproven: \(Self.map(error).responseFailure.message)"
         )
       }
-      try await Task.sleep(for: .milliseconds(100))
+      let transaction = NativeStopTransaction(
+        owner: .tunnel,
+        commandContext: request.context,
+        descriptor: descriptor)
+      try await proveFailedStartOff(transaction)
+      throw Self.map(originalError)
     }
-    throw NativeBridgeExecutionError.failure(
-      .timeout,
-      "Packet Tunnel did not provide bounded ready attestation."
-    )
+    do {
+      try Task.checkCancellation()
+      // Ticket validity remains ten seconds. Observing the OS's asynchronous
+      // disconnect error needs a separate, longer bound so a cold launch that
+      // expires its ticket reports that exact cause before cleanup and retry.
+      // The bound also outlasts the provider's interruptible libbox start.
+      let deadline = armTunnelReadinessDeadline(EngineStartBudget.tunnelReadiness)
+      while !deadline.hasPassed() {
+        let providerSnapshot: EngineSnapshot
+        do {
+          providerSnapshot = try await tunnel.snapshot()
+        } catch {
+          throw Self.map(error)
+        }
+        if providerSnapshot.state.kind == .tunnelActive {
+          let status = try await queryStatus(enforcePreferenceBarrier: false)
+          guard case .tunnel(let runtime) = status else {
+            throw NativeBridgeExecutionError.failure(
+              .identityRejected,
+              "Packet Tunnel provider was ready without matching global ownership."
+            )
+          }
+          guard runtime.context == request.context,
+            runtime.configDigest == request.configDigest.hex,
+            runtime.ready
+          else {
+            throw NativeBridgeExecutionError.failure(
+              .identityRejected,
+              "Packet Tunnel readiness does not match the exact start request."
+            )
+          }
+          do {
+            try await tunnel.completePreferenceMutation(
+              expectedConfiguration: descriptor)
+          } catch {
+            throw Self.map(error)
+          }
+          try Task.checkCancellation()
+          return runtime
+        }
+        if providerSnapshot.state.kind == .failed {
+          guard let failure = providerSnapshot.state.failure else {
+            throw NativeBridgeExecutionError.failure(
+              .identityRejected,
+              "Packet Tunnel returned a failed state without a typed failure."
+            )
+          }
+          throw Self.map(AppleNetworkError.providerFailure(failure))
+        }
+        try await Task.sleep(for: .milliseconds(100))
+      }
+      throw NativeBridgeExecutionError.failure(
+        .timeout,
+        "Packet Tunnel did not provide bounded ready attestation."
+      )
+    } catch {
+      try await rollbackStartedOwner(
+        .tunnel,
+        descriptor: descriptor,
+        commandContext: request.context,
+        after: error)
+    }
   }
 
   func stopTunnel(_ context: EngineCommandContext) async throws {
-    try beginMutation()
-    defer { endMutation() }
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    if try await acknowledgeCompletedStartCleanup(.tunnel, context: context) {
+      return
+    }
+    if try await resumePendingFailedStartOff(.tunnel, context: context) {
+      return
+    }
+    if let pendingStartCleanup {
+      guard pendingStartCleanup.owner == .tunnel,
+        pendingStartCleanup.commandContext == context
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .identityRejected,
+          "Tunnel cleanup retry does not match the failed start generation."
+        )
+      }
+      do {
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
+      } catch {
+        throw Self.map(error)
+      }
+      try await proveFailedStartOff(pendingStartCleanup)
+      guard try await acknowledgeCompletedStartCleanup(.tunnel, context: context) else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Tunnel failed-start cleanup completed without an exact receipt."
+        )
+      }
+      return
+    }
+    if try await prepareExplicitStop(.tunnel, context: context) {
+      try await drivePendingStop(restoringSettingsFirst: false)
+    }
+  }
+
+  private func requireNoPendingStopBeforeStart() throws {
+    guard pendingStop == nil,
+      pendingStartCleanup == nil,
+      pendingFailedStartOff == nil,
+      completedStartCleanup == nil
+    else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "A prior native stop transaction has not reached the global Off barrier."
+      )
+    }
+  }
+
+  private func prepareExplicitStop(
+    _ owner: NativeStopOwner,
+    context: EngineCommandContext
+  ) async throws -> Bool {
+    if let pendingStop {
+      guard pendingStop.owner == owner,
+        pendingStop.commandContext == context
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .identityRejected,
+          "The stop retry does not match the pending native stop transaction."
+        )
+      }
+      return true
+    }
+
     let snapshot: EngineSnapshot
     do {
-      snapshot = try await tunnel.snapshot()
+      snapshot = try await ownerSnapshot(owner)
     } catch {
       throw Self.map(error)
     }
-    guard let descriptor = try Self.activeDescriptor(snapshot, expectedMode: .tunnel),
+    if Self.isStableOff(snapshot) {
+      // The OS may finish a stop before the Host consumes its final status.
+      // Bind the request to that exact completed/stopping generation, then
+      // require both the independent OS barrier and the durable Off cursor.
+      do {
+        // An Authority that passed this generation since holds nothing of it,
+        // whatever later start it holds now.
+        if try await engineLease.stopResolution(context) == .superseded {
+          try await requireOwnerOffAfterSupersededStop(owner, context: context)
+          return false
+        }
+        if let recovered = try await engineLease.recoverStoppingLease() {
+          guard recovered.commandContext == context, recovered.owner == owner else {
+            throw NativeBridgeExecutionError.failure(
+              .identityRejected, "The stop request does not match the released owner generation.")
+          }
+        }
+        guard case .off = try await queryStatus() else {
+          throw AuthorityDomainError(code: .cleanupUnproven)
+        }
+        guard try await engineLease.stopResolution(context) != .unresolved else {
+          throw NativeBridgeExecutionError.failure(
+            .identityRejected, "The stop request has no matching completed generation.")
+        }
+        return false
+      } catch {
+        throw Self.map(error)
+      }
+    }
+    let expectedMode = owner.engineMode
+    let stopDescriptor: ConfigurationDescriptor?
+    if snapshot.state.kind == .failed,
+      snapshot.mode == expectedMode,
+      let descriptor = snapshot.configuration,
+      descriptor.slot.engineMode == expectedMode
+    {
+      // Failed is never readiness. An explicit Stop may still clean this exact
+      // retained owner; beginStop subsequently binds its content/identity digests
+      // and generation to the Authority lease before any owner teardown.
+      stopDescriptor = descriptor
+    } else {
+      stopDescriptor = try Self.activeDescriptor(snapshot, expectedMode: expectedMode)
+    }
+    guard let descriptor = stopDescriptor,
       Self.matches(descriptor, context: context)
     else {
       throw NativeBridgeExecutionError.failure(
         .identityRejected,
-        "Packet Tunnel stop does not match the active generation."
+        "The native owner stop does not match the active generation."
       )
     }
+    pendingStop = NativeStopTransaction(
+      owner: owner,
+      commandContext: context,
+      descriptor: descriptor)
+    return true
+  }
+
+  private func rollbackStartedOwner(
+    _ owner: NativeStopOwner,
+    descriptor: ConfigurationDescriptor,
+    commandContext: EngineCommandContext,
+    after originalError: Error,
+    cancellationFailure: Error? = nil
+  ) async throws -> Never {
+    if owner == .tunnel {
+      if let pendingStartCleanup {
+        guard pendingStartCleanup.owner == owner,
+          pendingStartCleanup.commandContext == commandContext,
+          pendingStartCleanup.descriptor == descriptor
+        else {
+          throw NativeBridgeExecutionError.failure(
+            .cleanupUnproven,
+            "Tunnel start verification conflicts with another cleanup transaction."
+          )
+        }
+      } else {
+        pendingStartCleanup = NativeStopTransaction(
+          owner: owner,
+          commandContext: commandContext,
+          descriptor: descriptor)
+      }
+      do {
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
+      } catch let error as NativeBridgeExecutionError {
+        let localCleanup = await attemptLocalStopAfterOrderingFailure()
+        let local = localCleanup.map { " Local stop also failed: \($0)" } ?? ""
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Tunnel start failed and durable preference cleanup remains unproven: \(error.responseFailure.message).\(local)"
+        )
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Tunnel start cleanup failed at an untyped boundary."
+        )
+      }
+      let transaction = NativeStopTransaction(
+        owner: owner,
+        commandContext: commandContext,
+        descriptor: descriptor)
+      try await proveFailedStartOff(transaction)
+      throw Self.map(originalError)
+    }
+
+    if let pendingStop {
+      guard pendingStop.owner == owner,
+        pendingStop.commandContext == commandContext,
+        pendingStop.descriptor == descriptor
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Start verification failed while another native stop transaction remained pending."
+        )
+      }
+    } else {
+      pendingStop = NativeStopTransaction(
+        owner: owner,
+        commandContext: commandContext,
+        descriptor: descriptor)
+    }
+
     do {
-      try await tunnel.stopTunnel(expectedConfiguration: descriptor)
+      // A rollback restores nothing first: the owner's own stop restores its
+      // settings once the Authority ordered it, so a failed start's owner never
+      // keeps running because they could not be restored. Restoring first is
+      // for an Off the user asked for.
+      try await drivePendingStop(restoringSettingsFirst: false)
+    } catch let error as NativeBridgeExecutionError {
+      let localCleanup = await attemptLocalStopAfterOrderingFailure()
+      let original = Self.map(originalError).responseFailure.message
+      let cancellation =
+        cancellationFailure.map {
+          " Preparation cancellation also failed: \(Self.map($0).responseFailure.message)"
+        } ?? ""
+      let cleanup = error.responseFailure.message
+      let local = localCleanup.map { " Local stop also failed: \($0)" } ?? ""
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Native start failed: \(original)\(cancellation) Cleanup remains unproven: \(cleanup).\(local)"
+      )
+    } catch {
+      let localCleanup = await attemptLocalStopAfterOrderingFailure()
+      let local = localCleanup.map { " Local stop also failed: \($0)" } ?? ""
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Native start cleanup failed at an untyped boundary.\(local)"
+      )
+    }
+    rememberCompletedStartCleanup(
+      owner: owner,
+      commandContext: commandContext,
+      descriptor: descriptor)
+    throw Self.map(originalError)
+  }
+
+  func reconcilePendingTunnelStartCleanup(
+    recordCompletion: Bool = true
+  ) async throws {
+    guard let transaction = pendingStartCleanup,
+      transaction.owner == .tunnel
+    else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "No exact Tunnel preparation cleanup is pending."
+      )
+    }
+
+    var ownerControlled = false
+    if let pendingStop {
+      guard pendingStop.owner == transaction.owner,
+        pendingStop.commandContext == transaction.commandContext,
+        pendingStop.descriptor == transaction.descriptor
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Tunnel preference cleanup conflicts with another stop transaction."
+        )
+      }
+      ownerControlled = true
+    } else {
+      ownerControlled =
+        !(try await engineLease.cancelPreparedStart(
+          for: transaction.descriptor))
+      if ownerControlled {
+        pendingStop = transaction
+      }
+    }
+
+    if ownerControlled {
+      try await beginPendingStopAtAuthority()
+    }
+
+    let preferenceCompensated: Bool
+    if pendingStop?.preferenceCompensated == true {
+      // A prior attempt already restored the exact preference state and proved
+      // OS Off, but Authority completion or the final global query failed. Do
+      // not replay beginStop after a lost complete reply may have committed Off.
+      // The final fresh verification below still guards journal removal.
+      preferenceCompensated = true
+    } else {
+      let authority = pendingStop?.authority ?? .unordered
+      let engineLease = self.engineLease
+      let commandContext = transaction.commandContext
+      do {
+        preferenceCompensated = try await tunnel.compensatePendingPreferenceMutation(
+          expectedConfiguration: transaction.descriptor,
+          revokePreparation: {
+            switch authority {
+            case .completed:
+              // The Authority committed Off for this lease, so nothing it
+              // authorized can start any more.
+              return
+            case .ordered(let authorityContext):
+              let observed: NativeAuthorityStopContext
+              do {
+                observed = try await engineLease.beginStop(for: transaction.descriptor)
+              } catch let error as AuthorityDomainError
+                where error.code == .globalAuthorityRecovering
+              {
+                // The Authority released the lease since, so nothing it
+                // authorized can start any more.
+                return
+              } catch let stale as AuthorityDomainError where stale.code == .staleOperation {
+                // The Authority reached Off at this generation or passed it
+                // since, so the lease ended and nothing it authorized can
+                // start any more.
+                guard try await engineLease.stopResolution(commandContext) != .unresolved else {
+                  throw stale
+                }
+                return
+              }
+              guard observed == authorityContext else {
+                throw NativeBridgeExecutionError.failure(
+                  .cleanupUnproven,
+                  "Authority stop identity changed during preference compensation."
+                )
+              }
+            case .unordered, .released:
+              // A Recovering Authority holds no preparation either.
+              guard try await engineLease.cancelPreparedStart(for: transaction.descriptor) else {
+                throw NativeBridgeExecutionError.failure(
+                  .cleanupUnproven,
+                  "Authority retained owner control during preference compensation."
+                )
+              }
+            }
+          }
+        )
+      } catch {
+        throw Self.map(error)
+      }
+    }
+
+    if ownerControlled {
+      if preferenceCompensated {
+        guard var stoppedTransaction = pendingStop else {
+          throw NativeBridgeExecutionError.failure(
+            .cleanupUnproven,
+            "Tunnel preference compensation lost its Authority stop transaction."
+          )
+        }
+        // Compensation has independently stopped the exact written manager and
+        // proved NetworkExtension Off. Authority completion remains the final,
+        // independent durable owner-stopped check.
+        stoppedTransaction.preferenceCompensated = true
+        stoppedTransaction.ownerStopped = true
+        pendingStop = stoppedTransaction
+      } else {
+        try await drivePendingStopToOwnerStopped(restoringSettingsFirst: false)
+      }
+      try await completePendingStopAfterOwnerStopped()
+    }
+
+    do {
+      try await tunnel.finishPreferenceCompensation(
+        expectedConfiguration: transaction.descriptor)
     } catch {
       throw Self.map(error)
     }
-    guard case .off = try await queryStatus() else {
+
+    pendingStartCleanup = nil
+    if recordCompletion {
+      rememberCompletedStartCleanup(
+        owner: transaction.owner,
+        commandContext: transaction.commandContext,
+        descriptor: transaction.descriptor)
+    }
+  }
+
+  private func rememberCompletedStartCleanup(
+    owner: NativeStopOwner,
+    commandContext: EngineCommandContext,
+    descriptor: ConfigurationDescriptor
+  ) {
+    completedStartCleanup = NativeStartCleanupReceipt(
+      owner: owner,
+      commandContext: commandContext,
+      descriptor: descriptor)
+  }
+
+  private func acknowledgeCompletedStartCleanup(
+    _ owner: NativeStopOwner,
+    context: EngineCommandContext
+  ) async throws -> Bool {
+    guard let receipt = completedStartCleanup else { return false }
+    guard receipt.owner == owner,
+      receipt.commandContext == context
+    else {
       throw NativeBridgeExecutionError.failure(
-        .unavailable,
-        "Packet Tunnel stop did not reach the global Off barrier."
+        .identityRejected,
+        "The cleanup acknowledgement does not match the failed start generation."
       )
+    }
+    try await requireFailedStartGlobalOff(
+      "The failed-start cleanup receipt no longer has a fresh global Off proof.")
+    completedStartCleanup = nil
+    return true
+  }
+
+  private func resumePendingFailedStartOff(
+    _ owner: NativeStopOwner,
+    context: EngineCommandContext
+  ) async throws -> Bool {
+    guard let transaction = pendingFailedStartOff else { return false }
+    guard transaction.owner == owner,
+      transaction.commandContext == context
+    else {
+      throw NativeBridgeExecutionError.failure(
+        .identityRejected,
+        "The failed-start Off retry does not match the pending generation."
+      )
+    }
+    try await proveFailedStartOff(transaction)
+    guard try await acknowledgeCompletedStartCleanup(owner, context: context) else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The failed-start Off proof completed without an exact receipt."
+      )
+    }
+    return true
+  }
+
+  private func retainPendingFailedStartOff(
+    _ transaction: NativeStopTransaction
+  ) throws {
+    if let pendingFailedStartOff {
+      guard pendingFailedStartOff.owner == transaction.owner,
+        pendingFailedStartOff.commandContext == transaction.commandContext,
+        pendingFailedStartOff.descriptor == transaction.descriptor
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Failed-start Off proof conflicts with another cleanup transaction."
+        )
+      }
+      return
+    }
+    guard completedStartCleanup == nil else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Failed-start Off proof conflicts with an unacknowledged cleanup receipt."
+      )
+    }
+    pendingFailedStartOff = transaction
+  }
+
+  private func proveFailedStartOff(
+    _ transaction: NativeStopTransaction
+  ) async throws {
+    try retainPendingFailedStartOff(transaction)
+    guard pendingStartCleanup == nil, pendingStop == nil else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Failed-start Off proof began before its earlier cleanup phase completed."
+      )
+    }
+    let initial: EngineSnapshot
+    do {
+      initial = try await ownerSnapshot(transaction.owner)
+    } catch {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Failed-start owner state could not be observed: \(Self.map(error).responseFailure.message)"
+      )
+    }
+    if !Self.isStableOff(initial) {
+      guard initial.state.kind == .failed,
+        initial.configuration == transaction.descriptor
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Failed-start owner state does not match the exact failed generation."
+        )
+      }
+      do {
+        try await stopOwner(transaction)
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Failed-start owner could not advance to Off: \(Self.map(error).responseFailure.message)"
+        )
+      }
+      let stopped: EngineSnapshot
+      do {
+        stopped = try await ownerSnapshot(transaction.owner)
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Stopped failed-start owner could not be observed: \(Self.map(error).responseFailure.message)"
+        )
+      }
+      guard Self.isStableOff(stopped) else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "The exact failed-start owner did not attest Off after cleanup."
+        )
+      }
+    }
+    try await requireFailedStartGlobalOff(
+      "Failed-start cleanup did not reach the independent global Off barrier.")
+    pendingFailedStartOff = nil
+    rememberCompletedStartCleanup(
+      owner: transaction.owner,
+      commandContext: transaction.commandContext,
+      descriptor: transaction.descriptor)
+  }
+
+  private func requireFailedStartGlobalOff(_ context: String) async throws {
+    let status: NativeEngineStatus
+    do {
+      status = try await queryStatus(enforcePreferenceBarrier: false)
+    } catch {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "\(context) Observation failed: \(Self.map(error).responseFailure.message)"
+      )
+    }
+    guard case .off = status else {
+      throw NativeBridgeExecutionError.failure(.cleanupUnproven, context)
+    }
+  }
+
+  /// `restoringSettingsFirst` is for a System Proxy stop the user asked for:
+  /// see `restoreSystemProxySettingsBeforeStop`.
+  private func drivePendingStop(restoringSettingsFirst: Bool) async throws {
+    try await drivePendingStopToOwnerStopped(restoringSettingsFirst: restoringSettingsFirst)
+    try await completePendingStopAfterOwnerStopped()
+  }
+
+  private func beginPendingStopAtAuthority() async throws {
+    guard var transaction = pendingStop else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "No native stop transaction is available to continue."
+      )
+    }
+
+    guard case .unordered = transaction.authority else { return }
+    do {
+      transaction.authority = .ordered(
+        try await engineLease.beginStop(for: transaction.descriptor))
+    } catch let error as AuthorityDomainError where error.code == .globalAuthorityRecovering {
+      // A restarted Authority, or one whose quarantined owner ended, holds no
+      // lease to order. The owner is still stopped, and the Host's own Off
+      // proof ends the stop.
+      transaction.authority = .released
+    } catch let stale as AuthorityDomainError where stale.code == .staleOperation {
+      // An Authority that already reached Off at this stop's generation, for
+      // example when a status query reconciled it after the owner ended, or
+      // that passed the generation since, holds no lease to order either. Any
+      // other state leaves the lease this stop names unaccounted for.
+      let resolution: NativeStopResolution
+      do {
+        resolution = try await engineLease.stopResolution(transaction.commandContext)
+      } catch {
+        throw Self.map(error)
+      }
+      guard resolution != .unresolved else { throw Self.map(stale) }
+      transaction.authority = .released
+    } catch {
+      throw Self.map(error)
+    }
+    pendingStop = transaction
+  }
+
+  private func drivePendingStopToOwnerStopped(restoringSettingsFirst: Bool) async throws {
+    var settingsRestored = false
+    if restoringSettingsFirst, let transaction = pendingStop,
+      transaction.authority == .unordered, transaction.owner == .systemProxy,
+      !transaction.ownerStopped
+    {
+      settingsRestored = try await restoreSystemProxySettingsBeforeStop(transaction.descriptor)
+    }
+    do {
+      try await beginPendingStopAtAuthority()
+    } catch let orderingError where settingsRestored {
+      // The settings no longer select the listener, so a session left running
+      // would serve nothing while the status still reported it. The user asked
+      // for Off: the owner stops now, and the stop stays pending until the
+      // Authority orders and completes it.
+      let ordering = Self.map(orderingError).responseFailure
+      guard let localFailure = await attemptLocalStopAfterOrderingFailure() else {
+        throw NativeBridgeExecutionError.failure(ordering.code, ordering.message)
+      }
+      throw NativeBridgeExecutionError.failure(
+        ordering.code, "\(ordering.message) Local stop also failed: \(localFailure)")
+    }
+    guard var transaction = pendingStop else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The native stop transaction disappeared after Authority ordering."
+      )
+    }
+
+    if !transaction.ownerStopped {
+      do {
+        try await stopOwner(transaction)
+      } catch ProxyAgentHostError.agentFailure(let failure)
+        where ProxyAgentFailure(code: failure.code) == .agent(.stopWithoutSession)
+      {
+        // The Authority is stopping this lease, so no owner can bind it any
+        // more, and a ProxyAgent with no session and no record of the stop
+        // holds nothing for it: its owner has ended, for example after an
+        // engine it could not close, or attested Stopped before it started the
+        // engine. No owner is left to stop. Authority completion decides: it
+        // accepts only an owner that attested Stopped, and otherwise reports
+        // unproven cleanup. A stale reply instead names a session of another
+        // generation, whose owner has not ended, so it fails the stop below.
+      } catch AppleNetworkError.staleStopRequest
+        where transaction.owner == .tunnel && transaction.authority == .released
+      {
+        // The Authority holds no lease of this stop, and Network Extension no
+        // manager of its generation: a later start replaced it, or none is
+        // left. Nothing of this stop is left to stop, and completion proves
+        // the tunnel Off.
+      } catch {
+        throw Self.map(error)
+      }
+      transaction.ownerStopped = true
+      pendingStop = transaction
+    }
+  }
+
+  private func completePendingStopAfterOwnerStopped() async throws {
+    guard var transaction = pendingStop, transaction.ownerStopped else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The owner is not proven stopped before Authority completion."
+      )
+    }
+
+    switch transaction.authority {
+    case .unordered:
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The Authority stop context was lost before completion."
+      )
+    case .ordered(let authorityContext):
+      do {
+        try await engineLease.completeStop(authorityContext)
+        transaction.authority = .completed(authorityContext)
+      } catch let error as AuthorityDomainError where error.code == .globalAuthorityRecovering {
+        // The Authority released the lease, as a restart does, once the owner
+        // that never attested this stop ended. Reconciling Off proves the stop.
+        transaction.authority = .released
+      } catch let error as AuthorityDomainError {
+        // An Authority that passed this stop's generation since ended its
+        // lease through a proven Off, so nothing is left to complete.
+        guard try await stopResolution(transaction) == .superseded else {
+          throw Self.map(error)
+        }
+        transaction.authority = .released
+      } catch {
+        throw Self.map(error)
+      }
+      pendingStop = transaction
+    case .completed, .released:
+      break
+    }
+
+    if case .released = transaction.authority,
+      try await stopResolution(transaction) == .superseded
+    {
+      // What the Authority holds now belongs to a later start, so its Off
+      // barrier says nothing of this stop's owner.
+      try await requireOwnerOffAfterSupersededStop(
+        transaction.owner, context: transaction.commandContext)
+      pendingStop = nil
+      return
+    }
+    // A Recovering Authority reaches Off only through this query's
+    // reconciliation, after the Host proved both owners and the OS Off.
+    guard case .off = try await queryStatus(enforcePreferenceBarrier: false) else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The native stop transaction did not reach the global Off barrier."
+      )
+    }
+    if case .released = transaction.authority {
+      guard try await stopResolution(transaction) != .unresolved else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "The Authority reached Off for another generation than this stop's."
+        )
+      }
+    }
+    pendingStop = nil
+  }
+
+  private func stopResolution(
+    _ transaction: NativeStopTransaction
+  ) async throws -> NativeStopResolution {
+    do {
+      return try await engineLease.stopResolution(transaction.commandContext)
+    } catch {
+      throw Self.map(error)
+    }
+  }
+
+  /// Ends a stop whose generation the Authority passed. Its lease ended
+  /// through a proven Off, so one fresh snapshot of the stop's own owner
+  /// showing it Off ends the stop. An explicit Tunnel stop also needs its
+  /// preference journal settled, as the status barrier it replaces does.
+  private func requireOwnerOffAfterSupersededStop(
+    _ owner: NativeStopOwner,
+    context: EngineCommandContext
+  ) async throws {
+    let snapshot: EngineSnapshot
+    do {
+      snapshot = try await ownerSnapshot(owner)
+    } catch {
+      throw Self.map(error)
+    }
+    guard Self.isStableOff(snapshot) else {
+      if let configuration = snapshot.configuration,
+        configuration.installationID == context.installationID,
+        (configuration.epoch, configuration.generation)
+          > (context.configEpoch, context.generation)
+      {
+        throw NativeBridgeExecutionError.failure(
+          .busy, "A later start holds the owner of this stop.")
+      }
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven, "The owner of a stop the Authority passed is not Off.")
+    }
+    guard owner == .tunnel, pendingStartCleanup == nil else { return }
+    let pendingMutation: ConfigurationDescriptor?
+    do {
+      pendingMutation = try await tunnel.pendingPreferenceMutationConfiguration()
+    } catch {
+      throw Self.map(error)
+    }
+    guard pendingMutation == nil else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "A durable Tunnel preference mutation must be recovered before the stop can end.")
+    }
+  }
+
+  /// Has the ProxyAgent give the OS back the System Proxy settings of the
+  /// session the user asked to stop while its engine still answers, before the
+  /// Authority is asked to stop the session. A restore that cannot reach the
+  /// settings then fails the stop with System Proxy still running, and the stop
+  /// stays retryable, instead of the settings outliving the listener they
+  /// select. Returns whether the ProxyAgent restored them. Only a ProxyAgent
+  /// of this app's build can, so one of an earlier build, or one whose build
+  /// cannot be told, is not asked: its session stops as that build stops it,
+  /// restoring the settings as it ends.
+  private func restoreSystemProxySettingsBeforeStop(
+    _ descriptor: ConfigurationDescriptor
+  ) async throws -> Bool {
+    let inspection: CurrentAppServiceBuildInspection
+    do {
+      inspection = try serviceBuildObserver.inspect()
+    } catch {
+      Self.restorationLog.error(
+        "The ProxyAgent build could not be told before a stop, so the stop restores no settings first: \(String(describing: error), privacy: .public)"
+      )
+      return false
+    }
+    guard inspection.proxy.isCurrent else { return false }
+    do {
+      try await proxy.restoreSettingsBeforeStop(configuration: descriptor)
+    } catch {
+      throw Self.map(error)
+    }
+    return true
+  }
+
+  private func ownerSnapshot(_ owner: NativeStopOwner) async throws -> EngineSnapshot {
+    switch owner {
+    case .localProxy, .systemProxy: try await proxy.snapshot()
+    case .tunnel: try await tunnel.snapshot()
+    }
+  }
+
+  private func stopOwner(_ transaction: NativeStopTransaction) async throws {
+    switch transaction.owner {
+    case .localProxy, .systemProxy:
+      try await proxy.stop(configuration: transaction.descriptor)
+    case .tunnel:
+      try await tunnel.stopTunnel(expectedConfiguration: transaction.descriptor)
+    }
+  }
+
+  /// If Authority ordering itself becomes unavailable during a failed start, or
+  /// after a System Proxy stop the user asked for restored its settings, the
+  /// already-started owner must still be asked to tear down. The transaction remains
+  /// pending so a later retry can complete the missing Authority barrier exactly.
+  private func attemptLocalStopAfterOrderingFailure() async -> String? {
+    guard var transaction = pendingStop, !transaction.ownerStopped else { return nil }
+    do {
+      try await stopOwner(transaction)
+      transaction.ownerStopped = true
+      pendingStop = transaction
+      return nil
+    } catch {
+      return Self.map(error).responseFailure.message
     }
   }
 }

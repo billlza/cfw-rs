@@ -69,24 +69,10 @@ public final class CrossProcessEngineLease: @unchecked Sendable {
   }
 }
 
-public struct CrossProcessEngineLeaseStore: Sendable {
-  /// Product-owned rendezvous port. It is never used for application traffic.
-  public static let productionPort: UInt16 = 49_373
+private struct CrossProcessLoopbackLeaseStore: Sendable {
+  let requestedPort: UInt16
 
-  private let requestedPort: UInt16
-
-  public init() {
-    requestedPort = Self.productionPort
-  }
-
-  /// Port zero asks the kernel for an ephemeral port and is intended only for
-  /// isolated tests. The chosen port is exposed by the returned lease so a
-  /// second store can test contention against the exact same endpoint.
-  init(testingPort: UInt16) {
-    requestedPort = testingPort
-  }
-
-  public func acquire() throws -> CrossProcessEngineLease {
+  func acquire() throws -> CrossProcessEngineLease {
     var descriptors: [Int32] = []
     do {
       let ipv6 = try bindIPv6(port: requestedPort)
@@ -105,10 +91,7 @@ public struct CrossProcessEngineLeaseStore: Sendable {
     }
   }
 
-  /// Returns false when any process owns either production endpoint. Other
-  /// socket failures remain explicit because treating them as availability
-  /// would permit two data planes after a platform or sandbox regression.
-  public func isAvailable() throws -> Bool {
+  func isAvailable() throws -> Bool {
     do {
       let lease = try acquire()
       lease.release()
@@ -207,5 +190,57 @@ public struct CrossProcessEngineLeaseStore: Sendable {
       throw CrossProcessEngineLeaseError.inspectPort(code: result == 0 ? EINVAL : errno)
     }
     return UInt16(bigEndian: address.sin6_port)
+  }
+}
+
+public struct CrossProcessEngineLeaseStore: Sendable {
+  /// Product-owned rendezvous port. It is never used for application traffic.
+  public static let productionPort: UInt16 = 49_373
+
+  private let requestedPort: UInt16
+
+  public init() {
+    requestedPort = Self.productionPort
+  }
+
+  /// Port zero asks the kernel for an ephemeral port and is intended only for
+  /// isolated tests. The chosen port is exposed by the returned lease so a
+  /// second store can test contention against the exact same endpoint.
+  init(testingPort: UInt16) {
+    requestedPort = testingPort
+  }
+
+  public func acquire() throws -> CrossProcessEngineLease {
+    try CrossProcessLoopbackLeaseStore(requestedPort: requestedPort).acquire()
+  }
+
+  /// Returns false when any process owns either production endpoint. Other
+  /// socket failures remain explicit because treating them as availability
+  /// would permit two data planes after a platform or sandbox regression.
+  public func isAvailable() throws -> Bool {
+    try CrossProcessLoopbackLeaseStore(requestedPort: requestedPort).isAvailable()
+  }
+}
+
+/// A second kernel-backed lease dedicated to Host control-plane operations. It
+/// deliberately uses a different rendezvous port from the data-plane lease so a
+/// running ProxyAgent or Packet Tunnel does not block status and stop commands.
+public typealias CrossProcessHostOperationLease = CrossProcessEngineLease
+
+public struct CrossProcessHostOperationLeaseStore: Sendable {
+  public static let productionPort: UInt16 = 49_374
+
+  private let requestedPort: UInt16
+
+  public init() {
+    requestedPort = Self.productionPort
+  }
+
+  init(testingPort: UInt16) {
+    requestedPort = testingPort
+  }
+
+  public func acquire() throws -> CrossProcessHostOperationLease {
+    try CrossProcessLoopbackLeaseStore(requestedPort: requestedPort).acquire()
   }
 }

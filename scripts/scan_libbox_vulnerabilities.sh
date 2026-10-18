@@ -11,6 +11,8 @@ source "$repo_root/scripts/dependency_pins.env"
 source "$repo_root/scripts/go_release_environment.sh"
 # shellcheck source=scripts/libbox_source_contract.sh
 source "$repo_root/scripts/libbox_source_contract.sh"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
 
 source_input="${SING_BOX_SOURCE:-}"
 if [[ -z "$source_input" ]]; then
@@ -27,6 +29,9 @@ go_bin="$toolchain_root/go-$GO_VERSION/bin/go"
 scanner="$toolchain_root/go-workspace/bin/govulncheck"
 
 libbox_validate_patched_source "$repo_root" "$source_root"
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
 if [[ "$($go_bin version)" != "go version go$GO_VERSION darwin/arm64" ]]; then
   echo "error: pinned Go toolchain identity mismatch" >&2
   exit 1
@@ -44,15 +49,26 @@ gopath="$toolchain_root/go-workspace"
 export GOBIN="$gopath/bin"
 export GOPATH="$gopath"
 export GOMODCACHE="$gopath/pkg/mod"
-export GOCACHE="$toolchain_root/go-build-cache"
+mkdir -p "$repo_root/target/release-build-cache"
+go_build_cache="$(mktemp -d "$repo_root/target/release-build-cache/vulnerability-scan.XXXXXX")"
+trap '/bin/rm -rf -- "$go_build_cache"' EXIT
+export GOCACHE="$go_build_cache"
 export PATH="$toolchain_root/go-$GO_VERSION/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 configure_offline_go_environment
+build_source_root="$(prepare_libbox_build_workspace "$source_root" "$go_bin" "$go_build_cache/workspace")"
 
-"$scanner" \
-  -C "$source_root" \
+# Scan both graphs: local replacements have no advisory version, so the
+# original pinned graph must remain covered as well as the corrected sources.
+for scan_source in "$source_root" "$build_source_root"; do
+  "$scanner" \
+  -C "$scan_source" \
   -db https://vuln.go.dev \
   -mode source \
   -scan symbol \
   -show verbose \
   -tags "$LIBBOX_BUILD_TAGS" \
   ./experimental/libbox
+done
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"

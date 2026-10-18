@@ -1,5 +1,6 @@
 import CFWSharedProtocol
 import Foundation
+@preconcurrency import NetworkExtension
 import Testing
 
 @testable import CFWAppleNetwork
@@ -37,7 +38,8 @@ private final class RecordingPreparer: TunnelStartPreparing, @unchecked Sendable
       copying: Data(repeating: ticketByte, count: AuthorityV1Limits.ticketBytes))
     return HostPreparedTunnelStart(
       ticket: ticket,
-      descriptor: descriptorOverride ?? preparation.descriptor)
+      descriptor: descriptorOverride ?? preparation.descriptor,
+      operationID: UUID())
   }
 }
 
@@ -61,7 +63,10 @@ private final class FakeManagedTunnel: ManagedTunnelOperating, @unchecked Sendab
   var startCount: Int { lock.withLock { startCountValue } }
   var startedTicket: Data? { lock.withLock { startedTicketValue } }
 
-  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws {
+  func saveDescriptorOnly(
+    _ descriptor: ConfigurationDescriptor,
+    operationID: UUID
+  ) async throws {
     lock.withLock {
       saveCountValue += 1
       savedDescriptor = descriptor
@@ -95,6 +100,7 @@ private func tunnelDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(),
     epoch: 1,
     generation: 1,
@@ -162,13 +168,46 @@ struct TicketOnlyTunnelStartTests {
     let allowedKeys: Set<String> = [
       "schemaVersion", "slot", "installationID", "epoch", "generation",
       "byteCount", "sha256", "identitySha256", "credentialSlots",
-      "ipv6Enabled", "bypassPrivateNetworks", "mtu",
+      "credentialProfileID", "credentialProfileDigest",
+      "ipv6Enabled", "bypassPrivateNetworks", "directIPv4Hosts", "mtu",
     ]
     #expect(Set(providerConfig.keys).isSubset(of: allowedKeys))
 
     // No value carries raw configuration JSON bytes or secret material.
     let stringValues = providerConfig.values.compactMap { $0 as? String }
     #expect(!stringValues.contains { $0.contains("{") || $0.contains("password") })
+  }
+
+  @Test func legacyProviderPreferencesRemainReadableWithoutChangingTheirIdentity() throws {
+    let descriptor = try tunnelDescriptor(identity: String(repeating: "12", count: 32))
+    var values = try descriptor.providerConfiguration()
+    #expect(values["schemaVersion"] as? String == "7")
+    values["schemaVersion"] = "6"
+    let tunnelProtocol = NETunnelProviderProtocol()
+    tunnelProtocol.providerConfiguration = values
+    let manager = NETunnelProviderManager()
+    manager.protocolConfiguration = tunnelProtocol
+    #expect(try manager.configurationDescriptor() == descriptor)
+    #expect(
+      try manager.configurationDescriptor().identitySHA256.hex == String(repeating: "12", count: 32)
+    )
+    #expect(tunnelProtocol.providerConfiguration?["schemaVersion"] as? String == "6")
+
+    for version in ["5", "06", "8"] {
+      var invalid = values
+      invalid["schemaVersion"] = version
+      tunnelProtocol.providerConfiguration = invalid
+      manager.protocolConfiguration = tunnelProtocol
+      #expect(throws: AppleNetworkError.providerResponseMismatch) {
+        try manager.configurationDescriptor()
+      }
+    }
+    values["unexpected"] = "not-a-legacy-field"
+    tunnelProtocol.providerConfiguration = values
+    manager.protocolConfiguration = tunnelProtocol
+    #expect(throws: AppleNetworkError.providerResponseMismatch) {
+      try manager.configurationDescriptor()
+    }
   }
 
   @Test func startOptionsCarryOnlyTheOpaqueTicket() throws {
@@ -225,4 +264,27 @@ struct TicketOnlyTunnelStartTests {
     #expect(!source.contains("TunnelStartPayloadCodec"))
     #expect(!source.contains("tunnelStartPayloadOptionKey"))
   }
+}
+
+private final class RecordingProviderSession: NETunnelProviderSession, @unchecked Sendable {
+  private(set) var suppliedOptions: [String: Any]?
+  private(set) var ordinaryVPNCalls = 0
+
+  override func startTunnel(options: [String: Any]? = nil) throws {
+    suppliedOptions = options
+  }
+
+  override func startVPNTunnel(options: [String: NSObject]? = nil) throws {
+    ordinaryVPNCalls += 1
+  }
+}
+
+@Test func providerSessionAPIReceivesTheExactOpaqueTicket() throws {
+  let session = RecordingProviderSession()
+  let bytes = Data(repeating: 0x73, count: AuthorityV1Limits.ticketBytes)
+  try NetworkExtensionHostBridge.startProviderSession(session, ticketBytes: bytes)
+  #expect(session.ordinaryVPNCalls == 0)
+  let options = try #require(session.suppliedOptions)
+  #expect(Set(options.keys) == [NativeProtocolConstants.tunnelStartTicketOptionKey])
+  #expect(options[NativeProtocolConstants.tunnelStartTicketOptionKey] as? Data == bytes)
 }

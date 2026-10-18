@@ -29,6 +29,289 @@ struct GlobalAuthorityEngineLeaseInspector: NativeEngineLeaseInspecting {
   /// an owner Active. No secrets, tickets, or credentials are exposed.
   func authorityOwnership() async throws -> AuthorityOwnershipObservation {
     let snapshot = try await authority.snapshot()
+    return Self.observation(snapshot)
+  }
+
+  func reconcileOff(
+    managedTunnel: RecoveryManagedTunnelStatus
+  ) async throws -> AuthorityOwnershipObservation {
+    guard managedTunnel == .disconnected || managedTunnel == .invalid else {
+      throw AuthorityDomainError(code: .cleanupUnproven)
+    }
+    let snapshot = try await authority.snapshot()
+    guard snapshot.state == .recovering,
+      snapshot.leaseView == nil,
+      let cursor = snapshot.replayCursor,
+      cursor.revision == snapshot.revision
+    else {
+      throw AuthorityDomainError(code: .globalAuthorityRecovering)
+    }
+    let request = try ReconcileOffRequest(
+      expectedRevision: snapshot.revision,
+      replayCursor: cursor,
+      proxy: RecoveryProxyOffEvidence(
+        ownershipCleared: true,
+        listenerClosed: true,
+        effectiveSystemConfigurationRestored: true),
+      provider: RecoveryProviderOffEvidence(
+        ownershipCleared: true,
+        libboxStopped: true,
+        packetPumpClosed: true),
+      managedTunnel: managedTunnel)
+    let receipt = try await authority.reconcileOff(request)
+    guard receipt.replayCursor == cursor,
+      receipt.revision == snapshot.revision + 1
+    else {
+      throw AuthorityDomainError(code: .staleOperation)
+    }
+    let reconciled = try await authority.snapshot()
+    guard reconciled.state == .off,
+      reconciled.revision == receipt.revision,
+      reconciled.leaseView == nil
+    else {
+      throw AuthorityDomainError(code: .cleanupUnproven)
+    }
+    return Self.observation(reconciled)
+  }
+
+  func recoverStoppingLease() async throws -> NativeRecoveredStop? {
+    let snapshot = try await authority.snapshot()
+    switch snapshot.state {
+    case .stopping:
+      guard let lease = snapshot.leaseView,
+        lease.state == .stopping || lease.state == .revoked
+      else {
+        throw AuthorityDomainError(code: .cleanupUnproven)
+      }
+      return try NativeRecoveredStop(
+        operation: lease.operation,
+        leaseID: lease.leaseID)
+    case .quarantined:
+      throw AuthorityDomainError(code: .quarantined)
+    case .off, .preparing, .starting, .active, .recovering:
+      return nil
+    }
+  }
+
+  func cancelPreparedStart(
+    for descriptor: ConfigurationDescriptor
+  ) async throws -> Bool {
+    let snapshot = try await authority.snapshot()
+    switch try Self.preparedCancellationDisposition(snapshot, descriptor: descriptor) {
+    case .alreadyOff, .released, .superseded:
+      return true
+    case .ownerControlled:
+      return false
+    case .cancel(let lease):
+      do {
+        try await authority.cancelPrepared(
+          lease.operation,
+          revision: snapshot.revision)
+      } catch {
+        let observed = try await authority.snapshot()
+        switch try Self.preparedCancellationDisposition(
+          observed,
+          descriptor: descriptor)
+        {
+        case .alreadyOff, .released, .superseded:
+          return true
+        case .ownerControlled:
+          return false
+        case .cancel:
+          throw error
+        }
+      }
+      let observed = try await authority.snapshot()
+      switch try Self.preparedCancellationDisposition(observed, descriptor: descriptor) {
+      case .alreadyOff, .superseded:
+        return true
+      case .released, .cancel, .ownerControlled:
+        throw AuthorityDomainError(code: .cleanupUnproven)
+      }
+    }
+  }
+
+  func beginStop(
+    for descriptor: ConfigurationDescriptor
+  ) async throws -> NativeAuthorityStopContext {
+    let snapshot = try await authority.snapshot()
+    if snapshot.state == .recovering {
+      throw AuthorityDomainError(code: .globalAuthorityRecovering)
+    }
+    guard [.starting, .active, .stopping].contains(snapshot.state),
+      let lease = snapshot.leaseView,
+      Self.matches(lease.operation, descriptor: descriptor)
+    else {
+      throw AuthorityDomainError(code: .staleOperation)
+    }
+    let request = try BeginStopRequest(
+      operation: lease.operation,
+      leaseID: lease.leaseID,
+      expectedRevision: snapshot.revision)
+    let directive = try await authority.beginStop(request)
+    let (nextRevision, overflow) = snapshot.revision.addingReportingOverflow(1)
+    let revisionIsValid =
+      snapshot.state == .stopping
+      ? directive.revision == snapshot.revision
+      : !overflow && directive.revision == nextRevision
+    guard directive.operation == lease.operation,
+      directive.leaseID == lease.leaseID,
+      revisionIsValid
+    else {
+      throw AuthorityDomainError(code: .staleOperation)
+    }
+    return NativeAuthorityStopContext(
+      operation: lease.operation,
+      leaseID: lease.leaseID)
+  }
+
+  func completeStop(_ context: NativeAuthorityStopContext) async throws {
+    let snapshot = try await authority.snapshot()
+    if Self.isCompleted(snapshot, context: context) {
+      return
+    }
+    if snapshot.state == .recovering {
+      throw AuthorityDomainError(code: .globalAuthorityRecovering)
+    }
+    guard snapshot.state == .stopping,
+      let lease = snapshot.leaseView,
+      lease.operation == context.operation,
+      lease.leaseID == context.leaseID
+    else {
+      throw AuthorityDomainError(code: .cleanupUnproven)
+    }
+    try await authority.completeStop(
+      CompleteStopRequest(
+        operation: context.operation,
+        leaseID: context.leaseID,
+        expectedRevision: snapshot.revision))
+  }
+
+  func stopResolution(_ context: EngineCommandContext) async throws -> NativeStopResolution {
+    Self.stopResolution(try await authority.snapshot(), context: context)
+  }
+
+  static func stopResolution(
+    _ snapshot: AuthoritySnapshot, context: EngineCommandContext
+  ) -> NativeStopResolution {
+    if hasPassed(
+      snapshot, installationID: context.installationID, epoch: context.configEpoch,
+      generation: context.generation)
+    {
+      return .superseded
+    }
+    guard snapshot.state == .off, snapshot.leaseView == nil,
+      let cursor = snapshot.replayCursor,
+      cursor.installationID.rawValue == context.installationID,
+      cursor.acceptedEpoch == context.configEpoch,
+      cursor.acceptedGeneration == context.generation
+    else { return .unresolved }
+    return .completed
+  }
+
+  /// Whether the replay cursor of the same installation passed the generation.
+  /// It advances only through a start prepared from a proven Off, so every
+  /// lease of a passed generation ended; a lease of it still in view would
+  /// contradict the cursor, and proves nothing.
+  private static func hasPassed(
+    _ snapshot: AuthoritySnapshot, installationID: UUID, epoch: UInt64, generation: UInt64
+  ) -> Bool {
+    guard let cursor = snapshot.replayCursor,
+      cursor.installationID.rawValue == installationID,
+      (cursor.acceptedEpoch, cursor.acceptedGeneration) > (epoch, generation)
+    else { return false }
+    guard let root = snapshot.leaseView?.operation.root else { return true }
+    return root.installationID.rawValue != installationID
+      || (root.epoch, root.generation) != (epoch, generation)
+  }
+
+  /// A completion reply can be lost after the Authority durably commits Off. The
+  /// replay cursor's exact installation/epoch/generation tuple is monotonic and
+  /// unique, so this is the only safe idempotent success projection after the lease
+  /// itself has been cleared.
+  private static func isCompleted(
+    _ snapshot: AuthoritySnapshot,
+    context: NativeAuthorityStopContext
+  ) -> Bool {
+    guard snapshot.state == .off,
+      snapshot.leaseView == nil,
+      let cursor = snapshot.replayCursor
+    else { return false }
+    return cursor.installationID == context.operation.root.installationID
+      && cursor.acceptedEpoch == context.operation.root.epoch
+      && cursor.acceptedGeneration == context.operation.root.generation
+  }
+
+  private static func matches(
+    _ operation: OperationContext,
+    descriptor: ConfigurationDescriptor
+  ) -> Bool {
+    let expectedMode = descriptor.slot.authorityMode
+    return operation.mode == expectedMode
+      && operation.root.installationID.rawValue == descriptor.installationID
+      && operation.root.epoch == descriptor.epoch
+      && operation.root.generation == descriptor.generation
+      && operation.configSHA256 == descriptor.sha256
+      && operation.identitySHA256 == descriptor.identitySHA256
+  }
+
+  private enum PreparedCancellationDisposition: Equatable {
+    case alreadyOff
+    /// Recovering: the Authority released every lease and admits no start
+    /// until the Host proves Off.
+    case released
+    /// The Authority passed the start's generation.
+    case superseded
+    case cancel(LeaseView)
+    case ownerControlled
+  }
+
+  private static func preparedCancellationDisposition(
+    _ snapshot: AuthoritySnapshot,
+    descriptor: ConfigurationDescriptor
+  ) throws -> PreparedCancellationDisposition {
+    // Whatever the Authority holds once it passed the failed start belongs to
+    // a later start, and nothing of this one can start any more.
+    if hasPassed(
+      snapshot, installationID: descriptor.installationID, epoch: descriptor.epoch,
+      generation: descriptor.generation)
+    {
+      return .superseded
+    }
+    switch snapshot.state {
+    case .off, .recovering:
+      guard snapshot.leaseView == nil else {
+        throw AuthorityDomainError(code: .cleanupUnproven)
+      }
+      if let cursor = snapshot.replayCursor,
+        cursor.installationID.rawValue != descriptor.installationID
+      {
+        throw AuthorityDomainError(code: .replayRejected)
+      }
+      return snapshot.state == .off ? .alreadyOff : .released
+    case .preparing:
+      guard let lease = snapshot.leaseView,
+        lease.state == .prepared,
+        matches(lease.operation, descriptor: descriptor)
+      else {
+        throw AuthorityDomainError(code: .staleOperation)
+      }
+      return .cancel(lease)
+    case .starting, .active, .stopping:
+      guard let lease = snapshot.leaseView,
+        matches(lease.operation, descriptor: descriptor)
+      else {
+        throw AuthorityDomainError(code: .staleOperation)
+      }
+      return .ownerControlled
+    case .quarantined:
+      throw AuthorityDomainError(code: .quarantined)
+    }
+  }
+
+  private static func observation(
+    _ snapshot: AuthoritySnapshot
+  ) -> AuthorityOwnershipObservation {
     let lease = snapshot.leaseView.map { view in
       AuthorityLeaseAgreement(
         installationID: view.operation.root.installationID.rawValue,

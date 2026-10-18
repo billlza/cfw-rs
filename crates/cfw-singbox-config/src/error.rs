@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{CredentialKind, CredentialSlotError};
+use crate::{CredentialKind, CredentialSlotError, InvalidCredentialAudience};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -30,22 +30,53 @@ pub enum ConfigError {
     ConflictingCredentialReference { id: String },
     #[error("credential slot contract is invalid: {0}")]
     InvalidCredentialSlot(#[from] CredentialSlotError),
+    #[error("credential audience is invalid: {0}")]
+    InvalidCredentialAudience(#[from] InvalidCredentialAudience),
     #[error("unsupported credential-free policy shape at {path}: {reason}")]
     UnsupportedPolicyShape { path: String, reason: String },
     #[error("sing-box profile structure exceeds {maximum} JSON nodes")]
     TooComplex { maximum: usize },
     #[error("mixed proxy port must be between 1 and 65535")]
     InvalidMixedPort,
+    #[error("controller port {0} must be at least 1024 and must not reuse the mixed proxy port")]
+    InvalidControllerPort(u16),
     #[error("tunnel MTU must be between 1280 and 9000, got {0}")]
     InvalidTunnelMtu(u16),
     #[error("tunnel bootstrap DNS servers are invalid: {0}")]
     InvalidBootstrapDnsServers(String),
     #[error("tunnel authenticated DNS servers are invalid: {0}")]
     InvalidAuthenticatedDnsServers(String),
+    #[error("release DNS evidence projection requires Tunnel mode with IPv6 enabled")]
+    InvalidReleaseDnsEvidenceMode,
+    #[error("release Packet evidence projection requires Tunnel mode")]
+    InvalidReleasePacketEvidenceMode,
 }
 
 impl From<serde_json::Error> for ConfigError {
     fn from(error: serde_json::Error) -> Self {
         Self::InvalidJson(error.to_string())
+    }
+}
+
+/// Where profile parsing stopped. An importer that also reads other source
+/// formats needs to know whether the typed schema described the input at all.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ProfileParseError {
+    /// The input never became a typed profile document: it is too large or
+    /// too complex, not a JSON object, has a top-level key outside the profile,
+    /// carries forbidden, remote or inline-credential keys, or does not match
+    /// the closed schema.
+    #[error(transparent)]
+    Unrecognized(ConfigError),
+    /// The input was read into the closed schema, then rejected.
+    #[error(transparent)]
+    Invalid(ConfigError),
+}
+
+impl From<ProfileParseError> for ConfigError {
+    fn from(error: ProfileParseError) -> Self {
+        match error {
+            ProfileParseError::Unrecognized(error) | ProfileParseError::Invalid(error) => error,
+        }
     }
 }

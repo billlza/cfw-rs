@@ -1,275 +1,211 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from scripts.harness.performance_gates import (
     PerformanceGateError,
-    percentiles,
     validate_performance_evidence,
 )
+from scripts.harness.performance_ledger import (
+    PerformanceLedgerError,
+    _log_query_timestamp,
+    _oslog_timestamp,
+)
+from scripts.harness.raw_artifacts import ArtifactReader, load_json_bytes
+from scripts.tests.physical_evidence_fixture import PhysicalEvidenceFixture
 
 
-def _series(samples: list[float]) -> dict:
-    summary = percentiles([float(sample) for sample in samples])
-    return {
-        "samples": list(samples),
-        "p50": summary["p50"],
-        "p95": summary["p95"],
-        "p99": summary["p99"],
-    }
+class PerformanceGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.fixture = PhysicalEvidenceFixture(self.root)
+        self.document = copy.deepcopy(self.fixture.report_documents[0]["performance"])
+        self.ledger_artifact = self.document["ledger_artifact"]
 
+    def read(self, descriptor: dict[str, object]) -> dict[str, object]:
+        data = (self.root / str(descriptor["path"])).read_bytes()
+        value = load_json_bytes(data, "performance test artifact")
+        self.assertIsInstance(value, dict)
+        return value
 
-def fixture() -> dict:
-    return {
-        "schema_version": 1,
-        "parameters": {
-            "machine": {
-                "architecture": "arm64",
-                "macos_version": "15.2",
-                "hardware_model": "Mac15,3",
-            },
-            "network": {
-                "description": "lab shaping bridge",
-                "uplink_mbps": 1000,
-            },
-            "power": {
-                "source": "ac",
-                "low_power_mode": False,
-            },
-            "build": {
-                "version": "0.4.0",
-                "build_number": "421",
-                "app_manifest_sha256": "a" * 64,
-            },
-        },
-        "weak_network": [
+    def rewrite_ledger(self, ledger: dict[str, object]) -> None:
+        self.fixture.rewrite_json(self.ledger_artifact, ledger)
+        self.document["ledger_artifact"] = self.ledger_artifact
+
+    @staticmethod
+    def rewrite_command_stdout(command: dict[str, object], stdout: str) -> None:
+        encoded = stdout.encode("utf-8")
+        command["stdout"] = stdout
+        command["stdout_size"] = len(encoded)
+        command["stdout_sha256"] = hashlib.sha256(encoded).hexdigest()
+
+    def validate(self) -> dict[str, object]:
+        with ArtifactReader(self.root) as artifacts:
+            return validate_performance_evidence(self.document, artifacts)
+
+    def test_complete_three_artifact_ledger_passes(self) -> None:
+        result = self.validate()
+        self.assertEqual(
+            {entry["subject"] for entry in result["artifacts"]},
+            {"sample-ledger", "shaping-intent", "shaping-restoration"},
+        )
+        self.assertEqual(
+            self.document["soak"],
             {
-                "id": "latency-100ms-loss-1pct-10mbps",
-                "control": {
-                    "applied": True,
-                    "kind": "shaping",
-                    "latency_ms": 100,
-                    "loss_percent": 1.0,
-                    "bandwidth_mbps": 10.0,
-                },
-                "recovery_ms": _series([4000.0, 5000.0, 6000.0, 7000.0]),
+                "duration_hours": 3.005,
+                "heartbeat_count": 37,
+                "traffic_count": 13,
+                "crash_count": 0,
             },
-            {
-                "id": "latency-300ms-loss-5pct-1mbps",
-                "control": {
-                    "applied": True,
-                    "kind": "shaping",
-                    "latency_ms": 300,
-                    "loss_percent": 5.0,
-                    "bandwidth_mbps": 1.0,
-                },
-                "recovery_ms": _series([6000.0, 7000.0, 8000.0, 9000.0]),
-            },
-            {
-                "id": "outage-30s",
-                "control": {
-                    "applied": True,
-                    "kind": "outage",
-                    "outage_seconds": 30,
-                },
-                "recovery_ms": _series([7000.0, 8000.0, 9000.0, 9500.0]),
-            },
-        ],
-        "latency": {
-            "connect_ms": _series([2000.0, 3000.0, 4000.0, 4500.0]),
-            "disconnect_ms": _series([1000.0, 1500.0, 2000.0, 2500.0]),
-            "added_latency_percent": _series([2.0, 4.0, 6.0, 8.0]),
-        },
-        "throughput": {
-            "baseline_mbps": 100.0,
-            "measured_mbps": 95.0,
-            "ratio_percent": 95.0,
-        },
-        "resources": {
-            "active_idle_cpu_percent": _series([0.2, 0.4, 0.6, 0.8]),
-            "active_rss_mib": _series([90.0, 100.0, 110.0, 118.0]),
-        },
-        "switch_cycle": {
-            "switch_count": 100,
-            "rss_growth_mib": 4.0,
-            "fd_growth": 1,
-        },
-        "soak": {
-            "duration_hours": 24,
-            "crash_count": 0,
-        },
-    }
+        )
+
+    def test_deleting_any_sample_fails_exact_count(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        ledger["samples"].pop(100)  # type: ignore[index,union-attr]
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "exactly 353 samples"):
+            self.validate()
+
+    def test_two_endpoint_fake_three_hour_soak_fails_continuity(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        samples = ledger["samples"]  # type: ignore[index]
+        ledger["samples"] = [  # type: ignore[index]
+            sample
+            for sample in samples  # type: ignore[union-attr]
+            if sample["kind"] not in {"soak-heartbeat", "soak-traffic"}
+            or sample["measurement"]["index"] in {0, 36, 12}
+        ]
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "exactly 353 samples"):
+            self.validate()
+
+    def test_wrong_process_roster_is_rejected(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        sample = ledger["samples"][0]  # type: ignore[index]
+        sample["roster"][0]["pid"] += 1
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "PID set|Host differs|did not find"):
+            self.validate()
+
+    def test_wrong_generation_is_rejected(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        sample = ledger["samples"][0]  # type: ignore[index]
+        sample["generation"] += 1
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "generation.*drifted"):
+            self.validate()
+
+    def test_missing_restoration_artifact_blocks(self) -> None:
+        restoration = self.document["shaping_restoration_artifact"]
+        (self.root / restoration["path"]).unlink()
+        with self.assertRaisesRegex(PerformanceGateError, "cannot be opened|missing|unavailable"):
+            self.validate()
+
+    def test_restoration_query_must_equal_original_state(self) -> None:
+        restoration_descriptor = self.document["shaping_restoration_artifact"]
+        restoration = self.read(restoration_descriptor)
+        command = restoration["transactions"][0]["restoration_queries"][0]  # type: ignore[index]
+        self.rewrite_command_stdout(command, "40001: still active\n")
+        self.fixture.rewrite_json(restoration_descriptor, restoration)
+        ledger = self.read(self.ledger_artifact)
+        ledger["shaping"]["restoration_artifact"] = restoration_descriptor  # type: ignore[index]
+        self.document["shaping_restoration_artifact"] = restoration_descriptor
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "restoration query differs"):
+            self.validate()
+
+    def test_shaping_requires_packet_filter_already_enabled(self) -> None:
+        intent_descriptor = self.document["shaping_intent_artifact"]
+        intent = self.read(intent_descriptor)
+        command = intent["original_state"]["pf_status_query"]  # type: ignore[index]
+        self.rewrite_command_stdout(command, "Status: Disabled\n")
+        self.fixture.rewrite_json(intent_descriptor, intent)
+        ledger = self.read(self.ledger_artifact)
+        ledger["shaping"]["intent_artifact"] = intent_descriptor  # type: ignore[index]
+        self.document["shaping_intent_artifact"] = intent_descriptor
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "not already enabled"):
+            self.validate()
+
+    def test_shaping_effective_pf_rules_must_be_exact(self) -> None:
+        restoration_descriptor = self.document["shaping_restoration_artifact"]
+        restoration = self.read(restoration_descriptor)
+        command = restoration["transactions"][0]["effective_queries"][1]  # type: ignore[index]
+        self.rewrite_command_stdout(
+            command,
+            command["stdout"] + "pass out all\n",  # type: ignore[operator]
+        )
+        self.fixture.rewrite_json(restoration_descriptor, restoration)
+        ledger = self.read(self.ledger_artifact)
+        ledger["shaping"]["restoration_artifact"] = restoration_descriptor  # type: ignore[index]
+        self.document["shaping_restoration_artifact"] = restoration_descriptor
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "exact reviewed PF rules"):
+            self.validate()
+
+    def test_off_generation_may_be_nonzero_after_real_transition(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        off_generations = [
+            sample["generation"]
+            for sample in ledger["samples"]  # type: ignore[index]
+            if sample["mode"] == "off"
+        ]
+        self.assertTrue(any(generation > 0 for generation in off_generations))
+        self.validate()
+
+    def test_runtime_codesign_identity_cannot_be_declared_away(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        process = ledger["samples"][0]["roster"][0]  # type: ignore[index]
+        process["runtime_signing_command"]["stderr"] = ""
+        process["runtime_signing_command"]["stderr_size"] = 0
+        process["runtime_signing_command"]["stderr_sha256"] = hashlib.sha256(b"").hexdigest()
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "runtime code identity differs"):
+            self.validate()
+
+    def test_report_summary_is_recomputed_from_ledger(self) -> None:
+        self.document["throughput"]["ratio_percent"] = 100.0
+        with self.assertRaisesRegex(PerformanceGateError, "throughput summary differs"):
+            self.validate()
+
+    def test_raw_byte_drift_fails_before_semantics(self) -> None:
+        path = self.root / self.ledger_artifact["path"]
+        path.write_bytes(path.read_bytes() + b" ")
+        with self.assertRaisesRegex(PerformanceGateError, "size does not match"):
+            self.validate()
+
+    def test_report_signature_must_follow_ledger_completion(self) -> None:
+        self.document["signed_at"] = "2026-07-27T12:00:00Z"
+        with self.assertRaisesRegex(PerformanceGateError, "signed before"):
+            self.validate()
 
 
-class PerformanceGatePassTests(unittest.TestCase):
-    def test_complete_in_threshold_document_passes(self) -> None:
-        document = validate_performance_evidence(fixture())
-        self.assertEqual(document["schema_version"], 1)
+class PerformanceTimestampTests(unittest.TestCase):
+    def test_actual_ndjson_oslog_timestamp_shape_is_accepted(self) -> None:
+        parsed = _oslog_timestamp(
+            "2026-08-01 20:04:51.924344+0000", "product log timestamp"
+        )
+        self.assertEqual(parsed.isoformat(), "2026-08-01T20:04:51.924344+00:00")
 
-    def test_percentiles_use_nearest_rank(self) -> None:
-        summary = percentiles([10.0, 20.0, 30.0, 40.0, 50.0])
-        self.assertEqual(summary, {"p50": 30.0, "p95": 50.0, "p99": 50.0})
+    def test_non_oslog_timestamp_shape_is_rejected(self) -> None:
+        with self.assertRaisesRegex(PerformanceLedgerError, "OSLog timestamp"):
+            _oslog_timestamp("2026-08-01T20:04:51.924Z", "product log timestamp")
 
+    def test_log_show_cli_boundary_shape_is_accepted(self) -> None:
+        parsed = _log_query_timestamp(
+            "2026-08-01 20:04:51", "product log query end"
+        )
+        self.assertEqual(parsed.isoformat(), "2026-08-01T20:04:51+00:00")
 
-class PerformanceGateFailClosedTests(unittest.TestCase):
-    def _reject(self, mutate) -> None:
-        evidence = fixture()
-        mutate(evidence)
-        with self.assertRaises(PerformanceGateError):
-            validate_performance_evidence(evidence)
-
-    def test_recovery_p95_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["weak_network"][2]["recovery_ms"] = _series(
-                [9000.0, 10_000.0, 11_000.0, 12_000.0]
-            )
-
-        self._reject(mutate)
-
-    def test_connect_p95_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["latency"]["connect_ms"] = _series([4000.0, 5000.0, 6000.0, 7000.0])
-
-        self._reject(mutate)
-
-    def test_disconnect_p95_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["latency"]["disconnect_ms"] = _series([2000.0, 3000.0, 4000.0, 5000.0])
-
-        self._reject(mutate)
-
-    def test_added_latency_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["latency"]["added_latency_percent"] = _series([8.0, 10.0, 12.0, 14.0])
-
-        self._reject(mutate)
-
-    def test_throughput_below_ninety_percent_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["throughput"] = {
-                "baseline_mbps": 100.0,
-                "measured_mbps": 85.0,
-                "ratio_percent": 85.0,
-            }
-
-        self._reject(mutate)
-
-    def test_throughput_ratio_mismatch_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["throughput"]["ratio_percent"] = 99.0
-
-        self._reject(mutate)
-
-    def test_idle_cpu_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["resources"]["active_idle_cpu_percent"] = _series(
-                [0.5, 0.8, 1.0, 1.2]
-            )
-
-        self._reject(mutate)
-
-    def test_active_rss_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["resources"]["active_rss_mib"] = _series(
-                [110.0, 118.0, 121.0, 125.0]
-            )
-
-        self._reject(mutate)
-
-    def test_switch_count_incomplete_duration_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["switch_cycle"]["switch_count"] = 99
-
-        self._reject(mutate)
-
-    def test_switch_rss_growth_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["switch_cycle"]["rss_growth_mib"] = 6.0
-
-        self._reject(mutate)
-
-    def test_switch_fd_growth_violation_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["switch_cycle"]["fd_growth"] = 3
-
-        self._reject(mutate)
-
-    def test_soak_incomplete_duration_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["soak"]["duration_hours"] = 23
-
-        self._reject(mutate)
-
-    def test_soak_crash_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["soak"]["crash_count"] = 1
-
-        self._reject(mutate)
-
-    def test_absent_shaping_control_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["weak_network"][0]["control"]["applied"] = False
-
-        self._reject(mutate)
-
-    def test_missing_weak_network_profile_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            del evidence["weak_network"][2]
-
-        self._reject(mutate)
-
-    def test_wrong_control_parameter_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["weak_network"][0]["control"]["latency_ms"] = 200
-
-        self._reject(mutate)
-
-    def test_malformed_non_numeric_sample_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["latency"]["connect_ms"]["samples"] = [2000.0, "slow", 4000.0]
-
-        self._reject(mutate)
-
-    def test_malformed_negative_sample_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["latency"]["connect_ms"]["samples"] = [2000.0, -1.0, 4000.0]
-
-        self._reject(mutate)
-
-    def test_empty_sample_series_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["latency"]["connect_ms"] = {
-                "samples": [],
-                "p50": 0.0,
-                "p95": 0.0,
-                "p99": 0.0,
-            }
-
-        self._reject(mutate)
-
-    def test_recorded_percentile_mismatch_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["latency"]["connect_ms"]["p95"] = 1.0
-
-        self._reject(mutate)
-
-    def test_missing_parameters_block_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            del evidence["parameters"]["power"]
-
-        self._reject(mutate)
-
-    def test_non_arm64_machine_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["parameters"]["machine"]["architecture"] = "x86_64"
-
-        self._reject(mutate)
-
-    def test_unknown_top_level_field_fails(self) -> None:
-        def mutate(evidence: dict) -> None:
-            evidence["unexpected"] = True
-
-        self._reject(mutate)
+    def test_iso_timestamp_is_not_accepted_as_log_show_cli_boundary(self) -> None:
+        with self.assertRaisesRegex(PerformanceLedgerError, "log-show boundary"):
+            _log_query_timestamp("2026-08-01T20:04:51Z", "product log query end")
 
 
 if __name__ == "__main__":

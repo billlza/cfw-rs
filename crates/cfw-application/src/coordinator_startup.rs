@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use cfw_engine_api::{
-    EngineBackend, EngineMode, EngineOwner, EngineSessionIdentity, EngineSnapshot,
-    NativeEngineStatus, RuntimeIdentity,
+    BackendErrorKind, EngineBackend, EngineMode, EngineOwner, EngineSessionIdentity,
+    EngineSnapshot, EngineState, NativeEngineStatus, RetryDirective, RuntimeIdentity,
 };
 use tokio::sync::watch;
 
@@ -10,8 +10,9 @@ use crate::{
     EngineCoordinatorError, EngineOperation,
     coordinator_actor::StartupReconciliation,
     runtime::{
-        CoordinatorState, NativeLease, NativeLeaseKind, backend_error, call_backend, publish,
-        set_failed, set_off, validate_cleanup_runtime, validate_recovered_runtime,
+        CoordinatorState, NativeLease, NativeLeaseKind, backend_error, call_backend,
+        prove_global_off, set_failed, set_off, validate_cleanup_runtime,
+        validate_recovered_runtime,
     },
     transition::stop_owned_runtime,
 };
@@ -20,6 +21,82 @@ use crate::{
 pub(crate) struct ReconciliationFailure {
     pub(crate) error: EngineCoordinatorError,
     pub(crate) safely_off: bool,
+}
+
+/// A failed observation is also the identity of one explicit recovery offer.
+/// Keeping that identity in the existing watch prevents queued clicks from
+/// retrying a newer failure after the first command has already completed.
+#[derive(Clone)]
+pub(crate) struct ReconciliationOutcome {
+    pub(crate) result: Result<EngineSnapshot, EngineCoordinatorError>,
+    pub(crate) recovery: Option<Arc<ReconciliationFailure>>,
+}
+
+pub(crate) fn publish_reconciliation(
+    channel: &watch::Sender<Option<ReconciliationOutcome>>,
+    state: &CoordinatorState,
+    failure: Option<&Arc<ReconciliationFailure>>,
+    policy: StartupReconciliation,
+) {
+    channel.send_replace(Some(ReconciliationOutcome {
+        result: failure.map_or_else(
+            || Ok(state.snapshot.clone()),
+            |failure| Err(failure.error.clone()),
+        ),
+        recovery: failure
+            .filter(|failure| failure.allows_service_reconciliation(state, policy))
+            .cloned(),
+    }));
+}
+
+impl ReconciliationFailure {
+    pub(crate) fn allows_service_reconciliation(
+        &self,
+        state: &CoordinatorState,
+        policy: StartupReconciliation,
+    ) -> bool {
+        matches!(policy, StartupReconciliation::CleanupKnownLineage)
+            && !self.safely_off
+            && state.snapshot.desired_mode == EngineMode::Off
+            && matches!(
+                state.snapshot.state,
+                EngineState::Failed {
+                    target: EngineMode::Off,
+                    ..
+                }
+            )
+            && state.native_lease.is_none()
+            && state.quarantine.is_none()
+            && match &self.error {
+                // Unproven cleanup is settled by re-observing and cleaning up;
+                // a transient or registration-bound read is settled by the
+                // same fresh observation once the services answer.
+                EngineCoordinatorError::Backend {
+                    operation: EngineOperation::QueryStatus,
+                    source,
+                } => {
+                    source.kind == BackendErrorKind::CleanupUnproven || self.allows_explicit_retry()
+                }
+                _ => false,
+            }
+    }
+
+    /// A failed startup observation may be repeated only at a later explicit
+    /// command boundary and only when the typed backend contract says that a
+    /// fresh read or an external registration-state change can resolve it.
+    /// Failures after cleanup, identity validation, or mutation remain terminal
+    /// because repeating those operations could target ambiguous native state.
+    pub(crate) fn allows_explicit_retry(&self) -> bool {
+        let EngineCoordinatorError::Backend {
+            operation: EngineOperation::QueryStatus,
+            source,
+        } = &self.error
+        else {
+            return false;
+        };
+        source.kind.allows_read_only_recheck()
+            || source.kind.retry_directive() == RetryDirective::RegistrationStatusChange
+    }
 }
 
 pub(crate) async fn reconcile_initial_state(
@@ -55,13 +132,15 @@ pub(crate) async fn reconcile_initial_state(
         }
     };
 
+    let local = matches!(status, NativeEngineStatus::LocalProxy { .. });
     match status {
         NativeEngineStatus::Off => {
             state.snapshot.desired_mode = EngineMode::Off;
             set_off(state, snapshots);
             Ok(())
         }
-        NativeEngineStatus::SystemProxy { runtime } => {
+        NativeEngineStatus::LocalProxy { runtime }
+        | NativeEngineStatus::SystemProxy { runtime } => {
             let context = ReconciliationContext {
                 backend,
                 state,
@@ -71,9 +150,17 @@ pub(crate) async fn reconcile_initial_state(
                 operation_timeout,
             };
             let kind = RecoveredRuntimeKind {
-                mode: EngineMode::SystemProxy,
+                mode: if local {
+                    EngineMode::LocalProxy
+                } else {
+                    EngineMode::SystemProxy
+                },
                 owner: EngineOwner::ProxyAgent,
-                lease_kind: NativeLeaseKind::SystemProxy,
+                lease_kind: if local {
+                    NativeLeaseKind::LocalProxy
+                } else {
+                    NativeLeaseKind::SystemProxy
+                },
             };
             if matches!(
                 startup_reconciliation,
@@ -81,7 +168,7 @@ pub(crate) async fn reconcile_initial_state(
             ) {
                 cleanup_runtime_without_lineage(context, kind, runtime).await
             } else {
-                reconcile_runtime(context, kind, runtime).await
+                cleanup_recovered_runtime(context, kind, runtime).await
             }
         }
         NativeEngineStatus::Tunnel { runtime } => {
@@ -104,7 +191,7 @@ pub(crate) async fn reconcile_initial_state(
             ) {
                 cleanup_runtime_without_lineage(context, kind, runtime).await
             } else {
-                reconcile_runtime(context, kind, runtime).await
+                cleanup_recovered_runtime(context, kind, runtime).await
             }
         }
     }
@@ -132,12 +219,16 @@ async fn cleanup_runtime_without_lineage(
     });
 
     let cleanup = stop_owned_runtime(backend, state, snapshots, operation_timeout).await;
-    match (validation_error, cleanup) {
-        (None, Ok(())) => {
+    let off_proof = match &cleanup {
+        Ok(()) => Some(prove_global_off(backend, state, snapshots, operation_timeout).await),
+        Err(_) => None,
+    };
+    match (validation_error, cleanup, off_proof) {
+        (None, Ok(()), Some(Ok(()))) => {
             set_off(state, snapshots);
             Ok(())
         }
-        (Some(error), Ok(())) => {
+        (Some(error), Ok(()), Some(Ok(()))) => {
             set_failed(
                 state,
                 snapshots,
@@ -150,7 +241,15 @@ async fn cleanup_runtime_without_lineage(
                 safely_off: true,
             })
         }
-        (None, Err(error)) => {
+        (None, Ok(()), Some(Err(error))) => Err(ReconciliationFailure {
+            error,
+            safely_off: false,
+        }),
+        (Some(validation_error), Ok(()), Some(Err(proof_error))) => {
+            let error = EngineCoordinatorError::ValidationAndOffProofFailed {
+                validation_error: Box::new(validation_error),
+                proof_error: Box::new(proof_error),
+            };
             set_failed(
                 state,
                 snapshots,
@@ -163,7 +262,24 @@ async fn cleanup_runtime_without_lineage(
                 safely_off: false,
             })
         }
-        (Some(validation_error), Err(EngineCoordinatorError::Backend { operation, source })) => {
+        (None, Err(error), None) => {
+            set_failed(
+                state,
+                snapshots,
+                kind.mode,
+                runtime.context.generation,
+                &error,
+            );
+            Err(ReconciliationFailure {
+                error,
+                safely_off: false,
+            })
+        }
+        (
+            Some(validation_error),
+            Err(EngineCoordinatorError::Backend { operation, source }),
+            None,
+        ) => {
             let error = EngineCoordinatorError::ValidationAndCleanupFailed {
                 validation_error: Box::new(validation_error),
                 cleanup_operation: operation,
@@ -181,7 +297,7 @@ async fn cleanup_runtime_without_lineage(
                 safely_off: false,
             })
         }
-        (Some(_), Err(unexpected)) => {
+        (Some(_), Err(unexpected), None) => {
             set_failed(
                 state,
                 snapshots,
@@ -193,6 +309,9 @@ async fn cleanup_runtime_without_lineage(
                 error: unexpected,
                 safely_off: false,
             })
+        }
+        (_, Ok(()), None) | (_, Err(_), Some(_)) => {
+            unreachable!("Off proof runs exactly once after a successful cleanup")
         }
     }
 }
@@ -213,7 +332,12 @@ struct RecoveredRuntimeKind {
     lease_kind: NativeLeaseKind,
 }
 
-async fn reconcile_runtime(
+/// A controller capability is scoped to one Host process. Even when the native
+/// runtime matches the durable generation lineage exactly, a replacement Host
+/// cannot authenticate to that runtime's loopback controller. Startup therefore
+/// tears the exact owner down and settles at Off; a later user request starts a
+/// fresh generation with this process's capability.
+async fn cleanup_recovered_runtime(
     context: ReconciliationContext<'_>,
     kind: RecoveredRuntimeKind,
     runtime: RuntimeIdentity,
@@ -226,7 +350,7 @@ async fn reconcile_runtime(
         expected_generation,
         operation_timeout,
     } = context;
-    state.snapshot.desired_mode = kind.mode;
+    state.snapshot.desired_mode = EngineMode::Off;
     state.snapshot.generation = runtime.context.generation;
     state.snapshot.config_digest = Some(runtime.config_digest.clone());
     state.native_lease = Some(NativeLease {
@@ -241,18 +365,30 @@ async fn reconcile_runtime(
         session,
         expected_generation,
     ) {
-        let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
-            Ok(()) => validation_error,
-            Err(EngineCoordinatorError::Backend { operation, source }) => {
-                EngineCoordinatorError::ValidationAndCleanupFailed {
-                    validation_error: Box::new(validation_error),
-                    cleanup_operation: operation,
-                    cleanup_error: source,
+        let (error, safely_off) =
+            match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
+                Ok(()) => {
+                    match prove_global_off(backend, state, snapshots, operation_timeout).await {
+                        Ok(()) => (validation_error, true),
+                        Err(proof_error) => (
+                            EngineCoordinatorError::ValidationAndOffProofFailed {
+                                validation_error: Box::new(validation_error),
+                                proof_error: Box::new(proof_error),
+                            },
+                            false,
+                        ),
+                    }
                 }
-            }
-            Err(unexpected) => unexpected,
-        };
-        let safely_off = state.native_lease.is_none();
+                Err(EngineCoordinatorError::Backend { operation, source }) => (
+                    EngineCoordinatorError::ValidationAndCleanupFailed {
+                        validation_error: Box::new(validation_error),
+                        cleanup_operation: operation,
+                        cleanup_error: source,
+                    },
+                    false,
+                ),
+                Err(unexpected) => (unexpected, false),
+            };
         set_failed(
             state,
             snapshots,
@@ -263,11 +399,29 @@ async fn reconcile_runtime(
         return Err(ReconciliationFailure { error, safely_off });
     }
 
-    state.snapshot.state = match kind.mode {
-        EngineMode::SystemProxy => cfw_engine_api::EngineState::ProxyActive { runtime },
-        EngineMode::Tunnel => cfw_engine_api::EngineState::TunnelActive { runtime },
-        EngineMode::Off => unreachable!("native running status cannot be Off"),
-    };
-    publish(state, snapshots);
-    Ok(())
+    match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
+        Ok(()) => match prove_global_off(backend, state, snapshots, operation_timeout).await {
+            Ok(()) => {
+                set_off(state, snapshots);
+                Ok(())
+            }
+            Err(error) => Err(ReconciliationFailure {
+                error,
+                safely_off: false,
+            }),
+        },
+        Err(error) => {
+            set_failed(
+                state,
+                snapshots,
+                kind.mode,
+                runtime.context.generation,
+                &error,
+            );
+            Err(ReconciliationFailure {
+                error,
+                safely_off: false,
+            })
+        }
+    }
 }

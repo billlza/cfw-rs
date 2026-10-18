@@ -1,23 +1,140 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const MAX_CREDENTIAL_SLOTS: usize = 256;
-const MAX_CREDENTIAL_OUTBOUNDS: usize = 128;
+pub use crate::capacity::MAX_CREDENTIAL_SLOTS;
+const MAX_CREDENTIAL_OUTBOUNDS: usize = crate::capacity::MAX_OUTBOUNDS;
 const MAX_CREDENTIAL_SECRET_BYTES: usize = 16 * 1024;
+const MAX_SOCKS5_CREDENTIAL_SECRET_BYTES: usize = 255;
+
+/// Exact, secret-free profile identity authorized to use a credential.
+///
+/// The repository-owned UUID prevents two profiles that reuse a credential
+/// reference from sharing material. The validated profile digest prevents a
+/// stale runtime projection from silently adopting credentials after the
+/// profile document changes.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialAudience {
+    profile_id: String,
+    profile_digest: String,
+}
+
+impl CredentialAudience {
+    pub fn new(
+        profile_id: impl Into<String>,
+        profile_digest: impl Into<String>,
+    ) -> Result<Self, InvalidCredentialAudience> {
+        let profile_id = profile_id.into();
+        let parsed = Uuid::parse_str(&profile_id).map_err(|_| InvalidCredentialAudience)?;
+        let profile_digest = profile_digest.into();
+        if parsed.hyphenated().to_string() != profile_id || !is_lowercase_sha256(&profile_digest) {
+            return Err(InvalidCredentialAudience);
+        }
+        Ok(Self {
+            profile_id,
+            profile_digest,
+        })
+    }
+
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub fn profile_digest(&self) -> &str {
+        &self.profile_digest
+    }
+}
+
+impl fmt::Debug for CredentialAudience {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialAudience")
+            .field("profile_id", &self.profile_id)
+            .field("profile_digest", &self.profile_digest)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CredentialAudienceWire {
+    profile_id: String,
+    profile_digest: String,
+}
+
+impl<'de> Deserialize<'de> for CredentialAudience {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CredentialAudienceWire::deserialize(deserializer)?;
+        Self::new(wire.profile_id, wire.profile_digest).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("credential audience requires a canonical profile UUID and lowercase SHA-256 digest")]
+pub struct InvalidCredentialAudience;
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// One exact non-secret vault identity. Sorting is the canonical wire and
+/// garbage-collection order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialBinding {
+    audience: CredentialAudience,
+    reference: CredentialRef,
+}
+
+impl CredentialBinding {
+    pub fn new(audience: CredentialAudience, reference: CredentialRef) -> Self {
+        Self {
+            audience,
+            reference,
+        }
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
+    }
+
+    pub fn reference(&self) -> &CredentialRef {
+        &self.reference
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKind {
+    #[serde(rename = "wireguard_private_key")]
+    WireGuardPrivateKey,
+    #[serde(rename = "wireguard_pre_shared_key")]
+    WireGuardPreSharedKey,
+    Socks5Username,
+    Socks5Password,
+    HttpProxyUsername,
+    HttpProxyPassword,
     ShadowsocksPassword,
     VmessUuid,
     VlessUuid,
     TrojanPassword,
     Hysteria2Password,
     Hysteria2ObfsPassword,
+    #[serde(rename = "anytls_password")]
+    AnyTlsPassword,
+    TuicUuid,
+    TuicPassword,
 }
 
 /// Stable, non-secret reference to a credential stored outside profile files.
@@ -81,33 +198,80 @@ pub struct InvalidCredentialRef;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialTarget {
+    #[serde(rename = "wireguard_private_key")]
+    WireGuardPrivateKey,
+    #[serde(rename = "wireguard_pre_shared_key")]
+    WireGuardPreSharedKey,
+    Socks5Username,
+    Socks5Password,
+    HttpProxyUsername,
+    HttpProxyPassword,
     ShadowsocksPassword,
     VmessUuid,
     VlessUuid,
     TrojanPassword,
     Hysteria2Password,
     Hysteria2ObfsPassword,
+    #[serde(rename = "anytls_password")]
+    AnyTlsPassword,
+    TuicUuid,
+    TuicPassword,
 }
 
 impl CredentialTarget {
     pub fn credential_kind(self) -> CredentialKind {
         match self {
+            Self::WireGuardPrivateKey => CredentialKind::WireGuardPrivateKey,
+            Self::WireGuardPreSharedKey => CredentialKind::WireGuardPreSharedKey,
+            Self::Socks5Username => CredentialKind::Socks5Username,
+            Self::Socks5Password => CredentialKind::Socks5Password,
+            Self::HttpProxyUsername => CredentialKind::HttpProxyUsername,
+            Self::HttpProxyPassword => CredentialKind::HttpProxyPassword,
             Self::ShadowsocksPassword => CredentialKind::ShadowsocksPassword,
             Self::VmessUuid => CredentialKind::VmessUuid,
             Self::VlessUuid => CredentialKind::VlessUuid,
             Self::TrojanPassword => CredentialKind::TrojanPassword,
             Self::Hysteria2Password => CredentialKind::Hysteria2Password,
             Self::Hysteria2ObfsPassword => CredentialKind::Hysteria2ObfsPassword,
+            Self::AnyTlsPassword => CredentialKind::AnyTlsPassword,
+            Self::TuicUuid => CredentialKind::TuicUuid,
+            Self::TuicPassword => CredentialKind::TuicPassword,
         }
     }
 
     fn pointer_suffix(self) -> &'static str {
         match self {
-            Self::ShadowsocksPassword | Self::TrojanPassword | Self::Hysteria2Password => {
-                "password"
-            }
-            Self::VmessUuid | Self::VlessUuid => "uuid",
+            Self::WireGuardPrivateKey => "private_key",
+            Self::WireGuardPreSharedKey => "peers/0/pre_shared_key",
+            Self::Socks5Username | Self::HttpProxyUsername => "username",
+            Self::Socks5Password
+            | Self::HttpProxyPassword
+            | Self::ShadowsocksPassword
+            | Self::TrojanPassword
+            | Self::Hysteria2Password
+            | Self::AnyTlsPassword
+            | Self::TuicPassword => "password",
+            Self::VmessUuid | Self::VlessUuid | Self::TuicUuid => "uuid",
             Self::Hysteria2ObfsPassword => "obfs/password",
+        }
+    }
+
+    fn container(self) -> &'static str {
+        match self {
+            Self::WireGuardPrivateKey | Self::WireGuardPreSharedKey => "endpoints",
+            Self::Socks5Username
+            | Self::HttpProxyUsername
+            | Self::HttpProxyPassword
+            | Self::Socks5Password
+            | Self::ShadowsocksPassword
+            | Self::VmessUuid
+            | Self::VlessUuid
+            | Self::TrojanPassword
+            | Self::Hysteria2Password
+            | Self::Hysteria2ObfsPassword
+            | Self::AnyTlsPassword
+            | Self::TuicUuid
+            | Self::TuicPassword => "outbounds",
         }
     }
 }
@@ -116,7 +280,9 @@ impl CredentialTarget {
 ///
 /// `json_pointer` is serialized for cross-language verification, but is always
 /// derived from `target` and `outbound_index`; deserialization rejects any
-/// disagreement or unknown field.
+/// disagreement or unknown field. The existing wire field `outbound_index`
+/// indexes the target's container: WireGuard targets use `endpoints`, while
+/// all other targets use `outbounds`. No caller-controlled container is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialSlot {
@@ -140,7 +306,11 @@ impl CredentialSlot {
         if reference.kind() != target.credential_kind() {
             return Err(CredentialSlotError::KindMismatch);
         }
-        let json_pointer = format!("/outbounds/{outbound_index}/{}", target.pointer_suffix());
+        let json_pointer = format!(
+            "/{}/{outbound_index}/{}",
+            target.container(),
+            target.pointer_suffix()
+        );
         Ok(Self {
             reference,
             target,
@@ -267,6 +437,46 @@ impl<'a> CredentialSecret<'a> {
     pub fn expose_to_vault(&self) -> &str {
         self.0
     }
+
+    pub fn validate_for_kind(&self, kind: CredentialKind) -> Result<(), InvalidCredentialSecret> {
+        if matches!(
+            kind,
+            CredentialKind::WireGuardPrivateKey | CredentialKind::WireGuardPreSharedKey
+        ) && !valid_wireguard_key(self.0)
+        {
+            return Err(InvalidCredentialSecret);
+        }
+        if matches!(
+            kind,
+            CredentialKind::Socks5Username | CredentialKind::Socks5Password
+        ) && self.0.len() > MAX_SOCKS5_CREDENTIAL_SECRET_BYTES
+        {
+            return Err(InvalidCredentialSecret);
+        }
+        if (kind == CredentialKind::HttpProxyUsername
+            && (self.0.len() > 1024 || self.0.contains(':')))
+            || (kind == CredentialKind::HttpProxyPassword && self.0.len() > 4096)
+        {
+            return Err(InvalidCredentialSecret);
+        }
+        if matches!(
+            kind,
+            CredentialKind::VmessUuid | CredentialKind::VlessUuid | CredentialKind::TuicUuid
+        ) {
+            let parsed = Uuid::parse_str(self.0).map_err(|_| InvalidCredentialSecret)?;
+            if parsed.hyphenated().to_string() != self.0 {
+                return Err(InvalidCredentialSecret);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn valid_wireguard_key(value: &str) -> bool {
+    value.len() == 44
+        && STANDARD.decode(value).is_ok_and(|key| {
+            key.len() == 32 && key.iter().any(|byte| *byte != 0) && STANDARD.encode(&key) == value
+        })
 }
 
 impl fmt::Debug for CredentialSecret<'_> {
@@ -276,5 +486,7 @@ impl fmt::Debug for CredentialSecret<'_> {
 }
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
-#[error("credential secret is empty, oversized, or contains control characters")]
+#[error(
+    "credential secret is empty, oversized, contains control characters, or is invalid for its credential kind"
+)]
 pub struct InvalidCredentialSecret;

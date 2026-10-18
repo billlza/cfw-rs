@@ -1,14 +1,61 @@
+import CFWCredentialTransport
 import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 import OSLog
+import Synchronization
 
+/// Counts the requests the agent received and has not answered yet. An agent
+/// that ends waits for them, so no Host waits for an answer that never
+/// comes; see `ProxyAgentProcessExit`.
+final class ProxyAgentUnansweredRequests: Sendable {
+  private struct State {
+    var count = 0
+    var whenNone: [@Sendable () -> Void] = []
+  }
+
+  private let state = Mutex(State())
+
+  /// Runs `work` once no request is left unanswered: at once when none is.
+  func whenNone(_ work: @escaping @Sendable () -> Void) {
+    let now = state.withLock { state -> Bool in
+      guard state.count > 0 else { return true }
+      state.whenNone.append(work)
+      return false
+    }
+    if now { work() }
+  }
+
+  /// Only `ProxyXPCReply` counts, once per request, so every answer has its
+  /// request.
+  fileprivate func received() {
+    state.withLock { $0.count += 1 }
+  }
+
+  fileprivate func answered() {
+    let ready = state.withLock { state -> [@Sendable () -> Void] in
+      precondition(state.count > 0, "A ProxyAgent request was answered twice")
+      state.count -= 1
+      guard state.count == 0 else { return [] }
+      defer { state.whenNone = [] }
+      return state.whenNone
+    }
+    for work in ready { work() }
+  }
+}
+
+/// Answers one request once, and counts it as unanswered until then.
 private final class ProxyXPCReply: @unchecked Sendable {
   private let lock = NSLock()
   private var handler: ((Data?, NSError?) -> Void)?
+  private let requests: ProxyAgentUnansweredRequests
 
-  init(_ handler: @escaping (Data?, NSError?) -> Void) {
+  init(
+    _ handler: @escaping (Data?, NSError?) -> Void, requests: ProxyAgentUnansweredRequests
+  ) {
     self.handler = handler
+    self.requests = requests
+    requests.received()
   }
 
   func finish(data: Data?, error: NSError?) {
@@ -16,27 +63,222 @@ private final class ProxyXPCReply: @unchecked Sendable {
     let handler = handler
     self.handler = nil
     lock.unlock()
-    handler?(data, error)
+    guard let handler else { return }
+    handler(data, error)
+    requests.answered()
+  }
+}
+
+/// Admits one call of a kind at a time. A call that returned frees its slot
+/// before its reply, so the Host's next call, which it sends once that reply
+/// arrived, finds the slot free; a call still inside libbox at its reply keeps
+/// the slot until it returns.
+private final class LibboxCallSlot: Sendable {
+  private let holder = Mutex<UUID?>(nil)
+
+  /// The admitted call's token, or nil while another call holds the slot.
+  func admit() -> UUID? {
+    holder.withLock { holder in
+      guard holder == nil else { return nil }
+      let token = UUID()
+      holder = token
+      return token
+    }
+  }
+
+  /// Frees the slot if the call `token` names still holds it, and returns
+  /// whether it did.
+  @discardableResult
+  func release(_ token: UUID) -> Bool {
+    holder.withLock { holder in
+      guard holder == token else { return false }
+      holder = nil
+      return true
+    }
   }
 }
 
 final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Sendable {
+  private static let authorizationLogger = Logger(
+    subsystem: "com.bill.clashformac", category: "system-proxy-authorization")
+  private static let validationLogger = Logger(
+    subsystem: "com.bill.clashformac", category: "configuration-validation")
   private let lifecycle: any ProxySystemProxyOwning
   private let configurationChecker: any LibboxConfigurationChecking
+  private let profileProbe: any LibboxProfileProbing
+  private let profileProbeSlot = LibboxCallSlot()
+  private let checkSlot = LibboxCallSlot()
+  private let boundedCall: LibboxBoundedCall
+  private let requests: ProxyAgentUnansweredRequests
+  private let preferences: SCPreferencesSystemProxyPreferences
+  private let journalStore: any ProxyOwnershipJournalStoring
+  private let authorizationQueue = DispatchQueue(
+    label: "com.bill.clashformac.proxy-authorization")
+  private let authorizationLock = NSLock()
+  private var authorizationPending = false
 
   init(
     lifecycle: any ProxySystemProxyOwning,
-    configurationChecker: any LibboxConfigurationChecking
+    configurationChecker: any LibboxConfigurationChecking,
+    preferences: SCPreferencesSystemProxyPreferences,
+    journalStore: any ProxyOwnershipJournalStoring,
+    profileProbe: any LibboxProfileProbing = SourceBuiltLibboxProfileProbe(),
+    boundedCall: LibboxBoundedCall = LibboxBoundedCall(),
+    requests: ProxyAgentUnansweredRequests = ProxyAgentUnansweredRequests()
   ) {
+    self.profileProbe = profileProbe
+    self.boundedCall = boundedCall
+    self.requests = requests
     self.lifecycle = lifecycle
     self.configurationChecker = configurationChecker
+    self.preferences = preferences
+    self.journalStore = journalStore
+  }
+
+  func testProfileProxies(
+    _ configuration: Data, proxies: Data, timeoutMS: UInt16, targetURL: String,
+    expectedStatus: String,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let response = ProxyXPCReply(reply, requests: requests)
+    let names: [String]
+    do {
+      guard !configuration.isEmpty,
+        configuration.count <= Int(NativeProtocolConstants.maximumConfigurationBytes),
+        proxies.count <= 32768
+      else { throw NativeBridgeProtocolError.invalidConfiguration }
+      names = try JSONDecoder().decode([String].self, from: proxies)
+      try ProfileDelayTestRequest.validateTargets(names, timeoutMS: timeoutMS)
+      try ProfileDelayTestRequest.validateTargetURL(targetURL, expectedStatus: expectedStatus)
+    } catch {
+      response.finish(data: nil, error: ProfileProbeServiceFailure.invalidRequest.error)
+      return
+    }
+    guard lifecycle.callsLibbox else {
+      response.finish(data: nil, error: ProfileProbeServiceFailure.agentEnding.error)
+      return
+    }
+    guard let slot = profileProbeSlot.admit() else {
+      response.finish(data: nil, error: ProfileProbeServiceFailure.busy.error)
+      return
+    }
+    let bytes = SensitiveDataBuffer(copying: configuration)
+    let profileProbe = profileProbe
+    boundedCall.run(
+      replyDeadline: .milliseconds(Int64(timeoutMS))
+        + ProxyAgentCallBudget.profileProbeReplyAllowance,
+      qos: .utility,
+      {
+        try bytes.withErasingData { configuration in
+          try profileProbe.test(
+            configuration: configuration, proxies: names, timeoutMS: timeoutMS,
+            targetURL: targetURL, expectedStatus: expectedStatus)
+        }
+      },
+      reply: { [self] answer in
+        if case .returned(let result) = answer {
+          retireIfItLeftItsInstance(result)
+          profileProbeSlot.release(slot)
+        }
+        switch answer {
+        case .returned(.success(let result)):
+          do {
+            response.finish(data: try JSONEncoder().encode(result), error: nil)
+          } catch {
+            response.finish(data: nil, error: ProfileProbeServiceFailure.executionFailed.error)
+          }
+        case .returned(.failure):
+          response.finish(data: nil, error: ProfileProbeServiceFailure.executionFailed.error)
+        case .stillRunning:
+          response.finish(data: nil, error: ProfileProbeServiceFailure.timedOut.error)
+        }
+      },
+      ended: { [self] end in
+        switch end {
+        case .returned(let result):
+          // A probe that returned before its reply decided all this there.
+          if profileProbeSlot.release(slot) { retireIfItLeftItsInstance(result) }
+        case .abandoned(let failure):
+          retire(after: failure)
+        }
+      })
+  }
+
+  /// A call whose instance libbox could not close leaves in this process what
+  /// only its end releases. Decided before the call's answer, so a request
+  /// the Host sends on that answer finds the agent retired.
+  private func retireIfItLeftItsInstance<Value>(_ result: Result<Value, any Error>) {
+    guard case .failure(let error as LibboxRuntimeError) = result,
+      let unclosed = error.unclosedCallInstance
+    else { return }
+    retire(after: unclosed)
+  }
+
+  /// A call abandoned inside libbox, or one whose instance libbox could not
+  /// close, leaves in this process what only its end releases.
+  private func retire(after failure: LibboxInstanceUnclosable) {
+    Self.validationLogger.fault(
+      "A configuration check or latency test left libbox holding what it built; the ProxyAgent retires"
+    )
+    lifecycle.retire(after: failure)
+  }
+
+  func authorizeSystemProxy(restorationOnly: Bool, withReply reply: @escaping (NSError?) -> Void) {
+    let response = ProxyXPCReply({ _, error in reply(error) }, requests: requests)
+    let admitted = authorizationLock.withLock {
+      guard !authorizationPending else { return false }
+      authorizationPending = true
+      return true
+    }
+    guard admitted else {
+      response.finish(
+        data: nil,
+        error: NSError(
+          domain: SystemProxyAuthorizationFailure.domain,
+          code: SystemProxyAuthorizationFailure.pending.rawValue))
+      return
+    }
+    authorizationQueue.async { [self] in
+      // The request stops counting as pending before its reply, so the Host
+      // may ask again as soon as the reply arrives.
+      let finish: @Sendable (NSError?) -> Void = { [self] error in
+        authorizationLock.withLock { authorizationPending = false }
+        response.finish(data: nil, error: error)
+      }
+      do {
+        let needsAuthorization = try !restorationOnly || journalStore.load() != nil
+        guard needsAuthorization else {
+          finish(nil)
+          return
+        }
+        try preferences.authorizeForStart()
+        // Settings the agent could not restore without these rights are
+        // restored with them before the reply, so the Off or quit that follows
+        // it finds them restored. The reply waits behind any operation already
+        // on the lifecycle's queue, an engine start included. A spent agent
+        // ends only after this reply was handed to XPC.
+        lifecycle.restoreSettingsAfterAuthorization { finish(nil) }
+      } catch SystemProxyPreferencesError.authorizationDenied {
+        finish(
+          NSError(
+            domain: SystemProxyAuthorizationFailure.domain,
+            code: SystemProxyAuthorizationFailure.denied.rawValue))
+      } catch {
+        Self.authorizationLogger.error(
+          "Network authorization request failed: \(String(describing: error), privacy: .public)")
+        finish(
+          NSError(
+            domain: SystemProxyAuthorizationFailure.domain,
+            code: SystemProxyAuthorizationFailure.internalFailure.rawValue))
+      }
+    }
   }
 
   func execute(
     _ requestData: Data,
     withReply reply: @escaping (Data?, NSError?) -> Void
   ) {
-    let reply = ProxyXPCReply(reply)
+    let reply = ProxyXPCReply(reply, requests: requests)
     let request: RequestEnvelope
     do {
       request = try ProtocolCodec.decodeRequest(requestData)
@@ -56,45 +298,21 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
           reply: reply
         )
       }
-    case .startSystemProxy:
-      do {
-        try GlobalAuthorityReleaseGate.requireStartAuthorization()
-      } catch {
-        respond(
-          requestID: request.requestID,
-          failure: EngineFailure(
-            code: GlobalAuthorityGateError.stableCode,
-            message: GlobalAuthorityGateError.stableMessage,
-            isRetryable: false
-          ),
-          reply: reply
-        )
-        return
-      }
-      guard let configuration = request.command.configuration else {
-        respond(
-          requestID: request.requestID,
-          failure: EngineFailure(
-            code: "missing-start-configuration",
-            message: "System proxy start requires an exact configuration descriptor.",
-            isRetryable: false
-          ),
-          reply: reply
-        )
-        return
-      }
-      lifecycle.start(configuration: configuration) { [self] result in
-        respondToOperation(requestID: request.requestID, result: result, reply: reply)
-      }
+    case .startLocalProxy, .startSystemProxy:
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          .agent(.startRequiresOwnerAuthorization),
+          message: "System proxy start requires a one-use Authority authorization."),
+        reply: reply
+      )
     case .stop:
       guard let configuration = request.command.configuration else {
         respond(
           requestID: request.requestID,
           failure: EngineFailure(
-            code: "missing-stop-generation",
-            message: "Stop commands must identify the exact active configuration.",
-            isRetryable: false
-          ),
+            .agent(.missingStopGeneration),
+            message: "Stop commands must identify the exact active configuration."),
           reply: reply
         )
         return
@@ -102,16 +320,115 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
       lifecycle.stop(expectedConfiguration: configuration) { [self] result in
         respondToOperation(requestID: request.requestID, result: result, reply: reply)
       }
+    case .restoreSettingsBeforeStop:
+      guard let configuration = request.command.configuration else {
+        respond(
+          requestID: request.requestID,
+          failure: EngineFailure(
+            .agent(.missingStopGeneration),
+            message: "Restoring settings before a stop must identify the exact configuration."),
+          reply: reply
+        )
+        return
+      }
+      lifecycle.restoreSettingsBeforeStop(expectedConfiguration: configuration) {
+        [self] result in
+        respondToOperation(requestID: request.requestID, result: result, reply: reply)
+      }
     case .installTunnel, .startTunnel, .validateConfiguration:
       respond(
         requestID: request.requestID,
         failure: EngineFailure(
-          code: "wrong-process-boundary",
-          message: "Tunnel commands are accepted only by the host bridge/provider boundary.",
-          isRetryable: false
-        ),
+          .agent(.wrongProcessBoundary),
+          message: "Tunnel commands are accepted only by the host bridge/provider boundary."),
         reply: reply
       )
+    }
+  }
+
+  func startSystemProxy(
+    _ capabilityData: Data,
+    context contextData: Data,
+    configuration configurationData: Data,
+    request requestData: Data,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let reply = ProxyXPCReply(reply, requests: requests)
+    let request: RequestEnvelope
+    let context: ProxyOwnerContext
+    var capabilityBytes = capabilityData
+    var configurationBytes = configurationData
+    defer {
+      capabilityBytes.resetBytes(
+        in: capabilityBytes.startIndex..<capabilityBytes.endIndex)
+      capabilityBytes.removeAll(keepingCapacity: false)
+      configurationBytes.resetBytes(
+        in: configurationBytes.startIndex..<configurationBytes.endIndex)
+      configurationBytes.removeAll(keepingCapacity: false)
+    }
+    do {
+      request = try ProtocolCodec.decodeRequest(requestData)
+      context = try AuthorityV1Codec.decodeCanonical(
+        ProxyOwnerContext.self, from: contextData)
+    } catch {
+      reply.finish(data: nil, error: protocolError())
+      return
+    }
+    guard request.command.kind == .startLocalProxy || request.command.kind == .startSystemProxy,
+      let descriptor = request.command.configuration,
+      descriptor.slot.isProxyAgent,
+      context.operation.mode == descriptor.slot.authorityMode,
+      capabilityBytes.count == AuthorityV1Limits.capabilityBytes,
+      context.operation.root.installationID.rawValue == descriptor.installationID,
+      context.operation.root.epoch == descriptor.epoch,
+      context.operation.root.generation == descriptor.generation,
+      context.operation.configSHA256 == descriptor.sha256,
+      context.operation.identitySHA256 == descriptor.identitySHA256
+    else {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          .agent(.invalidOwnerAuthorization),
+          message: "System proxy owner authorization does not match the start request."),
+        reply: reply
+      )
+      return
+    }
+    do {
+      try descriptor.validateConfigurationBytes(configurationBytes)
+    } catch {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          .agent(.invalidRuntimeConfiguration),
+          message: "System proxy runtime bytes do not match the authorized descriptor."),
+        reply: reply
+      )
+      return
+    }
+    let capability: OwnerCapability
+    do {
+      capability = try OwnerCapability(copying: capabilityBytes)
+    } catch {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          .agent(.invalidOwnerAuthorization),
+          message: "System proxy owner authorization is malformed."),
+        reply: reply
+      )
+      return
+    }
+    let authorization = ProxyOwnerAuthorization(
+      context: context, capability: capability)
+    let runtimeConfiguration = SensitiveDataBuffer(copying: configurationBytes)
+    lifecycle.start(
+      configuration: runtimeConfiguration,
+      descriptor: descriptor,
+      authorization: authorization
+    ) { [self] result in
+      authorization.erase()
+      respondToOperation(requestID: request.requestID, result: result, reply: reply)
     }
   }
 
@@ -120,7 +437,7 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
     request requestData: Data,
     withReply reply: @escaping (Data?, NSError?) -> Void
   ) {
-    let reply = ProxyXPCReply(reply)
+    let reply = ProxyXPCReply(reply, requests: requests)
     let request: RequestEnvelope
     do {
       request = try ProtocolCodec.decodeRequest(requestData)
@@ -136,56 +453,113 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
       respond(
         requestID: request.requestID,
         failure: EngineFailure(
-          code: "invalid-validation-request",
-          message: "Configuration validation request is malformed or exceeds its bound.",
-          isRetryable: false
-        ),
+          .agent(.invalidValidationRequest),
+          message: "Configuration validation request is malformed or exceeds its bound."),
         reply: reply
       )
       return
     }
-    var configuration = configurationData
-    defer {
-      configuration.resetBytes(in: configuration.startIndex..<configuration.endIndex)
-      configuration.removeAll(keepingCapacity: false)
+    guard lifecycle.callsLibbox else {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          .agent(.agentEnding),
+          message: "The proxy agent is ending; the next one checks the configuration."),
+        reply: reply)
+      return
     }
-    do {
-      try configurationChecker.check(configuration: configuration)
-      respond(
-        requestID: request.requestID,
-        result: Result { try CommandResult(kind: .accepted) },
-        reply: reply
-      )
-    } catch let error as LibboxRuntimeError {
-      let retryable: Bool
-      switch error {
-      case .libboxUnavailable, .missingBundleSetting, .appGroupUnavailable,
-        .unsafeRuntimeDirectory, .setupConflict, .setupFailed:
-        retryable = true
-      default:
-        retryable = false
-      }
+    guard let slot = checkSlot.admit() else {
       respond(
         requestID: request.requestID,
         failure: EngineFailure(
-          code: retryable ? "configuration-validator-unavailable" : "configuration-rejected",
-          message: retryable
-            ? "Source-built libbox validation is unavailable."
-            : "Source-built libbox rejected the configuration.",
-          isRetryable: retryable
-        ),
-        reply: reply
-      )
-    } catch {
-      respond(
-        requestID: request.requestID,
-        failure: EngineFailure(
-          code: "configuration-validator-failed",
-          message: "Configuration validation failed at an explicit internal boundary.",
-          isRetryable: true
-        ),
-        reply: reply
-      )
+          .agent(.configurationCheckTimedOut),
+          message: "An earlier configuration check is still running. Retry shortly."),
+        reply: reply)
+      return
+    }
+    // The check leaves the connection's queue, so a check inside libbox holds
+    // back no later message on that connection.
+    let configuration = SensitiveDataBuffer(copying: configurationData)
+    let configurationChecker = configurationChecker
+    let requestID = request.requestID
+    boundedCall.run(
+      replyDeadline: ProxyAgentCallBudget.configurationCheckReply,
+      qos: .userInitiated,
+      { try configuration.withErasingData { try configurationChecker.check(configuration: $0) } },
+      reply: { [self] answer in
+        if case .returned(let result) = answer {
+          retireIfItLeftItsInstance(result)
+          checkSlot.release(slot)
+        }
+        switch answer {
+        case .returned(.success):
+          respond(
+            requestID: requestID, result: Result { try CommandResult(kind: .accepted) },
+            reply: reply)
+        case .returned(.failure(let error)):
+          respond(requestID: requestID, failure: Self.checkFailure(for: error), reply: reply)
+        case .stillRunning:
+          respond(
+            requestID: requestID,
+            failure: EngineFailure(
+              .agent(.configurationCheckTimedOut),
+              message: "The configuration check did not finish in time. Retry shortly."),
+            reply: reply)
+        }
+      },
+      ended: { [self] end in
+        switch end {
+        case .returned(let result):
+          // A check that returned before its reply decided all this there.
+          if checkSlot.release(slot) { retireIfItLeftItsInstance(result) }
+        case .abandoned(let failure):
+          retire(after: failure)
+        }
+      })
+  }
+
+  /// What a configuration check that returned an error tells the Host.
+  static func checkFailure(for error: any Error) -> EngineFailure {
+    guard let error = error as? LibboxRuntimeError else {
+      return EngineFailure(
+        .agent(.validatorFailed),
+        message: "Configuration validation failed at an explicit internal boundary.")
+    }
+    if case .configurationCheckCleanupFailed = error {
+      // The configuration passed; what the check built stays in this process.
+      validationLogger.fault(
+        "libbox could not close the instance it built to check a configuration")
+    }
+    return validationFailure(for: error)
+  }
+
+  /// What a configuration check that did not pass tells the Host. Only a
+  /// configuration libbox read and refused is rejected. A check that could not
+  /// run, or whose instance did not close, may run again; any other runtime
+  /// error cannot come from a check and failed at an internal boundary.
+  static func validationFailure(for error: LibboxRuntimeError) -> EngineFailure {
+    switch error {
+    case .invalidConfigurationSize, .invalidConfigurationEncoding, .invalidConfigurationJSON,
+      .configurationCheckFailed:
+      EngineFailure(
+        .agent(.configurationRejected), message: "Source-built libbox rejected the configuration.")
+    case .libboxUnavailable, .missingBundleSetting, .appGroupUnavailable, .unsafeRuntimeDirectory,
+      .setupConflict, .setupFailed:
+      EngineFailure(
+        .agent(.validatorUnavailable), message: "Source-built libbox validation is unavailable.")
+    case .configurationCheckCleanupFailed:
+      EngineFailure(
+        .agent(.configurationCheckCleanupFailed),
+        message: "Source-built libbox could not close what it built to check the configuration.")
+    case .configurationCheckReturnedNothing, .profileProbeCleanupFailed,
+      .unexpectedPacketDescriptor, .missingPacketDescriptor,
+      .packetDescriptorAlreadyTransferred, .unsupportedPlatformOperation,
+      .networkMonitorAlreadyStarted, .networkMonitorUnavailable, .networkMonitorTimedOut,
+      .alreadyStarted, .serverCreationFailed, .serviceStartFailed, .serviceStartTimedOut,
+      .invalidRuntimeEndpoints, .invalidEndpointConflict, .endpointConflict, .serviceNotRunning:
+      EngineFailure(
+        .agent(.validatorFailed),
+        message: "Configuration validation failed at an explicit internal boundary.")
     }
   }
 
@@ -256,6 +630,182 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
   }
 }
 
+/// A connection whose sends XPC can order a block after: the block runs once
+/// every message handed to the connection before it has been sent.
+protocol ProxyAgentSendBarrier: AnyObject {
+  func scheduleSendBarrierBlock(_ block: @escaping @Sendable () -> Void)
+}
+
+extension NSXPCConnection: ProxyAgentSendBarrier {}
+
+/// The ProxyAgent's accepted connections, from acceptance until invalidation.
+final class ProxyAgentConnections: @unchecked Sendable {
+  private let lock = NSLock()
+  private var connections: [ObjectIdentifier: NSXPCConnection] = [:]
+
+  /// Tracks `connection` until it is invalidated. Call it before resuming the
+  /// connection.
+  func track(_ connection: NSXPCConnection) {
+    let key = ObjectIdentifier(connection)
+    lock.withLock { connections[key] = connection }
+    connection.invalidationHandler = { [weak self] in
+      self?.forget(key)
+    }
+  }
+
+  var open: [any ProxyAgentSendBarrier] {
+    lock.withLock { Array(connections.values) }
+  }
+
+  private func forget(_ key: ObjectIdentifier) {
+    lock.withLock { _ = connections.removeValue(forKey: key) }
+  }
+}
+
+/// Ends the ProxyAgent after libbox could not close a runtime: only the process
+/// ending releases the listeners, descriptors and goroutines that close left
+/// open. launchd starts the agent again for the Host's next request.
+struct ProxyAgentProcessExit: Sendable {
+  typealias Schedule = @Sendable (DispatchTime, @escaping @Sendable () -> Void) -> Void
+  /// Runs work once the agent answered every request it received.
+  typealias WhenAnswered = @Sendable (@escaping @Sendable () -> Void) -> Void
+
+  /// launchd starts an on-demand agent again no sooner than this after it last
+  /// started it, its default `ThrottleInterval`, which the agent's job keeps,
+  /// and holds every request for the agent until then, past the Host's
+  /// five-second reply wait. Measured on macOS 27.0.1 on 2026-10-16: an agent
+  /// that ended right after a reply had its next request answered 10.0 seconds
+  /// after its start, one that ended 11 seconds after its start within 50 ms.
+  static let launchdRestartThrottle: DispatchTimeInterval = .seconds(10)
+  /// The agent ends no sooner than this after it started, so launchd starts its
+  /// successor at once. The extra second covers the time from launchd starting
+  /// the agent to the agent reading the clock.
+  static let minimumLifetime: DispatchTimeInterval = .seconds(11)
+  /// How long the agent waits for the requests it received to be answered:
+  /// the Host waits for no answer longer than for a rights request's.
+  static let unansweredRequestLimit = DispatchTimeInterval.seconds(
+    Int(ProxyAgentRequestBudget.authorizationReply.components.seconds))
+  /// How long the agent waits for its connections to send the replies it gave
+  /// them. The Host waits five seconds for a reply, so one still unsent then is
+  /// no longer awaited.
+  static let sendBarrierLimit: DispatchTimeInterval = .seconds(5)
+
+  private static let logger = Logger(
+    subsystem: "com.bill.clashformac",
+    category: "proxy-agent-exit"
+  )
+  private let openConnections: @Sendable () -> [any ProxyAgentSendBarrier]
+  private let whenAnswered: WhenAnswered
+  private let launchedAt: DispatchTime
+  private let now: @Sendable () -> DispatchTime
+  private let schedule: Schedule
+  private let exit: @Sendable (Int32) -> Void
+
+  /// `launchedAt` is when the agent's process started. Dispatch time stops
+  /// while the Mac sleeps, so a wait that spans a sleep ends no earlier than
+  /// launchd's. `_exit` skips atexit handlers while libbox's threads still run.
+  init(
+    connections: ProxyAgentConnections, requests: ProxyAgentUnansweredRequests,
+    launchedAt: DispatchTime
+  ) {
+    self.init(
+      openConnections: { connections.open }, whenAnswered: { requests.whenNone($0) },
+      launchedAt: launchedAt, now: { .now() },
+      schedule: { deadline, work in
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: deadline, execute: work)
+      },
+      exit: { _exit($0) })
+  }
+
+  init(
+    openConnections: @escaping @Sendable () -> [any ProxyAgentSendBarrier],
+    whenAnswered: @escaping WhenAnswered,
+    launchedAt: DispatchTime,
+    now: @escaping @Sendable () -> DispatchTime,
+    schedule: @escaping Schedule,
+    exit: @escaping @Sendable (Int32) -> Void
+  ) {
+    self.openConnections = openConnections
+    self.whenAnswered = whenAnswered
+    self.launchedAt = launchedAt
+    self.now = now
+    self.schedule = schedule
+    self.exit = exit
+  }
+
+  /// Exits once the agent has run `minimumLifetime`, has answered every request
+  /// it received, and a send barrier has run on every open connection then, so
+  /// every reply, the failure's own included, has been sent; until then the
+  /// agent keeps answering. A request still unanswered
+  /// `unansweredRequestLimit` later, or a connection that has not sent its
+  /// replies `sendBarrierLimit` after its barrier, no longer holds the exit.
+  /// Only `ProxyAgentEndReason`'s reasons end the agent this way; libbox's
+  /// text is never logged.
+  func end(_ reason: ProxyAgentEndReason) {
+    switch reason {
+    case .engineUnclosable:
+      Self.logger.fault("libbox could not close a System Proxy runtime; ending the ProxyAgent")
+    case .quarantinedStop:
+      Self.logger.notice(
+        "The network Authority quarantined a stop this ProxyAgent finished; ending it so the Authority releases the lease"
+      )
+    case .retired:
+      Self.logger.fault(
+        "A configuration check or latency test left libbox holding what it built; ending the retired ProxyAgent"
+      )
+    }
+    schedule(max(now(), launchedAt + Self.minimumLifetime)) { [self] in
+      exitOnceAnswered()
+    }
+  }
+
+  private func exitOnceAnswered() {
+    let sending = ProxyAgentFirstPath()
+    schedule(now() + Self.unansweredRequestLimit) { [self] in
+      if sending.run({ exitOnceRepliesAreSent() }) {
+        Self.logger.fault("a request was still unanswered at its limit; ending the ProxyAgent")
+      }
+    }
+    whenAnswered { [self] in
+      sending.run { exitOnceRepliesAreSent() }
+    }
+  }
+
+  private func exitOnceRepliesAreSent() {
+    let exiting = ProxyAgentFirstPath()
+    let exit = self.exit
+    let sent = DispatchGroup()
+    for connection in openConnections() {
+      sent.enter()
+      connection.scheduleSendBarrierBlock { sent.leave() }
+    }
+    sent.notify(queue: .global(qos: .userInitiated)) {
+      exiting.run { exit(EX_SOFTWARE) }
+    }
+    schedule(now() + Self.sendBarrierLimit) {
+      if exiting.run({ exit(EX_SOFTWARE) }) {
+        Self.logger.fault("a connection did not send its replies in time; ending the ProxyAgent")
+      }
+    }
+  }
+}
+
+/// Runs the work of whichever of several paths comes first, and only its.
+private final class ProxyAgentFirstPath: Sendable {
+  private let taken = Mutex(false)
+
+  /// Runs `work` unless another path came first; returns whether it ran.
+  @discardableResult
+  func run(_ work: () -> Void) -> Bool {
+    let first = taken.withLock { taken -> Bool in
+      defer { taken = true }
+      return !taken
+    }
+    if first { work() }
+    return first
+  }
+}
+
 final class ProxyAgentListenerDelegate: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
   private static let logger = Logger(
     subsystem: "com.bill.clashformac",
@@ -263,10 +813,15 @@ final class ProxyAgentListenerDelegate: NSObject, NSXPCListenerDelegate, @unchec
   )
   private let identityPolicy: CodeIdentityPolicy
   private let service: ProxyAgentService
+  private let connections: ProxyAgentConnections
 
-  init(identityPolicy: CodeIdentityPolicy, service: ProxyAgentService) {
+  init(
+    identityPolicy: CodeIdentityPolicy, service: ProxyAgentService,
+    connections: ProxyAgentConnections
+  ) {
     self.identityPolicy = identityPolicy
     self.service = service
+    self.connections = connections
   }
 
   func listener(
@@ -285,6 +840,7 @@ final class ProxyAgentListenerDelegate: NSObject, NSXPCListenerDelegate, @unchec
 
     connection.exportedInterface = NSXPCInterface(with: CFWProxyAgentXPCProtocol.self)
     connection.exportedObject = service
+    connections.track(connection)
     connection.resume()
     return true
   }

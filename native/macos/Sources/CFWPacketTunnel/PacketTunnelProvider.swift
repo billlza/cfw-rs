@@ -1,4 +1,5 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWPacketTransport
 import CFWSharedProtocol
 import Foundation
@@ -9,6 +10,7 @@ public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case providerUnavailable
   case globalAuthorityUnavailable
   case invalidStartTicket
+  case expiredStartTicket
   case malformedProviderConfiguration
   case invalidConfigurationSlot
   case lifecycleConflict
@@ -18,7 +20,12 @@ public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case packetPumpSetup(String)
   case packetPump(PacketPumpError)
   case engineStart(String)
-  case engineStop(String)
+  /// libbox did not finish starting by the start deadline and was interrupted.
+  case engineStartTimedOut
+  case controllerEndpointConflict(port: UInt16)
+  case mixedEndpointConflict(port: UInt16)
+  /// libbox could not close the engine, so the extension is spent.
+  case engineUnclosable(LibboxInstanceUnclosable)
   case networkSettings(String)
 }
 
@@ -31,6 +38,8 @@ extension PacketTunnelProviderError: LocalizedError {
       return GlobalAuthorityGateError.stableMessage
     case .invalidStartTicket:
       return "Packet tunnel start ticket is missing or invalid."
+    case .expiredStartTicket:
+      return TunnelStartupFailure.ticketExpired.message
     case .malformedProviderConfiguration:
       return "Packet tunnel provider configuration is malformed."
     case .invalidConfigurationSlot:
@@ -49,8 +58,14 @@ extension PacketTunnelProviderError: LocalizedError {
       return "Packet pump failed: \(error)"
     case .engineStart:
       return "Packet tunnel engine start failed."
-    case .engineStop:
-      return "Packet tunnel engine stop failed."
+    case .engineStartTimedOut:
+      return TunnelStartupFailure.engineStartTimedOut.message
+    case .mixedEndpointConflict(let port):
+      return "The Packet Tunnel mixed endpoint could not bind to port \(port)."
+    case .controllerEndpointConflict(let port):
+      return "The Packet Tunnel controller endpoint could not bind to port \(port)."
+    case .engineUnclosable:
+      return TunnelStartupFailure.engineUnclosable.message
     case .networkSettings:
       return "Packet tunnel network settings failed."
     }
@@ -59,98 +74,59 @@ extension PacketTunnelProviderError: LocalizedError {
 
 extension PacketTunnelProviderError {
   var engineFailure: EngineFailure {
-    let fields: (code: String, message: String, isRetryable: Bool) =
-      switch self {
-      case .providerUnavailable:
-        (
-          "tunnel-provider-unavailable",
-          "Packet tunnel provider lifecycle is unavailable.",
-          true
-        )
-      case .globalAuthorityUnavailable:
-        (
-          GlobalAuthorityGateError.stableCode,
-          GlobalAuthorityGateError.stableMessage,
-          false
-        )
-      case .invalidStartTicket:
-        (
-          "tunnel-start-ticket-invalid",
-          "Packet tunnel start ticket is missing or invalid.",
-          false
-        )
-      case .malformedProviderConfiguration:
-        (
-          "tunnel-provider-configuration-malformed",
-          "Packet tunnel provider configuration is malformed.",
-          false
-        )
-      case .invalidConfigurationSlot:
-        (
-          "tunnel-configuration-slot-invalid",
-          "Packet tunnel received a configuration for another engine slot.",
-          false
-        )
-      case .lifecycleConflict:
-        (
-          "tunnel-lifecycle-conflict",
-          "Packet tunnel already owns a starting, active, or failed runtime.",
-          false
-        )
-      case .startupCancelled:
-        (
-          "tunnel-startup-cancelled",
-          "Packet tunnel startup was cancelled.",
-          false
-        )
-      case .configuration:
-        (
-          "tunnel-configuration-invalid",
-          "Packet tunnel configuration validation failed.",
-          false
-        )
-      case .engineCreation:
-        (
-          "tunnel-engine-creation-failed",
-          "Packet tunnel engine creation failed.",
-          true
-        )
-      case .packetPumpSetup:
-        (
-          "tunnel-packet-pump-setup-failed",
-          "Packet tunnel packet pump setup failed.",
-          true
-        )
-      case .packetPump:
-        (
-          "tunnel-packet-pump-failed",
-          "Packet tunnel packet transport failed.",
-          true
-        )
-      case .engineStart:
-        (
-          "tunnel-engine-start-failed",
-          "Packet tunnel engine startup failed.",
-          true
-        )
-      case .engineStop:
-        (
-          "tunnel-engine-stop-failed",
-          "Packet tunnel engine stop failed.",
-          true
-        )
-      case .networkSettings:
-        (
-          "tunnel-network-settings-failed",
-          "Packet tunnel network settings failed.",
-          true
-        )
-      }
-    return EngineFailure(
-      code: fields.code,
-      message: fields.message,
-      isRetryable: fields.isRetryable
-    )
+    switch self {
+    case .providerUnavailable:
+      EngineFailure(
+        .providerUnavailable, message: "Packet tunnel provider lifecycle is unavailable.")
+    case .globalAuthorityUnavailable:
+      EngineFailure(
+        .globalAuthorityUnavailable, message: GlobalAuthorityGateError.stableMessage)
+    case .invalidStartTicket:
+      EngineFailure(
+        .startTicketInvalid, message: "Packet tunnel start ticket is missing or invalid.")
+    case .expiredStartTicket:
+      TunnelStartupFailure.ticketExpired
+    case .malformedProviderConfiguration:
+      EngineFailure(
+        .providerConfigurationMalformed,
+        message: "Packet tunnel provider configuration is malformed.")
+    case .invalidConfigurationSlot:
+      EngineFailure(
+        .configurationSlotInvalid,
+        message: "Packet tunnel received a configuration for another engine slot.")
+    case .lifecycleConflict:
+      EngineFailure(
+        .lifecycleConflict,
+        message: "Packet tunnel already owns a starting, active, or failed runtime.")
+    case .startupCancelled:
+      EngineFailure(.startupCancelled, message: "Packet tunnel startup was cancelled.")
+    case .configuration:
+      EngineFailure(
+        .configurationInvalid, message: "Packet tunnel configuration validation failed.")
+    case .engineCreation:
+      EngineFailure(.engineCreationFailed, message: "Packet tunnel engine creation failed.")
+    case .packetPumpSetup:
+      EngineFailure(
+        .packetPumpSetupFailed, message: "Packet tunnel packet pump setup failed.")
+    case .packetPump:
+      EngineFailure(.packetPumpFailed, message: "Packet tunnel packet transport failed.")
+    case .engineStart:
+      EngineFailure(.engineStartFailed, message: "Packet tunnel engine startup failed.")
+    case .engineStartTimedOut:
+      TunnelStartupFailure.engineStartTimedOut
+    case .mixedEndpointConflict(let port):
+      EngineFailure(
+        .mixedEndpointInUse,
+        message: "The Packet Tunnel mixed endpoint could not bind to port \(port).")
+    case .controllerEndpointConflict(let port):
+      EngineFailure(
+        .controllerEndpointInUse,
+        message: "The Packet Tunnel controller endpoint could not bind to port \(port).")
+    case .engineUnclosable:
+      TunnelStartupFailure.engineUnclosable
+    case .networkSettings:
+      EngineFailure(.networkSettingsFailed, message: "Packet tunnel network settings failed.")
+    }
   }
 }
 
@@ -185,28 +161,43 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     super.init()
     let lifecycle = PacketTunnelSessionLifecycle(
       engineFactory: engineFactory,
-      dependencies: makeSessionDependencies()
-    ) { [weak self] error in
-      self?.cancelTunnelWithError(error)
-    }
+      dependencies: makeSessionDependencies(),
+      cancelTunnel: { [weak self] error in
+        self?.cancelTunnelWithError(error)
+      },
+      endProcess: { PacketTunnelProcessEnd.shared.spent($0) })
     sessionLifecycle = lifecycle
-    // Production ships without an authenticated Provider owner XPC channel yet, so
-    // the default owner client fails closed. Real redemption is wired by the Host
-    // and Authority integration tasks; the ticket-only start path here never falls
-    // back to a direct configuration/credential payload.
+    // The Provider redeems the opaque ticket only through the authenticated,
+    // bounded Global Authority channel. No configuration/credential fallback
+    // exists in the provider process.
+    let revocation = TunnelRevocationChannel()
+    let authorityRemote = NSXPCGlobalAuthorityRemote(
+      role: .provider,
+      onEvent: { event in
+        switch event {
+        case .revoke, .stop: revocation.revoke()
+        case .snapshot: break
+        }
+      },
+      onDisconnect: { revocation.revoke() })
     startCoordinator = TunnelTicketStartCoordinator(
-      authority: FailClosedEngineOwnerAuthorityClient(),
-      sessionLifecycle: lifecycle
-    )
+      authority: BoundedAuthorityXPCClient(remote: authorityRemote),
+      sessionLifecycle: lifecycle,
+      revocation: revocation,
+      reportRevocationFailure: { [weak self] error in
+        self?.cancelTunnelWithError(error.providerError)
+      },
+      completeRevocation: { [weak self] in
+        self?.cancelTunnelWithError(nil)
+      })
   }
 
-  /// Extracts the single bounded, opaque 32-byte start ticket from the tunnel start
-  /// options. The production channel carries only this value; a missing, extra, or
-  /// wrong-sized entry fails closed with `invalidStartTicket`.
+  /// Extracts only the bounded, opaque 32-byte ticket from the platform options.
+  /// macOS supplements Host options with connection metadata. Those fields never
+  /// supply configuration, credentials or authority; only ticket redemption can.
   static func startTicket(from options: [String: NSObject]?) throws -> StartTicket {
     guard
       let options,
-      options.count == 1,
       let ticketData = options[NativeProtocolConstants.tunnelStartTicketOptionKey] as? NSData
     else {
       throw PacketTunnelProviderError.invalidStartTicket
@@ -222,12 +213,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     options: [String: NSObject]?,
     completionHandler: @escaping @Sendable (Error?) -> Void
   ) {
-    do {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
-    } catch {
-      completionHandler(PacketTunnelProviderError.globalAuthorityUnavailable)
-      return
-    }
+    let optionCount = options?.count ?? 0
+    let ticketLength =
+      (options?[NativeProtocolConstants.tunnelStartTicketOptionKey] as? NSData)?.length ?? 0
+    let hasServerMetadata = options?["ServerAddress"] != nil
+    let hasVendorMetadata = options?["VendorData"] != nil
+    Self.logger.info(
+      "Tunnel start option structure: fields=\(optionCount, privacy: .public), ticketBytes=\(ticketLength, privacy: .public), serverMetadata=\(hasServerMetadata, privacy: .public), vendorMetadata=\(hasVendorMetadata, privacy: .public)"
+    )
     guard let startCoordinator else {
       completionHandler(PacketTunnelProviderError.providerUnavailable)
       return
@@ -241,22 +234,88 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       completionHandler(error)
       return
     }
+    if let refusal = Self.startRefusal(PacketTunnelProcessEnd.shared, configuration: descriptor) {
+      completionHandler(refusal)
+      return
+    }
     startCoordinator.start(
       ticket: ticket,
       descriptor: descriptor,
-      completion: completionHandler
+      completion: { error in
+        completionHandler(Self.platformStartError(error, configuration: descriptor))
+      }
     )
+  }
+
+  /// The Host's readiness wait sees a failed start only as a disconnected
+  /// tunnel. Causes it must act on travel with the start's lineage.
+  static func platformStartError(
+    _ error: Error?, configuration: ConfigurationDescriptor
+  ) -> Error? {
+    switch error as? PacketTunnelProviderError {
+    case .expiredStartTicket:
+      return TunnelStartupFailure.ticketExpiredError(configuration: configuration)
+    case .engineStartTimedOut:
+      return TunnelStartupFailure.engineStartTimedOutError(configuration: configuration)
+    case .engineUnclosable:
+      return TunnelStartupFailure.engineUnclosableError(configuration: configuration)
+    default:
+      return error
+    }
+  }
+
+  /// A provider Network Extension creates in a process whose runtime libbox
+  /// could not close does not start: that process cannot release what the
+  /// close left open. It fails with the start's lineage, as the spent runtime's
+  /// own starts do.
+  static func startRefusal(
+    _ processEnd: PacketTunnelProcessEnd, configuration: ConfigurationDescriptor
+  ) -> Error? {
+    guard processEnd.spentFailure != nil else { return nil }
+    return TunnelStartupFailure.engineUnclosableError(configuration: configuration)
+  }
+
+  /// Answers the stop Network Extension asked for, and only then lets a spent
+  /// extension end.
+  static func stopCompletion(
+    _ platformCompletion: @escaping @Sendable () -> Void,
+    processEnd: PacketTunnelProcessEnd
+  ) -> @Sendable () -> Void {
+    {
+      platformCompletion()
+      processEnd.networkExtensionStopAnswered()
+    }
   }
 
   public override func stopTunnel(
     with reason: NEProviderStopReason,
-    completionHandler: @escaping @Sendable () -> Void
+    completionHandler platformCompletion: @escaping @Sendable () -> Void
   ) {
+    let completionHandler = Self.stopCompletion(
+      platformCompletion, processEnd: PacketTunnelProcessEnd.shared)
     guard let startCoordinator else {
-      sessionLifecycle?.stop(completionHandler: completionHandler)
+      guard let sessionLifecycle else {
+        cancelTunnelWithError(PacketTunnelProviderError.providerUnavailable)
+        completionHandler()
+        return
+      }
+      sessionLifecycle.stop { [weak self] result in
+        if case .failure(let error) = result {
+          // NetworkExtension has a void stop completion. Preserve its required
+          // callback while reporting the typed failure through the platform's
+          // explicit provider-error channel.
+          self?.cancelTunnelWithError(error.providerError)
+        }
+        completionHandler()
+      }
       return
     }
-    startCoordinator.stop(completion: completionHandler)
+    startCoordinator.stop { [weak self] result in
+      if case .failure(let error) = result {
+        self?.cancelTunnelWithError(error.providerError)
+      }
+      completionHandler()
+    }
   }
 
   public override func handleAppMessage(
@@ -273,10 +332,8 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         let response = ResponseEnvelope(
           requestID: request.requestID,
           failure: EngineFailure(
-            code: "unsupported-provider-command",
-            message: "The packet tunnel provider accepts snapshot requests only.",
-            isRetryable: false
-          )
+            .unsupportedCommand,
+            message: "The packet tunnel provider accepts snapshot requests only.")
         )
         completion.finish(try ProtocolCodec.encode(response))
         return
@@ -375,6 +432,11 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       let tunnelOptions = try decodeTunnelOptions(values, slot: slot),
       let installationIDValue = values["installationID"] as? String,
       let installationID = UUID(uuidString: installationIDValue),
+      installationIDValue == installationID.uuidString.lowercased(),
+      let credentialProfileIDValue = values["credentialProfileID"] as? String,
+      let credentialProfileID = UUID(uuidString: credentialProfileIDValue),
+      credentialProfileIDValue == credentialProfileID.uuidString.lowercased(),
+      let credentialProfileDigestValue = values["credentialProfileDigest"] as? String,
       let epochValue = values["epoch"] as? String,
       let epoch = UInt64(epochValue),
       let generationValue = values["generation"] as? String,
@@ -395,6 +457,10 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       return try ConfigurationDescriptor(
         slot: slot,
         tunnelOptions: tunnelOptions,
+        credentialAudience: CredentialAudience(
+          profileID: credentialProfileID,
+          profileDigest: try SHA256Digest(hex: credentialProfileDigestValue)
+        ),
         installationID: installationID,
         epoch: epoch,
         generation: generation,
@@ -415,6 +481,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     guard slot == .tunnel,
       let ipv6Value = values["ipv6Enabled"] as? String,
       let bypassPrivateNetworksValue = values["bypassPrivateNetworks"] as? String,
+      let directIPv4Hosts = values["directIPv4Hosts"] as? [String],
       let mtuValue = values["mtu"] as? String,
       let mtu = UInt16(mtuValue)
     else {
@@ -438,10 +505,21 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     default:
       throw PacketTunnelProviderError.malformedProviderConfiguration
     }
+    let systemProxyPort: UInt16?
+    if let value = values["systemProxyPort"] {
+      guard let text = value as? String, let port = UInt16(text), port > 0,
+        text == String(port)
+      else { throw PacketTunnelProviderError.malformedProviderConfiguration }
+      systemProxyPort = port
+    } else {
+      systemProxyPort = nil
+    }
     return try TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
-      mtu: mtu
+      directIPv4Hosts: directIPv4Hosts,
+      mtu: mtu,
+      systemProxyPort: systemProxyPort
     )
   }
 
@@ -457,10 +535,15 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       addresses: [TunnelAddressPlan.ipv4Address],
       subnetMasks: [TunnelAddressPlan.ipv4SubnetMask]
     )
-    ipv4.includedRoutes = [.default()]
+    ipv4.includedRoutes = [
+      .default(),
+      NEIPv4Route(
+        destinationAddress: TunnelAddressPlan.ipv4NetworkAddress,
+        subnetMask: TunnelAddressPlan.ipv4SubnetMask),
+    ]
+    var excludedIPv4Routes: [NEIPv4Route] = []
     if tunnelOptions.bypassPrivateNetworks {
-      ipv4.excludedRoutes = [
-        NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
+      excludedIPv4Routes = [
         NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
         NEIPv4Route(destinationAddress: "172.16.0.0", subnetMask: "255.240.0.0"),
         NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
@@ -469,6 +552,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         NEIPv4Route(destinationAddress: "255.255.255.255", subnetMask: "255.255.255.255"),
       ]
     }
+    excludedIPv4Routes.append(
+      contentsOf: tunnelOptions.directIPv4Hosts.map {
+        NEIPv4Route(destinationAddress: $0, subnetMask: "255.255.255.255")
+      }
+    )
+    if !excludedIPv4Routes.isEmpty {
+      ipv4.excludedRoutes = excludedIPv4Routes
+    }
     settings.ipv4Settings = ipv4
 
     if tunnelOptions.ipv6Enabled {
@@ -476,10 +567,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         addresses: [TunnelAddressPlan.ipv6Address],
         networkPrefixLengths: [NSNumber(value: TunnelAddressPlan.ipv6PrefixLength)]
       )
-      ipv6.includedRoutes = [.default()]
+      ipv6.includedRoutes = [
+        .default(),
+        NEIPv6Route(
+          destinationAddress: TunnelAddressPlan.ipv6NetworkAddress,
+          networkPrefixLength: NSNumber(value: TunnelAddressPlan.ipv6PrefixLength)),
+      ]
       if tunnelOptions.bypassPrivateNetworks {
         ipv6.excludedRoutes = [
-          NEIPv6Route(destinationAddress: "::1", networkPrefixLength: 128),
           NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),
           NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10),
           NEIPv6Route(destinationAddress: "ff00::", networkPrefixLength: 8),
@@ -500,6 +595,17 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     dns.matchDomainsNoSearch = true
     settings.dnsSettings = dns
     settings.mtu = NSNumber(value: tunnelOptions.mtu)
+    if let port = tunnelOptions.systemProxyPort {
+      let proxy = NEProxySettings()
+      proxy.httpEnabled = true
+      proxy.httpServer = NEProxyServer(address: "127.0.0.1", port: Int(port))
+      proxy.httpsEnabled = true
+      proxy.httpsServer = NEProxyServer(address: "127.0.0.1", port: Int(port))
+      proxy.matchDomains = [""]
+      proxy.excludeSimpleHostnames = true
+      proxy.exceptionList = ["localhost", "127.0.0.1", "::1", "*.local"]
+      settings.proxySettings = proxy
+    }
     return settings
   }
 }

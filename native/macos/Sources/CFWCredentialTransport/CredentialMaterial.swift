@@ -32,7 +32,8 @@ public struct CredentialMaterialEntry: Equatable, Sendable {
     guard !secret.isEmpty,
       secret.count <= CredentialMaterialConstants.maximumSecretBytes,
       let value = String(data: secret, encoding: .utf8),
-      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+      reference.kind.admitsSecretSyntax(value)
     else {
       throw CredentialMaterialError.invalidSecret
     }
@@ -89,6 +90,34 @@ public struct CredentialMaterial: Equatable, Sendable {
 
   private init(validatedEntries: [CredentialMaterialEntry]) {
     entries = validatedEntries
+  }
+
+  /// Encodes the Authority's bounded XPC format, preserving descriptor order
+  /// instead of the vault's UUID ordering. The caller owns and erases the result.
+  public func authorityPayload(for slots: [CredentialSlot]) throws -> SensitiveBytes? {
+    let references = try AuthoritySecretPayloadCodec.references(for: slots)
+    let required = Set(references.map(\.id))
+    let supplied = Dictionary(uniqueKeysWithValues: entries.map { ($0.reference.id, $0) })
+    for entry in entries where !required.contains(entry.reference.id) {
+      throw CredentialMaterialError.unexpectedReference(entry.reference.id)
+    }
+    var secrets: [AuthoritySecretSlot] = []
+    defer { for secret in secrets { secret.erase() } }
+    for reference in references {
+      guard let entry = supplied[reference.id] else {
+        throw CredentialMaterialError.missingReference(reference.id)
+      }
+      guard entry.reference.kind == reference.kind else {
+        throw CredentialMaterialError.kindMismatch(reference.id)
+      }
+      secrets.append(
+        try entry.withSecretBytes {
+          try AuthoritySecretSlot(reference: reference, copying: $0)
+        })
+    }
+    let material = try AuthoritySecretMaterial(slots: secrets)
+    defer { material.erase() }
+    return try AuthoritySecretPayloadCodec.encode(material)
   }
 
   public mutating func erase() {
@@ -222,41 +251,73 @@ public enum CredentialInjector {
       }
     }
 
-    guard var outbounds = root["outbounds"] as? [Any] else {
-      throw CredentialMaterialError.invalidConfiguration
-    }
-    for slot in slots {
-      let index = Int(slot.outboundIndex)
-      guard index < outbounds.count,
-        var outbound = outbounds[index] as? [String: Any],
-        let entry = supplied[slot.reference.id],
-        let secret = String(data: entry.exposedSecret(), encoding: .utf8)
-      else {
+    // Remove the container before changing its elements. Retaining the root's
+    // array during each slot write would copy the entire subscription per slot.
+    for container in ["outbounds", "endpoints"] {
+      let containerSlots = slots.filter { $0.target.configurationContainer == container }
+      if containerSlots.isEmpty { continue }
+      guard var outbounds = root.removeValue(forKey: container) as? [Any] else {
         throw CredentialMaterialError.invalidConfiguration
       }
-      switch slot.target {
-      case .shadowsocksPassword, .trojanPassword, .hysteria2Password:
-        guard outbound["password"] as? String == "" else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
-        }
-        outbound["password"] = secret
-      case .vmessUUID, .vlessUUID:
-        guard outbound["uuid"] as? String == "" else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
-        }
-        outbound["uuid"] = secret
-      case .hysteria2ObfsPassword:
-        guard var obfs = outbound["obfs"] as? [String: Any],
-          obfs["password"] as? String == ""
+      for slot in containerSlots {
+        let index = Int(slot.outboundIndex)
+        guard index < outbounds.count,
+          var outbound = outbounds[index] as? [String: Any],
+          let entry = supplied[slot.reference.id],
+          let secret = String(data: entry.exposedSecret(), encoding: .utf8)
         else {
-          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          throw CredentialMaterialError.invalidConfiguration
         }
-        obfs["password"] = secret
-        outbound["obfs"] = obfs
+        if (slot.target == .httpProxyUsername || slot.target == .httpProxyPassword)
+          && outbound["type"] as? String != "http"
+        {
+          throw CredentialMaterialError.invalidConfiguration
+        }
+        switch slot.target {
+        case .wireguardPrivateKey:
+          guard outbound["type"] as? String == "wireguard", outbound["private_key"] as? String == ""
+          else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["private_key"] = secret
+        case .wireguardPreSharedKey:
+          guard outbound["type"] as? String == "wireguard",
+            var peers = outbound["peers"] as? [[String: Any]], peers.count == 1,
+            peers[0]["pre_shared_key"] as? String == ""
+          else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          peers[0]["pre_shared_key"] = secret
+          outbound["peers"] = peers
+        case .socks5Username, .httpProxyUsername:
+          guard outbound["username"] as? String == "" else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["username"] = secret
+        case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
+          .tuicPassword, .socks5Password, .httpProxyPassword:
+          guard outbound["password"] as? String == "" else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["password"] = secret
+        case .vmessUUID, .vlessUUID, .tuicUUID:
+          guard outbound["uuid"] as? String == "" else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          outbound["uuid"] = secret
+        case .hysteria2ObfsPassword:
+          guard var obfs = outbound["obfs"] as? [String: Any],
+            obfs["password"] as? String == ""
+          else {
+            throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+          }
+          obfs["password"] = secret
+          outbound["obfs"] = obfs
+        }
+        outbounds[index] = outbound
       }
-      outbounds[index] = outbound
+      root[container] = outbounds
     }
-    root["outbounds"] = outbounds
     let filled = try JSONSerialization.data(
       withJSONObject: root,
       options: [.sortedKeys, .withoutEscapingSlashes]

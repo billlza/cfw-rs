@@ -1,0 +1,76 @@
+name: CFMPhysicalTransportPeerIOS
+options:
+  bundleIdPrefix: com.bill.cfm
+  deploymentTarget:
+    iOS: "17.0"
+  generateEmptyDirectories: false
+  groupSortPosition: top
+settings:
+  base:
+    ARCHS: arm64
+    CLANG_ENABLE_MODULES: YES
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: $(CFM_IOS_PEER_DEVELOPMENT_TEAM)
+    ENABLE_BITCODE: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ONLY_ACTIVE_ARCH: NO
+    PROVISIONING_PROFILE_SPECIFIER: $(CFM_IOS_PEER_PROVISIONING_PROFILE_SPECIFIER)
+    SUPPORTS_MACCATALYST: NO
+    SUPPORTED_PLATFORMS: iphoneos
+    SWIFT_EMIT_CONST_VALUE_PROTOCOLS: ""
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    SWIFT_VERSION: "6.0"
+targets:
+  CFMPhysicalTransportPeer:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App
+      - path: Sources/TransportPeerCore
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: CFM Transport Peer
+        LSRequiresIPhoneOS: true
+        NSLocalNetworkUsageDescription: >-
+          This test-only peer receives bounded CFM transport validation traffic
+          on the local Wi-Fi network.
+        NSBonjourServices:
+          - _cfm-primer._tcp
+        UIApplicationExitsOnSuspend: true
+        UIRequiresFullScreen: true
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities:
+          - arm64
+          - wifi
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: ""
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.0.0"
+        PRODUCT_BUNDLE_IDENTIFIER: com.bill.cfm.physical-transport-peer
+        PRODUCT_NAME: CFMPhysicalTransportPeer
+        SKIP_INSTALL: NO
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: CryptoKit.framework
+schemes:
+  CFMPhysicalTransportPeer:
+    build:
+      targets:
+        CFMPhysicalTransportPeer: all
+    run:
+      config: Debug
+    archive:
+      config: Release

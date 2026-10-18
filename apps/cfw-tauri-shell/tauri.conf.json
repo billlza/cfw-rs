@@ -1,26 +1,31 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clash for Mac",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "com.bill.clashformac",
   "build": {
     "frontendDist": "ui/dist",
+    "features": ["physical-release-evidence"],
     "beforeBuildCommand": "../../scripts/build_ui_with_pinned_node.sh",
     "beforeDevCommand": "../../scripts/build_ui_with_pinned_node.sh"
   },
   "app": {
     "withGlobalTauri": false,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
         "title": "",
-        "width": 850,
-        "height": 603,
+        "width": 1100,
+        "height": 760,
         "minWidth": 850,
         "minHeight": 603,
         "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "transparent": true,
         "resizable": true,
-        "visible": true,
+        "visible": false,
         "center": true
       }
     ],
@@ -45,22 +50,25 @@
     "macOS": {
       "minimumSystemVersion": "15.0",
       "entitlements": "macos/entitlements.plist",
+      "infoPlist": "macos/Info.plist",
       "files": {
         "Frameworks/CFWNativeBridge.framework": "../../target/native-products/CFWNativeBridge.framework",
+        "Frameworks/libCFMNativeDashboard.dylib": "../../target/native-products/libCFMNativeDashboard.dylib",
         "Library/HelperTools/CFWGlobalAuthority": "../../target/native-products/CFWGlobalAuthority",
         "Library/HelperTools/cfw-helper-tombstone": "../../target/native-products/CFWLegacyTombstone/cfw-helper-tombstone",
         "Library/LaunchDaemons/com.bill.clashformac.global-authority.plist": "../../native/macos/Config/com.bill.clashformac.global-authority.plist",
         "Library/LaunchDaemons/com.bill.clashformac.helper.plist": "macos/legacy-tombstone/com.bill.clashformac.helper.plist",
         "Library/LaunchAgents/com.bill.clashformac.proxy-agent.plist": "../../native/macos/Config/com.bill.clashformac.proxy-agent.plist",
         "Library/LoginItems/CFWProxyAgent.app": "../../target/native-products/CFWProxyAgent.app",
-        "Library/SystemExtensions/CFWPacketTunnel.systemextension": "../../target/native-products/CFWPacketTunnel.systemextension"
+        "Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension": "../../target/native-products/com.bill.clashformac.packet-tunnel.systemextension",
+        "Resources/CFMNativeDashboard_CFMNativeDashboard.bundle": "../../target/native-products/CFMNativeDashboard_CFMNativeDashboard.bundle"
       }
     },
     "resources": []
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQxNjc4ODQ3NDhENTIwREQKUldUZElOVklSNGhuUWM1NnlCMS9qNGtyQm56L3JHSnFwYy9ZRm9iMHpQYzdBeTBqYmU0ZXNsMHUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzM0U5MjQ1ODFGMjBBQ0IKUldUTEN2S0JSWkkrSXhYUFFZTWFUWkI2d2tycWVFcnJTVmVZcTFwdndKSVB3aXhnWWhaTW5UL0oK",
       "endpoints": [
         "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json"
       ]

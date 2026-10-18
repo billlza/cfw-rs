@@ -1,0 +1,1 @@
+{"schema_version":8,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","result":{"kind":"service_maintenance","value":{"action":"unregister_installed_40019_proxy_agent","engine_status":"off","global_authority":"enabled","off_proof_profile":"installed_40019_engine_v5_authority_v1_0","proxy_agent":"not_registered"}},"failure":null}

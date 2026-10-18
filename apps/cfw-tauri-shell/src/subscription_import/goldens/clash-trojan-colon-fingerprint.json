@@ -1,0 +1,31 @@
+{
+  "credentials": [
+    {
+      "id": "40e5fd1b-eeae-559a-9309-bbe150eba491",
+      "kind": "trojan_password",
+      "secret_sha256": "26f4dd954fdf971f73c76233e8b1e149aeab338ef3d2200ef910fb5daae8e35d"
+    }
+  ],
+  "digest": "c91d8d82419511025c55b363b644b6d468f63145b8f699ce4135fee829eb0f95",
+  "profile": {
+    "outbounds": [
+      {
+        "credential_ref": {
+          "id": "40e5fd1b-eeae-559a-9309-bbe150eba491",
+          "kind": "trojan_password"
+        },
+        "server": "trojan.example.com",
+        "server_port": 443,
+        "tag": "trojan-pinned",
+        "tls": {
+          "certificate_sha256": [
+            "//79/Pv6+fj39vX08/Lx8O/u7ezr6uno5+bl5OPi4eA="
+          ],
+          "enabled": true,
+          "server_name": "trojan.example.com"
+        },
+        "type": "trojan"
+      }
+    ]
+  }
+}

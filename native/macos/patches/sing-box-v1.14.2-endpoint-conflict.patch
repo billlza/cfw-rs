@@ -1,0 +1,841 @@
+diff --git a/adapter/endpoint_conflict.go b/adapter/endpoint_conflict.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..af7ffce8767178b4a9eff5b3c17a24750be47427
+--- /dev/null
++++ b/adapter/endpoint_conflict.go
+@@ -0,0 +1,54 @@
++package adapter
++
++import "errors"
++
++type EndpointConflictRole int32
++
++const (
++	EndpointConflictNone EndpointConflictRole = iota
++	EndpointConflictMixed
++	EndpointConflictController
++)
++
++type EndpointConflictError struct {
++	role  EndpointConflictRole
++	port  uint16
++	cause error
++}
++
++func (e *EndpointConflictError) Error() string {
++	if e == nil || e.cause == nil {
++		return "endpoint conflict has no cause"
++	}
++	return e.cause.Error()
++}
++
++func (e *EndpointConflictError) Unwrap() error {
++	if e == nil {
++		return nil
++	}
++	return e.cause
++}
++
++func NewEndpointConflictError(role EndpointConflictRole, port uint16, err error) error {
++	if err == nil {
++		return errors.New("endpoint conflict cause is required")
++	}
++	if port == 0 {
++		return errors.New("endpoint conflict port is required")
++	}
++	switch role {
++	case EndpointConflictMixed, EndpointConflictController:
++	default:
++		return errors.New("endpoint conflict role is invalid")
++	}
++	return &EndpointConflictError{role: role, port: port, cause: err}
++}
++
++func EndpointConflictFromError(err error) (EndpointConflictRole, uint16, bool) {
++	var conflict *EndpointConflictError
++	if errors.As(err, &conflict) && conflict != nil && conflict.cause != nil {
++		return conflict.role, conflict.port, true
++	}
++	return EndpointConflictNone, 0, false
++}
+diff --git a/adapter/endpoint_conflict_test.go b/adapter/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8685643aceb8cea919b3eeccd6910868284d5c49
+--- /dev/null
++++ b/adapter/endpoint_conflict_test.go
+@@ -0,0 +1,39 @@
++package adapter
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++)
++
++func TestEndpointConflictRoleSurvivesWrapping(t *testing.T) {
++	err := fmt.Errorf("start mixed inbound: %w", NewEndpointConflictError(EndpointConflictMixed, 7891, syscall.EADDRINUSE))
++	role, port, ok := EndpointConflictFromError(err)
++	if !ok || role != EndpointConflictMixed || port != 7891 {
++		t.Fatalf("unexpected conflict: role=%v port=%d ok=%v", role, port, ok)
++	}
++	if !errors.Is(err, syscall.EADDRINUSE) {
++		t.Fatal("wrapped conflict lost EADDRINUSE")
++	}
++}
++
++func TestUnclassifiedAddressInUseIsNotAConflict(t *testing.T) {
++	role, port, ok := EndpointConflictFromError(syscall.EADDRINUSE)
++	if ok || role != EndpointConflictNone || port != 0 {
++		t.Fatalf("bare errno was classified as a product endpoint: role=%v port=%d ok=%v", role, port, ok)
++	}
++}
++
++func TestInvalidEndpointConflictsAreNotClassified(t *testing.T) {
++	for _, err := range []error{
++		NewEndpointConflictError(EndpointConflictMixed, 7890, nil),
++		NewEndpointConflictError(EndpointConflictNone, 7890, syscall.EADDRINUSE),
++		NewEndpointConflictError(EndpointConflictMixed, 0, syscall.EADDRINUSE),
++	} {
++		role, port, ok := EndpointConflictFromError(err)
++		if ok || role != EndpointConflictNone || port != 0 {
++			t.Fatalf("invalid conflict was classified: role=%v port=%d ok=%v", role, port, ok)
++		}
++	}
++}
+diff --git a/box.go b/box.go
+index 92cd1ecdd30048a1e510bbe9017295c14d8931cc..e85646632901c326344696a534c2c5e7e4e3951d 100644
+--- a/box.go
++++ b/box.go
+@@ -512 +512 @@ func (s *Box) Start() error {
+-	err := s.start()
++	err := s.StartWithExternalCleanup()
+@@ -525,0 +526,9 @@ func (s *Box) Start() error {
++	return nil
++}
++
++// StartWithExternalCleanup leaves failed-start cleanup to the lifecycle owner.
++func (s *Box) StartWithExternalCleanup() error {
++	err := s.start()
++	if err != nil {
++		return err
++	}
+diff --git a/common/listener/listener_tcp.go b/common/listener/listener_tcp.go
+index 50643ea44ac8b1919777e7dbd871eb1b52b4a785..8a9d0db86d49e2d0fc1722d5d5e0da9bbb461d93 100644
+--- a/common/listener/listener_tcp.go
++++ b/common/listener/listener_tcp.go
+@@ -37,0 +38,4 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
++		err = rejectLoopbackReuseAddr(bindAddr)
++		if err != nil {
++			return nil, err
++		}
+@@ -39,0 +44 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
++	listenConfig.Control = control.Append(listenConfig.Control, ShareLoopbackPortAcrossUsers())
+diff --git a/common/listener/loopback_share_darwin.go b/common/listener/loopback_share_darwin.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..77799172215a4a66cdca9b5e5a6ada8f93ff39c1
+--- /dev/null
++++ b/common/listener/loopback_share_darwin.go
+@@ -0,0 +1,68 @@
++package listener
++
++import (
++	"net"
++	"net/netip"
++	"os"
++	"syscall"
++
++	"github.com/sagernet/sing/common/control"
++	E "github.com/sagernet/sing/common/exceptions"
++	M "github.com/sagernet/sing/common/metadata"
++
++	"golang.org/x/sys/unix"
++)
++
++// ErrLoopbackReuseAddr rejects reuse_addr on a loopback TCP listener. Such a
++// listener carries SO_REUSESHAREUID, which leaves the exact-address bind check
++// as the only guard against another user taking over the live port, and
++// SO_REUSEPORT would bypass that check.
++var ErrLoopbackReuseAddr = E.New("reuse_addr is not allowed on a loopback listener")
++
++// ShareLoopbackPortAcrossUsers returns a listen control that sets
++// SO_REUSESHAREUID on sockets bound to a loopback address.
++//
++// XNU refuses a non-root bind while a socket owned by another user holds the
++// same local address and port, even with SO_REUSEADDR, unless that socket
++// carries SO_REUSESHAREUID. The root packet tunnel and the user proxy agent
++// serve the same loopback endpoints, so the connected and TIME_WAIT sockets the
++// tunnel leaves behind would push the agent to another port for 2*MSL.
++// Accepted sockets inherit the flag from the listener. A live listener still
++// refuses the bind through the exact-address check unless it also has
++// SO_REUSEPORT, which ListenTCP therefore refuses for loopback listeners.
++func ShareLoopbackPortAcrossUsers() control.Func {
++	return func(network, address string, conn syscall.RawConn) error {
++		loopback, err := isLoopbackListenAddress(address)
++		if err != nil {
++			return err
++		}
++		if !loopback {
++			return nil
++		}
++		return control.Raw(conn, func(fd uintptr) error {
++			return os.NewSyscallError("setsockopt SO_REUSESHAREUID", unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSESHAREUID, 1))
++		})
++	}
++}
++
++func isLoopbackListenAddress(address string) (bool, error) {
++	host, _, err := net.SplitHostPort(address)
++	if err != nil {
++		return false, E.Cause(err, "parse listen address")
++	}
++	if host == "" {
++		return false, nil
++	}
++	addr, err := netip.ParseAddr(host)
++	if err != nil {
++		return false, E.Cause(err, "parse listen address")
++	}
++	return addr.IsLoopback(), nil
++}
++
++func rejectLoopbackReuseAddr(bindAddr M.Socksaddr) error {
++	if bindAddr.Addr.IsLoopback() {
++		return E.Cause(ErrLoopbackReuseAddr, "listen ", bindAddr)
++	}
++	return nil
++}
+diff --git a/common/listener/loopback_share_darwin_test.go b/common/listener/loopback_share_darwin_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..92005b625f3531a75d084f038979373bb578e76e
+--- /dev/null
++++ b/common/listener/loopback_share_darwin_test.go
+@@ -0,0 +1,201 @@
++package listener
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"os"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/control"
++	"github.com/sagernet/sing/common/json/badoption"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	"golang.org/x/sys/unix"
++)
++
++func reuseShareUID(t *testing.T, conn syscall.Conn) int {
++	t.Helper()
++	value, err := control.Conn0[int](conn, func(fd uintptr) (int, error) {
++		return unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSESHAREUID)
++	})
++	if err != nil {
++		t.Fatalf("getsockopt SO_REUSESHAREUID: %v", err)
++	}
++	return value
++}
++
++func listenOn(address netip.Addr) option.ListenOptions {
++	listen := badoption.Addr(address)
++	return option.ListenOptions{Listen: &listen}
++}
++
++func newTCPListener(listen option.ListenOptions) *Listener {
++	return New(Options{
++		Context: context.Background(),
++		Logger:  log.NewNOPFactory().NewLogger("listener"),
++		Network: []string{N.NetworkTCP},
++		Listen:  listen,
++	})
++}
++
++func TestLoopbackTCPListenerSharesPortAcrossUsers(t *testing.T) {
++	fastOpen := listenOn(netip.MustParseAddr("127.0.0.1"))
++	fastOpen.TCPFastOpen = true
++	for _, test := range []struct {
++		name   string
++		listen option.ListenOptions
++	}{
++		{"127.0.0.1", listenOn(netip.MustParseAddr("127.0.0.1"))},
++		{"::1", listenOn(netip.IPv6Loopback())},
++		{"127.0.0.1 TCP Fast Open", fastOpen},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			tcpListener, err := newTCPListener(test.listen).ListenTCP()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer tcpListener.Close()
++			if reuseShareUID(t, tcpListener.(*net.TCPListener)) == 0 {
++				t.Fatal("loopback listener lacks SO_REUSESHAREUID")
++			}
++			client, err := net.Dial(N.NetworkTCP, tcpListener.Addr().String())
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer client.Close()
++			accepted, err := tcpListener.Accept()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer accepted.Close()
++			// The tunnel's lingering sockets are accepted ones, so the flag must
++			// be inherited from the listener.
++			if reuseShareUID(t, accepted.(*net.TCPConn)) == 0 {
++				t.Fatal("accepted loopback connection lacks SO_REUSESHAREUID")
++			}
++		})
++	}
++}
++
++func TestShareLoopbackPortAcrossUsersOnlyMarksLoopbackAddresses(t *testing.T) {
++	// Listening on a non-loopback address can raise the macOS firewall prompt,
++	// so the decision is checked on unbound sockets. The addresses have the form
++	// net.ListenConfig passes to Control: a literal IP, or an empty host for a
++	// wildcard listen, never a host name.
++	for _, test := range []struct {
++		family  int
++		address string
++		shared  bool
++	}{
++		{unix.AF_INET, "127.0.0.1:7890", true},
++		{unix.AF_INET, "127.8.9.10:0", true},
++		{unix.AF_INET6, "[::1]:9090", true},
++		{unix.AF_INET6, "[::ffff:127.0.0.1]:7890", true},
++		{unix.AF_INET, "0.0.0.0:7890", false},
++		{unix.AF_INET6, ":7890", false},
++		{unix.AF_INET6, "[::]:9090", false},
++		{unix.AF_INET, "192.0.2.10:7890", false},
++		{unix.AF_INET6, "[fe80::1%lo0]:7890", false},
++	} {
++		t.Run(test.address, func(t *testing.T) {
++			socket := newUnboundSocket(t, test.family)
++			defer socket.Close()
++			rawConn, err := socket.SyscallConn()
++			if err != nil {
++				t.Fatal(err)
++			}
++			err = ShareLoopbackPortAcrossUsers()(N.NetworkTCP, test.address, rawConn)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if shared := reuseShareUID(t, socket) != 0; shared != test.shared {
++				t.Fatalf("SO_REUSESHAREUID set=%v, want %v", shared, test.shared)
++			}
++		})
++	}
++}
++
++func TestShareLoopbackPortAcrossUsersReportsFailures(t *testing.T) {
++	socket := newUnboundSocket(t, unix.AF_INET)
++	defer socket.Close()
++	rawConn, err := socket.SyscallConn()
++	if err != nil {
++		t.Fatal(err)
++	}
++	err = ShareLoopbackPortAcrossUsers()(N.NetworkTCP, "localhost:7890", rawConn)
++	if err == nil {
++		t.Fatal("unresolved listen address was accepted")
++	}
++	if reuseShareUID(t, socket) != 0 {
++		t.Fatal("unresolved listen address set SO_REUSESHAREUID")
++	}
++
++	reader, writer, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reader.Close()
++	defer writer.Close()
++	rawPipe, err := reader.SyscallConn()
++	if err != nil {
++		t.Fatal(err)
++	}
++	err = ShareLoopbackPortAcrossUsers()(N.NetworkTCP, "127.0.0.1:7890", rawPipe)
++	if !errors.Is(err, unix.ENOTSOCK) {
++		t.Fatalf("setsockopt failure was not reported: %v", err)
++	}
++	if errors.Is(err, syscall.EADDRINUSE) {
++		t.Fatalf("setsockopt failure looks like an endpoint conflict: %v", err)
++	}
++}
++
++func TestLoopbackTCPListenerRejectsReuseAddr(t *testing.T) {
++	for _, address := range []netip.Addr{
++		netip.MustParseAddr("127.0.0.1"),
++		netip.IPv6Loopback(),
++		netip.MustParseAddr("::ffff:127.0.0.1"),
++	} {
++		t.Run(address.String(), func(t *testing.T) {
++			listen := listenOn(address)
++			listen.ReuseAddr = true
++			listener := newTCPListener(listen)
++			tcpListener, err := listener.ListenTCP()
++			if tcpListener != nil {
++				tcpListener.Close()
++			}
++			if !errors.Is(err, ErrLoopbackReuseAddr) {
++				t.Fatalf("loopback reuse_addr was not rejected: %v", err)
++			}
++			if errors.Is(err, syscall.EADDRINUSE) {
++				t.Fatalf("reuse_addr rejection looks like an endpoint conflict: %v", err)
++			}
++			if tcpListener != nil || listener.TCPListener() != nil {
++				t.Fatal("rejected listener was bound")
++			}
++		})
++	}
++	for _, address := range []netip.Addr{
++		netip.IPv4Unspecified(),
++		netip.IPv6Unspecified(),
++		netip.MustParseAddr("192.0.2.10"),
++	} {
++		if err := rejectLoopbackReuseAddr(M.SocksaddrFrom(address, 7890)); err != nil {
++			t.Fatalf("reuse_addr on %s was rejected: %v", address, err)
++		}
++	}
++}
++
++func newUnboundSocket(t *testing.T, family int) *os.File {
++	t.Helper()
++	fd, err := unix.Socket(family, unix.SOCK_STREAM, unix.IPPROTO_TCP)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return os.NewFile(uintptr(fd), "socket")
++}
+diff --git a/common/listener/loopback_share_other.go b/common/listener/loopback_share_other.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..accc3c2099cf9b6e2a606b0357b484d21cae4e99
+--- /dev/null
++++ b/common/listener/loopback_share_other.go
+@@ -0,0 +1,18 @@
++//go:build !darwin
++
++package listener
++
++import (
++	"github.com/sagernet/sing/common/control"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++// ShareLoopbackPortAcrossUsers is a no-op outside darwin because
++// SO_REUSESHAREUID is an XNU socket option.
++func ShareLoopbackPortAcrossUsers() control.Func {
++	return nil
++}
++
++func rejectLoopbackReuseAddr(M.Socksaddr) error {
++	return nil
++}
+diff --git a/daemon/instance.go b/daemon/instance.go
+index 5e7502ce593de82bd1eefa23d4efe88bbb49ee4b..09b2713a97f19e9573ac252f75664ca1a32b175d 100644
+--- a/daemon/instance.go
++++ b/daemon/instance.go
+@@ -162 +162 @@ func (i *Instance) Start() error {
+-	return i.instance.Start()
++	return i.instance.StartWithExternalCleanup()
+diff --git a/experimental/clashapi/controller_listen.go b/experimental/clashapi/controller_listen.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5006eff13f705cf038d2fb3cfd093f78afcd24e
+--- /dev/null
++++ b/experimental/clashapi/controller_listen.go
+@@ -0,0 +1,14 @@
++package clashapi
++
++import (
++	"context"
++	"net"
++
++	"github.com/sagernet/sing-box/common/listener"
++)
++
++// listenController applies the inbound loopback port sharing to the controller.
++func listenController(ctx context.Context, address string) (net.Listener, error) {
++	listenConfig := net.ListenConfig{Control: listener.ShareLoopbackPortAcrossUsers()}
++	return listenConfig.Listen(ctx, "tcp", address)
++}
+diff --git a/experimental/clashapi/endpoint_conflict_darwin_test.go b/experimental/clashapi/endpoint_conflict_darwin_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2c8127377573e72719f6593fdcded7d17f731b6
+--- /dev/null
++++ b/experimental/clashapi/endpoint_conflict_darwin_test.go
+@@ -0,0 +1,127 @@
++package clashapi
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/http"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing/common/control"
++
++	"golang.org/x/sys/unix"
++)
++
++func reuseShareUID(conn syscall.Conn) (int, error) {
++	return control.Conn0[int](conn, func(fd uintptr) (int, error) {
++		return unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSESHAREUID)
++	})
++}
++
++func newControllerServer(address string) *Server {
++	return &Server{
++		ctx:                context.Background(),
++		logger:             log.NewNOPFactory().NewLogger("clash-api"),
++		httpServer:         &http.Server{Addr: address, Handler: http.NotFoundHandler()},
++		externalController: true,
++	}
++}
++
++func TestControllerLoopbackListenerSharesPortAcrossUsers(t *testing.T) {
++	for _, address := range []string{"127.0.0.1:0", "[::1]:0", "localhost:0"} {
++		t.Run(address, func(t *testing.T) {
++			listener, err := listenController(context.Background(), address)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer listener.Close()
++			shared, err := reuseShareUID(listener.(*net.TCPListener))
++			if err != nil || shared == 0 {
++				t.Fatalf("controller listener lacks SO_REUSESHAREUID: value=%d err=%v", shared, err)
++			}
++			client, err := net.Dial("tcp", listener.Addr().String())
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer client.Close()
++			accepted, err := listener.Accept()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer accepted.Close()
++			shared, err = reuseShareUID(accepted.(*net.TCPConn))
++			if err != nil || shared == 0 {
++				t.Fatalf("accepted controller connection lacks SO_REUSESHAREUID: value=%d err=%v", shared, err)
++			}
++		})
++	}
++}
++
++func TestControllerStartSharesLoopbackPortAcrossUsers(t *testing.T) {
++	reservation, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	address := reservation.Addr().String()
++	if err = reservation.Close(); err != nil {
++		t.Fatal(err)
++	}
++	type acceptedFlag struct {
++		value int
++		err   error
++	}
++	accepted := make(chan acceptedFlag, 1)
++	server := newControllerServer(address)
++	server.httpServer.ConnState = func(conn net.Conn, state http.ConnState) {
++		if state != http.StateNew {
++			return
++		}
++		value, err := reuseShareUID(conn.(*net.TCPConn))
++		select {
++		case accepted <- acceptedFlag{value, err}:
++		default:
++		}
++	}
++	if err = server.Start(adapter.StartStateStarted); err != nil {
++		t.Fatal(err)
++	}
++	defer server.Close()
++	client, err := net.Dial("tcp", address)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Close()
++	select {
++	case flag := <-accepted:
++		if flag.err != nil || flag.value == 0 {
++			t.Fatalf("controller connection lacks SO_REUSESHAREUID: value=%d err=%v", flag.value, flag.err)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("controller did not accept the connection")
++	}
++}
++
++func TestLiveSharedLoopbackControllerStillConflicts(t *testing.T) {
++	first, err := listenController(context.Background(), "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer first.Close()
++	shared, err := reuseShareUID(first.(*net.TCPListener))
++	if err != nil || shared == 0 {
++		t.Fatalf("controller listener lacks SO_REUSESHAREUID: value=%d err=%v", shared, err)
++	}
++	port := uint16(first.Addr().(*net.TCPAddr).Port)
++
++	server := newControllerServer(first.Addr().String())
++	err = server.Start(adapter.StartStateStarted)
++	defer server.Close()
++	role, conflictPort, ok := adapter.EndpointConflictFromError(err)
++	if !ok || role != adapter.EndpointConflictController || conflictPort != port || !errors.Is(err, syscall.EADDRINUSE) {
++		t.Fatalf("live shared controller did not conflict: role=%v port=%d ok=%v err=%v", role, conflictPort, ok, err)
++	}
++}
+diff --git a/experimental/clashapi/endpoint_conflict_test.go b/experimental/clashapi/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc4e119b199fd8c12f5dd1c5b13a758bf89d66d6
+--- /dev/null
++++ b/experimental/clashapi/endpoint_conflict_test.go
+@@ -0,0 +1,37 @@
++package clashapi
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++func TestClassifyControllerListenError(t *testing.T) {
++	cause := fmt.Errorf("listen failed: %w", syscall.EADDRINUSE)
++	err := classifyControllerListenError("127.0.0.1:9092", cause)
++	role, port, ok := adapter.EndpointConflictFromError(err)
++	if !ok || role != adapter.EndpointConflictController || port != 9092 || !errors.Is(err, cause) {
++		t.Fatalf("unexpected controller conflict: role=%v port=%d ok=%v err=%v", role, port, ok, err)
++	}
++}
++
++func TestClassifyControllerListenErrorRejectsOtherAndMalformedErrors(t *testing.T) {
++	ordinary := errors.New("permission denied")
++	for _, test := range []struct {
++		address string
++		err     error
++	}{
++		{"127.0.0.1:9092", ordinary},
++		{"127.0.0.1", syscall.EADDRINUSE},
++		{"127.0.0.1:0", syscall.EADDRINUSE},
++		{"127.0.0.1:65536", syscall.EADDRINUSE},
++	} {
++		classified := classifyControllerListenError(test.address, test.err)
++		if classified != test.err {
++			t.Fatalf("unexpected classification for %q: %v", test.address, classified)
++		}
++	}
++}
+diff --git a/experimental/clashapi/server.go b/experimental/clashapi/server.go
+index b9222ad54403ec051e005c1f303e48c5cefe0c15..435e2cb89ff5bd6171bc602cd5ad56480de06250 100644
+--- a/experimental/clashapi/server.go
++++ b/experimental/clashapi/server.go
+@@ -10,0 +11 @@ import (
++	"strconv"
+@@ -161 +162 @@ func (s *Server) Start(stage adapter.StartStage) error {
+-			listener, err = net.Listen("tcp", s.httpServer.Addr)
++			listener, err = listenController(s.ctx, s.httpServer.Addr)
+@@ -168,0 +170 @@ func (s *Server) Start(stage adapter.StartStage) error {
++			err = classifyControllerListenError(s.httpServer.Addr, err)
+@@ -181,0 +184,16 @@ func (s *Server) Start(stage adapter.StartStage) error {
++func classifyControllerListenError(address string, err error) error {
++	if !errors.Is(err, syscall.EADDRINUSE) {
++		return err
++	}
++	_, portText, splitErr := net.SplitHostPort(address)
++	port, portErr := strconv.ParseUint(portText, 10, 16)
++	if splitErr != nil || portErr != nil || port == 0 {
++		return err
++	}
++	return adapter.NewEndpointConflictError(
++		adapter.EndpointConflictController,
++		uint16(port),
++		err,
++	)
++}
++
+diff --git a/experimental/libbox/endpoint_conflict_test.go b/experimental/libbox/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..34e4602ab060d563349c153be9cb942e6d6518c7
+--- /dev/null
++++ b/experimental/libbox/endpoint_conflict_test.go
+@@ -0,0 +1,41 @@
++package libbox
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++func TestRuntimeStartConflictPreservesExactRoleAndPort(t *testing.T) {
++	err := fmt.Errorf(
++		"start service: %w",
++		adapter.NewEndpointConflictError(adapter.EndpointConflictController, 9092, syscall.EADDRINUSE),
++	)
++	conflict := runtimeStartConflict(err)
++	if conflict == nil || conflict.Kind != RuntimeEndpointConflictController || conflict.Port != 9092 {
++		t.Fatalf("unexpected runtime conflict: %#v", conflict)
++	}
++}
++
++func TestRuntimeStartConflictRejectsOrdinaryAndMalformedErrors(t *testing.T) {
++	for _, err := range []error{
++		syscall.EADDRINUSE,
++		errors.New("ordinary startup failure"),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 7890, errors.New("wrong cause")),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 7890, nil),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictNone, 9090, syscall.EADDRINUSE),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 0, syscall.EADDRINUSE),
++		E.Errors(
++			adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 7890, syscall.EADDRINUSE),
++			errors.New("cleanup failed"),
++		),
++	} {
++		if conflict := runtimeStartConflict(err); conflict != nil {
++			t.Fatalf("unexpected retryable conflict for %v: %#v", err, conflict)
++		}
++	}
++}
+diff --git a/protocol/mixed/endpoint_conflict_darwin_test.go b/protocol/mixed/endpoint_conflict_darwin_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..70db7b3a333a48cad275150df6afa2fb2b8b85b2
+--- /dev/null
++++ b/protocol/mixed/endpoint_conflict_darwin_test.go
+@@ -0,0 +1,57 @@
++package mixed
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/control"
++	"github.com/sagernet/sing/common/json/badoption"
++
++	"golang.org/x/sys/unix"
++)
++
++func startLoopbackMixedInbound(t *testing.T, port uint16) (*Inbound, error) {
++	t.Helper()
++	listen := badoption.Addr(netip.MustParseAddr("127.0.0.1"))
++	created, err := NewInbound(context.Background(), nil, log.NewNOPFactory().NewLogger("mixed"), "mixed", option.HTTPMixedInboundOptions{
++		ListenOptions: option.ListenOptions{Listen: &listen, ListenPort: port},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	inbound := created.(*Inbound)
++	return inbound, inbound.Start(adapter.StartStateStart)
++}
++
++func TestLiveSharedLoopbackMixedListenerStillConflicts(t *testing.T) {
++	first, err := startLoopbackMixedInbound(t, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer first.Close()
++	tcpListener := first.listener.TCPListener().(*net.TCPListener)
++	shared, err := control.Conn0[int](tcpListener, func(fd uintptr) (int, error) {
++		return unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSESHAREUID)
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if shared == 0 {
++		t.Fatal("mixed loopback listener lacks SO_REUSESHAREUID")
++	}
++	port := uint16(tcpListener.Addr().(*net.TCPAddr).Port)
++
++	second, err := startLoopbackMixedInbound(t, port)
++	defer second.Close()
++	role, conflictPort, ok := adapter.EndpointConflictFromError(err)
++	if !ok || role != adapter.EndpointConflictMixed || conflictPort != port || !errors.Is(err, syscall.EADDRINUSE) {
++		t.Fatalf("live shared listener did not conflict: role=%v port=%d ok=%v err=%v", role, conflictPort, ok, err)
++	}
++}
+diff --git a/protocol/mixed/endpoint_conflict_test.go b/protocol/mixed/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f74d12c5aeeb267e9e7f4669ab3a5972f128c0d1
+--- /dev/null
++++ b/protocol/mixed/endpoint_conflict_test.go
+@@ -0,0 +1,35 @@
++package mixed
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++func TestClassifyMixedListenError(t *testing.T) {
++	cause := fmt.Errorf("listen failed: %w", syscall.EADDRINUSE)
++	err := classifyMixedListenError(7892, cause)
++	role, port, ok := adapter.EndpointConflictFromError(err)
++	if !ok || role != adapter.EndpointConflictMixed || port != 7892 || !errors.Is(err, cause) {
++		t.Fatalf("unexpected mixed conflict: role=%v port=%d ok=%v err=%v", role, port, ok, err)
++	}
++}
++
++func TestClassifyMixedListenErrorRejectsOtherAndMalformedErrors(t *testing.T) {
++	ordinary := errors.New("permission denied")
++	for _, test := range []struct {
++		port uint16
++		err  error
++	}{
++		{7892, ordinary},
++		{0, syscall.EADDRINUSE},
++	} {
++		classified := classifyMixedListenError(test.port, test.err)
++		if classified != test.err {
++			t.Fatalf("unexpected classification for port %d: %v", test.port, classified)
++		}
++	}
++}
+diff --git a/protocol/mixed/inbound.go b/protocol/mixed/inbound.go
+index c6cd08cb6dc8c421c3c66fe1e3267820a8825768..65542e3982989f3cc62c91ea2f3308696dcb70dd 100644
+--- a/protocol/mixed/inbound.go
++++ b/protocol/mixed/inbound.go
+@@ -5,0 +6 @@ import (
++	"errors"
+@@ -6,0 +8 @@ import (
++	"syscall"
+@@ -92 +94,11 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
+-	return h.listener.Start()
++	return classifyMixedListenError(
++		h.listener.ListenOptions().ListenPort,
++		h.listener.Start(),
++	)
++}
++
++func classifyMixedListenError(port uint16, err error) error {
++	if !errors.Is(err, syscall.EADDRINUSE) || port == 0 {
++		return err
++	}
++	return adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, port, err)

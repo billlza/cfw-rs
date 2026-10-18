@@ -6,6 +6,7 @@
 
 mod envelope;
 mod repository;
+mod selected_replace;
 mod selection;
 mod storage;
 mod storage_atomic;
@@ -14,34 +15,71 @@ mod storage_tests;
 
 pub use cfw_singbox_config::ValidatedSingBoxProfile;
 pub use repository::{
-    LockedProfileCredentialSnapshot, LockedSelectedProfile, ProfileCredentialSnapshot,
-    ProfileImportResult, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
+    ExactProfileImportOutcome, InvalidProfileRecord, InvalidSelection,
+    LockedCredentialProfileMutation, LockedProfileCredentialSnapshot, LockedSelectedProfile,
+    ProfileCredentialCatalogEntry, ProfileCredentialSnapshot, ProfileImportResult, ProfileRecord,
+    ProfileRepository, ProfileRepositorySnapshot, ProfileSelectionState, ProfileSourceKind,
     StoredProfile,
 };
 
 use cfw_singbox_config::{ConfigError, MAX_PROFILE_BYTES};
 use thiserror::Error;
 
+/// Names a stored profile in an error so the user can find it in the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileLabel {
+    pub id: String,
+    pub name: String,
+}
+
+impl std::fmt::Display for ProfileLabel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "\"{}\" ({})", self.name, self.id)
+    }
+}
+
 const PROFILE_SCHEMA_VERSION: u16 = 1;
 const PROFILE_FILE_SUFFIX: &str = ".profile.json";
 const SELECTION_SCHEMA_VERSION: u16 = 1;
 const SELECTION_FILE_NAME: &str = "selected-profile-v1.json";
 const MAX_SELECTION_BYTES: usize = 1_024;
+const MAX_SELECTED_REPLACE_BYTES: usize = 1_024;
+const SELECTED_REPLACE_FILE_NAME: &str = ".selected-profile-replace-v1.json";
+const SELECTED_REPLACE_SCHEMA_VERSION: u16 = 1;
 const MAX_PROFILE_NAME_CHARS: usize = 256;
+/// Shortest string that can still be an absolute `https` URL with a host.
+const MIN_SOURCE_URL_CHARS: usize = "https://a".len();
+/// Subscription URLs are stored verbatim inside the bounded envelope, so they
+/// are capped well below the envelope limit.
+const MAX_SOURCE_URL_BYTES: usize = 2_048;
 const MAX_REPOSITORY_ENTRIES: usize = 4_096;
-const MAX_REPOSITORY_CREDENTIAL_REFERENCES: usize = 512;
+const MAX_REPOSITORY_CREDENTIAL_REFERENCES: usize =
+    cfw_singbox_config::MAX_CREDENTIAL_VAULT_BINDINGS;
 const MAX_REPOSITORY_BYTES: u64 = 256 * 1024 * 1024;
 // Both incoming profiles and their complete on-disk envelopes are bounded.
 // A near-limit input can therefore be rejected after envelope construction
 // rather than causing storage to exceed the documented 384 KiB ceiling.
-const MAX_ENVELOPE_BYTES: usize = MAX_PROFILE_BYTES;
+const MAX_ENVELOPE_BYTES: usize = MAX_PROFILE_BYTES + 256 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ProfileError {
+    #[error(
+        "profile repository remained busy for 3 seconds; another process still owns its transaction lock"
+    )]
+    RepositoryBusy,
     #[error("profile repository I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("sing-box profile is invalid: {0}")]
     InvalidProfile(#[from] ConfigError),
+    /// A stored envelope no longer passes profile validation, for example a
+    /// node an earlier build accepted. It is listed so it can be deleted, and
+    /// every attempt to load, select or start it reports this error.
+    #[error("stored profile \"{name}\" ({id}) is invalid: {source}")]
+    StoredProfileInvalid {
+        id: String,
+        name: String,
+        source: ConfigError,
+    },
     #[error("profile envelope JSON is invalid: {0}")]
     InvalidEnvelopeJson(#[from] serde_json::Error),
     #[error("selected-profile JSON is invalid: {0}")]
@@ -52,6 +90,12 @@ pub enum ProfileError {
     InvalidName,
     #[error("profile id is not a canonical UUID: {0}")]
     InvalidProfileId(String),
+    #[error(
+        "subscription URL must be a bounded https URL of at most {MAX_SOURCE_URL_BYTES} bytes without whitespace"
+    )]
+    InvalidSourceUrl,
+    #[error("profile source kind does not match its subscription metadata: {id}")]
+    SourceKindMismatch { id: String },
     #[error("profile repository path contains a NUL byte")]
     InvalidRepositoryPath,
     #[error("profile repository is not an effective-user-owned real directory")]
@@ -64,6 +108,16 @@ pub enum ProfileError {
         "profile repository exceeds the {MAX_REPOSITORY_CREDENTIAL_REFERENCES}-reference credential vault capacity"
     )]
     TooManyCredentialReferences,
+    #[error("stored profile has an invalid credential audience: {0}")]
+    InvalidCredentialAudience(String),
+    /// Credential cleanup keeps every reference a stored document names. An
+    /// entry that fails validation yields none, so cleanup could remove the
+    /// credentials of a profile that is still listed.
+    #[error(
+        "credential cleanup needs every stored profile to pass validation; delete the invalid profiles first: {}",
+        .profiles.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    CredentialCleanupBlocked { profiles: Vec<ProfileLabel> },
     #[error(
         "profile repository would exceed the {MAX_REPOSITORY_BYTES}-byte aggregate limit: {actual} bytes"
     )]
@@ -72,10 +126,18 @@ pub enum ProfileError {
     UnsafeProfileFile(String),
     #[error("selected-profile state is not an effective-user-owned private regular file")]
     UnsafeSelectionFile,
+    #[error(
+        "selected-profile replacement intent is not an effective-user-owned private regular file"
+    )]
+    UnsafeSelectedReplaceFile,
     #[error("stored profile exceeds the {MAX_ENVELOPE_BYTES}-byte envelope limit: {actual} bytes")]
     StoredProfileTooLarge { actual: u64 },
     #[error("selected-profile state exceeds the {MAX_SELECTION_BYTES}-byte limit: {actual} bytes")]
     SelectionTooLarge { actual: u64 },
+    #[error(
+        "selected-profile replacement intent exceeds the {MAX_SELECTED_REPLACE_BYTES}-byte limit: {actual} bytes"
+    )]
+    SelectedReplaceTooLarge { actual: u64 },
     #[error("unsupported profile envelope schema version: {0}")]
     UnsupportedSchema(u16),
     #[error("unsupported selected-profile schema version: {0}")]
@@ -84,12 +146,24 @@ pub enum ProfileError {
     IdentityMismatch { expected: String, stored: String },
     #[error("profile digest mismatch for {id}")]
     DigestMismatch { id: String },
+    #[error("profile changed while an update was in progress: {id}")]
+    ProfileChanged { id: String },
     #[error("profile envelope is not in canonical form: {0}")]
     NonCanonicalEnvelope(String),
     #[error("selected-profile state is not in canonical form")]
     NonCanonicalSelection,
+    #[error("selected-profile replacement intent is invalid: {0}")]
+    InvalidSelectedReplace(String),
+    #[error("selected-profile replacement recovery conflicts with the repository state: {0}")]
+    SelectedReplaceConflict(String),
+    #[error(
+        "selected-profile replacement failed ({operation}); deterministic recovery also failed ({recovery})"
+    )]
+    SelectedReplaceRecovery { operation: String, recovery: String },
     #[error("selected profile does not exist: {0}")]
     SelectedProfileMissing(String),
+    #[error("profile does not exist: {0}")]
+    ProfileNotFound(String),
     #[error("no profile is selected")]
     NoSelectedProfile,
     #[error(
@@ -102,6 +176,10 @@ pub enum ProfileError {
     },
     #[error("selected profile must be deselected or replaced before deletion: {0}")]
     SelectedProfileDeletion(String),
+    /// Deleting the selected entry that fails validation also removes the
+    /// selection, which the caller did not allow.
+    #[error("the selected profile {0} is invalid; deleting it would also clear the selection")]
+    InvalidSelectionKept(ProfileLabel),
     #[error("profile already exists: {0}")]
     AlreadyExists(String),
     #[error(

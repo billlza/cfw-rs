@@ -5,25 +5,84 @@ exclusive controls: System Proxy and Tunnel. A requested mode is not displayed
 as Active until observed runtime owner, generation, config digest, readiness,
 and the relevant macOS status all match.
 
+Green switches represent observed activity. Failed requests and requests waiting
+for approval stay unchecked and have separate retry and cancellation actions.
+The exclusive mode model is a known CFW compatibility gap, documented in the
+[compatibility audit](../cfw-compatibility-audit.md).
+
 The legacy Service Mode row is a temporary cleanup-only migration affordance.
 It can unregister the retired helper and report an exact cleanup failure; it
 cannot install, approve, or start the old root data plane.
 
-Application launch never activates this cleanup path. While the migration is
-`awaiting_confirmation`, the existing VPN remains unchanged and the Profiles
-page stages the replacement in a directory that legacy cleanup never targets.
-The cutover button is enabled only after a replacement profile is selected and
-the signed native replacement reports preflight readiness. The server requires
-the same explicit confirmation and preflight again before invoking retirement;
-renderer state alone cannot authorize a destructive cutover.
+Application launch never activates this cleanup path. Older CFM maintenance is
+an explicit Settings action. Normal networking is independent of an untouched
+legacy installation; unfinished maintenance transactions still require their
+own recovery. Profiles are stored in a directory legacy cleanup never targets.
+Explicit maintenance requires a selected replacement and native preflight
+before destructive retirement; renderer state alone cannot authorize cleanup.
 
 Legacy System Proxy and DNS cleanup may require explicit review. The migration
 does not assume that a historical snapshot still owns the current macOS
-setting, and it does not overwrite a later user or administrator change. New
-network modes remain blocked until the UI reports the required proxy/DNS action
-as resolved.
+setting, and it does not overwrite a later user or administrator change. An
+existing enabled system proxy is a separate activation conflict, with its own
+error; it is not a malformed profile and is not evidence that every other
+startup failure was caused by the old app.
 
 Network-path changes mark observations stale and trigger coordinator recovery.
 They are not treated as UI-only refresh events. Loading, approval, failure,
 awaiting confirmation, cleaning, manual cleanup required, and Off remain
 distinct user-visible states.
+
+When an engine cannot be closed, after a failed start or at a stop, the app
+reports that global cleanup could not be proven. So does a close still
+unfinished 2 seconds into a stop, and an interrupted start still inside the
+engine 5.5 seconds after its deadline. The ProxyAgent or the tunnel extension
+then ends itself, so macOS releases the ports and connections the engine still
+held. The ProxyAgent first restores the system proxy settings it changed, and
+it waits until it has run 11 seconds, so macOS can start it again at once. If
+it cannot restore them, it keeps running and tries again whenever you approve
+the macOS password prompt that turning System Proxy off, quitting the app and
+Recover background services show; after the Mac restarts, quitting the app
+shows that prompt to restore them. The tunnel extension ends once macOS has
+stopped the tunnel, or 2 seconds after its report when macOS does not.
+Neither System Proxy nor Tunnel
+can be turned on again until the network is proven Off. Once the ProxyAgent or
+the extension has ended, turning the mode off proves it, without restarting the
+Mac. Until the network Authority restarts, as it does when the Mac restarts,
+only the app of the user who turned System Proxy on, signed in at the console,
+can prove its settings restored. After such a restart another user's app can
+prove the network Off, but it still cannot turn the network on, as the next
+paragraph explains, and settings the first user's System Proxy left can still
+point at its closed port until that user approves the prompt again, or an
+administrator clears them.
+
+The network Authority stays enrolled to the first installation of the app
+that asked it to start the network on this Mac, and rejects a start from any
+other installation. The app of another macOS user, or of the same user once
+the app's engine lineage is gone from that user's Keychain, therefore cannot
+turn System Proxy, Local Proxy or Tunnel on, also after the Mac restarts. This
+is a known limitation of 0.5.0.
+
+Turning System Proxy off gives macOS its proxy settings back before the engine
+stops. If macOS does not take them, System Proxy keeps running and the switch
+can be turned off again, instead of the Mac pointing at a port nothing listens
+on. A stop the system forces, at a user switch or sign-out, and the clean-up
+after a failed start still stop the engine even when the settings cannot be
+restored.
+
+A profile check answers within 3.5 seconds, and a latency test within 3.5
+seconds beyond its timeout; one that takes longer fails, asking to be retried,
+and keeps failing on a Mac where that profile always takes that long. A check
+or latency test still running 30 seconds later counts as hung: the ProxyAgent
+then refuses checks, latency tests and starts, asking for a retry, keeps a
+running System Proxy until it is turned off, and then ends, and macOS starts a
+fresh one.
+
+The GeoIP Database row lists the selected profile's GEOIP countries and, when
+Settings › Engine › Mainland China direct is on, names that switch first.
+Before the runtime settings are first read, and after a reload of them fails,
+the switch's state is unknown: the row then lists only the countries, or says
+unavailable when there are none, instead of reporting that no country rules
+exist. While the selected profile's saved policy is loading or cannot be read,
+its countries are unknown: the row names only the switch when it is known to be
+on, and otherwise says unavailable.

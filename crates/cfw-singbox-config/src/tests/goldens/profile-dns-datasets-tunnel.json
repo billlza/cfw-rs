@@ -1,0 +1,741 @@
+{
+  "config": {
+    "dns": {
+      "final": "cfw-fallback-dns-0",
+      "rules": [
+        {
+          "action": "route",
+          "mode": "and",
+          "rules": [
+            {
+              "query_type": [
+                "A",
+                "AAAA"
+              ]
+            },
+            {
+              "invert": true,
+              "mode": "or",
+              "rules": [
+                {
+                  "rule_set": [
+                    "cfw-geosite-cn"
+                  ]
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "server": "cfw-fake-ip",
+          "type": "logical"
+        },
+        {
+          "action": "route",
+          "domain_suffix": "example.org",
+          "server": "cfw-policy-dns-0-0"
+        },
+        {
+          "action": "route",
+          "rule_set": [
+            "cfw-geosite-cn"
+          ],
+          "server": "cfw-policy-dns-1-0"
+        },
+        {
+          "action": "route",
+          "rule_set": [
+            "cfw-geosite-geolocation-!cn"
+          ],
+          "server": "cfw-fallback-dns-0"
+        },
+        {
+          "action": "evaluate",
+          "invert": true,
+          "query_type": [
+            "A",
+            "AAAA",
+            "HTTPS"
+          ],
+          "server": "cfw-profile-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "invert": true,
+              "query_type": [
+                "A",
+                "AAAA",
+                "HTTPS"
+              ]
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        },
+        {
+          "action": "evaluate",
+          "invert": true,
+          "query_type": [
+            "A",
+            "AAAA",
+            "HTTPS"
+          ],
+          "server": "cfw-profile-dns-1"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "invert": true,
+              "query_type": [
+                "A",
+                "AAAA",
+                "HTTPS"
+              ]
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        },
+        {
+          "action": "route",
+          "invert": true,
+          "query_type": [
+            "A",
+            "AAAA",
+            "HTTPS"
+          ],
+          "server": "cfw-fallback-dns-0"
+        },
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "response_filter": {
+            "mode": "and",
+            "rules": [
+              {
+                "ip_accept_any": true
+              },
+              {
+                "rule_set": [
+                  "cfw-geoip-cn"
+                ]
+              }
+            ],
+            "type": "logical"
+          },
+          "response_ip_accept_all": true,
+          "server": "cfw-profile-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        },
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "response_filter": {
+            "mode": "and",
+            "rules": [
+              {
+                "ip_accept_any": true
+              },
+              {
+                "rule_set": [
+                  "cfw-geoip-cn"
+                ]
+              }
+            ],
+            "type": "logical"
+          },
+          "response_ip_accept_all": true,
+          "server": "cfw-profile-dns-1"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        }
+      ],
+      "servers": [
+        {
+          "server": "223.5.5.5",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-0",
+          "type": "udp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "1.1.1.1",
+          "server_port": 53,
+          "tag": "cfw-profile-dns-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "8.8.8.8",
+          "server_port": 53,
+          "tag": "cfw-profile-dns-1",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "server": "180.76.76.76",
+          "server_port": 53,
+          "tag": "cfw-proxy-server-dns-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "server": "114.114.114.114",
+          "server_port": 53,
+          "tag": "cfw-direct-dns-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "1.1.1.1",
+          "server_port": 53,
+          "tag": "cfw-policy-dns-0-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "223.5.5.5",
+          "server_port": 53,
+          "tag": "cfw-policy-dns-1-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "8.8.4.4",
+          "server_port": 53,
+          "tag": "cfw-fallback-dns-0",
+          "type": "udp"
+        },
+        {
+          "inet4_range": "198.19.0.0/16",
+          "inet6_range": "2001:2:ffff::/48",
+          "tag": "cfw-fake-ip",
+          "type": "fakeip"
+        }
+      ],
+      "strategy": "prefer_ipv4"
+    },
+    "experimental": {
+      "cache_file": {
+        "cache_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "enabled": true,
+        "path": "routing-cache.db",
+        "store_fakeip": true
+      },
+      "clash_api": {
+        "external_controller": "127.0.0.1:9090",
+        "secret": "<CLASH-API-SECRET>"
+      }
+    },
+    "inbounds": [
+      {
+        "address": [
+          "198.18.64.1/30",
+          "2001:2:0:64::1/126"
+        ],
+        "auto_route": false,
+        "mtu": 1500,
+        "stack": "system",
+        "tag": "cfw-tunnel",
+        "type": "tun"
+      }
+    ],
+    "log": {
+      "level": "info",
+      "timestamp": true
+    },
+    "outbounds": [
+      {
+        "domain_resolver": {
+          "server": "cfw-proxy-server-dns-0"
+        },
+        "server": "node.example.com",
+        "server_port": 1080,
+        "tag": "proxy",
+        "type": "socks",
+        "version": "5"
+      },
+      {
+        "domain_resolver": {
+          "server": "cfw-direct-dns-0"
+        },
+        "tag": "direct",
+        "type": "direct"
+      }
+    ],
+    "route": {
+      "default_domain_resolver": {
+        "policy": "default"
+      },
+      "final": "proxy",
+      "rule_set": [
+        {
+          "download_detour": "proxy",
+          "format": "binary",
+          "tag": "cfw-geosite-cn",
+          "type": "remote",
+          "update_interval": "1d",
+          "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+        },
+        {
+          "download_detour": "proxy",
+          "format": "binary",
+          "tag": "cfw-geosite-geolocation-!cn",
+          "type": "remote",
+          "update_interval": "1d",
+          "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"
+        },
+        {
+          "download_detour": "proxy",
+          "format": "binary",
+          "tag": "cfw-geoip-cn",
+          "type": "remote",
+          "update_interval": "1d",
+          "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+        }
+      ],
+      "rules": [
+        {
+          "action": "hijack-dns",
+          "port": 53
+        },
+        {
+          "action": "route",
+          "clash_mode": "Direct",
+          "outbound": "direct"
+        },
+        {
+          "action": "resolve",
+          "mode": "and",
+          "rules": [
+            {
+              "clash_mode": "Global"
+            },
+            {
+              "domain_regex": "."
+            }
+          ],
+          "type": "logical"
+        },
+        {
+          "action": "route",
+          "clash_mode": "Global",
+          "outbound": "proxy"
+        },
+        {
+          "action": "route",
+          "domain": "direct.example.com",
+          "outbound": "direct"
+        },
+        {
+          "action": "resolve",
+          "domain_regex": "."
+        }
+      ]
+    }
+  },
+  "credential_slots": [],
+  "direct_ipv4_hosts": "DirectIpv4HostRoutes { release_transport: false }",
+  "mode": "Tunnel",
+  "probe": {
+    "dns": {
+      "final": "cfw-fallback-dns-0",
+      "rules": [
+        {
+          "action": "route",
+          "mode": "and",
+          "rules": [
+            {
+              "query_type": [
+                "A",
+                "AAAA"
+              ]
+            },
+            {
+              "invert": true,
+              "mode": "or",
+              "rules": [
+                {
+                  "rule_set": [
+                    "cfw-geosite-cn"
+                  ]
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "server": "cfw-fake-ip",
+          "type": "logical"
+        },
+        {
+          "action": "route",
+          "domain_suffix": "example.org",
+          "server": "cfw-policy-dns-0-0"
+        },
+        {
+          "action": "route",
+          "rule_set": [
+            "cfw-geosite-cn"
+          ],
+          "server": "cfw-policy-dns-1-0"
+        },
+        {
+          "action": "route",
+          "rule_set": [
+            "cfw-geosite-geolocation-!cn"
+          ],
+          "server": "cfw-fallback-dns-0"
+        },
+        {
+          "action": "evaluate",
+          "invert": true,
+          "query_type": [
+            "A",
+            "AAAA",
+            "HTTPS"
+          ],
+          "server": "cfw-profile-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "invert": true,
+              "query_type": [
+                "A",
+                "AAAA",
+                "HTTPS"
+              ]
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        },
+        {
+          "action": "evaluate",
+          "invert": true,
+          "query_type": [
+            "A",
+            "AAAA",
+            "HTTPS"
+          ],
+          "server": "cfw-profile-dns-1"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "invert": true,
+              "query_type": [
+                "A",
+                "AAAA",
+                "HTTPS"
+              ]
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        },
+        {
+          "action": "route",
+          "invert": true,
+          "query_type": [
+            "A",
+            "AAAA",
+            "HTTPS"
+          ],
+          "server": "cfw-fallback-dns-0"
+        },
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "response_filter": {
+            "mode": "and",
+            "rules": [
+              {
+                "ip_accept_any": true
+              },
+              {
+                "rule_set": [
+                  "cfw-geoip-cn"
+                ]
+              }
+            ],
+            "type": "logical"
+          },
+          "response_ip_accept_all": true,
+          "server": "cfw-profile-dns-0"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        },
+        {
+          "action": "evaluate",
+          "domain_regex": ".*",
+          "response_filter": {
+            "mode": "and",
+            "rules": [
+              {
+                "ip_accept_any": true
+              },
+              {
+                "rule_set": [
+                  "cfw-geoip-cn"
+                ]
+              }
+            ],
+            "type": "logical"
+          },
+          "response_ip_accept_all": true,
+          "server": "cfw-profile-dns-1"
+        },
+        {
+          "action": "respond",
+          "mode": "and",
+          "rules": [
+            {
+              "domain_regex": ".*"
+            },
+            {
+              "mode": "or",
+              "rules": [
+                {
+                  "match_response": true,
+                  "response_rcode": "NOERROR"
+                },
+                {
+                  "match_response": true,
+                  "response_rcode": "NXDOMAIN"
+                }
+              ],
+              "type": "logical"
+            }
+          ],
+          "type": "logical"
+        }
+      ],
+      "servers": [
+        {
+          "server": "223.5.5.5",
+          "server_port": 53,
+          "tag": "cfw-bootstrap-dns-0",
+          "type": "udp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "1.1.1.1",
+          "server_port": 53,
+          "tag": "cfw-profile-dns-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "8.8.8.8",
+          "server_port": 53,
+          "tag": "cfw-profile-dns-1",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "server": "180.76.76.76",
+          "server_port": 53,
+          "tag": "cfw-proxy-server-dns-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "server": "114.114.114.114",
+          "server_port": 53,
+          "tag": "cfw-direct-dns-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "1.1.1.1",
+          "server_port": 53,
+          "tag": "cfw-policy-dns-0-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "223.5.5.5",
+          "server_port": 53,
+          "tag": "cfw-policy-dns-1-0",
+          "type": "tcp"
+        },
+        {
+          "connect_timeout": "5s",
+          "detour": "proxy",
+          "server": "8.8.4.4",
+          "server_port": 53,
+          "tag": "cfw-fallback-dns-0",
+          "type": "udp"
+        },
+        {
+          "inet4_range": "198.19.0.0/16",
+          "inet6_range": "2001:2:ffff::/48",
+          "tag": "cfw-fake-ip",
+          "type": "fakeip"
+        }
+      ],
+      "strategy": "prefer_ipv4"
+    },
+    "outbounds": [
+      {
+        "domain_resolver": {
+          "server": "cfw-proxy-server-dns-0"
+        },
+        "server": "node.example.com",
+        "server_port": 1080,
+        "tag": "proxy",
+        "type": "socks",
+        "version": "5"
+      },
+      {
+        "domain_resolver": {
+          "server": "cfw-direct-dns-0"
+        },
+        "tag": "direct",
+        "type": "direct"
+      }
+    ],
+    "route": {
+      "default_domain_resolver": {
+        "policy": "default"
+      }
+    }
+  }
+}

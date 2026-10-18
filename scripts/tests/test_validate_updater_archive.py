@@ -1,11 +1,17 @@
 import io
+import gzip
+import hashlib
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.validate_updater_archive import ArchiveContractError, validate_archive
+from scripts.validate_updater_archive import (
+    ArchiveContractError,
+    build_archive_app_manifest,
+    validate_archive,
+)
 from scripts.validate_updater_archive import MAX_EXTENSION_ENTRY_BYTES
 
 
@@ -67,6 +73,17 @@ class UpdaterArchiveContractTests(unittest.TestCase):
             count, expanded = validate_archive(archive.close(), ROOT)
             self.assertEqual(count, 6)
             self.assertEqual(expanded, len(b"plistbinary"))
+            manifest = build_archive_app_manifest(str(archive.path), ROOT)
+            self.assertEqual(manifest["algorithm"], "sha256-tree-v2")
+            self.assertEqual(manifest["root"], ROOT)
+            self.assertRegex(str(manifest["sha256"]), r"^[0-9a-f]{64}$")
+            by_path = {
+                entry["path"]: entry for entry in manifest["entries"]
+            }
+            self.assertEqual(
+                by_path["Contents/Info.plist"]["sha256"],
+                hashlib.sha256(b"plist").hexdigest(),
+            )
         finally:
             archive.cleanup()
 
@@ -105,6 +122,70 @@ class UpdaterArchiveContractTests(unittest.TestCase):
                         archive.add(*child)
                         archive.add(link)
                     with self.assertRaises(ArchiveContractError):
+                        validate_archive(archive.close(), ROOT)
+                finally:
+                    archive.cleanup()
+
+    def test_accepts_a_symlink_chain_that_stays_inside_the_root(self) -> None:
+        archive = ArchiveBuilder()
+        try:
+            archive.add_layout()
+            archive.add(symlink(f"{ROOT}/Contents/current", "MacOS"))
+            archive.add(symlink(f"{ROOT}/Contents/bin", "current/clash-for-mac"))
+            archive.add(symlink(f"{ROOT}/Contents/up", ".."))
+            archive.add(symlink(f"{ROOT}/Contents/MacOS/root", "../up/Contents"))
+            count, _expanded = validate_archive(archive.close(), ROOT)
+            self.assertEqual(count, 9)
+        finally:
+            archive.cleanup()
+
+    def test_rejects_symlinks_the_installer_cannot_resolve_inside_the_root(self) -> None:
+        cases = {
+            "dangling": [symlink(f"{ROOT}/Contents/missing", "nowhere")],
+            "dangling-through-link": [
+                symlink(f"{ROOT}/Contents/current", "MacOS"),
+                symlink(f"{ROOT}/Contents/bin", "current/absent"),
+            ],
+            "escape-through-link": [
+                symlink(f"{ROOT}/Contents/up", ".."),
+                symlink(f"{ROOT}/Contents/MacOS/escape", "../up/.."),
+            ],
+            "loop": [
+                symlink(f"{ROOT}/Contents/first", "second"),
+                symlink(f"{ROOT}/Contents/second", "first"),
+            ],
+        }
+        messages = {
+            "dangling": "does not exist",
+            "dangling-through-link": "does not exist",
+            "escape-through-link": "escapes the app root",
+            "loop": "too deep",
+        }
+        for case, entries in cases.items():
+            with self.subTest(case=case):
+                archive = ArchiveBuilder()
+                try:
+                    archive.add_layout()
+                    for entry in entries:
+                        archive.add(entry)
+                    with self.assertRaisesRegex(ArchiveContractError, messages[case]):
+                        validate_archive(archive.close(), ROOT)
+                finally:
+                    archive.cleanup()
+
+    def test_rejects_a_directory_its_owner_cannot_write_or_replace(self) -> None:
+        for mode in [0o555, 0o500, 0o300]:
+            with self.subTest(mode=oct(mode)):
+                archive = ArchiveBuilder()
+                try:
+                    for name in [f"{ROOT}/", f"{ROOT}/Contents/", f"{ROOT}/Contents/MacOS/"]:
+                        entry = directory(name)
+                        if name == f"{ROOT}/Contents/MacOS/":
+                            entry.mode = mode
+                        archive.add(entry)
+                    archive.add(*regular(f"{ROOT}/Contents/Info.plist", b"plist"))
+                    archive.add(*regular(f"{ROOT}/Contents/MacOS/clash-for-mac", b"binary"))
+                    with self.assertRaisesRegex(ArchiveContractError, "full access"):
                         validate_archive(archive.close(), ROOT)
                 finally:
                     archive.cleanup()
@@ -159,6 +240,46 @@ class UpdaterArchiveContractTests(unittest.TestCase):
             archive.add(entry, io.BytesIO(metadata))
             archive.add_layout()
             with self.assertRaises(ArchiveContractError):
+                validate_archive(archive.close(), ROOT)
+        finally:
+            archive.cleanup()
+
+    def test_rejects_nonzero_decompressed_bytes_after_tar_termination(self) -> None:
+        archive = ArchiveBuilder()
+        try:
+            archive.add_layout()
+            path = Path(archive.close())
+            raw_tar = gzip.decompress(path.read_bytes())
+            path.write_bytes(gzip.compress(raw_tar + b"hidden-after-tar", mtime=0))
+            with self.assertRaisesRegex(ArchiveContractError, "after its termination"):
+                validate_archive(str(path), ROOT)
+        finally:
+            archive.cleanup()
+
+    def test_rejects_concatenated_gzip_member_and_compressed_suffix(self) -> None:
+        for suffix in (gzip.compress(b"second-member", mtime=0), b"raw-suffix"):
+            with self.subTest(suffix=suffix[:8]):
+                archive = ArchiveBuilder()
+                try:
+                    archive.add_layout()
+                    path = Path(archive.close())
+                    path.write_bytes(path.read_bytes() + suffix)
+                    with self.assertRaisesRegex(
+                        ArchiveContractError,
+                        "concatenated member or trailing bytes",
+                    ):
+                        validate_archive(str(path), ROOT)
+                finally:
+                    archive.cleanup()
+
+    def test_rejects_unbound_pax_metadata(self) -> None:
+        archive = ArchiveBuilder()
+        try:
+            archive.add_layout()
+            entry, body = regular(f"{ROOT}/Contents/extra", b"extra")
+            entry.pax_headers = {"comment": "hidden-metadata"}
+            archive.add(entry, body)
+            with self.assertRaisesRegex(ArchiveContractError, "extended metadata"):
                 validate_archive(archive.close(), ROOT)
         finally:
             archive.cleanup()

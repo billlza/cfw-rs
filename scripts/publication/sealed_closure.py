@@ -1,15 +1,16 @@
 """Sealed-release source, license, vulnerability, and SBOM closure (Task 12.1).
 
 This module extends the existing offline publication tooling (it reuses
-``publication.common`` and ``publication.sbom`` and the pinned-input verifier in
-``scripts/verify_pinned_build_inputs.py``) with a single content-addressed
-supply-chain closure that binds, in one canonical document, the exact:
+``publication.common`` and ``publication.sbom`` and the pinned source-contract
+verifier in ``scripts/verify_pinned_build_inputs.py``) with a single
+content-addressed supply-chain closure that binds, in one canonical document,
+the exact:
 
 * GPL complete corresponding source (CCS) archive and tree digests;
 * GPL modification notice and third-party notices;
 * reviewed license nodes and the merged SPDX and CycloneDX SBOMs;
 * pinned Go/vulnerability tool identities and the govulncheck reports;
-* the patched sing-box source (upstream commit + three patch digests + the
+* the patched sing-box source (upstream commit + the pinned patch digests + the
   combined diff digest + verified Go module inputs);
 * the source-built ``Libbox.xcframework`` digest;
 * the signed application tree digest;
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .common import (
     PublicationError,
@@ -68,10 +69,19 @@ STATUSES = {SEALED, BLOCKED}
 # be promoted to ``sealed``.
 PHYSICAL_INPUTS = ("signed_app", "xcframework", "vulnerability_reports")
 
-# Toolchain identities the design pins (Requirement 5.1). These are the exact
-# content-addressed inputs the sealed closure must bind, in addition to the
-# versions carried by the pinned-input manifest.
+# Toolchain identities the design pins (Requirement 5.1). The sealed closure
+# binds these versions and content-addressed inputs exactly as
+# ``scripts/dependency_pins.env`` holds them.
+TOOLCHAIN_VERSION_KEYS = {
+    "rust": "RUST_VERSION",
+    "node": "NODE_VERSION",
+    "go": "GO_VERSION",
+    "gomobile": "GOMOBILE_VERSION",
+    "govulncheck": "GOVULNCHECK_VERSION",
+    "sing_box": "SING_BOX_VERSION",
+}
 TOOLCHAIN_DIGEST_KEYS = {
+    "rust_release_toolchain_surface_sha256": "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256",
     "node_darwin_arm64_sha256": "NODE_DARWIN_ARM64_SHA256",
     "go_darwin_arm64_sha256": "GO_DARWIN_ARM64_SHA256",
     "gomobile_module_sum": "GOMOBILE_MODULE_SUM",
@@ -83,6 +93,7 @@ GO_MODULE_INPUT_KEYS = (
     "SING_BOX_PATCHED_GO_MOD_SHA256",
     "SING_BOX_PATCHED_GO_SUM_SHA256",
 )
+UPSTREAM_COMMIT_KEY = "SING_BOX_COMMIT"
 MODULE_SUM_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -109,6 +120,13 @@ def _require_module_sum(value: str, label: str) -> str:
     return value
 
 
+def _pin(pins: Mapping[str, str], key: str) -> str:
+    value = pins.get(key)
+    if value is None:
+        raise PublicationError(f"dependency_pins.env has no {key} pin")
+    return value
+
+
 # --------------------------------------------------------------------------
 # Supply-chain (toolchain + patched source) derivation
 # --------------------------------------------------------------------------
@@ -117,66 +135,42 @@ def _require_module_sum(value: str, label: str) -> str:
 def derive_supply_chain(repository: Path) -> dict[str, Any]:
     """Derive the canonical, content-addressed toolchain and patched-source graph.
 
-    This first runs the fail-closed pinned-input verifier so a missing tool
-    input, a partial/legacy patch digest, or a combined diff that collapses to a
-    single patch digest is rejected before anything is bound. It then extracts
-    the exact pinned identities into a canonical structure.
+    This first runs the fail-closed static pinned source-contract verifier so a
+    missing tool input, a partial/legacy patch digest, or a combined diff that
+    collapses to a single patch digest is rejected before anything is bound.
+    The pin values that verifier checked are then extracted into a canonical
+    structure.
     """
     try:
-        pinned.verify(repository)
+        verified = pinned.verify_source_contract(repository)
     except pinned.PinnedInputError as error:
         raise PublicationError(f"pinned supply-chain inputs failed: {error}") from error
+    pins = verified.pins
 
-    manifest = pinned._load_manifest(repository)
-    env = pinned._parse_env(
-        pinned._read_text(
-            repository / manifest.get("dependencyPinsPath", "scripts/dependency_pins.env"),
-            "dependency_pins.env",
-        )
-    )
-
-    tools = manifest["tools"]
     toolchain_versions = {
-        "rust": _require_str(tools["RUST_VERSION"], "rust version", 64),
-        "node": _require_str(tools["NODE_VERSION"], "node version", 64),
-        "go": _require_str(tools["GO_VERSION"], "go version", 64),
-        "gomobile": _require_str(tools["GOMOBILE_VERSION"], "gomobile version", 64),
-        "govulncheck": _require_str(tools["GOVULNCHECK_VERSION"], "govulncheck version", 64),
-        "sing_box": _require_str(tools["SING_BOX_VERSION"], "sing-box version", 64),
+        field: _require_str(_pin(pins, key), f"{field} version", 64)
+        for field, key in TOOLCHAIN_VERSION_KEYS.items()
     }
     toolchain_digests: dict[str, str] = {}
     for field, key in TOOLCHAIN_DIGEST_KEYS.items():
-        value = pinned._require_env(env, key)
+        value = _pin(pins, key)
         if field.endswith("_module_sum"):
             toolchain_digests[field] = _require_module_sum(value, f"toolchain {field}")
         else:
             toolchain_digests[field] = require_sha256(value, f"toolchain {field}")
 
-    patch_digests = sorted(
-        require_sha256(patch["sha256"], f"patch digest {patch.get('name')}")
-        for patch in manifest["patches"]
-    )
-    combined = require_sha256(manifest["combinedDiffSha256"], "combined diff digest")
-    if combined in patch_digests:
-        raise PublicationError("combined diff digest equals a single patch digest")
-    rejected = sorted(
-        require_sha256(digest, "rejected patch digest")
-        for digest in (manifest.get("rejectedPatchDigests") or [])
-    )
-    for digest in patch_digests:
-        if digest in rejected:
-            raise PublicationError("a bound patch digest is a rejected/legacy digest")
-
-    go_module_inputs = {}
-    for key in GO_MODULE_INPUT_KEYS:
-        value = pinned._require_env(env, key)
-        go_module_inputs[key] = require_sha256(value, f"Go module input {key}")
+    go_module_inputs = {
+        key: require_sha256(_pin(pins, key), f"Go module input {key}")
+        for key in GO_MODULE_INPUT_KEYS
+    }
 
     patched_source = {
-        "upstream_commit": _require_commit(manifest["singBoxCommit"], "sing-box upstream commit"),
-        "patch_digests": patch_digests,
-        "combined_diff_sha256": combined,
-        "rejected_patch_digests": rejected,
+        "upstream_commit": _require_commit(
+            _pin(pins, UPSTREAM_COMMIT_KEY), "sing-box upstream commit"
+        ),
+        "patch_digests": sorted(verified.patch_digests),
+        "combined_diff_sha256": verified.combined_diff_sha256,
+        "rejected_patch_digests": sorted(verified.rejected_patch_digests),
         "go_module_inputs": go_module_inputs,
     }
     return {
@@ -457,7 +451,11 @@ def validate_sealed_closure(
         "vulnerability_reports",
     }
     parsed = require_exact_keys(document, fields | {"closure_sha256"}, "sealed closure")
-    if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != SCHEMA_VERSION
+        or parsed["document"] != DOCUMENT_KIND
+    ):
         raise PublicationError("sealed closure has an unsupported schema/document kind")
     if parsed["fixture"] is not bool(fixture):
         raise PublicationError("sealed closure fixture mode mismatch")

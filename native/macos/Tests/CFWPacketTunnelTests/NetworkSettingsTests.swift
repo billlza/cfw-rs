@@ -50,21 +50,59 @@ private func prefixContains(_ prefix: [UInt8], length: UInt8, address: [UInt8]) 
 
 private func descriptor(
   ipv6Enabled: Bool,
-  bypassPrivateNetworks: Bool = true
+  bypassPrivateNetworks: Bool = true,
+  directIPv4Hosts: [String] = [],
+  systemProxyPort: UInt16? = nil
 ) throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
-      mtu: 1_500
+      directIPv4Hosts: directIPv4Hosts,
+      mtu: 1_500,
+      systemProxyPort: systemProxyPort
     ),
+    credentialAudience: CredentialAudience(
+      profileID: UUID(),
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: UUID(),
     epoch: 1,
     generation: 1,
     byteCount: 2,
     sha256: SHA256Digest(hex: String(repeating: "00", count: 32))
   )
+}
+
+@Test func combinedTunnelPublishesRealProxySettingsAndRemovingProxyPreservesRoutes() throws {
+  let combined = PacketTunnelProvider.networkSettings(
+    descriptor: try descriptor(ipv6Enabled: true, systemProxyPort: 7891)
+  )
+  let proxy = try #require(combined.proxySettings)
+  #expect(proxy.httpEnabled && proxy.httpsEnabled)
+  #expect(proxy.httpServer?.address == "127.0.0.1")
+  #expect(proxy.httpServer?.port == 7891)
+  #expect(proxy.httpsServer?.port == 7891)
+  #expect(proxy.matchDomains == [""])
+  let tunnel = PacketTunnelProvider.networkSettings(descriptor: try descriptor(ipv6Enabled: true))
+  #expect(tunnel.proxySettings == nil)
+  #expect(tunnel.ipv4Settings?.addresses == combined.ipv4Settings?.addresses)
+  #expect(tunnel.ipv6Settings?.addresses == combined.ipv6Settings?.addresses)
+  #expect(tunnel.dnsSettings?.servers == combined.dnsSettings?.servers)
+}
+
+@Test func sourceOwnedDirectIPv4HostBecomesAnExact32ExcludedRoute() throws {
+  let settings = PacketTunnelProvider.networkSettings(
+    descriptor: try descriptor(
+      ipv6Enabled: true,
+      bypassPrivateNetworks: false,
+      directIPv4Hosts: [TunnelNetworkOptions.releasePacketTransportIPv4]
+    )
+  )
+  let routes = settings.ipv4Settings?.excludedRoutes?.map {
+    "\($0.destinationAddress)/\($0.destinationSubnetMask)"
+  }
+  #expect(routes == ["35.194.216.98/255.255.255.255"])
 }
 
 @Test func privateNetworkBypassIsBoundToNetworkSettings() throws {
@@ -78,7 +116,6 @@ private func descriptor(
   )
   #expect(
     ipv4Exclusions == [
-      "127.0.0.0/255.0.0.0",
       "10.0.0.0/255.0.0.0",
       "172.16.0.0/255.240.0.0",
       "192.168.0.0/255.255.0.0",
@@ -92,7 +129,7 @@ private func descriptor(
       "\($0.destinationAddress)/\($0.destinationNetworkPrefixLength.uint16Value)"
     } ?? []
   )
-  #expect(ipv6Exclusions == ["::1/128", "fc00::/7", "fe80::/10", "ff00::/8"])
+  #expect(ipv6Exclusions == ["fc00::/7", "fe80::/10", "ff00::/8"])
   #expect(!ipv4Exclusions.contains("198.18.0.0/255.254.0.0"))
 
   let captured = PacketTunnelProvider.networkSettings(
@@ -114,6 +151,38 @@ private func descriptor(
   #expect(settings.dnsSettings?.matchDomains == [""])
   #expect(settings.dnsSettings?.matchDomainsNoSearch == true)
   #expect(settings.mtu?.uint16Value == 1_500)
+}
+
+@Test func providerVirtualSubnetsHaveSpecificRoutesAndNoInvalidLoopbackExclusions() throws {
+  let settings = PacketTunnelProvider.networkSettings(descriptor: try descriptor(ipv6Enabled: true))
+  let ipv4 = try #require(settings.ipv4Settings)
+  let ipv6 = try #require(settings.ipv6Settings)
+  #expect(
+    ipv4.includedRoutes?.contains {
+      $0.destinationAddress == TunnelAddressPlan.ipv4NetworkAddress
+        && $0.destinationSubnetMask == TunnelAddressPlan.ipv4SubnetMask
+    } == true)
+  #expect(
+    ipv6.includedRoutes?.contains {
+      $0.destinationAddress == TunnelAddressPlan.ipv6NetworkAddress
+        && $0.destinationNetworkPrefixLength.uint8Value == TunnelAddressPlan.ipv6PrefixLength
+    } == true)
+  #expect(ipv4.excludedRoutes?.contains { $0.destinationAddress == "127.0.0.0" } == false)
+  #expect(ipv6.excludedRoutes?.contains { $0.destinationAddress == "::1" } == false)
+  for address in [TunnelAddressPlan.ipv4Address, TunnelAddressPlan.ipv4DNSPeer] {
+    #expect(
+      prefixContains(
+        try addressBytes(TunnelAddressPlan.ipv4NetworkAddress, family: AF_INET, count: 4),
+        length: TunnelAddressPlan.ipv4PrefixLength,
+        address: try addressBytes(address, family: AF_INET, count: 4)))
+  }
+  for address in [TunnelAddressPlan.ipv6Address, TunnelAddressPlan.ipv6DNSPeer] {
+    #expect(
+      prefixContains(
+        try addressBytes(TunnelAddressPlan.ipv6NetworkAddress, family: AF_INET6, count: 16),
+        length: TunnelAddressPlan.ipv6PrefixLength,
+        address: try addressBytes(address, family: AF_INET6, count: 16)))
+  }
 }
 
 @Test func dualStackProjectionUsesTheMatching126IPv6Prefix() throws {

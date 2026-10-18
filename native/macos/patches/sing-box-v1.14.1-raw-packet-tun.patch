@@ -1,0 +1,1455 @@
+diff --git a/daemon/started_service.go b/daemon/started_service.go
+index 5e8c79987cfb09531537f24e2d38026085f300ca..b3188c91c5daae877a571259001643c1edceb06b 100644
+--- a/daemon/started_service.go
++++ b/daemon/started_service.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/protocol/group"
+ 	"github.com/sagernet/sing/common"
++	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/memory"
+ 	"github.com/sagernet/sing/common/observable"
+ 	"github.com/sagernet/sing/service"
+@@ -256,12 +257,17 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 	}
+ 	oldInstance := s.instance
+ 	if oldInstance != nil {
+-		s.instance = nil
+ 		s.updateStatus(ServiceStatus_STOPPING)
+ 		s.serviceAccess.Unlock()
+-		_ = oldInstance.Close()
+-		runtimeDebug.FreeOSMemory()
++		closeErr := oldInstance.Close()
+ 		s.serviceAccess.Lock()
++		if closeErr != nil {
++			err := E.Cause(closeErr, "close previous service")
++			s.updateStatusError(err)
++			s.serviceAccess.Unlock()
++			return err
++		}
++		s.instance = nil
+ 	}
+ 	s.startInterrupted = false
+ 	s.updateStatus(ServiceStatus_STARTING)
+@@ -283,21 +289,25 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 	s.serviceAccess.Unlock()
+ 	err = instance.Start()
+ 	s.serviceAccess.Lock()
+-	if s.startInterrupted {
++	if s.startInterrupted || err != nil {
++		interrupted := s.startInterrupted
+ 		s.startInterrupted = false
+-		s.instance = nil
+ 		s.serviceAccess.Unlock()
+-		_ = instance.Close()
+-		runtimeDebug.FreeOSMemory()
+-		return nil
+-	}
+-	if err != nil {
+-		s.instance = nil
+-		s.updateStatusError(err)
++		closeErr := instance.Close()
++		s.serviceAccess.Lock()
++		if closeErr != nil {
++			err = E.Errors(err, E.Cause(closeErr, "close failed service"))
++		} else {
++			s.instance = nil
++		}
++		if err != nil && (!interrupted || closeErr != nil) {
++			s.updateStatusError(err)
++			s.serviceAccess.Unlock()
++			return err
++		}
+ 		s.serviceAccess.Unlock()
+-		_ = instance.Close()
+ 		runtimeDebug.FreeOSMemory()
+-		return err
++		return nil
+ 	}
+ 	s.startedAt = time.Now()
+ 	s.updateStatus(ServiceStatus_STARTED)
+@@ -317,23 +327,34 @@ func (s *StartedService) Close() {
+ 	s.notificationSubscriber.Close()
+ }
+ 
++func (s *StartedService) RuntimeStatus() (ServiceStatus_Type, string) {
++	s.serviceAccess.RLock()
++	defer s.serviceAccess.RUnlock()
++	return s.serviceStatus.Status, s.serviceStatus.ErrorMessage
++}
++
+ func (s *StartedService) CloseService() error {
+ 	s.interruptStart()
+ 	s.lifecycleAccess.Lock()
+ 	defer s.lifecycleAccess.Unlock()
+ 	s.serviceAccess.Lock()
+ 	instance := s.instance
+-	if instance == nil && s.serviceStatus.Status != ServiceStatus_STARTING && s.serviceStatus.Status != ServiceStatus_STARTED {
++	if instance == nil && s.serviceStatus.Status != ServiceStatus_STARTING && s.serviceStatus.Status != ServiceStatus_STARTED && s.serviceStatus.Status != ServiceStatus_FATAL {
+ 		s.serviceAccess.Unlock()
+ 		return nil
+ 	}
+-	s.instance = nil
+ 	s.updateStatus(ServiceStatus_STOPPING)
+ 	s.serviceAccess.Unlock()
+ 	if instance != nil {
+-		_ = instance.Close()
++		if err := instance.Close(); err != nil {
++			s.serviceAccess.Lock()
++			s.updateStatusError(err)
++			s.serviceAccess.Unlock()
++			return err
++		}
+ 	}
+ 	s.serviceAccess.Lock()
++	s.instance = nil
+ 	s.startedAt = time.Time{}
+ 	s.updateStatus(ServiceStatus_IDLE)
+ 	s.serviceAccess.Unlock()
+@@ -1491,7 +1512,7 @@ func (s *StartedService) StartNetworkQualityTest(
+ 		return err
+ 	}
+ 
+-	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
++	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", nil, adapter.DNSQueryOptions{}, 0)
+ 	httpClient := networkquality.NewHTTPClient(resolvedDialer)
+ 	defer httpClient.CloseIdleConnections()
+ 
+@@ -1537,7 +1558,7 @@ func (s *StartedService) StartSTUNTest(
+ 		return err
+ 	}
+ 
+-	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
++	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", nil, adapter.DNSQueryOptions{}, 0)
+ 
+ 	result, stunErr := stun.Run(stun.Options{
+ 		Server:  request.Server,
+diff --git a/daemon/started_service_test.go b/daemon/started_service_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..87038bf836fc6f830caecafee22004e4c8b42577
+--- /dev/null
++++ b/daemon/started_service_test.go
+@@ -0,0 +1,101 @@
++package daemon
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter/certificate"
++	"github.com/sagernet/sing-box/adapter/endpoint"
++	"github.com/sagernet/sing-box/adapter/inbound"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	serviceRegistry "github.com/sagernet/sing-box/adapter/service"
++	"github.com/sagernet/sing-box/dns"
++	"github.com/sagernet/sing-box/dns/transport/local"
++)
++
++func TestStartedServiceRuntimeStatusAndFatalCleanup(t *testing.T) {
++	service := NewStartedService(ServiceOptions{Context: context.Background()})
++	defer service.Close()
++
++	status, message := service.RuntimeStatus()
++	if status != ServiceStatus_IDLE || message != "" {
++		t.Fatalf("unexpected initial status: %v %q", status, message)
++	}
++
++	service.SetError(errors.New("test failure"))
++	status, message = service.RuntimeStatus()
++	if status != ServiceStatus_FATAL || message != "test failure" {
++		t.Fatalf("unexpected fatal status: %v %q", status, message)
++	}
++
++	if err := service.CloseService(); err != nil {
++		t.Fatalf("clean fatal service: %v", err)
++	}
++	status, message = service.RuntimeStatus()
++	if status != ServiceStatus_IDLE || message != "" {
++		t.Fatalf("unexpected cleaned status: %v %q", status, message)
++	}
++}
++
++func TestCloseServiceRetainsInstanceWhenCleanupFails(t *testing.T) {
++	startedService := NewStartedService(ServiceOptions{
++		Context: testServiceContext(),
++	})
++	defer startedService.Close()
++	instance := newClosedTestInstance(t, startedService)
++	startedService.serviceAccess.Lock()
++	startedService.instance = instance
++	startedService.updateStatus(ServiceStatus_STARTED)
++	startedService.serviceAccess.Unlock()
++
++	if err := startedService.CloseService(); err == nil {
++		t.Fatal("expected cleanup failure")
++	}
++	startedService.serviceAccess.RLock()
++	defer startedService.serviceAccess.RUnlock()
++	if startedService.instance != instance || startedService.serviceStatus.Status != ServiceStatus_FATAL {
++		t.Fatal("failed cleanup released instance ownership or reported a false idle state")
++	}
++}
++
++func TestReloadRetainsPreviousInstanceWhenCleanupFails(t *testing.T) {
++	startedService := NewStartedService(ServiceOptions{
++		Context: testServiceContext(),
++	})
++	defer startedService.Close()
++	instance := newClosedTestInstance(t, startedService)
++	startedService.serviceAccess.Lock()
++	startedService.instance = instance
++	startedService.updateStatus(ServiceStatus_STARTED)
++	startedService.serviceAccess.Unlock()
++
++	if err := startedService.StartOrReloadService(context.Background(), "{}", nil); err == nil {
++		t.Fatal("expected previous-instance cleanup failure")
++	}
++	startedService.serviceAccess.RLock()
++	defer startedService.serviceAccess.RUnlock()
++	if startedService.instance != instance || startedService.serviceStatus.Status != ServiceStatus_FATAL {
++		t.Fatal("failed replacement cleanup released previous instance ownership")
++	}
++}
++
++func newClosedTestInstance(t *testing.T, service *StartedService) *Instance {
++	t.Helper()
++	instance, err := service.newInstance(context.Background(), "{}", nil)
++	if err != nil {
++		t.Fatalf("create test instance: %v", err)
++	}
++	if err := instance.Close(); err != nil {
++		t.Fatalf("close test instance: %v", err)
++	}
++	return instance
++}
++
++func testServiceContext() context.Context {
++	dnsRegistry := dns.NewTransportRegistry()
++	local.RegisterTransport(dnsRegistry)
++	return box.Context(context.Background(), inbound.NewRegistry(), outbound.NewRegistry(),
++		endpoint.NewRegistry(), dnsRegistry, serviceRegistry.NewRegistry(), certificate.NewRegistry())
++}
+diff --git a/experimental/libbox/command_server.go b/experimental/libbox/command_server.go
+index 5f62d03db24fa936cfb07f0b56986a9e18107eca..75df4e8fb0e9d93d89330f3cf34f22cc733d5364 100644
+--- a/experimental/libbox/command_server.go
++++ b/experimental/libbox/command_server.go
+@@ -211,11 +211,30 @@ type OverrideOptions struct {
+ 	ExcludePackage StringIterator
+ }
+ 
+-func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
+-	saveConfigSnapshot(configContent)
+-	if s.powerManager.Recorder() != nil {
+-		copyConfigSnapshot(filepath.Join(sWorkingPath, powerreport.DraftDirectoryName))
++const (
++	RuntimeStateIdle int32 = iota
++	RuntimeStateStarting
++	RuntimeStateStarted
++	RuntimeStateStopping
++	RuntimeStateFatal
++)
++
++type RuntimeStatus struct {
++	State        int32
++	ErrorMessage string
++}
++
++func (s *CommandServer) RuntimeStatus() *RuntimeStatus {
++	status, message := s.StartedService.RuntimeStatus()
++	return &RuntimeStatus{
++		State:        int32(status),
++		ErrorMessage: message,
+ 	}
++}
++
++func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
++	// CFM injects credentials only for this in-memory startup. Never persist
++	// the runtime configuration in diagnostic or power-report snapshots.
+ 	err := s.StartedService.StartOrReloadService(s.ctx, configContent, &daemon.OverrideOptions{
+ 		AutoRedirect:   options.AutoRedirect,
+ 		IncludePackage: iteratorToArray(options.IncludePackage),
+@@ -231,6 +250,52 @@ func (s *CommandServer) CloseService() error {
+ 	return s.StartedService.CloseService()
+ }
+ 
++const (
++	RuntimeEndpointConflictMixed      int32 = int32(adapter.EndpointConflictMixed)
++	RuntimeEndpointConflictController int32 = int32(adapter.EndpointConflictController)
++)
++
++type RuntimeStartConflict struct {
++	Kind int32
++	Port int32
++}
++
++// StartOrReloadServiceReportingConflict preserves every ordinary start error.
++// Only an exact product listener EADDRINUSE is converted to structured data so
++// the embedding application can retry after its own cleanup and Off proof.
++func (s *CommandServer) StartOrReloadServiceReportingConflict(configContent string, options *OverrideOptions) (*RuntimeStartConflict, error) {
++	err := s.StartOrReloadService(configContent, options)
++	if err == nil {
++		return nil, nil
++	}
++	conflict := runtimeStartConflict(err)
++	if conflict == nil {
++		return nil, err
++	}
++	return conflict, nil
++}
++
++func runtimeStartConflict(err error) *RuntimeStartConflict {
++	if containsMultiError(err) || !errors.Is(err, syscall.EADDRINUSE) {
++		return nil
++	}
++	role, port, isConflict := adapter.EndpointConflictFromError(err)
++	if !isConflict || port == 0 || (role != adapter.EndpointConflictMixed && role != adapter.EndpointConflictController) {
++		return nil
++	}
++	return &RuntimeStartConflict{Kind: int32(role), Port: int32(port)}
++}
++
++func containsMultiError(err error) bool {
++	for err != nil {
++		if _, ok := err.(interface{ Unwrap() []error }); ok {
++			return true
++		}
++		err = errors.Unwrap(err)
++	}
++	return false
++}
++
+ func (s *CommandServer) WriteMessage(level int32, message string) {
+ 	s.StartedService.WriteMessage(log.Level(level), message)
+ }
+diff --git a/experimental/libbox/command_types.go b/experimental/libbox/command_types.go
+index 5be81a22830d6c86aa976d4c60dd96fc65eb1712..924eb7804ee1bf4a5a4c1b2818b950f520b78076 100644
+--- a/experimental/libbox/command_types.go
++++ b/experimental/libbox/command_types.go
+@@ -120,7 +120,11 @@ type Connections struct {
+ 	filterApplied bool
+ }
+ 
+-func NewConnections() *Connections {
++// CreateConnections intentionally avoids the gomobile "NewType" constructor
++// convention. That convention generates a nullable Objective-C -init which
++// conflicts with NSObject's nonnull initializer and makes every strict Swift
++// import emit a nullability warning.
++func CreateConnections() *Connections {
+ 	return &Connections{
+ 		connectionMap: make(map[string]*Connection),
+ 	}
+diff --git a/experimental/libbox/command_types_openconnect.go b/experimental/libbox/command_types_openconnect.go
+index b31abe9aa29a6bcaa38367b2451fb18e1782276c..2908ef41556ccef1291e937f3ba8bcc92dda804a 100644
+--- a/experimental/libbox/command_types_openconnect.go
++++ b/experimental/libbox/command_types_openconnect.go
+@@ -127,7 +127,9 @@ type OpenConnectFormValues struct {
+ 	values map[string]string
+ }
+ 
+-func NewOpenConnectFormValues() *OpenConnectFormValues {
++// NewOpenConnectFormValuesWithDefaults uses an explicit Objective-C initializer selector.
++// A nullable Go constructor must not override NSObject.init in the Swift 6.4 SDK.
++func NewOpenConnectFormValuesWithDefaults() *OpenConnectFormValues {
+ 	return &OpenConnectFormValues{values: make(map[string]string)}
+ }
+ 
+diff --git a/experimental/libbox/command_types_taildrop.go b/experimental/libbox/command_types_taildrop.go
+index 3adca4ec6fd3c6a9feabbb72e8174235c6b14a4c..97136eb9541393e9d13e7700dfadc15df6746911 100644
+--- a/experimental/libbox/command_types_taildrop.go
++++ b/experimental/libbox/command_types_taildrop.go
+@@ -84,7 +84,9 @@ type TaildropSendOptions struct {
+ 	files        []*daemon.TaildropOutgoingFile
+ }
+ 
+-func NewTaildropSendOptions() *TaildropSendOptions {
++// NewTaildropSendOptionsWithDefaults uses an explicit Objective-C initializer selector.
++// A nullable Go constructor must not override NSObject.init in the Swift 6.4 SDK.
++func NewTaildropSendOptionsWithDefaults() *TaildropSendOptions {
+ 	return &TaildropSendOptions{}
+ }
+ 
+diff --git a/experimental/libbox/monitor.go b/experimental/libbox/monitor.go
+index 273b127565eee35a91a693dbde9d055433830f50..83facbdfcdad8398b48b4bf1a8375fac39c6720f 100644
+--- a/experimental/libbox/monitor.go
++++ b/experimental/libbox/monitor.go
+@@ -1,6 +1,10 @@
+ package libbox
+ 
+ import (
++	"net"
++	"slices"
++	"strings"
++
+ 	"github.com/sagernet/sing-box/service/powerreport"
+ 	tun "github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common/control"
+@@ -20,6 +24,7 @@ type platformDefaultInterfaceMonitor struct {
+ 	callbacks                   list.List[tun.DefaultInterfaceUpdateCallback]
+ 	myInterfaces                []string
+ 	defaultInterfaceInitialized bool
++	lastNetwork                 interfaceNetworkIdentity
+ }
+ 
+ func (m *platformDefaultInterfaceMonitor) Start() error {
+@@ -100,15 +105,22 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+ 		}
+ 		recorder.UpdateNetworkType(networkType)
+ 	}
++	m.defaultInterfaceAccess.Lock()
+ 	m.isExpensive = isExpensive
+ 	m.isConstrained = isConstrained
++	m.defaultInterfaceAccess.Unlock()
+ 	err := m.networkManager.UpdateInterfaces()
+ 	if err != nil {
+ 		m.logger.Error(E.Cause(err, "update interfaces"))
+ 	}
+ 	m.defaultInterfaceAccess.Lock()
+ 	if interfaceIndex32 == -1 {
++		if m.defaultInterfaceInitialized && m.defaultInterface == nil {
++			m.defaultInterfaceAccess.Unlock()
++			return
++		}
+ 		m.defaultInterface = nil
++		m.lastNetwork = interfaceNetworkIdentity{}
+ 		m.defaultInterfaceInitialized = true
+ 		callbacks := m.callbacks.Array()
+ 		m.defaultInterfaceAccess.Unlock()
+@@ -125,11 +137,13 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+ 		return
+ 	}
+ 	m.defaultInterface = newInterface
+-	if m.defaultInterfaceInitialized && oldInterface != nil && oldInterface.Name == m.defaultInterface.Name && oldInterface.Index == m.defaultInterface.Index {
++	network := networkIdentity(newInterface, isExpensive, isConstrained)
++	if m.defaultInterfaceInitialized && oldInterface != nil && m.lastNetwork == network {
+ 		m.defaultInterfaceAccess.Unlock()
+ 		return
+ 	}
+ 	m.defaultInterfaceInitialized = true
++	m.lastNetwork = network
+ 	callbacks := m.callbacks.Array()
+ 	m.defaultInterfaceAccess.Unlock()
+ 	for _, callback := range callbacks {
+@@ -137,6 +151,39 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
+ 	}
+ }
+ 
++// Moving between Wi-Fi networks keeps the same interface name and index.
++// Compare routing-relevant network state so DNS transports and connections are
++// reset for a new subnet. IPv6 privacy-address rotation within one prefix does
++// not turn into a reconnect loop.
++type interfaceNetworkIdentity struct {
++	name                   string
++	index, mtu             int
++	flags                  net.Flags
++	networks               string
++	expensive, constrained bool
++}
++
++func networkIdentity(network *control.Interface, expensive, constrained bool) interfaceNetworkIdentity {
++	prefixes := make([]string, 0, len(network.Addresses))
++	for _, prefix := range network.Addresses {
++		if prefix.IsValid() {
++			if prefix.Addr().Is4() {
++				// A changed IPv4 lease invalidates existing source addresses even
++				// when both leases belong to the same subnet.
++				prefixes = append(prefixes, prefix.String())
++			} else {
++				prefixes = append(prefixes, prefix.Masked().String())
++			}
++		}
++	}
++	slices.Sort(prefixes)
++	prefixes = slices.Compact(prefixes)
++	return interfaceNetworkIdentity{
++		name: network.Name, index: network.Index, mtu: network.MTU, flags: network.Flags,
++		networks: strings.Join(prefixes, ","), expensive: expensive, constrained: constrained,
++	}
++}
++
+ func (m *platformDefaultInterfaceMonitor) RegisterMyInterface(interfaceName string) {
+ 	m.defaultInterfaceAccess.Lock()
+ 	defer m.defaultInterfaceAccess.Unlock()
+diff --git a/experimental/libbox/monitor_network_change_test.go b/experimental/libbox/monitor_network_change_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..65cfb33f7bcbf03f2e377facac42d864520b2806
+--- /dev/null
++++ b/experimental/libbox/monitor_network_change_test.go
+@@ -0,0 +1,91 @@
++package libbox
++
++import (
++	"net"
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing/common/control"
++	"github.com/sagernet/sing/common/logger"
++)
++
++type networkChangeFixture struct {
++	adapter.NetworkManager
++	finder  *control.DefaultInterfaceFinder
++	current control.Interface
++}
++
++func (m *networkChangeFixture) UpdateInterfaces() error {
++	m.finder.UpdateInterfaces([]control.Interface{m.current})
++	return nil
++}
++
++func (m *networkChangeFixture) InterfaceFinder() control.InterfaceFinder { return m.finder }
++
++func TestSameWiFiInterfaceNotifiesOnHotspotSubnetChange(t *testing.T) {
++	network := &networkChangeFixture{
++		finder: control.NewDefaultInterfaceFinder(),
++		current: control.Interface{Name: "en0", Index: 7, MTU: 1500, Flags: net.FlagUp,
++			Addresses: []netip.Prefix{netip.MustParsePrefix("192.168.0.103/24")}},
++	}
++	monitor := &platformDefaultInterfaceMonitor{
++		platformInterfaceWrapper: &platformInterfaceWrapper{networkManager: network},
++		logger:                   logger.NOP(),
++	}
++	var observed []string
++	monitor.RegisterCallback(func(current *control.Interface, _ int) {
++		if current == nil {
++			observed = append(observed, "unavailable")
++			return
++		}
++		observed = append(observed, current.Addresses[0].String())
++	})
++	monitor.UpdateDefaultInterface("en0", 7, false, false)
++	monitor.UpdateDefaultInterface("en0", 7, false, false)
++	network.current.Addresses = []netip.Prefix{netip.MustParsePrefix("172.20.10.2/28")}
++	monitor.UpdateDefaultInterface("en0", 7, false, false)
++	if len(observed) != 2 || observed[1] != "172.20.10.2/28" {
++		t.Fatalf("network handoff was lost behind the unchanged en0 identity: %v", observed)
++	}
++	monitor.UpdateDefaultInterface("en0", 7, true, false)
++	monitor.UpdateDefaultInterface("en0", 7, true, false)
++	monitor.UpdateDefaultInterface("", -1, false, false)
++	monitor.UpdateDefaultInterface("", -1, false, false)
++	monitor.UpdateDefaultInterface("en0", 7, true, false)
++	if len(observed) != 5 || observed[3] != "unavailable" {
++		t.Fatalf("cost, loss or recovery notification was incorrect: %v", observed)
++	}
++	network.current.Addresses = []netip.Prefix{netip.MustParsePrefix("172.20.10.3/28")}
++	monitor.UpdateDefaultInterface("en0", 7, true, false)
++	if len(observed) != 6 {
++		t.Fatalf("changed IPv4 lease did not invalidate existing connections: %v", observed)
++	}
++}
++
++func TestPrivacyAddressRotationDoesNotResetSameNetwork(t *testing.T) {
++	network := &networkChangeFixture{
++		finder: control.NewDefaultInterfaceFinder(),
++		current: control.Interface{Name: "en0", Index: 7, MTU: 1500, Flags: net.FlagUp,
++			Addresses: []netip.Prefix{netip.MustParsePrefix("2001:db8:1::1/64")}},
++	}
++	monitor := &platformDefaultInterfaceMonitor{
++		platformInterfaceWrapper: &platformInterfaceWrapper{networkManager: network},
++		logger:                   logger.NOP(),
++	}
++	updates := 0
++	monitor.RegisterCallback(func(_ *control.Interface, _ int) { updates++ })
++	monitor.UpdateDefaultInterface("en0", 7, false, false)
++	network.current.Addresses = []netip.Prefix{
++		netip.MustParsePrefix("2001:db8:1::2/64"), netip.MustParsePrefix("2001:db8:1::3/64"),
++	}
++	monitor.UpdateDefaultInterface("en0", 7, false, false)
++	if updates != 1 {
++		t.Fatalf("privacy address rotation reset the network %d times", updates)
++	}
++	network.current.Addresses = []netip.Prefix{netip.MustParsePrefix("2001:db8:2::1/64")}
++	monitor.UpdateDefaultInterface("en0", 7, false, false)
++	if updates != 2 {
++		t.Fatalf("changed IPv6 network did not trigger a reset: %d", updates)
++	}
++}
+diff --git a/experimental/libbox/networkquality.go b/experimental/libbox/networkquality.go
+index fcbe6f3a664624fd67c59390907c0178aef9229d..53b74bb5462adad26223ac3552cdb546c4ee58fb 100644
+--- a/experimental/libbox/networkquality.go
++++ b/experimental/libbox/networkquality.go
+@@ -12,7 +12,9 @@ type NetworkQualityTest struct {
+ 	cancel context.CancelFunc
+ }
+ 
+-func NewNetworkQualityTest() *NetworkQualityTest {
++// NewNetworkQualityTestWithDefaults uses an explicit Objective-C initializer selector.
++// A nullable Go constructor must not override NSObject.init in the Swift 6.4 SDK.
++func NewNetworkQualityTestWithDefaults() *NetworkQualityTest {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	return &NetworkQualityTest{ctx: ctx, cancel: cancel}
+ }
+diff --git a/experimental/libbox/platform.go b/experimental/libbox/platform.go
+index 108cc20939c8ef958414f8b230bad64f65a0b52c..4c03abb91ad1427d0854fc59e2328e9a85d74e3f 100644
+--- a/experimental/libbox/platform.go
++++ b/experimental/libbox/platform.go
+@@ -6,6 +6,10 @@ type PlatformInterface interface {
+ 	LocalDNSTransport() LocalDNSTransport
+ 	UsePlatformAutoDetectInterfaceControl() bool
+ 	AutoDetectInterfaceControl(fd int32) error
++	UseRawPacketTun() bool
++	// OpenRawPacketTun returns a connected AF_UNIX/SOCK_DGRAM descriptor.
++	// A successful return transfers descriptor ownership to libbox.
++	OpenRawPacketTun(options TunOptions) (int32, error)
+ 	OpenTun(options TunOptions) (int32, error)
+ 	UseProcFS() bool
+ 	FindConnectionOwner(ipProtocol int32, sourceAddress string, sourcePort int32, destinationAddress string, destinationPort int32) (*ConnectionOwner, error)
+diff --git a/experimental/libbox/raw_packet_tun.go b/experimental/libbox/raw_packet_tun.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..76e7e7e8e0a5bf8626d9a2eccf86e2395ae8b878
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun.go
+@@ -0,0 +1,14 @@
++package libbox
++
++import "errors"
++
++const rawPacketTunName = "cfw-packet-flow"
++
++var (
++	errRawPacketTunUnsupported          = errors.New("raw packet tun is unsupported on this platform")
++	errRawPacketTunInvalidDescriptor    = errors.New("raw packet tun descriptor is invalid")
++	errRawPacketTunInvalidConfiguration = errors.New("raw packet tun configuration is invalid")
++	errRawPacketTunConfigurationChanged = errors.New("raw packet tun configuration changed")
++	errRawPacketTunInvalidPacket        = errors.New("raw packet tun packet is invalid")
++	errRawPacketTunPacketTruncated      = errors.New("raw packet tun packet was truncated")
++)
+diff --git a/experimental/libbox/raw_packet_tun_darwin.go b/experimental/libbox/raw_packet_tun_darwin.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..61604a5727a89f6ea7e7963c000a223712df9d0f
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_darwin.go
+@@ -0,0 +1,252 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"encoding/binary"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"reflect"
++	"slices"
++	"sync"
++
++	tun "github.com/sagernet/sing-tun"
++	"golang.org/x/sys/unix"
++)
++
++const (
++	rawPacketTunMinimumMTU = 1280
++	rawPacketTunMaximumMTU = 1500
++	rawPacketTunHeaderSize = 4
++)
++
++type rawPacketTun struct {
++	connection    *net.UnixConn
++	name          string
++	mtu           int
++	configuration tun.Options
++	closeOnce     sync.Once
++	closeErr      error
++}
++
++var _ tun.Tun = (*rawPacketTun)(nil)
++
++// newRawPacketTun takes ownership of fd on every path. The descriptor must be
++// one end of a connected AF_UNIX/SOCK_DGRAM socketpair carrying exactly one
++// headerless IP packet per datagram.
++func newRawPacketTun(fd int32, options *tun.Options) (tun.Tun, error) {
++	return newRawPacketTunWithInterfaceResolver(fd, options, resolveRawPacketTunInterface)
++}
++
++func newRawPacketTunWithInterfaceResolver(fd int32, options *tun.Options, resolve func(*tun.Options) (string, error)) (tun.Tun, error) {
++	if fd < 0 {
++		return nil, fmt.Errorf("%w: negative file descriptor", errRawPacketTunInvalidDescriptor)
++	}
++	closeFD := true
++	defer func() {
++		if closeFD {
++			_ = unix.Close(int(fd))
++		}
++	}()
++
++	socketType, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_TYPE)
++	if err != nil {
++		return nil, fmt.Errorf("%w: query socket type: %v", errRawPacketTunInvalidDescriptor, err)
++	}
++	if socketType != unix.SOCK_DGRAM {
++		return nil, fmt.Errorf("%w: expected SOCK_DGRAM", errRawPacketTunInvalidDescriptor)
++	}
++	if _, ok := mustSockaddrUnix(unix.Getsockname(int(fd))); !ok {
++		return nil, fmt.Errorf("%w: expected AF_UNIX socket", errRawPacketTunInvalidDescriptor)
++	}
++	if _, ok := mustSockaddrUnix(unix.Getpeername(int(fd))); !ok {
++		return nil, fmt.Errorf("%w: expected connected AF_UNIX socket", errRawPacketTunInvalidDescriptor)
++	}
++	if options == nil {
++		return nil, fmt.Errorf("%w: missing options", errRawPacketTunInvalidConfiguration)
++	}
++	if options.MTU < rawPacketTunMinimumMTU || options.MTU > rawPacketTunMaximumMTU {
++		return nil, fmt.Errorf("%w: MTU %d is outside %d...%d", errRawPacketTunInvalidConfiguration, options.MTU, rawPacketTunMinimumMTU, rawPacketTunMaximumMTU)
++	}
++	if options.AutoRoute {
++		return nil, fmt.Errorf("%w: auto_route must be disabled", errRawPacketTunInvalidConfiguration)
++	}
++	if options.GSO {
++		return nil, fmt.Errorf("%w: GSO is unsupported", errRawPacketTunInvalidConfiguration)
++	}
++	interfaceName, err := resolve(options)
++	if err != nil {
++		return nil, err
++	}
++
++	file := os.NewFile(uintptr(fd), rawPacketTunName)
++	if file == nil {
++		return nil, fmt.Errorf("%w: adopt file descriptor", errRawPacketTunInvalidDescriptor)
++	}
++	connection, err := net.FileConn(file)
++	fileCloseErr := file.Close()
++	closeFD = false
++	if err != nil {
++		if fileCloseErr != nil {
++			return nil, fmt.Errorf("%w: adopt datagram socket: %v; close transferred descriptor: %v", errRawPacketTunInvalidDescriptor, err, fileCloseErr)
++		}
++		return nil, fmt.Errorf("%w: adopt datagram socket: %v", errRawPacketTunInvalidDescriptor, err)
++	}
++	if fileCloseErr != nil {
++		_ = connection.Close()
++		return nil, fmt.Errorf("%w: close transferred descriptor: %v", errRawPacketTunInvalidDescriptor, fileCloseErr)
++	}
++	unixConnection, ok := connection.(*net.UnixConn)
++	if !ok {
++		_ = connection.Close()
++		return nil, fmt.Errorf("%w: descriptor did not produce UnixConn", errRawPacketTunInvalidDescriptor)
++	}
++
++	options.Name = interfaceName
++	options.FileDescriptor = 0
++	options.EXP_ExternalConfiguration = true
++	options.EXP_MultiPendingPackets = false
++	options.EXP_SendMsgX = false
++	return &rawPacketTun{
++		connection:    unixConnection,
++		name:          interfaceName,
++		mtu:           int(options.MTU),
++		configuration: cloneRawPacketTunOptions(*options),
++	}, nil
++}
++
++func cloneRawPacketTunOptions(options tun.Options) tun.Options {
++	options.Inet4Address = slices.Clone(options.Inet4Address)
++	options.Inet6Address = slices.Clone(options.Inet6Address)
++	options.DNSAddress = slices.Clone(options.DNSAddress)
++	options.Inet4LoopbackAddress = slices.Clone(options.Inet4LoopbackAddress)
++	options.Inet6LoopbackAddress = slices.Clone(options.Inet6LoopbackAddress)
++	options.Inet4RouteAddress = slices.Clone(options.Inet4RouteAddress)
++	options.Inet6RouteAddress = slices.Clone(options.Inet6RouteAddress)
++	options.Inet4RouteExcludeAddress = slices.Clone(options.Inet4RouteExcludeAddress)
++	options.Inet6RouteExcludeAddress = slices.Clone(options.Inet6RouteExcludeAddress)
++	options.IncludeInterface = slices.Clone(options.IncludeInterface)
++	options.ExcludeInterface = slices.Clone(options.ExcludeInterface)
++	options.IncludeUID = slices.Clone(options.IncludeUID)
++	options.ExcludeUID = slices.Clone(options.ExcludeUID)
++	options.IncludeAndroidUser = slices.Clone(options.IncludeAndroidUser)
++	options.IncludePackage = slices.Clone(options.IncludePackage)
++	options.ExcludePackage = slices.Clone(options.ExcludePackage)
++	// Runtime collaborators do not describe the externally managed Network
++	// Extension settings and must not participate in configuration equality.
++	options.InterfaceFinder = nil
++	options.InterfaceMonitor = nil
++	options.Logger = nil
++	return options
++}
++
++func mustSockaddrUnix(address unix.Sockaddr, err error) (*unix.SockaddrUnix, bool) {
++	if err != nil {
++		return nil, false
++	}
++	unixAddress, ok := address.(*unix.SockaddrUnix)
++	return unixAddress, ok
++}
++
++func (t *rawPacketTun) Name() (string, error) {
++	return t.name, nil
++}
++
++func (t *rawPacketTun) Start() error {
++	return nil
++}
++
++func (t *rawPacketTun) Close() error {
++	t.closeOnce.Do(func() {
++		t.closeErr = t.connection.Close()
++	})
++	return t.closeErr
++}
++
++func (t *rawPacketTun) Read(buffer []byte) (int, error) {
++	required := t.mtu + rawPacketTunHeaderSize
++	if len(buffer) < required {
++		return 0, fmt.Errorf("%w: read buffer is %d, need %d", errRawPacketTunInvalidConfiguration, len(buffer), required)
++	}
++	packetLength, _, flags, _, err := t.connection.ReadMsgUnix(buffer[rawPacketTunHeaderSize:required], nil)
++	if err != nil {
++		return 0, err
++	}
++	if flags&unix.MSG_TRUNC != 0 {
++		return 0, errRawPacketTunPacketTruncated
++	}
++	if packetLength == 0 {
++		return 0, io.ErrUnexpectedEOF
++	}
++	addressFamily, err := validateRawIPPacket(buffer[rawPacketTunHeaderSize : rawPacketTunHeaderSize+packetLength])
++	if err != nil {
++		return 0, err
++	}
++	binary.BigEndian.PutUint32(buffer[:rawPacketTunHeaderSize], uint32(addressFamily))
++	return rawPacketTunHeaderSize + packetLength, nil
++}
++
++func (t *rawPacketTun) Write(packetWithHeader []byte) (int, error) {
++	if len(packetWithHeader) < rawPacketTunHeaderSize {
++		return 0, fmt.Errorf("%w: missing Darwin address-family header", errRawPacketTunInvalidPacket)
++	}
++	packet := packetWithHeader[rawPacketTunHeaderSize:]
++	if len(packet) > t.mtu {
++		return 0, fmt.Errorf("%w: packet is %d bytes, MTU is %d", errRawPacketTunInvalidPacket, len(packet), t.mtu)
++	}
++	addressFamily, err := validateRawIPPacket(packet)
++	if err != nil {
++		return 0, err
++	}
++	providedFamily := binary.BigEndian.Uint32(packetWithHeader[:rawPacketTunHeaderSize])
++	if providedFamily != uint32(addressFamily) {
++		return 0, fmt.Errorf("%w: address family %d does not match IP version", errRawPacketTunInvalidPacket, providedFamily)
++	}
++	written, err := t.connection.Write(packet)
++	if err != nil {
++		return 0, err
++	}
++	if written != len(packet) {
++		return 0, io.ErrShortWrite
++	}
++	return len(packetWithHeader), nil
++}
++
++func (t *rawPacketTun) UpdateRouteOptions(options tun.Options) error {
++	if !reflect.DeepEqual(t.configuration, cloneRawPacketTunOptions(options)) {
++		return errRawPacketTunConfigurationChanged
++	}
++	return nil
++}
++
++func validateRawIPPacket(packet []byte) (int, error) {
++	if len(packet) == 0 {
++		return 0, fmt.Errorf("%w: empty packet", errRawPacketTunInvalidPacket)
++	}
++	switch packet[0] >> 4 {
++	case 4:
++		if len(packet) < 20 {
++			return 0, fmt.Errorf("%w: truncated IPv4 header", errRawPacketTunInvalidPacket)
++		}
++		headerLength := int(packet[0]&0x0f) * 4
++		if headerLength < 20 || headerLength > len(packet) {
++			return 0, fmt.Errorf("%w: invalid IPv4 header length", errRawPacketTunInvalidPacket)
++		}
++		if int(binary.BigEndian.Uint16(packet[2:4])) != len(packet) {
++			return 0, fmt.Errorf("%w: IPv4 total length mismatch", errRawPacketTunInvalidPacket)
++		}
++		return unix.AF_INET, nil
++	case 6:
++		if len(packet) < 40 {
++			return 0, fmt.Errorf("%w: truncated IPv6 header", errRawPacketTunInvalidPacket)
++		}
++		if 40+int(binary.BigEndian.Uint16(packet[4:6])) != len(packet) {
++			return 0, fmt.Errorf("%w: IPv6 payload length mismatch", errRawPacketTunInvalidPacket)
++		}
++		return unix.AF_INET6, nil
++	default:
++		return 0, fmt.Errorf("%w: unsupported IP version", errRawPacketTunInvalidPacket)
++	}
++}
+diff --git a/experimental/libbox/raw_packet_tun_darwin_test.go b/experimental/libbox/raw_packet_tun_darwin_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee07b527f3eaf6994ac4c8b6e1c1d5eadbb9acba
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_darwin_test.go
+@@ -0,0 +1,307 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"encoding/binary"
++	"errors"
++	"net/netip"
++	"slices"
++	"testing"
++	"time"
++
++	tun "github.com/sagernet/sing-tun"
++	"golang.org/x/sys/unix"
++)
++
++func TestRawPacketTunReadAddsDarwinAddressFamilyHeader(t *testing.T) {
++	tests := []struct {
++		name          string
++		packet        []byte
++		addressFamily int
++	}{
++		{"IPv4", testIPv4Packet(32), unix.AF_INET},
++		{"IPv6", testIPv6Packet(48), unix.AF_INET6},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++			if err := unix.Send(peer, test.packet, 0); err != nil {
++				t.Fatal(err)
++			}
++			buffer := make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize)
++			n, err := rawTun.Read(buffer)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if n != len(test.packet)+rawPacketTunHeaderSize {
++				t.Fatalf("unexpected framed packet length: %d", n)
++			}
++			if family := int(binary.BigEndian.Uint32(buffer[:rawPacketTunHeaderSize])); family != test.addressFamily {
++				t.Fatalf("unexpected address family: %d", family)
++			}
++			if !slices.Equal(buffer[rawPacketTunHeaderSize:n], test.packet) {
++				t.Fatal("raw packet payload changed")
++			}
++		})
++	}
++}
++
++func TestRawPacketTunWriteRemovesAndValidatesDarwinHeader(t *testing.T) {
++	rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	packet := testIPv6Packet(64)
++	framed := frameTestPacket(packet, unix.AF_INET6)
++	written, err := rawTun.Write(framed)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if written != len(framed) {
++		t.Fatalf("unexpected write length: %d", written)
++	}
++	received := make([]byte, rawPacketTunMinimumMTU)
++	n, err := unix.Read(peer, received)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !slices.Equal(received[:n], packet) {
++		t.Fatal("Darwin header leaked into raw packet datagram")
++	}
++
++	if _, err = rawTun.Write(frameTestPacket(testIPv4Packet(32), unix.AF_INET6)); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected address-family validation error, got %v", err)
++	}
++	malformedHeader := append([]byte{1, 0, 0, unix.AF_INET}, testIPv4Packet(32)...)
++	if _, err = rawTun.Write(malformedHeader); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected malformed address-family header error, got %v", err)
++	}
++}
++
++func TestRawPacketTunAcceptsExactMaximumMTUDatagramAndRejectsMaximumPlusOne(t *testing.T) {
++	rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMaximumMTU)
++	packet := testIPv4Packet(rawPacketTunMaximumMTU)
++	if err := unix.Send(peer, packet, 0); err != nil {
++		t.Fatalf("send exact maximum datagram: %v", err)
++	}
++	buffer := make([]byte, rawPacketTunMaximumMTU+rawPacketTunHeaderSize)
++	n, err := rawTun.Read(buffer)
++	if err != nil {
++		t.Fatalf("read exact maximum datagram: %v", err)
++	}
++	if n != rawPacketTunMaximumMTU+rawPacketTunHeaderSize {
++		t.Fatalf("unexpected exact maximum framed length: %d", n)
++	}
++
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(pair[0])
++	_, err = newRawPacketTunWithTestInterface(
++		int32(pair[1]),
++		testRawPacketTunOptions(rawPacketTunMaximumMTU+1),
++	)
++	if !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatalf("expected maximum plus one MTU rejection, got %v", err)
++	}
++	if err := unix.Close(pair[1]); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("rejected maximum plus one descriptor was not closed: %v", err)
++	}
++}
++
++func TestRawPacketTunRejectsTruncationOversizeAndMalformedPackets(t *testing.T) {
++	rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	oversize := testIPv4Packet(rawPacketTunMinimumMTU + 1)
++	if err := unix.Send(peer, oversize, 0); err != nil {
++		t.Fatal(err)
++	}
++	buffer := make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize)
++	if _, err := rawTun.Read(buffer); !errors.Is(err, errRawPacketTunPacketTruncated) {
++		t.Fatalf("expected truncation error, got %v", err)
++	}
++
++	if _, err := rawTun.Write(frameTestPacket(oversize, unix.AF_INET)); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected outbound MTU error, got %v", err)
++	}
++	if err := unix.Send(peer, []byte{0x70, 0, 0, 0}, 0); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := rawTun.Read(buffer); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected IP validation error, got %v", err)
++	}
++	if _, err := rawTun.Read(make([]byte, rawPacketTunMinimumMTU)); !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatalf("expected bounded read-buffer error, got %v", err)
++	}
++}
++
++func TestRawPacketTunCloseUnblocksReadAndIsIdempotent(t *testing.T) {
++	rawTun, _, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	readStarted := make(chan struct{})
++	readFinished := make(chan error, 1)
++	go func() {
++		close(readStarted)
++		_, err := rawTun.Read(make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize))
++		readFinished <- err
++	}()
++	<-readStarted
++	if err := rawTun.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := rawTun.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-readFinished:
++		if err == nil {
++			t.Fatal("blocked read returned success after close")
++		}
++	case <-time.After(time.Second):
++		t.Fatal("close did not unblock packet read")
++	}
++}
++
++func TestRawPacketTunOwnsDescriptorAndUsesExternalConfiguration(t *testing.T) {
++	rawTun, peer, options := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	name, err := rawTun.Name()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if name != "utun42" || options.Name != "utun42" {
++		t.Fatalf("unexpected logical name: %q / %q", name, options.Name)
++	}
++	if !options.EXP_ExternalConfiguration || options.EXP_MultiPendingPackets || options.EXP_SendMsgX {
++		t.Fatal("raw transport did not enforce external configuration")
++	}
++
++	unchanged := *options
++	unchanged.Inet4Address = slices.Clone(options.Inet4Address)
++	unchanged.Inet6Address = slices.Clone(options.Inet6Address)
++	if err := rawTun.UpdateRouteOptions(unchanged); err != nil {
++		t.Fatalf("unchanged options were rejected: %v", err)
++	}
++	changedMTU := unchanged
++	changedMTU.MTU++
++	if err := rawTun.UpdateRouteOptions(changedMTU); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected MTU change rejection, got %v", err)
++	}
++	changedAddress := unchanged
++	changedAddress.Inet4Address = []netip.Prefix{netip.MustParsePrefix("198.18.64.5/30")}
++	if err := rawTun.UpdateRouteOptions(changedAddress); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected address change rejection, got %v", err)
++	}
++	changedRoute := unchanged
++	changedRoute.Inet4RouteAddress = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
++	if err := rawTun.UpdateRouteOptions(changedRoute); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected route change rejection, got %v", err)
++	}
++	changedDNS := unchanged
++	changedDNS.DNSAddress = []netip.Addr{netip.MustParseAddr("2001:2:0:65::2")}
++	if err := rawTun.UpdateRouteOptions(changedDNS); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected DNS change rejection, got %v", err)
++	}
++	changedInterface := unchanged
++	changedInterface.IncludeInterface = []string{"en0"}
++	if err := rawTun.UpdateRouteOptions(changedInterface); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected interface change rejection, got %v", err)
++	}
++	changedExternalConfiguration := unchanged
++	changedExternalConfiguration.EXP_ExternalConfiguration = false
++	if err := rawTun.UpdateRouteOptions(changedExternalConfiguration); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected external configuration change rejection, got %v", err)
++	}
++
++	packet := testIPv4Packet(32)
++	if err := unix.Send(peer, packet, 0); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := rawTun.Read(make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize)); err != nil {
++		t.Fatalf("adopted connection is not usable: %v", err)
++	}
++}
++
++func TestRawPacketTunRejectsAndClosesInvalidDescriptors(t *testing.T) {
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(pair[0])
++	options := testRawPacketTunOptions(rawPacketTunMinimumMTU)
++	if _, err := newRawPacketTunWithTestInterface(int32(pair[1]), options); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
++		t.Fatalf("expected descriptor validation error, got %v", err)
++	}
++	if err := unix.Close(pair[1]); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("failed constructor retained descriptor ownership: %v", err)
++	}
++
++	datagram, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := newRawPacketTunWithTestInterface(int32(datagram), testRawPacketTunOptions(rawPacketTunMinimumMTU)); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
++		t.Fatalf("expected connected-socket validation error, got %v", err)
++	}
++	if err := unix.Close(datagram); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("unconnected descriptor was not closed: %v", err)
++	}
++}
++
++func newTestRawPacketTun(t *testing.T, mtu int) (*rawPacketTun, int, *tun.Options) {
++	t.Helper()
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	options := testRawPacketTunOptions(mtu)
++	created, err := newRawPacketTunWithTestInterface(int32(pair[1]), options)
++	if err != nil {
++		unix.Close(pair[0])
++		t.Fatal(err)
++	}
++	if err := unix.Close(pair[1]); !errors.Is(err, unix.EBADF) {
++		created.Close()
++		unix.Close(pair[0])
++		t.Fatalf("transferred descriptor was not closed: %v", err)
++	}
++	rawTun := created.(*rawPacketTun)
++	t.Cleanup(func() {
++		_ = rawTun.Close()
++		_ = unix.Close(pair[0])
++	})
++	return rawTun, pair[0], options
++}
++
++func testRawPacketTunOptions(mtu int) *tun.Options {
++	return &tun.Options{
++		MTU:          uint32(mtu),
++		Inet4Address: []netip.Prefix{netip.MustParsePrefix("198.18.64.1/30")},
++		Inet6Address: []netip.Prefix{netip.MustParsePrefix("2001:2:0:64::1/126")},
++	}
++}
++
++func frameTestPacket(packet []byte, addressFamily int) []byte {
++	framed := make([]byte, rawPacketTunHeaderSize+len(packet))
++	binary.BigEndian.PutUint32(framed[:rawPacketTunHeaderSize], uint32(addressFamily))
++	copy(framed[rawPacketTunHeaderSize:], packet)
++	return framed
++}
++
++func testIPv4Packet(length int) []byte {
++	packet := make([]byte, length)
++	packet[0] = 0x45
++	binary.BigEndian.PutUint16(packet[2:4], uint16(length))
++	packet[8] = 64
++	packet[9] = unix.IPPROTO_UDP
++	return packet
++}
++
++func testIPv6Packet(length int) []byte {
++	packet := make([]byte, length)
++	packet[0] = 0x60
++	binary.BigEndian.PutUint16(packet[4:6], uint16(length-40))
++	packet[6] = unix.IPPROTO_UDP
++	packet[7] = 64
++	return packet
++}
++
++func newRawPacketTunWithTestInterface(fd int32, options *tun.Options) (tun.Tun, error) {
++	return newRawPacketTunWithInterfaceResolver(fd, options, func(*tun.Options) (string, error) { return "utun42", nil })
++}
+diff --git a/experimental/libbox/raw_packet_tun_interface_darwin.go b/experimental/libbox/raw_packet_tun_interface_darwin.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0ef9979224c71bfbe258a4cc2d70f17faea11fb
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_interface_darwin.go
+@@ -0,0 +1,95 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"fmt"
++	tun "github.com/sagernet/sing-tun"
++	"net"
++	"net/netip"
++	"strings"
++)
++
++type rawPacketInterface struct {
++	name      string
++	flags     net.Flags
++	addresses []netip.Addr
++}
++
++// NetworkExtension has already installed the addressed utun before libbox is
++// started. Resolve that interface using public enumeration, never the private
++// provider descriptor. The system TCP stack binds its forwarder to this name.
++func resolveRawPacketTunInterface(options *tun.Options) (string, error) {
++	interfaces, err := net.Interfaces()
++	if err != nil {
++		return "", fmt.Errorf("%w: enumerate packet interface: %v", errRawPacketTunInvalidConfiguration, err)
++	}
++	candidates := make([]rawPacketInterface, 0, len(interfaces))
++	for _, iface := range interfaces {
++		if !strings.HasPrefix(iface.Name, "utun") || iface.Flags&net.FlagPointToPoint == 0 || iface.Flags&net.FlagUp == 0 {
++			continue
++		}
++		addresses, err := iface.Addrs()
++		if err != nil {
++			return "", fmt.Errorf("%w: enumerate packet interface addresses: %v", errRawPacketTunInvalidConfiguration, err)
++		}
++		candidate := rawPacketInterface{name: iface.Name, flags: iface.Flags}
++		for _, address := range addresses {
++			ip, _, err := net.ParseCIDR(address.String())
++			if err != nil {
++				return "", fmt.Errorf("%w: invalid packet interface address", errRawPacketTunInvalidConfiguration)
++			}
++			parsed, ok := netip.AddrFromSlice(ip)
++			if !ok {
++				return "", fmt.Errorf("%w: invalid packet interface IP", errRawPacketTunInvalidConfiguration)
++			}
++			candidate.addresses = append(candidate.addresses, parsed.Unmap())
++		}
++		candidates = append(candidates, candidate)
++	}
++	return matchRawPacketTunInterface(options, candidates)
++}
++
++func matchRawPacketTunInterface(options *tun.Options, candidates []rawPacketInterface) (string, error) {
++	required := make([]netip.Addr, 0, len(options.Inet4Address)+len(options.Inet6Address))
++	for _, prefix := range options.Inet4Address {
++		required = append(required, prefix.Addr())
++	}
++	for _, prefix := range options.Inet6Address {
++		required = append(required, prefix.Addr())
++	}
++	if len(required) == 0 {
++		return "", fmt.Errorf("%w: packet interface addresses are missing", errRawPacketTunInvalidConfiguration)
++	}
++	matched := ""
++	for _, iface := range candidates {
++		if !strings.HasPrefix(iface.name, "utun") || iface.flags&net.FlagPointToPoint == 0 || iface.flags&net.FlagUp == 0 {
++			continue
++		}
++		matches := true
++		for _, expected := range required {
++			found := false
++			for _, actual := range iface.addresses {
++				if actual == expected {
++					found = true
++					break
++				}
++			}
++			if !found {
++				matches = false
++				break
++			}
++		}
++		if !matches {
++			continue
++		}
++		if matched != "" {
++			return "", fmt.Errorf("%w: packet interface is ambiguous", errRawPacketTunInvalidConfiguration)
++		}
++		matched = iface.name
++	}
++	if matched == "" {
++		return "", fmt.Errorf("%w: addressed packet interface is unavailable", errRawPacketTunInvalidConfiguration)
++	}
++	return matched, nil
++}
+diff --git a/experimental/libbox/raw_packet_tun_interface_darwin_test.go b/experimental/libbox/raw_packet_tun_interface_darwin_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e29e815766a4fa51fa0e0dc8afa43a3ccb20aa37
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_interface_darwin_test.go
+@@ -0,0 +1,69 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"errors"
++	tun "github.com/sagernet/sing-tun"
++	"golang.org/x/sys/unix"
++	"net"
++	"net/netip"
++	"testing"
++)
++
++func TestRawPacketInterfaceRequiresUniqueActiveAddressedTunnel(t *testing.T) {
++	v4 := netip.MustParseAddr("198.18.64.1")
++	v6 := netip.MustParseAddr("2001:2:0:64::1")
++	flags := net.FlagUp | net.FlagPointToPoint
++	options := &tun.Options{Inet4Address: []netip.Prefix{netip.PrefixFrom(v4, 30)}, Inet6Address: []netip.Prefix{netip.PrefixFrom(v6, 126)}}
++	good := rawPacketInterface{name: "utun42", flags: flags, addresses: []netip.Addr{v4, v6}}
++	tests := []struct {
++		name       string
++		candidates []rawPacketInterface
++		accepted   bool
++	}{
++		{"exact dual stack", []rawPacketInterface{good}, true},
++		{"missing", nil, false},
++		{"wrong IPv4", []rawPacketInterface{{name: "utun43", flags: flags, addresses: []netip.Addr{netip.MustParseAddr("198.18.0.1"), v6}}}, false},
++		{"missing IPv6", []rawPacketInterface{{name: "utun42", flags: flags, addresses: []netip.Addr{v4}}}, false},
++		{"physical interface", []rawPacketInterface{{name: "en0", flags: flags, addresses: good.addresses}}, false},
++		{"down interface", []rawPacketInterface{{name: "utun42", flags: net.FlagPointToPoint, addresses: good.addresses}}, false},
++		{"not point to point", []rawPacketInterface{{name: "utun42", flags: net.FlagUp, addresses: good.addresses}}, false},
++		{"ambiguous", []rawPacketInterface{good, {name: "utun43", flags: flags, addresses: good.addresses}}, false},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			name, err := matchRawPacketTunInterface(options, test.candidates)
++			if test.accepted {
++				if err != nil || name != "utun42" {
++					t.Fatalf("resolved %q: %v", name, err)
++				}
++			} else if name != "" || !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++				t.Fatalf("invalid interface accepted: %q %v", name, err)
++			}
++		})
++	}
++	empty := &tun.Options{}
++	if _, err := matchRawPacketTunInterface(empty, []rawPacketInterface{good}); !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatal("missing configured addresses accepted")
++	}
++	ipv4Only := &tun.Options{Inet4Address: options.Inet4Address}
++	if name, err := matchRawPacketTunInterface(ipv4Only, []rawPacketInterface{{name: "utun42", flags: flags, addresses: []netip.Addr{v4}}}); err != nil || name != "utun42" {
++		t.Fatalf("IPv4-only interface rejected: %v", err)
++	}
++}
++
++func TestRawPacketInterfaceResolutionFailureClosesTransferredDescriptor(t *testing.T) {
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(pair[1])
++	_, err = newRawPacketTunWithInterfaceResolver(int32(pair[0]), &tun.Options{MTU: 1280}, func(*tun.Options) (string, error) { return "", errRawPacketTunInvalidConfiguration })
++	if !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if _, err = unix.FcntlInt(uintptr(pair[0]), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("transferred descriptor leaked: %v", err)
++	}
++}
+diff --git a/experimental/libbox/raw_packet_tun_other.go b/experimental/libbox/raw_packet_tun_other.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7acd788c1fefcb08af97392dd83d945a6d45ff20
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_other.go
+@@ -0,0 +1,19 @@
++//go:build !darwin
++
++package libbox
++
++import (
++	"fmt"
++	"os"
++
++	tun "github.com/sagernet/sing-tun"
++)
++
++func newRawPacketTun(fd int32, _ *tun.Options) (tun.Tun, error) {
++	if fd >= 0 {
++		if file := os.NewFile(uintptr(fd), rawPacketTunName); file != nil {
++			_ = file.Close()
++		}
++	}
++	return nil, fmt.Errorf("%w", errRawPacketTunUnsupported)
++}
+diff --git a/experimental/libbox/service.go b/experimental/libbox/service.go
+index 4cd6045a88760b834e52531c76bf16a753352ce2..7ef6a1f589923ce91e2e93409fcf28a9d3e1e6f9 100644
+--- a/experimental/libbox/service.go
++++ b/experimental/libbox/service.go
+@@ -67,7 +67,23 @@ func (w *platformInterfaceWrapper) OpenInterface(options *tun.Options, platformO
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	tunFd, err := w.iif.OpenTun(&tunOptions{options, routeRanges, platformOptions})
++	platformTunOptions := &tunOptions{options, routeRanges, platformOptions}
++	if w.iif.UseRawPacketTun() {
++		tunFd, err := w.iif.OpenRawPacketTun(platformTunOptions)
++		if err != nil {
++			return nil, err
++		}
++		rawTun, err := newRawPacketTun(tunFd, options)
++		if err != nil {
++			return nil, E.Cause(err, "create raw packet tun")
++		}
++		options.InterfaceMonitor.RegisterMyInterface(options.Name)
++		w.myTunName = options.Name
++		w.myTunAddress = myTunAddress(options)
++		w.iif.RegisterMyInterface(options.Name)
++		return rawTun, nil
++	}
++	tunFd, err := w.iif.OpenTun(platformTunOptions)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -133,6 +149,7 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
+ 		// Why not used?
+ 		//nolint:staticcheck
+ 		isDefault := netInterface.Name != w.myTunName && w.defaultInterface != nil && int(netInterface.Index) == w.defaultInterface.Index
++		isExpensive, isConstrained := w.isExpensive, w.isConstrained
+ 		w.defaultInterfaceAccess.Unlock()
+ 		interfaces = append(interfaces, adapter.NetworkInterface{
+ 			Interface: control.Interface{
+@@ -148,8 +165,8 @@ func (w *platformInterfaceWrapper) NetworkInterfaces() ([]adapter.NetworkInterfa
+ 				gateway, _ := netip.ParseAddr(it)
+ 				return gateway.Unmap().WithZone("")
+ 			}), netip.Addr.IsValid),
+-			Expensive:   netInterface.Metered || isDefault && w.isExpensive,
+-			Constrained: isDefault && w.isConstrained,
++			Expensive:   netInterface.Metered || isDefault && isExpensive,
++			Constrained: isDefault && isConstrained,
+ 		})
+ 	}
+ 	interfaces = common.UniqBy(interfaces, func(it adapter.NetworkInterface) string {
+diff --git a/experimental/libbox/stun.go b/experimental/libbox/stun.go
+index 3f38815d7981a898bbaa36b85cf3fd4c1506045a..fb720ab2b6e3e1eba3a00814706c2051e8b057bc 100644
+--- a/experimental/libbox/stun.go
++++ b/experimental/libbox/stun.go
+@@ -11,7 +11,9 @@ type STUNTest struct {
+ 	cancel context.CancelFunc
+ }
+ 
+-func NewSTUNTest() *STUNTest {
++// NewSTUNTestWithDefaults uses an explicit Objective-C initializer selector.
++// A nullable Go constructor must not override NSObject.init in the Swift 6.4 SDK.
++func NewSTUNTestWithDefaults() *STUNTest {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	return &STUNTest{ctx: ctx, cancel: cancel}
+ }

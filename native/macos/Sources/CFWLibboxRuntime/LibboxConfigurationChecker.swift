@@ -41,14 +41,23 @@ public struct SourceBuiltLibboxConfigurationChecker: LibboxConfigurationChecking
   public func check(configuration: Data) throws {
     let configurationText = try LibboxConfigurationDocument.text(from: configuration)
     #if canImport(Libbox)
-      // gomobile's public CheckConfig API accepts NSString, so Swift creates a
-      // transient immutable String that cannot be explicitly zeroized. Its
-      // scope ends at this call; the caller owns and erases the source Data.
+      // gomobile's public API accepts NSString, so Swift creates a transient
+      // immutable String that cannot be explicitly zeroized. Its scope ends at
+      // this call; the caller owns and erases the source Data. Unlike
+      // CheckConfig, this check also reports whether the instance it built
+      // closed (CFM's libbox patch).
       var error: NSError?
-      guard LibboxCheckConfig(configurationText, &error) else {
+      let check = LibboxCheckConfigClosingInstance(configurationText, &error)
+      if let error {
         throw LibboxRuntimeError.configurationCheckFailed(
-          error?.localizedDescription ?? "libbox rejected the configuration without a diagnostic"
-        )
+          LibboxDiagnostic(error.localizedDescription))
+      }
+      guard let check else {
+        throw LibboxRuntimeError.configurationCheckReturnedNothing
+      }
+      guard check.closed else {
+        throw LibboxRuntimeError.configurationCheckCleanupFailed(
+          LibboxDiagnostic(check.closeError))
       }
     #else
       _ = configurationText

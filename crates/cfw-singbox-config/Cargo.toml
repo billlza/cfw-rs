@@ -1,6 +1,6 @@
 [package]
 name = "cfw-singbox-config"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license.workspace = true
 
@@ -11,3 +11,5 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+url.workspace = true
+regex = "=1.13.1"

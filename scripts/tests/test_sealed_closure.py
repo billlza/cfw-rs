@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.publication.common import PublicationError, canonical_json, tree_digest
+from scripts.publication.graph_model import load_pins
 from scripts.publication.sealed_closure import (
     BLOCKED,
     SEALED,
@@ -18,28 +19,21 @@ from scripts.publication.sealed_closure import (
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-# The three design-pinned sing-box patches. The supply-chain test hashes these
-# files itself, so the derived patch closure is bound to the patch bytes in the
-# repository rather than to the pin table the production code already reads.
-PATCH_PATHS = {
-    "security": "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-    "raw_packet": "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-    "dns_failover": "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
-}
-# Authoritative digest of the *corrected* raw-packet TUN patch: its hunk header
-# declared 271 added lines while the hunk carried 303, so `git apply` silently
-# dropped four test helpers. Kept as a literal because hashing the file alone
-# would still pass if that patch regressed and the pins were recomputed to match.
-EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
+# The six sing-box patch path pins. The supply-chain test hashes the files those
+# pins name itself, so the derived patch closure is bound to the patch bytes in
+# the repository rather than to the digest pins the production code reads.
+PATCH_PATH_PINS = (
+    "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+    "SING_BOX_SECURITY_PATCH_PATH",
+    "SING_BOX_RAW_PACKET_PATCH_PATH",
+    "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+    "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+    "SING_BOX_PROFILE_PROBE_PATCH_PATH",
 )
-# The combined diff is the digest of the whole working-tree diff of the patched
-# sing-box checkout (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256),
-# which cannot be recomputed from the patch files alone. A pinned literal is
-# therefore the only form of this assertion that still fails when a pin drifts.
-EXPECTED_COMBINED_DIFF_SHA256 = (
-    "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233"
-)
+
+
+def _pins() -> dict[str, str]:
+    return load_pins(REPOSITORY / "scripts/dependency_pins.env")
 
 
 def _sha(label: str) -> str:
@@ -116,7 +110,7 @@ def _artifact_manifest() -> dict:
 
 def _request(**overrides) -> dict:
     request = {
-        "product": {"name": "Clash for Mac", "version": "0.4.0", "build_number": "40000"},
+        "product": {"name": "Clash for Mac", "version": "0.5.0", "build_number": "40000"},
         "commit": _sha("commit")[:40],
         "sbom": _sbom_graph(),
         "ccs": {"sha256": _sha("ccs-tree"), "archive_sha256": _sha("ccs-archive")},
@@ -141,26 +135,38 @@ def _request(**overrides) -> dict:
 
 class DeriveSupplyChainTests(unittest.TestCase):
     def test_binds_repository_toolchain_and_patched_source(self) -> None:
+        pins = _pins()
         supply_chain = derive_supply_chain(REPOSITORY)
-        self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.97.1")
-        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.26.5")
+        self.assertEqual(
+            supply_chain["toolchain_versions"],
+            {
+                "rust": pins["RUST_VERSION"],
+                "node": pins["NODE_VERSION"],
+                "go": pins["GO_VERSION"],
+                "gomobile": pins["GOMOBILE_VERSION"],
+                "govulncheck": pins["GOVULNCHECK_VERSION"],
+                "sing_box": pins["SING_BOX_VERSION"],
+            },
+        )
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
-            "25a600db24f7680ad9806ce5427bd0ab8afe1114",
+            pins["SING_BOX_COMMIT"],
         )
         patched_source = supply_chain["patched_source"]
 
-        # The bound patch closure must be exactly the three patch files that live
+        # The bound patch closure must be exactly the six patch files that live
         # in this repository, hashed from their bytes here.
-        on_disk = {name: _file_sha256(path) for name, path in PATCH_PATHS.items()}
-        self.assertEqual(len(patched_source["patch_digests"]), 3)
-        self.assertEqual(patched_source["patch_digests"], sorted(on_disk.values()))
-        # ...and the raw-packet patch must be the corrected revision, not the
-        # truncated-hunk one that silently dropped four test helpers.
-        self.assertEqual(on_disk["raw_packet"], EXPECTED_RAW_PACKET_PATCH_SHA256)
+        on_disk = sorted(_file_sha256(pins[key]) for key in PATCH_PATH_PINS)
+        self.assertEqual(len(patched_source["patch_digests"]), 6)
+        self.assertEqual(patched_source["patch_digests"], on_disk)
 
+        # The combined diff covers the whole materialized working tree
+        # (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256) and
+        # cannot be recomputed from the patch files here; materialization and the
+        # reproducible libbox build compare the pin with the real tree.
         self.assertEqual(
-            patched_source["combined_diff_sha256"], EXPECTED_COMBINED_DIFF_SHA256
+            patched_source["combined_diff_sha256"],
+            pins["SING_BOX_COMBINED_DIFF_SHA256"],
         )
         # The combined diff must never collapse to a single patch digest.
         self.assertNotIn(
@@ -179,17 +185,17 @@ class DeriveSupplyChainTests(unittest.TestCase):
     def test_missing_tool_inputs_fail_closed(self) -> None:
         from scripts.publication import sealed_closure
 
-        original = sealed_closure.pinned.verify
+        original = sealed_closure.pinned.verify_source_contract
 
         def _raise(_repository):
             raise sealed_closure.pinned.PinnedInputError("dependency_pins.env is missing GO_VERSION")
 
-        sealed_closure.pinned.verify = _raise
+        sealed_closure.pinned.verify_source_contract = _raise
         try:
             with self.assertRaisesRegex(PublicationError, "pinned supply-chain inputs failed"):
                 derive_supply_chain(REPOSITORY)
         finally:
-            sealed_closure.pinned.verify = original
+            sealed_closure.pinned.verify_source_contract = original
 
 
 class SealedClosureRoundTripTests(unittest.TestCase):
@@ -219,6 +225,14 @@ class SealedClosureRoundTripTests(unittest.TestCase):
 class SealedClosureRejectionTests(unittest.TestCase):
     def _base(self) -> dict:
         return build_sealed_closure(REPOSITORY, _request(), fixture=True)
+
+    def test_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                closure = self._base()
+                closure["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                    validate_sealed_closure(REPOSITORY, closure, fixture=True)
 
     def test_unreviewed_license_node_rejected(self) -> None:
         graph = _sbom_graph()
@@ -294,7 +308,7 @@ class SealedClosureRejectionTests(unittest.TestCase):
 
 class CrossConsistentGraphTests(unittest.TestCase):
     def test_dependency_graph_must_cover_every_component(self) -> None:
-        product = {"name": "Clash for Mac", "version": "0.4.0", "build_number": "40000"}
+        product = {"name": "Clash for Mac", "version": "0.5.0", "build_number": "40000"}
         graph = _sbom_graph()
         from scripts.publication.sealed_closure import _sbom_graph as normalize
 

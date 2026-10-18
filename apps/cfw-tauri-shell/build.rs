@@ -5,12 +5,61 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[path = "build_support/development_native_ui.rs"]
+mod development_native_ui;
+
+#[path = "build_support/native_product_input.rs"]
+mod native_product_input;
+
+use native_product_input::{
+    CandidateNativeProducts, require_real_directory, require_single_link_regular_file,
+    require_utf8_relative_artifact_path,
+};
+
 /// The candidate build lanes (`scripts/build_unsigned_candidate.sh` and
 /// `scripts/build_signed_candidate.sh`) export the immutable, candidate-scoped
 /// native product root and the native build scripts refuse any other layout.
 /// A release build of this crate reads the root from this variable only: there
 /// is no shared directory, no implicit default, and no stale-directory recovery.
 const NATIVE_PRODUCTS_OUTPUT_ENV: &str = "CFW_NATIVE_PRODUCTS_OUTPUT";
+const BUILD_NUMBER_ENV: &str = "CFW_BUILD_NUMBER";
+const VALIDATION_XCODE_VERSION_ENV: &str = "CFW_UNSIGNED_VALIDATION_XCODE_VERSION";
+const VALIDATION_XCODE_BUILD_ENV: &str = "CFW_UNSIGNED_VALIDATION_XCODE_BUILD_VERSION";
+const VALIDATION_PYTHON_ENV: &str = "CFW_UNSIGNED_VALIDATION_PYTHON";
+const REPOSITORY_COMMIT_ENV: &str = "CFW_REPOSITORY_COMMIT";
+const RELEASE_SOURCE_SHA256_ENV: &str = "CFW_RELEASE_SOURCE_SHA256";
+const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
+const GO_TOOLS_TREE_SHA256_ENV: &str = "CFW_GO_TOOLS_TREE_SHA256";
+const GO_MODULE_CACHE_TREE_SHA256_ENV: &str = "CFW_GO_MODULE_CACHE_TREE_SHA256";
+
+const LIBBOX_METADATA_KEYS: [&str; 26] = [
+    "sourceTag",
+    "sourceCommit",
+    "goVersion",
+    "goToolchainTreeSha256",
+    "goToolsTreeSha256",
+    "goModuleCacheTreeSha256",
+    "gomobileVersion",
+    "gomobileCommit",
+    "gomobileModuleSum",
+    "archiveDeterminism",
+    "headerNormalization",
+    "platform",
+    "buildTags",
+    "nonMacOsTags",
+    "upstreamGoModSha256",
+    "upstreamGoSumSha256",
+    "securityPatchSha256",
+    "rawPacketPatchSha256",
+    "dnsFailoverPatchSha256",
+    "endpointConflictPatchSha256",
+    "profileProbePatchSha256",
+    "socksLifecyclePatchSha256",
+    "patchedDiffSha256",
+    "combinedDiffSha256",
+    "patchedGoModSha256",
+    "patchedGoSumSha256",
+];
 
 /// Every native product the release bundle embeds, with its required artifact
 /// kind. The full set must be present in the candidate root; a partial set is a
@@ -19,7 +68,10 @@ const NATIVE_PRODUCTS: [(&str, &str); 4] = [
     ("CFWGlobalAuthority", "native-global-authority-v1"),
     ("CFWNativeBridge.framework", "native-host-bridge-v1"),
     ("CFWProxyAgent.app", "native-proxy-agent-v1"),
-    ("CFWPacketTunnel.systemextension", "native-packet-tunnel-v1"),
+    (
+        "com.bill.clashformac.packet-tunnel.systemextension",
+        "native-packet-tunnel-v1",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -57,49 +109,40 @@ impl ArtifactEntry {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct NativeDependencyLock {
-    go: String,
-    gomobile: String,
-    sing_box: SingBoxLock,
-    sing_box_for_apple_reference: AppleReferenceLock,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SingBoxLock {
-    commit: String,
-    tag: String,
-    android_reference_commit: String,
-    security_patch: SingBoxSecurityPatchLock,
-    raw_packet_patch: SingBoxSourcePatchLock,
-    dns_failover_patch: SingBoxSourcePatchLock,
-    combined_diff_sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SingBoxSecurityPatchLock {
-    path: String,
-    sha256: String,
-    patched_diff_sha256: String,
-    patched_go_mod_sha256: String,
-    patched_go_sum_sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SingBoxSourcePatchLock {
-    path: String,
-    sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppleReferenceLock {
-    commit: String,
-}
+/// The sing-box patches libbox is built from, as `(description, path pin,
+/// digest pin)` keys in `scripts/dependency_pins.env`.
+const SING_BOX_PATCH_PINS: [(&str, &str, &str); 6] = [
+    (
+        "security",
+        "SING_BOX_SECURITY_PATCH_PATH",
+        "SING_BOX_SECURITY_PATCH_SHA256",
+    ),
+    (
+        "raw packet",
+        "SING_BOX_RAW_PACKET_PATCH_PATH",
+        "SING_BOX_RAW_PACKET_PATCH_SHA256",
+    ),
+    (
+        "DNS failover",
+        "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+        "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+    ),
+    (
+        "endpoint conflict",
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+    ),
+    (
+        "profile probe",
+        "SING_BOX_PROFILE_PROBE_PATCH_PATH",
+        "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+    ),
+    (
+        "SOCKS lifecycle",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_PATH",
+        "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
+    ),
+];
 
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -115,12 +158,17 @@ fn main() {
         .ancestors()
         .nth(2)
         .expect("Tauri manifest must remain under apps/cfw-tauri-shell");
-    println!(
-        "cargo:rerun-if-changed={}",
-        repository_root
-            .join("native/macos/Dependencies.lock.json")
-            .display()
-    );
+    if std::env::var_os("CARGO_FEATURE_NATIVE_UI").is_some() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            verify_release_native_ui(repository_root).unwrap_or_else(|error| {
+                panic!("native UI release artifact validation failed: {error}")
+            });
+        } else {
+            verify_development_native_ui(repository_root).unwrap_or_else(|error| {
+                panic!("native UI development inputs failed: {error}; run scripts/prepare_development_native_ui.py before Cargo")
+            });
+        }
+    }
     println!(
         "cargo:rerun-if-changed={}",
         repository_root
@@ -128,12 +176,177 @@ fn main() {
             .display()
     );
     println!("cargo:rerun-if-env-changed={NATIVE_PRODUCTS_OUTPUT_ENV}");
+    println!("cargo:rerun-if-env-changed={BUILD_NUMBER_ENV}");
+    println!("cargo:rerun-if-env-changed={VALIDATION_XCODE_VERSION_ENV}");
+    println!("cargo:rerun-if-env-changed={VALIDATION_XCODE_BUILD_ENV}");
+    println!("cargo:rerun-if-env-changed={VALIDATION_PYTHON_ENV}");
+    println!("cargo:rerun-if-env-changed={REPOSITORY_COMMIT_ENV}");
+    println!("cargo:rerun-if-env-changed={RELEASE_SOURCE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed={GO_TOOLCHAIN_TREE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed={GO_TOOLS_TREE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed={GO_MODULE_CACHE_TREE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+    println!("cargo:rerun-if-env-changed=SDKROOT");
+    println!("cargo:rerun-if-changed=/var/db/xcode_select_link");
+    let release_observation_log = manifest_dir.join("src/release_observation_log.c");
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir
+            .join("build_support/native_product_input.rs")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        release_observation_log.display()
+    );
+    let macos_sdk = macos_sdk_root();
+    let macos_sdk = macos_sdk
+        .to_str()
+        .expect("selected macOS SDK path must be valid UTF-8");
+    let mut release_log = cc::Build::new();
+    release_log
+        .file(release_observation_log)
+        .flag("-isysroot")
+        .flag(macos_sdk)
+        .warnings_into_errors(true)
+        .compile("cfw_release_observation_log");
 
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         verify_release_native_artifacts(repository_root)
             .unwrap_or_else(|error| panic!("native release artifact validation failed: {error}"));
     }
     tauri_build::build()
+}
+
+fn verify_development_native_ui(repository_root: &Path) -> Result<(), String> {
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        development_native_ui::OUTPUT_ENV
+    );
+    for relative in development_native_ui::SOURCE_PATHS {
+        println!(
+            "cargo:rerun-if-changed={}",
+            repository_root.join(relative).display()
+        );
+    }
+    let products = PathBuf::from(
+        std::env::var_os(development_native_ui::OUTPUT_ENV)
+            .ok_or("CFW_DEVELOPMENT_NATIVE_UI_PRODUCTS is unset")?,
+    );
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo output is missing")?);
+    let profile = out_dir
+        .ancestors()
+        .nth(3)
+        .ok_or("Cargo profile output is missing")?;
+    let verified =
+        development_native_ui::verify(repository_root, &products, profile, |path, value| {
+            let manifest: ArtifactManifest = serde_json::from_value(value.clone())
+                .map_err(|error| format!("parse development artifact manifest: {error}"))?;
+            verify_manifest(path, &manifest)
+        })?;
+    for path in verified.watched_paths {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!(
+        "cargo:rustc-link-search=native={}",
+        verified.library_root.display()
+    );
+    println!("cargo:rustc-link-lib=dylib=CFMNativeDashboard");
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        verified.library_root.display()
+    );
+    Ok(())
+}
+
+fn verify_release_native_ui(repository_root: &Path) -> Result<(), String> {
+    // The rejected standalone Overview remains a development experiment. The
+    // installable preview adds only the in-place native component bridges.
+    if std::env::var_os("CARGO_FEATURE_NATIVE_DASHBOARD").is_some() {
+        return Err("native-dashboard cannot be included in a release candidate".into());
+    }
+    let products = candidate_native_products_root(repository_root)?;
+    if !matches!(
+        products.context,
+        native_product_input::NativeProductContext::GaPreSign
+            | native_product_input::NativeProductContext::UnsignedPreviewValidation
+    ) {
+        return Err(
+            "native-ui release inputs require the GA pre-sign or unsigned preview validation context".into(),
+        );
+    }
+    let script = repository_root.join("scripts/build_native_ui.sh");
+    for relative in [
+        "scripts/build_native_ui.sh",
+        "scripts/native_ui_artifact.py",
+        "scripts/hash_artifact.py",
+        "scripts/repository_source_identity.py",
+        "native/dashboard/Package.swift",
+        "native/dashboard/Sources",
+        "native/dashboard/include",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            repository_root.join(relative).display()
+        );
+    }
+    require_single_link_regular_file(&script)?;
+    for name in [
+        "libCFMNativeDashboard.dylib",
+        "CFMNativeDashboard_CFMNativeDashboard.bundle",
+    ] {
+        let path = products.root.join(name);
+        let manifest_path = products.root.join(format!("{name}.manifest.json"));
+        let manifest: ArtifactManifest = read_json(&manifest_path)?;
+        verify_manifest(&path, &manifest)?;
+    }
+    // Reuse the artifact verifier with the selected context's sealed interpreter
+    // and compiler selection. It checks source, toolchain, Mach-O load paths and
+    // localization resources, rather than accepting a caller's digest string.
+    let result = native_product_input::native_ui_verifier_command(
+        &script,
+        std::env::vars_os(),
+        products.context,
+    )
+    .output()
+    .map_err(|error| format!("run native UI artifact verifier: {error}"))?;
+    if !result.status.success() {
+        return Err(format!(
+            "native UI artifact verifier failed: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    println!("cargo:rustc-link-search=native={}", products.root.display());
+    println!("cargo:rustc-link-lib=dylib=CFMNativeDashboard");
+    // verify_release_native_artifacts adds the shared package-relative rpath.
+    // No development build directory is embedded in the Host load commands.
+    Ok(())
+}
+
+fn macos_sdk_root() -> PathBuf {
+    let path = if let Some(sdk_root) = std::env::var_os("SDKROOT") {
+        PathBuf::from(sdk_root)
+    } else {
+        let developer = if let Some(developer_dir) = std::env::var_os("DEVELOPER_DIR") {
+            PathBuf::from(developer_dir)
+        } else {
+            fs::read_link("/var/db/xcode_select_link")
+                .expect("xcode-select must identify an Xcode Developer directory")
+        };
+        developer.join("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
+    };
+    let canonical = path
+        .canonicalize()
+        .expect("selected macOS SDK path must resolve without ambiguity");
+    if !path.is_absolute()
+        || !canonical.is_dir()
+        || !canonical.join("usr/include/os/log.h").is_file()
+        || !canonical.join("System/Library/Frameworks").is_dir()
+    {
+        panic!("selected macOS SDK is incomplete or noncanonical");
+    }
+    canonical
 }
 
 fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String> {
@@ -159,125 +372,22 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     )?;
     require_real_directory(&repository_root.join("native/macos/Sources/CFWNativeBridge"))?;
 
-    let dependency_lock_path = repository_root.join("native/macos/Dependencies.lock.json");
-    let dependency_lock: NativeDependencyLock = read_json(&dependency_lock_path)?;
     let pins = read_pins(&repository_root.join("scripts/dependency_pins.env"))?;
-    require_pin(&pins, "GO_VERSION", &dependency_lock.go)?;
-    require_pin(&pins, "GOMOBILE_VERSION", &dependency_lock.gomobile)?;
-    require_pin(&pins, "SING_BOX_VERSION", &dependency_lock.sing_box.tag)?;
-    require_pin(&pins, "SING_BOX_COMMIT", &dependency_lock.sing_box.commit)?;
-    require_pin(
-        &pins,
-        "SING_BOX_ANDROID_REFERENCE_COMMIT",
-        &dependency_lock.sing_box.android_reference_commit,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_SECURITY_PATCH_PATH",
-        &dependency_lock.sing_box.security_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_SECURITY_PATCH_SHA256",
-        &dependency_lock.sing_box.security_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_RAW_PACKET_PATCH_PATH",
-        &dependency_lock.sing_box.raw_packet_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_RAW_PACKET_PATCH_SHA256",
-        &dependency_lock.sing_box.raw_packet_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_DNS_FAILOVER_PATCH_PATH",
-        &dependency_lock.sing_box.dns_failover_patch.path,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
-        &dependency_lock.sing_box.dns_failover_patch.sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PATCHED_DIFF_SHA256",
-        &dependency_lock.sing_box.security_patch.patched_diff_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_COMBINED_DIFF_SHA256",
-        &dependency_lock.sing_box.combined_diff_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PATCHED_GO_MOD_SHA256",
-        &dependency_lock
-            .sing_box
-            .security_patch
-            .patched_go_mod_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_PATCHED_GO_SUM_SHA256",
-        &dependency_lock
-            .sing_box
-            .security_patch
-            .patched_go_sum_sha256,
-    )?;
-    require_pin(
-        &pins,
-        "SING_BOX_APPLE_REFERENCE_COMMIT",
-        &dependency_lock.sing_box_for_apple_reference.commit,
-    )?;
-    let security_patch_path = repository_root.join(safe_relative_path(
-        &dependency_lock.sing_box.security_patch.path,
-    )?);
-    println!("cargo:rerun-if-changed={}", security_patch_path.display());
-    require_regular_file(&security_patch_path)?;
-    let security_patch = fs::read(&security_patch_path).map_err(|error| {
-        format!(
-            "read sing-box security patch {}: {error}",
-            security_patch_path.display()
-        )
-    })?;
-    if sha256_hex(&security_patch) != dependency_lock.sing_box.security_patch.sha256.as_str() {
-        return Err("sing-box security patch digest differs from dependency lock".into());
-    }
-    let raw_packet_patch_path = repository_root.join(safe_relative_path(
-        &dependency_lock.sing_box.raw_packet_patch.path,
-    )?);
-    println!("cargo:rerun-if-changed={}", raw_packet_patch_path.display());
-    require_regular_file(&raw_packet_patch_path)?;
-    let raw_packet_patch = fs::read(&raw_packet_patch_path).map_err(|error| {
-        format!(
-            "read sing-box raw packet patch {}: {error}",
-            raw_packet_patch_path.display()
-        )
-    })?;
-    if sha256_hex(&raw_packet_patch) != dependency_lock.sing_box.raw_packet_patch.sha256.as_str() {
-        return Err("sing-box raw packet patch digest differs from dependency lock".into());
-    }
-    let dns_failover_patch_path = repository_root.join(safe_relative_path(
-        &dependency_lock.sing_box.dns_failover_patch.path,
-    )?);
-    println!(
-        "cargo:rerun-if-changed={}",
-        dns_failover_patch_path.display()
-    );
-    require_regular_file(&dns_failover_patch_path)?;
-    let dns_failover_patch = fs::read(&dns_failover_patch_path).map_err(|error| {
-        format!(
-            "read sing-box DNS failover patch {}: {error}",
-            dns_failover_patch_path.display()
-        )
-    })?;
-    if sha256_hex(&dns_failover_patch)
-        != dependency_lock.sing_box.dns_failover_patch.sha256.as_str()
-    {
-        return Err("sing-box DNS failover patch digest differs from dependency lock".into());
+    for (description, path_pin, sha256_pin) in SING_BOX_PATCH_PINS {
+        let path = repository_root.join(safe_relative_path(required_pin(&pins, path_pin)?)?);
+        println!("cargo:rerun-if-changed={}", path.display());
+        require_single_link_regular_file(&path)?;
+        let bytes = fs::read(&path).map_err(|error| {
+            format!(
+                "read sing-box {description} patch {}: {error}",
+                path.display()
+            )
+        })?;
+        if sha256_hex(&bytes) != required_pin(&pins, sha256_pin)? {
+            return Err(format!(
+                "sing-box {description} patch digest differs from {sha256_pin}"
+            ));
+        }
     }
 
     let dependency_root = repository_root.join("target/native-dependencies");
@@ -289,25 +399,19 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         &fs::read(&manifest_path)
             .map_err(|error| format!("read {}: {error}", manifest_path.display()))?,
     );
-    require_metadata(&manifest, "sourceTag", &dependency_lock.sing_box.tag)?;
-    require_metadata(&manifest, "sourceCommit", &dependency_lock.sing_box.commit)?;
-    require_metadata(&manifest, "goVersion", &dependency_lock.go)?;
-    require_metadata(&manifest, "gomobileVersion", &dependency_lock.gomobile)?;
+    require_metadata(&manifest, "archiveDeterminism", "zeroArDate-v1")?;
     require_metadata(
         &manifest,
         "headerNormalization",
         "angleBracketFrameworkImports-v1",
     )?;
     for (metadata_key, pin_key) in [
+        ("sourceTag", "SING_BOX_VERSION"),
+        ("sourceCommit", "SING_BOX_COMMIT"),
+        ("goVersion", "GO_VERSION"),
+        ("gomobileVersion", "GOMOBILE_VERSION"),
         ("gomobileCommit", "GOMOBILE_COMMIT"),
         ("gomobileModuleSum", "GOMOBILE_MODULE_SUM"),
-    ] {
-        let expected = pins
-            .get(pin_key)
-            .ok_or_else(|| format!("required pin {pin_key} is missing"))?;
-        require_metadata(&manifest, metadata_key, expected)?;
-    }
-    for (metadata_key, pin_key) in [
         ("platform", "LIBBOX_APPLE_PLATFORM"),
         ("buildTags", "LIBBOX_BUILD_TAGS"),
         ("nonMacOsTags", "LIBBOX_NON_MACOS_TAGS"),
@@ -319,38 +423,71 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
             "dnsFailoverPatchSha256",
             "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
         ),
+        (
+            "endpointConflictPatchSha256",
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        ),
+        (
+            "profileProbePatchSha256",
+            "SING_BOX_PROFILE_PROBE_PATCH_SHA256",
+        ),
+        (
+            "socksLifecyclePatchSha256",
+            "SING_BOX_SOCKS_LIFECYCLE_PATCH_SHA256",
+        ),
         ("patchedDiffSha256", "SING_BOX_PATCHED_DIFF_SHA256"),
         ("combinedDiffSha256", "SING_BOX_COMBINED_DIFF_SHA256"),
         ("patchedGoModSha256", "SING_BOX_PATCHED_GO_MOD_SHA256"),
         ("patchedGoSumSha256", "SING_BOX_PATCHED_GO_SUM_SHA256"),
     ] {
-        let expected = pins
-            .get(pin_key)
-            .ok_or_else(|| format!("required pin {pin_key} is missing"))?;
-        require_metadata(&manifest, metadata_key, expected)?;
+        require_metadata(&manifest, metadata_key, required_pin(&pins, pin_key)?)?;
+    }
+    for (metadata_key, environment_key) in [
+        ("goToolchainTreeSha256", GO_TOOLCHAIN_TREE_SHA256_ENV),
+        ("goToolsTreeSha256", GO_TOOLS_TREE_SHA256_ENV),
+        ("goModuleCacheTreeSha256", GO_MODULE_CACHE_TREE_SHA256_ENV),
+    ] {
+        let expected = required_lower_hex_environment(environment_key, 64)?;
+        require_metadata(&manifest, metadata_key, &expected)?;
+    }
+    let expected_metadata_keys: BTreeSet<&str> = LIBBOX_METADATA_KEYS.into_iter().collect();
+    let actual_metadata_keys: BTreeSet<&str> =
+        manifest.metadata.keys().map(String::as_str).collect();
+    if actual_metadata_keys != expected_metadata_keys {
+        return Err("Libbox artifact metadata field set differs from the release contract".into());
     }
 
     let native_source_sha256 = native_build_inputs_digest(repository_root)?;
-    let xcode_version = pins
-        .get("XCODE_VERSION")
-        .ok_or_else(|| "required pin XCODE_VERSION is missing".to_string())?;
-    let xcode_build = pins
-        .get("XCODE_BUILD_VERSION")
-        .ok_or_else(|| "required pin XCODE_BUILD_VERSION is missing".to_string())?;
-    let deployment_target = pins
-        .get("MACOS_DEPLOYMENT_TARGET")
-        .ok_or_else(|| "required pin MACOS_DEPLOYMENT_TARGET is missing".to_string())?;
+    let repository_commit = required_lower_hex_environment(REPOSITORY_COMMIT_ENV, 40)?;
+    let release_source_sha256 = required_lower_hex_environment(RELEASE_SOURCE_SHA256_ENV, 64)?;
+    let xcode_version = required_pin(&pins, "XCODE_VERSION")?;
+    let xcode_build = required_pin(&pins, "XCODE_BUILD_VERSION")?;
+    let deployment_target = required_pin(&pins, "MACOS_DEPLOYMENT_TARGET")?;
     let products = candidate_native_products_root(repository_root)?;
+    // The bound build is the runtime migration admission's expected bundle
+    // build (src/legacy/admission.rs); no other build input reaches it.
+    println!(
+        "cargo:rustc-env=CFW_RELEASE_BUNDLE_BUILD={}",
+        products.build_number()
+    );
+    let validation_version = optional_utf8_environment(VALIDATION_XCODE_VERSION_ENV)?;
+    let validation_build = optional_utf8_environment(VALIDATION_XCODE_BUILD_ENV)?;
+    let validation_python = optional_utf8_environment(VALIDATION_PYTHON_ENV)?;
+    let (xcode_version, xcode_build) = products.context.expected_apple_identity(
+        (xcode_version, xcode_build),
+        (validation_version.as_deref(), validation_build.as_deref()),
+        validation_python.as_deref(),
+    )?;
     for (product, artifact_kind) in NATIVE_PRODUCTS {
-        let product_path = products.join(product);
-        let product_manifest_path = products.join(format!("{product}.manifest.json"));
+        let product_path = products.root.join(product);
+        let product_manifest_path = products.root.join(format!("{product}.manifest.json"));
         let product_manifest: ArtifactManifest = read_json(&product_manifest_path)?;
         verify_manifest(&product_path, &product_manifest)?;
         require_metadata(&product_manifest, "artifactKind", artifact_kind)?;
         require_metadata(
             &product_manifest,
             "singBoxCommit",
-            &dependency_lock.sing_box.commit,
+            required_pin(&pins, "SING_BOX_COMMIT")?,
         )?;
         require_metadata(&product_manifest, "architecture", "arm64")?;
         require_metadata(&product_manifest, "configuration", "Release")?;
@@ -366,24 +503,22 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
             "nativeSourceSha256",
             &native_source_sha256,
         )?;
+        require_metadata(
+            &product_manifest,
+            "releaseSourceSha256",
+            &release_source_sha256,
+        )?;
+        require_metadata(&product_manifest, "repositoryCommit", &repository_commit)?;
         require_metadata(&product_manifest, "xcodeVersion", xcode_version)?;
         require_metadata(&product_manifest, "xcodeBuild", xcode_build)?;
-        match product_manifest
-            .metadata
-            .get("signingMode")
-            .map(String::as_str)
-        {
-            Some("unsigned-validation" | "developer-id") => {}
-            Some(value) => {
-                return Err(format!("unsupported native product signing mode: {value}"));
-            }
-            None => return Err("native product signingMode metadata is missing".into()),
-        }
+        products.require_manifest_identity(&product_manifest.metadata, product)?;
     }
-    let bridge_header = products.join("CFWNativeBridge.framework/Headers/CFWNativeBridge.h");
-    require_regular_file(&bridge_header)?;
-    let tombstone_root = products.join("CFWLegacyTombstone");
-    let tombstone_manifest_path = products.join("CFWLegacyTombstone.manifest.json");
+    let bridge_header = products
+        .root
+        .join("CFWNativeBridge.framework/Headers/CFWNativeBridge.h");
+    require_single_link_regular_file(&bridge_header)?;
+    let tombstone_root = products.root.join("CFWLegacyTombstone");
+    let tombstone_manifest_path = products.root.join("CFWLegacyTombstone.manifest.json");
     let tombstone_manifest: ArtifactManifest = read_json(&tombstone_manifest_path)?;
     verify_manifest(&tombstone_root, &tombstone_manifest)?;
     require_metadata(
@@ -391,10 +526,14 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         "artifactKind",
         "legacy-service-tombstone-v1",
     )?;
-    let rust_version = pins
-        .get("RUST_VERSION")
-        .ok_or_else(|| "required pin RUST_VERSION is missing".to_string())?;
-    require_metadata(&tombstone_manifest, "rustVersion", rust_version)?;
+    require_metadata(&tombstone_manifest, "architecture", "arm64")?;
+    require_metadata(&tombstone_manifest, "deploymentTarget", deployment_target)?;
+    products.require_manifest_identity(&tombstone_manifest.metadata, "CFWLegacyTombstone")?;
+    require_metadata(
+        &tombstone_manifest,
+        "rustVersion",
+        required_pin(&pins, "RUST_VERSION")?,
+    )?;
     require_file_digest_metadata(
         &tombstone_manifest,
         "sourceSha256",
@@ -411,14 +550,17 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         &repository_root.join("Cargo.lock"),
     )?;
     let tombstone = tombstone_root.join("cfw-helper-tombstone");
-    require_regular_file(&tombstone)?;
+    require_single_link_regular_file(&tombstone)?;
     reject_retired_helper_markers(&tombstone)?;
-    require_regular_file(
+    require_single_link_regular_file(
         &repository_root
             .join("apps/cfw-tauri-shell/macos/legacy-tombstone/com.bill.clashformac.helper.plist"),
     )?;
 
-    println!("cargo:rustc-link-search=framework={}", products.display());
+    println!(
+        "cargo:rustc-link-search=framework={}",
+        products.root.display()
+    );
     println!("cargo:rustc-link-lib=framework=CFWNativeBridge");
     // The host executable loads the bridge from the bundle it ships in
     // (Contents/Frameworks), never from the candidate build directory.
@@ -426,78 +568,78 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     Ok(())
 }
 
+fn optional_utf8_environment(name: &str) -> Result<Option<String>, String> {
+    std::env::var_os(name)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| format!("{name} must be UTF-8"))
+        })
+        .transpose()
+}
+
 /// Resolve the candidate-scoped native product root that the release build must
 /// consume. The lane-exported `CFW_NATIVE_PRODUCTS_OUTPUT` is the only accepted
-/// input: it must be an absolute path to a real directory named
-/// `native-products` under `target/candidates/<version>/<lane>/`, and every
-/// native product manifest must already be published there. A missing variable,
-/// a non-candidate layout, or an incomplete product set fails the build.
-fn candidate_native_products_root(repository_root: &Path) -> Result<PathBuf, String> {
+/// input. Only the exact unsigned-validation roots and the GA pre-sign root of
+/// the declared `CFW_BUILD_NUMBER` are valid; each path binds the one build
+/// number and signing mode every native manifest must carry. A missing
+/// variable, an aliased path, a different lane, or an incomplete product set
+/// fails the build.
+fn candidate_native_products_root(
+    repository_root: &Path,
+) -> Result<CandidateNativeProducts, String> {
     let version = std::env::var("CARGO_PKG_VERSION")
         .map_err(|error| format!("CARGO_PKG_VERSION is unavailable: {error}"))?;
     let candidate_root = repository_root.join(format!("target/candidates/{version}"));
-    let declared = std::env::var_os(NATIVE_PRODUCTS_OUTPUT_ENV).ok_or_else(|| {
-        format!(
-            "{NATIVE_PRODUCTS_OUTPUT_ENV} is unset: a release build must be driven by \
-             scripts/build_unsigned_candidate.sh or scripts/build_signed_candidate.sh, which \
-             publish and export the immutable candidate native product root \
-             {}/<lane>/native-products",
-            candidate_root.display()
-        )
-    })?;
-    let declared = PathBuf::from(declared);
-    if !declared.is_absolute() {
-        return Err(format!(
-            "{NATIVE_PRODUCTS_OUTPUT_ENV} must be an absolute path, found {}",
-            declared.display()
-        ));
-    }
-    require_real_directory(&declared)?;
-    let products = fs::canonicalize(&declared).map_err(|error| {
-        format!(
-            "resolve {NATIVE_PRODUCTS_OUTPUT_ENV} {}: {error}",
-            declared.display()
-        )
-    })?;
-    let candidate_root = fs::canonicalize(&candidate_root).map_err(|error| {
-        format!(
-            "resolve candidate root {}: {error}",
-            candidate_root.display()
-        )
-    })?;
-    let relative = products.strip_prefix(&candidate_root).map_err(|_| {
-        format!(
-            "{NATIVE_PRODUCTS_OUTPUT_ENV} must be candidate-scoped under {}, found {}",
-            candidate_root.display(),
-            products.display()
-        )
-    })?;
-    let lane = relative.components().collect::<Vec<_>>();
-    if lane.len() < 2
-        || lane
-            .iter()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        || relative.file_name().and_then(|name| name.to_str()) != Some("native-products")
-    {
-        return Err(format!(
-            "{NATIVE_PRODUCTS_OUTPUT_ENV} must name <lane>/native-products under {}, found {}",
-            candidate_root.display(),
-            products.display()
-        ));
-    }
+    let declared = match std::env::var(NATIVE_PRODUCTS_OUTPUT_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            return Err(format!(
+                "{NATIVE_PRODUCTS_OUTPUT_ENV} is unset: a release build must be driven by \
+                 scripts/build_unsigned_candidate.sh or scripts/build_signed_candidate.sh, which \
+                 publish and export one approved immutable native product root under {}",
+                candidate_root.display()
+            ));
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!("{NATIVE_PRODUCTS_OUTPUT_ENV} must be valid UTF-8"));
+        }
+    };
+    let build_number = match std::env::var(BUILD_NUMBER_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            return Err(format!(
+                "required release identity {BUILD_NUMBER_ENV} is missing"
+            ));
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!(
+                "required release identity {BUILD_NUMBER_ENV} must be valid UTF-8"
+            ));
+        }
+    };
+    let products = CandidateNativeProducts::resolve(&candidate_root, &declared, &build_number)?;
     for (product, _) in NATIVE_PRODUCTS {
-        let manifest_path = products.join(format!("{product}.manifest.json"));
-        require_regular_file(&manifest_path).map_err(|error| {
+        let manifest_path = products.root.join(format!("{product}.manifest.json"));
+        require_single_link_regular_file(&manifest_path).map_err(|error| {
             format!(
                 "candidate native product root {} is incomplete: {error}",
-                products.display()
+                products.root.display()
             )
         })?;
     }
+    let tombstone_manifest = products.root.join("CFWLegacyTombstone.manifest.json");
+    require_single_link_regular_file(&tombstone_manifest).map_err(|error| {
+        format!(
+            "candidate native product root {} is incomplete: {error}",
+            products.root.display()
+        )
+    })?;
     Ok(products)
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    require_single_link_regular_file(path)?;
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
 }
@@ -525,12 +667,10 @@ fn read_pins(path: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(pins)
 }
 
-fn require_pin(pins: &BTreeMap<String, String>, key: &str, expected: &str) -> Result<(), String> {
-    match pins.get(key).map(String::as_str) {
-        Some(actual) if actual == expected => Ok(()),
-        Some(actual) => Err(format!("pin {key} is {actual}, expected {expected}")),
-        None => Err(format!("required pin {key} is missing")),
-    }
+fn required_pin<'a>(pins: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str, String> {
+    pins.get(key)
+        .map(String::as_str)
+        .ok_or_else(|| format!("required pin {key} is missing"))
 }
 
 fn require_metadata(manifest: &ArtifactManifest, key: &str, expected: &str) -> Result<(), String> {
@@ -541,6 +681,22 @@ fn require_metadata(manifest: &ArtifactManifest, key: &str, expected: &str) -> R
         )),
         None => Err(format!("artifact metadata {key} is missing")),
     }
+}
+
+fn required_lower_hex_environment(name: &str, length: usize) -> Result<String, String> {
+    let value =
+        std::env::var(name).map_err(|_| format!("required release identity {name} is missing"))?;
+    if value.len() != length
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(format!(
+            "release identity {name} is not canonical lower hex"
+        ));
+    }
+    Ok(value)
 }
 
 fn require_file_digest_metadata(
@@ -579,7 +735,6 @@ fn native_build_inputs_digest(repository_root: &Path) -> Result<String, String> 
         "native/macos/Headers",
         "native/macos/Sources",
         "native/macos/SystemExtension",
-        "native/macos/Dependencies.lock.json",
         "native/macos/Package.swift",
         "native/macos/project.yml",
     ] {
@@ -721,7 +876,7 @@ fn verify_manifest(root: &Path, manifest: &ArtifactManifest) -> Result<(), Strin
                 size,
                 sha256,
             } => {
-                require_regular_file(&path)?;
+                require_single_link_regular_file(&path)?;
                 let bytes = fs::read(&path)
                     .map_err(|error| format!("read artifact {}: {error}", path.display()))?;
                 if bytes.len() as u64 != *size || sha256_hex(&bytes) != *sha256 {
@@ -786,11 +941,7 @@ fn collect_paths(
     {
         let entry = entry.map_err(|error| format!("enumerate artifact entry: {error}"))?;
         let path = entry.path();
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| error.to_string())?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = require_utf8_relative_artifact_path(root, &path)?;
         output.insert(relative);
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| format!("inspect artifact {}: {error}", path.display()))?;
@@ -812,30 +963,6 @@ fn safe_relative_path(value: &str) -> Result<&Path, String> {
         return Err(format!("unsafe artifact manifest path: {value}"));
     }
     Ok(path)
-}
-
-fn require_real_directory(path: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect required directory {}: {error}", path.display()))?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(format!(
-            "required path is not a real directory: {}",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-fn require_regular_file(path: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect required file {}: {error}", path.display()))?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(format!(
-            "required path is not a regular file: {}",
-            path.display()
-        ));
-    }
-    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

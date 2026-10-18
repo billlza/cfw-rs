@@ -1,4 +1,5 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWPacketTransport
 import CFWSharedProtocol
 import Darwin
@@ -39,7 +40,11 @@ private final class RestartableOwnerAuthorityClient: EngineOwnerAuthorityClient,
   var readyAttestations: [ReadyAttestation] { lock.withLock { readyValue } }
   var stoppedAttestations: [StoppedAttestation] { lock.withLock { stoppedValue } }
 
-  func bind(_ capability: OwnerCapability) async throws -> LeaseView {
+  func bind(
+    _ capability: OwnerCapability,
+    context: ProxyOwnerContext
+  ) async throws -> LeaseView {
+    _ = context
     capability.erase()
     throw AuthorityDomainError(code: .globalAuthorityUnavailable)
   }
@@ -70,14 +75,16 @@ private final class FakeEngine: PacketEngine, @unchecked Sendable {
 
   deinit { closeOwned() }
 
-  func start(configuration: Data, packetFileDescriptor: Int32) throws {
+  func start(configuration: Data, packetFileDescriptor: Int32, deadline: EngineStartDeadline)
+    throws
+  {
     lock.withLock {
       startCountValue += 1
       ownedDescriptor = packetFileDescriptor
     }
   }
 
-  func stop() throws {
+  func stop() throws(LibboxInstanceUnclosable) {
     lock.withLock {
       stopCountValue += 1
       closeOwnedLocked()
@@ -152,16 +159,35 @@ private final class CompletionRecorder: @unchecked Sendable {
   var values: [PacketTunnelProviderError?] { lock.withLock { recorded } }
 }
 
-private final class VoidRecorder: @unchecked Sendable {
+private final class StopResultRecorder: @unchecked Sendable {
+  private let lock = NSLock()
   private let semaphore = DispatchSemaphore(value: 0)
-  func record() { semaphore.signal() }
+  private var resultsValue: [Result<Void, PacketTunnelStopError>] = []
+
+  func record(_ result: Result<Void, PacketTunnelStopError>) {
+    lock.withLock { resultsValue.append(result) }
+    semaphore.signal()
+  }
+
   func wait() -> Bool { semaphore.wait(timeout: .now() + 2) == .success }
+  var results: [Result<Void, PacketTunnelStopError>] { lock.withLock { resultsValue } }
+}
+
+private func stopSucceeded(
+  _ result: Result<Void, PacketTunnelStopError>?
+) -> Bool {
+  guard let result else { return false }
+  if case .success = result { return true }
+  return false
 }
 
 private func tunnelDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: CredentialAudience(
+      profileID: UUID(),
+      profileDigest: try SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: UUID(),
     epoch: 1,
     generation: 1,
@@ -186,7 +212,7 @@ private func makeRedeemed(
     authorityRevision: 1)
   let lease = try LeaseView(
     leaseID: AuthorityIdentifier(UUID()), operation: operation,
-    state: .active, expiryMonotonic: 10_000)
+    state: .starting, expiryMonotonic: 10_000)
   let configuration = try SensitiveBytes(
     copying: Data("{}".utf8), maximumCount: AuthorityV1Limits.maximumConfigurationBytes)
   let secrets = try AuthoritySecretMaterial(slots: [])
@@ -223,7 +249,8 @@ private func makeCoordinator(clockValue: UInt64 = 5_000) throws -> CoordinatorFi
   let lifecycle = PacketTunnelSessionLifecycle(
     engineFactory: FakeEngineFactory(engine: engine),
     dependencies: dependencies,
-    cancelTunnel: { _ in })
+    cancelTunnel: { _ in },
+    endProcess: { _ in Issue.record("every engine in this test closes") })
   let coordinator = TunnelTicketStartCoordinator(
     authority: authority,
     sessionLifecycle: lifecycle,
@@ -249,9 +276,10 @@ struct ProviderTicketRestartIntegrationTests {
     #expect(fixture.engine.startCount == 1)
 
     // Proven stop returns the coordinator to idle and attests stopped exactly once.
-    let stop = VoidRecorder()
-    fixture.coordinator.stop { stop.record() }
+    let stop = StopResultRecorder()
+    fixture.coordinator.stop { stop.record($0) }
     #expect(stop.wait())
+    #expect(stopSucceeded(stop.results.first))
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.authority.stoppedAttestations.count == 1)
 
@@ -267,18 +295,20 @@ struct ProviderTicketRestartIntegrationTests {
     #expect(fixture.authority.readyAttestations.count == 2)
 
     // Clean up the second session.
-    let finalStop = VoidRecorder()
-    fixture.coordinator.stop { finalStop.record() }
+    let finalStop = StopResultRecorder()
+    fixture.coordinator.stop { finalStop.record($0) }
     #expect(finalStop.wait())
+    #expect(stopSucceeded(finalStop.results.first))
     #expect(fixture.engine.stopCount == 2)
   }
 
   @Test func stopWithoutAnActiveContextAttestsNothing() throws {
     let fixture = try makeCoordinator()
 
-    let stop = VoidRecorder()
-    fixture.coordinator.stop { stop.record() }
+    let stop = StopResultRecorder()
+    fixture.coordinator.stop { stop.record($0) }
     #expect(stop.wait())
+    #expect(stopSucceeded(stop.results.first))
 
     // No start ever occurred: nothing is redeemed and no stopped attestation is
     // sent to the Authority for a context that was never bound.

@@ -3,6 +3,7 @@ import Darwin
 import Dispatch
 import Foundation
 import NetworkExtension
+import Synchronization
 
 public protocol PacketFlowClient: AnyObject {
   func readPackets(_ completion: @escaping @Sendable ([Data], [NSNumber]) -> Void)
@@ -44,14 +45,26 @@ public enum PacketPumpError: Error, Equatable, Sendable {
   case engineSocketClosed
 }
 
-private final class FlowSocketOwner: @unchecked Sendable {
-  private let lock = NSLock()
-  private var descriptorValue: Int32
-  private var registeredSources = 0
-  private var closeRequested = false
+private final class FlowSocketOwner: Sendable {
+  private struct State: Sendable {
+    var descriptor: Int32
+    var registeredSources = 0
+    var closeRequested = false
+
+    mutating func takeDescriptorIfReadyToClose() -> Int32 {
+      guard closeRequested, registeredSources == 0 else {
+        return -1
+      }
+      let descriptor = self.descriptor
+      self.descriptor = -1
+      return descriptor
+    }
+  }
+
+  private let state: Mutex<State>
 
   init(descriptor: Int32) {
-    descriptorValue = descriptor
+    state = Mutex(State(descriptor: descriptor))
   }
 
   deinit {
@@ -59,24 +72,24 @@ private final class FlowSocketOwner: @unchecked Sendable {
   }
 
   var descriptor: Int32 {
-    lock.withLock { descriptorValue }
+    state.withLock { $0.descriptor }
   }
 
   func registerSource() -> Bool {
-    lock.withLock {
-      guard descriptorValue >= 0, !closeRequested else {
+    state.withLock { state in
+      guard state.descriptor >= 0, !state.closeRequested else {
         return false
       }
-      registeredSources += 1
+      state.registeredSources += 1
       return true
     }
   }
 
   func sourceDidCancel() {
-    let descriptorToClose: Int32 = lock.withLock {
-      precondition(registeredSources > 0, "Unbalanced socket source cancellation")
-      registeredSources -= 1
-      return takeDescriptorIfReadyToClose()
+    let descriptorToClose: Int32 = state.withLock { state in
+      precondition(state.registeredSources > 0, "Unbalanced socket source cancellation")
+      state.registeredSources -= 1
+      return state.takeDescriptorIfReadyToClose()
     }
     if descriptorToClose >= 0 {
       Darwin.close(descriptorToClose)
@@ -84,22 +97,13 @@ private final class FlowSocketOwner: @unchecked Sendable {
   }
 
   func requestClose() {
-    let descriptorToClose: Int32 = lock.withLock {
-      closeRequested = true
-      return takeDescriptorIfReadyToClose()
+    let descriptorToClose: Int32 = state.withLock { state in
+      state.closeRequested = true
+      return state.takeDescriptorIfReadyToClose()
     }
     if descriptorToClose >= 0 {
       Darwin.close(descriptorToClose)
     }
-  }
-
-  private func takeDescriptorIfReadyToClose() -> Int32 {
-    guard closeRequested, registeredSources == 0 else {
-      return -1
-    }
-    let descriptor = descriptorValue
-    descriptorValue = -1
-    return descriptor
   }
 }
 

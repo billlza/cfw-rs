@@ -36,7 +36,7 @@ prerelease，发布时间为 `2026-10-18T09:12:23Z`，附件为 macOS 产物。
   Apple 的权限、Keychain、XPC 和 Network Extension。
 - `scripts/build_libbox.sh` 通过 `gomobile bind` 生成 Apple/Objective-C 绑定；
   Windows 引擎宿主/绑定也需要实现，不能把共享 Rust 编译通过当成引擎已移植。
-- 宿主 `build.rs` 明确拒绝非 `aarch64-apple-darwin`；现有 CI 的三个 job 均为
+- 宿主 `build.rs` 明确拒绝非 `aarch64-apple-darwin`；现有 Mac CI 的三个 job 均为
   `xcode-27`（Windows 验证流水线为本次新增）。2026-10-18 仓库 runner API 返回 0 台自托管 runner。
 
 ## 页面和 UI 对照表
@@ -139,7 +139,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | --- | --- | --- |
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
-| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 设置、窗口状态、诊断及配置仓库已在 Windows 通过验证；当前 407 项 Rust/310 项前端测试通过，追加枚举锁超时回归中；完整平台适配尚未完成 |
+| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 设置、窗口状态、诊断及配置仓库已在 Windows 通过验证；当前 408 项 Rust/310 项前端测试通过；完整平台适配尚未完成 |
 | Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 待实现和运行；不得用展示壳代替 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
@@ -271,8 +271,14 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   `--no-fail-fast` 收集独立目标的全部结果，但任何失败仍使命令和 job 失败。
   完整回执在 `target/cfw-validation/windows-profiles-green-result.json`，日志 SHA-256
   为 `d1fa976512f1e104b3b07d2af74b7b599fc2ca2029827f44b83e1d44dd309131`。
-  追加的枚举游标超时/释放后恢复用例正在验证。本阶段仍不证明 Windows 应用启动、
-  凭据库、引擎、系统代理、TUN、桌面视觉或发布验收。
+- [最终 Windows 仓库回归](https://github.com/billlza/cfw-rs/actions/runs/39139812422)
+  在 `e9fb5d79b4ca7dae3909a2f84b6d3b7cd7909449` 成功：408 项 Rust、310 项前端测试，
+  格式、Clippy、目录刷盘探针均通过，失败/忽略/过滤/跳过为 0。新增用例实际持有
+  枚举游标锁，观察到三秒超时，并在释放后完成重新枚举。回执为
+  `target/cfw-validation/windows-profiles-final-result.json`，日志 SHA-256 为
+  `7741cd000f645d65292893c32f507f7b178aab92194113c9024e51250e6c5560`。
+  同源 Mac 托管 CI 的三个 job 仍排队，不能替代或冒充本地固定工具链验证。
+  本阶段仍不证明 Windows 应用启动、凭据库、引擎、系统代理、TUN、桌面视觉或发布验收。
 
 ## 官方资料
 

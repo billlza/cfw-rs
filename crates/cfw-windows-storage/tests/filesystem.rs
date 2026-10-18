@@ -36,6 +36,13 @@ fn replacement_is_bounded_private_and_changes_the_file_identity() {
     assert_eq!(before.bytes, after.bytes);
     assert_ne!(before.identity, after.identity);
     assert_ne!(before.identity.revision(), after.identity.revision());
+    let revision = after.identity.revision();
+    assert_eq!(revision.len(), 64);
+    assert!(
+        revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     assert!(matches!(
         directory
             .write()

@@ -63,13 +63,17 @@ pub(super) fn require_user_policy() -> Result<(), ProxyError> {
         return Err(ProxyError::PolicyDenied);
     }
     for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
-        let restricted = policy(
-            root,
-            r"SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel",
-            "Proxy",
-        )?;
-        if !matches!(restricted, None | Some(0)) {
-            return Err(ProxyError::PolicyDenied);
+        // Activation also changes automatic-detection flags. Its separate
+        // administrative restriction must not be bypassed by a manual proxy.
+        for name in ["Proxy", "Autoconfig"] {
+            let restricted = policy(
+                root,
+                r"SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel",
+                name,
+            )?;
+            if !matches!(restricted, None | Some(0)) {
+                return Err(ProxyError::PolicyDenied);
+            }
         }
     }
     Ok(())

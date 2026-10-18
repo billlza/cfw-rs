@@ -56,6 +56,20 @@ jobs:
         run: |
           $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
           $receipt = Get-Content (Join-Path $artifactRoot 'build-receipt.json') -Raw | ConvertFrom-Json
+          $policyPath = Join-Path $env:SystemRoot 'PolicyDefinitions/inetres.admx'
+          [xml]$policyDefinitions = Get-Content $policyPath -Raw -ErrorAction Stop
+          $proxyPolicyBindings = @(
+            @{ Value = 'Proxy'; Key = 'Software\Policies\Microsoft\Internet Explorer\Control Panel' },
+            @{ Value = 'Autoconfig'; Key = 'Software\Policies\Microsoft\Internet Explorer\Control Panel' },
+            @{ Value = 'ProxySettingsPerUser'; Key = 'Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings' }
+          )
+          foreach ($binding in $proxyPolicyBindings) {
+            $proxyPolicies = @($policyDefinitions.policyDefinitions.policies.policy | Where-Object {
+              $_.key -ieq $binding.Key -and $_.valueName -ieq $binding.Value
+            })
+            if ($proxyPolicies.Count -ne 1) { throw "Missing or ambiguous installed proxy policy mapping: $($binding.Value)" }
+            "Verified Windows policy: $($proxyPolicies[0].name), value=$($binding.Value), scope=$($proxyPolicies[0].class)"
+          }
           $env:CFW_ENGINE_HOST_PATH = Join-Path $artifactRoot $receipt.host_artifact.filename
           $env:CFW_ENGINE_HOST_SHA256 = $receipt.host_artifact.sha256
           $env:CFW_ENGINE_HOST_VERSION = $receipt.engine_version.TrimStart('v')

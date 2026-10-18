@@ -247,10 +247,12 @@ fn storage_error(error: cfw_windows_storage::Error) -> Error {
     use cfw_windows_storage::Error as Storage;
     match error {
         Storage::CommitUncertain(_) => Error::OutcomeUnknown,
-        Storage::Busy => Error::ConcurrentModification,
-        Storage::UnsafeDirectory | Storage::UnsafeFile | Storage::InvalidSecurityDescriptor => {
-            Error::AccessDenied
-        }
+        Storage::Busy | Storage::MutexBusy => Error::ConcurrentModification,
+        Storage::UnsafeDirectory
+        | Storage::UnsafeFile
+        | Storage::InvalidSecurityDescriptor
+        | Storage::UnsafeMutex
+        | Storage::ImpersonatedIdentity => Error::AccessDenied,
         Storage::TooLarge { .. } | Storage::InvalidDirectoryListing => Error::Corrupt,
         Storage::TooManyEntries { .. } => Error::CapacityExceeded,
         Storage::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -260,9 +262,10 @@ fn storage_error(error: cfw_windows_storage::Error) -> Error {
         // CleanupFailed is emitted before publication; it does not conceal a
         // commit. Preserve publication uncertainty if that contract ever grows.
         Storage::CleanupFailed { operation, .. } => storage_error(*operation),
-        Storage::InvalidName | Storage::InvalidLimit | Storage::UnexpectedDirectory => {
-            Error::Internal
-        }
+        Storage::InvalidName
+        | Storage::InvalidLimit
+        | Storage::UnexpectedDirectory
+        | Storage::InvalidMutexParameters => Error::Internal,
     }
 }
 

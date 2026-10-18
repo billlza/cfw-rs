@@ -252,7 +252,13 @@ fn storage_error(error: Error, entry: &str) -> ProfileError {
         Error::UnsafeDirectory => ProfileError::UnsafeRepositoryDirectory,
         Error::UnsafeFile => ProfileError::UnsafeProfileFile(entry.to_owned()),
         Error::UnexpectedDirectory => ProfileError::UnexpectedManagedSubdirectory(entry.to_owned()),
-        Error::Busy => ProfileError::RepositoryBusy,
+        Error::Busy | Error::MutexBusy => ProfileError::RepositoryBusy,
+        Error::UnsafeMutex | Error::ImpersonatedIdentity => {
+            ProfileError::Io(io::Error::new(io::ErrorKind::PermissionDenied, error))
+        }
+        Error::InvalidMutexParameters => {
+            ProfileError::Io(io::Error::new(io::ErrorKind::InvalidInput, error))
+        }
         Error::TooManyEntries { .. } => ProfileError::TooManyEntries,
         Error::TooLarge { actual, .. } => match entry {
             SELECTION_FILE_NAME => ProfileError::SelectionTooLarge { actual },

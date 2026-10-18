@@ -34,6 +34,8 @@ prerelease，发布时间为 `2026-10-18T09:12:23Z`，附件为 macOS 产物。
   描述符、权限、文件锁及 `openat`/`renameat`。不能通过删除检查或普通路径拼接移植。
 - `cfw-platform` 实际仍是 macOS 适配器；`cfw-apple-network` 及 Swift 服务依赖
   Apple 的权限、Keychain、XPC 和 Network Extension。
+- `scripts/build_libbox.sh` 通过 `gomobile bind` 生成 Apple/Objective-C 绑定；
+  Windows 引擎宿主/绑定也需要实现，不能把共享 Rust 编译通过当成引擎已移植。
 - 宿主 `build.rs` 明确拒绝非 `aarch64-apple-darwin`；现有 CI 的三个 job 均为
   `xcode-27`。2026-10-18 仓库 runner API 返回 0 台自托管 runner。
 
@@ -137,7 +139,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | --- | --- | --- |
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
-| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 首批 UI 宿主身份和终端命令已修改；设置/平台说明、用例与持久化尚未完成 |
+| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 首批 UI 宿主身份和终端命令已修改；Windows 共享层 290 项 Rust/310 项前端测试通过；设置/平台说明、用例与持久化尚未完成 |
 | Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 待实现和运行；不得用展示壳代替 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；无自托管 runner 已注册 |
@@ -176,7 +178,13 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
   在 `694fd4e` 已通过全部共享 Rust 测试，验证了该修复。前端构建成功，310 项前端
   测试中 309 项通过，1 项在测试自身的源码定位阶段失败：用 `/` 拼接的文件后缀
   无法匹配 Windows 路径。改为平台正确的 `path.join` 精确定位，并明确断言来源存在；
-  控制器权限检查的断言和要求保持不变。新运行待完成。
+  控制器权限检查的断言和要求保持不变。
+- [第三次 Windows CI](https://github.com/billlza/cfw-rs/actions/runs/39128685609)
+  在 `bdfbcd4af47598bdee090cb4d044c43a6b8420eb` 完成并成功：格式、共享包 Clippy、
+  290 项 Rust 测试、前端构建、310 项前端测试均通过，失败/忽略/跳过均为 0。
+  原始完整日志和提取结果在 `target/cfw-validation/windows-ci-final.log` 与
+  `windows-contract-result.json`。相同提交的 [Mac 托管 CI](https://github.com/billlza/cfw-rs/actions/runs/39128685594)
+  三个 job 仍在排队，不能将本地 Clippy 结果算成该托管运行通过。
   这些结果不证明 Windows 产品可用或达到 GA。
 
 实际验证入口：

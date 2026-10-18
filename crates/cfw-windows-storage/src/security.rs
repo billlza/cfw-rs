@@ -12,7 +12,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-    SDDL_REVISION_1, SE_FILE_OBJECT,
+    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
 };
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -26,6 +26,22 @@ use windows_sys::Win32::System::Threading::{
 use crate::{Error, ReadPolicy};
 
 const MAX_SECURITY_BYTES: usize = 16 * 1024;
+
+/// Current-user native authorities must not accidentally read or create state
+/// for an impersonated caller. A failed token query never falls back to process.
+pub fn require_process_identity() -> Result<(), Error> {
+    let mut token = null_mut();
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } != 0 {
+        let _token = unsafe { OwnedHandle::from_raw_handle(token) };
+        return Err(Error::ImpersonatedIdentity);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_NO_TOKEN as i32) {
+        Ok(())
+    } else {
+        Err(error.into())
+    }
+}
 
 // These allocations come exclusively from APIs documented to use LocalAlloc.
 // They stay local to one call and are released exactly once, including errors.
@@ -164,11 +180,22 @@ pub(crate) struct Security {
 
 impl Security {
     pub(crate) fn current() -> Result<Self, Error> {
+        Self::for_object(false)
+    }
+
+    pub(crate) fn for_mutex() -> Result<Self, Error> {
+        Self::for_object(true)
+    }
+
+    fn for_object(mutex: bool) -> Result<Self, Error> {
         let owner = Sid::current()?;
         let sid = owner.text()?;
-        let sddl: Vec<u16> = format!("O:{sid}D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)\0")
-            .encode_utf16()
-            .collect();
+        let acl = if mutex {
+            format!("(A;;GA;;;{sid})(A;;GA;;;SY)")
+        } else {
+            format!("(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)")
+        };
+        let sddl: Vec<u16> = format!("O:{sid}D:P{acl}\0").encode_utf16().collect();
         let mut descriptor = null_mut();
         let mut length = 0;
         if unsafe {
@@ -208,9 +235,36 @@ impl Security {
         self.descriptor.as_ptr().cast()
     }
 
+    pub(crate) fn principal(&self) -> Result<String, Error> {
+        self.owner.text()
+    }
+
+    pub(crate) fn verify_mutex(&self, handle: &OwnedHandle) -> Result<(), Error> {
+        self.verify_handle(
+            handle.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            ReadPolicy::Private,
+            false,
+        )
+        .map_err(|error| match error {
+            Error::UnsafeFile => Error::UnsafeMutex,
+            other => other,
+        })
+    }
+
     pub(crate) fn verify(
         &self,
         file: &File,
+        policy: ReadPolicy,
+        directory: bool,
+    ) -> Result<(), Error> {
+        self.verify_handle(file.as_raw_handle(), SE_FILE_OBJECT, policy, directory)
+    }
+
+    fn verify_handle(
+        &self,
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        object_type: SE_OBJECT_TYPE,
         policy: ReadPolicy,
         directory: bool,
     ) -> Result<(), Error> {
@@ -228,8 +282,8 @@ impl Security {
         // until the owner and every applicable ACE have been checked.
         let result = unsafe {
             GetSecurityInfo(
-                file.as_raw_handle(),
-                SE_FILE_OBJECT,
+                handle,
+                object_type,
                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                 &mut owner,
                 null_mut(),

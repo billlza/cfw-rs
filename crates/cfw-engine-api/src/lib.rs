@@ -64,6 +64,47 @@ impl EngineMode {
 pub enum EngineOwner {
     ProxyAgent,
     PacketTunnelSystemExtension,
+    WindowsUserAgent,
+    WindowsTunnelService,
+}
+
+/// Closed platform identity selected by the concrete backend, never inferred
+/// from an incoming runtime observation. The Apple wire owner names stay intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineRuntimePlatform {
+    MacOs,
+    Windows,
+}
+
+impl EngineRuntimePlatform {
+    pub const fn proxy_owner(self) -> EngineOwner {
+        match self {
+            Self::MacOs => EngineOwner::ProxyAgent,
+            Self::Windows => EngineOwner::WindowsUserAgent,
+        }
+    }
+
+    pub const fn tunnel_owner(self) -> EngineOwner {
+        match self {
+            Self::MacOs => EngineOwner::PacketTunnelSystemExtension,
+            Self::Windows => EngineOwner::WindowsTunnelService,
+        }
+    }
+}
+
+impl EngineOwner {
+    pub const fn supports_mode(self, mode: EngineMode) -> bool {
+        matches!(
+            (self, mode),
+            (
+                Self::ProxyAgent | Self::WindowsUserAgent,
+                EngineMode::LocalProxy | EngineMode::SystemProxy
+            ) | (
+                Self::PacketTunnelSystemExtension | Self::WindowsTunnelService,
+                EngineMode::Tunnel | EngineMode::TunnelSystemProxy
+            )
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1279,6 +1320,10 @@ pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BackendErr
 /// A successful stop is a barrier: the process has stopped libbox, released
 /// its cross-process lease, and will issue no more callbacks for that runtime.
 pub trait EngineBackend: Send + Sync + 'static {
+    /// Fixed for this backend's lifetime. The coordinator uses this closed
+    /// mapping for start, recovery and observation; a peer cannot choose it.
+    fn runtime_platform(&self) -> EngineRuntimePlatform;
+
     /// Queries both native owners and returns one fresh, mutually-exclusive
     /// typed observation. Implementations must reject conflicting simultaneous
     /// owners instead of selecting one, and must not return a cached Active

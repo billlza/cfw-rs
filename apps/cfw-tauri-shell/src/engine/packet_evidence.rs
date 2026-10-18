@@ -1076,6 +1076,10 @@ mod tests {
     }
 
     impl EngineBackend for FakeBackend {
+        fn runtime_platform(&self) -> cfw_engine_api::EngineRuntimePlatform {
+            cfw_engine_api::EngineRuntimePlatform::MacOs
+        }
+
         fn check_configuration(&self, _request: EngineStartRequest) -> BackendFuture<'_, ()> {
             Box::pin(async { Ok(()) })
         }

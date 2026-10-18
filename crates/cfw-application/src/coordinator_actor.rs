@@ -92,6 +92,9 @@ pub(crate) async fn run_coordinator(
         startup_reconciliation,
     } = runtime;
     let mut state = CoordinatorState {
+        // Pin the trusted backend selection once. Incoming observations or a
+        // later backend inconsistency cannot switch this actor's platform.
+        runtime_platform: backend.runtime_platform(),
         snapshot: initial_snapshot,
         native_lease: None,
         quarantine: None,

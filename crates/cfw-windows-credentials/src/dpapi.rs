@@ -1,15 +1,10 @@
-use std::io;
 use std::ptr::{null, null_mut};
 
 use cfw_engine_api::CredentialVaultError as Error;
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_NO_TOKEN, LocalFree};
-use windows_sys::Win32::Security::{
-    Cryptography::{
-        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
-    },
-    TOKEN_QUERY,
+use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Security::Cryptography::{
+    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::document::MAX_DOCUMENT_BYTES;
@@ -22,18 +17,7 @@ const ENTROPY: &[u8] = b"com.bill.clashforwindows.credential-vault.v1";
 /// must not accidentally create a different user's vault through impersonation.
 /// A future privileged broker needs a separate authenticated owner boundary.
 pub(crate) fn require_process_identity() -> Result<(), Error> {
-    let mut token = null_mut();
-    // SAFETY: valid pseudo-thread handle and writable output handle.
-    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } != 0 {
-        // SAFETY: OpenThreadToken returned an owned, valid token handle.
-        unsafe { CloseHandle(token) };
-        return Err(Error::AccessDenied);
-    }
-    if io::Error::last_os_error().raw_os_error() == Some(ERROR_NO_TOKEN as i32) {
-        Ok(())
-    } else {
-        Err(Error::AccessDenied)
-    }
+    cfw_windows_storage::require_process_identity().map_err(|_| Error::AccessDenied)
 }
 
 pub(crate) fn protect(plaintext: &[u8]) -> Result<Vec<u8>, Error> {

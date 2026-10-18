@@ -15,12 +15,14 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+cfw-engine-api = { path = "../cfw-engine-api" }
 cfw-windows-storage = { path = "../cfw-windows-storage" }
 sha2.workspace = true
 uuid.workspace = true
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Credentials",
   "Win32_Storage_FileSystem",
   "Win32_System_JobObjects",
   "Win32_System_Threading",

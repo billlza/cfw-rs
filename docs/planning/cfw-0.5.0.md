@@ -399,6 +399,31 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   原因是测试端 accept 后仍处于非阻塞模式。修订两个测试对端，明确切换为阻塞
   模式后使用已有读写超时。此项属于夹具修正，完整凭据流仍需下一轮实测确认。
 
+- 第三轮 [原生验证](https://github.com/billlza/cfw-rs/actions/runs/39152550973) 在
+  `ff2b3e34736a63ad1ccc195e5a8a1724715361ea` 全部通过：438 项共享 Rust、310 项
+  前端、474 个 Go 测试/子测试和 6 项真实引擎集成。下载后的两份 x64 EXE、构建
+  回执、源码身份及 116 份许可文件摘要均已核对；完整产品发布仍未验收。
+
+### 2026-10-18：协调器平台身份与 Windows 用户代次
+
+- 共享后端显式声明 Mac 或 Windows 运行平台，协调器在 actor 启动时固定该身份。
+  Windows 用户代理和 TUN 服务有独立 owner 名称；启动、恢复、持续观察按对应平台
+  核对。Apple 现有 owner 的序列化名称不变。共享 UI 按封闭的运行角色呈现两平台。
+- 重启规格保留完整已接受的运行身份，安装 ID、epoch、owner、generation 或 digest
+  漂移都不能继续匹配原基线。新增协调器测试还要求 Windows 清理后的独立全局 Off
+  证明；这些是状态机测试，不作为 Windows 服务、TUN 或真实网络证据。
+- 新增当前用户的 Credential Manager 代次存储，使用固定产品 target 和规范文档，
+  以 SID/target 隔离的 Global mutex 串行比较并更新。拒绝线程模拟、错误文档、
+  陈旧代次、溢出，以及已绑定实例的权威丢失或安装身份替换；写入后读取不一致
+  报告结果不确定，不承诺回滚。该记录不是特权服务身份，也不提供同用户恶意进程
+  下的独立隔离或全局停止证明。
+- 原生用例覆盖真实 Credential Manager 重开、四个进程的 32 次代次分配、陈旧 CAS、
+  损坏不覆盖、溢出、模拟身份拒绝和安装身份替换；仅使用随机隔离测试 target，
+  不触碰正式记录。新 mutex 复用存储层已有 SID/ACL 校验和原生进程身份检查。
+- 本地当前共享变更通过 1,157 项 Rust、311 项前端测试、全工作区 Clippy 和
+  cargo-deny；Credential Manager 与 mutex 的 Windows 原生结果待 CI 核对。
+  桌面启动工厂、Windows 服务/授权和各网络模式的实际接线仍未完成。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。
@@ -417,3 +442,6 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [Go 官方下载元数据](https://go.dev/dl/?mode=json&include=all)
 - [Windows CreateFile 访问权限与共享约束](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
 - [Windows accept 继承监听 socket 属性](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept)
+- [Windows Credential Manager 写入契约](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)
+- [Credential Manager 记录与持久化范围](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw)
+- [Windows 跨会话内核对象命名空间](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)

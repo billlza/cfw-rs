@@ -291,6 +291,10 @@ impl<B> AppleNetworkBackend<B> {
 }
 
 impl<B: NativeBridge> EngineBackend for AppleNetworkBackend<B> {
+    fn runtime_platform(&self) -> cfw_engine_api::EngineRuntimePlatform {
+        cfw_engine_api::EngineRuntimePlatform::MacOs
+    }
+
     fn check_configuration(&self, request: EngineStartRequest) -> BackendFuture<'_, ()> {
         Box::pin(async move {
             self.bridge

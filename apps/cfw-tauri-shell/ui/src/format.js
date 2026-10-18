@@ -226,10 +226,10 @@ function engineMode(value) {
   throw new TypeError("engine mode is invalid");
 }
 
-function normalizeRuntimeIdentity(runtime, expectedOwner, generation, digest) {
+function normalizeRuntimeIdentity(runtime, expectedOwners, generation, digest) {
   const context = runtime?.context;
   if (runtime?.ready !== true
-    || runtime.owner !== expectedOwner
+    || !expectedOwners.includes(runtime.owner)
     || !context
     || typeof context.installation_id !== "string"
     || context.installation_id.length === 0
@@ -242,7 +242,7 @@ function normalizeRuntimeIdentity(runtime, expectedOwner, generation, digest) {
     throw new TypeError("runtime identity does not match the engine snapshot");
   }
   return Object.freeze({
-    owner: expectedOwner,
+    owner: runtime.owner,
     context: Object.freeze({
       installation_id: context.installation_id,
       config_epoch: context.config_epoch,
@@ -259,6 +259,8 @@ function normalizeRuntimeIdentity(runtime, expectedOwner, generation, digest) {
 /// snapshot agrees with the snapshot's own generation and configuration digest
 /// and reports itself ready, so a malformed or stale payload can never make the
 /// dashboard claim the network is up.
+/// The coordinator validates the backend's concrete platform before publishing;
+/// presentation validates that its closed owner role agrees with the mode.
 export function normalizeEngineStatus(value) {
   if (!value || typeof value !== "object" || !value.snapshot || typeof value.snapshot !== "object") {
     throw new TypeError("engine snapshot envelope is invalid");
@@ -280,7 +282,7 @@ export function normalizeEngineStatus(value) {
   if (stateTag === "local_proxy_active" || stateTag === "proxy_active") {
     runtimeIdentity = normalizeRuntimeIdentity(
       snapshot.state.runtime,
-      "proxy_agent",
+      ["proxy_agent", "windows_user_agent"],
       snapshot.generation,
       configDigest,
     );
@@ -288,7 +290,7 @@ export function normalizeEngineStatus(value) {
   } else if (stateTag === "tunnel_active" || stateTag === "tunnel_system_proxy_active") {
     runtimeIdentity = normalizeRuntimeIdentity(
       snapshot.state.runtime,
-      "packet_tunnel_system_extension",
+      ["packet_tunnel_system_extension", "windows_tunnel_service"],
       snapshot.generation,
       configDigest,
     );

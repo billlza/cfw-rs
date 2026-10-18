@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use cfw_engine_api::{
     BackendError, BackendErrorKind, EngineBackend, EngineCommandContext, EngineGenerationStore,
-    EngineMode, EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
+    EngineMode, EngineSnapshot, EngineState, TunnelInstallOutcome,
 };
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use tokio::sync::watch;
@@ -157,7 +157,7 @@ pub(crate) async fn transition(
             };
             if let Err(error) = validate_runtime(
                 &runtime,
-                EngineOwner::ProxyAgent,
+                state.runtime_platform.proxy_owner(),
                 &context,
                 &request.config_digest,
             ) {
@@ -255,7 +255,7 @@ pub(crate) async fn transition(
             };
             if let Err(error) = validate_runtime(
                 &runtime,
-                EngineOwner::PacketTunnelSystemExtension,
+                state.runtime_platform.tunnel_owner(),
                 &context,
                 &request.config_digest,
             ) {

@@ -7,7 +7,10 @@
 
 mod entries;
 mod locking;
+mod mutex;
 mod security;
+pub use mutex::PrivateUserMutex;
+pub use security::require_process_identity;
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -72,6 +75,14 @@ pub enum Error {
         "private storage entry is redirected, linked, has another owner, or grants unsafe access"
     )]
     UnsafeFile,
+    #[error("private mutex has another owner or grants access to another principal")]
+    UnsafeMutex,
+    #[error("private mutex purpose or admission deadline is invalid")]
+    InvalidMutexParameters,
+    #[error("private user authority mutex exceeded its admission deadline")]
+    MutexBusy,
+    #[error("current-user authority requires an unimpersonated process identity")]
+    ImpersonatedIdentity,
     #[error("managed storage cleanup refuses to traverse or remove a directory")]
     UnexpectedDirectory,
     #[error("private storage remained busy for 3 seconds")]

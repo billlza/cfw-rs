@@ -1,6 +1,6 @@
 use std::fmt;
 
-use cfw_engine_api::{EngineMode, EngineOwner, EngineSnapshot, EngineState};
+use cfw_engine_api::{EngineMode, EngineSnapshot, EngineState, RuntimeIdentity};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 
 /// The last source inputs accepted by the serialized coordinator actor.
@@ -17,6 +17,7 @@ pub struct EngineRestartSpec {
     settings: EngineSettings,
     generation: u64,
     config_digest: Option<String>,
+    runtime: Option<RuntimeIdentity>,
 }
 
 impl EngineRestartSpec {
@@ -37,6 +38,13 @@ impl EngineRestartSpec {
             settings,
             generation: snapshot.generation,
             config_digest: snapshot.config_digest.clone(),
+            runtime: match &snapshot.state {
+                EngineState::LocalProxyActive { runtime }
+                | EngineState::ProxyActive { runtime }
+                | EngineState::TunnelActive { runtime }
+                | EngineState::TunnelSystemProxyActive { runtime } => Some(runtime.clone()),
+                _ => None,
+            },
         }
     }
 
@@ -79,14 +87,16 @@ impl EngineRestartSpec {
             (EngineState::LocalProxyActive { runtime }, EngineMode::LocalProxy)
             | (EngineState::ProxyActive { runtime }, EngineMode::SystemProxy) => {
                 runtime.ready
-                    && runtime.owner == EngineOwner::ProxyAgent
+                    && runtime.owner.supports_mode(self.mode)
+                    && self.runtime.as_ref() == Some(runtime)
                     && runtime.context.generation == self.generation
                     && Some(runtime.config_digest.as_str()) == self.config_digest()
             }
             (EngineState::TunnelActive { runtime }, EngineMode::Tunnel)
             | (EngineState::TunnelSystemProxyActive { runtime }, EngineMode::TunnelSystemProxy) => {
                 runtime.ready
-                    && runtime.owner == EngineOwner::PacketTunnelSystemExtension
+                    && runtime.owner.supports_mode(self.mode)
+                    && self.runtime.as_ref() == Some(runtime)
                     && runtime.context.generation == self.generation
                     && Some(runtime.config_digest.as_str()) == self.config_digest()
             }

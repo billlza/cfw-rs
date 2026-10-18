@@ -12,7 +12,11 @@ mod protocol;
 pub use configuration::PreparedConfig;
 
 #[cfg(windows)]
+mod lineage;
+#[cfg(windows)]
 mod listeners;
+#[cfg(windows)]
+pub use lineage::{LineageError, WindowsEngineGenerationStore};
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]

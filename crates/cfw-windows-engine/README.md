@@ -34,6 +34,28 @@ in `docs/planning/cfw-0.5.0.md`.
 
 ## Lifecycle
 
+`WindowsEngineGenerationStore` implements the shared generation-store contract
+using a canonical generic Credential Manager record for the current process
+user. `CRED_PERSIST_LOCAL_MACHINE` persists across that user's logon sessions;
+it does not grant other users access. A private Global-namespace mutex uses the
+current SID and authority target to serialize cooperating processes across
+sessions, independently of the application's selected home directory.
+
+The store rejects impersonation, malformed/noncanonical documents, stale CAS
+expectations and counter exhaustion. An instance binds its first confirmed
+installation identity; disappearance or replacement cannot silently reset that
+coordinator's lineage. A fresh instance after deliberate credential removal
+uses a fresh installation UUID. Writes require exact readback; a failed readback
+reports an uncertain outcome without promising rollback. This is user lineage,
+not privileged-service authentication, rollback resistance against another
+process with the same user's full authority, or proof of global Off.
+
+The shared coordinator pins a backend's declared runtime platform when its actor
+starts. Windows user-agent/tunnel-service owners have distinct wire names from
+Apple owners. Start, restart and status paths retain exact owner/context/digest
+checks. These contracts prepare the application seam; they do not instantiate a
+Windows service or remove the desktop application's existing build restriction.
+
 The child has no console window. It is assigned to an unnamed, non-inheritable
 Windows Job Object before the first request is sent. The job has
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and no breakaway flags. See Microsoft's

@@ -99,6 +99,36 @@ fn invalid_names_and_reserved_lock_aliases_do_not_change_existing_data() {
 }
 
 #[test]
+fn internal_temporary_names_cannot_be_used_as_application_records() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("private");
+    let directory = PrivateDirectory::open_or_create(&path).unwrap();
+    let mut transaction = directory.write().unwrap();
+    transaction
+        .replace("state.json", b"preserved", 1024)
+        .unwrap();
+    for name in [".state.json.tmp", ".STATE.JSON.TMP"] {
+        assert!(
+            matches!(
+                transaction.replace(name, b"a separate record", 1024),
+                Err(Error::InvalidName)
+            ),
+            "an application record must not alias an internal temporary: {name}"
+        );
+        assert!(matches!(
+            transaction.read(name, 1024, ReadPolicy::Private),
+            Err(Error::InvalidName)
+        ));
+        assert!(matches!(
+            transaction.remove(name, 1024, ReadPolicy::Private),
+            Err(Error::InvalidName)
+        ));
+    }
+    assert_eq!(fs::read(path.join("state.json")).unwrap(), b"preserved");
+    assert!(!path.join(".state.json.tmp").exists());
+}
+
+#[test]
 fn symlinks_hard_links_and_directory_redirection_are_rejected() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("private");

@@ -32,6 +32,10 @@ windows-sys = { version = "=0.61.2", features = [
 [dev-dependencies]
 tempfile.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+cfw-engine-api = { path = "../cfw-engine-api" }
+cfw-windows-credentials = { path = "../cfw-windows-credentials" }
+
 [[test]]
 name = "native_engine"
 required-features = ["native-engine-validation"]

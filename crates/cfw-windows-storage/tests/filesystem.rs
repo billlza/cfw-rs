@@ -7,6 +7,65 @@ use std::time::{Duration, Instant};
 use cfw_windows_storage::{EntryKind, Error, PrivateDirectory, Publication, ReadPolicy};
 
 #[test]
+fn freshly_created_directory_can_be_pinned_without_delete_sharing() {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("private");
+    let directory = PrivateDirectory::open_or_create(&path).unwrap();
+    let pin = || {
+        OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+    };
+
+    // Reproduce the former fresh-directory access mask independently: a
+    // DELETE-capable handle conflicts with a non-replaceable path pin.
+    let legacy_access = OpenOptions::new()
+        .read(true)
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        pin().unwrap_err().raw_os_error(),
+        Some(ERROR_SHARING_VIOLATION as i32)
+    );
+    drop(legacy_access);
+
+    let _pinned = pin().expect("retained storage directory must not require self-delete rights");
+    directory
+        .write()
+        .unwrap()
+        .replace("state.json", b"first", 1024)
+        .unwrap();
+    directory
+        .write()
+        .unwrap()
+        .replace("state.json", b"second", 1024)
+        .unwrap();
+    assert_eq!(
+        directory
+            .read()
+            .unwrap()
+            .read("state.json", 1024, ReadPolicy::Private)
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"second"
+    );
+}
+
+#[test]
 fn queued_waiters_make_progress_during_repeated_lock_reacquisition() {
     let temporary = tempfile::tempdir().unwrap();
     let directory =

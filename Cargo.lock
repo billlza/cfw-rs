@@ -665,7 +665,9 @@ dependencies = [
 name = "cfw-windows-engine"
 version = "0.5.0"
 dependencies = [
+ "cfw-engine-api",
  "cfw-singbox-config",
+ "cfw-windows-credentials",
  "cfw-windows-storage",
  "serde",
  "serde_json",

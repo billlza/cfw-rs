@@ -28,6 +28,15 @@ pub enum Error {
     Rejected(&'static str),
     #[error("Windows engine I/O: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Windows engine {operation}: {source}")]
+    Operation {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[cfg(windows)]
+    #[error("Windows engine private runtime directory: {0}")]
+    Storage(#[from] cfw_windows_storage::Error),
     #[error("Windows engine operation exceeded its deadline")]
     Timeout,
     #[error("Windows engine process exited unexpectedly")]

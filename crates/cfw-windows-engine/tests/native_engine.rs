@@ -2,6 +2,9 @@
 //! Missing artifacts fail; no mocked worker or skipped test is accepted.
 #![cfg(windows)]
 
+#[path = "native_engine/credentials.rs"]
+mod credentials;
+
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},

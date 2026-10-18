@@ -381,6 +381,18 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - 本地新增 8 项 Rust 单元测试及对应 Clippy 已通过。最初两项凭据测试因用错
   Trojan 配置字段失败，修正测试输入为现有契约的 `credential_ref`，不改生产
   配置校验。Windows 原生结果需在新提交运行后记录，当前不宣称通过。
+- 首轮 `ef0ab0f` 的 Windows 共享检查通过 437 项 Rust 和 310 项前端测试；引擎
+  双缓存构建、474 个 Go 测试/子测试及旧 CLI 流量检查也通过，但 5 项 Rust 宿主
+  原生用例全部在启动阶段失败，故没有正常停止成功证据。错误为共享冲突 32。
+  源码显示新目录的长期句柄误用了文件发布所需的 `DELETE` 权限，与宿主的禁止
+  删除共享句柄冲突。修订目录创建权限并增加原生回归：显式重现旧权限冲突，再
+  要求实际存储目录能保持不可替换状态并完成两次原子写入。文件发布权限不变。
+- 同时增加真实 DPAPI → 配置注入 → 私有管道 → SOCKS 出站认证 → HTTP 返回的
+  原生用例。代理节点契约禁止回环地址，因此测试对端绑定 runner 自己的私有 IPv4，
+  所有流量仍留在同一 runner；不放宽生产地址校验。此新增用例等待原生结果。
+- `ef0ab0f` 本地 Mac 回归通过 1,153 项 Rust、全工作区 Clippy 和 cargo-deny；
+  Go 入口本地 16 个测试/子测试通过。原始日志与摘要保存于
+  `target/cfw-validation/host-local-result.json`；未将这些结果代替 Windows 验收。
 
 ## 官方资料
 
@@ -398,3 +410,4 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [LockFileEx 异步文件锁](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
 - [Windows I/O 取消与完成](https://learn.microsoft.com/en-us/windows/win32/fileio/canceling-pending-i-o-operations)
 - [Go 官方下载元数据](https://go.dev/dl/?mode=json&include=all)
+- [Windows CreateFile 访问权限与共享约束](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)

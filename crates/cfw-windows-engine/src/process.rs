@@ -126,7 +126,15 @@ fn hold_path(path: &Path, directory: bool) -> Result<Vec<File>, Error> {
             .read(true)
             .share_mode(FILE_SHARE_READ | if is_directory { FILE_SHARE_WRITE } else { 0 })
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-            .open(ancestor)?;
+            .open(ancestor)
+            .map_err(|source| Error::Operation {
+                operation: if is_directory {
+                    "retain directory path"
+                } else {
+                    "retain executable path"
+                },
+                source,
+            })?;
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         // SAFETY: the handle stays owned by `file`, and the output has the API's layout.
         if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
@@ -191,8 +199,7 @@ impl EngineProcess {
             .parent()
             .ok_or(Error::ExecutableIdentity)?;
         let mut runtime_path = hold_path(parent, true)?;
-        let private = PrivateDirectory::open_or_create(runtime_directory)
-            .map_err(|_| Error::Configuration("runtime directory is not private"))?;
+        let private = PrivateDirectory::open_or_create(runtime_directory)?;
         // Parent identities were retained before the private leaf opened, so
         // the ACL-checked directory and CreateProcess working directory agree.
         runtime_path.extend(hold_path(runtime_directory, true)?);
@@ -224,7 +231,11 @@ impl EngineProcess {
             // control reply returns stable error codes; runtime logs remain
             // available through the authenticated, observable Clash API.
             .stderr(Stdio::null())
-            .spawn()?;
+            .spawn()
+            .map_err(|source| Error::Operation {
+                operation: "spawn verified worker",
+                source,
+            })?;
         let mut owner = Self {
             child,
             job,

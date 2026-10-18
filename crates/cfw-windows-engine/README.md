@@ -71,5 +71,9 @@ The job supplies `CFW_ENGINE_HOST_PATH`, `CFW_ENGINE_HOST_SHA256` and
 `CFW_ENGINE_HOST_VERSION` from that exact build. Missing inputs fail. Tests cover
 real HTTP traffic, controller authorization, normal stop and listener release,
 startup conflicts, process crash, deadline cleanup, owner drop and wrong binary
-or version rejection. These checks do not establish TUN, system proxy recovery,
+or version rejection. The credential test uses the real DPAPI store and engine
+to authenticate a SOCKS outbound and return HTTP data. Its peer binds the
+runner's own private IPv4 interface because validated remote proxy endpoints
+reject loopback IPs. It sends no traffic to an external proxy and does not relax
+endpoint validation. These checks do not establish TUN, system proxy recovery,
 interactive UI, sleep/wake, installation/update, signing or release acceptance.

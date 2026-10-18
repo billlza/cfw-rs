@@ -620,6 +620,11 @@ fn open_relative_units(
     };
     let (mut rights, share_delete) = match access {
         Access::Read => (FILE_GENERIC_READ, true),
+        // A retained directory needs to create/flush child entries, not delete
+        // itself. DELETE here prevents a caller from pinning that directory
+        // without FILE_SHARE_DELETE, even in the same process. File publication
+        // still needs DELETE for atomic rename and keeps the existing rights.
+        Access::Write if directory == Some(true) => (FILE_GENERIC_READ | FILE_GENERIC_WRITE, true),
         Access::Write => (FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE, true),
         Access::Delete => (FILE_GENERIC_READ | DELETE, true),
         Access::Lock => (FILE_GENERIC_READ | FILE_GENERIC_WRITE, false),

@@ -95,6 +95,43 @@ Microsoft documents [connection option allocation and restoration](https://learn
 [LAN versus RAS scope](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_option_listw)
 and [the proxy-change policy](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-internetexplorer#disableproxychange).
 
+## Service peer admission
+
+`LocalServicePipe` opens a fixed local named-pipe path from a validated service
+name with identification-only SQOS. It exposes stream I/O without raw-handle
+import or mutable access to the inner client. `WindowsServicePeer` binds that
+exact connection to a retained SCM service object, live PID/creation time and
+the file identity of an already hash-verified installation executable. A new
+pipe cannot reuse the old admission. The expected name, path and hash must come
+from the trusted installation; neither IPC nor an adjacent untrusted receipt is
+a trust root.
+
+The adapter requests query/read-control SCM rights and limited process-query
+plus synchronization rights. It does not request SYSTEM-token access, start or
+reconfigure services, or elevate the UI. The service must be a running dedicated
+process in session zero, configured as LocalSystem with the exact quoted image
+and no arguments. The owner must be SYSTEM or Administrators; other principals
+may query, but may not change configuration, start/stop/control the service, or
+rewrite its security. All observations are rechecked before admitting a result.
+
+Microsoft specifies that [service configuration may describe the next launch](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw),
+so the live image is verified independently. This does not inspect the running
+service token: the trusted service must check its own SYSTEM identity before
+opening its endpoint. Missing, stopped, inaccessible and conflicting services
+are errors, never global Off or a readiness proof. The full privileged backend,
+runtime authorization, service installation/signing and lifecycle supervision
+remain separate work.
+
+The `native-service-fixture` example installs two uniquely named disposable
+SYSTEM services only with `CFW_NATIVE_SERVICE_MUTATION_TESTS=1`. It checks actual
+SCM/pipe/image identity, another SYSTEM peer, ACL/configuration changes, a
+byte-identical replacement file, missing/stopped services and a medium-integrity
+client with Administrators disabled and privileges removed. It stops and removes
+the services, waits for their processes and verifies deletion before emitting a
+source-bound receipt. The fixture is not shipped as a product service. Package
+tests never install services. Native execution must pass before this boundary is
+reported as verified.
+
 `WindowsEngineGenerationStore` implements the shared generation-store contract
 using a canonical generic Credential Manager record for the current process
 user. `CRED_PERSIST_LOCAL_MACHINE` persists across that user's logon sessions;

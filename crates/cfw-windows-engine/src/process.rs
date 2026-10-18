@@ -48,6 +48,32 @@ pub struct VerifiedExecutable {
 }
 
 impl VerifiedExecutable {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Compare the live process image to the already hash-verified, retained
+    /// file. A byte-identical copy at another file identity is not this install.
+    pub(crate) fn verify_image_file(&self, image: &Path) -> Result<(), Error> {
+        let handles = hold_path(image, false)?;
+        let expected = self._handles.last().ok_or(Error::ExecutableIdentity)?;
+        let actual = handles.last().ok_or(Error::ExecutableIdentity)?;
+        let mut identities = [BY_HANDLE_FILE_INFORMATION::default(); 2];
+        for (file, info) in [expected, actual].into_iter().zip(&mut identities) {
+            if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info) } == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        let [left, right] = identities;
+        if left.dwVolumeSerialNumber != right.dwVolumeSerialNumber
+            || left.nFileIndexHigh != right.nFileIndexHigh
+            || left.nFileIndexLow != right.nFileIndexLow
+        {
+            return Err(Error::ExecutableIdentity);
+        }
+        Ok(())
+    }
+
     pub fn open(path: &Path, expected_sha256: [u8; 32], version: &str) -> Result<Self, Error> {
         if version.is_empty()
             || version.len() > 32

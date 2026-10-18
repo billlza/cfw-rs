@@ -19,6 +19,10 @@ mod peer;
 #[cfg(windows)]
 pub use peer::{NativePeerIdentity, NativePeerProcess, PeerIdentityError};
 #[cfg(windows)]
+mod service_peer;
+#[cfg(windows)]
+pub use service_peer::{LocalServicePipe, ServicePeerError, WindowsServicePeer};
+#[cfg(windows)]
 mod listeners;
 #[cfg(windows)]
 pub use lineage::{LineageError, WindowsEngineGenerationStore};

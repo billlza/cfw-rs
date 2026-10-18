@@ -81,6 +81,17 @@ jobs:
           "Native proxy test session: $((Get-Process -Id $PID).SessionId)"
           cargo test --locked -p cfw-windows-engine --features native-engine-validation --test native_engine -- --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'rust-host-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native Rust engine ownership validation failed" }
+      - name: Verify SCM peer authentication with a disposable SYSTEM service
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
+          $receipt = Get-Content (Join-Path $artifactRoot 'build-receipt.json') -Raw | ConvertFrom-Json
+          # Only the disposable CI VM installs these uniquely named fixtures.
+          # The product adapter requests read-only SCM/process access.
+          $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
+          $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
+          $env:CFW_NATIVE_SERVICE_SOURCE = $receipt.product_source
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'service-peer-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM service-peer authentication failed" }
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -110,6 +121,7 @@ jobs:
         run: |
           "Built the GA-pinned Windows engine twice from independent caches and ran its native package tests and loopback HTTP/SOCKS TCP/UDP checks." >> $env:GITHUB_STEP_SUMMARY
           "The Rust owner additionally checks private-pipe identity, real WinINet HTTP through current-user proxy settings, exact restoration before engine stop, owner-process exit, conflicting settings, startup failure and emergency cleanup." >> $env:GITHUB_STEP_SUMMARY
+          "Disposable SCM fixtures check the service object, live image and pipe identity, a medium-integrity client without administrator membership, configuration/ACL changes and cleanup. This is not the product service backend." >> $env:GITHUB_STEP_SUMMARY
           "This unsigned engine component does not establish Windows desktop hosting, global service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
 
   storage-contract:
@@ -190,7 +202,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check shared Rust contracts on Windows
-        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials -p cfw-windows-engine -p cfw-platform --all-targets --features cfw-windows-engine/native-engine-validation -- -D warnings
+        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials -p cfw-windows-engine -p cfw-platform --all-targets --features cfw-windows-engine/native-engine-validation,cfw-windows-engine/native-service-validation -- -D warnings
       - name: Test shared Rust contracts on Windows
         run: cargo test --locked --no-fail-fast -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials -p cfw-windows-engine -p cfw-platform --all-targets
       - name: Install locked UI dependencies

@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 native-engine-validation = []
+native-service-validation = []
 
 [dependencies]
 cfw-singbox-config = { path = "../cfw-singbox-config" }
@@ -18,7 +19,7 @@ zeroize.workspace = true
 cfw-engine-api = { path = "../cfw-engine-api" }
 cfw-windows-storage = { path = "../cfw-windows-storage" }
 sha2.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "net", "io-util"] }
 uuid.workspace = true
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
@@ -35,6 +36,9 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_Networking_WinInet",
   "Win32_System_Memory",
   "Win32_System_Registry",
+  "Win32_System_Services",
+  "Win32_System_SystemServices",
+  "Win32_System_RemoteDesktop",
 ] }
 
 [dev-dependencies]
@@ -48,3 +52,8 @@ tokio = { workspace = true, features = ["rt", "net", "io-util"] }
 [[test]]
 name = "native_engine"
 required-features = ["native-engine-validation"]
+
+[[example]]
+name = "native-service-fixture"
+path = "examples/native_service/main.rs"
+required-features = ["native-service-validation"]

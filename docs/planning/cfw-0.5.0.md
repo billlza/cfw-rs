@@ -534,6 +534,22 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   等待容量，并拒绝已过期的新入队。受控传输回归保留已超时等待者的迟到响应、真实
   控制循环、满队列与后续连续序号，原生验收继续执行，不给测试增加时序延时来绕过。
 
+### 2026-10-18：系统代理原生收尾与 SCM 服务对端
+
+- `e3213af` 的 [Windows CI](https://github.com/billlza/cfw-rs/actions/runs/39170513287)
+  完成全部三项 job：476 项共享 Rust、311 项前端、476 项 Go 测试/子测试、DNS 200 轮
+  专项及九项真实引擎集成均通过。WinINet 流量、冲突保留、恢复后停止和进程退出恢复
+  回执已下载核对；EXE 字节与前一已验证产物一致。此前失败仍保留，不替换原始记录。
+- 新增只读 SCM 对端认证及固定本机管道类型，绑定服务对象、实际管道 PID、进程创建
+  时间与受信任可执行文件身份。不请求 SYSTEM 令牌、不提升 UI 权限，不将服务缺失
+  解释为 Off；未知、停止、配置变化或危险服务 ACL 均拒绝。SCM 配置可能描述下次
+  启动，因此必须独立确认当前映像；可信服务也必须在公开端点前检查自己的 SYSTEM
+  主身份。完整网络服务、签名安装与运行授权并未由此实现。
+- Windows CI 新增临时 SCM 服务夹具：两个实际 SYSTEM 服务、撤销管理员组与特权的
+  中完整性客户端、ACL/配置变化、相同字节但不同文件的映像替换、缺失/停止服务与
+  清理读回。仅在指定临时 Windows 用户中启用；本机不安装服务。四项包内反例与原生
+  运行均需通过，当前实现等待原生 CI，不以交叉编译代替该验收。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。
@@ -567,3 +583,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [WinINet 连接设置与恢复](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_optionw)
 - [WinINet 默认 LAN 与 RAS 范围](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_option_listw)
 - [Windows 禁止修改代理的策略](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-internetexplorer#disableproxychange)
+- [SCM 服务访问权限](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights)
+- [SCM 服务状态与 PID 有效范围](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex)
+- [SCM 配置与下次启动](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw)
+- [实际进程映像查询](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)

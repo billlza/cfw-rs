@@ -554,6 +554,9 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   夹具服务。原日志未携带具体状态字段，不能据此声称已定位根因。现保留全部校验，
   让错误携带实际类型、状态、PID 与标志，并将不依赖 Go 引擎的服务测试拆为独立
   并行 job；四项 Windows job 均通过才算完整 Windows CI。
+- `93cdc1a` 的独立服务 job 观察到类型 `0x10`、状态 `SERVICE_STOPPED`、PID 0、标志 0。
+  此时拒绝符合契约；仍需解释夹具服务为何提前退出。服务回调增加有界的原始错误记录，
+  父进程在清理后保留这些记录及客户端报告，测试日志标明实际执行阶段。认证条件不改。
 
 ## 官方资料
 

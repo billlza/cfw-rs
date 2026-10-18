@@ -140,12 +140,48 @@ unsafe extern "system" fn control(code: u32, _: u32, _: *mut c_void, _: *mut c_v
 unsafe extern "system" fn service_main(argc: u32, argv: *mut *mut u16) {
     // Never unwind across the SCM callback ABI.
     let result = std::panic::catch_unwind(|| unsafe { service_body(argc, argv) });
-    if !matches!(result, Ok(Ok(()))) {
+    let failure = match result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(payload) => Some(if let Some(text) = payload.downcast_ref::<String>() {
+            text.clone()
+        } else if let Some(text) = payload.downcast_ref::<&str>() {
+            (*text).to_owned()
+        } else {
+            "service callback panicked with a non-string payload".into()
+        }),
+    };
+    if let Some(error) = failure {
+        if let Err(record_error) = record_service_failure(&error) {
+            eprintln!("service failure ({error}); recording failed ({record_error})");
+        }
         SERVICE_EXIT.store(1, Ordering::SeqCst);
         // A failed fixture must terminate rather than leave SCM reporting a
         // live server whose validation thread no longer exists.
         std::process::exit(2);
     }
+}
+
+fn record_service_failure(error: &str) -> Result<()> {
+    let image = std::env::current_exe().map_err(|e| e.to_string())?;
+    let path = image
+        .parent()
+        .ok_or("missing fixture image parent")?
+        .join(format!(
+            "service-process-{}.failure.txt",
+            std::process::id()
+        ));
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    let text: String = error.chars().take(4096).collect();
+    let bytes =
+        serde_json::to_vec(&serde_json::json!({"process_id":std::process::id(),"error":text}))
+            .map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut output, &bytes).map_err(|e| e.to_string())?;
+    output.sync_all().map_err(|e| e.to_string())
 }
 
 unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<()> {
@@ -191,14 +227,16 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<()> {
                 let mut bytes = [0; 4];
                 pipe.read_exact(&mut bytes)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| format!("read fixture request: {e}"))?;
                 if bytes != *b"ping" {
                     return Err("unexpected fixture request".into());
                 }
-                pipe.write_all(b"pong").await.map_err(|e| e.to_string())?;
+                pipe.write_all(b"pong")
+                    .await
+                    .map_err(|e| format!("write fixture response: {e}"))?;
                 pipe.read_exact(&mut bytes)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| format!("read fixture completion: {e}"))?;
                 if bytes != *b"done" {
                     return Err("fixture completion mismatch".into());
                 }
@@ -217,7 +255,8 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<()> {
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err("fixture client conversation timed out".into()),
             }
-            pipe.disconnect().map_err(|e| e.to_string())?;
+            pipe.disconnect()
+                .map_err(|e| format!("disconnect fixture pipe: {e}"))?;
         }
         status(handle, SERVICE_STOP_PENDING, 0)?;
         Ok(())
@@ -484,11 +523,49 @@ fn run_validation() -> Result<()> {
         return Err("invalid service receipt directory".into());
     }
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let image = root.path().join("service-fixture.exe");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_in_directory(root.path(), &receipt_root, &source)
+    }));
+    collect_fixture_diagnostics(root.path(), &receipt_root)?;
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let Some(text) = name.to_str() else {
+            return Err("non-Unicode fixture diagnostic filename".into());
+        };
+        if !text.ends_with(".failure.txt") && !text.ends_with("-client.json") {
+            continue;
+        }
+        if !entry.file_type().map_err(|e| e.to_string())?.is_file()
+            || entry.metadata().map_err(|e| e.to_string())?.len() > 16384
+        {
+            return Err("invalid fixture diagnostic file".into());
+        }
+        let bytes = std::fs::read(entry.path()).map_err(|e| e.to_string())?;
+        let mut target = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output.join(name))
+            .map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut target, &bytes).map_err(|e| e.to_string())?;
+        target.sync_all().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()> {
+    let image = root.join("service-fixture.exe");
     std::fs::copy(std::env::current_exe().map_err(|e| e.to_string())?, &image)
         .map_err(|e| e.to_string())?;
     let expected = digest(&image)?;
-    let replacement = root.path().join("same-bytes-other-file.exe");
+    let replacement = root.join("same-bytes-other-file.exe");
     std::fs::copy(&image, &replacement).map_err(|e| e.to_string())?;
     assert_eq!(digest(&replacement)?, expected);
     let manager = Sc(unsafe {
@@ -506,6 +583,7 @@ fn run_validation() -> Result<()> {
     let mut second = Installed::create(&manager, format!("{prefix}-b"), &image)?;
     let tests = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         runtime()?.block_on(async {
+            println!("service fixture stage: scm_image_and_pipe_identity");
             let mut pipe = connect(&first.name).await?;
             let peer = WindowsServicePeer::from_pipe_server(
                 &first.name,
@@ -520,6 +598,7 @@ fn run_validation() -> Result<()> {
             finish(&mut pipe).await?;
             drop((peer, pipe));
 
+            println!("service fixture stage: different_system_service_rejected");
             let mut other = connect(&second.name).await?;
             assert!(matches!(
                 WindowsServicePeer::from_pipe_server(
@@ -533,6 +612,7 @@ fn run_validation() -> Result<()> {
             finish(&mut other).await?;
             drop(other);
 
+            println!("service fixture stage: unsafe_service_acl_rejected");
             let mut pipe = connect(&first.name).await?;
             let peer = WindowsServicePeer::from_pipe_server(&first.name, verified(&image, expected)?, &pipe).map_err(|e| e.to_string())?;
             first.acl("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORCWP;;;AU)")?;
@@ -547,6 +627,7 @@ fn run_validation() -> Result<()> {
             ));
             first.acl(SERVICE_ACL)?;
             peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
+            println!("service fixture stage: changed_configuration_revokes_peer");
             first.binary(&replacement)?;
             assert!(matches!(peer.verify_pipe_server(&pipe), Err(ServicePeerError::ConfigurationMismatch)));
             // SCM now describes the next launch of an identical file copy.
@@ -563,7 +644,9 @@ fn run_validation() -> Result<()> {
             drop((peer, pipe));
             Ok::<_, String>(())
         })?;
+        println!("service fixture stage: unprivileged_client_admitted");
         restricted::run(&image, &first.name, expected)?;
+        println!("service fixture stage: stopped_service_is_not_authority");
         first.stop()?;
         runtime()?.block_on(async {
             let mut pipe = connect(&second.name).await?;

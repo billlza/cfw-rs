@@ -324,6 +324,22 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - 此阶段尚未验证 Windows 桌面宿主、凭据服务授权、引擎、系统代理、TUN、安装更新、
   签名或真实桌面视觉；完整产品和正式发布目标继续保持未完成。
 
+### 2026-10-18：Windows 原生引擎构建（验证中）
+
+- 新增独立 Windows x64 job，使用与 GA 相同的 Go 1.27.2、sing-box 提交、六组补丁
+  和构建标签，生成 `cfw-engine.exe`。Windows Go ZIP 的摘要来自官方 Go 下载元数据；
+  不改动 Mac 的版本、补丁或模块图。Python 固定为既有 3.14.7。
+- 移植的构建入口只在新的独立目录准备源码与工具，不覆盖现有检出。上游提交、
+  go.mod/go.sum、各补丁与合并 diff 均检查既有 GA 摘要；构建前后另直接比较源码
+  文件内容，避免仅依赖 Git 的索引状态。新入口产生的真实源码已通过原 Mac
+  `libbox_validate_patched_source` 校验，五项辅助工具测试与 actionlint 通过。
+- CI 配置要求两个独立 Go 编译缓存产生相同字节，并在 Windows 运行 GA 测试包
+  集合。当前采用非 CGO 构建，不把普通测试报告为 race 检查。另以隔离回环端点
+  验证有效/无效配置、控制器鉴权、HTTP 代理、SOCKS TCP/UDP 和强制结束子进程后
+  的监听清理；配置通过 stdin 提供，不写配置文件或更改系统代理/TUN。
+- 本节尚待 Windows job 的实际运行回执。即使组件构建和回环验证通过，也不代表
+  Rust 宿主接线、完整协议、正常退出恢复、Windows UI、签名安装或发布验收完成。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。
@@ -339,3 +355,4 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [Windows DPAPI 解密](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata)
 - [LockFileEx 异步文件锁](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
 - [Windows I/O 取消与完成](https://learn.microsoft.com/en-us/windows/win32/fileio/canceling-pending-i-o-operations)
+- [Go 官方下载元数据](https://go.dev/dl/?mode=json&include=all)

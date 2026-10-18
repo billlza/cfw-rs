@@ -14,6 +14,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  engine:
+    name: Windows x64 engine build and loopback traffic
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify source identity and read the pinned Python version
+        id: engine-pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actualSource = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          $versions = [regex]::Matches($pins, '(?m)^PYTHON_VERSION=([0-9]+\.[0-9]+\.[0-9]+)\r?$')
+          if ($versions.Count -ne 1) { throw "Missing or ambiguous Python pin" }
+          "python-version=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ steps.engine-pins.outputs.python-version }}
+      - name: Build and test the exact CFM engine source on Windows
+        run: |
+          python -m unittest discover -s scripts/tests -p test_windows_engine.py -v
+          if ($LASTEXITCODE -ne 0) { throw "Windows engine source contract tests failed" }
+          python scripts/windows_engine.py build --repository "$pwd" --output "$env:RUNNER_TEMP/cfw-windows-engine"
+      - name: Verify real loopback proxy traffic and child cleanup
+        run: python scripts/fixtures/windows_engine_smoke.py --artifacts "$env:RUNNER_TEMP/cfw-windows-engine/artifacts"
+      - name: Upload the verified unsigned engine component
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-engine-ci-windows-x64
+          path: ${{ runner.temp }}/cfw-windows-engine/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve native engine failure details
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-engine-windows-failure-logs
+          path: |
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.jsonl
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.txt
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Record the component validation boundary
+        run: |
+          "Built the GA-pinned Windows engine twice from independent caches and ran its native package tests and loopback HTTP/SOCKS TCP/UDP checks." >> $env:GITHUB_STEP_SUMMARY
+          "This unsigned engine component does not establish Windows desktop hosting, graceful owner shutdown, service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
+
   storage-contract:
     name: Windows directory durability contract
     runs-on: windows-2025

@@ -61,8 +61,15 @@ pub enum ServicePeerError {
     ConfigurationMismatch,
     #[error("Windows service can be controlled or reconfigured by an untrusted principal")]
     UnsafeServiceSecurity,
-    #[error("Windows service is not running as a dedicated service process")]
-    NotRunning,
+    #[error(
+        "Windows service is not running as a dedicated service process (type={service_type:#x}, state={state}, pid={process_id}, flags={flags:#x})"
+    )]
+    NotRunning {
+        service_type: u32,
+        state: u32,
+        process_id: u32,
+        flags: u32,
+    },
     #[error("Windows service pipe, process or creation identity does not match")]
     WrongProcess,
     #[error("Windows service process has exited")]
@@ -361,7 +368,12 @@ fn validate_status(status: &SERVICE_STATUS_PROCESS) -> Result<u32, ServicePeerEr
         || status.dwProcessId == 0
         || status.dwServiceFlags != 0
     {
-        return Err(ServicePeerError::NotRunning);
+        return Err(ServicePeerError::NotRunning {
+            service_type: status.dwServiceType,
+            state: status.dwCurrentState,
+            process_id: status.dwProcessId,
+            flags: status.dwServiceFlags,
+        });
     }
     Ok(status.dwProcessId)
 }

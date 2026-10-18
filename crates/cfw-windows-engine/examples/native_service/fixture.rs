@@ -573,7 +573,10 @@ fn run_validation() -> Result<()> {
                     verified(&image, expected)?,
                     &pipe
                 ),
-                Err(ServicePeerError::NotRunning)
+                Err(ServicePeerError::NotRunning {
+                    state: SERVICE_STOPPED,
+                    ..
+                })
             ));
             ping(&mut pipe).await?;
             finish(&mut pipe).await

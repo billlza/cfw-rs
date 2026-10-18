@@ -549,6 +549,11 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   中完整性客户端、ACL/配置变化、相同字节但不同文件的映像替换、缺失/停止服务与
   清理读回。仅在指定临时 Windows 用户中启用；本机不安装服务。四项包内反例与原生
   运行均需通过，当前实现等待原生 CI，不以交叉编译代替该验收。
+- `cb5c160` 的 [原生执行](https://github.com/billlza/cfw-rs/actions/runs/39172775390)
+  通过 480 项共享 Rust、311 项前端及九项真实引擎测试，但 SCM 服务状态校验拒绝了
+  夹具服务。原日志未携带具体状态字段，不能据此声称已定位根因。现保留全部校验，
+  让错误携带实际类型、状态、PID 与标志，并将不依赖 Go 引擎的服务测试拆为独立
+  并行 job；四项 Windows job 均通过才算完整 Windows CI。
 
 ## 官方资料
 

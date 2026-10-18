@@ -81,17 +81,6 @@ jobs:
           "Native proxy test session: $((Get-Process -Id $PID).SessionId)"
           cargo test --locked -p cfw-windows-engine --features native-engine-validation --test native_engine -- --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'rust-host-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native Rust engine ownership validation failed" }
-      - name: Verify SCM peer authentication with a disposable SYSTEM service
-        run: |
-          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
-          $receipt = Get-Content (Join-Path $artifactRoot 'build-receipt.json') -Raw | ConvertFrom-Json
-          # Only the disposable CI VM installs these uniquely named fixtures.
-          # The product adapter requests read-only SCM/process access.
-          $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
-          $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
-          $env:CFW_NATIVE_SERVICE_SOURCE = $receipt.product_source
-          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'service-peer-tests.txt')
-          if ($LASTEXITCODE -ne 0) { throw "Native SCM service-peer authentication failed" }
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -121,8 +110,72 @@ jobs:
         run: |
           "Built the GA-pinned Windows engine twice from independent caches and ran its native package tests and loopback HTTP/SOCKS TCP/UDP checks." >> $env:GITHUB_STEP_SUMMARY
           "The Rust owner additionally checks private-pipe identity, real WinINet HTTP through current-user proxy settings, exact restoration before engine stop, owner-process exit, conflicting settings, startup failure and emergency cleanup." >> $env:GITHUB_STEP_SUMMARY
-          "Disposable SCM fixtures check the service object, live image and pipe identity, a medium-integrity client without administrator membership, configuration/ACL changes and cleanup. This is not the product service backend." >> $env:GITHUB_STEP_SUMMARY
           "This unsigned engine component does not establish Windows desktop hosting, global service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
+
+  service-peer:
+    name: Windows SCM service peer authentication
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify the service fixture source and Rust pin
+        id: service-pins
+        env:
+          EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actualSource = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualSource -cne $env:EXPECTED_SOURCE) { throw "Source identity mismatch" }
+          $pins = Get-Content scripts/dependency_pins.env -Raw
+          $versions = [regex]::Matches($pins, '(?m)^RUST_VERSION=([0-9]+\.[0-9]+\.[0-9]+)\r?$')
+          if ($versions.Count -ne 1) { throw "Missing or ambiguous Rust pin" }
+          "version=$($versions[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          "source=$actualSource" >> $env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ steps.service-pins.outputs.version }}
+      - name: Verify SCM peer authentication with disposable SYSTEM services
+        env:
+          CFW_NATIVE_SERVICE_SOURCE: ${{ steps.service-pins.outputs.source }}
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-service-peer'
+          New-Item -ItemType Directory -Path $artifactRoot -ErrorAction Stop | Out-Null
+          # Only this disposable VM installs uniquely named fixtures. The
+          # product adapter requests read-only SCM/process access.
+          $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
+          $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'service-peer-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM service-peer authentication failed" }
+      - name: Upload verified service peer validation
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-service-peer-ci-windows-x64
+          path: ${{ runner.temp }}/cfw-service-peer/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record failed service validation
+        if: failure()
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-service-peer'
+          New-Item -ItemType Directory -Force -Path $artifactRoot -ErrorAction Stop | Out-Null
+          "Windows SCM validation failed; see the workflow job and native log. Run: $env:GITHUB_RUN_ID" | Set-Content -Path (Join-Path $artifactRoot 'service-peer-failure.txt') -Encoding utf8NoBOM
+      - name: Preserve failed service validation
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cfw-service-peer-windows-failure-logs
+          path: ${{ runner.temp }}/cfw-service-peer/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record service validation scope
+        run: |
+          "Validated SCM configuration/security, live process/image/pipe identity, an unprivileged client, negative cases and temporary-service cleanup." >> $env:GITHUB_STEP_SUMMARY
+          "These disposable fixtures do not establish the product service backend, privileged runtime/TUN behavior, signing, installation or release acceptance." >> $env:GITHUB_STEP_SUMMARY
 
   storage-contract:
     name: Windows directory durability contract

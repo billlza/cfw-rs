@@ -124,7 +124,7 @@ fn service_native_strings_and_pending_status_never_become_an_identity() {
         status.dwCurrentState = state;
         assert!(matches!(
             validate_status(&status),
-            Err(ServicePeerError::NotRunning)
+            Err(ServicePeerError::NotRunning { state: observed, .. }) if observed == state
         ));
     }
     status.dwCurrentState = SERVICE_RUNNING;

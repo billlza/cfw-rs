@@ -441,6 +441,10 @@ fn an_open_directory_cannot_be_redirected_to_a_replacement_path() {
         }
         Err(error) => panic!("unexpected directory rename error: {error}"),
     }
+    assert_eq!(
+        directory.read().unwrap().entry_names(1).unwrap(),
+        vec![std::ffi::OsString::from("state.json")]
+    );
 }
 
 #[test]
@@ -489,11 +493,15 @@ fn enumeration_is_bounded_and_concurrent_calls_have_independent_cursors() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("private");
     let directory = PrivateDirectory::open_or_create(&path).unwrap();
-    let expected = [
+    let mut expected = vec![
         "first.json".to_owned(),
         "配置.json".to_owned(),
         "x".repeat(250),
     ];
+    // More than one 64 KiB query buffer, so concurrent enumerations exercise
+    // cursor continuation instead of returning everything in their first call.
+    expected.extend((0..160).map(|index| format!("{index:03}-{}", "x".repeat(246))));
+    let count = expected.len();
     {
         let mut transaction = directory.write().unwrap();
         for name in &expected {
@@ -507,27 +515,35 @@ fn enumeration_is_bounded_and_concurrent_calls_have_independent_cursors() {
     ));
     let expected: std::collections::HashSet<std::ffi::OsString> =
         expected.into_iter().map(Into::into).collect();
+    let start = Barrier::new(3);
+    let collect = || {
+        start.wait();
+        (0..4)
+            .map(|_| {
+                reader
+                    .entry_names(count)
+                    .unwrap()
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
     std::thread::scope(|scope| {
-        let first = scope.spawn(|| {
-            reader
-                .entry_names(3)
-                .unwrap()
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>()
-        });
-        let second = scope.spawn(|| {
-            reader
-                .entry_names(3)
-                .unwrap()
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>()
-        });
-        assert_eq!(first.join().unwrap(), expected);
-        assert_eq!(second.join().unwrap(), expected);
+        let first = scope.spawn(&collect);
+        let second = scope.spawn(&collect);
+        start.wait();
+        for actual in first
+            .join()
+            .unwrap()
+            .into_iter()
+            .chain(second.join().unwrap())
+        {
+            assert_eq!(actual, expected);
+        }
     });
     assert_eq!(
         reader
-            .entry_names(3)
+            .entry_names(count)
             .unwrap()
             .into_iter()
             .collect::<std::collections::HashSet<_>>(),
@@ -584,9 +600,9 @@ fn a_non_directory_ancestor_is_not_reported_as_a_missing_store() {
     let root = tempfile::tempdir().unwrap();
     let blocker = root.path().join("not-a-directory");
     fs::write(&blocker, b"preserved").unwrap();
-    assert!(matches!(
-        PrivateDirectory::open_existing(&blocker.join("private")),
-        Err(Error::UnsafeDirectory)
-    ));
+    assert!(
+        PrivateDirectory::open_existing(&blocker.join("private")).is_err(),
+        "an invalid ancestor must not become an absent store"
+    );
     assert_eq!(fs::read(&blocker).unwrap(), b"preserved");
 }

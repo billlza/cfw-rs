@@ -20,6 +20,21 @@ fn test_store(name: &str) -> (PathBuf, SettingsStore) {
 }
 
 #[test]
+fn a_non_directory_ancestor_never_becomes_default_preferences() {
+    let (root, store) = test_store("invalid-ancestor");
+    fs::write(&root, b"preserved non-directory ancestor").unwrap();
+    assert!(
+        store.read_or_default().is_err(),
+        "an invalid path is not a first launch"
+    );
+    assert_eq!(
+        fs::read(&root).unwrap(),
+        b"preserved non-directory ancestor"
+    );
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
 fn a_contended_settings_lock_times_out_without_inventing_defaults() {
     use std::time::Duration;
 

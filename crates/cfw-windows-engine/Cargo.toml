@@ -1,0 +1,37 @@
+[package]
+name = "cfw-windows-engine"
+version = "0.5.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+native-engine-validation = []
+
+[dependencies]
+cfw-singbox-config = { path = "../cfw-singbox-config" }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cfw-windows-storage = { path = "../cfw-windows-storage" }
+sha2.workspace = true
+uuid.workspace = true
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_IO",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Networking_WinSock",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[test]]
+name = "native_engine"
+required-features = ["native-engine-validation"]

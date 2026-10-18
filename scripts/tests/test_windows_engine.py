@@ -16,6 +16,23 @@ SPEC.loader.exec_module(engine)
 
 
 class WindowsEngineContractTests(unittest.TestCase):
+    def test_host_source_is_an_exact_overlay_without_mutating_ga_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "ga-source"
+            source.mkdir()
+            (source / "go.mod").write_bytes(b"module unchanged\n")
+            before = engine.source_files(source)
+            destination = root / "host-source"
+            expected = engine.prepare_host_source(REPOSITORY, source, destination)
+            self.assertEqual(engine.source_files(source), before)
+            self.assertEqual(engine.source_files(destination), expected)
+            self.assertEqual((destination / "go.mod").read_bytes(), b"module unchanged\n")
+            self.assertEqual((destination / "cmd/cfw-engine-host/main.go").read_bytes(),
+                             (REPOSITORY / "native/windows/engine-host/main.go").read_bytes())
+            with self.assertRaisesRegex(RuntimeError, "refusing to overwrite"):
+                engine.prepare_host_source(REPOSITORY, source, destination)
+
     def test_component_notices_keep_actual_license_and_notice_bytes(self) -> None:
         import json
         with tempfile.TemporaryDirectory() as temporary:

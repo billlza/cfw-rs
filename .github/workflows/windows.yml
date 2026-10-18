@@ -52,6 +52,15 @@ jobs:
           python scripts/windows_engine.py build --repository "$pwd" --output "$env:RUNNER_TEMP/cfw-windows-engine"
       - name: Verify real loopback proxy traffic and child cleanup
         run: python scripts/fixtures/windows_engine_smoke.py --artifacts "$env:RUNNER_TEMP/cfw-windows-engine/artifacts"
+      - name: Verify the Rust owner against the real native engine host
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'cfw-windows-engine/artifacts'
+          $receipt = Get-Content (Join-Path $artifactRoot 'build-receipt.json') -Raw | ConvertFrom-Json
+          $env:CFW_ENGINE_HOST_PATH = Join-Path $artifactRoot $receipt.host_artifact.filename
+          $env:CFW_ENGINE_HOST_SHA256 = $receipt.host_artifact.sha256
+          $env:CFW_ENGINE_HOST_VERSION = $receipt.engine_version.TrimStart('v')
+          cargo test --locked -p cfw-windows-engine --features native-engine-validation --test native_engine -- --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'rust-host-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native Rust engine ownership validation failed" }
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -79,7 +88,8 @@ jobs:
       - name: Record the component validation boundary
         run: |
           "Built the GA-pinned Windows engine twice from independent caches and ran its native package tests and loopback HTTP/SOCKS TCP/UDP checks." >> $env:GITHUB_STEP_SUMMARY
-          "This unsigned engine component does not establish Windows desktop hosting, graceful owner shutdown, service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
+          "The Rust child owner additionally checks private-pipe identity, real HTTP traffic, normal Close/exit and listener release, startup failure and emergency cleanup." >> $env:GITHUB_STEP_SUMMARY
+          "This unsigned engine component does not establish Windows desktop hosting, global service/TUN/system-proxy recovery, installation, signing or release acceptance." >> $env:GITHUB_STEP_SUMMARY
 
   storage-contract:
     name: Windows directory durability contract
@@ -159,9 +169,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check shared Rust contracts on Windows
-        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials --all-targets -- -D warnings
+        run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials -p cfw-windows-engine --all-targets --features cfw-windows-engine/native-engine-validation -- -D warnings
       - name: Test shared Rust contracts on Windows
-        run: cargo test --locked --no-fail-fast -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials --all-targets
+        run: cargo test --locked --no-fail-fast -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles -p cfw-windows-credentials -p cfw-windows-engine --all-targets
       - name: Install locked UI dependencies
         working-directory: apps/cfw-tauri-shell
         run: node $env:CFW_NPM_CLI ci --ignore-scripts=false --install-links=true

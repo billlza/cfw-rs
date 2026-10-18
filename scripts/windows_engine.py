@@ -134,7 +134,7 @@ def module_graph(data: bytes) -> list[dict[str, object]]:
 
 def bundle_notices(go: Path, source: Path, output: Path, environment: dict[str, str], pins: dict[str, str]) -> dict[str, object]:
     packages = json_objects(command([str(go), "list", "-deps", "-json", "-tags", pins["LIBBOX_BUILD_TAGS"],
-                                     "./cmd/sing-box"], cwd=source, env=environment))
+                                     "./cmd/sing-box", "./cmd/cfw-engine-host"], cwd=source, env=environment))
     roots: dict[tuple[str, str], Path] = {("Go", pins["GO_VERSION"]): go.parent.parent.resolve()}
     for package in packages:
         module = package.get("Module")
@@ -240,6 +240,29 @@ def prepare_source(repository: Path, source: Path, pins: dict[str, str]) -> None
     verify_source(repository, source, pins, patched=True)
 
 
+def prepare_host_source(repository: Path, source: Path, destination: Path) -> dict[str, str]:
+    """Add our process entry point in a separate tree; never change the GA pins."""
+    require(not destination.exists(), "refusing to overwrite a host build tree")
+    baseline = source_files(source)
+    host = repository / "native/windows/engine-host"
+    additions = source_files(host)
+    require("main.go" in additions and "main_test.go" in additions, "missing Windows host source")
+    require(all(re.fullmatch(r"[a-z_]+\.go", name) for name in additions), "unexpected host source member")
+    expected = {**baseline, **{f"cmd/cfw-engine-host/{name}": digest for name, digest in additions.items()}}
+    require(len(expected) == len(baseline) + len(additions), "host entry point collides with upstream source")
+    destination.mkdir()
+    for name in baseline:
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / name, target)
+    for name in additions:
+        target = destination / "cmd/cfw-engine-host" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(host / name, target)
+    require(source_files(destination) == expected, "host build source copy changed bytes")
+    return expected
+
+
 def test_packages(repository: Path, pins: dict[str, str]) -> list[str]:
     path = pinned_path(repository, pins["LIBBOX_MODULE_CACHE_CONTRACT_PATH"])
     require(sha256(path) == pins["LIBBOX_MODULE_CACHE_CONTRACT_SHA256"], "module/test contract digest mismatch")
@@ -291,10 +314,12 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     work.mkdir(parents=False)
     print("Preparing the hash-pinned Windows Go toolchain", flush=True)
     go = prepare_go(work, pins)
-    source = work / "source"
+    baseline_source = work / "source"
     print("Materializing the unchanged CFM GA engine source and six patches", flush=True)
-    prepare_source(repository, source, pins)
-    expected_files = source_files(source)
+    prepare_source(repository, baseline_source, pins)
+    baseline_files = source_files(baseline_source)
+    source = work / "host-source"
+    expected_files = prepare_host_source(repository, baseline_source, source)
     output = work / "artifacts"
     output.mkdir()
     fixture_directory = work / "dns-projections"
@@ -325,6 +350,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     environment["CFW_DNS_PROJECTED_FIXTURE_DIR"] = str(fixture_directory)
     tags = pins["LIBBOX_BUILD_TAGS"]
     packages = test_packages(repository, pins)
+    packages.append("./cmd/cfw-engine-host")
     print("Resolving the locked Windows build and test package closure", flush=True)
     command([str(go), "list", "-deps", "-test", "-tags", tags, "./cmd/sing-box", *packages],
             cwd=source, env=environment, timeout=1200)
@@ -333,7 +359,8 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     # before entering the offline build phase, without changing module pins.
     modules = module_graph(command([str(go), "list", "-m", "-json", "all"], cwd=source, env=environment))
     (output / "module-graph.json").write_text(json.dumps(modules, indent=2) + "\n", encoding="utf-8")
-    verify_source(repository, source, pins, patched=True)
+    verify_source(repository, baseline_source, pins, patched=True)
+    require(source_files(baseline_source) == baseline_files, "GA baseline source bytes changed")
     require(source_files(source) == expected_files, "module resolution changed engine source bytes")
     environment.update({"GOPROXY": "off", "GOSUMDB": "off"})
     command([str(go), "mod", "verify"], cwd=source, env=environment)
@@ -342,11 +369,16 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     arguments = [str(go), "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-tags", tags, "-ldflags", flags]
     print("Building the native Windows engine without network resolution", flush=True)
     command([*arguments, "-o", str(executable), "./cmd/sing-box"], cwd=source, env=environment, timeout=1200)
+    host_executable = output / "cfw-engine-host.exe"
+    command([*arguments, "-o", str(host_executable), "./cmd/cfw-engine-host"], cwd=source, env=environment, timeout=1200)
     print("Checking an independent build cache produces identical bytes", flush=True)
     environment["GOCACHE"] = str(work / "second-cache")
     second = work / "second-engine.exe"
     command([*arguments, "-o", str(second), "./cmd/sing-box"], cwd=source, env=environment, timeout=1200)
     require(sha256(executable) == sha256(second), "Windows engine build is not reproducible across caches")
+    second_host = work / "second-engine-host.exe"
+    command([*arguments, "-o", str(second_host), "./cmd/cfw-engine-host"], cwd=source, env=environment, timeout=1200)
+    require(sha256(host_executable) == sha256(second_host), "Windows host build is not reproducible across caches")
     print("Running the GA engine test package union on Windows (without race instrumentation)", flush=True)
     # Match the GA engine's Go linker contract; the Mac-only external clang
     # linker is omitted because this Windows component does not use CGO.
@@ -361,11 +393,14 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                      if event.get("Action") == "skip" and "Test" in event]
     require(not skipped_tests, "native engine tests were skipped; inspect the complete Go test event log")
     packages_without_tests = [event["Package"] for event in test_events if event.get("Action") == "skip" and "Test" not in event]
-    verify_source(repository, source, pins, patched=True)
+    verify_source(repository, baseline_source, pins, patched=True)
+    require(source_files(baseline_source) == baseline_files, "GA baseline source bytes changed")
     require(source_files(source) == expected_files, "build or tests changed engine source bytes")
     version = command([str(executable), "version"]).decode("utf-8")
     info = command([str(go), "version", "-m", str(executable)], env=environment).decode("utf-8")
     (output / "build-info.txt").write_text(info, encoding="utf-8")
+    host_info = command([str(go), "version", "-m", str(host_executable)], env=environment).decode("utf-8")
+    (output / "host-build-info.txt").write_text(host_info, encoding="utf-8")
     shutil.copyfile(source / "LICENSE", output / "LICENSE")
     command([str(go), "mod", "verify"], cwd=source, env=environment)
     print("Collecting source license and notice texts for the linked Windows engine", flush=True)
@@ -374,7 +409,9 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "component": "windows-engine", "platform": "windows-amd64", "release_accepted": False,
                "engine_version": pins["SING_BOX_VERSION"], "engine_commit": pins["SING_BOX_COMMIT"],
                "combined_diff_sha256": pins["SING_BOX_COMBINED_DIFF_SHA256"],
-               "source_files_sha256": hashlib.sha256(json.dumps(expected_files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+               "source_files_sha256": hashlib.sha256(json.dumps(baseline_files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+               "host_source_files_sha256": hashlib.sha256(json.dumps(expected_files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+               "host_source_additions": source_files(repository / "native/windows/engine-host"),
                "go_version": pins["GO_VERSION"], "go_archive_sha256": pins["GO_WINDOWS_AMD64_SHA256"],
                "build_tags": tags.split(","), "cgo_enabled": False, "independent_cache_builds_equal": True,
                "test_packages": packages, "tests_passed": len(passed_tests), "tests_skipped": skipped_tests,
@@ -382,7 +419,8 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "module_graph_sha256": sha256(output / "module-graph.json"),
                "rust_version": pins["RUST_VERSION"], "rust_dns_fixture_sha256": fixture_hashes,
                "race_instrumentation": False, "version_output": version,
-               "artifact": {"filename": executable.name, "size": executable.stat().st_size, "sha256": sha256(executable)}}
+               "artifact": {"filename": executable.name, "size": executable.stat().st_size, "sha256": sha256(executable)},
+               "host_artifact": {"filename": host_executable.name, "size": host_executable.stat().st_size, "sha256": sha256(host_executable)}}
     (output / "build-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(receipt, indent=2), flush=True)
 

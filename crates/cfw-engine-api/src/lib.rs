@@ -797,6 +797,43 @@ pub trait CredentialVaultProvisioner: Send + Sync + 'static {
     ) -> CredentialGarbageCollectionCommitFuture<'_>;
 }
 
+impl<T: CredentialVaultProvisioner + ?Sized> CredentialVaultProvisioner for std::sync::Arc<T> {
+    fn rebind_profile_credentials(
+        &self,
+        request: CredentialRebindRequest,
+    ) -> CredentialVaultFuture<'_> {
+        (**self).rebind_profile_credentials(request)
+    }
+
+    fn provision_profile_credentials<'a>(
+        &'a self,
+        request: CredentialProvisionRequest<'a>,
+    ) -> CredentialVaultFuture<'a> {
+        (**self).provision_profile_credentials(request)
+    }
+
+    fn query_profile_credentials(
+        &self,
+        request: CredentialPresenceRequest,
+    ) -> CredentialPresenceFuture<'_> {
+        (**self).query_profile_credentials(request)
+    }
+
+    fn preview_credential_garbage_collection(
+        &self,
+        request: CredentialGarbageCollectionRequest,
+    ) -> CredentialGarbageCollectionPreviewFuture<'_> {
+        (**self).preview_credential_garbage_collection(request)
+    }
+
+    fn commit_credential_garbage_collection(
+        &self,
+        request: CredentialGarbageCollectionCommitRequest,
+    ) -> CredentialGarbageCollectionCommitFuture<'_> {
+        (**self).commit_credential_garbage_collection(request)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelNetworkOptions {
     pub ipv6_enabled: bool,

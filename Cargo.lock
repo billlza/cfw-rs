@@ -646,6 +646,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfw-windows-credentials"
+version = "0.5.0"
+dependencies = [
+ "cfw-engine-api",
+ "cfw-singbox-config",
+ "cfw-windows-storage",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
 name = "cfw-windows-storage"
 version = "0.5.0"
 dependencies = [

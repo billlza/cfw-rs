@@ -4,6 +4,7 @@ members = [
   "crates/cfw-controller",
   "crates/cfw-core",
   "crates/cfw-windows-storage",
+  "crates/cfw-windows-credentials",
   "crates/cfw-engine-api",
   "crates/cfw-singbox-config",
   "crates/cfw-application",

@@ -140,7 +140,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
 | 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 设置、窗口状态、诊断、配置仓库及凭据存储在 Windows 通过 429 项 Rust/310 项前端测试；Mac 全工作区 1,145 项 Rust 回归通过；凭据与 Windows 引擎的产品接线及完整平台适配尚未完成 |
-| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 待实现和运行；不得用展示壳代替 |
+| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 引擎组件已在 Windows 构建并完成 HTTP/SOCKS TCP/UDP 回环验证；Rust 宿主接线、完整生命周期及桌面链路待完成 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
 | 正式发布 | 无阻塞缺陷、源/包身份一致、授权发布和下载验证 | 未开始 |
@@ -324,7 +324,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - 此阶段尚未验证 Windows 桌面宿主、凭据服务授权、引擎、系统代理、TUN、安装更新、
   签名或真实桌面视觉；完整产品和正式发布目标继续保持未完成。
 
-### 2026-10-18：Windows 原生引擎构建（验证中）
+### 2026-10-18：Windows 原生引擎构建与回环验证
 
 - 新增独立 Windows x64 job，使用与 GA 相同的 Go 1.27.2、sing-box 提交、六组补丁
   和构建标签，生成 `cfw-engine.exe`。Windows Go ZIP 的摘要来自官方 Go 下载元数据；
@@ -337,8 +337,32 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   集合。当前采用非 CGO 构建，不把普通测试报告为 race 检查。另以隔离回环端点
   验证有效/无效配置、控制器鉴权、HTTP 代理、SOCKS TCP/UDP 和强制结束子进程后
   的监听清理；配置通过 stdin 提供，不写配置文件或更改系统代理/TUN。
-- 本节尚待 Windows job 的实际运行回执。即使组件构建和回环验证通过，也不代表
-  Rust 宿主接线、完整协议、正常退出恢复、Windows UI、签名安装或发布验收完成。
+- 第一轮运行在离线 `go mod verify` 阶段暴露依赖元数据缺口：所选包的依赖准备没有
+  覆盖完整模块图。修正为在线准备阶段显式解析全部模块元数据，再关闭网络；模块
+  文件摘要和固定版本没有放宽。第二轮成功生成 EXE，但关闭端口的负向 TCP 连接
+  检查超时，不能证明监听状态，故尚未进入代理流量测试。现改用 Windows 系统
+  TCP 监听表，且启动后必须证明监听 PID 属于该子进程。
+- 第二轮还明确发现两项 DNS 用例因缺少 Rust 投影而跳过。Windows job 现在使用
+  同一 Rust 测试生成 mixed/tunnel/filter/named 四份输入，保持与 Mac 回归的接线
+  一致。命名 Go 测试被跳过会使 job 失败，无测试的包单独列为仅编译。
+- [Windows 引擎验证](https://github.com/billlza/cfw-rs/actions/runs/39146027517)
+  在 `c4e87b68e47336e568d13d63bea6c6fad56bc6ee` 成功：458 个 Go 命名测试及子测试
+  通过，命名测试跳过为 0；根包、`common/dialer`、`common/listener` 没有测试，
+  只完成编译。11 项 Rust DNS 投影测试生成真实输入；独立的完整共享检查仍为
+  429 项 Rust、310 项前端测试通过，失败/忽略/过滤/跳过均为 0。
+- 下载后的 `cfw-engine.exe` 已核对 PE 机器类型 `0x8664`、大小 37,986,816 字节，
+  SHA-256 为 `7daf87a7910d42f6f25d60e3dda1449fc26fe3c63f135dec3c7b4b0f69a63fe3`，
+  与两个独立缓存构建及前一轮构建相同。实际 1,623 份源码文件的内容集合也与本地
+  已经原 Mac 校验器确认的源码一致。完整日志 SHA-256 为
+  `0856425246731ebf68b97799d8963690f5c35ff420c69f154da5066d6886da46`。
+- 流量回执实测有效/无效配置、控制器鉴权与拒绝匿名访问、监听 PID、HTTP 代理、
+  SOCKS TCP、SOCKS UDP，以及强制结束后监听消失。验证未更改系统代理或安装 TUN，
+  也没有将强制结束写成正常关闭证明。原始组件、ZIP 和回执保存在
+  `target/cfw-validation/windows-engine-component-c4e87b6/` 及对应 ZIP。
+- 组件交付继续补入实际链接 Go 模块和 Go 工具链的上游许可/NOTICE 文本，复用既有
+  许可文件发现逻辑并保留原始字节及摘要；完整 Windows 许可审查仍属发布验收。
+  同源 Mac 托管 CI 在核对时仍排队。Rust 宿主、完整协议和 race 覆盖、正常退出恢复、
+  Windows UI、签名安装与正式发布均未完成。
 
 ## 官方资料
 

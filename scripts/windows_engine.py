@@ -19,6 +19,8 @@ import tempfile
 import urllib.request
 import zipfile
 
+from publication.license_resolution import candidate_license_files
+
 
 PATCHES = ("SECURITY", "RAW_PACKET", "DNS_FAILOVER", "ENDPOINT_CONFLICT", "PROFILE_PROBE", "SOCKS_LIFECYCLE")
 DIFF_OPTIONS = [
@@ -102,14 +104,24 @@ def command(arguments: list[str], *, cwd: Path | None = None,
     return result.stdout
 
 
-def module_graph(data: bytes) -> list[dict[str, object]]:
+def json_objects(data: bytes) -> list[dict[str, object]]:
     text = data.decode("utf-8")
     decoder = json.JSONDecoder()
     result = []
     while text.strip():
         text = text.lstrip()
-        module, end = decoder.raw_decode(text)
-        require(isinstance(module, dict) and isinstance(module.get("Path"), str), "invalid Go module metadata")
+        value, end = decoder.raw_decode(text)
+        require(isinstance(value, dict), "invalid Go JSON object stream")
+        result.append(value)
+        text = text[end:]
+    require(bool(result), "empty Go JSON object stream")
+    return result
+
+
+def module_graph(data: bytes) -> list[dict[str, object]]:
+    result = []
+    for module in json_objects(data):
+        require(isinstance(module.get("Path"), str), "invalid Go module metadata")
         identity = {key: module[key] for key in ("Path", "Version", "Sum", "GoModSum", "Main") if key in module}
         if "Replace" in module:
             replacement = module["Replace"]
@@ -117,9 +129,51 @@ def module_graph(data: bytes) -> list[dict[str, object]]:
                     "unversioned local module replacement is not admitted")
             identity["Replace"] = {key: replacement[key] for key in ("Path", "Version", "Sum", "GoModSum") if key in replacement}
         result.append(identity)
-        text = text[end:]
-    require(bool(result), "empty Go module graph")
     return result
+
+
+def bundle_notices(go: Path, source: Path, output: Path, environment: dict[str, str], pins: dict[str, str]) -> dict[str, object]:
+    packages = json_objects(command([str(go), "list", "-deps", "-json", "-tags", pins["LIBBOX_BUILD_TAGS"],
+                                     "./cmd/sing-box"], cwd=source, env=environment))
+    roots: dict[tuple[str, str], Path] = {("Go", pins["GO_VERSION"]): go.parent.parent.resolve()}
+    for package in packages:
+        module = package.get("Module")
+        if module is None:
+            continue
+        require(isinstance(module, dict) and "Replace" not in module, "unexpected linked module replacement")
+        name = module.get("Path")
+        version = pins["SING_BOX_VERSION"] if module.get("Main") is True else module.get("Version")
+        directory = module.get("Dir")
+        require(isinstance(name, str) and isinstance(version, str) and isinstance(directory, str),
+                "linked module lacks a source identity for license collection")
+        root = Path(directory).resolve(strict=True)
+        allowed = source.resolve() if module.get("Main") is True else Path(environment["GOMODCACHE"]).resolve()
+        require(root.is_relative_to(allowed), "linked module source escaped the verified build inputs")
+        key = (name, version)
+        require(key not in roots or roots[key] == root, "linked module has conflicting source roots")
+        roots[key] = root
+    records = []
+    for (name, version), root in sorted(roots.items()):
+        # Keep actual upstream license/notice files, including nested vendored
+        # notices. This preserves texts; SPDX resolution and final distribution
+        # review remain part of the full Windows release publication boundary.
+        files = candidate_license_files(root, maximum_depth=12)
+        require(bool(files), f"no source license texts found for {name} {version}")
+        directory = hashlib.sha256(f"{name}@{version}".encode()).hexdigest()
+        entries = []
+        for path in files:
+            relative = path.relative_to(root)
+            destination = output / "licenses" / directory / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, destination)
+            entries.append({"path": destination.relative_to(output).as_posix(), "sha256": sha256(destination)})
+        records.append({"component": name, "version": version, "files": entries})
+    index = {"schema_version": 1, "scope": "linked Go modules and Go toolchain source notices",
+             "release_license_review_complete": False, "components": records}
+    index_path = output / "third-party-notices.json"
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    return {"components": len(records), "files": sum(len(record["files"]) for record in records),
+            "index_sha256": sha256(index_path)}
 
 
 def git(source: Path, *arguments: str, index: Path | None = None) -> bytes:
@@ -306,12 +360,16 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
     skipped_tests = [{"package": event["Package"], "test": event["Test"]} for event in test_events
                      if event.get("Action") == "skip" and "Test" in event]
     require(not skipped_tests, "native engine tests were skipped; inspect the complete Go test event log")
+    packages_without_tests = [event["Package"] for event in test_events if event.get("Action") == "skip" and "Test" not in event]
     verify_source(repository, source, pins, patched=True)
     require(source_files(source) == expected_files, "build or tests changed engine source bytes")
     version = command([str(executable), "version"]).decode("utf-8")
     info = command([str(go), "version", "-m", str(executable)], env=environment).decode("utf-8")
     (output / "build-info.txt").write_text(info, encoding="utf-8")
     shutil.copyfile(source / "LICENSE", output / "LICENSE")
+    command([str(go), "mod", "verify"], cwd=source, env=environment)
+    print("Collecting source license and notice texts for the linked Windows engine", flush=True)
+    notices = bundle_notices(go, source, output, environment, pins)
     receipt = {"schema_version": 1, "product_source": git(repository, "rev-parse", "HEAD").decode().strip(),
                "component": "windows-engine", "platform": "windows-amd64", "release_accepted": False,
                "engine_version": pins["SING_BOX_VERSION"], "engine_commit": pins["SING_BOX_COMMIT"],
@@ -320,6 +378,7 @@ def build(repository: Path, work: Path, pins: dict[str, str]) -> None:
                "go_version": pins["GO_VERSION"], "go_archive_sha256": pins["GO_WINDOWS_AMD64_SHA256"],
                "build_tags": tags.split(","), "cgo_enabled": False, "independent_cache_builds_equal": True,
                "test_packages": packages, "tests_passed": len(passed_tests), "tests_skipped": skipped_tests,
+               "packages_without_tests": packages_without_tests, "source_notices": notices,
                "module_graph_sha256": sha256(output / "module-graph.json"),
                "rust_version": pins["RUST_VERSION"], "rust_dns_fixture_sha256": fixture_hashes,
                "race_instrumentation": False, "version_output": version,

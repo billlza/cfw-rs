@@ -222,14 +222,19 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<ServiceCompleti
     }
     let runtime = runtime()?;
     let result = runtime.block_on(async {
-        let mut pipe = server(&name)?;
+        let mut waiting = server(&name, true)?;
         status(handle, SERVICE_RUNNING, 0)?;
         while !STOP.load(Ordering::SeqCst) {
-            match tokio::time::timeout(Duration::from_millis(50), pipe.connect()).await {
+            match tokio::time::timeout(Duration::from_millis(50), waiting.connect()).await {
                 Err(_) => continue,
                 Ok(Err(e)) => return Err(e.to_string()),
                 Ok(Ok(())) => {}
             }
+            // Mio eagerly schedules another read after consuming a buffer.
+            // A disconnected instance can retain a prior read's error. Follow
+            // Tokio's accept pattern: each connection has separate I/O state.
+            let mut pipe = waiting;
+            waiting = server(&name, false)?;
             let conversation = tokio::time::timeout(LIMIT, async {
                 let mut bytes = [0; 4];
                 pipe.read_exact(&mut bytes)
@@ -262,8 +267,7 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<ServiceCompleti
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err("fixture client conversation timed out".into()),
             }
-            pipe.disconnect()
-                .map_err(|e| format!("disconnect fixture pipe: {e}"))?;
+            drop(pipe);
         }
         status(handle, SERVICE_STOP_PENDING, 0)?;
         Ok(())
@@ -315,7 +319,7 @@ fn status(handle: SERVICE_STATUS_HANDLE, state: u32, exit: u32) -> Result<()> {
     Ok(())
 }
 
-fn server(name: &str) -> Result<NamedPipeServer> {
+fn server(name: &str, first: bool) -> Result<NamedPipeServer> {
     let descriptor = Descriptor::new("O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;AU)")?;
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -324,7 +328,10 @@ fn server(name: &str) -> Result<NamedPipeServer> {
     };
     unsafe {
         ServerOptions::new()
-            .first_pipe_instance(true)
+            .first_pipe_instance(first)
+            // Current connection, listener and bounded retiring overlapped
+            // handles; this fixture makes fewer than 16 connections.
+            .max_instances(16)
             .reject_remote_clients(true)
             .create_with_security_attributes_raw(
                 pipe_name(name),
@@ -673,8 +680,11 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             // SCM now describes the next launch of an identical file copy.
             // The running process still maps the original file, so matching
             // a registry command and hash alone must not admit that identity.
-            assert!(matches!(WindowsServicePeer::from_pipe_server(&first.name, verified(&replacement, expected)?, &pipe),
-                Err(ServicePeerError::Executable(cfw_windows_engine::Error::ExecutableIdentity))));
+            match WindowsServicePeer::from_pipe_server(&first.name, verified(&replacement, expected)?, &pipe) {
+                Err(ServicePeerError::Executable(cfw_windows_engine::Error::ExecutableIdentity)) => {}
+                Err(error) => panic!("live image mismatch returned a different failure: {error:?}"),
+                Ok(_) => panic!("the next-start copy was admitted as the running image"),
+            }
             first.binary(&image)?;
             peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
             assert!(matches!(WindowsServicePeer::from_pipe_server(&format!("{prefix}-missing"), verified(&image, expected)?, &pipe),

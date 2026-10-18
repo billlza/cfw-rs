@@ -69,7 +69,9 @@ pub fn configure_service_process_observation() -> Result<(), ServicePeerError> {
         return Err(native("read service process observation ACL"));
     }
     if present == 0 || defaulted != 0 || expected.is_null() {
-        return Err(ServicePeerError::ObservationSecurityMismatch);
+        return Err(ServicePeerError::ObservationSecurityMismatch {
+            detail: "constructed DACL is missing or defaulted".into(),
+        });
     }
     let raw = unsafe { OpenProcess(READ_CONTROL | WRITE_DAC, 0, std::process::id()) };
     if raw.is_null() {
@@ -120,15 +122,23 @@ pub fn configure_service_process_observation() -> Result<(), ServicePeerError> {
     if readback.0.is_null()
         || owner.is_null()
         || unsafe { IsValidSecurityDescriptor(readback.0) } == 0
-        || unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } == 0
     {
-        return Err(ServicePeerError::ObservationSecurityMismatch);
+        return Err(ServicePeerError::ObservationSecurityMismatch {
+            detail: "invalid native descriptor or absent owner".into(),
+        });
     }
     if unsafe { GetSecurityDescriptorControl(readback.0, &mut control, &mut revision) } == 0 {
         return Err(native("inspect service process observation control"));
     }
-    if control & SE_DACL_PROTECTED == 0 || !same_aces(expected, actual)? {
-        return Err(ServicePeerError::ObservationSecurityMismatch);
+    let owner_system = unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } != 0;
+    let owner_admin = unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0;
+    let aces_match = same_aces(expected, actual)?;
+    if !owner_system || control & SE_DACL_PROTECTED == 0 || !aces_match {
+        return Err(ServicePeerError::ObservationSecurityMismatch {
+            detail: format!(
+                "owner_system={owner_system}, owner_admin={owner_admin}, control={control:#x}, exact_aces={aces_match}"
+            ),
+        });
     }
     Ok(())
 }

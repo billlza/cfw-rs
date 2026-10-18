@@ -64,8 +64,8 @@ pub enum ServicePeerError {
         "Windows service observation setup requires the SYSTEM primary identity in session zero"
     )]
     InvalidServiceProcessIdentity,
-    #[error("Windows service process observation permissions did not match after setup")]
-    ObservationSecurityMismatch,
+    #[error("Windows service process observation permissions did not match after setup: {detail}")]
+    ObservationSecurityMismatch { detail: String },
     #[error("Windows service primary identity: {0}")]
     ServiceIdentity(#[from] crate::PeerIdentityError),
     #[error("Windows service configuration does not match the installation")]

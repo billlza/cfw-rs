@@ -26,6 +26,7 @@ use windows_sys::Win32::{
     System::{Services::*, Threading::*},
 };
 
+mod desktop;
 mod restricted;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: Duration = Duration::from_secs(15);

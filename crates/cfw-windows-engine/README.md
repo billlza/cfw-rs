@@ -126,7 +126,11 @@ The `native-service-fixture` example installs two uniquely named disposable
 SYSTEM services only with `CFW_NATIVE_SERVICE_MUTATION_TESTS=1`. It checks actual
 SCM/pipe/image identity, another SYSTEM peer, ACL/configuration changes, a
 byte-identical replacement file, missing/stopped services and a medium-integrity
-client with Administrators disabled and privileges removed. It stops and removes
+client with Administrators disabled and `DISABLE_MAX_PRIVILEGE` applied. The
+client uses a temporary user/SYSTEM-only window station and desktop at medium
+integrity; the controller restores its prior selections before launch. Existing
+user-object ACLs are not modified. This is not desktop UI qualification.
+The fixture stops and removes
 the services, waits for their processes and verifies deletion before emitting a
 source-bound receipt. The fixture is not shipped as a product service. Package
 tests never install services. Native execution must pass before this boundary is

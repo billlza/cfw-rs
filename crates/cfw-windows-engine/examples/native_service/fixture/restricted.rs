@@ -123,6 +123,7 @@ fn token() -> Result<OwnedHandle> {
 
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     let token = token()?;
+    let mut desktop = desktop::Desktop::new()?;
     let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
     let mut command = wide(&format!("\"{}\" --client {name} {hex}", image.display()));
     let parent = image.parent().ok_or("missing fixture image parent")?;
@@ -146,6 +147,7 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
         StartupInfo: STARTUPINFOW {
             cb: size_of::<STARTUPINFOEXW>() as u32,
             dwFlags: STARTF_USESTDHANDLES,
+            lpDesktop: desktop.path(),
             hStdInput: handles[0],
             hStdOutput: handles[1],
             hStdError: handles[1],
@@ -212,6 +214,7 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
             "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
         ));
     }
+    desktop.close()?;
     Ok(())
 }
 

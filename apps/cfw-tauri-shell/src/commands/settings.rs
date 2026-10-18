@@ -74,24 +74,21 @@ fn launch_at_login_state(
 pub(super) fn with_login_item_status(
     snapshot: SettingsSnapshot,
     status: ServiceModeStatus,
-) -> UiSettingsSnapshot {
+) -> Result<UiSettingsSnapshot, String> {
     let launch_at_login = launch_at_login_state(snapshot.settings.launch_at_login, status);
-    UiSettingsSnapshot {
-        resolved_locale: crate::i18n::resolve(snapshot.settings.language),
+    Ok(UiSettingsSnapshot {
+        resolved_locale: crate::i18n::resolve(snapshot.settings.language)?,
         settings: snapshot.settings,
         persisted: snapshot.persisted,
         launch_at_login,
-    }
+    })
 }
 
 pub(crate) fn settings_snapshot_with_live_status(
     store: &SettingsStore,
 ) -> Result<UiSettingsSnapshot, String> {
     let snapshot = store.snapshot().map_err(|error| error.to_string())?;
-    Ok(with_login_item_status(
-        snapshot,
-        MacOsPlatformService.login_item_status(),
-    ))
+    with_login_item_status(snapshot, MacOsPlatformService.login_item_status())
 }
 
 fn write_preferences(
@@ -123,10 +120,9 @@ pub(crate) fn sanitize_legacy_preferences(
     preferences: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
     let snapshot = write_preferences(store, preferences)?;
-    Ok(with_login_item_status(
-        snapshot,
-        MacOsPlatformService.login_item_status(),
-    ))
+    with_login_item_status(snapshot, MacOsPlatformService.login_item_status()).map_err(|error| {
+        format!("preferences were saved, but their display status is unavailable: {error}")
+    })
 }
 
 #[tauri::command]
@@ -139,7 +135,7 @@ pub(crate) async fn read_settings_snapshot(
         if include_login_item_status == Some(false) {
             let snapshot = store.snapshot().map_err(|error| error.to_string())?;
             Ok(UiSettingsSnapshot {
-                resolved_locale: crate::i18n::resolve(snapshot.settings.language),
+                resolved_locale: crate::i18n::resolve(snapshot.settings.language)?,
                 launch_at_login: UiLaunchAtLoginState {
                     persisted_intent: snapshot.settings.launch_at_login,
                     live_status: UiLoginItemLiveStatus::Checking,
@@ -179,12 +175,17 @@ pub(crate) async fn write_settings_snapshot(
             write_renderer_preferences(&store, settings)
         })
         .await?;
-    crate::i18n::apply(&app, snapshot.settings.language).await?;
+    crate::i18n::apply(&app, snapshot.settings.language)
+        .await
+        .map_err(|error| {
+            format!("preferences were saved, but language application failed: {error}")
+        })?;
     crate::startup_state::prepare_off_main(move || {
-        Ok(with_login_item_status(
-            snapshot,
-            MacOsPlatformService.login_item_status(),
-        ))
+        with_login_item_status(snapshot, MacOsPlatformService.login_item_status()).map_err(
+            |error| {
+                format!("preferences were saved, but their display status is unavailable: {error}")
+            },
+        )
     })
     .await
 }
@@ -245,10 +246,10 @@ fn update_launch_at_login(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     }
     preferences.launch_at_login = enabled;
     match write_preferences(&store, preferences) {
-        Ok(snapshot) => Ok(with_login_item_status(
+        Ok(snapshot) => with_login_item_status(
             snapshot,
             platform.login_item_status(),
-        )),
+        ).map_err(|error| format!("Login Item and preferences were saved, but their display status is unavailable: {error}")),
         Err(persist_error) => match restore_login_item_status(&platform, original_status) {
             Ok(()) => Err(format!(
                 "failed to persist the Login Item preference; restored the previous macOS state: {persist_error}"
@@ -439,7 +440,7 @@ mod tests {
 
     #[test]
     fn login_item_snapshot_has_a_stable_typed_wire_shape() {
-        let expected_locale = crate::i18n::resolve(cfw_core::UiLanguage::System);
+        let expected_locale = crate::i18n::resolve(cfw_core::UiLanguage::System).unwrap();
         let snapshot = with_login_item_status(
             SettingsSnapshot {
                 settings: UiPreferences {
@@ -449,7 +450,8 @@ mod tests {
                 persisted: true,
             },
             ServiceModeStatus::RequiresApproval,
-        );
+        )
+        .expect("resolve snapshot locale");
         assert_eq!(
             serde_json::to_value(snapshot).expect("serialize settings snapshot"),
             serde_json::json!({

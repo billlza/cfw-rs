@@ -38,9 +38,14 @@ pub fn request_wifi_name_access() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 pub fn request_wifi_name_access() -> anyhow::Result<()> {
-    anyhow::bail!("Wi-Fi name access is supported only on macOS")
+    crate::windows::network::request_wifi_name_access()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn request_wifi_name_access() -> anyhow::Result<()> {
+    anyhow::bail!("Wi-Fi name access is unsupported on this platform")
 }
 
 #[cfg(target_os = "macos")]
@@ -191,7 +196,12 @@ pub fn current_network_context() -> anyhow::Result<Option<NetworkContext>> {
     Ok(candidates.into_iter().next())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 pub fn current_network_context() -> anyhow::Result<Option<NetworkContext>> {
-    anyhow::bail!("physical network observation is supported only on macOS")
+    crate::windows::network::current_network_context()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn current_network_context() -> anyhow::Result<Option<NetworkContext>> {
+    anyhow::bail!("physical network observation is unsupported on this platform")
 }

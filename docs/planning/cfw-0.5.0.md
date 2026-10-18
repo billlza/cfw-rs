@@ -471,7 +471,27 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   安装身份仍需要单独接线，不能用此观察工具冒充服务认证或网络授权。
 - 四项 Windows 测试覆盖真实双进程管道、消息中伪造 PID、陈旧身份、退出后拒绝、
   非管道句柄、观察者模拟身份拒绝和 SID 缓冲边界。固定管道拥有私有 ACL、拒绝远程
-  客户端，子进程和 I/O 有期限；原生结果待本次提交后的 CI。
+  客户端，子进程和 I/O 有期限。[原生 CI](https://github.com/billlza/cfw-rs/actions/runs/39160357742)
+  在 `eff74e5` 完成全部三项 Windows job：458 项共享 Rust、311 项前端、476 项命名
+  Go 测试/子测试和七项引擎原生集成测试均通过，失败、忽略及命名跳过为零。下载产物
+  的源码、两份 EXE、构建回执和 116 份许可文件已核对；完整桌面与服务认证仍未接线。
+
+### 2026-10-18：Windows 桌面平台观察
+
+- 原 Windows 编译探针在 `cfw-platform` 暴露五项错误：Unix 进程组、kill 与 Mac
+  sysctl 被无条件编译。现将 Apple 更新、注册、迁移、签名和进程管理接口限定为
+  macOS，保留 Mac 实现，并提供实际 Windows 版本、语言和物理网络观察。
+- Windows 读取有界的原生网卡/地址记录，过滤虚拟、断开、暂停网卡与未就绪或冲突
+  地址。只有可用网关地址参与优先选择，截断和循环链表显式失败。SSID 按网卡 GUID
+  使用微软推荐的 `GetConnectedSsid`，不扫描附近 Wi-Fi 或查询 BSSID；复用已有 Rust
+  绑定，不引入 C#/.NET。原生观察在工作线程完成，不承诺同步 OS 调用的硬期限。
+- 系统语言查询改为可失败接口，所有应用调用点传播错误。设置写入完成后，若语言
+  应用或显示观察失败，返回信息明确说明设置已保存，避免把后续失败说成写入回滚。
+- 本地完整 Mac Rust 回归 1,157 项通过，Clippy 与 cargo-deny 通过；Windows 目标
+  Clippy 和 Windows workflow actionlint 通过。519 个 registry 依赖版本及校验值
+  不变。新增十项 Windows 测试覆盖原生观察与解析反例，原生执行结果待提交后的 CI。
+- 桌面应用的 Mac 构建限制仍保留。此阶段不等于 Windows 应用可启动，也不证明物理
+  Wi-Fi、代理/TUN、服务授权、完整 UI、休眠恢复或发布验收已完成。
 
 ## 官方资料
 
@@ -499,3 +519,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [Windows 管道消息令牌](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient)
 - [恢复线程身份的失败契约](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-reverttoself)
 - [跨账户进程令牌访问边界](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken)
+- [Windows 有序 UI 语言](https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-getuserpreferreduilanguages)
+- [Windows 网卡地址观察](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getadaptersaddresses)
+- [Windows 地址 DAD 状态](https://learn.microsoft.com/en-us/windows/win32/api/nldef/ne-nldef-nl_dad_state)
+- [Windows Wi-Fi SSID 与位置权限](https://learn.microsoft.com/en-us/windows/win32/nativewifi/wi-fi-access-location-changes)

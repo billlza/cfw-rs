@@ -374,12 +374,19 @@ pub(crate) async fn reset_settings_snapshot(
             },
         )
         .await?;
-    crate::i18n::apply(&app, snapshot.settings.language).await?;
+    crate::i18n::apply(&app, snapshot.settings.language)
+        .await
+        .map_err(|error| {
+            format!("preferences were reset, but language application failed: {error}")
+        })?;
     crate::startup_state::prepare_off_main(move || {
-        Ok(super::settings::with_login_item_status(
+        super::settings::with_login_item_status(
             snapshot,
             cfw_platform::MacOsPlatformService.login_item_status(),
-        ))
+        )
+        .map_err(|error| {
+            format!("preferences were reset, but their display status is unavailable: {error}")
+        })
     })
     .await
 }

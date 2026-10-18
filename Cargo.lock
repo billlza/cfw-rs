@@ -674,6 +674,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "uuid",
  "windows-sys 0.61.2",
  "zeroize",

@@ -58,6 +58,22 @@ Apple owners. Start, restart and status paths retain exact owner/context/digest
 checks. These contracts prepare the application seam; they do not instantiate a
 Windows service or remove the desktop application's existing build restriction.
 
+`NativePeerProcess` observes the actual named-pipe peer PID, retains the process
+handle and creation time, and records its full SID, logon authentication ID,
+session, integrity level, AppContainer and restricted-token state. These types
+cannot be constructed from deserialized caller claims. Server-side verification
+must follow a request read: the pipe's last-message token must also match the
+observed process identity. The synchronous token capture immediately restores
+the observer before inspecting data or returning; restoration failure terminates
+the process instead of continuing under an unknown security context.
+
+This is peer observation, not publisher or SCM service authentication, and not
+permission to change network state. The caller must serialize reads/admission
+on a fixed pipe instance. An unprivileged UI may be unable to query a SYSTEM
+process token; permission failures stay errors, and this helper must not be used
+to require UI elevation or assume that any SYSTEM peer is the product service.
+The service connector still needs SCM identity and trusted installation binding.
+
 The child has no console window. It is assigned to an unnamed, non-inheritable
 Windows Job Object before the first request is sent. The job has
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and no breakaway flags. See Microsoft's

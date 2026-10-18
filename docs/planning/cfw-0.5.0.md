@@ -456,7 +456,22 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   取消并收尾。mutex 和进程退出等待复用同一语义。
 - 确定性用例覆盖提前超时、亚毫秒余量向上取整、后续正常/abandoned 获取、已到期
   和原生错误保留；真实文件锁的三秒下界和 mutex 的二十毫秒下界继续验证。
-  Windows cross-target Clippy 已通过，修复后的原生执行待 CI。
+  [修复后的原生 CI](https://github.com/billlza/cfw-rs/actions/runs/39158308639) 在
+  `3216f57` 全部通过：454 项 Rust、311 项前端、476 项命名 Go 测试/子测试和七项
+  引擎集成测试。原有三秒断言通过；下载 worker 与 Mac 交叉构建逐字节相同。
+
+### 2026-10-18：Windows 管道对端进程与消息身份
+
+- 新增从实际管道 PID、保留进程句柄及主令牌获得的对端身份。完整 SID、登录会话、
+  session、完整性、AppContainer、受限令牌状态和进程创建时间不由调用者 JSON 提供，
+  不转换成 Mac 的数值 UID。已退出进程和变化的身份不能复用原观察结果。
+- 服务端读取请求后，另取该消息的管道令牌，与观察到的进程身份比对；获取句柄后立即
+  恢复观察者身份，再读取令牌信息，不在模拟区间进行产品 I/O 或 async 挂起。恢复失败
+  遵守 Win32 契约终止进程。普通 UI 不因此获得读取 SYSTEM 令牌的权限；SCM 与受信任
+  安装身份仍需要单独接线，不能用此观察工具冒充服务认证或网络授权。
+- 四项 Windows 测试覆盖真实双进程管道、消息中伪造 PID、陈旧身份、退出后拒绝、
+  非管道句柄、观察者模拟身份拒绝和 SID 缓冲边界。固定管道拥有私有 ACL、拒绝远程
+  客户端，子进程和 I/O 有期限；原生结果待本次提交后的 CI。
 
 ## 官方资料
 
@@ -480,3 +495,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [Credential Manager 记录与持久化范围](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentialw)
 - [Windows 跨会话内核对象命名空间](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
 - [Windows 等待函数与时钟粒度](https://learn.microsoft.com/en-us/windows/win32/sync/wait-functions)
+- [Windows 管道客户端进程](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid)
+- [Windows 管道消息令牌](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient)
+- [恢复线程身份的失败契约](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-reverttoself)
+- [跨账户进程令牌访问边界](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken)

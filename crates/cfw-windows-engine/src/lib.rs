@@ -14,6 +14,10 @@ pub use configuration::{PreparedConfig, ResolvedProjection};
 #[cfg(windows)]
 mod lineage;
 #[cfg(windows)]
+mod peer;
+#[cfg(windows)]
+pub use peer::{NativePeerIdentity, NativePeerProcess, PeerIdentityError};
+#[cfg(windows)]
 mod listeners;
 #[cfg(windows)]
 pub use lineage::{LineageError, WindowsEngineGenerationStore};

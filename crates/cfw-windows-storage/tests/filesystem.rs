@@ -107,7 +107,13 @@ fn internal_temporary_names_cannot_be_used_as_application_records() {
     transaction
         .replace("state.json", b"preserved", 1024)
         .unwrap();
-    for name in [".state.json.tmp", ".STATE.JSON.TMP"] {
+    for name in [
+        ".state.json.tmp",
+        ".STATE.JSON.TMP",
+        ".cfw-internal",
+        ".CFW-internal",
+        ".cfw-ſtorage-lock-v1",
+    ] {
         assert!(
             matches!(
                 transaction.replace(name, b"a separate record", 1024),
@@ -134,7 +140,11 @@ fn unicode_names_and_the_maximum_record_name_round_trip() {
     let path = temporary.path().join("私有目录");
     let directory = PrivateDirectory::open_or_create(&path).unwrap();
     let mut transaction = directory.write().unwrap();
-    for name in ["配置.json".to_owned(), "x".repeat(250)] {
+    for name in [
+        "配置.json".to_owned(),
+        ".application-state.json".to_owned(),
+        "x".repeat(250),
+    ] {
         transaction.replace(&name, b"first", 1024).unwrap();
         transaction.replace(&name, b"second", 1024).unwrap();
         assert_eq!(

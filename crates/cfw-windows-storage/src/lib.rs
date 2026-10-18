@@ -435,10 +435,17 @@ fn leaf(name: &str) -> Result<Vec<u16>, Error> {
 
 fn record_name(name: &str) -> Result<(), Error> {
     let encoded = leaf(name)?;
-    // The dot-prefixed namespace belongs exclusively to locks and temporary
-    // files. Reserving the whole prefix also closes case-insensitive aliases.
-    // Leave room for the temporary's leading dot and trailing ".tmp".
-    if name.starts_with('.') || encoded.len() > MAX_LEAF_UNITS - 5 {
+    // Reserve the storage-owned prefix and temporary suffix, including case
+    // variants. Other hidden application records (such as migration journals)
+    // remain valid. Leave room for the temporary's dot and ".tmp" suffix.
+    let storage_name = name
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".cfw-"));
+    let temporary_name = name.starts_with('.')
+        && name
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("tmp"));
+    if storage_name || temporary_name || encoded.len() > MAX_LEAF_UNITS - 5 {
         return Err(Error::InvalidName);
     }
     Ok(())

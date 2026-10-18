@@ -28,10 +28,11 @@ OS shared/exclusive lock. Only contention is retried, at most three seconds;
 other errors remain errors. A transaction retains its lock until dropped.
 
 Application record names are single leaves of at most 250 UTF-16 code units.
-Dot-prefixed names are reserved for internal state and rejected by all public
-record operations, including case variants. An application record cannot alias
-a temporary belonging to a different record. Unicode directory and record names
-remain supported within these limits.
+The `.cfw-` prefix and dot-prefixed names ending in `.tmp` are reserved for
+internal state and rejected by all public record operations, including case
+variants. An application record cannot alias a temporary belonging to a different
+record. Other hidden records, such as migration journals, remain supported,
+as do Unicode directory and record names within these limits.
 
 Replacement validates existing state, writes a private temporary, flushes its
 contents, renames within the same opened directory and flushes directory

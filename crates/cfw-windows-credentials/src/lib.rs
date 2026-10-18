@@ -109,6 +109,7 @@ impl WindowsCredentialStore {
         request: &CredentialGarbageCollectionRequest,
         runtime_bindings: &[CredentialBinding],
     ) -> Result<CredentialGarbageCollectionPreview, Error> {
+        validate_catalog(request)?;
         let document = self.read()?.ok_or(Error::MissingVault)?;
         let orphan_bindings = document.orphans(request.catalog(), runtime_bindings)?;
         Ok(CredentialGarbageCollectionPreview {
@@ -125,6 +126,23 @@ impl WindowsCredentialStore {
         request: &CredentialGarbageCollectionCommitRequest,
         runtime_bindings: &[CredentialBinding],
     ) -> Result<CredentialGarbageCollectionReceipt, Error> {
+        let catalog = CredentialGarbageCollectionRequest::new(
+            request.snapshot_digest(),
+            request.catalog().to_vec(),
+        )
+        .map_err(|_| Error::InvalidMaterial)?;
+        let preview = CredentialGarbageCollectionPreview {
+            snapshot_digest: request.snapshot_digest().to_owned(),
+            vault_revision: request.expected_vault_revision().to_owned(),
+            orphan_bindings: request.expected_orphan_bindings().to_vec(),
+            orphan_count: u32::try_from(request.expected_orphan_bindings().len())
+                .map_err(|_| Error::InvalidMaterial)?,
+        };
+        let canonical = CredentialGarbageCollectionCommitRequest::new(catalog, &preview)
+            .map_err(|_| Error::InvalidMaterial)?;
+        if &canonical != request {
+            return Err(Error::InvalidMaterial);
+        }
         self.mutate(true, |document| {
             if document.revision.to_string() != request.expected_vault_revision() {
                 return Err(Error::ConcurrentModification);
@@ -194,6 +212,21 @@ impl WindowsCredentialStore {
                 .map_err(storage_error)?;
         }
         Ok(result)
+    }
+}
+
+// These shared maintenance DTOs also implement Deserialize, so the storage
+// boundary cannot assume that their checked constructors were used.
+fn validate_catalog(request: &CredentialGarbageCollectionRequest) -> Result<(), Error> {
+    let canonical = CredentialGarbageCollectionRequest::new(
+        request.snapshot_digest(),
+        request.catalog().to_vec(),
+    )
+    .map_err(|_| Error::InvalidMaterial)?;
+    if &canonical == request {
+        Ok(())
+    } else {
+        Err(Error::InvalidMaterial)
     }
 }
 

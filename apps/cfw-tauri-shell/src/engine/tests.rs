@@ -1061,6 +1061,15 @@ impl cfw_apple_network::NativeBridge for RestorationRightsBridge {
     }
 }
 
+impl cfw_engine_api::ProfileDelayBackend for RestorationRightsBridge {
+    fn test_profile_delays(
+        &self,
+        _request: cfw_engine_api::ProfileDelayTestRequest,
+    ) -> cfw_engine_api::BackendFuture<'_, Vec<cfw_engine_api::ProfileProxyDelay>> {
+        panic!("a network restoration rights test must never start a latency probe")
+    }
+}
+
 /// An engine whose rights requests reach `bridge`.
 fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::ManagedEngine {
     super::ManagedEngine {
@@ -1075,6 +1084,7 @@ fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::Man
         preflight_backend: Arc::new(cfw_apple_network::AppleNetworkBackend::new(
             cfw_apple_network::MissingNativeBridge,
         )),
+        profile_delay_backend: bridge.clone(),
         authorization_bridge: bridge,
         cutover: super::cutover::CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),

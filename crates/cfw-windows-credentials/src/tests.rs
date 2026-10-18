@@ -594,3 +594,29 @@ fn aggregate_secret_capacity_is_enforced_before_publication() {
     );
     assert_eq!(before, ciphertext(&store));
 }
+
+#[test]
+fn deserialized_maintenance_requests_must_still_satisfy_constructor_contracts() {
+    let (_root, store) = fixture();
+    provision(&store, ID, &profile(), SECRET).unwrap();
+    let before = ciphertext(&store);
+    let invalid: CredentialGarbageCollectionRequest =
+        serde_json::from_value(json!({"snapshot_digest":"invalid", "catalog":[]})).unwrap();
+    assert_eq!(
+        store.preview_garbage_collection(&invalid, &[]),
+        Err(Error::InvalidMaterial)
+    );
+    let request = empty_catalog();
+    let preview = store.preview_garbage_collection(&request, &[]).unwrap();
+    let mut wire = serde_json::to_value(
+        CredentialGarbageCollectionCommitRequest::new(request, &preview).unwrap(),
+    )
+    .unwrap();
+    wire["snapshot_digest"] = json!("invalid");
+    let invalid: CredentialGarbageCollectionCommitRequest = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        store.commit_garbage_collection(&invalid, &[]),
+        Err(Error::InvalidMaterial)
+    );
+    assert_eq!(before, ciphertext(&store));
+}

@@ -23,7 +23,9 @@ pub use cfw_singbox_config::{
 // together; older bridges cannot attest these operations.
 mod profile_probe;
 pub use cfw_singbox_config::ProjectionMode as EngineStartMode;
-pub use profile_probe::{ProfileDelayTestRequest, ProfileProbeFailure, ProfileProxyDelay};
+pub use profile_probe::{
+    ProfileDelayBackend, ProfileDelayTestRequest, ProfileProbeFailure, ProfileProxyDelay,
+};
 
 pub const ENGINE_PROTOCOL_VERSION: u16 = 10;
 

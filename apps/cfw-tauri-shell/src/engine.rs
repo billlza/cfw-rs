@@ -166,6 +166,7 @@ pub struct ManagedEngine {
     unavailable_reason: Option<String>,
     pub(crate) preflight_backend: Arc<dyn CutoverPreflightBackend>,
     authorization_bridge: Arc<dyn cfw_apple_network::NativeBridge>,
+    pub(crate) profile_delay_backend: Arc<dyn cfw_engine_api::ProfileDelayBackend>,
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
     endpoints: Arc<RwLock<EngineEndpointBinding>>,
@@ -439,6 +440,7 @@ pub(crate) fn prepare_managed_engine(
     let native_available = bridge.is_available();
     let native_failure = bridge.unavailable_reason().map(ToOwned::to_owned);
     let authorization_bridge = Arc::new(bridge.clone());
+    let profile_delay_backend = authorization_bridge.clone();
     let concrete_backend = Arc::new(AppleNetworkBackend::new(bridge));
     let engine_backend: Arc<dyn EngineBackend> = concrete_backend.clone();
     let preflight_backend: Arc<dyn CutoverPreflightBackend> = concrete_backend;
@@ -489,6 +491,7 @@ pub(crate) fn prepare_managed_engine(
         unavailable_reason: lineage_failure.or(native_failure),
         preflight_backend,
         authorization_bridge,
+        profile_delay_backend,
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
         endpoints: Arc::new(RwLock::new(EngineEndpointBinding {

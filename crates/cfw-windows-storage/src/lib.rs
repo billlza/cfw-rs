@@ -39,6 +39,9 @@ use security::Security;
 
 const LOCK_NAME: &str = ".cfw-storage-lock-v1";
 const LOCK_WAIT: Duration = Duration::from_secs(3);
+// Directory cursor admission uses an in-process mutex, independently of the
+// queued kernel file lock used by storage transactions.
+const LOCK_POLL: Duration = Duration::from_millis(10);
 const MAX_LEAF_UNITS: usize = 255;
 
 #[derive(Debug, Error)]

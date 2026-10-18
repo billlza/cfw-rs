@@ -391,8 +391,8 @@ pub(super) async fn probe_saved_nodes(
             target_url: Some(policy.url),
             expected_status: Some(policy.expected_status),
         };
-        return profiles
-            .credential_vault()
+        return engine
+            .profile_delay_backend
             .test_profile_delays(request)
             .await
             .map(|results| {

@@ -25,8 +25,13 @@ File operations use `NtCreateFile` relative to the opened directory. Rename and
 delete target opened handles, so changing the original directory pathname cannot
 redirect a transaction. `.cfw-storage-lock-v1` is a persistent, empty private lock
 file. Every transaction opens its own handle without delete sharing and uses the
-OS shared/exclusive lock. Only contention is retried, at most three seconds;
-other errors remain errors. A transaction retains its lock until dropped.
+OS shared/exclusive lock. `LockFileEx` queues one overlapped request with a
+three-second admission wait, avoiding repeated polling races against a writer
+that releases and reacquires. On timeout, the exact request is cancelled and
+its completion is drained before releasing its event and OVERLAPPED memory.
+Driver cancellation acknowledgement can extend teardown beyond the admission
+deadline; the code never releases a buffer still owned by the kernel. Other
+errors remain errors. A transaction retains its lock until dropped.
 
 Directory enumeration uses the existing directory handle with a bounded
 `NtQueryDirectoryFile` buffer. A per-handle mutex serializes complete scans and

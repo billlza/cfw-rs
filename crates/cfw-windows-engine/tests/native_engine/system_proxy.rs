@@ -308,8 +308,9 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
             Err(Error::ProxyRestoration(error)) if matches!(error.as_ref(), ProxyError::SettingsChanged)
         ));
         assert_eq!(authority.snapshot().unwrap(), replacement);
-        // A timeout used to close the private pipes before proxy recovery.
-        // Both explicit stop and error cleanup must now retain this owner.
+        // Both explicit stop and expired observation cleanup must retain this
+        // owner. The portable control-stream regression separately gates a
+        // response until after its accepted request's waiter has expired.
         let failure = engine
             .observe(Duration::from_nanos(1))
             .expect_err("the observation deadline must expire");
@@ -348,7 +349,7 @@ async fn actual_system_proxy_carries_wininet_http_and_restores_before_engine_sto
             "native_authorization_without_mutation",
             "wininet_http_via_owned_engine",
             "restoration_conflict_does_not_stop_engine",
-            "expired_waiter_does_not_close_control_pipes",
+            "expired_observation_preserves_control_owner",
             "exact_restoration_before_engine_stop",
             "normal_engine_stop",
         ],

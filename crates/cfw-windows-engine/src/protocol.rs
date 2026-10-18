@@ -1,4 +1,9 @@
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    sync::mpsc::{self, Receiver, SyncSender, TrySendError},
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -8,6 +13,75 @@ use crate::{Error, ResolvedProjection, configuration::serialize_bounded};
 const PROTOCOL: u32 = 1;
 const MAX_REQUEST: usize = cfw_singbox_config::MAX_ENGINE_CONFIG_BYTES + 4096;
 const MAX_RESPONSE: usize = 4096;
+
+pub(crate) struct Exchange {
+    pub bytes: Zeroizing<Vec<u8>>,
+    pub result: SyncSender<Result<Response, Error>>,
+}
+
+pub(crate) fn submit(
+    sender: &SyncSender<Exchange>,
+    sequence: &mut u64,
+    session: &str,
+    operation: &str,
+    digest: Option<&str>,
+    config: Option<&ResolvedProjection>,
+    deadline: Instant,
+) -> Result<Receiver<Result<Response, Error>>, Error> {
+    let next = sequence
+        .checked_add(1)
+        .ok_or(Error::Protocol("request sequence exhausted"))?;
+    let bytes = request(session, next, operation, digest, config)?;
+    let (result, receiver) = mpsc::sync_channel(1);
+    let mut pending = Exchange { bytes, result };
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or(Error::Timeout)?;
+        match sender.try_send(pending) {
+            Ok(()) => {
+                // The worker requires contiguous IDs. Neither serialization
+                // failure nor queue refusal is a request on that wire.
+                *sequence = next;
+                return Ok(receiver);
+            }
+            Err(TrySendError::Full(request)) => {
+                // A preceding expired waiter may still occupy the bounded
+                // queue. Wait for capacity within this same RPC deadline;
+                // retry only admission, never an already admitted operation.
+                pending = request;
+                thread::sleep(remaining.min(Duration::from_millis(1)));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(Error::Protocol("control channel disconnected"));
+            }
+        }
+    }
+}
+
+pub(crate) fn run_control(
+    input: &mut impl Write,
+    output: &mut impl Read,
+    receiver: Receiver<Exchange>,
+) {
+    let mut transport_failed = false;
+    while let Ok(work) = receiver.recv() {
+        let result = if transport_failed {
+            Err(Error::Protocol("control transport requires owner recovery"))
+        } else {
+            exchange(input, output, &work.bytes)
+        };
+        transport_failed |= result.is_err();
+        // An expired per-operation waiter is not owner loss. The owner must
+        // restore proxy settings before closing pipes or terminating its job.
+        // A late response is retired, never admitted to another request.
+        if let Err(retired_response) = work.result.send(result) {
+            drop(retired_response);
+        }
+    }
+    // Only channel closure from the process owner releases the control pipes.
+}
 
 #[derive(Serialize)]
 struct Request<'a> {
@@ -215,5 +289,247 @@ mod tests {
             value,
             json!({"protocol":1,"session":"0123","id":2,"op":"observe","digest":"digest"})
         );
+    }
+
+    #[test]
+    fn full_queue_timeout_does_not_consume_a_protocol_sequence() {
+        let (sender, requests) = mpsc::sync_channel(1);
+        let mut sequence = 0;
+        let first = submit(
+            &sender,
+            &mut sequence,
+            "session",
+            "hello",
+            None,
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        drop(first);
+        let result = submit(
+            &sender,
+            &mut sequence,
+            "session",
+            "observe",
+            Some("digest"),
+            None,
+            Instant::now(),
+        );
+        assert_eq!(sequence, 1, "an unqueued request must not consume an ID");
+        assert!(matches!(result, Err(Error::Timeout)));
+        let expired = requests.try_recv().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&expired.bytes).unwrap();
+        assert_eq!(value["id"], 1);
+        assert!(expired.result.send(Err(Error::Timeout)).is_err());
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        let _response = submit(
+            &sender,
+            &mut sequence,
+            "session",
+            "stop",
+            Some("digest"),
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&requests.try_recv().unwrap().bytes).unwrap();
+        assert_eq!(sequence, 2);
+        assert_eq!(
+            value["id"], 2,
+            "the real worker rejects a gap in request IDs"
+        );
+        assert_eq!(value["op"], "stop");
+    }
+
+    #[test]
+    fn expired_response_and_queue_pressure_preserve_the_control_stream() {
+        struct GatedReader {
+            bytes: Cursor<Vec<u8>>,
+            gate: Option<(SyncSender<()>, Receiver<()>)>,
+        }
+        impl Read for GatedReader {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if let Some((entered, resume)) = self.gate.take() {
+                    entered.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                self.bytes.read(output)
+            }
+        }
+        let mut bytes = Vec::new();
+        for id in 1..=3 {
+            let mut value = reply();
+            value["id"] = json!(id);
+            if id == 3 {
+                value["state"] = json!("stopped");
+            }
+            let encoded = serde_json::to_vec(&value).unwrap();
+            bytes.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        let (sender, requests) = mpsc::sync_channel(1);
+        let (entered, entered_waiter) = mpsc::sync_channel(1);
+        let (resume, resumed) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let mut writer = Vec::new();
+            let mut reader = GatedReader {
+                bytes: Cursor::new(bytes),
+                gate: Some((entered, resumed)),
+            };
+            run_control(&mut writer, &mut reader, requests);
+            writer
+        });
+        let mut sequence = 0;
+        let first = submit(
+            &sender,
+            &mut sequence,
+            "session",
+            "observe",
+            Some("digest"),
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        entered_waiter.recv_timeout(Duration::from_secs(2)).unwrap();
+        // The accepted request reaches the transport, but its caller expires
+        // before the gated response can arrive. The real control loop is used.
+        assert!(matches!(
+            first.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(first);
+        let second = submit(
+            &sender,
+            &mut sequence,
+            "session",
+            "observe",
+            Some("digest"),
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        let wait = Duration::from_millis(20);
+        let start = Instant::now();
+        let refused = submit(
+            &sender,
+            &mut sequence,
+            "session",
+            "observe",
+            Some("digest"),
+            None,
+            start + wait,
+        );
+        assert!(matches!(refused, Err(Error::Timeout)));
+        assert!(start.elapsed() >= wait);
+        assert_eq!(sequence, 2);
+        let pending_sender = sender.clone();
+        let (admitted, admitted_waiter) = mpsc::sync_channel(1);
+        let admission = thread::spawn(move || {
+            let mut sequence = sequence;
+            let last = submit(
+                &pending_sender,
+                &mut sequence,
+                "session",
+                "stop",
+                Some("digest"),
+                None,
+                Instant::now() + Duration::from_secs(2),
+            );
+            admitted.send((sequence, last)).unwrap();
+        });
+        assert!(matches!(
+            admitted_waiter.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        resume.send(()).unwrap();
+        second
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .validate("session", 2, 123, "1.14.2", "running", "digest")
+            .unwrap();
+        let (sequence, last) = admitted_waiter
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(sequence, 3);
+        let last = last.unwrap();
+        last.recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .validate("session", 3, 123, "1.14.2", "stopped", "digest")
+            .unwrap();
+        admission.join().unwrap();
+        drop(sender);
+        let mut wire = Cursor::new(worker.join().unwrap());
+        for id in 1..=3 {
+            let mut length = [0; 4];
+            wire.read_exact(&mut length).unwrap();
+            let mut bytes = vec![0; u32::from_le_bytes(length) as usize];
+            wire.read_exact(&mut bytes).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["id"], id);
+        }
+        assert_eq!(wire.position() as usize, wire.get_ref().len());
+    }
+
+    #[test]
+    fn expired_disconnected_and_exhausted_admission_never_enqueues() {
+        let (sender, requests) = mpsc::sync_channel(1);
+        let mut sequence = 0;
+        assert!(matches!(
+            submit(
+                &sender,
+                &mut sequence,
+                "session",
+                "start",
+                None,
+                None,
+                Instant::now(),
+            ),
+            Err(Error::Timeout)
+        ));
+        assert_eq!(sequence, 0);
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        sequence = u64::MAX;
+        assert!(matches!(
+            submit(
+                &sender,
+                &mut sequence,
+                "session",
+                "observe",
+                None,
+                None,
+                Instant::now() + Duration::from_secs(2),
+            ),
+            Err(Error::Protocol("request sequence exhausted"))
+        ));
+        assert_eq!(sequence, u64::MAX);
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(requests);
+        sequence = 0;
+        assert!(matches!(
+            submit(
+                &sender,
+                &mut sequence,
+                "session",
+                "observe",
+                None,
+                None,
+                Instant::now() + Duration::from_secs(2),
+            ),
+            Err(Error::Protocol("control channel disconnected"))
+        ));
+        assert_eq!(sequence, 0);
     }
 }

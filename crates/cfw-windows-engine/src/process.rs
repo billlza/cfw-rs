@@ -15,6 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    Error, PreparedConfig, ResolvedProjection,
+    protocol::{self, Exchange},
+};
 use cfw_windows_storage::{PrivateDirectory, WaitOutcome, wait_until};
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::{
@@ -32,12 +36,6 @@ use windows_sys::Win32::{
         },
         Threading::CREATE_NO_WINDOW,
     },
-};
-use zeroize::Zeroizing;
-
-use crate::{
-    Error, PreparedConfig, ResolvedProjection,
-    protocol::{self, Response},
 };
 
 /// A byte identity supplied by a trusted installation descriptor. An adjacent
@@ -149,11 +147,6 @@ fn hold_path(path: &Path, directory: bool) -> Result<Vec<File>, Error> {
         handles.push(file);
     }
     Ok(handles)
-}
-
-struct Exchange {
-    bytes: Zeroizing<Vec<u8>>,
-    result: SyncSender<Result<Response, Error>>,
 }
 
 /// Holds the live process handle and private pipe. Not serializable/reconnectable.
@@ -287,23 +280,7 @@ impl EngineProcess {
         let worker = thread::Builder::new()
             .name("cfw-engine-control".into())
             .spawn(move || {
-                let mut transport_failed = false;
-                while let Ok(work) = receiver.recv() {
-                    let result = if transport_failed {
-                        Err(Error::Protocol("control transport requires owner recovery"))
-                    } else {
-                        protocol::exchange(&mut input, &mut output, &work.bytes)
-                    };
-                    transport_failed |= result.is_err();
-                    // An expired per-operation waiter is not owner loss. The
-                    // owner has received its timeout and must restore proxy
-                    // settings before closing pipes or terminating the job.
-                    // A late response is retired, never admitted elsewhere.
-                    if let Err(retired_response) = work.result.send(result) {
-                        drop(retired_response);
-                    }
-                }
-                // Only channel closure from the owning process releases pipes.
+                protocol::run_control(&mut input, &mut output, receiver);
             })?;
         owner.sender = Some(sender);
         owner.worker = Some(worker);
@@ -457,26 +434,15 @@ impl EngineProcess {
         if self.closed || self.child.try_wait()?.is_some() {
             return Err(Error::Exited);
         }
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or(Error::Protocol("request sequence exhausted"))?;
-        let bytes = protocol::request(
+        let receiver = protocol::submit(
+            self.sender.as_ref().ok_or(Error::Exited)?,
+            &mut self.sequence,
             &self.session,
-            self.sequence,
             operation,
             (!digest.is_empty()).then_some(digest),
             config,
+            deadline,
         )?;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        self.sender
-            .as_ref()
-            .ok_or(Error::Exited)?
-            .try_send(Exchange {
-                bytes,
-                result: sender,
-            })
-            .map_err(|_| Error::Protocol("control channel unavailable"))?;
         let response =
             receiver
                 .recv_timeout(remaining(deadline)?)

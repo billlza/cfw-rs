@@ -6,6 +6,14 @@ worker uses the same pinned sing-box source and six patches as CFM 0.5.0.
 unchanged source bytes plus `native/windows/engine-host`; it preserves and
 verifies the original GA tree independently.
 
+The Windows build tree also applies one narrowly checked test-only overlay.
+The DNS rcode fixture waits for its TXT reply and A/AAAA reuse-probe response
+writes before test teardown can close the transport. All write failures and
+rcode/fallback assertions remain failures, with the original deadline. The
+overlay cannot change production files; its before/after hashes are recorded
+separately. The original GA tree and six patch pins remain unchanged. Native CI
+also repeats the corrected fixture 200 times and retains the full event log.
+
 The component starts local and SystemProxy data planes; SystemProxy settings
 require the separate durable owner described below. Tunnel modes still require
 Windows platform authority and restoration contracts. This is not an

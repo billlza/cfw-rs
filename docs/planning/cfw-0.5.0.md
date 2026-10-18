@@ -513,6 +513,13 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   与外部修改。测试保存/核对原始设置，输出独立恢复回执；原生结果待提交后的 CI。
 - 本地 1,160 项 Mac Rust 测试、完整 Clippy、cargo-deny 与 Windows 目标 Clippy
   通过；Windows workflow actionlint 通过，519 个 registry 版本/校验值保持不变。
+- `dbba859` 的 [Windows CI](https://github.com/billlza/cfw-rs/actions/runs/39166565328)
+  通过 473 项 Rust 与 311 项前端测试，但 Go 阶段的既有 NXDOMAIN 测试服务器在写入
+  时收到连接重置，尚未执行新增代理变更测试。原始失败日志已保存。该测试的主 TXT
+  响应可在 A/AAAA 后台复用探测结束前返回，清理可能与响应写入重叠；Windows 构建树
+  新增仅限此测试文件的同步补丁，并保留全部写入、结果、回退和期限断言。原始 GA 树
+  与生产代码不改。新旧夹具在 Mac 各执行 200 轮通过，Windows 新增 200 轮专项验证；
+  不把本地结果冒充 Windows 反例复现或新代理测试通过。
 - 桌面工厂、完整服务授权、TUN、多会话/睡眠恢复、完整 UI、安装更新和签名仍未完成。
 
 ## 官方资料

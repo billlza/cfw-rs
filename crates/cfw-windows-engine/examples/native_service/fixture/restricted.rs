@@ -17,6 +17,51 @@ impl Drop for Sid {
     }
 }
 
+struct Attributes(Vec<usize>);
+impl Attributes {
+    fn handles(handles: &[HANDLE]) -> Result<Self> {
+        let mut size = 0;
+        let first = unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size) };
+        if first != 0
+            || io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
+            || size == 0
+            || size > 65536
+        {
+            return Err("invalid fixture process attribute size".into());
+        }
+        let mut words = vec![0usize; size.div_ceil(size_of::<usize>())];
+        if unsafe { InitializeProcThreadAttributeList(words.as_mut_ptr().cast(), 1, 0, &mut size) }
+            == 0
+        {
+            return Err(error("initialize fixture process attributes"));
+        }
+        let mut result = Self(words);
+        if unsafe {
+            UpdateProcThreadAttribute(
+                result.pointer(),
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr().cast(),
+                std::mem::size_of_val(handles),
+                null_mut(),
+                null(),
+            )
+        } == 0
+        {
+            return Err(error("limit fixture inherited handles"));
+        }
+        Ok(result)
+    }
+    fn pointer(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        self.0.as_mut_ptr().cast()
+    }
+}
+impl Drop for Attributes {
+    fn drop(&mut self) {
+        unsafe { DeleteProcThreadAttributeList(self.pointer()) };
+    }
+}
+
 fn token() -> Result<OwnedHandle> {
     let mut original = null_mut();
     if unsafe {
@@ -80,9 +125,33 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     let token = token()?;
     let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
     let mut command = wide(&format!("\"{}\" --client {name} {hex}", image.display()));
-    let startup = STARTUPINFOW {
-        cb: size_of::<STARTUPINFOW>() as u32,
-        ..Default::default()
+    let parent = image.parent().ok_or("missing fixture image parent")?;
+    let output_path = parent.join(format!("{name}-client-output.txt"));
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output_path)
+        .map_err(|e| e.to_string())?;
+    let input = std::fs::File::open("NUL").map_err(|e| e.to_string())?;
+    let handles = [input.as_raw_handle(), output.as_raw_handle()];
+    for handle in handles {
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            return Err(error("mark fixture diagnostic handle inheritable"));
+        }
+    }
+    // Inherit only the NUL input and diagnostic output, never token, service,
+    // process or pipe handles from this privileged test controller.
+    let mut attributes = Attributes::handles(&handles)?;
+    let startup = STARTUPINFOEXW {
+        StartupInfo: STARTUPINFOW {
+            cb: size_of::<STARTUPINFOEXW>() as u32,
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: handles[0],
+            hStdOutput: handles[1],
+            hStdError: handles[1],
+            ..Default::default()
+        },
+        lpAttributeList: attributes.pointer(),
     };
     let mut info = PROCESS_INFORMATION::default();
     if unsafe {
@@ -92,11 +161,11 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
             command.as_mut_ptr(),
             null(),
             null(),
-            0,
-            CREATE_NO_WINDOW,
+            1,
+            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
             null(),
             null(),
-            &startup,
+            &startup.StartupInfo,
             &mut info,
         )
     } == 0
@@ -123,13 +192,13 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
         return Err(error("read fixture client exit"));
     }
-    let report = std::fs::read(
-        image
-            .parent()
-            .ok_or("missing fixture image parent")?
-            .join(format!("{name}-client.json")),
-    )
-    .map_err(|e| e.to_string())?;
+    let diagnostics = std::fs::read(&output_path).map_err(|e| e.to_string())?;
+    if diagnostics.len() > 16384 {
+        return Err("fixture client diagnostics exceed bound".into());
+    }
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    let report = std::fs::read(parent.join(format!("{name}-client.json")))
+        .map_err(|e| format!("unprivileged client exit={exit:#x}; report unavailable: {e}; diagnostics: {diagnostics}"))?;
     if report.len() > 8192 {
         return Err("fixture client report exceeds bound".into());
     }
@@ -139,7 +208,9 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
         || report["medium_integrity"] != true
         || report["administrator_member"] != false
     {
-        return Err(format!("unprivileged client exit={exit}, report={report}"));
+        return Err(format!(
+            "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
+        ));
     }
     Ok(())
 }
@@ -159,24 +230,34 @@ pub(super) fn client(name: &str, hex: &str) -> Result<()> {
         }
         Err(e) => serde_json::json!({"success":false,"error":e}),
     };
-    let mut output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(
-            image
-                .parent()
-                .ok_or("missing fixture image parent")?
-                .join(format!("{name}-client.json")),
+    let written = (|| -> Result<()> {
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(
+                image
+                    .parent()
+                    .ok_or("missing fixture image parent")?
+                    .join(format!("{name}-client.json")),
+            )
+            .map_err(|e| e.to_string())?;
+        std::io::Write::write_all(
+            &mut output,
+            serde_json::to_string(&report)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
         )
         .map_err(|e| e.to_string())?;
-    std::io::Write::write_all(
-        &mut output,
-        serde_json::to_string(&report)
-            .map_err(|e| e.to_string())?
-            .as_bytes(),
-    )
-    .map_err(|e| e.to_string())?;
-    output.sync_all().map_err(|e| e.to_string())?;
+        output.sync_all().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if let Err(error) = written {
+        let admission = match &result {
+            Ok(()) => "admission passed".to_owned(),
+            Err(failure) => format!("admission failed: {failure}"),
+        };
+        return Err(format!("{admission}; client report write failed: {error}"));
+    }
     result
 }
 

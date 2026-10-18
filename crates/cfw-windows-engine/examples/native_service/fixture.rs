@@ -587,7 +587,10 @@ fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
         let Some(text) = name.to_str() else {
             return Err("non-Unicode fixture diagnostic filename".into());
         };
-        if !text.ends_with(".failure.txt") && !text.ends_with("-client.json") {
+        if !text.ends_with(".failure.txt")
+            && !text.ends_with("-client.json")
+            && !text.ends_with("-client-output.txt")
+        {
             continue;
         }
         if !entry.file_type().map_err(|e| e.to_string())?.is_file()

@@ -125,6 +125,9 @@ fn rust_owner_runs_real_projected_http_then_closes_and_releases_listeners() {
                 Err(error) => panic!("loopback peer accept failed: {error}"),
             }
         };
+        // Windows accepted sockets can retain the listener's nonblocking
+        // mode. The accept loop is bounded separately; peer I/O uses deadlines.
+        socket.set_nonblocking(false).unwrap();
         socket.set_read_timeout(Some(TIMEOUT)).unwrap();
         socket.set_write_timeout(Some(TIMEOUT)).unwrap();
         let mut header = Vec::new();

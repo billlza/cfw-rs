@@ -87,6 +87,9 @@ fn dpapi_material_reaches_the_real_engine_and_authenticates_a_socks_outbound() {
                 Err(error) => panic!("SOCKS fixture accept failed: {error}"),
             }
         };
+        // Switch the accepted Windows socket out of the bounded accept
+        // loop's nonblocking mode before exercising timed protocol reads.
+        socket.set_nonblocking(false).unwrap();
         socket.set_read_timeout(Some(TIMEOUT)).unwrap();
         socket.set_write_timeout(Some(TIMEOUT)).unwrap();
         let mut greeting = [0; 2];

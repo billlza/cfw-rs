@@ -393,6 +393,11 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - `ef0ab0f` 本地 Mac 回归通过 1,153 项 Rust、全工作区 Clippy 和 cargo-deny；
   Go 入口本地 16 个测试/子测试通过。原始日志与摘要保存于
   `target/cfw-validation/host-local-result.json`；未将这些结果代替 Windows 验收。
+- 第二轮 `84ca5a2` 已让原来失败的 5 项宿主用例全部通过：真实 HTTP、控制器鉴权、
+  正常关闭和端口释放、启动冲突、崩溃、超时/Drop 清理、错误二进制/版本拒绝。
+  新凭据用例在测试对端读取时返回 `WSAEWOULDBLOCK`，随后客户端收到连接重置；
+  原因是测试端 accept 后仍处于非阻塞模式。修订两个测试对端，明确切换为阻塞
+  模式后使用已有读写超时。此项属于夹具修正，完整凭据流仍需下一轮实测确认。
 
 ## 官方资料
 
@@ -411,3 +416,4 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [Windows I/O 取消与完成](https://learn.microsoft.com/en-us/windows/win32/fileio/canceling-pending-i-o-operations)
 - [Go 官方下载元数据](https://go.dev/dl/?mode=json&include=all)
 - [Windows CreateFile 访问权限与共享约束](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+- [Windows accept 继承监听 socket 属性](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept)

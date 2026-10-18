@@ -272,3 +272,26 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, Error> {
     };
     Ok(u32::from_le_bytes([*a, *b, *c, *d]))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_contended_cursor_times_out_and_a_later_scan_restarts_cleanly() {
+        let root = tempfile::tempdir().unwrap();
+        let directory =
+            crate::PrivateDirectory::open_or_create(&root.path().join("private")).unwrap();
+        let reader = directory.read().unwrap();
+        let cursor = directory.inner.enumeration.lock().unwrap();
+        let started = Instant::now();
+        assert!(
+            matches!(reader.entry_names(0), Err(Error::Enumeration { operation: "cursor acquisition", source })
+            if source.kind() == io::ErrorKind::WouldBlock)
+        );
+        assert!(started.elapsed() >= LOCK_WAIT);
+        assert!(started.elapsed() < std::time::Duration::from_secs(6));
+        drop(cursor);
+        assert!(reader.entry_names(0).unwrap().is_empty());
+    }
+}

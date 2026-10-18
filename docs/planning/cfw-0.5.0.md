@@ -30,14 +30,14 @@ prerelease，发布时间为 `2026-10-18T09:12:23Z`，附件为 macOS 产物。
   有 11 个 Swift 文件、3,157 行。这是 GA 源码规模，不是工期估算。
 - `cfw-application`、`cfw-engine-api`、`cfw-singbox-config`、`cfw-controller`
   是共享业务的主要基础；尚不能从代码结构推断它们已在 Windows 测试通过。
-- `cfw-core` 的设置、诊断及旧控制会话，和 `cfw-profiles` 的存储路径使用 Unix
+- GA 中 `cfw-core` 的设置、诊断及旧控制会话，和 `cfw-profiles` 的存储路径使用 Unix
   描述符、权限、文件锁及 `openat`/`renameat`。不能通过删除检查或普通路径拼接移植。
 - `cfw-platform` 实际仍是 macOS 适配器；`cfw-apple-network` 及 Swift 服务依赖
   Apple 的权限、Keychain、XPC 和 Network Extension。
 - `scripts/build_libbox.sh` 通过 `gomobile bind` 生成 Apple/Objective-C 绑定；
   Windows 引擎宿主/绑定也需要实现，不能把共享 Rust 编译通过当成引擎已移植。
 - 宿主 `build.rs` 明确拒绝非 `aarch64-apple-darwin`；现有 CI 的三个 job 均为
-  `xcode-27`。2026-10-18 仓库 runner API 返回 0 台自托管 runner。
+  `xcode-27`（Windows 验证流水线为本次新增）。2026-10-18 仓库 runner API 返回 0 台自托管 runner。
 
 ## 页面和 UI 对照表
 
@@ -139,7 +139,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | --- | --- | --- |
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
-| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 设置、窗口状态和诊断已有 Windows 验证；配置仓库适配已写入，Mac 71 项仓库测试通过，Windows 验证进行中；完整平台适配尚未完成 |
+| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 设置、窗口状态、诊断及配置仓库已在 Windows 通过验证；当前 407 项 Rust/310 项前端测试通过，追加枚举锁超时回归中；完整平台适配尚未完成 |
 | Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 待实现和运行；不得用展示壳代替 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
@@ -239,7 +239,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   仍排队；本轮成功的 Mac 回归是本地固定工具链结果。
 - 新直接依赖复用锁文件已有的 `windows-sys 0.61.2`；注册表包的名称、版本和
   checksum 集合未变化。Mac 依赖策略检查已通过；Windows 完整发布依赖审计仍待建设。
-  本阶段没有实现 Windows 配置仓库、
+  初步存储阶段尚未包含 Windows 配置仓库（后续进展见下节）、
   凭据库、引擎宿主、桌面壳、服务或 TUN，也未作可发布声明。
 
 ### 2026-10-18：Windows 配置仓库
@@ -247,17 +247,32 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - `cfw-profiles` 分离 Mac 与 Windows 文件系统实现；将三处重复的文件所有权/权限
   检查收归存储边界。配置、选中项、替换意图的格式、规范化、大小与摘要校验，以及
   现有恢复事务继续共享。跨凭据准备和配置提交的守卫实际保留 Windows 独占文件锁。
-- Windows 存储补充同一目录对象的独立枚举游标、有界目录记录解析、只读私有文件
+- Windows 存储补充原目录句柄上的受锁保护枚举、有界目录记录解析、只读私有文件
   句柄、拒绝覆盖的原子创建和显式批量清理。清理删除链接本身，不读取外部目标，
   拒绝遍历真实子目录；批量删除后的同步和部分失败仍由仓库事务处理。
 - 共享仓库测试全部保留；Mac 专属 UID/fchmod 用例继续在 Mac 运行，Windows 增加
   实际目录描述符的所有者匹配测试及真实只读目标导致发布失败后的临时文件清理。
   持久锁文件有独立的所有权、私有权限和空内容断言，再从应用记录数量中排除。
   故障 fixture 仍可在持有仓库守卫时模拟外部改写，不通过跳过锁测试适配 Windows。
-- 本地固定工具链的仓库测试通过：23 项单元、48 项集成，失败/忽略/过滤均为 0；
-  仓库和核心 Clippy 通过。新的 Windows 编译和完整文件系统/仓库回归尚待结果；
-  Mac 全工作区回归及本次依赖策略审计正在运行。锁文件仅新增工作区内部依赖边，
-  注册表包版本和校验和集合未改变。
+- 本地固定工具链的仓库测试通过：23 项单元、49 项集成，失败/忽略/过滤均为 0；
+  仓库和核心 Clippy 通过。在 `efd9ebd` 上全工作区/all-targets/all-features Clippy、
+  1,143 项 Rust 测试、主线程集成和依赖审计通过；之后新增的路径回归随 34 项核心
+  测试及 72 项仓库测试另行通过。后续改动的 Mac 产品路径与该整库验证一致。
+  锁文件仅新增工作区内部依赖边，注册表包版本和校验和集合未改变。
+- Windows 实测发现 `ReOpenFile` 拒绝这些目录句柄，原生相对 `.` 打开也不接受该
+  名称；失败都在枚举开始前发生。最终直接保留原目录句柄，对完整游标扫描加有界
+  互斥保护，每次从头枚举。多缓冲区并发读取和目录改名用例保留，未改为路径枚举。
+  同轮反例还确认底层 `open_existing` 会将文件占据祖先的路径当作不存在；现已在
+  返回缺失状态前检查最近的现存祖先。原生用例和仓库快照回归验证错误不会变成空仓库。
+- [Windows 配置仓库验证](https://github.com/billlza/cfw-rs/actions/runs/39138677712)
+  在 `637f76336bf4b547732ee106efcdd31c9a55cab3` 成功：407 项 Rust、310 项前端测试、
+  格式、Clippy 和目录刷盘探针通过，失败/忽略/过滤/跳过均为 0。仓库包含 21 项
+  单元与 49 项集成测试，原生存储包含 1 项所有者检查和 15 项文件系统测试。
+  `--no-fail-fast` 收集独立目标的全部结果，但任何失败仍使命令和 job 失败。
+  完整回执在 `target/cfw-validation/windows-profiles-green-result.json`，日志 SHA-256
+  为 `d1fa976512f1e104b3b07d2af74b7b599fc2ca2029827f44b83e1d44dd309131`。
+  追加的枚举游标超时/释放后恢复用例正在验证。本阶段仍不证明 Windows 应用启动、
+  凭据库、引擎、系统代理、TUN、桌面视觉或发布验收。
 
 ## 官方资料
 

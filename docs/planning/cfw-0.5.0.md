@@ -591,6 +591,14 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   `GXGR`；关闭 BA 后没有给用户正常控制自建对象的权限。夹具仅为新降权令牌设置
   当前用户/SYSTEM 默认 DACL，保留中完整性、禁用管理员组及特权。移除临时调试器与
   IFEO 设置，随后必须用无调试器的同一原生场景确认；加载器原始日志与诊断提交保留。
+- `ac05f02` 的无调试器客户端成功进入 Rust，并确认中完整性/非管理员身份，随后在
+  打开 SYSTEM 服务进程时收到 Access Denied。默认 DACL 修复解决了初始化失败，
+  但服务默认进程权限不足以满足查询/等待退出的客户端契约。新增服务启动侧函数：
+  仅 SYSTEM、session 0 的主身份可为自身进程设置并读回受保护 DACL；普通用户只获
+  limited-query 与 synchronize，不能读内存、终止、修改权限或查询 SYSTEM 令牌。
+  原生夹具在开放管道前使用该产品函数，并逐项检查这些拒绝；UI 端认证条件保持不变。
+  另修正夹具保留句柄只请求 synchronize、却调用 GetExitCodeProcess 的静态权限错误，
+  补上该 API 所需 limited-query；此前尚未执行到正常停止验收，不虚称已观察该错误。
 
 ## 官方资料
 

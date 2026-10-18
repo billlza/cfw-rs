@@ -21,7 +21,9 @@ pub use peer::{NativePeerIdentity, NativePeerProcess, PeerIdentityError};
 #[cfg(windows)]
 mod service_peer;
 #[cfg(windows)]
-pub use service_peer::{LocalServicePipe, ServicePeerError, WindowsServicePeer};
+pub use service_peer::{
+    LocalServicePipe, ServicePeerError, WindowsServicePeer, configure_service_process_observation,
+};
 #[cfg(windows)]
 mod listeners;
 #[cfg(windows)]

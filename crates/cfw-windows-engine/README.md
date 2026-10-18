@@ -114,6 +114,16 @@ and no arguments. The owner must be SYSTEM or Administrators; other principals
 may query, but may not change configuration, start/stop/control the service, or
 rewrite its security. All observations are rechecked before admitting a result.
 
+Before publishing the endpoint, the dedicated SYSTEM service calls
+`configure_service_process_observation`. This replaces only its own process
+DACL, retains SYSTEM/Administrators control and grants authenticated users
+`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`. It verifies the actual owner,
+protected DACL and exact ACE readback. The helper rejects a non-SYSTEM primary
+identity, another session, an AppContainer or restricted identity before mutation.
+It does not grant access to process memory, modification, handle duplication or
+the SYSTEM token. Without these explicit query rights the ordinary UI correctly
+fails admission instead of elevating itself or dropping live-process checks.
+
 Microsoft specifies that [service configuration may describe the next launch](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw),
 so the live image is verified independently. This does not inspect the running
 service token: the trusted service must check its own SYSTEM identity before
@@ -126,7 +136,11 @@ The `native-service-fixture` example installs two uniquely named disposable
 SYSTEM services only with `CFW_NATIVE_SERVICE_MUTATION_TESTS=1`. It checks actual
 SCM/pipe/image identity, another SYSTEM peer, ACL/configuration changes, a
 byte-identical replacement file, missing/stopped services and a medium-integrity
-client with Administrators disabled and `DISABLE_MAX_PRIVILEGE` applied. The
+client with Administrators disabled and `DISABLE_MAX_PRIVILEGE` applied. Only the
+new token's default DACL grants its user/SYSTEM control of its new objects; the
+runner's elevated default DACL would otherwise depend on the disabled group.
+The client also requires access denied for service memory/mutation rights and
+SYSTEM-token queries. The
 client uses a temporary user/SYSTEM-only window station and desktop at medium
 integrity; the controller restores its prior selections before launch. Existing
 user-object ACLs are not modified. This is not desktop UI qualification.
@@ -221,5 +235,5 @@ or version rejection. The credential test uses the real DPAPI store and engine
 to authenticate a SOCKS outbound and return HTTP data. Its peer binds the
 runner's own private IPv4 interface because validated remote proxy endpoints
 reject loopback IPs. It sends no traffic to an external proxy and does not relax
-endpoint validation. These checks do not establish TUN, system proxy recovery,
+endpoint validation. These checks do not establish TUN, global service recovery,
 interactive UI, sleep/wake, installation/update, signing or release acceptance.

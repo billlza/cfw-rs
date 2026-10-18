@@ -1,5 +1,6 @@
 use cfw_windows_engine::{
     LocalServicePipe, NativePeerProcess, ServicePeerError, VerifiedExecutable, WindowsServicePeer,
+    configure_service_process_observation,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -216,6 +217,7 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<ServiceCompleti
     if !identity.identity().is_local_system() || identity.identity().session_id() != 0 {
         return Err("fixture service is not SYSTEM in session zero".into());
     }
+    configure_service_process_observation().map_err(|e| e.to_string())?;
     let handle =
         unsafe { RegisterServiceCtrlHandlerExW(wide(&name).as_ptr(), Some(control), null()) };
     if handle.is_null() {
@@ -426,7 +428,13 @@ impl Installed {
             return Err(error("start disposable service"));
         }
         result.wait(SERVICE_RUNNING)?;
-        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, result.query()?.dwProcessId) };
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                result.query()?.dwProcessId,
+            )
+        };
         if process.is_null() {
             return Err(error("retain disposable service process"));
         }

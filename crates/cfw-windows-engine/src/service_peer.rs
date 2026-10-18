@@ -44,6 +44,9 @@ use windows_sys::Win32::{
 
 use crate::VerifiedExecutable;
 
+mod observation;
+pub use observation::configure_service_process_observation;
+
 const MAX_CONFIG_BYTES: usize = 8192;
 const MAX_IMAGE_UNITS: usize = 32768;
 
@@ -57,6 +60,14 @@ pub enum ServicePeerError {
     },
     #[error("Windows service installation expectation is invalid")]
     InvalidExpectation,
+    #[error(
+        "Windows service observation setup requires the SYSTEM primary identity in session zero"
+    )]
+    InvalidServiceProcessIdentity,
+    #[error("Windows service process observation permissions did not match after setup")]
+    ObservationSecurityMismatch,
+    #[error("Windows service primary identity: {0}")]
+    ServiceIdentity(#[from] crate::PeerIdentityError),
     #[error("Windows service configuration does not match the installation")]
     ConfigurationMismatch,
     #[error("Windows service can be controlled or reconfigured by an untrusted principal")]

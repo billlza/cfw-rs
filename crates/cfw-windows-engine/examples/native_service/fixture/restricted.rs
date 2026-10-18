@@ -241,6 +241,7 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
         || report["success"] != true
         || report["medium_integrity"] != true
         || report["administrator_member"] != false
+        || report["query_only_service_process"] != true
     {
         return Err(format!(
             "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
@@ -261,7 +262,7 @@ pub(super) fn client(name: &str, hex: &str) -> Result<()> {
     let result = client_body(name, hex, &image);
     let report = match &result {
         Ok(()) => {
-            serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false})
+            serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true})
         }
         Err(e) => serde_json::json!({"success":false,"error":e}),
     };
@@ -321,8 +322,50 @@ fn client_body(name: &str, hex: &str, image: &Path) -> Result<()> {
         let mut pipe = connect(name).await?;
         let peer = WindowsServicePeer::from_pipe_server(name, verified(image, expected)?, &pipe)
             .map_err(|e| e.to_string())?;
+        verify_query_only_service_access(peer.process_id())?;
         ping(&mut pipe).await?;
         peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
         finish(&mut pipe).await
     })
+}
+
+fn verify_query_only_service_access(pid: u32) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{WRITE_DAC, WRITE_OWNER};
+    for access in [
+        PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
+        PROCESS_VM_OPERATION,
+        PROCESS_DUP_HANDLE,
+        PROCESS_CREATE_THREAD,
+        PROCESS_TERMINATE,
+        PROCESS_SET_INFORMATION,
+        PROCESS_SUSPEND_RESUME,
+        WRITE_DAC,
+        WRITE_OWNER,
+    ] {
+        let handle = unsafe { OpenProcess(access, 0, pid) };
+        if !handle.is_null() {
+            drop(unsafe { OwnedHandle::from_raw_handle(handle) });
+            return Err(format!(
+                "unprivileged client obtained service mutation/memory access {access:#x}"
+            ));
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+            return Err(error("unexpected service process access rejection"));
+        }
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(error("open read-only fixture service process"));
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut token) } != 0 {
+        drop(unsafe { OwnedHandle::from_raw_handle(token) });
+        return Err("unprivileged client obtained SYSTEM token access".into());
+    }
+    if io::Error::last_os_error().raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+        return Err(error("unexpected service token access rejection"));
+    }
+    Ok(())
 }

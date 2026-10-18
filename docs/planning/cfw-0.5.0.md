@@ -557,6 +557,11 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - `93cdc1a` 的独立服务 job 观察到类型 `0x10`、状态 `SERVICE_STOPPED`、PID 0、标志 0。
   此时拒绝符合契约；仍需解释夹具服务为何提前退出。服务回调增加有界的原始错误记录，
   父进程在清理后保留这些记录及客户端报告，测试日志标明实际执行阶段。认证条件不改。
+- `68c0938` 已完成首次 SCM/映像/管道认证及另一个 SYSTEM 对端的拒绝，随后首次服务
+  已停止。保存的服务失败文件为空；检查发现夹具在发布 `SERVICE_STOPPED` 后才写入
+  失败记录，违反微软要求终止状态之前完成全部工作的契约。现前置记录、刷盘和运行时
+  清理，并要求正常停止前仍为 Running、停止后 SCM 与进程退出码均为零；底层 I/O
+  失败原因仍待新的原生日志，不改认证拒绝条件。
 
 ## 官方资料
 
@@ -595,3 +600,4 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [SCM 服务状态与 PID 有效范围](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex)
 - [SCM 配置与下次启动](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw)
 - [实际进程映像查询](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)
+- [服务终止状态之前完成清理](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-setservicestatus)

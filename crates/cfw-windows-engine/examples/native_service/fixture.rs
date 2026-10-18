@@ -35,6 +35,11 @@ const SERVICE_ACL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORC;;;AU)";
 static STOP: AtomicBool = AtomicBool::new(false);
 static SERVICE_EXIT: AtomicU32 = AtomicU32::new(0);
 
+enum ServiceCompletion {
+    Clean,
+    Failed,
+}
+
 fn error(operation: &str) -> String {
     format!("{operation}: {}", io::Error::last_os_error())
 }
@@ -141,7 +146,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut *mut u16) {
     // Never unwind across the SCM callback ABI.
     let result = std::panic::catch_unwind(|| unsafe { service_body(argc, argv) });
     let failure = match result {
-        Ok(Ok(())) => None,
+        // The completed callback has already persisted its outcome before
+        // publishing SERVICE_STOPPED. No work is safe after that publication.
+        Ok(Ok(ServiceCompletion::Clean | ServiceCompletion::Failed)) => None,
         Ok(Err(error)) => Some(error),
         Err(payload) => Some(if let Some(text) = payload.downcast_ref::<String>() {
             text.clone()
@@ -184,7 +191,7 @@ fn record_service_failure(error: &str) -> Result<()> {
     output.sync_all().map_err(|e| e.to_string())
 }
 
-unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<()> {
+unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<ServiceCompletion> {
     if argc != 1 || argv.is_null() {
         return Err("invalid SCM fixture invocation".into());
     }
@@ -261,16 +268,27 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<()> {
         status(handle, SERVICE_STOP_PENDING, 0)?;
         Ok(())
     });
+    // SCM may terminate the process as soon as SERVICE_STOPPED is published.
+    // Finish I/O, teardown and failure recording before that terminal report.
+    drop(runtime);
+    drop(identity);
+    let completion = match result {
+        Ok(()) => ServiceCompletion::Clean,
+        Err(error) => {
+            record_service_failure(&error)?;
+            SERVICE_EXIT.store(1, Ordering::SeqCst);
+            ServiceCompletion::Failed
+        }
+    };
     status(
         handle,
         SERVICE_STOPPED,
-        if result.is_ok() {
-            0
-        } else {
-            ERROR_SERVICE_SPECIFIC_ERROR
+        match completion {
+            ServiceCompletion::Clean => 0,
+            ServiceCompletion::Failed => ERROR_SERVICE_SPECIFIC_ERROR,
         },
     )?;
-    result
+    Ok(completion)
 }
 
 fn status(handle: SERVICE_STATUS_HANDLE, state: u32, exit: u32) -> Result<()> {
@@ -491,6 +509,28 @@ impl Installed {
         }
         Ok(())
     }
+    fn normal_stop(&self) -> Result<()> {
+        if self.query()?.dwCurrentState != SERVICE_RUNNING {
+            return Err("fixture service exited before its requested stop".into());
+        }
+        self.stop()?;
+        let status = self.query()?;
+        let process = self
+            .process
+            .as_ref()
+            .ok_or("missing service process identity")?;
+        let mut exit = u32::MAX;
+        if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
+            return Err(error("read stopped fixture process exit"));
+        }
+        if status.dwWin32ExitCode != 0 || status.dwServiceSpecificExitCode != 0 || exit != 0 {
+            return Err(format!(
+                "fixture service failed during stop: win32={}, service={}, process={exit}",
+                status.dwWin32ExitCode, status.dwServiceSpecificExitCode
+            ));
+        }
+        Ok(())
+    }
     fn remove(&mut self) -> Result<()> {
         self.stop()?;
         if unsafe { DeleteService(self.handle.0) } == 0 {
@@ -647,7 +687,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
         println!("service fixture stage: unprivileged_client_admitted");
         restricted::run(&image, &first.name, expected)?;
         println!("service fixture stage: stopped_service_is_not_authority");
-        first.stop()?;
+        first.normal_stop()?;
         runtime()?.block_on(async {
             let mut pipe = connect(&second.name).await?;
             assert!(matches!(
@@ -664,6 +704,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             ping(&mut pipe).await?;
             finish(&mut pipe).await
         })?;
+        second.normal_stop()?;
         Ok(())
     }));
     let restored_first = first.remove();

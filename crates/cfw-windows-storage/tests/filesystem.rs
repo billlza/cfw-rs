@@ -7,6 +7,40 @@ use std::time::{Duration, Instant};
 use cfw_windows_storage::{EntryKind, Error, PrivateDirectory, Publication, ReadPolicy};
 
 #[test]
+fn queued_waiters_make_progress_during_repeated_lock_reacquisition() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory =
+        Arc::new(PrivateDirectory::open_or_create(&temporary.path().join("private")).unwrap());
+    let held = directory.write().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader_directory = Arc::clone(&directory);
+    let reader = std::thread::spawn(move || {
+        send.send(()).unwrap();
+        let _read = reader_directory
+            .read()
+            .expect("reader must acquire during writer activity");
+        send.send(()).unwrap();
+    });
+    receive.recv().unwrap();
+    // Hold the writer long enough for the competing read to enter its wait.
+    std::thread::sleep(Duration::from_millis(100));
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        let _write = directory.write().unwrap();
+        if receive.try_recv().is_ok() {
+            reader.join().unwrap();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    reader.join().unwrap();
+    receive
+        .recv()
+        .expect("reader reported successful acquisition");
+}
+
+#[test]
 fn replacement_is_bounded_private_and_changes_the_file_identity() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("private");

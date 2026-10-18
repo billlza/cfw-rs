@@ -6,9 +6,10 @@
 #![cfg(windows)]
 
 mod entries;
+mod locking;
 mod security;
 
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::mem::{offset_of, size_of};
 use std::os::windows::fs::OpenOptionsExt;
@@ -16,7 +17,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -38,7 +39,6 @@ use security::Security;
 
 const LOCK_NAME: &str = ".cfw-storage-lock-v1";
 const LOCK_WAIT: Duration = Duration::from_secs(3);
-const LOCK_POLL: Duration = Duration::from_millis(10);
 const MAX_LEAF_UNITS: usize = 255;
 
 #[derive(Debug, Error)]
@@ -253,29 +253,10 @@ impl PrivateDirectory {
             Some(&self.inner.security),
         )?;
         verify_file(&self.inner, &file, 0, ReadPolicy::Private)?;
-        let deadline = Instant::now() + LOCK_WAIT;
-        loop {
-            let result = if exclusive {
-                file.try_lock()
-            } else {
-                file.try_lock_shared()
-            };
-            match result {
-                Ok(()) => {
-                    return Ok(ReadTransaction {
-                        inner: Arc::clone(&self.inner),
-                        _lock: file,
-                    });
-                }
-                Err(TryLockError::Error(error)) => return Err(error.into()),
-                Err(TryLockError::WouldBlock) => {}
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Error::Busy);
-            }
-            std::thread::sleep(LOCK_POLL.min(deadline.saturating_duration_since(now)));
-        }
+        Ok(ReadTransaction {
+            inner: Arc::clone(&self.inner),
+            _lock: locking::acquire(file, exclusive)?,
+        })
     }
 }
 
@@ -645,8 +626,14 @@ fn open_relative_units(
     if directory == Some(true) {
         rights |= FILE_TRAVERSE;
     }
-    let options = FILE_SYNCHRONOUS_IO_NONALERT
-        | FILE_OPEN_REPARSE_POINT
+    // Lock requests must be asynchronous so Windows can retain the waiter
+    // between releases and we can cancel it at the existing deadline. Data and
+    // directory operations retain their synchronous handle contract.
+    let options = if matches!(access, Access::Lock) {
+        0
+    } else {
+        FILE_SYNCHRONOUS_IO_NONALERT
+    } | FILE_OPEN_REPARSE_POINT
         | match directory {
             Some(true) => FILE_DIRECTORY_FILE,
             Some(false) => FILE_NON_DIRECTORY_FILE,
@@ -691,8 +678,8 @@ fn open_relative_units(
 }
 
 fn nt_result(status: i32) -> Result<(), Error> {
-    // NT_SUCCESS includes nonnegative informational results. All handles are
-    // synchronous, so the caller owns a completed operation before returning.
+    // NT_SUCCESS includes nonnegative informational results. Callers pass
+    // completed native operations; asynchronous lock completion is separate.
     if status >= 0 {
         return Ok(());
     }

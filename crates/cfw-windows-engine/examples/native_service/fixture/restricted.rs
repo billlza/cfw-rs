@@ -118,16 +118,44 @@ fn token() -> Result<OwnedHandle> {
     {
         return Err(error("set fixture token medium integrity"));
     }
+    // The hosted runner's elevated default DACL grants full access to BA/SY
+    // and only read/execute to its logon SID. After disabling BA that no longer
+    // gives the child normal control of objects it creates during startup.
+    // Change only this new token's defaults, not existing objects or the parent.
+    let user = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
+    let descriptor = Descriptor::new(&format!(
+        "D:P(A;;GA;;;{})(A;;GA;;;SY)",
+        user.identity().user_sid()
+    ))?;
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl = null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) }
+        == 0
+    {
+        return Err(error("read fixture user default DACL"));
+    }
+    if present == 0 || defaulted != 0 || dacl.is_null() {
+        return Err("invalid fixture user default DACL".into());
+    }
+    let defaults = TOKEN_DEFAULT_DACL { DefaultDacl: dacl };
+    if unsafe {
+        SetTokenInformation(
+            token.as_raw_handle(),
+            TokenDefaultDacl,
+            (&defaults as *const TOKEN_DEFAULT_DACL).cast(),
+            size_of::<TOKEN_DEFAULT_DACL>() as u32,
+        )
+    } == 0
+    {
+        return Err(error("set fixture user default DACL"));
+    }
     Ok(token)
 }
 
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     let token = token()?;
     let mut desktop = desktop::Desktop::new()?;
-    let trace_loader = std::env::var("CFW_NATIVE_SERVICE_LOADER_TRACE").as_deref() == Ok("1");
-    if trace_loader {
-        loader::token_default_dacl(&token)?;
-    }
     let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
     let mut command = wide(&format!("\"{}\" --client {name} {hex}", image.display()));
     let parent = image.parent().ok_or("missing fixture image parent")?;
@@ -168,13 +196,7 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
             null(),
             null(),
             1,
-            CREATE_NO_WINDOW
-                | EXTENDED_STARTUPINFO_PRESENT
-                | if trace_loader {
-                    DEBUG_ONLY_THIS_PROCESS
-                } else {
-                    0
-                },
+            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
             null(),
             null(),
             &startup.StartupInfo,
@@ -186,13 +208,6 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     }
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
-    if trace_loader {
-        let exit = loader::trace(&process, info.dwProcessId)?;
-        // This isolated diagnostic is never evidence of normal client admission.
-        return Err(format!(
-            "diagnostic-only loader trace completed: exit={exit:#x}"
-        ));
-    }
     let waited = cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?;
     if waited != cfw_windows_storage::WaitOutcome::Signaled {

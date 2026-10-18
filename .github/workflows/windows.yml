@@ -149,19 +149,8 @@ jobs:
           # product adapter requests read-only SCM/process access.
           $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
           $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
-          # Temporary loader investigation applies only to this fixture image.
-          # The diagnostic path always fails, even if its debuggee exits zero.
-          $loaderKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\service-fixture.exe'
-          if (Test-Path $loaderKey) { throw 'Fixture loader key already exists' }
-          New-Item -Path $loaderKey -ErrorAction Stop | Out-Null
-          try {
-            New-ItemProperty -Path $loaderKey -Name GlobalFlag -PropertyType String -Value '0x2' -ErrorAction Stop | Out-Null
-            $env:CFW_NATIVE_SERVICE_LOADER_TRACE = '1'
-            cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'service-peer-tests.txt')
-            if ($LASTEXITCODE -ne 0) { throw "Native SCM service-peer authentication failed" }
-          } finally {
-            Remove-Item -LiteralPath $loaderKey -Recurse -ErrorAction Stop
-          }
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'service-peer-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM service-peer authentication failed" }
       - name: Upload verified service peer validation
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

@@ -1,9 +1,10 @@
 # Windows private application storage
 
 This crate is the Windows filesystem boundary used by `cfw-core` for settings,
-window state, diagnostic journals and reference-bound legacy settings migration.
-It does not implement the profile repository, a credential vault, a network
-service or a Windows application shell.
+window state, diagnostics and migration, and by `cfw-profiles` for profile files,
+selection journals and repository transactions. Profile schemas, credential
+references and recovery policy stay in `cfw-profiles`. This crate does not
+implement a credential vault, network service or Windows application shell.
 
 Directories capture the effective Windows token identity when opened. A thread
 token is used when present; only `ERROR_NO_TOKEN` permits using the process token.
@@ -27,6 +28,12 @@ file. Every transaction opens its own handle without delete sharing and uses the
 OS shared/exclusive lock. Only contention is retried, at most three seconds;
 other errors remain errors. A transaction retains its lock until dropped.
 
+Directory enumeration reopens the same object with `ReOpenFile` and uses a
+bounded `NtQueryDirectoryFile` buffer. Each enumeration has its own cursor,
+including concurrent readers. It validates record lengths and offsets, rejects
+incomplete results, enforces the caller's entry limit and excludes only the
+already-validated storage lock. It never resolves a handle back into a pathname.
+
 Application record names are single leaves of at most 250 UTF-16 code units.
 The `.cfw-` prefix and dot-prefixed names ending in `.tmp` are reserved for
 internal state and rejected by all public record operations, including case
@@ -41,6 +48,15 @@ after publication is `CommitUncertain`, not an assertion that
 the old value remains. Pre-publication cleanup failures retain both errors.
 The file snapshot identity covers the volume, the complete 128-bit file ID and
 the bytes; equal bytes in a replacement file still invalidate a stale revision.
+
+Repositories can publish with their canonical UUID temporary names, retaining
+their existing crash-recovery rules. `Publication::CreateNew` refuses to replace
+an existing destination in the native rename operation. Opened private files
+remain read-only handles; the decoder owns its format and read-size bounds.
+Explicit managed cleanup can unlink a file, hard link or reparse point without
+reading its contents or following its target. It refuses real subdirectories
+and the active lock. This batch operation requires the caller to track partial
+removal and call `sync_directory`; ordinary record removal still flushes itself.
 
 The Windows CI uses real temporary files and OS locks. Tests cover malformed
 names, namespace redirection, symlinks, hard links, broadened ACLs, bounded reads,
@@ -59,4 +75,6 @@ API references:
 - [NtCreateFile and directory-relative names](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)
 - [Handle-relative rename](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
 - [File and directory flush](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+- [Independent handle reopening](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile)
+- [Handle-relative directory enumeration](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile)
 - [Security information from an opened handle](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)

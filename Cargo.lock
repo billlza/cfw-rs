@@ -570,6 +570,7 @@ name = "cfw-profiles"
 version = "0.5.0"
 dependencies = [
  "cfw-singbox-config",
+ "cfw-windows-storage",
  "libc",
  "serde",
  "serde_json",

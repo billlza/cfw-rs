@@ -1,5 +1,8 @@
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file as symlink;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -114,9 +117,78 @@ const EARLIER_REALITY_DIGEST: &str =
 const EARLIER_REALITY_ENVELOPE: &str = r#"{"schema_version":1,"id":"3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d","name":"Reality node","profile":{"outbounds":[{"credential_ref":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","kind":"vless_uuid"},"flow":"xtls-rprx-vision","server":"vless.example.com","server_port":443,"tag":"proxy","tls":{"enabled":true,"reality":{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"},"server_name":"www.example.com"},"type":"vless"}],"route":{"final":"proxy"}},"digest":"0a212f0622cc414ed98a9a138233c8b6224b7625fc6e7d6f9ab1db756d5bc5fa","created_epoch_secs":1791415969,"source_url":"https://subscription.example/profile?token=private-test-value"}"#;
 const EARLIER_REALITY_SELECTION: &str = r#"{"schema_version":1,"profile_id":"3b9d6c2e-4f1a-4e8b-9c7d-2a5f8e1b0c4d","profile_digest":"0a212f0622cc414ed98a9a138233c8b6224b7625fc6e7d6f9ab1db756d5bc5fa"}"#;
 
-fn write_private(path: &std::path::Path, bytes: &[u8]) {
-    fs::write(path, bytes).expect("write repository entry");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("set private entry mode");
+#[path = "support/private_file.rs"]
+mod private_file_fixture;
+use private_file_fixture::write_private;
+
+fn create_private_directory(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        fs::create_dir_all(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    cfw_windows_storage::PrivateDirectory::open_or_create(path).unwrap();
+}
+
+fn assert_private_file(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let metadata = fs::metadata(path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.nlink(), 1);
+    }
+    #[cfg(windows)]
+    cfw_windows_storage::validate_private_file(&fs::File::open(path).unwrap()).unwrap();
+}
+
+fn assert_private_directory(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let metadata = fs::metadata(path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+    }
+    #[cfg(windows)]
+    assert!(
+        cfw_windows_storage::PrivateDirectory::open_existing(path)
+            .unwrap()
+            .is_some()
+    );
+}
+
+fn weaken_file_privacy(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    #[cfg(windows)]
+    {
+        let grant = std::process::Command::new("icacls.exe")
+            .arg(path)
+            .args(["/grant", "*S-1-1-0:(R)"])
+            .output()
+            .unwrap();
+        assert!(grant.status.success(), "weaken fixture DACL");
+    }
+}
+
+fn application_entries(path: &std::path::Path) -> Vec<fs::DirEntry> {
+    let entries = fs::read_dir(path)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    #[cfg(windows)]
+    {
+        let lock = path.join(".cfw-storage-lock-v1");
+        assert_private_file(&lock);
+        assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
+        entries
+            .into_iter()
+            .filter(|entry| entry.file_name() != ".cfw-storage-lock-v1")
+            .collect()
+    }
+    #[cfg(target_os = "macos")]
+    entries
 }
 
 /// Places the earlier envelope in an existing repository, optionally with
@@ -626,7 +698,7 @@ fn damaged_invalid_profiles_still_fail_closed_and_are_never_deleted() {
             .expect("import other profile");
         let path = store_earlier_reality_profile(&root, false);
         if case == "mode" {
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("weaken mode");
+            weaken_file_privacy(&path);
         } else {
             fs::hard_link(&path, root.join("external-link.json")).expect("hard link");
         }
@@ -725,38 +797,10 @@ fn import_list_load_and_delete_round_trip_is_private_and_atomic() {
     assert_eq!(imported.name, "Work profile");
 
     let profiles_dir = root.join("profiles");
-    assert_eq!(
-        fs::metadata(&profiles_dir)
-            .expect("directory metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o700
-    );
-    assert_eq!(
-        fs::metadata(&profiles_dir)
-            .expect("directory metadata")
-            .uid(),
-        unsafe { libc::geteuid() }
-    );
-    let entries = fs::read_dir(&profiles_dir)
-        .expect("read profiles")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("profile entries");
+    assert_private_directory(&profiles_dir);
+    let entries = application_entries(&profiles_dir);
     assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries[0]
-            .metadata()
-            .expect("file metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    assert_eq!(
-        entries[0].metadata().expect("file metadata").uid(),
-        unsafe { libc::geteuid() }
-    );
+    assert_private_file(&entries[0].path());
     assert!(!entries[0].file_name().to_string_lossy().contains(".tmp"));
 
     let records = listed(&repository).expect("list profiles");
@@ -1050,13 +1094,10 @@ fn digest_tampering_is_reported_instead_of_skipped() {
 fn oversized_stored_file_is_rejected_before_deserialization() {
     let (root, repository) = repository("oversized");
     let profiles_dir = root.join("profiles");
-    fs::create_dir_all(&profiles_dir).expect("create directory");
-    fs::set_permissions(&profiles_dir, fs::Permissions::from_mode(0o700))
-        .expect("set directory permissions");
+    create_private_directory(&profiles_dir);
     let id = Uuid::new_v4().hyphenated().to_string();
     let path = stored_path(&root, &id);
-    fs::write(&path, vec![b' '; MAX_STORED_BYTES + 1]).expect("write oversized file");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("set file permissions");
+    write_private(&path, &vec![b' '; MAX_STORED_BYTES + 1]);
 
     assert!(matches!(
         listed(&repository),
@@ -1087,9 +1128,7 @@ fn traversal_and_noncanonical_ids_are_rejected() {
 #[test]
 fn symlink_profile_is_rejected_without_reading_target() {
     let (root, repository) = repository("symlink");
-    fs::create_dir_all(root.join("profiles")).expect("create profiles directory");
-    fs::set_permissions(root.join("profiles"), fs::Permissions::from_mode(0o700))
-        .expect("set directory mode");
+    create_private_directory(&root.join("profiles"));
     let outside = root.join("outside.json");
     fs::write(&outside, b"secret").expect("write outside file");
     let id = Uuid::new_v4().hyphenated().to_string();
@@ -1140,7 +1179,7 @@ fn one_way_cleanup_unlinks_symlinks_without_touching_targets() {
 #[test]
 fn malformed_or_unexpected_entries_are_not_silently_skipped() {
     let (root, repository) = repository("unexpected");
-    fs::create_dir_all(root.join("profiles")).expect("create directory");
+    create_private_directory(&root.join("profiles"));
     fs::write(root.join("profiles").join("legacy.yaml"), b"proxies: []")
         .expect("write legacy entry");
     assert!(matches!(
@@ -1189,9 +1228,7 @@ fn abandoned_import_and_selection_temporaries_are_recovered_under_the_lock() {
     let import_temporary = profiles_dir.join(format!(".{}.tmp", Uuid::new_v4().hyphenated()));
     let selection_temporary = profiles_dir.join(format!(".{}.tmp", Uuid::new_v4().hyphenated()));
     for path in [&import_temporary, &selection_temporary] {
-        fs::write(path, b"interrupted private transaction").expect("write abandoned temporary");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .expect("private temporary mode");
+        write_private(path, b"interrupted private transaction");
     }
 
     assert_eq!(
@@ -1235,9 +1272,7 @@ fn selection_round_trip_is_private_digest_bound_and_blocks_selected_deletion() {
 
     let selected = repository.select(&imported.id).expect("select profile");
     assert_eq!(selected.id, imported.id);
-    let selection_metadata = fs::metadata(selection_path(&root)).expect("selection metadata");
-    assert_eq!(selection_metadata.permissions().mode() & 0o777, 0o600);
-    assert_eq!(selection_metadata.uid(), unsafe { libc::geteuid() });
+    assert_private_file(&selection_path(&root));
 
     let snapshot = repository.snapshot().expect("repository snapshot");
     assert_eq!(
@@ -1485,10 +1520,7 @@ fn replace_keeps_identity_credentials_and_rebinds_the_selection_digest() {
     );
 
     // Only one entry plus the selection exists: replacing never adds a profile.
-    let entries = fs::read_dir(root.join("profiles"))
-        .expect("read profiles")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("entries");
+    let entries = application_entries(&root.join("profiles"));
     assert_eq!(entries.len(), 2);
 
     assert!(matches!(
@@ -2050,9 +2082,7 @@ fn selecting_a_valid_profile_repairs_a_stale_selection_of_an_invalid_one() {
 fn a_repository_holding_only_a_selected_invalid_profile_admits_its_replacement() {
     const URL: &str = "https://subscription.example/profile?token=private-test-value";
     let (root, repository) = repository("earlier-only");
-    fs::create_dir_all(root.join("profiles")).expect("create repository");
-    fs::set_permissions(root.join("profiles"), fs::Permissions::from_mode(0o700))
-        .expect("private repository");
+    create_private_directory(&root.join("profiles"));
     store_earlier_reality_profile(&root, true);
 
     let snapshot = repository.snapshot().expect("snapshot");

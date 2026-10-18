@@ -5,6 +5,7 @@
 //! file access and renames remain relative to that same opened directory.
 #![cfg(windows)]
 
+mod entries;
 mod security;
 
 use std::fs::{File, OpenOptions, TryLockError};
@@ -48,6 +49,10 @@ pub enum Error {
     InvalidName,
     #[error("private storage read limit is invalid")]
     InvalidLimit,
+    #[error("private storage directory exceeds its {maximum}-entry limit")]
+    TooManyEntries { maximum: usize },
+    #[error("private storage directory enumeration returned invalid or incomplete data")]
+    InvalidDirectoryListing,
     #[error("private storage security descriptor is invalid")]
     InvalidSecurityDescriptor,
     #[error(
@@ -58,6 +63,8 @@ pub enum Error {
         "private storage entry is redirected, linked, has another owner, or grants unsafe access"
     )]
     UnsafeFile,
+    #[error("managed storage cleanup refuses to traverse or remove a directory")]
+    UnexpectedDirectory,
     #[error("private storage remained busy for 3 seconds")]
     Busy,
     #[error("private storage file exceeds its limit: {actual} bytes exceeds {maximum}")]
@@ -77,6 +84,19 @@ pub enum Error {
 pub enum ReadPolicy {
     Private,
     LegacyReadOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Publication {
+    CreateNew,
+    Replace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Directory,
+    ReparsePoint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +139,8 @@ enum Access {
     Write,
     Delete,
     Lock,
+    Inspect,
+    RemoveNode,
 }
 
 pub struct PrivateDirectory {
@@ -237,6 +259,22 @@ impl PrivateDirectory {
 }
 
 impl ReadTransaction {
+    /// Opens a private regular record without reading its bytes. The consumer
+    /// must impose its own read bound; the returned handle cannot write data.
+    pub fn open_private_file(&self, name: &str) -> Result<File, Error> {
+        record_name(name)?;
+        self.open_private_entry(name)
+    }
+
+    fn open_private_entry(&self, name: &str) -> Result<File, Error> {
+        let file = open_relative(&self.inner.file, name, FILE_OPEN, false, Access::Read, None)?;
+        verify_kind(&file, false)?;
+        self.inner
+            .security
+            .verify(&file, ReadPolicy::Private, false)?;
+        Ok(file)
+    }
+
     pub fn read(
         &self,
         name: &str,
@@ -299,6 +337,16 @@ impl ReadTransaction {
 }
 
 impl WriteTransaction {
+    pub fn open_private_file(&self, name: &str) -> Result<File, Error> {
+        self.read.open_private_file(name)
+    }
+
+    /// Validates an abandoned temporary without reading potentially large data.
+    pub fn validate_temporary(&self, name: &str) -> Result<(), Error> {
+        temporary_name(name)?;
+        self.read.open_private_entry(name).map(drop)
+    }
+
     pub fn read(
         &self,
         name: &str,
@@ -325,9 +373,34 @@ impl WriteTransaction {
         {
             self.remove_entry(&temporary, maximum, ReadPolicy::Private)?;
         }
+        self.publish_with_temporary(name, &temporary, bytes, maximum, Publication::Replace)
+    }
+
+    /// Publishes through a caller-selected, exclusive private temporary. It is
+    /// never reused or removed if it already exists. This supports repositories
+    /// whose crash journal owns canonical random temporary names.
+    pub fn publish_with_temporary(
+        &mut self,
+        name: &str,
+        temporary: &str,
+        bytes: &[u8],
+        maximum: usize,
+        publication: Publication,
+    ) -> Result<(), Error> {
+        record_name(name)?;
+        temporary_name(temporary)?;
+        if bytes.len() > maximum {
+            return Err(Error::TooLarge {
+                actual: bytes.len() as u64,
+                maximum,
+            });
+        }
+        if publication == Publication::Replace {
+            self.read(name, maximum, ReadPolicy::Private)?;
+        }
         let mut file = open_relative(
             &self.read.inner.file,
-            &temporary,
+            temporary,
             FILE_CREATE,
             false,
             Access::Write,
@@ -337,7 +410,7 @@ impl WriteTransaction {
             verify_file(&self.read.inner, &file, maximum, ReadPolicy::Private)?;
             file.write_all(bytes)?;
             file.sync_all()?;
-            rename(&self.read.inner.file, &file, name)?;
+            rename(&self.read.inner.file, &file, name, publication)?;
             Ok(())
         })();
         match prepared {
@@ -393,6 +466,13 @@ impl WriteTransaction {
             .sync_all()
             .map_err(Error::CommitUncertain)
     }
+}
+
+/// Validates an already-opened codec input against the current effective user.
+/// The caller still owns bounded reading and its format/integrity checks.
+pub fn validate_private_file(file: &File) -> Result<(), Error> {
+    verify_kind(file, false)?;
+    Security::current()?.verify(file, ReadPolicy::Private, false)
 }
 
 fn validate_path(path: &Path) -> Result<(), Error> {
@@ -451,6 +531,18 @@ fn record_name(name: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn temporary_name(name: &str) -> Result<(), Error> {
+    leaf(name)?;
+    if !name.starts_with('.')
+        || !name
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("tmp"))
+    {
+        return Err(Error::InvalidName);
+    }
+    Ok(())
+}
+
 fn open_relative(
     parent: &File,
     name: &str,
@@ -460,6 +552,24 @@ fn open_relative(
     security: Option<&Security>,
 ) -> Result<File, Error> {
     let encoded = leaf(name)?;
+    open_relative_units(
+        parent,
+        &encoded,
+        disposition,
+        Some(directory),
+        access,
+        security,
+    )
+}
+
+fn open_relative_units(
+    parent: &File,
+    encoded: &[u16],
+    disposition: u32,
+    directory: Option<bool>,
+    access: Access,
+    security: Option<&Security>,
+) -> Result<File, Error> {
     let name = UNICODE_STRING {
         Length: (encoded.len() * 2) as u16,
         MaximumLength: (encoded.len() * 2) as u16,
@@ -469,7 +579,14 @@ fn open_relative(
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: parent.as_raw_handle(),
         ObjectName: &name,
-        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        // Metadata/deletion opens deliberately retain the reparse point itself.
+        // They still have one validated leaf and FILE_OPEN_REPARSE_POINT.
+        Attributes: OBJ_CASE_INSENSITIVE
+            | if directory.is_some() {
+                OBJ_DONT_REPARSE
+            } else {
+                0
+            },
         SecurityDescriptor: security.map_or(null(), Security::descriptor),
         SecurityQualityOfService: null(),
     };
@@ -478,16 +595,18 @@ fn open_relative(
         Access::Write => (FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE, true),
         Access::Delete => (FILE_GENERIC_READ | DELETE, true),
         Access::Lock => (FILE_GENERIC_READ | FILE_GENERIC_WRITE, false),
+        Access::Inspect => (FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, true),
+        Access::RemoveNode => (FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE, true),
     };
-    if directory {
+    if directory == Some(true) {
         rights |= FILE_TRAVERSE;
     }
     let options = FILE_SYNCHRONOUS_IO_NONALERT
         | FILE_OPEN_REPARSE_POINT
-        | if directory {
-            FILE_DIRECTORY_FILE
-        } else {
-            FILE_NON_DIRECTORY_FILE
+        | match directory {
+            Some(true) => FILE_DIRECTORY_FILE,
+            Some(false) => FILE_NON_DIRECTORY_FILE,
+            None => 0,
         }
         | if matches!(access, Access::Write | Access::Lock) {
             FILE_WRITE_THROUGH
@@ -516,7 +635,7 @@ fn open_relative(
         )
     };
     if status == STATUS_REPARSE_POINT_ENCOUNTERED {
-        return Err(if directory {
+        return Err(if directory == Some(true) {
             Error::UnsafeDirectory
         } else {
             Error::UnsafeFile
@@ -583,7 +702,12 @@ struct RenameBuffer {
     name: [u16; MAX_LEAF_UNITS],
 }
 
-fn rename(directory: &File, file: &File, destination: &str) -> Result<(), Error> {
+fn rename(
+    directory: &File,
+    file: &File,
+    destination: &str,
+    publication: Publication,
+) -> Result<(), Error> {
     // Keep the fixed buffer's prefix exactly compatible with the SDK's flexible
     // structure; it is naturally aligned and never exposes an undersized slice.
     const {
@@ -591,7 +715,9 @@ fn rename(directory: &File, file: &File, destination: &str) -> Result<(), Error>
     }
     let encoded = leaf(destination)?;
     let mut info = RenameBuffer {
-        flags: FILE_RENAME_INFORMATION_0 { Flags: 1 },
+        flags: FILE_RENAME_INFORMATION_0 {
+            Flags: u32::from(publication == Publication::Replace),
+        },
         directory: directory.as_raw_handle(),
         length: (encoded.len() * 2) as u32,
         name: [0; MAX_LEAF_UNITS],

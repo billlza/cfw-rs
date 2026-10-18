@@ -4,7 +4,7 @@ use std::fs;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use cfw_windows_storage::{Error, PrivateDirectory, ReadPolicy};
+use cfw_windows_storage::{EntryKind, Error, PrivateDirectory, Publication, ReadPolicy};
 
 #[test]
 fn replacement_is_bounded_private_and_changes_the_file_identity() {
@@ -441,4 +441,152 @@ fn an_open_directory_cannot_be_redirected_to_a_replacement_path() {
         }
         Err(error) => panic!("unexpected directory rename error: {error}"),
     }
+}
+
+#[test]
+fn exclusive_publication_and_failed_replacement_preserve_the_prior_record() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("private");
+    let directory = PrivateDirectory::open_or_create(&path).unwrap();
+    let mut transaction = directory.write().unwrap();
+    transaction
+        .publish_with_temporary(
+            "state.json",
+            ".first.tmp",
+            b"preserved",
+            1024,
+            Publication::CreateNew,
+        )
+        .unwrap();
+    assert!(
+        matches!(transaction.publish_with_temporary("state.json", ".collision.tmp", b"replacement", 1024, Publication::CreateNew),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+    );
+    assert_eq!(fs::read(path.join("state.json")).unwrap(), b"preserved");
+    assert!(!path.join(".collision.tmp").exists());
+
+    let original_permissions = fs::metadata(path.join("state.json")).unwrap().permissions();
+    let mut read_only = original_permissions.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(path.join("state.json"), read_only).unwrap();
+    let failure = transaction.publish_with_temporary(
+        "state.json",
+        ".failed.tmp",
+        b"changed",
+        1024,
+        Publication::Replace,
+    );
+    fs::set_permissions(path.join("state.json"), original_permissions).unwrap();
+    assert!(
+        matches!(failure, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(fs::read(path.join("state.json")).unwrap(), b"preserved");
+    assert!(!path.join(".failed.tmp").exists());
+}
+
+#[test]
+fn enumeration_is_bounded_and_concurrent_calls_have_independent_cursors() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("private");
+    let directory = PrivateDirectory::open_or_create(&path).unwrap();
+    let expected = [
+        "first.json".to_owned(),
+        "配置.json".to_owned(),
+        "x".repeat(250),
+    ];
+    {
+        let mut transaction = directory.write().unwrap();
+        for name in &expected {
+            transaction.replace(name, b"record", 1024).unwrap();
+        }
+    }
+    let reader = directory.read().unwrap();
+    assert!(matches!(
+        reader.entry_names(2),
+        Err(Error::TooManyEntries { maximum: 2 })
+    ));
+    let expected: std::collections::HashSet<std::ffi::OsString> =
+        expected.into_iter().map(Into::into).collect();
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            reader
+                .entry_names(3)
+                .unwrap()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let second = scope.spawn(|| {
+            reader
+                .entry_names(3)
+                .unwrap()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        });
+        assert_eq!(first.join().unwrap(), expected);
+        assert_eq!(second.join().unwrap(), expected);
+    });
+    assert_eq!(
+        reader
+            .entry_names(3)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn managed_cleanup_removes_links_without_traversing_or_deleting_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = root.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep.json"), b"external").unwrap();
+    let path = root.path().join("private");
+    let directory = PrivateDirectory::open_or_create(&path).unwrap();
+    fs::create_dir(path.join("subdirectory")).unwrap();
+    std::os::windows::fs::symlink_file(outside.join("keep.json"), path.join("file-link")).unwrap();
+    std::os::windows::fs::symlink_dir(&outside, path.join("directory-link")).unwrap();
+    fs::hard_link(outside.join("keep.json"), path.join("hard-link")).unwrap();
+    let mut transaction = directory.write().unwrap();
+    assert_eq!(
+        transaction
+            .entry_kind(std::ffi::OsStr::new("directory-link"))
+            .unwrap(),
+        EntryKind::ReparsePoint
+    );
+    assert_eq!(
+        transaction
+            .entry_kind(std::ffi::OsStr::new("subdirectory"))
+            .unwrap(),
+        EntryKind::Directory
+    );
+    assert!(matches!(
+        transaction.unlink_managed_entry(std::ffi::OsStr::new("subdirectory")),
+        Err(Error::UnexpectedDirectory)
+    ));
+    for name in ["file-link", "directory-link", "hard-link"] {
+        transaction
+            .unlink_managed_entry(std::ffi::OsStr::new(name))
+            .unwrap();
+    }
+    transaction.sync_directory().unwrap();
+    assert_eq!(fs::read(outside.join("keep.json")).unwrap(), b"external");
+    assert!(outside.is_dir());
+    assert!(path.join("subdirectory").is_dir());
+    assert_eq!(
+        transaction.entry_names(1).unwrap(),
+        vec![std::ffi::OsString::from("subdirectory")]
+    );
+}
+
+#[test]
+fn a_non_directory_ancestor_is_not_reported_as_a_missing_store() {
+    let root = tempfile::tempdir().unwrap();
+    let blocker = root.path().join("not-a-directory");
+    fs::write(&blocker, b"preserved").unwrap();
+    assert!(matches!(
+        PrivateDirectory::open_existing(&blocker.join("private")),
+        Err(Error::UnsafeDirectory)
+    ));
+    assert_eq!(fs::read(&blocker).unwrap(), b"preserved");
 }

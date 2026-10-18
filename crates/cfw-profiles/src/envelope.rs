@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cfw_singbox_config::{ConfigError, ValidatedSingBoxProfile, sha256_hex};
@@ -106,16 +105,10 @@ pub(crate) fn encode_with_timestamp(
 }
 
 pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEntry, ProfileError> {
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.file_type().is_socket()
-        || metadata.nlink() != 1
-        || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.uid() != effective_user_id()
-    {
-        return Err(ProfileError::UnsafeProfileFile(expected_id.to_string()));
-    }
+    let metadata = crate::storage::private_metadata(
+        &file,
+        ProfileError::UnsafeProfileFile(expected_id.to_string()),
+    )?;
     if metadata.len() > MAX_ENVELOPE_BYTES as u64 {
         return Err(ProfileError::StoredProfileTooLarge {
             actual: metadata.len(),
@@ -214,10 +207,6 @@ fn decode_invalid(
         source_url: envelope.source_url,
         error,
     }))
-}
-
-fn effective_user_id() -> u32 {
-    unsafe { libc::geteuid() }
 }
 
 pub(crate) fn normalize_name(name: &str) -> Result<String, ProfileError> {

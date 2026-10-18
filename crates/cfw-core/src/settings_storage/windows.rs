@@ -95,7 +95,14 @@ impl From<Error> for SettingsStoreError {
             Error::Busy => Self::StoreBusy,
             Error::InvalidName | Error::InvalidLimit => Self::InvalidPath,
             Error::UnsafeDirectory => Self::UnsafeDirectory,
+            Error::UnexpectedDirectory => Self::UnsafeDirectory,
             Error::UnsafeFile => Self::UnsafeFile,
+            Error::TooManyEntries { .. } | Error::InvalidDirectoryListing => {
+                Self::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Windows storage directory enumeration failed its contract",
+                ))
+            }
             Error::InvalidSecurityDescriptor => Self::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Windows storage security could not be validated",

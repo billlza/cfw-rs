@@ -103,16 +103,14 @@ impl Sid {
     }
 
     fn system() -> Result<Self, Error> {
+        Self::well_known(WinLocalSystemSid)
+    }
+
+    fn well_known(kind: WELL_KNOWN_SID_TYPE) -> Result<Self, Error> {
         let mut buffer = vec![0u32; (SECURITY_MAX_SID_SIZE as usize).div_ceil(4)];
         let mut length = SECURITY_MAX_SID_SIZE;
-        if unsafe {
-            CreateWellKnownSid(
-                WinLocalSystemSid,
-                null_mut(),
-                buffer.as_mut_ptr().cast(),
-                &mut length,
-            )
-        } == 0
+        if unsafe { CreateWellKnownSid(kind, null_mut(), buffer.as_mut_ptr().cast(), &mut length) }
+            == 0
         {
             return Err(io::Error::last_os_error().into());
         }
@@ -153,6 +151,29 @@ impl Sid {
             .map_err(|_| Error::InvalidSecurityDescriptor)?;
         drop(allocation);
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_real_directory_owner_must_match_the_captured_principal() {
+        let root = tempfile::tempdir().unwrap();
+        let directory =
+            crate::PrivateDirectory::open_or_create(&root.path().join("private")).unwrap();
+        let mut expected = Security::current().unwrap();
+        expected
+            .verify(&directory.inner.file, ReadPolicy::Private, true)
+            .unwrap();
+        // Everyone is a group SID, never this effective user's token-user SID.
+        // The same actual filesystem descriptor must fail for another owner.
+        expected.owner = Sid::well_known(WinWorldSid).unwrap();
+        assert!(matches!(
+            expected.verify(&directory.inner.file, ReadPolicy::Private, true),
+            Err(Error::UnsafeDirectory)
+        ));
     }
 }
 

@@ -309,7 +309,9 @@ impl fmt::Debug for CredentialProvision<'_> {
 /// admitted only when both its kind and secret bytes are exactly identical,
 /// making retries idempotent. Changing either is an immutable-reference
 /// conflict; credential rotation must generate a new UUID and update the
-/// profile. Any error must leave the prior vault unchanged. This contract
+/// profile. A confirmed failure leaves the prior vault unchanged.
+/// `OutcomeUnknown` does not assert rollback: a timeout or a failed durability
+/// confirmation can occur after publication. This contract
 /// prevents partial import and keeps runtime identity bound to public
 /// reference IDs without deriving a digest from secret bytes.
 /// The request carries the validated profile's complete unique reference set
@@ -720,7 +722,7 @@ impl CredentialPresenceRequest {
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum CredentialVaultError {
-    #[error("credential vault outcome is unknown after a boundary timeout")]
+    #[error("credential vault outcome is unknown; completion could not be confirmed")]
     OutcomeUnknown,
     #[error("credential vault is unavailable")]
     Unavailable,

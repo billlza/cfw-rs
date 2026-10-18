@@ -139,7 +139,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | --- | --- | --- |
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
-| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 设置、窗口状态、诊断及配置仓库已在 Windows 通过验证；当前 408 项 Rust/310 项前端测试通过；完整平台适配尚未完成 |
+| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | 设置、窗口状态、诊断、配置仓库及凭据存储在 Windows 通过 429 项 Rust/310 项前端测试；Mac 全工作区 1,145 项 Rust 回归通过；凭据与 Windows 引擎的产品接线及完整平台适配尚未完成 |
 | Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 待实现和运行；不得用展示壳代替 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
@@ -280,6 +280,50 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   同源 Mac 托管 CI 的三个 job 在结果核对时仍排队，未取得托管通过结果。
   本阶段仍不证明 Windows 应用启动、凭据库、引擎、系统代理、TUN、桌面视觉或发布验收。
 
+### 2026-10-18：Windows 凭据存储与宿主边界
+
+- `cfw-windows-credentials` 实现当前用户作用域的 DPAPI 持久化，复用已建立的私有
+  目录、DACL、句柄相对访问和跨进程事务。磁盘及临时文件只接收密文；整批校验
+  UUID 不可变性、精确 profile/digest 绑定、凭据类型和容量后才发布。支持存在性查询、
+  保留凭据重绑、引擎读取，以及绑定版本和精确孤立集合的清理。解密、身份或格式
+  失败不变成空库；发布后不能确认刷盘仍返回 `OutcomeUnknown`。
+- 清理显式接收运行时绑定，必须在引擎生命周期互斥范围内观察活动、待定和持久化
+  恢复配置，并在提交时重新核对。该组件尚未实现产品的 `CredentialVaultProvisioner`
+  接线，避免在 Windows 引擎观察尚未实现时用空集合代替。凭据读取也没有前端命令。
+  当前用户 DPAPI 不提供同用户进程隔离；特权服务身份和 IPC 授权仍是独立待办。
+- 共享 `ManagedProfiles` 改为持有公共凭据接口；Mac 仍注入原来的原生桥。实际编译
+  揭示原先离线节点测速也挂在 `credential_vault()` 上，现将其移到引擎的
+  `ProfileDelayBackend`，继续调用 Mac 原实现及结果校验。
+- [后续 Windows 仓库运行](https://github.com/billlza/cfw-rs/actions/runs/39141160208)
+  在仅改文档的 `3fbcc9d` 暴露 3 项 `StoreBusy` 并发失败，证明先前单次全绿不足以
+  排除锁饥饿。原实现每 10 ms 尝试抢锁，连续写者可能在读者醒来前重新取得锁；
+  已改用一次异步 `LockFileEx` 等待，保留三秒准入期限，超时取消并等待该请求完成
+  后才释放内存。未放宽超时或修改原有并发断言，另加重复抢锁期间的进展回归。
+  驱动确认取消的时间可能延长退出清理，文档未将其宣称为绝对三秒返回。
+- 第一轮本地编译暴露测速调用耦合；[第一轮 Windows 编译](https://github.com/billlza/cfw-rs/actions/runs/39142347830)
+  暴露枚举游标仍依赖轮询常量，二者均在 `e54b2de` 修正。原始失败日志保留于
+  `target/cfw-validation/credential-mac-clippy.log` 和 `windows-credentials-first-failure.log`。
+- 新直接依赖复用已有的 `subtle 2.6.1`、`windows-sys 0.61.2`、`zeroize` 等，
+  519 个注册表包的名称、版本、来源与 checksum 集合保持不变。
+- [Windows 凭据与并发回归](https://github.com/billlza/cfw-rs/actions/runs/39142577800)
+  在 `e54b2de0b427adfb57f86a7e02b017646929aad5` 成功：429 项 Rust、310 项前端
+  测试、格式、Clippy 和目录刷盘探针均通过，失败/忽略/过滤/跳过为 0。包含 20 项
+  真实 DPAPI 凭据测试、跨进程重开、损坏与容量拒绝、身份检查、清理版本和运行时
+  竞态，以及全部三个先前失败的并发用例和新的锁进展测试。回执为
+  `target/cfw-validation/windows-credentials-green-result.json`，原始日志 SHA-256 为
+  `ad0eeacf57ef0bc3cb009d72c9c52e6ab0f2c6521093ec651a620db70951b680`。
+- 同源本地固定工具链全工作区 Clippy、1,145 项 Rust 测试、310 项前端测试和
+  cargo-deny 均成功；Rust 失败/忽略/过滤为 0，启动测试记录
+  `main_queue_callback_ms=24 late_engine_installations=0`。回执为
+  `target/cfw-validation/credential-mac-result.json`，Rust 原始日志 SHA-256 为
+  `6551b7bf94ee5279ce060a44236de7e8024d2f2a1b1dd086da694866c3e056a5`。
+  同源 Mac 托管 CI 在本次结果核对时仍排队，不能冒充托管通过。
+- 随后将共享 `OutcomeUnknown` 的错误说明由仅指超时改为“无法确认完成”，并明确
+  该错误不保证回滚，以覆盖发布后刷盘失败。此文字/契约修订通过全部 27 项
+  engine-api 测试及该包 Clippy，不改变错误变体或持久化格式。
+- 此阶段尚未验证 Windows 桌面宿主、凭据服务授权、引擎、系统代理、TUN、安装更新、
+  签名或真实桌面视觉；完整产品和正式发布目标继续保持未完成。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。
@@ -291,3 +335,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [GitHub runner 类型与资源](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [交互式桌面测试配置](https://learn.microsoft.com/en-us/azure/devops/pipelines/test/ui-testing-considerations?view=azure-devops)
 - [Wintun 官方分发与签名边界](https://www.wintun.net/)
+- [Windows DPAPI 加密](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
+- [Windows DPAPI 解密](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata)
+- [LockFileEx 异步文件锁](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
+- [Windows I/O 取消与完成](https://learn.microsoft.com/en-us/windows/win32/fileio/canceling-pending-i-o-operations)

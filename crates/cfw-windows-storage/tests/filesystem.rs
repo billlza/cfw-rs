@@ -529,8 +529,8 @@ fn enumeration_is_bounded_and_concurrent_calls_have_independent_cursors() {
             .collect::<Vec<_>>()
     };
     std::thread::scope(|scope| {
-        let first = scope.spawn(&collect);
-        let second = scope.spawn(&collect);
+        let first = scope.spawn(collect);
+        let second = scope.spawn(collect);
         start.wait();
         for actual in first
             .join()

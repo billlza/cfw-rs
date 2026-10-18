@@ -154,29 +154,6 @@ impl Sid {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_real_directory_owner_must_match_the_captured_principal() {
-        let root = tempfile::tempdir().unwrap();
-        let directory =
-            crate::PrivateDirectory::open_or_create(&root.path().join("private")).unwrap();
-        let mut expected = Security::current().unwrap();
-        expected
-            .verify(&directory.inner.file, ReadPolicy::Private, true)
-            .unwrap();
-        // Everyone is a group SID, never this effective user's token-user SID.
-        // The same actual filesystem descriptor must fail for another owner.
-        expected.owner = Sid::well_known(WinWorldSid).unwrap();
-        assert!(matches!(
-            expected.verify(&directory.inner.file, ReadPolicy::Private, true),
-            Err(Error::UnsafeDirectory)
-        ));
-    }
-}
-
 pub(crate) struct Security {
     owner: Sid,
     system: Sid,
@@ -341,5 +318,28 @@ impl Security {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_real_directory_owner_must_match_the_captured_principal() {
+        let root = tempfile::tempdir().unwrap();
+        let directory =
+            crate::PrivateDirectory::open_or_create(&root.path().join("private")).unwrap();
+        let mut expected = Security::current().unwrap();
+        expected
+            .verify(&directory.inner.file, ReadPolicy::Private, true)
+            .unwrap();
+        // Everyone is a group SID, never this effective user's token-user SID.
+        // The same actual filesystem descriptor must fail for another owner.
+        expected.owner = Sid::well_known(WinWorldSid).unwrap();
+        assert!(matches!(
+            expected.verify(&directory.inner.file, ReadPolicy::Private, true),
+            Err(Error::UnsafeDirectory)
+        ));
     }
 }

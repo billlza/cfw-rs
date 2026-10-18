@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"net"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -130,17 +132,65 @@ func TestConfigurationFailureIsExplicitAndRedacted(t *testing.T) {
 		`{"log":{"output":"stdout"}}`,
 		`{"log":{"output":"secret-log-path"}}`,
 	} {
+		for _, operation := range []string{"start", "check"} {
+			var output bytes.Buffer
+			input := messages(t, hello(), request{protocol, testSession, 2, operation, testDigest, json.RawMessage(configuration)})
+			if run(bytes.NewReader(input), &output) == 0 {
+				t.Fatal("bad config accepted")
+			}
+			replies := responses(t, output.Bytes())
+			if len(replies) != 2 || replies[1].Error == "" || replies[1].State != "idle" {
+				t.Fatal("missing failure receipt")
+			}
+			if strings.Contains(output.String(), "secret-") {
+				t.Fatal("configuration echoed in response")
+			}
+		}
+	}
+}
+
+func TestCheckConstructsAndClosesWithoutOpeningListeners(t *testing.T) {
+	// Holding both ports makes an accidental Start fail, rather than letting a
+	// momentarily active proxy pass a post-exit listener-only assertion.
+	mixed, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mixed.Close()
+	controller, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	configuration := json.RawMessage(`{"log":{"disabled":true},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":` + strconv.Itoa(mixed.Addr().(*net.TCPAddr).Port) + `}],"outbounds":[{"type":"direct","tag":"direct"}],"experimental":{"clash_api":{"external_controller":"` + controller.Addr().String() + `","secret":"check-only-secret"}}}`)
+	var output bytes.Buffer
+	if code := run(bytes.NewReader(messages(t, hello(), request{protocol, testSession, 2, "check", testDigest, configuration})), &output); code != 0 {
+		t.Fatalf("check failed: %d, %s", code, output.Bytes())
+	}
+	replies := responses(t, output.Bytes())
+	if len(replies) != 2 || replies[1].State != "checked" || replies[1].Error != "" || replies[1].Digest != testDigest || replies[1].PID <= 0 {
+		t.Fatalf("missing exact check receipt: %+v", replies)
+	}
+	if strings.Contains(output.String(), "check-only-secret") {
+		t.Fatal("check echoed credential material")
+	}
+}
+
+func TestCheckCannotValidateAnActiveInstanceOrMalformedCandidate(t *testing.T) {
+	configuration := json.RawMessage(`{"log":{"disabled":true},"outbounds":[{"type":"direct","tag":"direct"}]}`)
+	for _, input := range [][]byte{
+		messages(t, hello(), request{protocol, testSession, 2, "check", "bad-digest", configuration}),
+		messages(t, hello(), request{protocol, testSession, 2, "check", testDigest, nil}),
+		messages(t, hello(), request{protocol, testSession, 2, "start", testDigest, configuration}, request{protocol, testSession, 3, "check", testDigest, configuration}),
+	} {
 		var output bytes.Buffer
-		input := messages(t, hello(), request{protocol, testSession, 2, "start", testDigest, json.RawMessage(configuration)})
 		if run(bytes.NewReader(input), &output) == 0 {
-			t.Fatal("bad config accepted")
+			t.Fatal("invalid check accepted")
 		}
 		replies := responses(t, output.Bytes())
-		if len(replies) != 2 || replies[1].Error == "" || replies[1].State == "running" {
-			t.Fatal("missing failure receipt")
-		}
-		if strings.Contains(output.String(), "secret-") {
-			t.Fatal("configuration echoed in response")
+		last := replies[len(replies)-1]
+		if last.Error != "invalid_check" || last.State == "checked" || last.State == "stopped" {
+			t.Fatalf("false check receipt: %+v", last)
 		}
 	}
 }

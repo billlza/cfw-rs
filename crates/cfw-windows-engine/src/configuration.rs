@@ -10,33 +10,31 @@ use crate::Error;
 
 /// Resolved material for one already validated projection. The identity is the
 /// original secret-free projection digest, never a hash of injected secrets.
-pub struct PreparedConfig {
+pub struct ResolvedProjection {
     pub(crate) bytes: Zeroizing<Vec<u8>>,
     pub(crate) digest: String,
-    pub(crate) listeners: Vec<std::net::SocketAddr>,
 }
 
-impl fmt::Debug for PreparedConfig {
+impl fmt::Debug for ResolvedProjection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PreparedConfig")
+            .debug_struct("ResolvedProjection")
             .field("digest", &self.digest)
             .field("bytes", &"[REDACTED]")
             .finish()
     }
 }
 
-impl PreparedConfig {
+impl ResolvedProjection {
     /// The caller must resolve these references for `credential_audience()`
     /// under its lifecycle guard. This method checks exact material coverage;
     /// it does not grant vault authorization or own the global engine lineage.
-    pub fn local_proxy<'a>(
+    /// All projection modes can be checked without activating a runtime. This
+    /// type is not a start capability; local starts require `PreparedConfig`.
+    pub fn new<'a>(
         projection: &ProjectedConfig,
         material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
     ) -> Result<Self, Error> {
-        if projection.mode() != ProjectionMode::LocalProxy {
-            return Err(Error::Configuration("platform mode is not yet admitted"));
-        }
         let mut values = BTreeMap::new();
         let mut total = 0usize;
         for (reference, value) in material {
@@ -75,6 +73,41 @@ impl PreparedConfig {
         if used.len() != values.len() {
             return Err(Error::Configuration("unrequested credential material"));
         }
+        let bytes = serialize_bounded(&document.0, MAX_ENGINE_CONFIG_BYTES)?;
+        Ok(Self {
+            bytes,
+            digest: projection.digest().to_owned(),
+        })
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+/// Admits only the local proxy data plane. A checked tunnel projection cannot
+/// be passed to `EngineProcess::start` through this type.
+#[derive(Debug)]
+pub struct PreparedConfig {
+    pub(crate) resolved: ResolvedProjection,
+    pub(crate) listeners: Vec<std::net::SocketAddr>,
+}
+
+impl PreparedConfig {
+    pub fn local_proxy<'a>(
+        projection: &ProjectedConfig,
+        material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
+    ) -> Result<Self, Error> {
+        if projection.mode() != ProjectionMode::LocalProxy {
+            return Err(Error::Configuration("platform mode is not yet admitted"));
+        }
+        let resolved = ResolvedProjection::new(projection, material)?;
+        // Listener metadata comes from the immutable projection. Its generated
+        // controller credential is also erased when this temporary DOM drops.
+        let document = SecretDocument(
+            serde_json::from_str(projection.as_json())
+                .map_err(|_| Error::Configuration("invalid projected template"))?,
+        );
         let mut listeners = vec![std::net::SocketAddr::new(
             projection.clash_api().address().into(),
             projection.clash_api().port(),
@@ -98,16 +131,14 @@ impl PreparedConfig {
                 .ok_or(Error::Configuration("invalid listener port"))?;
             listeners.push(std::net::SocketAddr::new(address, port));
         }
-        let bytes = serialize_bounded(&document.0, MAX_ENGINE_CONFIG_BYTES)?;
         Ok(Self {
-            bytes,
-            digest: projection.digest().to_owned(),
+            resolved,
             listeners,
         })
     }
 
     pub fn digest(&self) -> &str {
-        &self.digest
+        self.resolved.digest()
     }
 }
 
@@ -180,7 +211,7 @@ mod tests {
         let reference = CredentialRef::new(REFERENCE, CredentialKind::TrojanPassword).unwrap();
         let config =
             PreparedConfig::local_proxy(&projected, [(&reference, "test-secret-123")]).unwrap();
-        let parsed: Value = serde_json::from_slice(&config.bytes).unwrap();
+        let parsed: Value = serde_json::from_slice(&config.resolved.bytes).unwrap();
         assert_eq!(
             parsed
                 .pointer(projected.credential_slots()[0].json_pointer())
@@ -223,6 +254,8 @@ mod tests {
             let projected = profile
                 .project(PROFILE, mode, &EngineSettings::default())
                 .unwrap();
+            let checked = ResolvedProjection::new(&projected, []).unwrap();
+            assert_eq!(checked.digest(), projected.digest());
             assert!(PreparedConfig::local_proxy(&projected, []).is_err());
         }
     }

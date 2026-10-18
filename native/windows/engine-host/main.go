@@ -164,9 +164,9 @@ func run(input io.Reader, output io.Writer) int {
 			if len(message.Config) != 0 || message.Digest != "" {
 				errorCode = "invalid_request"
 			}
-		case "start":
+		case "start", "check":
 			if state != "idle" || len(message.Config) == 0 || len(message.Config) > maxConfig || !canonicalHex(message.Digest, 32) {
-				errorCode = "invalid_start"
+				errorCode = "invalid_" + message.Op
 				break
 			}
 			ctx, release := context.WithCancel(include.Context(context.Background()))
@@ -186,6 +186,21 @@ func run(input io.Reader, output io.Writer) int {
 			instance, err = box.New(box.Options{Context: ctx, Options: options})
 			if err != nil {
 				errorCode = "construct_failed"
+				break
+			}
+			if message.Op == "check" {
+				// Match the actual engine's check path, but also require Close
+				// success. Never call Start or issue a running/stopped receipt.
+				closeErr := instance.Close()
+				instance = nil
+				cancel()
+				cancel = nil
+				if closeErr != nil {
+					errorCode = "close_failed"
+				} else {
+					state, digest = "checked", message.Digest
+					terminal = true
+				}
 				break
 			}
 			if err = instance.Start(); err != nil {

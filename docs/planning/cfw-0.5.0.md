@@ -420,9 +420,29 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - 原生用例覆盖真实 Credential Manager 重开、四个进程的 32 次代次分配、陈旧 CAS、
   损坏不覆盖、溢出、模拟身份拒绝和安装身份替换；仅使用随机隔离测试 target，
   不触碰正式记录。新 mutex 复用存储层已有 SID/ACL 校验和原生进程身份检查。
-- 本地当前共享变更通过 1,157 项 Rust、311 项前端测试、全工作区 Clippy 和
-  cargo-deny；Credential Manager 与 mutex 的 Windows 原生结果待 CI 核对。
+- 本地共享变更通过 1,157 项 Rust、311 项前端测试、全工作区 Clippy 和 cargo-deny。
+  [Windows 原生回归](https://github.com/billlza/cfw-rs/actions/runs/39156834433)
+  在 `85755f79e45ef40b14ad3d92fc21d7b67ea70f0a` 全部通过：451 项共享 Rust、
+  311 项前端、474 项命名 Go 测试/子测试及 6 项真实引擎集成测试。Credential Manager
+  的七项原生测试和 mutex 的两项原生测试均执行；失败、忽略及命名跳过均为零。
+- 保留三轮 Windows 编译失败证据：首轮 SHA2 摘要格式化接口使用错误，后两轮新
+  StorageError 变体在凭据/配置仓库及核心设置映射中未覆盖。修复使用既有字节编码和
+  显式错误分类，未增加默认成功或放宽 lint；519 个 registry 依赖版本和 checksum 未变。
+  后续 Windows 条件编译另用任务隔离、官方摘要核对的 Windows Rust 标准库进行
+  cross-target Clippy 检查；该检查只证明编译，不替代原生执行。
+- 下载产物后核对 ZIP 摘要、精确源码、两份 EXE、原生测试回执及 116 份许可文件。
   桌面启动工厂、Windows 服务/授权和各网络模式的实际接线仍未完成。
+
+### 2026-10-18：Windows 启动前配置检查
+
+- 新增有界私有管道 `check` 操作：真实 sing-box 解析、构造、Close，要求 Close 成功
+  和子进程正常退出，不调用 Start。Rust 继续核对进程身份、精确配置摘要、管道收尾、
+  空 Job Object 和监听表。检查回执与运行/停止回执使用不同类型。
+- 四种模式均可用 `ResolvedProjection` 校验；本地启动仍需独立的 `PreparedConfig`
+  类型，不能因 TUN 配置校验成功而绕过 Windows 网络权限和恢复实现。
+- 新原生测试在整个检查期间占用代理和控制端口，并要求工作目录没有生成配置/缓存
+  文件；误启动监听会产生明确失败。Go 用例补充错误配置脱敏、运行中检查拒绝及
+  实际占用端口反例。Windows 原生结果待本次提交后的 CI，尚未声明接入完整后端。
 
 ## 官方资料
 

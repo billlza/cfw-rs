@@ -9,7 +9,7 @@ mod configuration;
 #[cfg(any(windows, test))]
 mod protocol;
 #[cfg(any(windows, test))]
-pub use configuration::PreparedConfig;
+pub use configuration::{PreparedConfig, ResolvedProjection};
 
 #[cfg(windows)]
 mod lineage;
@@ -20,7 +20,9 @@ pub use lineage::{LineageError, WindowsEngineGenerationStore};
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
-pub use process::{EngineProcess, RunningChild, StoppedChild, VerifiedExecutable};
+pub use process::{
+    CheckedConfiguration, EngineProcess, RunningChild, StoppedChild, VerifiedExecutable,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

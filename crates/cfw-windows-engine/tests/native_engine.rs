@@ -15,7 +15,9 @@ use std::{
 };
 
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
-use cfw_windows_engine::{EngineProcess, Error, PreparedConfig, VerifiedExecutable};
+use cfw_windows_engine::{
+    EngineProcess, Error, PreparedConfig, ResolvedProjection, VerifiedExecutable,
+};
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     System::Threading::{
@@ -88,6 +90,51 @@ fn request(address: SocketAddr, text: &str) -> String {
         .read_to_string(&mut response)
         .unwrap();
     response
+}
+
+#[test]
+fn all_projected_modes_are_checked_without_starting_their_occupied_listeners() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mixed = reserve();
+    let controller = reserve();
+    let settings = EngineSettings {
+        mixed_port: mixed.local_addr().unwrap().port(),
+        controller_port: controller.local_addr().unwrap().port(),
+        ..EngineSettings::default()
+    };
+    let profile =
+        ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
+            .unwrap();
+    for (index, mode) in [
+        ProjectionMode::LocalProxy,
+        ProjectionMode::SystemProxy,
+        ProjectionMode::Tunnel,
+        ProjectionMode::TunnelSystemProxy,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let projection = profile
+            .project("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", mode, &settings)
+            .unwrap();
+        let resolved = ResolvedProjection::new(&projection, []).unwrap();
+        let directory = temporary.path().join(format!("check-{index}"));
+        let child = EngineProcess::spawn(executable(), &directory, TIMEOUT).unwrap();
+        let pid = child.process_id();
+        let handle = process_handle(pid);
+        let checked = child.check(&resolved, TIMEOUT).unwrap();
+        assert_eq!(checked.process_id, pid);
+        assert_eq!(checked.configuration_digest, projection.digest());
+        exited(&handle);
+        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
+    }
+    // These remain owned by the test throughout; a check that accidentally
+    // starts either mixed or controller listeners cannot pass the real engine.
+    assert_eq!(mixed.local_addr().unwrap().port(), settings.mixed_port);
+    assert_eq!(
+        controller.local_addr().unwrap().port(),
+        settings.controller_port
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{Error, PreparedConfig, configuration::serialize_bounded};
+use crate::{Error, ResolvedProjection, configuration::serialize_bounded};
 
 const PROTOCOL: u32 = 1;
 const MAX_REQUEST: usize = cfw_singbox_config::MAX_ENGINE_CONFIG_BYTES + 4096;
@@ -39,7 +39,7 @@ pub(crate) fn request(
     id: u64,
     op: &str,
     digest: Option<&str>,
-    config: Option<&PreparedConfig>,
+    config: Option<&ResolvedProjection>,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     let config = config
         .map(|value| serde_json::from_slice::<&serde_json::value::RawValue>(&value.bytes))
@@ -101,6 +101,7 @@ impl Response {
             return Err(Error::Rejected(match self.error.as_str() {
                 "invalid_request" => "invalid_request",
                 "invalid_start" => "invalid_start",
+                "invalid_check" => "invalid_check",
                 "invalid_config" => "invalid_config",
                 "invalid_log_output" => "invalid_log_output",
                 "construct_failed" => "construct_failed",

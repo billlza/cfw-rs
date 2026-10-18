@@ -37,7 +37,7 @@ use windows_sys::Win32::{
 use zeroize::Zeroizing;
 
 use crate::{
-    Error, PreparedConfig,
+    Error, PreparedConfig, ResolvedProjection,
     protocol::{self, Response},
 };
 
@@ -188,6 +188,14 @@ pub struct StoppedChild {
     pub configuration_digest: String,
 }
 
+/// The actual parser constructed and closed this candidate without starting it.
+/// This says nothing about active runtime readiness or system network state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedConfiguration {
+    pub process_id: u32,
+    pub configuration_digest: String,
+}
+
 impl EngineProcess {
     pub fn spawn(
         executable: VerifiedExecutable,
@@ -298,6 +306,28 @@ impl EngineProcess {
         self.child.id()
     }
 
+    /// Uses a disposable worker. Success requires parser/constructor/Close
+    /// success, exit 0, drained control I/O, an empty job and no owned listeners.
+    pub fn check(
+        mut self,
+        config: &ResolvedProjection,
+        timeout: Duration,
+    ) -> Result<CheckedConfiguration, Error> {
+        let deadline = deadline(timeout)?;
+        if self.closed || self.digest.is_some() {
+            return Err(Error::Protocol("child is not idle"));
+        }
+        let result = self
+            .rpc("check", Some(config), "checked", config.digest(), deadline)
+            .and_then(|()| self.finish_normal_exit(deadline));
+        self.finish_operation(result)?;
+        self.closed = true;
+        Ok(CheckedConfiguration {
+            process_id: self.child.id(),
+            configuration_digest: config.digest().to_owned(),
+        })
+    }
+
     pub fn start(
         &mut self,
         config: &PreparedConfig,
@@ -307,7 +337,13 @@ impl EngineProcess {
         if self.closed || self.digest.is_some() {
             return Err(Error::Protocol("child is not idle"));
         }
-        let result = self.rpc("start", Some(config), "running", config.digest(), deadline);
+        let result = self.rpc(
+            "start",
+            Some(&config.resolved),
+            "running",
+            config.digest(),
+            deadline,
+        );
         self.finish_operation(result)?;
         self.digest = Some(config.digest().to_owned());
         self.listeners = config.listeners.clone();
@@ -356,21 +392,7 @@ impl EngineProcess {
             .ok_or(Error::Protocol("child is not running"))?;
         let result = self
             .rpc("stop", None, "stopped", &digest, deadline)
-            .and_then(|()| {
-                wait_process(&self.child, deadline)?;
-                if !self.child.wait()?.success() {
-                    return Err(Error::Exited);
-                }
-                self.finish_io(deadline)?;
-                while active_processes(&self.job)? != 0 {
-                    remaining(deadline)?;
-                    thread::sleep(Duration::from_millis(1));
-                }
-                if !crate::listeners::owned(self.child.id())?.is_empty() {
-                    return Err(Error::Cleanup);
-                }
-                Ok(())
-            });
+            .and_then(|()| self.finish_normal_exit(deadline));
         self.finish_operation(result)?;
         self.closed = true;
         Ok(StoppedChild {
@@ -379,10 +401,26 @@ impl EngineProcess {
         })
     }
 
+    fn finish_normal_exit(&mut self, deadline: Instant) -> Result<(), Error> {
+        wait_process(&self.child, deadline)?;
+        if !self.child.wait()?.success() {
+            return Err(Error::Exited);
+        }
+        self.finish_io(deadline)?;
+        while active_processes(&self.job)? != 0 {
+            remaining(deadline)?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        if !crate::listeners::owned(self.child.id())?.is_empty() {
+            return Err(Error::Cleanup);
+        }
+        Ok(())
+    }
+
     fn rpc(
         &mut self,
         operation: &str,
-        config: Option<&PreparedConfig>,
+        config: Option<&ResolvedProjection>,
         state: &str,
         digest: &str,
         deadline: Instant,

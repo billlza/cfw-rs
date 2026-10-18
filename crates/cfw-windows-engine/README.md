@@ -6,7 +6,7 @@ worker uses the same pinned sing-box source and six patches as CFM 0.5.0.
 unchanged source bytes plus `native/windows/engine-host`; it preserves and
 verifies the original GA tree independently.
 
-The component currently admits `ProjectionMode::LocalProxy`. The other modes
+The component currently starts only `ProjectionMode::LocalProxy`. The other modes
 require Windows platform authority and restoration contracts which are not yet
 implemented. This is not a replacement `EngineBackend`, a Windows service, or
 proof of `NativeEngineStatus::Off`. The full Windows feature/UI target remains
@@ -14,11 +14,13 @@ in `docs/planning/cfw-0.5.0.md`.
 
 ## Configuration and identity
 
-- `PreparedConfig` accepts the opaque shared `ProjectedConfig`, validates exact
+- `ResolvedProjection` accepts the opaque shared `ProjectedConfig`, validates exact
   typed credential coverage and empty injection slots, and keeps the original
   projection digest. Resolved secret bytes are never hashed into public identity.
   The caller must first resolve material for the projection's exact audience
   under its lifecycle guard. This component does not grant vault authorization.
+  All four modes can be checked. `PreparedConfig` separately admits only local
+  proxy starts, so a checked tunnel projection is not a start capability.
 - Credential strings in the Rust document and serialized buffers are zeroized
   when dropped. Serialization reserves its bounded buffer once. Go runtime
   copies remain in the child until it exits; this is not a promise that all Go
@@ -73,6 +75,11 @@ actual `Box.Close` success reply, exit status 0, completed pipe thread, empty jo
 and no listeners owned by the retained process. It returns only `StoppedChild`,
 which says nothing about global system proxy/TUN restoration or other owners.
 
+`check` uses a disposable worker to parse the exact resolved configuration,
+construct the real engine and close it without calling `Start`. Success also
+requires exit 0, completed pipe I/O, an empty job and no owned listeners. Its
+`CheckedConfiguration` receipt is distinct from running and stopped receipts.
+
 Each operation accepts a nonzero timeout up to 120 seconds. A failed operation
 terminates the owned job and allows a separate five-second cleanup interval;
 cleanup failure is reported together with the original error. Drop is emergency
@@ -91,7 +98,8 @@ cargo test --locked -p cfw-windows-engine --features native-engine-validation --
 
 The job supplies `CFW_ENGINE_HOST_PATH`, `CFW_ENGINE_HOST_SHA256` and
 `CFW_ENGINE_HOST_VERSION` from that exact build. Missing inputs fail. Tests cover
-real HTTP traffic, controller authorization, normal stop and listener release,
+all four projected modes with both listener ports deliberately occupied, real
+HTTP traffic, controller authorization, normal stop and listener release,
 startup conflicts, process crash, deadline cleanup, owner drop and wrong binary
 or version rejection. The credential test uses the real DPAPI store and engine
 to authenticate a SOCKS outbound and return HTTP data. Its peer binds the

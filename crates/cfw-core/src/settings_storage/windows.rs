@@ -96,7 +96,14 @@ impl From<Error> for SettingsStoreError {
                 source.kind(),
                 Error::Enumeration { operation, source },
             )),
-            Error::Busy => Self::StoreBusy,
+            Error::Busy | Error::MutexBusy => Self::StoreBusy,
+            Error::UnsafeMutex | Error::ImpersonatedIdentity => Self::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                error,
+            )),
+            Error::InvalidMutexParameters => {
+                Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+            }
             Error::InvalidName | Error::InvalidLimit => Self::InvalidPath,
             Error::UnsafeDirectory => Self::UnsafeDirectory,
             Error::UnexpectedDirectory => Self::UnsafeDirectory,

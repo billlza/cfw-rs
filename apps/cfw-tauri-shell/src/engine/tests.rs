@@ -906,8 +906,8 @@ mod ticket_retry;
 /// What the recovery asks macOS for, and what macOS answers.
 fn restoration_answer(
     requests: &Arc<Mutex<Vec<bool>>>,
-    answer: Result<(), cfw_apple_network::NativeBridgeError>,
-) -> impl FnOnce(bool) -> std::future::Ready<Result<(), cfw_apple_network::NativeBridgeError>> {
+    answer: Result<(), cfw_engine_api::BackendError>,
+) -> impl FnOnce(bool) -> std::future::Ready<Result<(), cfw_engine_api::BackendError>> {
     let requests = requests.clone();
     move |restoration_only| {
         requests
@@ -920,7 +920,7 @@ fn restoration_answer(
 
 #[tokio::test]
 async fn a_declined_settings_restoration_ends_the_recovery_before_it_starts() {
-    use cfw_apple_network::{NativeBridgeError, NativeBridgeErrorCode as Code};
+    use cfw_engine_api::{BackendError, BackendErrorKind as Code};
     for (code, expected) in [
         (Code::Timeout, "or the ProxyAgent did not reply"),
         (Code::ApprovalDenied, "cancelled or denied"),
@@ -930,7 +930,7 @@ async fn a_declined_settings_restoration_ends_the_recovery_before_it_starts() {
         let recoveries = Arc::new(AtomicUsize::new(0));
         let recovered = recoveries.clone();
         let outcome = super::recover_after_settings_restoration(
-            restoration_answer(&requests, Err(NativeBridgeError::new(code, "the prompt"))),
+            restoration_answer(&requests, Err(BackendError::new(code, "the prompt"))),
             async move {
                 recovered.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -974,7 +974,6 @@ async fn a_granted_settings_restoration_runs_the_recovery_and_reports_its_result
 #[derive(Default)]
 struct RestorationRightsBridge {
     requests: Mutex<Vec<bool>>,
-    absent: cfw_apple_network::MissingNativeBridge,
 }
 
 impl RestorationRightsBridge {
@@ -983,85 +982,16 @@ impl RestorationRightsBridge {
     }
 }
 
-impl cfw_apple_network::NativeBridge for RestorationRightsBridge {
+impl cfw_engine_api::SystemProxyAuthorization for RestorationRightsBridge {
     fn authorize_system_proxy(
         &self,
         restoration_only: bool,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
+    ) -> cfw_engine_api::BackendFuture<'_, ()> {
         self.requests
             .lock()
             .expect("rights requests")
             .push(restoration_only);
         Box::pin(async { Ok(()) })
-    }
-    fn query_status(&self) -> cfw_apple_network::NativeBridgeFuture<'_, NativeEngineStatus> {
-        self.absent.query_status()
-    }
-    fn check_configuration(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.check_configuration(request)
-    }
-    fn start_local_proxy(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
-        self.absent.start_local_proxy(request)
-    }
-    fn stop_local_proxy(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.stop_local_proxy(context)
-    }
-    fn start_system_proxy(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
-        self.absent.start_system_proxy(request)
-    }
-    fn stop_system_proxy(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.stop_system_proxy(context)
-    }
-    fn install_tunnel(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, TunnelInstallOutcome> {
-        self.absent.install_tunnel(context)
-    }
-    fn cancel_tunnel_install(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.cancel_tunnel_install(context)
-    }
-    fn authorize_tunnel_configuration(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.authorize_tunnel_configuration(request)
-    }
-    fn start_tunnel(
-        &self,
-        request: EngineStartRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, RuntimeIdentity> {
-        self.absent.start_tunnel(request)
-    }
-    fn stop_tunnel(
-        &self,
-        context: EngineCommandContext,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, ()> {
-        self.absent.stop_tunnel(context)
-    }
-    fn preflight_cutover(
-        &self,
-        request: cfw_engine_api::CutoverPreflightRequest,
-    ) -> cfw_apple_network::NativeBridgeFuture<'_, cfw_engine_api::CutoverPreflightOutcome> {
-        self.absent.preflight_cutover(request)
     }
 }
 
@@ -1089,7 +1019,7 @@ fn engine_with_rights_bridge(bridge: Arc<RestorationRightsBridge>) -> super::Man
             cfw_apple_network::MissingNativeBridge,
         )),
         profile_delay_backend: bridge.clone(),
-        authorization_bridge: bridge,
+        system_proxy_authorization: bridge,
         cutover: super::cutover::CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
         endpoints: Arc::new(std::sync::RwLock::new(endpoint_binding(
@@ -1122,12 +1052,12 @@ async fn background_recovery_asks_only_for_restoration_rights_then_recovers() {
 
 #[tokio::test]
 async fn a_service_fault_before_the_restoration_leaves_the_recovery_to_repair_it() {
-    use cfw_apple_network::{NativeBridgeError, NativeBridgeErrorCode as Code};
+    use cfw_engine_api::{BackendError, BackendErrorKind as Code};
     let requests = Arc::new(Mutex::new(Vec::new()));
     let fault = || {
         restoration_answer(
             &requests,
-            Err(NativeBridgeError::new(
+            Err(BackendError::new(
                 Code::Unavailable,
                 "ProxyAgent connection-retired",
             )),
@@ -1154,7 +1084,7 @@ async fn a_service_fault_before_the_restoration_leaves_the_recovery_to_repair_it
 
 #[test]
 fn system_proxy_authorization_outcomes_tell_the_user_what_to_do() {
-    use cfw_apple_network::NativeBridgeErrorCode as Code;
+    use cfw_engine_api::BackendErrorKind as Code;
     let timed_out =
         super::authorization_failure_message(Code::Timeout, "The native operation timed out.");
     assert!(timed_out.contains("did not get an answer"), "{timed_out}");

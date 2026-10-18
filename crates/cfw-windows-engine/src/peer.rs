@@ -79,6 +79,9 @@ impl NativePeerIdentity {
     pub fn session_id(&self) -> u32 {
         self.session_id
     }
+    pub fn process_creation_time(&self) -> u64 {
+        self.created_at
+    }
     pub fn integrity_rid(&self) -> u32 {
         self.integrity_rid
     }

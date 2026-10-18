@@ -1,8 +1,9 @@
 //! Owned Windows data-plane child, below the application/privileged authority.
 //!
 //! A stopped child is not evidence of globally restored proxy/TUN state. This
-//! layer currently admits local-proxy projections only. It does not implement
-//! `EngineBackend` or manufacture `NativeEngineStatus::Off`.
+//! layer admits local/SystemProxy data planes and separately journals current-
+//! user WinINet settings. It does not implement `EngineBackend` or manufacture
+//! `NativeEngineStatus::Off`.
 
 #[cfg(any(windows, test))]
 mod configuration;
@@ -24,8 +25,15 @@ pub use lineage::{LineageError, WindowsEngineGenerationStore};
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
+mod system_proxy;
+#[cfg(windows)]
 pub use process::{
     CheckedConfiguration, EngineProcess, RunningChild, StoppedChild, VerifiedExecutable,
+};
+#[cfg(windows)]
+pub use system_proxy::{
+    ProxyError, ProxyOwnershipObservation, ProxySettings, ProxySettingsReceipt,
+    ProxySettingsRestored, WindowsSystemProxy,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +55,9 @@ pub enum Error {
     #[cfg(windows)]
     #[error("Windows engine private runtime directory: {0}")]
     Storage(#[from] cfw_windows_storage::Error),
+    #[cfg(windows)]
+    #[error("Windows engine cannot stop before proxy restoration: {0}")]
+    ProxyRestoration(Box<ProxyError>),
     #[error("Windows engine operation exceeded its deadline")]
     Timeout,
     #[error("Windows engine process exited unexpectedly")]

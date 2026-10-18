@@ -85,12 +85,13 @@ impl ResolvedProjection {
     }
 }
 
-/// Admits only the local proxy data plane. A checked tunnel projection cannot
-/// be passed to `EngineProcess::start` through this type.
+/// Admits a local or SystemProxy data plane. Starting this child alone does not
+/// claim OS proxy ownership. Tunnel projections remain inadmissible here.
 #[derive(Debug)]
 pub struct PreparedConfig {
     pub(crate) resolved: ResolvedProjection,
     pub(crate) listeners: Vec<std::net::SocketAddr>,
+    system_proxy_endpoint: Option<std::net::SocketAddr>,
 }
 
 impl PreparedConfig {
@@ -98,7 +99,24 @@ impl PreparedConfig {
         projection: &ProjectedConfig,
         material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
     ) -> Result<Self, Error> {
-        if projection.mode() != ProjectionMode::LocalProxy {
+        Self::prepare(projection, material, ProjectionMode::LocalProxy)
+    }
+
+    /// Prepare the exact SystemProxy projection; the authority must separately
+    /// activate and durably own OS settings through `WindowsSystemProxy`.
+    pub fn system_proxy_data_plane<'a>(
+        projection: &ProjectedConfig,
+        material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
+    ) -> Result<Self, Error> {
+        Self::prepare(projection, material, ProjectionMode::SystemProxy)
+    }
+
+    fn prepare<'a>(
+        projection: &ProjectedConfig,
+        material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
+        expected: ProjectionMode,
+    ) -> Result<Self, Error> {
+        if projection.mode() != expected {
             return Err(Error::Configuration("platform mode is not yet admitted"));
         }
         let resolved = ResolvedProjection::new(projection, material)?;
@@ -117,8 +135,9 @@ impl PreparedConfig {
             .get("inbounds")
             .and_then(Value::as_array)
             .ok_or(Error::Configuration("missing projected listeners"))?;
+        let mut system_proxy_endpoint = None;
         for inbound in inbounds {
-            let address = inbound
+            let address: std::net::IpAddr = inbound
                 .get("listen")
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse().ok())
@@ -130,15 +149,47 @@ impl PreparedConfig {
                 .filter(|value| *value != 0)
                 .ok_or(Error::Configuration("invalid listener port"))?;
             listeners.push(std::net::SocketAddr::new(address, port));
+            if expected == ProjectionMode::SystemProxy {
+                if inbound.get("type").and_then(Value::as_str) != Some("mixed")
+                    || system_proxy_endpoint.is_some()
+                {
+                    return Err(Error::Configuration(
+                        "SystemProxy requires one mixed listener",
+                    ));
+                }
+                let local_address = match address {
+                    std::net::IpAddr::V4(value) if value.is_unspecified() => {
+                        std::net::Ipv4Addr::LOCALHOST.into()
+                    }
+                    std::net::IpAddr::V6(value) if value.is_unspecified() => {
+                        std::net::Ipv6Addr::LOCALHOST.into()
+                    }
+                    value if value.is_loopback() => value,
+                    _ => {
+                        return Err(Error::Configuration(
+                            "SystemProxy listener is not locally addressable",
+                        ));
+                    }
+                };
+                system_proxy_endpoint = Some(std::net::SocketAddr::new(local_address, port));
+            }
+        }
+        if expected == ProjectionMode::SystemProxy && system_proxy_endpoint.is_none() {
+            return Err(Error::Configuration("SystemProxy listener is missing"));
         }
         Ok(Self {
             resolved,
             listeners,
+            system_proxy_endpoint,
         })
     }
 
     pub fn digest(&self) -> &str {
         self.resolved.digest()
+    }
+
+    pub fn system_proxy_endpoint(&self) -> Option<std::net::SocketAddr> {
+        self.system_proxy_endpoint
     }
 }
 
@@ -257,6 +308,33 @@ mod tests {
             let checked = ResolvedProjection::new(&projected, []).unwrap();
             assert_eq!(checked.digest(), projected.digest());
             assert!(PreparedConfig::local_proxy(&projected, []).is_err());
+        }
+    }
+
+    #[test]
+    fn system_proxy_data_plane_preserves_mode_and_has_a_local_endpoint() {
+        let profile =
+            ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
+                .unwrap();
+        for mode in [
+            ProjectionMode::LocalProxy,
+            ProjectionMode::SystemProxy,
+            ProjectionMode::Tunnel,
+            ProjectionMode::TunnelSystemProxy,
+        ] {
+            let projected = profile
+                .project(PROFILE, mode, &EngineSettings::default())
+                .unwrap();
+            if mode == ProjectionMode::SystemProxy {
+                let prepared = PreparedConfig::system_proxy_data_plane(&projected, []).unwrap();
+                assert_eq!(prepared.digest(), projected.digest());
+                let endpoint = prepared.system_proxy_endpoint().unwrap();
+                assert!(endpoint.ip().is_loopback());
+                assert_eq!(endpoint.port(), EngineSettings::default().mixed_port);
+                assert!(prepared.listeners.contains(&endpoint));
+            } else {
+                assert!(PreparedConfig::system_proxy_data_plane(&projected, []).is_err());
+            }
         }
     }
 

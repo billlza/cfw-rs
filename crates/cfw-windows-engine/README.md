@@ -6,9 +6,10 @@ worker uses the same pinned sing-box source and six patches as CFM 0.5.0.
 unchanged source bytes plus `native/windows/engine-host`; it preserves and
 verifies the original GA tree independently.
 
-The component currently starts only `ProjectionMode::LocalProxy`. The other modes
-require Windows platform authority and restoration contracts which are not yet
-implemented. This is not a replacement `EngineBackend`, a Windows service, or
+The component starts local and SystemProxy data planes; SystemProxy settings
+require the separate durable owner described below. Tunnel modes still require
+Windows platform authority and restoration contracts. This is not an
+`EngineBackend`, a Windows service, or
 proof of `NativeEngineStatus::Off`. The full Windows feature/UI target remains
 in `docs/planning/cfw-0.5.0.md`.
 
@@ -19,8 +20,9 @@ in `docs/planning/cfw-0.5.0.md`.
   projection digest. Resolved secret bytes are never hashed into public identity.
   The caller must first resolve material for the projection's exact audience
   under its lifecycle guard. This component does not grant vault authorization.
-  All four modes can be checked. `PreparedConfig` separately admits only local
-  proxy starts, so a checked tunnel projection is not a start capability.
+  All four modes can be checked. `PreparedConfig` separately admits local and
+  SystemProxy data planes, so a checked tunnel projection is not a start
+  capability. A local projection cannot become SystemProxy ownership.
 - Credential strings in the Rust document and serialized buffers are zeroized
   when dropped. Serialization reserves its bounded buffer once. Go runtime
   copies remain in the child until it exits; this is not a promise that all Go
@@ -35,6 +37,55 @@ in `docs/planning/cfw-0.5.0.md`.
   be written there by the engine.
 
 ## Lifecycle
+
+`SystemProxyAuthorization` is a shared application contract. The Apple adapter
+delegates to its existing native rights request without changing restoration
+intent or error classifications. The Windows implementation runs current-user identity,
+policy and ownership checks on a blocking worker. Authorization never changes
+settings, starts/stops an engine or substitutes for a native ownership lease.
+
+`WindowsSystemProxy` owns the current user's WinINet default/LAN HTTP and HTTPS
+settings. It refuses service/session-zero, restricted, AppContainer and low-
+integrity users, machine-wide proxy policy, prohibited proxy changes and an
+existing explicit proxy/PAC. It does not change WinHTTP, RAS/VPN connection
+settings or policy. Active autodetection is saved and restored with all original
+option values; native UTF-16 is preserved without lossy conversion.
+
+A SID-scoped global mutex serializes cooperating owners. A bounded private
+journal binds the full engine context, projection digest, process ID/creation
+time, endpoint and exact before/applied settings. Durable publication precedes
+the first WinINet mutation. Activation reobserves the actual owned engine and
+listeners before and after applying settings. Repeated activation must match
+that complete binding. Recovery can reopen a crashed predecessor's record, but
+only restores settings matching the original or application-owned values.
+Other values are a conflict, and the journal remains. Native write/notification
+failure does not promise rollback. Successful restoration requires OS readback
+and journal removal before the authority stops the engine.
+
+WinINet has no atomic compare-and-write operation against non-cooperating apps.
+The adapter rechecks values and reports observed conflicts; it does not claim
+elimination of that OS race. Synchronous native calls have no hard deadline.
+The process owner installs a restoration obligation before the first possible
+settings effect. Explicit stop and error cleanup restore settings before closing
+the engine/control pipes; a restoration failure retains the process owner for
+retry. Expired request waiters cannot independently close those pipes. Drop is
+abnormal ownership loss and only attempts restoration; kernel job closure still
+terminates the child. A durable record alone does not restore settings after a
+process crash: user-agent/service supervision and desktop lifecycle
+integration remain required. A settings restoration receipt is not global Off.
+
+Native mutation tests require `CFW_NATIVE_PROXY_MUTATION_TESTS=1`, an absolute
+`CFW_NATIVE_PROXY_RECEIPTS` output directory and `CFW_NATIVE_PROXY_SOURCE`. They are invoked
+only in the disposable Windows engine CI job. They exercise an actual WinINet
+HTTP request through the engine, restoration while the engine is still alive,
+owner-process exit, stale-context rejection and an independent settings change.
+Fixtures attempt exact cleanup even when assertions fail. Read-only package
+tests do not opt into proxy mutation. Physical sleep/wake and multi-session
+authority acceptance remain separate.
+
+Microsoft documents [connection option allocation and restoration](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_optionw),
+[LAN versus RAS scope](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_option_listw)
+and [the proxy-change policy](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-internetexplorer#disableproxychange).
 
 `WindowsEngineGenerationStore` implements the shared generation-store contract
 using a canonical generic Credential Manager record for the current process

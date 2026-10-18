@@ -8,7 +8,7 @@
 use cfw_engine_api::{
     BackendError, BackendErrorKind, BackendFuture, CutoverPreflightBackend, CutoverPreflightFuture,
     CutoverPreflightRequest, EngineBackend, EngineCommandContext, EngineStartRequest,
-    NativeEngineStatus, RuntimeIdentity, TunnelInstallOutcome,
+    NativeEngineStatus, RuntimeIdentity, SystemProxyAuthorization, TunnelInstallOutcome,
 };
 
 mod generation_store;
@@ -395,6 +395,17 @@ impl<B: NativeBridge> EngineBackend for AppleNetworkBackend<B> {
     }
 }
 
+impl<B: NativeBridge> SystemProxyAuthorization for AppleNetworkBackend<B> {
+    fn authorize_system_proxy(&self, restoration_only: bool) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.bridge
+                .authorize_system_proxy(restoration_only)
+                .await
+                .map_err(map_bridge_error)
+        })
+    }
+}
+
 impl<B: NativeBridge> CutoverPreflightBackend for AppleNetworkBackend<B> {
     fn preflight_cutover(&self, request: CutoverPreflightRequest) -> CutoverPreflightFuture<'_> {
         Box::pin(async move {
@@ -508,6 +519,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingBridge {
         calls: Mutex<Vec<EngineCommandContext>>,
+        authorization_requests: Mutex<Vec<bool>>,
+        authorization_error: Option<NativeBridgeError>,
     }
 
     impl NativeBridge for RecordingBridge {
@@ -534,8 +547,17 @@ mod tests {
             })
         }
 
-        fn authorize_system_proxy(&self, _restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
-            Box::pin(async { Ok(()) })
+        fn authorize_system_proxy(&self, restoration_only: bool) -> NativeBridgeFuture<'_, ()> {
+            Box::pin(async move {
+                self.authorization_requests
+                    .lock()
+                    .unwrap()
+                    .push(restoration_only);
+                match &self.authorization_error {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(()),
+                }
+            })
         }
 
         fn query_status(&self) -> NativeBridgeFuture<'_, NativeEngineStatus> {
@@ -676,6 +698,43 @@ mod tests {
         let bridge = NativeBridgeErrorCode::from(kind);
         assert_eq!(bridge, NativeBridgeErrorCode::ProxyAgentApprovalRequired);
         assert_eq!(BackendErrorKind::from(bridge), kind);
+    }
+
+    #[tokio::test]
+    async fn authorization_preserves_intent_without_starting_a_runtime() {
+        let backend = AppleNetworkBackend::new(RecordingBridge::default());
+        let authorization: &dyn SystemProxyAuthorization = &backend;
+        authorization.authorize_system_proxy(true).await.unwrap();
+        authorization.authorize_system_proxy(false).await.unwrap();
+        assert_eq!(
+            *backend.bridge().authorization_requests.lock().unwrap(),
+            [true, false]
+        );
+        assert!(backend.bridge().calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authorization_denials_timeouts_and_transport_errors_remain_errors() {
+        for kind in [
+            BackendErrorKind::ApprovalDenied,
+            BackendErrorKind::PermissionDenied,
+            BackendErrorKind::Timeout,
+            BackendErrorKind::Unavailable,
+        ] {
+            let backend = AppleNetworkBackend::new(RecordingBridge {
+                authorization_error: Some(NativeBridgeError::new(kind.into(), "native refusal")),
+                ..RecordingBridge::default()
+            });
+            assert_eq!(
+                backend.authorize_system_proxy(true).await,
+                Err(BackendError::new(kind, "native refusal"))
+            );
+            assert_eq!(
+                *backend.bridge().authorization_requests.lock().unwrap(),
+                [true]
+            );
+            assert!(backend.bridge().calls.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

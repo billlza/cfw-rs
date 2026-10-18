@@ -493,6 +493,28 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - 桌面应用的 Mac 构建限制仍保留。此阶段不等于 Windows 应用可启动，也不证明物理
   Wi-Fi、代理/TUN、服务授权、完整 UI、休眠恢复或发布验收已完成。
 
+### 2026-10-18：共享授权与 Windows 用户代理恢复
+
+- 应用层新增共享 `SystemProxyAuthorization` 契约，Apple 后端继续代理原生权限请求；
+  关闭、切换模式、配置替换和恢复路径保留“先取得恢复权限、再停止引擎”的顺序。
+  Mac 授权拒绝/超时及服务故障恢复回归继续执行，Windows 使用自己的权限错误信息。
+- `WindowsSystemProxy` 通过 WinINet 管理当前交互用户的默认/LAN HTTP、HTTPS 代理。
+  版本化私有记录先于设置修改落盘，绑定完整上下文、配置摘要、引擎 PID/创建时间和
+  原始/写入值。保留原始 UTF-16、停用期间的 PAC URL 与自动检测状态，不写 WinHTTP、
+  RAS 或系统策略。已有明确代理/PAC、机器级策略和禁止修改策略会阻止接管。
+- 恢复只接受原值或本应用写入值，冲突不覆盖其他程序设置。WinINet 没有跨程序原子
+  比较写入契约；这里保留读回、冲突与结果不确定语义，不宣称消除了 OS 竞态。
+- 接线发现原有子进程管理器把单次 RPC 等待超时当成整个所有者消失，关闭管道并终止
+  引擎。现在进程保留恢复义务；显式停止与异常清理先恢复设置，恢复失败保留所有者。
+  过期等待者只丢弃该次迟到结果，不能自行关闭控制管道。进程崩溃/Drop 仍需上层监护
+  恢复，不能据此生成全局 Off。
+- 两项新增原生集成测试要求托管临时用户显式授权，覆盖实际 WinINet HTTP 流量、
+  恢复冲突时引擎存活、RPC 超时不关闭管道、恢复后停止、所有者进程退出、陈旧上下文
+  与外部修改。测试保存/核对原始设置，输出独立恢复回执；原生结果待提交后的 CI。
+- 本地 1,160 项 Mac Rust 测试、完整 Clippy、cargo-deny 与 Windows 目标 Clippy
+  通过；Windows workflow actionlint 通过，519 个 registry 版本/校验值保持不变。
+- 桌面工厂、完整服务授权、TUN、多会话/睡眠恢复、完整 UI、安装更新和签名仍未完成。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。
@@ -523,3 +545,6 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [Windows 网卡地址观察](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getadaptersaddresses)
 - [Windows 地址 DAD 状态](https://learn.microsoft.com/en-us/windows/win32/api/nldef/ne-nldef-nl_dad_state)
 - [Windows Wi-Fi SSID 与位置权限](https://learn.microsoft.com/en-us/windows/win32/nativewifi/wi-fi-access-location-changes)
+- [WinINet 连接设置与恢复](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_optionw)
+- [WinINet 默认 LAN 与 RAS 范围](https://learn.microsoft.com/en-us/windows/win32/api/wininet/ns-wininet-internet_per_conn_option_listw)
+- [Windows 禁止修改代理的策略](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-internetexplorer#disableproxychange)

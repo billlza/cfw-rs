@@ -171,6 +171,7 @@ pub struct EngineProcess {
     listeners: Vec<std::net::SocketAddr>,
     assigned: bool,
     closed: bool,
+    proxy_cleanup: Option<crate::system_proxy::ProxyCleanup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +258,7 @@ impl EngineProcess {
             listeners: Vec::new(),
             assigned: false,
             closed: false,
+            proxy_cleanup: None,
         };
         // The worker cannot start an engine before receiving a request. No
         // request or configuration leaves this process until job assignment.
@@ -285,14 +287,23 @@ impl EngineProcess {
         let worker = thread::Builder::new()
             .name("cfw-engine-control".into())
             .spawn(move || {
+                let mut transport_failed = false;
                 while let Ok(work) = receiver.recv() {
-                    let result = protocol::exchange(&mut input, &mut output, &work.bytes);
-                    let failed = result.is_err();
-                    // A disappeared receiver means owner cancellation; close pipes.
-                    if work.result.send(result).is_err() || failed {
-                        break;
+                    let result = if transport_failed {
+                        Err(Error::Protocol("control transport requires owner recovery"))
+                    } else {
+                        protocol::exchange(&mut input, &mut output, &work.bytes)
+                    };
+                    transport_failed |= result.is_err();
+                    // An expired per-operation waiter is not owner loss. The
+                    // owner has received its timeout and must restore proxy
+                    // settings before closing pipes or terminating the job.
+                    // A late response is retired, never admitted elsewhere.
+                    if let Err(retired_response) = work.result.send(result) {
+                        drop(retired_response);
                     }
                 }
+                // Only channel closure from the owning process releases pipes.
             })?;
         owner.sender = Some(sender);
         owner.worker = Some(worker);
@@ -354,6 +365,21 @@ impl EngineProcess {
     }
 
     fn observe_remaining(&mut self, deadline: Instant) -> Result<RunningChild, Error> {
+        let result = self.observe_native(deadline);
+        self.finish_operation(result)
+    }
+
+    /// Activation already holds the proxy journal lock. Return the failure to
+    /// that owner without recursive cleanup; it retains this process and the
+    /// durable recovery record until the outer transaction releases its lock.
+    pub(crate) fn observe_under_proxy_lock(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<RunningChild, Error> {
+        self.observe_native(deadline(timeout)?)
+    }
+
+    fn observe_native(&mut self, deadline: Instant) -> Result<RunningChild, Error> {
         let digest = self
             .digest
             .clone()
@@ -376,14 +402,18 @@ impl EngineProcess {
                 }
                 Ok(())
             });
-        self.finish_operation(result)?;
+        result?;
         Ok(RunningChild {
             process_id: self.child.id(),
             configuration_digest: digest,
         })
     }
 
-    pub fn stop(mut self, timeout: Duration) -> Result<StoppedChild, Error> {
+    pub fn stop(&mut self, timeout: Duration) -> Result<StoppedChild, Error> {
+        // Validate before any effect. The child cleanup deadline starts only
+        // after the distinct settings restoration operation has completed.
+        deadline(timeout)?;
+        self.restore_proxy()?;
         let deadline = deadline(timeout)?;
         let digest = self
             .digest
@@ -477,6 +507,34 @@ impl EngineProcess {
         }
     }
 
+    pub(crate) fn bind_proxy_cleanup(
+        &mut self,
+        cleanup: crate::system_proxy::ProxyCleanup,
+    ) -> Result<(), Error> {
+        if self.digest.as_deref() != Some(cleanup.config_digest.as_str())
+            || self
+                .proxy_cleanup
+                .as_ref()
+                .is_some_and(|current| !current.same_binding(&cleanup))
+        {
+            return Err(Error::Protocol(
+                "proxy cleanup does not match this engine ownership",
+            ));
+        }
+        self.proxy_cleanup = Some(cleanup);
+        Ok(())
+    }
+
+    fn restore_proxy(&mut self) -> Result<(), Error> {
+        if let Some(cleanup) = &self.proxy_cleanup {
+            cleanup
+                .restore()
+                .map_err(|error| Error::ProxyRestoration(Box::new(error)))?;
+            self.proxy_cleanup = None;
+        }
+        Ok(())
+    }
+
     fn finish_io(&mut self, deadline: Instant) -> Result<(), Error> {
         self.sender.take();
         if let Some(worker) = self.worker.as_ref() {
@@ -495,6 +553,7 @@ impl EngineProcess {
         if self.closed {
             return Ok(());
         }
+        self.restore_proxy()?;
         let deadline = Instant::now() + Duration::from_secs(5);
         if self.assigned {
             if unsafe { TerminateJobObject(self.job.as_raw_handle(), 2) } == 0 {
@@ -517,8 +576,10 @@ impl EngineProcess {
 
 impl Drop for EngineProcess {
     fn drop(&mut self) {
-        // Best effort only; an explicit operation reports cleanup failures.
-        // Closing the retained job is the final OS cleanup on owner drop.
+        // Explicit operations retain this owner on restoration failure. Drop
+        // is abnormal ownership loss: attempt restoration, then kernel handle
+        // closure is the final cleanup. A surviving journal still requires the
+        // supervising authority's recovery; Drop never proves global Off.
         let _ = self.abort();
     }
 }

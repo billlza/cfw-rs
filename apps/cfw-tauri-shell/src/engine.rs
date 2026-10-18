@@ -24,12 +24,12 @@ use std::time::Instant;
 
 use cfw_apple_network::{
     AppleNetworkBackend, KeychainEngineGenerationStore, NATIVE_BRIDGE_OUTER_WATCHDOG,
-    NativeBridgeErrorCode, NativeFrameworkBridge,
+    NativeFrameworkBridge,
 };
 use cfw_application::{EngineControllerAccess, EngineCoordinatorError, EngineModeCoordinator};
 use cfw_engine_api::{
     BackendErrorKind, CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineOwner,
-    EngineSnapshot, EngineState,
+    EngineSnapshot, EngineState, SystemProxyAuthorization,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
@@ -165,7 +165,7 @@ pub struct ManagedEngine {
     capabilities: EngineCapabilities,
     unavailable_reason: Option<String>,
     pub(crate) preflight_backend: Arc<dyn CutoverPreflightBackend>,
-    authorization_bridge: Arc<dyn cfw_apple_network::NativeBridge>,
+    system_proxy_authorization: Arc<dyn SystemProxyAuthorization>,
     pub(crate) profile_delay_backend: Arc<dyn cfw_engine_api::ProfileDelayBackend>,
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
@@ -311,7 +311,7 @@ impl ManagedEngine {
             .reserve_maintenance()
             .map_err(|error| error.to_string())?;
         let coordinator = self.coordinator.clone();
-        let authorization = self.authorization_bridge.clone();
+        let authorization = self.system_proxy_authorization.clone();
         let (result, maintenance) = maintenance
             .run_to_completion(async move {
                 authorize_proxy_transition(authorization.as_ref(), true).await?;
@@ -338,9 +338,11 @@ impl ManagedEngine {
     where
         R: std::future::Future<Output = Result<(), String>> + Send + 'static,
     {
-        let bridge = self.authorization_bridge.clone();
+        let authorization = self.system_proxy_authorization.clone();
         recover_after_settings_restoration(
-            move |restoration_only| async move { bridge.authorize_system_proxy(restoration_only).await },
+            move |restoration_only| async move {
+                authorization.authorize_system_proxy(restoration_only).await
+            },
             recovery,
         )
     }
@@ -439,9 +441,9 @@ pub(crate) fn prepare_managed_engine(
         .map_err(|error| format!("engine settings are unusable: {error}"))?;
     let native_available = bridge.is_available();
     let native_failure = bridge.unavailable_reason().map(ToOwned::to_owned);
-    let authorization_bridge = Arc::new(bridge.clone());
-    let profile_delay_backend = authorization_bridge.clone();
+    let profile_delay_backend = Arc::new(bridge.clone());
     let concrete_backend = Arc::new(AppleNetworkBackend::new(bridge));
+    let system_proxy_authorization = concrete_backend.clone();
     let engine_backend: Arc<dyn EngineBackend> = concrete_backend.clone();
     let preflight_backend: Arc<dyn CutoverPreflightBackend> = concrete_backend;
     let generation_store =
@@ -490,7 +492,7 @@ pub(crate) fn prepare_managed_engine(
         },
         unavailable_reason: lineage_failure.or(native_failure),
         preflight_backend,
-        authorization_bridge,
+        system_proxy_authorization,
         profile_delay_backend,
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
@@ -598,7 +600,7 @@ pub(crate) async fn apply_admitted_engine_mode(
         .map_err(|error| error.to_string())?;
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
-    let authorization = engine.authorization_bridge.clone();
+    let authorization = engine.system_proxy_authorization.clone();
     let retry_guard = mode_lease.retry_guard();
     let completion = mode_lease.run_to_completion(async move {
         // Authorization precedes the runtime transition, including restoration
@@ -655,7 +657,7 @@ where
     let settings = engine.engine_settings()?;
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
-    let authorization = engine.authorization_bridge.clone();
+    let authorization = engine.system_proxy_authorization.clone();
     let (result, lease) = lease
         .run_to_completion(async move {
             let before = coordinator.snapshot();
@@ -715,10 +717,10 @@ enum RightsPromptOutcome {
 }
 
 impl RightsPromptOutcome {
-    fn of(code: NativeBridgeErrorCode) -> Option<Self> {
+    fn of(code: BackendErrorKind) -> Option<Self> {
         match code {
-            NativeBridgeErrorCode::Timeout => Some(Self::Unanswered),
-            NativeBridgeErrorCode::ApprovalDenied | NativeBridgeErrorCode::PermissionDenied => {
+            BackendErrorKind::Timeout => Some(Self::Unanswered),
+            BackendErrorKind::ApprovalDenied | BackendErrorKind::PermissionDenied => {
                 Some(Self::Refused)
             }
             _ => None,
@@ -728,7 +730,12 @@ impl RightsPromptOutcome {
 
 /// What the page shows when System Proxy authorization does not go through:
 /// either outcome the user caused gets the way back.
-fn authorization_failure_message(code: NativeBridgeErrorCode, message: &str) -> String {
+fn authorization_failure_message(code: BackendErrorKind, message: &str) -> String {
+    if cfg!(windows) {
+        return format!(
+            "System Proxy authorization failed: {code:?}: {message}. Check Windows proxy policy and the user session before trying again."
+        );
+    }
     match RightsPromptOutcome::of(code) {
         Some(RightsPromptOutcome::Unanswered) => "System Proxy authorization timed out: macOS did \
              not get an answer to its prompt. Turn System Proxy on again and approve the prompt."
@@ -741,13 +748,13 @@ fn authorization_failure_message(code: NativeBridgeErrorCode, message: &str) -> 
 }
 
 async fn authorize_proxy_transition(
-    authorization: &dyn cfw_apple_network::NativeBridge,
+    authorization: &dyn SystemProxyAuthorization,
     restoration_only: bool,
 ) -> Result<(), String> {
     authorization
         .authorize_system_proxy(restoration_only)
         .await
-        .map_err(|error| authorization_failure_message(error.code, &error.message))
+        .map_err(|error| authorization_failure_message(error.kind, &error.message))
 }
 
 /// Recovers background services once macOS granted the rights to restore the
@@ -764,11 +771,18 @@ async fn recover_after_settings_restoration<A>(
     recovery: impl std::future::Future<Output = Result<(), String>>,
 ) -> Result<(), String>
 where
-    A: std::future::Future<Output = Result<(), cfw_apple_network::NativeBridgeError>>,
+    A: std::future::Future<Output = Result<(), cfw_engine_api::BackendError>>,
 {
     let unrequested = match authorize(true).await {
         Ok(()) => None,
-        Err(error) => match RightsPromptOutcome::of(error.code) {
+        #[cfg(windows)]
+        Err(error) if RightsPromptOutcome::of(error.kind).is_some() => {
+            return Err(format!(
+                "Restoring System Proxy settings was not authorized: {}. Check Windows proxy policy and the user session, then recover background services again.",
+                error.message
+            ));
+        }
+        Err(error) => match RightsPromptOutcome::of(error.kind) {
             Some(RightsPromptOutcome::Unanswered) => {
                 return Err(
                     "Restoring System Proxy settings timed out: macOS did not get an \
@@ -784,7 +798,7 @@ where
                         .into(),
                 );
             }
-            None => Some(format!("{:?}: {}", error.code, error.message)),
+            None => Some(format!("{:?}: {}", error.kind, error.message)),
         },
     };
     recovery.await.map_err(|error| match unrequested {

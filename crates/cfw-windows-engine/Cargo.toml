@@ -18,6 +18,7 @@ zeroize.workspace = true
 cfw-engine-api = { path = "../cfw-engine-api" }
 cfw-windows-storage = { path = "../cfw-windows-storage" }
 sha2.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 uuid.workspace = true
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
@@ -31,6 +32,9 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_Pipes",
   "Win32_NetworkManagement_IpHelper",
   "Win32_Networking_WinSock",
+  "Win32_Networking_WinInet",
+  "Win32_System_Memory",
+  "Win32_System_Registry",
 ] }
 
 [dev-dependencies]

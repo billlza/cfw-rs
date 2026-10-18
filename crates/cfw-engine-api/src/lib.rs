@@ -1315,6 +1315,19 @@ impl BackendError {
 
 pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BackendError>> + Send + 'a>>;
 
+/// Native authorization before a System Proxy transition or recovery.
+///
+/// This may require interactive consent and therefore runs before a short-lived
+/// engine start/cleanup transaction. It neither starts/stops an engine nor
+/// changes proxy settings or claims an ownership lease. Implementations must
+/// authenticate the intended user and respect the platform's access policy.
+/// `restoration_only` permits restoring settings already owned by this app, not
+/// taking over new settings. A refusal or unanswered consent request remains an
+/// explicit error; callers must not stop a working engine before resolving it.
+pub trait SystemProxyAuthorization: Send + Sync + 'static {
+    fn authorize_system_proxy(&self, restoration_only: bool) -> BackendFuture<'_, ()>;
+}
+
 /// Native engine operations used by the application coordinator.
 ///
 /// A successful stop is a barrier: the process has stopped libbox, released

@@ -40,7 +40,7 @@ pub(crate) async fn change_runtime_preferences(
     }
     let coordinator = engine.coordinator.clone();
     let endpoints = engine.endpoints.clone();
-    let authorization = engine.authorization_bridge.clone();
+    let authorization = engine.system_proxy_authorization.clone();
     let repository = profiles.repository().clone();
     let store = settings_store()?;
     let (result, lease) = lease

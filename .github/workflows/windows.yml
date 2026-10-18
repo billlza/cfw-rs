@@ -94,7 +94,7 @@ jobs:
       - name: Check shared Rust contracts on Windows
         run: cargo clippy --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles --all-targets -- -D warnings
       - name: Test shared Rust contracts on Windows
-        run: cargo test --locked -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles --all-targets
+        run: cargo test --locked --no-fail-fast -p cfw-engine-api -p cfw-singbox-config -p cfw-controller -p cfw-application -p cfw-core -p cfw-windows-storage -p cfw-profiles --all-targets
       - name: Install locked UI dependencies
         working-directory: apps/cfw-tauri-shell
         run: node $env:CFW_NPM_CLI ci --ignore-scripts=false --install-links=true

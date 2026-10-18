@@ -244,6 +244,10 @@ fn poisoned_transaction() -> ProfileError {
 fn storage_error(error: Error, entry: &str) -> ProfileError {
     match error {
         Error::Io(error) => ProfileError::Io(error),
+        Error::Enumeration { operation, source } => ProfileError::Io(io::Error::new(
+            source.kind(),
+            Error::Enumeration { operation, source },
+        )),
         Error::InvalidName => ProfileError::InvalidRepositoryPath,
         Error::UnsafeDirectory => ProfileError::UnsafeRepositoryDirectory,
         Error::UnsafeFile => ProfileError::UnsafeProfileFile(entry.to_owned()),

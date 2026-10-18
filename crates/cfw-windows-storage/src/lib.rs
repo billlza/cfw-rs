@@ -53,6 +53,12 @@ pub enum Error {
     TooManyEntries { maximum: usize },
     #[error("private storage directory enumeration returned invalid or incomplete data")]
     InvalidDirectoryListing,
+    #[error("private storage directory {operation} failed: {source}")]
+    Enumeration {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
     #[error("private storage security descriptor is invalid")]
     InvalidSecurityDescriptor,
     #[error(

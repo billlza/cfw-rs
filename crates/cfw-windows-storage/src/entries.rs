@@ -28,10 +28,12 @@ impl ReadTransaction {
     /// readers of the same directory object.
     pub fn entry_names(&self, maximum: usize) -> Result<Vec<OsString>, Error> {
         let directory = reopen_for_enumeration(&self.inner.file)?;
-        verify_kind(&directory, true)?;
+        verify_kind(&directory, true)
+            .map_err(|error| enumeration_error(error, "metadata inspection"))?;
         self.inner
             .security
-            .verify(&directory, ReadPolicy::Private, true)?;
+            .verify(&directory, ReadPolicy::Private, true)
+            .map_err(|error| enumeration_error(error, "security inspection"))?;
         let mut buffer = vec![0u32; 16 * 1024];
         let capacity = buffer.len() * size_of::<u32>();
         let mut names = Vec::new();
@@ -60,7 +62,7 @@ impl ReadTransaction {
             if status == STATUS_NO_MORE_FILES {
                 return Ok(names);
             }
-            nt_result(status)?;
+            nt_result(status).map_err(|error| enumeration_error(error, "entry query"))?;
             let written = status_block.Information;
             if written == 0 || written > capacity {
                 return Err(Error::InvalidDirectoryListing);
@@ -190,7 +192,10 @@ fn reopen_for_enumeration(directory: &File) -> Result<File, Error> {
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error().into());
+        return Err(Error::Enumeration {
+            operation: "handle reopening",
+            source: io::Error::last_os_error(),
+        });
     }
     // SAFETY: a successful reopen transfers exactly one live owned handle.
     Ok(unsafe { File::from_raw_handle(handle) })
@@ -213,6 +218,13 @@ fn node_kind(file: &File) -> Result<EntryKind, Error> {
             EntryKind::File
         },
     )
+}
+
+fn enumeration_error(error: Error, operation: &'static str) -> Error {
+    match error {
+        Error::Io(source) => Error::Enumeration { operation, source },
+        error => error,
+    }
 }
 
 fn is_lock_name(name: &OsStr) -> bool {

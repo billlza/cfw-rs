@@ -92,6 +92,10 @@ impl From<Error> for SettingsStoreError {
     fn from(error: Error) -> Self {
         match error {
             Error::Io(error) => Self::Io(error),
+            Error::Enumeration { operation, source } => Self::Io(std::io::Error::new(
+                source.kind(),
+                Error::Enumeration { operation, source },
+            )),
             Error::Busy => Self::StoreBusy,
             Error::InvalidName | Error::InvalidLimit => Self::InvalidPath,
             Error::UnsafeDirectory => Self::UnsafeDirectory,

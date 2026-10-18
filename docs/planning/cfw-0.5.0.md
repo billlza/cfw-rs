@@ -184,7 +184,7 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
   290 项 Rust 测试、前端构建、310 项前端测试均通过，失败/忽略/跳过均为 0。
   原始完整日志和提取结果在 `target/cfw-validation/windows-ci-final.log` 与
   `windows-contract-result.json`。相同提交的 [Mac 托管 CI](https://github.com/billlza/cfw-rs/actions/runs/39128685594)
-  三个 job 仍在排队，不能将本地 Clippy 结果算成该托管运行通过。
+  三个 job 在当时查询时仍排队，不能将本地 Clippy 结果算成该托管运行通过。
   这些结果不证明 Windows 产品可用或达到 GA。
 
 实际验证入口：
@@ -236,7 +236,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   完整回执在 `target/cfw-validation/windows-storage-final-result.json`，原始日志
   SHA-256 为 `9dbf2afc40ecf46fe072d2c39836fab53028e8f5e85af2256d05815b6197ecd8`。
   相同提交的三个 [Mac 托管 job](https://github.com/billlza/cfw-rs/actions/runs/39133991506)
-  仍排队；本轮成功的 Mac 回归是本地固定工具链结果。
+  在当时查询时仍排队；本轮成功的 Mac 回归是本地固定工具链结果。
 - 新直接依赖复用锁文件已有的 `windows-sys 0.61.2`；注册表包的名称、版本和
   checksum 集合未变化。Mac 依赖策略检查已通过；Windows 完整发布依赖审计仍待建设。
   初步存储阶段尚未包含 Windows 配置仓库（后续进展见下节）、
@@ -277,7 +277,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   枚举游标锁，观察到三秒超时，并在释放后完成重新枚举。回执为
   `target/cfw-validation/windows-profiles-final-result.json`，日志 SHA-256 为
   `7741cd000f645d65292893c32f507f7b178aab92194113c9024e51250e6c5560`。
-  同源 Mac 托管 CI 的三个 job 仍排队，不能替代或冒充本地固定工具链验证。
+  同源 Mac 托管 CI 的三个 job 在结果核对时仍排队，未取得托管通过结果。
   本阶段仍不证明 Windows 应用启动、凭据库、引擎、系统代理、TUN、桌面视觉或发布验收。
 
 ## 官方资料

@@ -167,6 +167,9 @@ impl RuntimeJob {
     pub(super) fn transfer_keeper(&self, peer: &NativePeerProcess) -> Result<u64> {
         keeper::transfer(&self._observer, peer)
     }
+    pub(super) fn verify_keeper(&self, peer: &NativePeerProcess, value: u64) -> Result<()> {
+        keeper::verify(&self._observer, peer, value)
+    }
     pub(super) fn assign(root: &RootContext, peer: &NativePeerProcess) -> Result<Self> {
         crate::service_peer::require_system_service_identity()?;
         let job = create(root)?;

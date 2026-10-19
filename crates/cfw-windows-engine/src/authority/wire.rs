@@ -15,7 +15,8 @@ use zeroize::Zeroizing;
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 const PROTOCOL: &str = "cfw.windows.authority";
 // v3 additionally transfers a zero-access lifetime reference before Bind
-// publication. Earlier services cannot establish that contract.
+// publication, then verifies the receiver's retained copy before Ready.
+// Earlier services cannot establish that contract.
 const VERSION: u16 = 3;
 
 #[derive(Debug, thiserror::Error)]
@@ -139,6 +140,7 @@ pub(super) enum CommandTag {
     ReserveGeneration,
     Prepare,
     BindUserAgent,
+    ConfirmRuntimeKeeper,
     Ready,
     Heartbeat,
     BeginStop,
@@ -151,6 +153,12 @@ pub(super) enum CommandTag {
 pub struct BindRequest {
     pub context: LeaseContext,
     pub ticket: TicketMaterial,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeeperRequest {
+    pub context: LeaseContext,
+    pub handle: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -168,6 +176,7 @@ pub enum Command {
     ReserveGeneration(super::AuthorityLineage),
     Prepare(PrepareRequest),
     BindUserAgent(BindRequest),
+    ConfirmRuntimeKeeper(KeeperRequest),
     Ready(ReadyReport),
     Heartbeat(LeaseContext),
     BeginStop(StopRequest),
@@ -184,6 +193,7 @@ impl Command {
             Self::ReserveGeneration(_) => CommandTag::ReserveGeneration,
             Self::Prepare(_) => CommandTag::Prepare,
             Self::BindUserAgent(_) => CommandTag::BindUserAgent,
+            Self::ConfirmRuntimeKeeper(_) => CommandTag::ConfirmRuntimeKeeper,
             Self::Ready(_) => CommandTag::Ready,
             Self::Heartbeat(_) => CommandTag::Heartbeat,
             Self::BeginStop(_) => CommandTag::BeginStop,
@@ -200,6 +210,10 @@ impl Command {
             }
             Self::Prepare(input) => input.validate().map_err(|_| WireError::Malformed),
             Self::BindUserAgent(input) => validate_context(&input.context),
+            Self::ConfirmRuntimeKeeper(input) => {
+                validate_context(&input.context)?;
+                validate_handle(input.handle)
+            }
             Self::Ready(report) => {
                 validate_context(&report.context)?;
                 report.validate().map_err(|_| WireError::Malformed)
@@ -294,6 +308,7 @@ impl Request {
             Command::ReserveGeneration(expected) => envelope(self.id, tag, expected),
             Command::Prepare(input) => envelope(self.id, tag, input),
             Command::BindUserAgent(input) => envelope(self.id, tag, input),
+            Command::ConfirmRuntimeKeeper(input) => envelope(self.id, tag, input),
             Command::Ready(input) => envelope(self.id, tag, input),
             Command::Heartbeat(input) => envelope(self.id, tag, input),
             Command::BeginStop(input) | Command::AbortPrepared(input) => {
@@ -326,6 +341,7 @@ impl Request {
             }
             CommandTag::Prepare => Command::Prepare(decode(body)?),
             CommandTag::BindUserAgent => Command::BindUserAgent(decode(body)?),
+            CommandTag::ConfirmRuntimeKeeper => Command::ConfirmRuntimeKeeper(decode(body)?),
             CommandTag::Ready => Command::Ready(decode(body)?),
             CommandTag::Heartbeat => Command::Heartbeat(decode(body)?),
             CommandTag::BeginStop => Command::BeginStop(decode(body)?),
@@ -458,7 +474,11 @@ impl BoundGrant {
         self.committed_revision
     }
     #[cfg(windows)]
-    pub(super) fn adopt_keeper(&mut self, owner: &crate::NativePeerProcess) -> Result<()> {
+    pub(super) fn adopt_keeper(
+        &mut self,
+        owner: &crate::NativePeerProcess,
+        verify: impl FnOnce(u64) -> Result<()>,
+    ) -> Result<()> {
         if self.keeper.is_some() {
             return Err(WireError::Correlation);
         }
@@ -466,6 +486,7 @@ impl BoundGrant {
             self.keeper_handle,
             &self.context.operation.root,
             owner,
+            verify,
         )?);
         Ok(())
     }
@@ -660,12 +681,7 @@ pub(super) fn response(
         }
         (Command::BindUserAgent(input), ResponseTag::Bound) => {
             let value: BoundPayload = decode(payload)?;
-            if value.keeper_handle == 0
-                || value.keeper_handle > isize::MAX as u64
-                || value.keeper_handle & 3 != 0
-            {
-                return Err(WireError::Malformed);
-            }
+            validate_handle(value.keeper_handle)?;
             if value.context != input.context
                 || value.context.operation.owner != *owner
                 || input.context.operation.prepared_revision.checked_add(1)
@@ -693,6 +709,12 @@ pub(super) fn response(
             let value: AuthoritySnapshot = decode(payload)?;
             snapshot_valid(&value)?;
             let (context, accepted) = match command {
+                Command::ConfirmRuntimeKeeper(input) => (
+                    &input.context,
+                    value.state == AuthorityState::Starting
+                        && input.context.operation.prepared_revision.checked_add(1)
+                            == value.revision,
+                ),
                 Command::Ready(report) => (
                     &report.context,
                     value.state == AuthorityState::Active
@@ -736,6 +758,13 @@ pub(super) fn response(
         }
         _ => Err(WireError::Correlation),
     }
+}
+
+fn validate_handle(value: u64) -> Result<()> {
+    if value == 0 || value > isize::MAX as u64 || value & 3 != 0 {
+        return Err(WireError::Malformed);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -581,6 +581,22 @@ fn serve_connection(
                         .map_err(|e| e.to_string())?;
                     Some(b"retained".to_vec())
                 }
+                body if body.starts_with(b"job-keeper-verify:") => {
+                    let bytes: [u8; 8] = body[b"job-keeper-verify:".len()..]
+                        .try_into()
+                        .map_err(|_| "invalid keeper verification frame")?;
+                    let result = job_keeper
+                        .as_ref()
+                        .ok_or("missing keeper fixture")?
+                        .verify_reference(admitted.process(), u64::from_le_bytes(bytes));
+                    Some(match result {
+                        Ok(()) => b"verified".to_vec(),
+                        Err(cfw_windows_engine::authority::RuntimeJobError::Security) => {
+                            b"unrelated".to_vec()
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    })
+                }
                 b"job-keeper-release" => {
                     job_keeper
                         .as_mut()

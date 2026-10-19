@@ -73,6 +73,10 @@ fn commands_roundtrip_without_a_generic_secret_value_or_extra_fields() {
             context: value.clone(),
             ticket: TicketMaterial::from_slice(&[7; 32]).unwrap(),
         }),
+        Command::ConfirmRuntimeKeeper(KeeperRequest {
+            context: value.clone(),
+            handle: 4,
+        }),
         Command::Ready(ReadyReport {
             context: value.clone(),
             runtime_digest: [4; 32],
@@ -101,6 +105,63 @@ fn commands_roundtrip_without_a_generic_secret_value_or_extra_fields() {
         malformed["payload"]["extra"] = serde_json::json!(true);
         assert!(matches!(
             Request::decode(&serde_json::to_vec(&malformed).unwrap()),
+            Err(WireError::Malformed)
+        ));
+    }
+}
+
+#[test]
+fn keeper_confirmation_requires_the_exact_starting_revision_and_root() {
+    let request = Request::new(Command::ConfirmRuntimeKeeper(KeeperRequest {
+        context: context(),
+        handle: 4,
+    }))
+    .unwrap();
+    let expected = AuthoritySnapshot {
+        state: AuthorityState::Starting,
+        revision: Some(3),
+        root: Some(context().operation.root),
+    };
+    let bytes = Response::Status(expected.clone())
+        .encode(request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&request, bytes.as_bytes(), &owner()),
+        Ok(Response::Status(_))
+    ));
+    for changed in [
+        AuthoritySnapshot {
+            state: AuthorityState::Active,
+            ..expected.clone()
+        },
+        AuthoritySnapshot {
+            revision: Some(2),
+            ..expected.clone()
+        },
+        AuthoritySnapshot {
+            revision: Some(4),
+            ..expected.clone()
+        },
+        AuthoritySnapshot {
+            root: Some(RootContext {
+                generation: 2,
+                ..context().operation.root
+            }),
+            ..expected
+        },
+    ] {
+        let bytes = Response::Status(changed).encode(request.id).unwrap();
+        assert!(matches!(
+            response(&request, bytes.as_bytes(), &owner()),
+            Err(WireError::Correlation)
+        ));
+    }
+    for handle in [0, 1, 2, u64::MAX] {
+        assert!(matches!(
+            Request::new(Command::ConfirmRuntimeKeeper(KeeperRequest {
+                context: context(),
+                handle,
+            })),
             Err(WireError::Malformed)
         ));
     }

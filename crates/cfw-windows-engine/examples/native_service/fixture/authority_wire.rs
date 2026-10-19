@@ -129,6 +129,8 @@ impl Validation {
             (AuthorityState::Preparing, 3, Some(Rejection::Ticket)),
             (AuthorityState::Starting, 4, None),
             (AuthorityState::Starting, 4, Some(Rejection::Identity)),
+            (AuthorityState::Starting, 4, None),
+            (AuthorityState::Starting, 4, Some(Rejection::Identity)),
             (AuthorityState::Starting, 4, Some(Rejection::Identity)),
             (AuthorityState::Active, 5, None),
             (AuthorityState::Active, 5, None),
@@ -159,7 +161,7 @@ impl Validation {
         scoped.requests += 1;
         if scoped.requests == 10 {
             scoped.verify_reopen_with_live_runtime(1)?;
-        } else if scoped.requests == 18 {
+        } else if scoped.requests == 20 {
             require_live_runtime(
                 scoped
                     .controller
@@ -175,7 +177,7 @@ impl Validation {
             return Err("duplicate wire fixture finish".into());
         }
         let scoped = self.scoped.as_mut().ok_or("missing wire fixture scope")?;
-        if scoped.requests != 20 {
+        if scoped.requests != 22 {
             return Err("wire fixture command sequence incomplete".into());
         }
         let controller = scoped
@@ -398,7 +400,7 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         Ok(_) => return Err("wrong ticket was accepted".into()),
     }
     let Response::Bound(bound) = channel
-        .request(bind, Instant::now() + LIMIT)
+        .unconfirmed_bind_for_validation(bind, Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?
     else {
         return Err("agent did not receive a runtime binding".into());
@@ -406,6 +408,24 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     assert_eq!(bound.context(), &context);
     assert_eq!(bound.committed_revision(), 4);
     require_job_access_denied(&context.operation.root)?;
+    let ready = ReadyReport {
+        context: context.clone(),
+        runtime_digest: context.operation.identity_sha256,
+        ready_flags: 7,
+        packet_pump_limits: None,
+        observed_millis: 1,
+    };
+    match channel.request(
+        Request::new(Command::Ready(ready.clone())).map_err(|e| e.to_string())?,
+        Instant::now() + LIMIT,
+    ) {
+        Err(WireError::Rejected(Rejection::Identity)) => {}
+        Err(error) => return Err(format!("unconfirmed keeper Ready rejection: {error}")),
+        Ok(_) => return Err("Ready admitted before keeper confirmation".into()),
+    }
+    let bound = channel
+        .confirm_binding_for_validation(bound, Instant::now() + LIMIT)
+        .map_err(|e| e.to_string())?;
     drop((bound, bytes));
     match channel.request(
         Request::new(Command::LoadLineage).map_err(|e| e.to_string())?,
@@ -423,13 +443,6 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         Err(error) => return Err(format!("agent recorded scope role rejection: {error}")),
         Ok(_) => return Err("agent acquired Desktop recorded scope access".into()),
     }
-    let ready = ReadyReport {
-        context: context.clone(),
-        runtime_digest: context.operation.identity_sha256,
-        ready_flags: 7,
-        packet_pump_limits: None,
-        observed_millis: 1,
-    };
     status(
         request(&mut channel, Command::Ready(ready.clone()))?,
         AuthorityState::Active,
@@ -557,7 +570,7 @@ pub(super) fn require_job_access_denied(root: &RootContext) -> Result<()> {
     Ok(())
 }
 fn report() -> serde_json::Value {
-    serde_json::json!({"success":true,"versioned_requests":20,"typed_rejections":7,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"recorded_runtime_scope_validated":true,"recorded_scope_observer_control_rejected":true,"user_agent_recorded_scope_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"live_processes_block_reconcile":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"ordinary_agent_job_rights_denied":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"versioned_requests":22,"typed_rejections":8,"unconfirmed_keeper_ready_rejected":true,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"recorded_runtime_scope_validated":true,"recorded_scope_observer_control_rejected":true,"user_agent_recorded_scope_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"live_processes_block_reconcile":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"ordinary_agent_job_rights_denied":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
 }
 pub(super) fn require_report(root: &Path) -> Result<()> {
     let bytes =

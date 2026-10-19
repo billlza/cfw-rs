@@ -56,6 +56,17 @@ impl JobKeeperProbe {
         }
         Ok(())
     }
+    pub fn verify_reference(&self, peer: &NativePeerProcess, value: u64) -> Result<()> {
+        self.check_peer(peer)?;
+        if self.phase != Phase::Sent {
+            return Err(RuntimeJobError::Observation);
+        }
+        super::super::keeper::verify(
+            self.creator.as_ref().ok_or(RuntimeJobError::Observation)?,
+            peer,
+            value,
+        )
+    }
     pub fn observe_without_creator(&mut self, peer: &NativePeerProcess) -> Result<()> {
         self.check_peer(peer)?;
         if self.phase != Phase::Sent {

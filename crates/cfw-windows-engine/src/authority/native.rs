@@ -28,6 +28,7 @@ pub struct WindowsAuthority {
     host_process: Option<NativePeerProcess>,
     runtime_process: Option<NativePeerProcess>,
     runtime_job: Option<RuntimeJob>,
+    keeper_confirmed: bool,
     cleanup_context: Option<LeaseContext>,
     #[cfg(feature = "native-service-validation")]
     next_fault: Option<crate::authority_journal::JournalFaultPoint>,
@@ -43,6 +44,7 @@ impl WindowsAuthority {
             host_process: None,
             runtime_process: None,
             runtime_job: None,
+            keeper_confirmed: false,
             cleanup_context: None,
             #[cfg(feature = "native-service-validation")]
             next_fault: None,
@@ -134,6 +136,7 @@ impl WindowsAuthority {
         Ok(())
     }
     fn suspend(&mut self, uncertain: bool) {
+        self.keeper_confirmed = false;
         if let Some(context) = self.machine.context() {
             self.cleanup_context = Some(context.clone());
         }
@@ -166,6 +169,7 @@ impl WindowsAuthority {
             self.host_process = None;
             self.runtime_process = None;
             self.runtime_job = None;
+            self.keeper_confirmed = false;
             self.cleanup_context = None;
         }
         Ok(())
@@ -291,6 +295,7 @@ impl WindowsAuthority {
         let process = authorization.process().retain()?;
         let mut candidate = self.machine.clone();
         candidate.bind(&peer, &context, ticket, now)?;
+        self.keeper_confirmed = false;
         self.runtime_job = Some(
             match RuntimeJob::assign(&context.operation.root, &process) {
                 Ok(job) => job,
@@ -323,6 +328,29 @@ impl WindowsAuthority {
             keeper_handle,
         })
     }
+    pub(super) fn confirm_runtime_keeper(
+        &mut self,
+        authorization: &ServicePeerAuthorization,
+        context: &LeaseContext,
+        value: u64,
+    ) -> Result<AuthoritySnapshot> {
+        let deadline = Instant::now() + ADMISSION;
+        let peer = self.admit(authorization, deadline)?;
+        self.advance_timers(Instant::now())?;
+        if peer.role != Role::UserAgent || self.machine.lease_for_owner(&peer)? != *context {
+            return Err(AuthorityError::Identity);
+        }
+        if self.machine.phase() != AuthorityState::Starting || self.keeper_confirmed {
+            return Err(AuthorityError::Stale);
+        }
+        self.runtime_job
+            .as_ref()
+            .ok_or(AuthorityError::Recovering)?
+            .verify_keeper(authorization.process(), value)?;
+        self.after_publication(authorization, deadline)?;
+        self.keeper_confirmed = true;
+        Ok(self.snapshot())
+    }
     pub fn ready(
         &mut self,
         authorization: &ServicePeerAuthorization,
@@ -332,6 +360,9 @@ impl WindowsAuthority {
         let peer = self.admit(authorization, deadline)?;
         let now = Instant::now();
         self.advance_timers(now)?;
+        if !self.keeper_confirmed {
+            return Err(AuthorityError::Identity);
+        }
         let mut candidate = self.machine.clone();
         candidate.ready(&peer, &report, now)?;
         self.commit(candidate)?;

@@ -28,6 +28,22 @@ pub(super) fn client(channel: &mut ServiceChannel) -> Result<()> {
     let keeper = cfw_windows_engine::authority::validate_runtime_keeper_adoption(
         transfer.handle,
         &transfer.root,
+        |handle| {
+            use cfw_windows_engine::authority::RuntimeJobError;
+            let mut request = b"job-keeper-verify:".to_vec();
+            request.extend_from_slice(&handle.to_le_bytes());
+            let reply = channel
+                .request(&request, Instant::now() + LIMIT)
+                .map_err(|error| RuntimeJobError::Native {
+                    operation: "keeper fixture confirmation transport",
+                    source: io::Error::other(error),
+                })?;
+            match reply.as_bytes() {
+                b"verified" => Ok(()),
+                b"unrelated" => Err(RuntimeJobError::Security),
+                _ => Err(RuntimeJobError::Observation),
+            }
+        },
     )
     .map_err(|e| e.to_string())?;
     let mut flags = 0;

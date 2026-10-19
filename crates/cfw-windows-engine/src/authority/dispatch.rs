@@ -81,6 +81,7 @@ impl WindowsAuthority {
                 command.command,
                 Command::Observe
                     | Command::BindUserAgent(_)
+                    | Command::ConfirmRuntimeKeeper(_)
                     | Command::Ready(_)
                     | Command::Heartbeat(_)
                     | Command::Stopped(_)
@@ -138,6 +139,11 @@ impl WindowsAuthority {
                 })
             }
             Command::Ready(input) => Response::Status(self.ready(authorization, input)?),
+            Command::ConfirmRuntimeKeeper(input) => Response::Status(self.confirm_runtime_keeper(
+                authorization,
+                &input.context,
+                input.handle,
+            )?),
             Command::Heartbeat(context) => {
                 Response::Status(self.heartbeat(authorization, &context)?)
             }

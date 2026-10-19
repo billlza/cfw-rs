@@ -152,6 +152,14 @@ impl PreparedConfig {
                 .ok_or(Error::Configuration("invalid listener port"))?;
             listeners.push(std::net::SocketAddr::new(address, port));
             if expected == ProjectionMode::SystemProxy {
+                // The shared projection separately validates LAN ingress and
+                // its source allowlist. Retain its native listener observation,
+                // but never adopt that endpoint as this user's OS proxy.
+                match inbound.get("tag").and_then(Value::as_str) {
+                    Some("cfw-lan-proxy") => continue,
+                    Some("cfw-system-proxy") => {}
+                    _ => return Err(Error::Configuration("unknown projected proxy role")),
+                }
                 if inbound.get("type").and_then(Value::as_str) != Some("mixed")
                     || system_proxy_endpoint.is_some()
                 {
@@ -355,5 +363,49 @@ mod tests {
     fn encoding_budget_counts_escaped_bytes() {
         assert!(serialize_bounded(&"\\\\\\", 6).is_err());
         assert_eq!(&*serialize_bounded(&"ok", 4).unwrap(), b"\"ok\"");
+    }
+
+    #[test]
+    fn lan_sharing_remains_separate_from_local_system_proxy_ownership() {
+        let profile =
+            ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
+                .unwrap();
+        for listen in ["0.0.0.0", "192.168.42.1"] {
+            let settings = EngineSettings {
+                lan_proxy: Some(cfw_singbox_config::LanProxySettings {
+                    listen: listen.parse().unwrap(),
+                    port: 8081,
+                    allowed_source_cidrs: vec!["192.168.42.0/24".into()],
+                }),
+                ..EngineSettings::default()
+            };
+            for mode in [ProjectionMode::LocalProxy, ProjectionMode::SystemProxy] {
+                let projected = profile.project(PROFILE, mode, &settings).unwrap();
+                let prepared = match mode {
+                    ProjectionMode::LocalProxy => PreparedConfig::local_proxy(&projected, []),
+                    ProjectionMode::SystemProxy => {
+                        PreparedConfig::system_proxy_data_plane(&projected, [])
+                    }
+                    _ => unreachable!(),
+                }
+                .expect("valid shared LAN projection must remain admissible on Windows");
+                assert_eq!(prepared.listeners.len(), 3);
+                assert!(
+                    prepared
+                        .listeners
+                        .contains(&std::net::SocketAddr::new(listen.parse().unwrap(), 8081))
+                );
+                assert_eq!(
+                    prepared.system_proxy_endpoint(),
+                    (mode == ProjectionMode::SystemProxy)
+                        .then(|| std::net::SocketAddr::from(([127, 0, 0, 1], settings.mixed_port)))
+                );
+                assert_eq!(
+                    prepared.configuration_digest(),
+                    projected.configuration_digest()
+                );
+                assert_eq!(prepared.digest(), projected.digest());
+            }
+        }
     }
 }

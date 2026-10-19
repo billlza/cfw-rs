@@ -31,6 +31,11 @@ in `docs/planning/cfw-0.5.0.md`.
   All four modes can be checked. `PreparedConfig` separately admits local and
   SystemProxy data planes, so a checked tunnel projection is not a start
   capability. A local projection cannot become SystemProxy ownership.
+  Optional LAN sharing remains a separate observed listener. Only the
+  `cfw-system-proxy` inbound supplies the current-user OS proxy endpoint;
+  `cfw-lan-proxy` cannot replace it or cause an otherwise valid shared
+  projection to be rejected. Shared LAN validation and its source allowlist
+  remain unchanged.
 - Credential strings in the Rust document and serialized buffers are zeroized
   when dropped. Serialization reserves its bounded buffer once. Go runtime
   copies remain in the child until it exits; this is not a promise that all Go

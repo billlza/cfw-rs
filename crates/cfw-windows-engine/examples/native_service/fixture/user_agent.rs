@@ -18,6 +18,8 @@ use std::{
     sync::{Arc, mpsc},
 };
 
+mod lan;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EngineInstallation {
@@ -131,7 +133,7 @@ impl Validation {
     }
 }
 pub(super) fn client_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"desktop_runtime_same_process_fixture":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","desktop_runtime_same_process_fixture":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
 }
 pub(super) fn run_validation() -> Result<()> {
     for variable in [
@@ -264,6 +266,11 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         }
         let mixed = reserve()?;
         let controller = reserve()?;
+        let mut lan = if index == 1 {
+            Some(lan::Fixture::new()?)
+        } else {
+            None
+        };
         let mixed_address = mixed.local_addr().map_err(|e| e.to_string())?;
         let controller_address = controller.local_addr().map_err(|e| e.to_string())?;
         let projection =
@@ -276,6 +283,7 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
                         mixed_port: mixed_address.port(),
                         controller_port: controller_address.port(),
                         bypass_private_networks: false,
+                        lan_proxy: lan.as_ref().map(lan::Fixture::settings),
                         ..EngineSettings::default()
                     },
                 )
@@ -330,6 +338,9 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         )
         .map_err(|e| e.to_string())?;
         drop((mixed, controller, projection));
+        if let Some(lan) = &mut lan {
+            lan.release_reservation()?;
+        }
         let stop = AtomicBool::new(false);
         let (sender, receiver) = mpsc::sync_channel(1);
         thread::scope(|scope| -> Result<()> {
@@ -347,6 +358,9 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
                 }
                 let process = unsafe { OwnedHandle::from_raw_handle(process) };
                 traffic(mixed_address)?;
+                if let Some(lan) = &lan {
+                    lan.exercise()?;
+                }
                 // Let at least one genuine heartbeat cross the service boundary.
                 thread::sleep(Duration::from_millis(1250));
                 if index == 1 {
@@ -414,6 +428,9 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
             .map_err(|e| format!("runtime mixed listener retained: {e}"))?;
         let _controller = TcpListener::bind(controller_address)
             .map_err(|e| format!("runtime controller listener retained: {e}"))?;
+        if let Some(lan) = &lan {
+            lan.require_released()?;
+        }
     }
     if observed(&mut desktop)?.state != AuthorityState::Off {
         return Err("fixture-injected global cleanup did not complete".into());

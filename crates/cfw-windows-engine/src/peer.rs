@@ -62,16 +62,22 @@ fn native(operation: &'static str) -> PeerIdentityError {
 /// No Deserialize/default/public-field constructor permits claimed wire data.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NativePeerIdentity {
-    user_sid: String,
-    authentication_id: u64,
-    session_id: u32,
+    user_session: NativeUserSession,
     integrity_rid: u32,
     app_container: bool,
     restricted: bool,
     created_at: u64,
 }
 
-impl NativePeerIdentity {
+/// Native logon identity; equal account SIDs in different logons or sessions
+/// are different owners. No wire/default/public-field constructor is exposed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NativeUserSession {
+    user_sid: String,
+    authentication_id: u64,
+    session_id: u32,
+}
+impl NativeUserSession {
     pub fn user_sid(&self) -> &str {
         &self.user_sid
     }
@@ -80,6 +86,37 @@ impl NativePeerIdentity {
     }
     pub fn session_id(&self) -> u32 {
         self.session_id
+    }
+    fn is_interactive(&self) -> bool {
+        !matches!(self.user_sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
+            && self.authentication_id != 0
+            && self.authentication_id != u64::MAX
+            && self.session_id != 0
+            && self.session_id != u32::MAX
+    }
+}
+impl fmt::Debug for NativeUserSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeUserSession")
+            .field("user_sid", &"[REDACTED]")
+            .field("authentication_id", &"[REDACTED]")
+            .field("session_id", &self.session_id)
+            .finish()
+    }
+}
+
+impl NativePeerIdentity {
+    pub fn user_session(&self) -> &NativeUserSession {
+        &self.user_session
+    }
+    pub fn user_sid(&self) -> &str {
+        self.user_session.user_sid()
+    }
+    pub fn authentication_id(&self) -> u64 {
+        self.user_session.authentication_id()
+    }
+    pub fn session_id(&self) -> u32 {
+        self.user_session.session_id()
     }
     pub fn process_creation_time(&self) -> u64 {
         self.created_at
@@ -94,7 +131,7 @@ impl NativePeerIdentity {
         self.restricted
     }
     pub fn is_local_system(&self) -> bool {
-        self.user_sid == "S-1-5-18"
+        self.user_sid() == "S-1-5-18"
     }
 }
 
@@ -102,7 +139,7 @@ impl fmt::Debug for NativePeerIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NativePeerIdentity")
             .field("user_sid", &"[REDACTED]")
-            .field("session_id", &self.session_id)
+            .field("session_id", &self.session_id())
             .field("integrity_rid", &self.integrity_rid)
             .field("app_container", &self.app_container)
             .field("restricted", &self.restricted)
@@ -154,6 +191,27 @@ impl NativePeerProcess {
     }
     pub fn identity(&self) -> &NativePeerIdentity {
         &self.identity
+    }
+
+    pub(crate) fn retain(&self) -> Result<Self, PeerIdentityError> {
+        cfw_windows_storage::require_process_identity()?;
+        alive(&self.process)?;
+        if observe(&self.process)? != self.identity {
+            return Err(PeerIdentityError::IdentityChanged);
+        }
+        let process = self
+            .process
+            .try_clone()
+            .map_err(|source| PeerIdentityError::Native {
+                operation: "retain peer process",
+                source,
+            })?;
+        alive(&process)?;
+        Ok(Self {
+            process,
+            process_id: self.process_id,
+            identity: self.identity.clone(),
+        })
     }
 
     pub(crate) fn verify_executable(
@@ -297,21 +355,7 @@ fn observe_token(
     created_at: u64,
     token_type: TOKEN_TYPE,
 ) -> Result<NativePeerIdentity, PeerIdentityError> {
-    let user = TokenData::read(token, TokenUser, size_of::<TOKEN_USER>())?;
-    let sid = unsafe { (&*user.pointer::<TOKEN_USER>()).User.Sid };
-    user.sid(sid)?;
-    let user_sid = sid_text(sid)?;
-    let statistics_buffer = TokenData::read(token, TokenStatistics, size_of::<TOKEN_STATISTICS>())?;
-    let statistics = unsafe { &*statistics_buffer.pointer::<TOKEN_STATISTICS>() };
-    if statistics.TokenType != token_type
-        || (token_type == TokenImpersonation
-            && statistics.ImpersonationLevel < SecurityIdentification)
-    {
-        return Err(PeerIdentityError::InvalidIdentity);
-    }
-    let authentication = statistics.AuthenticationId;
-    let session = TokenData::read(token, TokenSessionId, size_of::<u32>())?;
-    let session_id = unsafe { *session.pointer::<u32>() };
+    let user_session = observe_user_session(token, token_type)?;
     let integrity = TokenData::read(
         token,
         TokenIntegrityLevel,
@@ -336,14 +380,38 @@ fn observe_token(
     let restrictions = TokenData::read(token, TokenRestrictedSids, size_of::<u32>())?;
     let restricted = unsafe { *restrictions.pointer::<u32>() } != 0;
     Ok(NativePeerIdentity {
-        user_sid,
-        authentication_id: u64::from(authentication.LowPart)
-            | (u64::from(authentication.HighPart as u32) << 32),
-        session_id,
+        user_session,
         integrity_rid,
         app_container,
         restricted,
         created_at,
+    })
+}
+
+fn observe_user_session(
+    token: &OwnedHandle,
+    token_type: TOKEN_TYPE,
+) -> Result<NativeUserSession, PeerIdentityError> {
+    let user = TokenData::read(token, TokenUser, size_of::<TOKEN_USER>())?;
+    let sid = unsafe { (&*user.pointer::<TOKEN_USER>()).User.Sid };
+    user.sid(sid)?;
+    let user_sid = sid_text(sid)?;
+    let statistics_buffer = TokenData::read(token, TokenStatistics, size_of::<TOKEN_STATISTICS>())?;
+    let statistics = unsafe { &*statistics_buffer.pointer::<TOKEN_STATISTICS>() };
+    if statistics.TokenType != token_type
+        || (token_type == TokenImpersonation
+            && statistics.ImpersonationLevel < SecurityIdentification)
+    {
+        return Err(PeerIdentityError::InvalidIdentity);
+    }
+    let authentication = statistics.AuthenticationId;
+    let session = TokenData::read(token, TokenSessionId, size_of::<u32>())?;
+    let session_id = unsafe { *session.pointer::<u32>() };
+    Ok(NativeUserSession {
+        user_sid,
+        authentication_id: u64::from(authentication.LowPart)
+            | (u64::from(authentication.HighPart as u32) << 32),
+        session_id,
     })
 }
 
@@ -452,3 +520,9 @@ fn sid_text(sid: PSID) -> Result<String, PeerIdentityError> {
 
 #[cfg(test)]
 mod tests;
+
+mod authorization;
+pub use authorization::{
+    LiveConsoleSession, ServiceAuthorizationError, ServicePeerAuthorization,
+    UserAgentLeaseRequirement, authorize_service_request,
+};

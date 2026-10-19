@@ -249,6 +249,47 @@ pub struct LocalServiceConnection {
     pending: Option<u64>,
 }
 impl LocalServiceConnection {
+    pub(crate) fn close(&mut self) {
+        self.pipe = None;
+        self.slot = None;
+        self.peer = None;
+        self.pending = None;
+    }
+
+    fn request_peer(
+        &self,
+        request: &AuthenticatedServiceRequest,
+        pipe: &OwnedHandle,
+    ) -> Result<&NativePeerProcess, ServiceTransportError> {
+        if !Arc::ptr_eq(&request.connection, &self.identity)
+            || self.pending != Some(request.sequence)
+        {
+            return Err(ServiceTransportError::RequestOrder);
+        }
+        let peer = self.peer.as_ref().ok_or(ServiceTransportError::Closed)?;
+        peer.verify_pipe_client(pipe)?;
+        peer.verify_executable(&self.expected_client)?;
+        Ok(peer)
+    }
+
+    pub(crate) fn retain_request_peer(
+        &mut self,
+        request: &AuthenticatedServiceRequest,
+        deadline: Instant,
+    ) -> Result<NativePeerProcess, ServiceTransportError> {
+        let result = (|| {
+            check_deadline(deadline)?;
+            let pipe = self.pipe.as_ref().ok_or(ServiceTransportError::Closed)?;
+            let peer = self.request_peer(request, pipe)?.retain()?;
+            check_deadline(deadline)?;
+            Ok(peer)
+        })();
+        if result.is_err() {
+            self.close();
+        }
+        result
+    }
+
     /// A full native message is immediately bound to its last-message token,
     /// primary process and expected image. No prefetch/read occurs in between.
     /// Live session/lease authorization must still precede runtime commands.
@@ -318,14 +359,7 @@ impl LocalServiceConnection {
         let slot = self.slot.take().ok_or(ServiceTransportError::Closed)?;
         let result = (|| {
             check_deadline(deadline)?;
-            if !Arc::ptr_eq(&request.connection, &self.identity)
-                || self.pending != Some(request.sequence)
-            {
-                return Err(ServiceTransportError::RequestOrder);
-            }
-            let peer = self.peer.as_ref().ok_or(ServiceTransportError::Closed)?;
-            peer.verify_pipe_client(&pipe)?;
-            peer.verify_executable(&self.expected_client)?;
+            self.request_peer(request, &pipe)?;
             native_io::write(&pipe, body, deadline)?;
             self.pending = None;
             Ok(())
@@ -419,7 +453,7 @@ impl ServiceChannel {
     }
 }
 
-fn check_deadline(deadline: Instant) -> Result<(), ServiceTransportError> {
+pub(crate) fn check_deadline(deadline: Instant) -> Result<(), ServiceTransportError> {
     match deadline.checked_duration_since(Instant::now()) {
         Some(left) if !left.is_zero() && left <= MAX_IO_TIME => Ok(()),
         _ => Err(ServiceTransportError::Deadline),

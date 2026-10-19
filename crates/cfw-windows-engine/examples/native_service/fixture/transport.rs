@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,7 +66,9 @@ pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 3
         return Err("desktop fixture report exceeded bound".into());
     }
     let report: serde_json::Value = serde_json::from_slice(&report).map_err(|e| e.to_string())?;
-    if report != serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true}) {
+    if report
+        != serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true,"live_console_authorized":true})
+    {
         return Err(format!(
             "desktop fixture report did not attest its checks: {report}"
         ));
@@ -114,7 +117,7 @@ pub(super) fn desktop_validation(prefix: &str, hex: &str) -> Result<()> {
     report
         .write_all(
             serde_json::to_string(
-                &serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true}),
+                &serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true,"live_console_authorized":true}),
             )
             .map_err(|e| e.to_string())?
             .as_bytes(),
@@ -237,14 +240,19 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
     )
     .map_err(|e| e.to_string())?;
     let mut workers = Vec::new();
+    // Fixture ownership is established by the first actually admitted desktop,
+    // never by the bootstrap JSON. This exercises the policy input; it is not
+    // the product's durable authority lease or runtime state machine.
+    let lease_owner = Arc::new(Mutex::new(None));
     for (role, listener) in [
         (ServiceClientRole::Desktop, desktop),
         (ServiceClientRole::UserAgent, agent),
     ] {
         let name = name.to_owned();
         let installed = installed.clone();
+        let lease_owner = lease_owner.clone();
         workers.push(thread::spawn(move || {
-            let result = serve_role(&name, role, listener, &installed);
+            let result = serve_role(&name, role, listener, &installed, &lease_owner);
             if result.is_err() {
                 STOP.store(true, Ordering::SeqCst);
             }
@@ -285,6 +293,7 @@ fn serve_role(
     role: ServiceClientRole,
     mut listener: LocalServiceListener,
     installed: &Installation,
+    lease_owner: &Mutex<Option<NativeUserSession>>,
 ) -> Result<()> {
     while !STOP.load(Ordering::SeqCst) {
         let mut connection = match listener.accept(Instant::now() + Duration::from_millis(100)) {
@@ -322,9 +331,70 @@ fn serve_role(
                     "authenticated fixture request lost native role/user/session binding".into(),
                 );
             }
+            let peer_session = request.identity().user_session().clone();
+            let mut owner = lease_owner
+                .lock()
+                .map_err(|_| "fixture lease guard poisoned")?;
+            let system = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
+            let (lease, requirement) = match (role, request.body()) {
+                (ServiceClientRole::UserAgent, b"agent-without-lease") => {
+                    (None, UserAgentLeaseRequirement::OwnedLease)
+                }
+                (ServiceClientRole::UserAgent, b"agent-foreign-lease") => (
+                    Some(system.identity().user_session()),
+                    UserAgentLeaseRequirement::OwnedLease,
+                ),
+                (ServiceClientRole::UserAgent, b"agent-observe-without-lease") => {
+                    (None, UserAgentLeaseRequirement::OwnedLeaseOrNone)
+                }
+                _ => (owner.as_ref(), UserAgentLeaseRequirement::OwnedLease),
+            };
+            let admitted = match authorize_service_request(
+                &mut connection,
+                request,
+                lease,
+                requirement,
+                Instant::now() + LIMIT,
+            ) {
+                Ok(admitted) => admitted,
+                Err(ServiceAuthorizationError::LeaseRequired) => {
+                    record_rejection(name, role, "lease_required")?;
+                    break;
+                }
+                Err(ServiceAuthorizationError::LeaseOwnerMismatch) => {
+                    record_rejection(name, role, "lease_owner_mismatch")?;
+                    break;
+                }
+                Err(error) => {
+                    let detail = match LiveConsoleSession::observe() {
+                        Ok(console) => format!(
+                            "peer_session={}, console_session={}, sid_matches={}, logon_matches={}",
+                            peer_session.session_id(),
+                            console.identity().session_id(),
+                            peer_session.user_sid() == console.identity().user_sid(),
+                            peer_session.authentication_id()
+                                == console.identity().authentication_id()
+                        ),
+                        Err(observation) => format!("console observation: {observation}"),
+                    };
+                    return Err(format!(
+                        "native fixture authorization failed: {error}; {detail}"
+                    ));
+                }
+            };
+            if role == ServiceClientRole::Desktop && owner.is_none() {
+                *owner = Some(admitted.owner().clone());
+            }
+            drop(owner);
+            let request = admitted.request();
+            if admitted.process().process_id() == 0
+                || admitted.process().identity() != request.identity()
+            {
+                return Err("authorized fixture lost its retained process identity".into());
+            }
             if request.body() == b"identity-probe" {
                 connection
-                    .reply(&request, b"ready", Instant::now() + LIMIT)
+                    .reply(request, b"ready", Instant::now() + LIMIT)
                     .map_err(|e| e.to_string())?;
                 let root = installed
                     .agent_image
@@ -349,9 +419,12 @@ fn serve_role(
             let (reply, finished): (&[u8], bool) = match request.body() {
                 b"ping" => (b"pong", false),
                 b"done" => (b"end!", true),
+                b"agent-observe-without-lease" if role == ServiceClientRole::UserAgent => {
+                    (b"seen", true)
+                }
                 _ => return Err("unexpected authenticated fixture request".into()),
             };
-            if let Err(error) = connection.reply(&request, reply, Instant::now() + LIMIT) {
+            if let Err(error) = connection.reply(request, reply, Instant::now() + LIMIT) {
                 if STOP.load(Ordering::SeqCst) {
                     return Ok(());
                 }

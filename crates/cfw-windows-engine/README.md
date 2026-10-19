@@ -175,7 +175,9 @@ client file copy, a medium-impersonated message queued before a primary-identity
 message, oversized messages and ordinary-client pipe-instance creation. Client
 and server read deadlines are exercised separately, followed by a fresh successful
 exchange. The fixture serves each role serially; connection saturation is not
-yet native-tested. These new transport cases require their own native CI result.
+yet native-tested. All 17 service/transport cases passed on hosted Windows at
+[`50a3db7`](https://github.com/billlza/cfw-rs/actions/runs/39184109050/job/117842791151);
+the downloaded source-bound receipt and all three client reports were audited.
 The client uses a temporary user/SYSTEM-only window station and desktop at medium
 integrity; the controller restores its prior selections before launch. Existing
 user-object ACLs are not modified. This is not desktop UI qualification.
@@ -184,6 +186,39 @@ the services, waits for their processes and verifies deletion before emitting a
 source-bound receipt. The fixture is not shipped as a product service. Package
 tests never install services. Native execution must pass before this boundary is
 reported as verified.
+
+## Live session and role authorization
+
+`NativeUserSession` preserves the full SID, logon authentication LUID and Windows
+session number as one native observation. A later logon by the same account is
+a different owner. The released Mac `owner_uid` wire field is unchanged; a
+Windows SID is never truncated or hashed into that numeric identity.
+
+`LiveConsoleSession` runs only inside the validated SYSTEM service. It resolves
+the physical console session, requires an active connection state and compares
+two fresh primary-token observations. The
+[console-session API](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-wtsgetactiveconsolesessionid)
+and [WTS user-token API](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken)
+provide these observations; user tokens are not impersonated or returned to the
+client. Token handles are closed. WTS/permission failures stay errors. A missing
+console denies admission and says nothing about globally restored network state.
+
+`authorize_service_request` binds the pending request to that current console
+logon. A user-agent method additionally needs the service's exact lease owner;
+only a dispatcher-selected connection/bound-lease observation can admit no
+lease, and it still rejects another logon's lease. The API rechecks the actual
+pending connection/message/image after the WTS calls and retains the process
+object. Authorization failure closes the connection. Callers hold their
+lifecycle/lease guard through admission and dispatch; this peer authorization
+does not allocate a runtime lease or bypass command/context checks. Session
+change, process loss and heartbeat supervision remain required runtime work.
+
+The native fixture now exercises this authorization before responses, with
+fixture ownership established by an admitted desktop. It adds real no-lease
+and foreign-owner rejection plus the narrow unleased observation case. This
+fixture owner is not a durable product lease. The new 21-case fixture has not
+yet run on Windows. RDP/session switching, lock/unlock and sleep/wake behavior
+remain separate qualification gates.
 
 `WindowsEngineGenerationStore` implements the shared generation-store contract
 using a canonical generic Credential Manager record for the current process
@@ -221,7 +256,9 @@ permission to change network state. The caller must serialize reads/admission
 on a fixed pipe instance. An unprivileged UI may be unable to query a SYSTEM
 process token; permission failures stay errors, and this helper must not be used
 to require UI elevation or assume that any SYSTEM peer is the product service.
-The service connector still needs SCM identity and trusted installation binding.
+The service connector uses `WindowsServicePeer` for SCM identity and trusted
+installation binding, with query-only process access instead of SYSTEM-token
+inspection by the UI.
 
 The child has no console window. It is assigned to an unnamed, non-inheritable
 Windows Job Object before the first request is sent. The job has

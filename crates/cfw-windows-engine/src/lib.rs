@@ -17,7 +17,11 @@ mod lineage;
 #[cfg(windows)]
 mod peer;
 #[cfg(windows)]
-pub use peer::{NativePeerIdentity, NativePeerProcess, PeerIdentityError};
+pub use peer::{
+    LiveConsoleSession, NativePeerIdentity, NativePeerProcess, NativeUserSession,
+    PeerIdentityError, ServiceAuthorizationError, ServicePeerAuthorization,
+    UserAgentLeaseRequirement, authorize_service_request,
+};
 #[cfg(windows)]
 mod service_peer;
 #[cfg(windows)]

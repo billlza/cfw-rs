@@ -153,7 +153,7 @@ fn native_pipe_identity_uses_the_actual_peer_and_expires_with_its_process() {
             current.identity().session_id()
         );
         let mut stale = NativePeerProcess::open(child.0.id()).unwrap();
-        stale.identity.authentication_id ^= 1;
+        stale.identity.user_session.authentication_id ^= 1;
         assert!(matches!(
             stale.verify_pipe_client(&server),
             Err(PeerIdentityError::IdentityChanged)

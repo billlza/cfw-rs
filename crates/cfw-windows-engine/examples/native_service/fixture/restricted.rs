@@ -22,7 +22,7 @@ impl ClientCase {
     fn report(self) -> serde_json::Value {
         match self {
             Self::UserAgent => {
-                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true})
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true})
             }
             Self::CopiedImage => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"client_image_rejected":true})
@@ -415,6 +415,30 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
             require_rejection(wrong_role.request(b"ping", Instant::now() + LIMIT))?;
         }
     }
+    for command in [b"agent-without-lease".as_slice(), b"agent-foreign-lease"] {
+        let mut denied = ServiceChannel::connect(
+            name,
+            ServiceClientRole::UserAgent,
+            verified(&image, expected)?,
+        )
+        .map_err(|e| e.to_string())?;
+        require_rejection(denied.request(command, Instant::now() + LIMIT))?;
+    }
+    let mut observation = ServiceChannel::connect(
+        name,
+        ServiceClientRole::UserAgent,
+        verified(&image, expected)?,
+    )
+    .map_err(|e| e.to_string())?;
+    if observation
+        .request(b"agent-observe-without-lease", Instant::now() + LIMIT)
+        .map_err(|e| e.to_string())?
+        .as_bytes()
+        != b"seen"
+    {
+        return Err("unleased fixture observation was not admitted".into());
+    }
+    drop(observation);
     let mut channel = ServiceChannel::connect(
         name,
         ServiceClientRole::UserAgent,

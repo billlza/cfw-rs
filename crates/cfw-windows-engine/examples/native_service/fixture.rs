@@ -1,7 +1,8 @@
 use cfw_windows_engine::{
-    LocalServiceListener, LocalServicePipe, NativePeerProcess, ServiceChannel, ServiceClientRole,
-    ServicePeerError, ServiceTransportError, VerifiedExecutable, WindowsServicePeer,
-    configure_service_process_observation,
+    LiveConsoleSession, LocalServiceListener, LocalServicePipe, NativePeerProcess,
+    NativeUserSession, ServiceAuthorizationError, ServiceChannel, ServiceClientRole,
+    ServicePeerError, ServiceTransportError, UserAgentLeaseRequirement, VerifiedExecutable,
+    WindowsServicePeer, authorize_service_request, configure_service_process_observation,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -635,7 +636,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             return Err("fixture service deletion was not observed".into());
         }
     }
-    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","stopped_service_is_not_authority","temporary_services_removed"],"service_fixture_only":true,"full_service_backend_proven":false,"release_accepted":false});
+    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","temporary_services_removed"],"service_fixture_only":true,"full_service_backend_proven":false,"release_accepted":false});
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -741,6 +742,9 @@ fn exercise_services(
         ServiceClientRole::Desktop,
         "executable_mismatch",
     )?;
+    for rejection in ["lease_required", "lease_owner_mismatch"] {
+        transport::require_rejection(root, &first.name, ServiceClientRole::UserAgent, rejection)?;
+    }
     println!("service fixture stage: identical_client_copy_rejected");
     restricted::run_rejected_copy(&replacement, &first.name, expected)?;
     transport::require_rejection(

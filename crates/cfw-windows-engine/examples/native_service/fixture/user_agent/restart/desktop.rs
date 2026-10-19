@@ -178,7 +178,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
         let _controller = TcpListener::bind(controller_address)
             .map_err(|e| format!("restart controller listener remains: {e}"))?;
         let mut observer =
-            AuthorityChannel::connect(name, ServiceClientRole::Desktop, service_image)
+            AuthorityChannel::connect(name, ServiceClientRole::Desktop, Arc::clone(&service_image))
                 .map_err(|e| e.to_string())?;
         let Response::RuntimeScope(recorded) = observer
             .request(
@@ -222,10 +222,19 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
             Request::new(Command::OwnedLease).map_err(|e| e.to_string())?,
             Instant::now() + LIMIT,
         ) {
-            Err(WireError::Rejected(Rejection::Identity)) => Ok(()),
-            Err(error) => Err(format!("restarted lease rejection differs: {error}")),
-            Ok(_) => Err("restarted Authority restored the old execution lease".into()),
-        }
+            Err(WireError::Rejected(Rejection::Identity)) => {}
+            Err(error) => return Err(format!("restarted lease rejection differs: {error}")),
+            Ok(_) => return Err("restarted Authority restored the old execution lease".into()),
+        };
+        recovery::exercise(
+            name,
+            root,
+            service_image,
+            &mut observer,
+            cfw_windows_engine::authority::ProxyRecoveryTarget::from_recorded(&recorded)
+                .map_err(|e| e.to_string())?,
+            &context,
+        )
     })
 }
 

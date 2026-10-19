@@ -23,8 +23,14 @@ pub struct AuthorizedReply {
     authorization: ServicePeerAuthorization,
     message: Message,
     rejection: Option<AuthorityError>,
+    proxy_recovery: Option<super::ProxyRecoveryObservation>,
 }
 impl AuthorizedReply {
+    /// Available only to the service supervisor handling this exact reply.
+    /// A wire acknowledgement is not a constructor for native cleanup evidence.
+    pub fn proxy_recovery_observation(&self) -> Option<&super::ProxyRecoveryObservation> {
+        self.proxy_recovery.as_ref()
+    }
     pub fn rejection(&self) -> Option<&AuthorityError> {
         self.rejection.as_ref()
     }
@@ -71,6 +77,8 @@ impl WindowsAuthority {
                 Command::Observe
                     | Command::LoadLineage
                     | Command::ReadRuntimeScope
+                    | Command::BeginProxyRecovery(_)
+                    | Command::ConfirmProxyRecovery(_)
                     | Command::ReserveGeneration(_)
                     | Command::Prepare(_)
                     | Command::BeginStop(_)
@@ -93,72 +101,83 @@ impl WindowsAuthority {
         } else {
             Err(AuthorityError::Identity)
         };
-        let (message, rejection) = match outcome {
-            Ok(response) => (response.encode(command.id)?, None),
-            Err(error) => (wire::rejection(command.id, &error)?, Some(error)),
+        let (message, rejection, proxy_recovery) = match outcome {
+            Ok((response, observed)) => (response.encode(command.id)?, None, observed),
+            Err(error) => (wire::rejection(command.id, &error)?, Some(error), None),
         };
         Ok(AuthorizedReply {
             authorization,
             message,
             rejection,
+            proxy_recovery,
         })
     }
     fn execute(
         &mut self,
         authorization: &ServicePeerAuthorization,
         command: Command,
-    ) -> Result<Response, AuthorityError> {
-        Ok(match command {
-            Command::Observe => Response::Observed(self.poll()?),
-            Command::LoadLineage => Response::Lineage(self.lineage(authorization)?),
-            Command::ReadRuntimeScope => {
-                Response::RuntimeScope(self.recorded_runtime_scope(authorization)?)
-            }
-            Command::ReserveGeneration(expected) => {
-                Response::Lineage(self.reserve_generation(authorization, &expected)?)
-            }
-            Command::Prepare(input) => {
-                let ticket = self.prepare(authorization, input)?;
-                let material = ticket
-                    .with_ticket(wire::TicketMaterial::from_slice)
-                    .map_err(|_| AuthorityError::Invalid)?;
-                Response::Prepared(wire::PreparedGrant {
-                    context: ticket.context().clone(),
-                    ticket: material,
-                })
-            }
-            Command::BindUserAgent(input) => {
-                let grant = input.ticket.with_bytes(|ticket| {
-                    self.bind_user_agent(authorization, input.context.clone(), ticket)
-                })?;
-                Response::Bound(wire::BoundGrant {
-                    context: grant.context().clone(),
-                    committed_revision: grant.committed_revision(),
-                    keeper_handle: grant.keeper_handle(),
-                    keeper: None,
-                })
-            }
-            Command::Ready(input) => Response::Status(self.ready(authorization, input)?),
-            Command::ConfirmRuntimeKeeper(input) => Response::Status(self.confirm_runtime_keeper(
-                authorization,
-                &input.context,
-                input.handle,
-            )?),
-            Command::Heartbeat(context) => {
-                Response::Status(self.heartbeat(authorization, &context)?)
-            }
-            Command::BeginStop(input) => Response::Status(self.begin_stop(
-                authorization,
-                &input.context,
-                input.expected_revision,
-            )?),
-            Command::AbortPrepared(input) => Response::Status(self.abort_prepared(
-                authorization,
-                &input.context,
-                input.expected_revision,
-            )?),
-            Command::Stopped(input) => Response::Status(self.stopped(authorization, input)?),
-            Command::OwnedLease => Response::Lease(self.owned_lease(authorization)?),
-        })
+    ) -> Result<(Response, Option<super::ProxyRecoveryObservation>), AuthorityError> {
+        let response =
+            match command {
+                Command::Observe => Response::Observed(self.poll()?),
+                Command::LoadLineage => Response::Lineage(self.lineage(authorization)?),
+                Command::ReadRuntimeScope => {
+                    Response::RuntimeScope(self.recorded_runtime_scope(authorization)?)
+                }
+                Command::BeginProxyRecovery(target) => Response::ProxyRecoveryGranted(
+                    self.begin_proxy_recovery(authorization, target)?,
+                ),
+                Command::ConfirmProxyRecovery(report) => {
+                    let observed = self.confirm_proxy_recovery(authorization, report)?;
+                    return Ok((
+                        Response::ProxyRecoveryObserved(observed.receipt()?),
+                        Some(observed),
+                    ));
+                }
+                Command::ReserveGeneration(expected) => {
+                    Response::Lineage(self.reserve_generation(authorization, &expected)?)
+                }
+                Command::Prepare(input) => {
+                    let ticket = self.prepare(authorization, input)?;
+                    let material = ticket
+                        .with_ticket(wire::TicketMaterial::from_slice)
+                        .map_err(|_| AuthorityError::Invalid)?;
+                    Response::Prepared(wire::PreparedGrant {
+                        context: ticket.context().clone(),
+                        ticket: material,
+                    })
+                }
+                Command::BindUserAgent(input) => {
+                    let grant = input.ticket.with_bytes(|ticket| {
+                        self.bind_user_agent(authorization, input.context.clone(), ticket)
+                    })?;
+                    Response::Bound(wire::BoundGrant {
+                        context: grant.context().clone(),
+                        committed_revision: grant.committed_revision(),
+                        keeper_handle: grant.keeper_handle(),
+                        keeper: None,
+                    })
+                }
+                Command::Ready(input) => Response::Status(self.ready(authorization, input)?),
+                Command::ConfirmRuntimeKeeper(input) => Response::Status(
+                    self.confirm_runtime_keeper(authorization, &input.context, input.handle)?,
+                ),
+                Command::Heartbeat(context) => {
+                    Response::Status(self.heartbeat(authorization, &context)?)
+                }
+                Command::BeginStop(input) => Response::Status(self.begin_stop(
+                    authorization,
+                    &input.context,
+                    input.expected_revision,
+                )?),
+                Command::AbortPrepared(input) => Response::Status(self.abort_prepared(
+                    authorization,
+                    &input.context,
+                    input.expected_revision,
+                )?),
+                Command::Stopped(input) => Response::Status(self.stopped(authorization, input)?),
+                Command::OwnedLease => Response::Lease(self.owned_lease(authorization)?),
+            };
+        Ok((response, None))
     }
 }

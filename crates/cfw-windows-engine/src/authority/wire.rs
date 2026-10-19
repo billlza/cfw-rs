@@ -11,13 +11,14 @@ use serde_json::value::RawValue;
 use std::fmt;
 use uuid::Uuid;
 use zeroize::Zeroizing;
+mod recovery;
+pub use recovery::{ProxyRecoveryGrant, ProxyRecoveryReceipt, ProxyRecoveryReport};
 
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 const PROTOCOL: &str = "cfw.windows.authority";
-// v3 additionally transfers a zero-access lifetime reference before Bind
-// publication, then verifies the receiver's retained copy before Ready.
-// Earlier services cannot establish that contract.
-const VERSION: u16 = 3;
+// v4 adds single-use, connection-bound proxy recovery observations. Earlier
+// services cannot establish this separate, non-executing authorization.
+const VERSION: u16 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -137,6 +138,8 @@ pub(super) enum CommandTag {
     Observe,
     LoadLineage,
     ReadRuntimeScope,
+    BeginProxyRecovery,
+    ConfirmProxyRecovery,
     ReserveGeneration,
     Prepare,
     BindUserAgent,
@@ -173,6 +176,8 @@ pub enum Command {
     Observe,
     LoadLineage,
     ReadRuntimeScope,
+    BeginProxyRecovery(super::ProxyRecoveryTarget),
+    ConfirmProxyRecovery(ProxyRecoveryReport),
     ReserveGeneration(super::AuthorityLineage),
     Prepare(PrepareRequest),
     BindUserAgent(BindRequest),
@@ -190,6 +195,8 @@ impl Command {
             Self::Observe => CommandTag::Observe,
             Self::LoadLineage => CommandTag::LoadLineage,
             Self::ReadRuntimeScope => CommandTag::ReadRuntimeScope,
+            Self::BeginProxyRecovery(_) => CommandTag::BeginProxyRecovery,
+            Self::ConfirmProxyRecovery(_) => CommandTag::ConfirmProxyRecovery,
             Self::ReserveGeneration(_) => CommandTag::ReserveGeneration,
             Self::Prepare(_) => CommandTag::Prepare,
             Self::BindUserAgent(_) => CommandTag::BindUserAgent,
@@ -205,6 +212,8 @@ impl Command {
     fn validate(&self) -> Result<()> {
         match self {
             Self::Observe | Self::OwnedLease | Self::LoadLineage | Self::ReadRuntimeScope => Ok(()),
+            Self::BeginProxyRecovery(target) => target.validate().map_err(|_| WireError::Malformed),
+            Self::ConfirmProxyRecovery(report) => report.validate(),
             Self::ReserveGeneration(expected) => {
                 expected.validate().map_err(|_| WireError::Malformed)
             }
@@ -306,6 +315,8 @@ impl Request {
             | Command::LoadLineage
             | Command::ReadRuntimeScope => envelope(self.id, tag, &Empty {}),
             Command::ReserveGeneration(expected) => envelope(self.id, tag, expected),
+            Command::BeginProxyRecovery(input) => envelope(self.id, tag, input),
+            Command::ConfirmProxyRecovery(input) => envelope(self.id, tag, input),
             Command::Prepare(input) => envelope(self.id, tag, input),
             Command::BindUserAgent(input) => envelope(self.id, tag, input),
             Command::ConfirmRuntimeKeeper(input) => envelope(self.id, tag, input),
@@ -335,6 +346,10 @@ impl Request {
                 Command::ReadRuntimeScope
             }
             CommandTag::ReserveGeneration => Command::ReserveGeneration(decode(body)?),
+            CommandTag::BeginProxyRecovery => Command::BeginProxyRecovery(decode(body)?),
+            CommandTag::ConfirmProxyRecovery => {
+                Command::ConfirmProxyRecovery(ProxyRecoveryReport::decode(body)?)
+            }
             CommandTag::OwnedLease => {
                 let _: Empty = decode(body)?;
                 Command::OwnedLease
@@ -409,6 +424,8 @@ enum ResponseTag {
     Observed,
     Lineage,
     RuntimeScope,
+    ProxyRecoveryGranted,
+    ProxyRecoveryObserved,
     Prepared,
     Bound,
     Status,
@@ -499,6 +516,8 @@ pub enum Response {
     Observed(AuthoritySnapshot),
     Lineage(super::AuthorityLineage),
     RuntimeScope(RecordedRuntimeScope),
+    ProxyRecoveryGranted(ProxyRecoveryGrant),
+    ProxyRecoveryObserved(ProxyRecoveryReceipt),
     Prepared(PreparedGrant),
     Bound(BoundGrant),
     Status(AuthoritySnapshot),
@@ -510,6 +529,10 @@ impl Response {
             Self::Observed(value) => envelope(id, ResponseTag::Observed, value),
             Self::Lineage(value) => envelope(id, ResponseTag::Lineage, value),
             Self::RuntimeScope(value) => envelope(id, ResponseTag::RuntimeScope, value),
+            Self::ProxyRecoveryGranted(value) => recovery::encode_grant(id, value),
+            Self::ProxyRecoveryObserved(value) => {
+                envelope(id, ResponseTag::ProxyRecoveryObserved, value)
+            }
             Self::Prepared(value) => envelope(
                 id,
                 ResponseTag::Prepared,
@@ -598,6 +621,12 @@ pub(super) fn response(
         return Err(WireError::Rejected(rejected.code));
     }
     match (&request.command, wire.kind) {
+        (Command::BeginProxyRecovery(target), ResponseTag::ProxyRecoveryGranted) => Ok(
+            Response::ProxyRecoveryGranted(recovery::decode_grant(payload, target, owner)?),
+        ),
+        (Command::ConfirmProxyRecovery(report), ResponseTag::ProxyRecoveryObserved) => Ok(
+            Response::ProxyRecoveryObserved(recovery::decode_receipt(payload, report, owner)?),
+        ),
         (Command::ReadRuntimeScope, ResponseTag::RuntimeScope) => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

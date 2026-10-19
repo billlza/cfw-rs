@@ -17,6 +17,8 @@ use std::{
 };
 
 const ADMISSION: Duration = Duration::from_millis(cfw_engine_api::authority_v1::COMMAND_TIMEOUT_MS);
+mod recovery;
+pub use recovery::ProxyRecoveryObservation;
 
 /// The service owns one instance behind its lifecycle guard. This component
 /// binds native callers and persists policy; the runtime supervisor still owns
@@ -30,6 +32,7 @@ pub struct WindowsAuthority {
     runtime_job: Option<RuntimeJob>,
     keeper_confirmed: bool,
     cleanup_context: Option<LeaseContext>,
+    proxy_recovery: Option<super::recovery::ProxyRecoveryAdmission>,
     #[cfg(feature = "native-service-validation")]
     next_fault: Option<crate::authority_journal::JournalFaultPoint>,
 }
@@ -46,6 +49,7 @@ impl WindowsAuthority {
             runtime_job: None,
             keeper_confirmed: false,
             cleanup_context: None,
+            proxy_recovery: None,
             #[cfg(feature = "native-service-validation")]
             next_fault: None,
         };
@@ -136,6 +140,7 @@ impl WindowsAuthority {
         Ok(())
     }
     fn suspend(&mut self, uncertain: bool) {
+        self.proxy_recovery = None;
         self.keeper_confirmed = false;
         if let Some(context) = self.machine.context() {
             self.cleanup_context = Some(context.clone());
@@ -145,6 +150,7 @@ impl WindowsAuthority {
     }
     fn commit(&mut self, candidate: Machine) -> Result<()> {
         if candidate.metadata() != self.machine.metadata() {
+            self.proxy_recovery = None;
             let metadata = candidate.metadata().ok_or(AuthorityError::Invalid)?;
             #[cfg(feature = "native-service-validation")]
             let publication = match self.next_fault.take() {

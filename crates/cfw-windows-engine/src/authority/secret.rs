@@ -4,7 +4,12 @@ use zeroize::Zeroizing;
 
 pub(super) struct Ticket(Zeroizing<[u8; 32]>);
 #[derive(Clone)]
-pub(super) struct TicketDigest(Zeroizing<[u8; 32]>);
+pub(super) struct TicketDigest {
+    bytes: Zeroizing<[u8; 32]>,
+    domain: &'static [u8],
+}
+const PREPARATION: &[u8] = b"cfw-windows-authority-preparation-v1\0";
+const RECOVERY: &[u8] = b"cfw-windows-authority-proxy-recovery-v1\0";
 impl Ticket {
     #[cfg(windows)]
     pub(super) fn generate() -> super::Result<Self> {
@@ -28,7 +33,10 @@ impl Ticket {
         Ok(Self(bytes))
     }
     pub(super) fn digest(&self) -> TicketDigest {
-        TicketDigest::of(self.0.as_ref())
+        TicketDigest::of(self.0.as_ref(), PREPARATION)
+    }
+    pub(super) fn recovery_digest(&self) -> TicketDigest {
+        TicketDigest::of(self.0.as_ref(), RECOVERY)
     }
     pub(super) fn expose<T>(&self, consume: impl FnOnce(&[u8]) -> T) -> T {
         consume(self.0.as_ref())
@@ -39,17 +47,20 @@ impl Ticket {
     }
 }
 impl TicketDigest {
-    fn of(bytes: &[u8]) -> Self {
+    fn of(bytes: &[u8], domain: &'static [u8]) -> Self {
         let mut hash = Sha256::new();
-        hash.update(b"cfw-windows-authority-preparation-v1\0");
+        hash.update(domain);
         hash.update(bytes);
-        Self(Zeroizing::new(hash.finalize().into()))
+        Self {
+            bytes: Zeroizing::new(hash.finalize().into()),
+            domain,
+        }
     }
     pub(super) fn accepts(&self, bytes: &[u8]) -> bool {
         if bytes.len() != 32 {
             return false;
         }
-        let candidate = Self::of(bytes);
-        bool::from(self.0.as_ref().ct_eq(candidate.0.as_ref()))
+        let candidate = Self::of(bytes, self.domain);
+        bool::from(self.bytes.as_ref().ct_eq(candidate.bytes.as_ref()))
     }
 }

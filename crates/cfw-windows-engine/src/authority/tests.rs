@@ -28,7 +28,7 @@ fn peer(role: Role) -> Peer {
         role,
     }
 }
-fn recovered(state: Option<AuthorityCommittedState>) -> Machine {
+pub(super) fn recovered(state: Option<AuthorityCommittedState>) -> Machine {
     let action = state.as_ref().map_or(RecoveryAction::VerifyOff, |value| {
         value.restart_action().unwrap()
     });
@@ -95,7 +95,7 @@ fn report(context: &LeaseContext) -> ReadyReport {
         observed_millis: 1,
     }
 }
-fn active(now: Instant) -> (Machine, Peer, Peer, LeaseContext) {
+pub(super) fn active(now: Instant) -> (Machine, Peer, Peer, LeaseContext) {
     let (mut value, host, runtime, context, ticket) = prepared(now);
     ticket
         .expose(|bytes| value.bind(&runtime, &context, bytes, now))

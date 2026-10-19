@@ -7,6 +7,7 @@ mod dispatch;
 mod machine;
 #[cfg(windows)]
 mod native;
+mod recovery;
 #[cfg(windows)]
 mod runtime_job;
 mod secret;
@@ -17,7 +18,10 @@ pub use client::AuthorityChannel;
 #[cfg(windows)]
 pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
+pub use native::ProxyRecoveryObservation;
+#[cfg(windows)]
 pub use native::WindowsAuthority;
+pub use recovery::{ProxyRecoveryContext, ProxyRecoveryTarget};
 #[cfg(windows)]
 pub(crate) use runtime_job::RuntimeKeeper;
 #[cfg(all(windows, feature = "native-service-validation"))]

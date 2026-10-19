@@ -373,197 +373,86 @@ fn serve_connections(
     lease_owner: &Mutex<Option<NativeUserSession>>,
     authority: &Mutex<Validation>,
 ) -> Result<()> {
-    while !STOP.load(Ordering::SeqCst) {
-        let mut connection = match listener.accept(Instant::now() + Duration::from_millis(100)) {
-            Ok(connection) => connection,
-            // An idle poll does not cancel the pending native connection or
-            // replay a command. Explicit shutdown reaps its native operation.
-            Err(ServiceTransportError::Deadline) => continue,
-            Err(error) => return Err(error.to_string()),
-        };
-        let mut wire_connection = false;
-        loop {
-            if STOP.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-            // The wire fixture keeps its desktop connection while a restricted
-            // child exchanges commands. Existing transport timeout cases retain
-            // their five-second deadline; typed fixture connections get LIMIT.
-            let receive_timeout = if wire_connection {
-                LIMIT
-            } else {
-                Duration::from_secs(5)
-            };
-            let request = match connection.receive(Instant::now() + receive_timeout) {
-                Ok(request) => request,
-                Err(error) => {
-                    if STOP.load(Ordering::SeqCst) {
-                        return Ok(());
+    thread::scope(|scope| {
+        let mut workers: Vec<thread::ScopedJoinHandle<'_, Result<()>>> = Vec::new();
+        let serving = (|| -> Result<()> {
+            while !STOP.load(Ordering::SeqCst) {
+                let mut index = 0;
+                while index < workers.len() {
+                    if workers[index].is_finished() {
+                        workers
+                            .swap_remove(index)
+                            .join()
+                            .map_err(|_| "fixture connection worker panicked")??;
+                    } else {
+                        index += 1;
                     }
-                    let kind = rejection_kind(&error).ok_or_else(|| error.to_string())?;
-                    record_rejection(name, role, kind)?;
-                    break;
                 }
-            };
-            if STOP.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-            let identity = request.identity();
-            if request.role() != role
-                || identity.user_sid() != installed.user_sid
-                || identity.authentication_id() != installed.authentication_id
-                || identity.session_id() != installed.session_id
-            {
-                return Err(
-                    "authenticated fixture request lost native role/user/session binding".into(),
-                );
-            }
-            if request.body().starts_with(b"{") {
-                wire_connection = true;
-                let mut authority = authority
-                    .lock()
-                    .map_err(|_| "native wire lifecycle guard poisoned")?;
-                let reply = authority.handle(&mut connection, request)?;
-                match reply
-                    .send(&mut connection, Instant::now() + LIMIT)
-                    .map_err(|e| e.to_string())?
+                let connection = match listener.accept(Instant::now() + Duration::from_millis(100))
                 {
-                    None
-                    | Some(
-                        cfw_windows_engine::authority::AuthorityError::Ticket
-                        | cfw_windows_engine::authority::AuthorityError::Stale
-                        | cfw_windows_engine::authority::AuthorityError::Identity,
-                    ) => {}
-                    Some(error) => {
-                        return Err(format!(
-                            "unexpected wire fixture rejection after publication: {error}"
-                        ));
-                    }
-                }
-                continue;
-            }
-            let peer_session = request.identity().user_session().clone();
-            let mut owner = lease_owner
-                .lock()
-                .map_err(|_| "fixture lease guard poisoned")?;
-            let system = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
-            let (lease, requirement) = match (role, request.body()) {
-                (ServiceClientRole::UserAgent, b"agent-without-lease") => {
-                    (None, UserAgentLeaseRequirement::OwnedLease)
-                }
-                (ServiceClientRole::UserAgent, b"agent-foreign-lease") => (
-                    Some(system.identity().user_session()),
-                    UserAgentLeaseRequirement::OwnedLease,
-                ),
-                (ServiceClientRole::UserAgent, b"agent-observe-without-lease") => {
-                    (None, UserAgentLeaseRequirement::OwnedLeaseOrNone)
-                }
-                _ => (owner.as_ref(), UserAgentLeaseRequirement::OwnedLease),
-            };
-            let admitted = match authorize_service_request(
-                &mut connection,
-                request,
-                lease,
-                requirement,
-                Instant::now() + LIMIT,
-            ) {
-                Ok(admitted) => admitted,
-                Err(ServiceAuthorizationError::LeaseRequired) => {
-                    record_rejection(name, role, "lease_required")?;
-                    break;
-                }
-                Err(ServiceAuthorizationError::LeaseOwnerMismatch) => {
-                    record_rejection(name, role, "lease_owner_mismatch")?;
-                    break;
-                }
-                Err(error) => {
-                    let detail = match LiveConsoleSession::observe() {
-                        Ok(console) => format!(
-                            "peer_session={}, console_session={}, sid_matches={}, logon_matches={}",
-                            peer_session.session_id(),
-                            console.identity().session_id(),
-                            peer_session.user_sid() == console.identity().user_sid(),
-                            peer_session.authentication_id()
-                                == console.identity().authentication_id()
-                        ),
-                        Err(observation) => format!("console observation: {observation}"),
-                    };
-                    return Err(format!(
-                        "native fixture authorization failed: {error}; {detail}"
-                    ));
-                }
-            };
-            if role == ServiceClientRole::Desktop && owner.is_none() {
-                *owner = Some(admitted.owner().clone());
-            }
-            drop(owner);
-            let request = admitted.request();
-            if admitted.process().process_id() == 0
-                || admitted.process().identity() != request.identity()
-            {
-                return Err("authorized fixture lost its retained process identity".into());
-            }
-            if request.body() == b"identity-probe" {
-                connection
-                    .reply(request, b"ready", Instant::now() + LIMIT)
-                    .map_err(|e| e.to_string())?;
-                let root = installed
-                    .agent_image
-                    .parent()
-                    .ok_or("missing fixture root")?;
-                let deadline = Instant::now() + LIMIT;
-                while !root
-                    .join("identity-probe.ready")
-                    .try_exists()
-                    .map_err(|e| e.to_string())?
-                {
-                    if STOP.load(Ordering::SeqCst) {
-                        return Ok(());
-                    }
-                    if Instant::now() >= deadline {
-                        return Err("queued identity fixture did not become ready".into());
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                continue;
-            }
-            let state_validation =
-                if request.body() == b"authority-state" && role == ServiceClientRole::Desktop {
-                    Some(authority_state::begin(&admitted)?)
-                } else {
-                    None
+                    Ok(connection) => connection,
+                    // The same pending accept survives an idle poll. Product
+                    // listener slots bound the number of retained connections.
+                    Err(ServiceTransportError::Deadline) => continue,
+                    Err(error) => return Err(error.to_string()),
                 };
-            let (reply, finished): (&[u8], bool) = match request.body() {
-                b"ping" => (b"pong", false),
-                b"done" => (b"end!", true),
-                b"authority-wire-finish" | b"authority-runtime-finish"
-                    if role == ServiceClientRole::Desktop =>
-                {
-                    authority
-                        .lock()
-                        .map_err(|_| "native wire lifecycle guard poisoned")?
-                        .finish()?;
-                    (b"wire-ok", true)
-                }
-                b"authority-state" if state_validation.is_some() => (b"state-ok", true),
-                command @ (b"authority-journal" | b"authority-journal-observe")
-                    if role == ServiceClientRole::Desktop =>
-                {
-                    authority_journal::exercise(name, command, admitted.owner())?;
-                    (b"journal-ok", true)
-                }
-                command @ (b"machine-record-seed" | b"machine-record-observe")
-                    if role == ServiceClientRole::Desktop =>
-                {
-                    machine_record::exercise(name, command)?;
-                    (b"record-ok", true)
-                }
-                b"agent-observe-without-lease" if role == ServiceClientRole::UserAgent => {
-                    (b"seen", true)
-                }
-                _ => return Err("unexpected authenticated fixture request".into()),
-            };
-            if let Err(error) = connection.reply(request, reply, Instant::now() + LIMIT) {
+                workers.push(scope.spawn(move || {
+                    // Move before the first read: each worker owns all reads,
+                    // native message admission and replies on this connection.
+                    let result =
+                        serve_connection(name, role, connection, installed, lease_owner, authority);
+                    if result.is_err() {
+                        STOP.store(true, Ordering::SeqCst);
+                    }
+                    result
+                }));
+            }
+            Ok(())
+        })();
+        let mut failures = Vec::new();
+        if let Err(error) = serving {
+            STOP.store(true, Ordering::SeqCst);
+            failures.push(error);
+        }
+        for worker in workers {
+            match worker.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(error),
+                Err(_) => failures.push("fixture connection worker panicked".into()),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    })
+}
+
+fn serve_connection(
+    name: &str,
+    role: ServiceClientRole,
+    mut connection: cfw_windows_engine::LocalServiceConnection,
+    installed: &Installation,
+    lease_owner: &Mutex<Option<NativeUserSession>>,
+    authority: &Mutex<Validation>,
+) -> Result<()> {
+    let mut wire_connection = false;
+    loop {
+        if STOP.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        // The wire fixture keeps its desktop connection while a restricted
+        // child exchanges commands. Existing transport timeout cases retain
+        // their five-second deadline; typed fixture connections get LIMIT.
+        let receive_timeout = if wire_connection {
+            LIMIT
+        } else {
+            Duration::from_secs(5)
+        };
+        let request = match connection.receive(Instant::now() + receive_timeout) {
+            Ok(request) => request,
+            Err(error) => {
                 if STOP.load(Ordering::SeqCst) {
                     return Ok(());
                 }
@@ -571,12 +460,177 @@ fn serve_connections(
                 record_rejection(name, role, kind)?;
                 break;
             }
-            if let Some(validation) = state_validation {
-                validation.finish_after_reply(&admitted)?;
+        };
+        if STOP.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let identity = request.identity();
+        if request.role() != role
+            || identity.user_sid() != installed.user_sid
+            || identity.authentication_id() != installed.authentication_id
+            || identity.session_id() != installed.session_id
+        {
+            return Err(
+                "authenticated fixture request lost native role/user/session binding".into(),
+            );
+        }
+        if request.body().starts_with(b"{") {
+            wire_connection = true;
+            let mut authority = authority
+                .lock()
+                .map_err(|_| "native wire lifecycle guard poisoned")?;
+            let reply = authority.handle(&mut connection, request)?;
+            match reply
+                .send(&mut connection, Instant::now() + LIMIT)
+                .map_err(|e| e.to_string())?
+            {
+                None
+                | Some(
+                    cfw_windows_engine::authority::AuthorityError::Ticket
+                    | cfw_windows_engine::authority::AuthorityError::Stale
+                    | cfw_windows_engine::authority::AuthorityError::Identity,
+                ) => {}
+                Some(error) => {
+                    return Err(format!(
+                        "unexpected wire fixture rejection after publication: {error}"
+                    ));
+                }
             }
-            if finished {
+            continue;
+        }
+        let peer_session = request.identity().user_session().clone();
+        let mut owner = lease_owner
+            .lock()
+            .map_err(|_| "fixture lease guard poisoned")?;
+        let system = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
+        let (lease, requirement) = match (role, request.body()) {
+            (ServiceClientRole::UserAgent, b"agent-without-lease") => {
+                (None, UserAgentLeaseRequirement::OwnedLease)
+            }
+            (ServiceClientRole::UserAgent, b"agent-foreign-lease") => (
+                Some(system.identity().user_session()),
+                UserAgentLeaseRequirement::OwnedLease,
+            ),
+            (ServiceClientRole::UserAgent, b"agent-observe-without-lease") => {
+                (None, UserAgentLeaseRequirement::OwnedLeaseOrNone)
+            }
+            _ => (owner.as_ref(), UserAgentLeaseRequirement::OwnedLease),
+        };
+        let admitted = match authorize_service_request(
+            &mut connection,
+            request,
+            lease,
+            requirement,
+            Instant::now() + LIMIT,
+        ) {
+            Ok(admitted) => admitted,
+            Err(ServiceAuthorizationError::LeaseRequired) => {
+                record_rejection(name, role, "lease_required")?;
                 break;
             }
+            Err(ServiceAuthorizationError::LeaseOwnerMismatch) => {
+                record_rejection(name, role, "lease_owner_mismatch")?;
+                break;
+            }
+            Err(error) => {
+                let detail = match LiveConsoleSession::observe() {
+                    Ok(console) => format!(
+                        "peer_session={}, console_session={}, sid_matches={}, logon_matches={}",
+                        peer_session.session_id(),
+                        console.identity().session_id(),
+                        peer_session.user_sid() == console.identity().user_sid(),
+                        peer_session.authentication_id() == console.identity().authentication_id()
+                    ),
+                    Err(observation) => format!("console observation: {observation}"),
+                };
+                return Err(format!(
+                    "native fixture authorization failed: {error}; {detail}"
+                ));
+            }
+        };
+        if role == ServiceClientRole::Desktop && owner.is_none() {
+            *owner = Some(admitted.owner().clone());
+        }
+        drop(owner);
+        let request = admitted.request();
+        if admitted.process().process_id() == 0
+            || admitted.process().identity() != request.identity()
+        {
+            return Err("authorized fixture lost its retained process identity".into());
+        }
+        if request.body() == b"identity-probe" {
+            connection
+                .reply(request, b"ready", Instant::now() + LIMIT)
+                .map_err(|e| e.to_string())?;
+            let root = installed
+                .agent_image
+                .parent()
+                .ok_or("missing fixture root")?;
+            let deadline = Instant::now() + LIMIT;
+            while !root
+                .join("identity-probe.ready")
+                .try_exists()
+                .map_err(|e| e.to_string())?
+            {
+                if STOP.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err("queued identity fixture did not become ready".into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            continue;
+        }
+        let state_validation =
+            if request.body() == b"authority-state" && role == ServiceClientRole::Desktop {
+                Some(authority_state::begin(&admitted)?)
+            } else {
+                None
+            };
+        let (reply, finished): (&[u8], bool) = match request.body() {
+            b"ping" => (b"pong", false),
+            b"done" => (b"end!", true),
+            b"authority-wire-finish" | b"authority-runtime-finish"
+                if role == ServiceClientRole::Desktop =>
+            {
+                authority
+                    .lock()
+                    .map_err(|_| "native wire lifecycle guard poisoned")?
+                    .finish()?;
+                (b"wire-ok", true)
+            }
+            b"authority-state" if state_validation.is_some() => (b"state-ok", true),
+            command @ (b"authority-journal" | b"authority-journal-observe")
+                if role == ServiceClientRole::Desktop =>
+            {
+                authority_journal::exercise(name, command, admitted.owner())?;
+                (b"journal-ok", true)
+            }
+            command @ (b"machine-record-seed" | b"machine-record-observe")
+                if role == ServiceClientRole::Desktop =>
+            {
+                machine_record::exercise(name, command)?;
+                (b"record-ok", true)
+            }
+            b"agent-observe-without-lease" if role == ServiceClientRole::UserAgent => {
+                (b"seen", true)
+            }
+            _ => return Err("unexpected authenticated fixture request".into()),
+        };
+        if let Err(error) = connection.reply(request, reply, Instant::now() + LIMIT) {
+            if STOP.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let kind = rejection_kind(&error).ok_or_else(|| error.to_string())?;
+            record_rejection(name, role, kind)?;
+            break;
+        }
+        if let Some(validation) = state_validation {
+            validation.finish_after_reply(&admitted)?;
+        }
+        if finished {
+            break;
         }
     }
     Ok(())

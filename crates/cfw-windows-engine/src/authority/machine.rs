@@ -664,4 +664,26 @@ impl Machine {
         }
         Ok(&lease.context)
     }
+    pub(super) fn local_stopped_cleanup_target(&self) -> Result<AuthorityCommittedState> {
+        if !self.durable_known {
+            return Err(AuthorityError::Recovering);
+        }
+        if self.phase != AuthorityState::Stopping {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        let lease = self.lease.as_ref().ok_or(AuthorityError::CleanupUnproven)?;
+        let metadata = self.metadata.as_ref().ok_or(AuthorityError::Recovering)?;
+        if lease.context.operation.mode != cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+            || !lease.owner_stopped
+            || lease.ticket.is_some()
+            || lease.accepted_ready.is_some()
+            || metadata.root() != &lease.context.operation.root
+            || metadata.operation() != Some(&lease.context.recorded()?)
+            || metadata.revision() != self.revision
+        {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        metadata.validate()?;
+        Ok(metadata.clone())
+    }
 }

@@ -1,6 +1,5 @@
 //! Real engine/WinINet ownership through the native SYSTEM dispatcher. The
-//! SystemProxy stop uses production cleanup; LocalProxy cleanup is still
-//! explicitly injected until its native proof constructor is connected.
+//! LocalProxy and SystemProxy normal stops use their production cleanup paths.
 use super::*;
 use cfw_engine_api::{EngineCommandContext, EngineStartRequest, authority_v1::AuthorityState};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
@@ -8,7 +7,7 @@ use cfw_windows_credentials::WindowsCredentialStore;
 use cfw_windows_engine::{
     AuthenticatedServiceRequest, LocalServiceConnection, WindowsSystemProxy,
     authority::{
-        AuthorizedReply, CleanupEvidence,
+        AuthorizedReply,
         wire::{Command, Rejection, Request, WireError},
     },
     user_agent::{
@@ -68,6 +67,7 @@ pub(super) struct Validation {
     reconciled: usize,
     rejected_bindings: usize,
     cleanup_rejections: Vec<&'static str>,
+    local_live_stop_rejected: bool,
     process_observations: Vec<serde_json::Value>,
 }
 impl Validation {
@@ -80,6 +80,7 @@ impl Validation {
             reconciled: 0,
             rejected_bindings: 0,
             cleanup_rejections: Vec::new(),
+            local_live_stop_rejected: false,
             process_observations: Vec::new(),
         }
     }
@@ -102,10 +103,6 @@ impl Validation {
             if snapshot.state != AuthorityState::Stopping {
                 return Err("runtime did not preserve stopped scope".into());
             }
-            let lease = controller
-                .cleanup_target()
-                .ok_or("missing stopped runtime scope")?
-                .lease_id;
             let observation = controller
                 .observe_runtime_processes()
                 .map_err(|e| e.to_string())?;
@@ -121,15 +118,22 @@ impl Validation {
                 .mode
                 == cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
             {
-                // LocalProxy still needs its own production proof constructor.
-                // SystemProxy completes through the product Desktop/API path.
-                controller
-                    .reconcile_off(CleanupEvidence::for_validation(
-                        snapshot.revision.ok_or("unknown runtime revision")?,
-                        Some(lease),
-                        true,
-                    ))
+                let completed = controller
+                    .reconcile_local_stop()
                     .map_err(|e| e.to_string())?;
+                if !self.local_live_stop_rejected || completed.snapshot().state != AuthorityState::Off
+                    || completed.snapshot().revision != snapshot.revision.and_then(|v| v.checked_add(1))
+                    || controller.recovery_target().is_none_or(|m| m.operation().is_some()
+                        || m.transition() != cfw_windows_engine::authority_journal::JournalTransition::GlobalOff)
+                { return Err("LocalProxy stop did not commit exact production GlobalOff".into()); }
+                write_report(
+                    &authority_journal::root()?.join("runtime-stop-local-service.json"),
+                    &serde_json::json!({
+                        "prior":completed.prior(),"processes":authority_wire::process_report("normal_stop", completed.processes()),
+                        "snapshot":completed.snapshot(),"metadata":controller.recovery_target(),
+                        "production_cleanup":true,"live_stopped_owner_rejected":true,"lease_released":controller.lease_owner().is_none(),
+                    }),
+                )?;
                 self.reconciled += 1;
             }
         }
@@ -207,6 +211,23 @@ impl Validation {
         }
         if stopped {
             let observation = authority_wire::require_live_runtime(controller, 1)?;
+            if controller
+                .cleanup_target()
+                .ok_or("missing acknowledged stop")?
+                .operation
+                .mode
+                == cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+            {
+                let before = controller.snapshot();
+                if !matches!(
+                    controller.reconcile_local_stop(),
+                    Err(cfw_windows_engine::authority::AuthorityError::CleanupUnproven)
+                ) || controller.snapshot() != before
+                {
+                    return Err("live LocalProxy owner did not block production cleanup".into());
+                }
+                self.local_live_stop_rejected = true;
+            }
             self.process_observations
                 .push(authority_wire::process_report(
                     "stopped_report",
@@ -236,6 +257,7 @@ impl Validation {
             || self.reconciled != 2
             || self.heartbeats < 2
             || self.rejected_bindings != 1
+            || !self.local_live_stop_rejected
             || self.cleanup_rejections
                 != [
                     "active_cleanup_rejected",
@@ -254,7 +276,7 @@ impl Validation {
             .cleanup()?;
         write_report(
             &authority_journal::root()?.join("user-agent.wire-validation.json"),
-            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"system_runtime_job_observed":true,"job_failure_boundaries_verified":true,"process_observations":self.process_observations,"nested_engine_membership_observed":true,"engine_keeper_survives_agent_reference_release":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"live_processes_block_reconcile":true,"ordinary_agent_job_rights_denied":true,"global_cleanup_observations_injected":true,"production_system_proxy_stop":true,"injected_cleanup_modes":["local_proxy"],"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
+            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"system_runtime_job_observed":true,"job_failure_boundaries_verified":true,"process_observations":self.process_observations,"nested_engine_membership_observed":true,"engine_keeper_survives_agent_reference_release":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"live_processes_block_reconcile":true,"ordinary_agent_job_rights_denied":true,"global_cleanup_observations_injected":false,"production_system_proxy_stop":true,"production_local_proxy_stop":true,"injected_cleanup_modes":[],"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
         )
     }
 }
@@ -262,9 +284,10 @@ fn credential_report() -> serde_json::Value {
     serde_json::json!({"runtime_credential_bindings_persisted":true,"async_credential_vault_adapter":true,"async_credential_rebind_verified":true,"active_gc_protects_exact_audience":true,"gc_rechecks_state_at_commit":true,"runtime_gc_observation_errors_rejected":true,"protected_vault_missing_rejected":true,"retired_credentials_collected":true})
 }
 pub(super) fn client_report() -> serde_json::Value {
-    let mut report = serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"durable_runtime_storage":true,"restoration_observed_after_agent_exit":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"credential_lifecycle":credential_report(),"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false});
+    let mut report = serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"durable_runtime_storage":true,"restoration_observed_after_agent_exit":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"credential_lifecycle":credential_report(),"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":false,"full_service_backend_proven":false});
     report["production_system_proxy_stop"] = serde_json::json!(true);
-    report["injected_cleanup_modes"] = serde_json::json!(["local_proxy"]);
+    report["production_local_proxy_stop"] = serde_json::json!(true);
+    report["injected_cleanup_modes"] = serde_json::json!([]);
     report
 }
 pub(super) fn run_validation() -> Result<()> {

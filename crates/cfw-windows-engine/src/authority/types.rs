@@ -210,12 +210,25 @@ pub struct CleanupEvidence {
 pub(super) enum CleanupBinding {
     Runtime(super::ProxyRecoveryTarget),
     RecordedOff(AuthorityCommittedState),
+    LocalStop(AuthorityCommittedState),
     #[cfg(any(test, feature = "native-service-validation"))]
     Validation,
 }
 impl CleanupEvidence {
     pub(super) fn validate_scope(&self, metadata: Option<&AuthorityCommittedState>) -> Result<()> {
         match &self.binding {
+            CleanupBinding::LocalStop(target) => {
+                target.validate()?;
+                let operation = target.operation().ok_or(AuthorityError::CleanupUnproven)?;
+                if target.state() != AuthorityState::Stopping
+                    || operation.mode() != AuthorityMode::LocalProxy
+                    || metadata != Some(target)
+                    || self.revision != target.revision()
+                    || self.lease_id != Some(operation.lease_id())
+                {
+                    return Err(AuthorityError::Stale);
+                }
+            }
             CleanupBinding::RecordedOff(target) => {
                 target.validate()?;
                 if target.state() != AuthorityState::Off

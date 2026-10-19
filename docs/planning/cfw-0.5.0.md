@@ -1302,7 +1302,7 @@ Agent/引擎退出，核对原代理设置并重新绑定两处监听端口。�
 参考 [进程终止与退出观察](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)
 及 [SCM 启动与状态观察](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicew)。
 
-### 持久化代理恢复观察与稳定运行目录（待原生验证）
+### 持久化代理恢复观察与稳定运行目录
 
 产品新增 `UserRuntimeStorage`，由受信安装层提供当前用户目录，固定保留 `engine-v1`
 与 `proxy-v1`，通过持有私有目录句柄防止运行/清理期间路径被替换。启动消息不携带
@@ -1325,7 +1325,28 @@ WinINet 恢复现在先写入最多 4 KiB 的单份恢复记录，再重新读�
 退出后重开生产存储，把恢复记录中的 PID/创建时间与保留的引擎内核句柄比较。
 SCM 重启场景还会独立观察整个 Job 的最终零计数，缺失 Job 仍是错误。
 
-默认特性与全特性 Windows 交叉 Clippy 已通过；以上新增原生行为等待 CI。
+默认特性与全特性 Windows 交叉 Clippy 已通过。代码 `d3a4070` 的
+[Windows CI 39305301320](https://github.com/billlza/cfw-rs/actions/runs/39305301320)
+四项作业全部成功：579 项共享 Rust、311 项 UI、11 项原生引擎、35 项 SCM、1 项
+保留句柄准入和 2 项诊断测试通过。256 次连接压力检查在 12.981767 秒内完成。
+原两种代理模式保持 Ready/Stopped 与 8 次心跳，恢复记录的中断、重开、身份绑定
+及外部设置变化拒绝均经原生执行；固定 UTF-16 摘要测试向量也通过。
+
+已下载并严格核对源码身份、ZIP 哈希、原生用例和报告字段：
+
+- 服务产物 `12213980964`：`1b54b20deca261c757c07f1674f016509cea4f6b21c4b6d0c75b62f998390c74`。
+- 引擎产物 `12213482988`：`bd7cb200c71645da63d59cc8c84535c4f7e53783e30cc88657ced57ae5d862cf`。
+
+实际崩溃的服务进程为 832，重启进程为 9924；新服务重开同一 Job 时活动计数为
+3，随后独立观察到活动计数 0、累计成员 3。Desktop 在保留句柄证明旧进程退出后
+重新打开稳定存储，核对了恢复记录的完整上下文、配置身份及历史 PID/创建时间，
+并重新查询当前用户的 WinINet 默认连接选项。普通与崩溃两种 SystemProxy 路径
+均通过这项检查。上述观察未生成全局 Off，产品控制丢失错误与无 Stopped 确认
+继续保留。服务重新打开时 Job 名称已消失的恢复分支仍未完成，不能用本次成功
+推断该分支安全。
+
+WinINet 观察保留在当前用户进程中，接口作用域参见
+[设置与读取连接选项](https://learn.microsoft.com/en-us/windows/win32/wininet/setting-and-retrieving-internet-options)。
 服务侧恢复专用授权、这些观察到生产 CleanupEvidence 的接线、缺失 Job 的恢复、
 完整应用/界面和发布验收仍未完成。
 

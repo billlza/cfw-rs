@@ -336,6 +336,26 @@ lifecycle integration must still correlate persisted bindings under a lifecycle
 guard; this query alone does not implement credential collection or prove global
 cleanup. Existing mutation admission still requires the exact owner and channel.
 
+`WindowsCredentialLifecycle` now supplies the synchronous LocalProxy/SystemProxy
+integration. Desktop preparation durably publishes a bounded, canonical record
+of the root, operation, audience, credential slots, mode/options and both hashes
+before sending Prepare. A current-user mutex covers that publication and request
+as well as vault provisioning/rebind and both GC phases. Each GC call reloads
+the record and obtains a fresh authenticated recorded scope; it checks the full
+identity and protects the exact audience even when absent from the repository.
+Recovery and uncertain publication never become an empty binding set. A missing
+vault with protected runtime references is a distinct error, not MissingVault's
+legitimate empty-store case. Only confirmed service Off allows the retired
+runtime binding to stop protecting credentials. No templates, controller keys,
+tickets or resolved credentials enter this record.
+
+The native runtime fixture uses a shared current-user DPAPI vault in distinct
+Desktop/Agent processes, exercises real GC while the engine remains active, and
+checks stale pre-start previews plus missing/corrupt bindings, missing authority
+and a missing protected vault. Global cleanup remains injected. The async
+application vault adapter, independent global recovery, Tunnel/persisted candidate
+bindings and complete application factory are still separate integration work.
+
 The shared coordinator pins a backend's declared runtime platform when its actor
 starts. Windows user-agent/tunnel-service owners have distinct wire names from
 Apple owners. Start, restart and status paths retain exact owner/context/digest

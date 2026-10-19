@@ -30,15 +30,15 @@ native DPAPI output allocation are erased when dropped. Debug output is
 redacted. This does not claim erasure of OS/internal serializer buffers or
 protection against process compromise.
 
-The API deliberately does **not** implement `CredentialVaultProvisioner` yet.
-The Windows engine owner must first serialize lifecycle mutations, obtain the
-repository and active/pending/persisted runtime bindings, and supply those
-bindings to both maintenance calls. Failure to observe runtime state must fail
-maintenance. Replacing that observation with an empty list would risk deleting
-credentials used by an older running generation. The owner must also execute
-these synchronous calls on a blocking worker, and authenticate engine requests
-before calling `resolve_for_engine`. No credential-resolution UI command is
-provided.
+The storage API does **not** implement `CredentialVaultProvisioner` itself.
+`cfw-windows-engine::credential_lifecycle::WindowsCredentialLifecycle` now wraps
+it with a cross-process lifecycle guard and persisted LocalProxy/SystemProxy
+bindings correlated with the authenticated Authority, for both GC phases. The
+application's async vault adapter and Tunnel/persisted candidate integration are
+still required. Failure to observe runtime state must fail maintenance; an empty
+list cannot substitute for a failed observation. Call these synchronous methods
+on a blocking worker, and authenticate the exact engine request before calling
+`resolve_for_engine`. No credential-resolution UI command is provided.
 
 Native Windows tests exercise real DPAPI, private files, cross-process reopen,
 concurrent writers, lock contention, exact audience separation, immutable

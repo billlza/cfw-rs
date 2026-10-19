@@ -1,5 +1,6 @@
 use super::*;
 use cfw_windows_engine::authority::{AuthorityChannel, wire::Response};
+use cfw_windows_engine::credential_lifecycle::WindowsCredentialLifecycle;
 use cfw_windows_engine::user_agent::{
     desktop::DesktopUserAgent,
     launcher::{UserAgentInvocation, ValidationAgent},
@@ -31,6 +32,12 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         return Err("runtime desktop and agent must use distinct installed images".into());
     }
     let service_image = Arc::new(verified(&image, expected)?);
+    let credential_directory = root.join("runtime-credentials");
+    let lifecycle = WindowsCredentialLifecycle::new(
+        name.into(),
+        Arc::clone(&service_image),
+        &credential_directory,
+    );
     let generations = cfw_windows_engine::WindowsEngineGenerationStore::new(
         name.into(),
         Arc::clone(&service_image),
@@ -73,12 +80,14 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                 serde_json::json!({"type":"direct","tag":format!("handoff-direct-{number:04}")}),
             );
         }
+        outbounds.push(credentials::outbound());
         let profile = serde_json::to_string(&serde_json::json!({"outbounds":outbounds}))
             .map_err(|e| e.to_string())?;
-        let projection = ValidatedSingBoxProfile::parse(&profile)
-            .map_err(|e| e.to_string())?
+        let profile = ValidatedSingBoxProfile::parse(&profile).map_err(|e| e.to_string())?;
+        let credential_fixture = credentials::Fixture::new(&lifecycle, &profile)?;
+        let projection = profile
             .project(
-                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                credentials::PROFILE,
                 mode,
                 &EngineSettings {
                     mixed_port: mixed_address.port(),
@@ -149,13 +158,13 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         thread::scope(|scope| -> Result<()> {
             let worker_stop = Arc::clone(&stop);
             let worker_image = Arc::clone(&service_image);
+            let lifecycle = &lifecycle;
             let image = &image;
             let worker = scope.spawn(move || -> Result<_> {
                 // Construct the native connection on the owning lifecycle
                 // thread; no thread-affine channel is transferred from the UI.
                 let mut operation = DesktopUserAgent::prepare(
-                    name.into(),
-                    Arc::clone(&worker_image),
+                    lifecycle,
                     worker_image,
                     start_request,
                     Instant::now() + LIMIT,
@@ -256,6 +265,11 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                     );
                 }
                 drop(observer);
+                credential_fixture.while_active(
+                    lifecycle,
+                    &credential_directory,
+                    Arc::clone(&service_image),
+                )?;
                 let raw = unsafe {
                     OpenProcess(
                         PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
@@ -306,6 +320,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
             }
             restricted::check_report(root, &prefix, case, exit.exit_code())
         })?;
+        credential_fixture.after_stop(&lifecycle)?;
         if proxy.snapshot().map_err(|e| e.to_string())? != initial_proxy {
             return Err("desktop observed different proxy settings after agent exit".into());
         }

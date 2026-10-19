@@ -14,6 +14,8 @@ mod configuration;
 #[cfg(any(windows, test))]
 mod connection_binding;
 #[cfg(any(windows, test))]
+pub mod credential_lifecycle;
+#[cfg(any(windows, test))]
 mod protocol;
 #[cfg(any(windows, test))]
 pub mod user_agent;

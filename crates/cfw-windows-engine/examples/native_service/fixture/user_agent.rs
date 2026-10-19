@@ -23,6 +23,7 @@ use std::{
 };
 
 mod child;
+mod credentials;
 mod desktop_runtime;
 mod lan;
 mod progress;
@@ -156,8 +157,11 @@ impl Validation {
         )
     }
 }
+fn credential_report() -> serde_json::Value {
+    serde_json::json!({"runtime_credential_bindings_persisted":true,"active_gc_protects_exact_audience":true,"gc_rechecks_state_at_commit":true,"runtime_gc_observation_errors_rejected":true,"protected_vault_missing_rejected":true,"retired_credentials_collected":true})
+}
 pub(super) fn client_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"credential_lifecycle":credential_report(),"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
 }
 pub(super) fn run_validation() -> Result<()> {
     for variable in [
@@ -191,7 +195,7 @@ pub(super) fn run_validation() -> Result<()> {
     let _held = VerifiedExecutable::open(&install.path, install.digest, &install.version)
         .map_err(|e| e.to_string())?;
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let result = (|| {
+    with_diagnostics(root.path(), &receipts, || {
         let image = root.path().join("service-fixture.exe");
         std::fs::copy(std::env::current_exe().map_err(|e| e.to_string())?, &image)
             .map_err(|e| e.to_string())?;
@@ -213,8 +217,15 @@ pub(super) fn run_validation() -> Result<()> {
         let removal = service.remove();
         match (test, removal) {
             (Ok(()), Ok(())) => {}
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
-            (Err(test), Err(cleanup)) => return Err(format!("{test}; service cleanup: {cleanup}")),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => {
+                eprintln!("runtime fixture failed before service disposal: {error}");
+                return Err(error);
+            }
+            (Err(test), Err(cleanup)) => {
+                let error = format!("{test}; service cleanup: {cleanup}");
+                eprintln!("runtime fixture failed before service disposal: {error}");
+                return Err(error);
+            }
         }
         drop(service);
         let check =
@@ -241,14 +252,66 @@ pub(super) fn run_validation() -> Result<()> {
             &receipts.join("user-agent-runtime-receipt.json"),
             &serde_json::json!({"product_source":source,"client":client_report(),"wire":wire,"temporary_service_removed":true,"release_accepted":false}),
         )
-    })();
-    let diagnostics = collect_fixture_diagnostics(root.path(), &receipts);
+    })
+}
+fn with_diagnostics(
+    root: &Path,
+    receipts: &Path,
+    operation: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    let diagnostics = collect_fixture_diagnostics(root, receipts);
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => {
+            if let Err(error) = diagnostics {
+                eprintln!("runtime fixture diagnostic collection also failed: {error}");
+            }
+            std::panic::resume_unwind(payload)
+        }
+    };
     match (result, diagnostics) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(test), Err(diagnostics)) => {
             Err(format!("{test}; diagnostic collection: {diagnostics}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn cleanup_panic_still_exports_diagnostics_and_remains_a_panic() {
+        let root = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("runtime-client-output.txt"),
+            b"original runtime error",
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(|| {
+            with_diagnostics(root.path(), output.path(), || panic!("disposal fault"))
+        });
+        let payload = result.unwrap_err();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"disposal fault"));
+        assert_eq!(
+            std::fs::read(output.path().join("runtime-client-output.txt")).unwrap(),
+            b"original runtime error"
+        );
+    }
+    #[test]
+    fn diagnostic_failure_preserves_the_original_operation_error() {
+        let root = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("invalid-client-output.txt")).unwrap();
+        let error = with_diagnostics(root.path(), output.path(), || {
+            Err("primary runtime error".into())
+        })
+        .unwrap_err();
+        assert!(error.contains("primary runtime error"));
+        assert!(error.contains("invalid fixture diagnostic file"));
     }
 }
 fn reserve() -> Result<TcpListener> {
@@ -267,10 +330,10 @@ pub(super) fn agent(
     child::run(name, image, digest, case)
 }
 pub(super) fn desktop_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"role":"desktop","privileged_console_observer_rejected":true,"medium_integrity":true,"administrator_member":false,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_agent_process":true,"distinct_agent_image":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true})
+    serde_json::json!({"success":true,"role":"desktop","privileged_console_observer_rejected":true,"medium_integrity":true,"administrator_member":false,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"credential_lifecycle":credential_report(),"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_agent_process":true,"distinct_agent_image":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true})
 }
 pub(super) fn agent_report(mode: ProjectionMode) -> serde_json::Value {
-    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"mode":mode,"inherited_start_request_validated":true,"parent_image_authenticated":true,"actual_engine_started":true,"authority_revocation_stopped_runtime":true,"native_stopped_acknowledged":true,"local_cleanup_observed":true,"original_proxy_restored":true})
+    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"mode":mode,"runtime_credentials_resolved_from_shared_vault":true,"inherited_start_request_validated":true,"parent_image_authenticated":true,"actual_engine_started":true,"authority_revocation_stopped_runtime":true,"native_stopped_acknowledged":true,"local_cleanup_observed":true,"original_proxy_restored":true})
 }
 pub(super) fn rejected_report() -> serde_json::Value {
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"inherited_start_request_validated":true,"parent_image_authenticated":true,"invalid_ticket_precedes_vault_access":true,"actual_engine_started":false})

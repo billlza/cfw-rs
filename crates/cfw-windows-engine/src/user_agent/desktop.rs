@@ -7,18 +7,15 @@ use super::{
     launcher::{AgentExit, LaunchError, UserAgentChild, UserAgentInvocation, medium_process},
 };
 use crate::{
-    CheckedStartConfiguration, ServiceClientRole, ServiceTransportError, VerifiedExecutable,
+    CheckedStartConfiguration, ServiceTransportError, VerifiedExecutable,
     authority::{
-        AuthorityChannel, AuthoritySnapshot, LeaseContext, PrepareRequest,
+        AuthorityChannel, AuthoritySnapshot, LeaseContext,
         wire::{Command, Rejection, Request, Response, StopRequest, WireError},
     },
+    credential_lifecycle::{CredentialLifecycleError, WindowsCredentialLifecycle},
     service_transport::check_deadline,
 };
-use cfw_engine_api::{
-    EngineStartRequest,
-    authority_v1::{AuthorityMode, AuthorityState, RootContext},
-};
-use cfw_singbox_config::ProjectionMode;
+use cfw_engine_api::{EngineStartRequest, authority_v1::AuthorityState};
 use std::{
     fs::File,
     sync::{
@@ -38,6 +35,8 @@ const STOP_LIMIT: Duration = Duration::from_secs(15);
 pub enum DesktopError {
     #[error("Windows Desktop configuration: {0}")]
     Configuration(#[from] crate::Error),
+    #[error("Windows Desktop credential lifecycle: {0}")]
+    Credentials(#[from] CredentialLifecycleError),
     #[error("Windows Desktop authority: {0}")]
     Authority(#[from] WireError),
     #[error("Windows Desktop transport: {0}")]
@@ -121,55 +120,24 @@ pub struct DesktopUserAgent {
 }
 impl DesktopUserAgent {
     pub fn prepare(
-        service: String,
-        service_image: Arc<VerifiedExecutable>,
+        credentials: &WindowsCredentialLifecycle,
         agent_image: Arc<VerifiedExecutable>,
         request: EngineStartRequest,
         deadline: Instant,
     ) -> Result<Self> {
         check_deadline(deadline)?;
         let request = CheckedStartConfiguration::new(request)?;
-        let mode = match request.mode() {
-            ProjectionMode::LocalProxy => AuthorityMode::LocalProxy,
-            ProjectionMode::SystemProxy => AuthorityMode::SystemProxy,
-            _ => return Err(DesktopError::State("UserAgent cannot own a tunnel")),
-        };
         let current = medium_process()?;
         current
             .require_current_console_session()
             .map_err(LaunchError::from)?;
-        let mut authority =
-            AuthorityChannel::connect(&service, ServiceClientRole::Desktop, service_image)?;
-        let Response::Observed(before) = send(&mut authority, Command::Observe, deadline)? else {
-            return Err(DesktopError::Response);
-        };
-        if before.state != AuthorityState::Off {
-            return Err(DesktopError::State("authority is not independently Off"));
-        }
-        let root = request.context();
-        let input = PrepareRequest {
-            root: RootContext {
-                installation_id: uuid::Uuid::parse_str(&root.installation_id)
-                    .map_err(|_| DesktopError::Context)?,
-                epoch: root.config_epoch,
-                generation: root.generation,
-            },
-            operation_id: uuid::Uuid::new_v4(),
-            mode,
-            config_sha256: digest(request.configuration_digest())?,
-            identity_sha256: digest(request.digest())?,
-            expected_revision: before.revision.ok_or(DesktopError::Context)?,
-        };
-        let Response::Prepared(grant) = send(&mut authority, Command::Prepare(input), deadline)?
-        else {
-            return Err(DesktopError::Response);
-        };
+        let (authority, grant, request) = credentials.prepare(request, deadline)?;
         // AuthorityChannel already checked root, operation, mode, digests,
         // native owner and revision. No child exists if this validation fails;
         // closing this exact connection revokes an unbound preparation.
         let launch = UserAgentLaunch::checked(grant.into_bind(), request)?;
         Ok(Self {
-            service,
+            service: credentials.service().to_owned(),
             authority: Some(authority),
             context: launch.context().clone(),
             pending: Some(launch),
@@ -463,17 +431,6 @@ fn send(authority: &mut AuthorityChannel, command: Command, deadline: Instant) -
         Request::new(command)?,
         deadline.min(Instant::now() + COMMAND_LIMIT),
     )?)
-}
-fn digest(value: &str) -> Result<[u8; 32]> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(DesktopError::Context);
-    }
-    let mut result = [0; 32];
-    for (index, byte) in result.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| DesktopError::Context)?;
-    }
-    Ok(result)
 }
 fn wait_signal(stop: &AtomicBool, interval: Duration) {
     let end = Instant::now() + interval;

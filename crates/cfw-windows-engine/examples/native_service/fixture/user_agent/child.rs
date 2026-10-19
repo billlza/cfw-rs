@@ -63,7 +63,13 @@ pub(super) fn run(
     );
     let mut session = UserAgentSession::new(
         launch
-            .into_plan(WindowsCredentialStore::new(directory.path().join("vault")))
+            .into_plan(WindowsCredentialStore::new(
+                image
+                    .parent()
+                    .ok_or("missing installed runtime directory")?
+                    .join("runtime-credentials")
+                    .join("vault"),
+            ))
             .map_err(|e| e.to_string())?,
         name.into(),
         service_image,

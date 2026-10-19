@@ -8,6 +8,9 @@ mod credentials;
 #[path = "native_engine/system_proxy.rs"]
 mod system_proxy;
 
+#[path = "native_engine/inheritance.rs"]
+mod inheritance;
+
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},

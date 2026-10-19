@@ -6,11 +6,9 @@ use std::{
     os::windows::{
         ffi::OsStringExt,
         fs::OpenOptionsExt,
-        io::{AsRawHandle, FromRawHandle, OwnedHandle},
-        process::CommandExt,
+        io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
     ptr::null,
     sync::{
         Arc,
@@ -35,14 +33,17 @@ use windows_sys::Win32::{
     },
     System::{
         JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
             QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
         },
-        Threading::{CREATE_NO_WINDOW, QueryFullProcessImageNameW},
+        Threading::QueryFullProcessImageNameW,
     },
 };
+
+mod child;
+use child::NativeChild;
 
 /// A byte identity supplied by a trusted installation descriptor. An adjacent
 /// receipt is not a trust root. Publisher-signature admission belongs to the
@@ -203,7 +204,7 @@ fn hold_path(path: &Path, directory: bool) -> Result<Vec<File>, Error> {
 
 /// Holds the live process handle and private pipe. Not serializable/reconnectable.
 pub struct EngineProcess {
-    child: Child,
+    child: NativeChild,
     job: OwnedHandle,
     _executable: VerifiedExecutable,
     _runtime_directory: PrivateDirectory,
@@ -336,14 +337,29 @@ impl EngineProcess {
         }
     }
     fn initialize(&mut self, deadline: Instant) -> Result<(), Error> {
-        // The worker cannot start an engine before receiving a request. No
-        // configuration leaves this process until job assignment succeeds.
-        if unsafe { AssignProcessToJobObject(self.job.as_raw_handle(), self.child.as_raw_handle()) }
-            == 0
+        // CreateProcess assigned the local Job while creating a suspended
+        // thread. Confirm that ownership before any worker code/configuration.
+        let mut member = 0;
+        if unsafe {
+            IsProcessInJob(
+                self.child.as_raw_handle(),
+                self.job.as_raw_handle(),
+                &mut member,
+            )
+        } == 0
         {
             return Err(std::io::Error::last_os_error().into());
         }
+        if member == 0 {
+            return Err(Error::Protocol("worker was not created in its cleanup job"));
+        }
         self.assigned = true;
+        self.child.verify(&self._executable)?;
+        remaining(deadline)?;
+        if self.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.child.resume()?;
         let mut input = self
             .child
             .stdin
@@ -500,7 +516,7 @@ impl EngineProcess {
 
     fn finish_normal_exit(&mut self, deadline: Instant) -> Result<(), Error> {
         wait_process(&self.child, deadline)?;
-        if !self.child.wait()?.success() {
+        if !self.child.exit_status()?.success() {
             return Err(Error::Exited);
         }
         self.finish_io(deadline)?;
@@ -679,7 +695,7 @@ impl EngineProcess {
             self.child.kill()?;
         }
         wait_process(&self.child, deadline)?;
-        self.child.wait()?;
+        self.child.exit_status()?;
         while active_processes(&self.job)? != 0 {
             remaining(deadline)?;
             thread::sleep(Duration::from_millis(1));
@@ -701,7 +717,7 @@ impl Drop for EngineProcess {
 }
 
 struct SpawnAssets {
-    child: Child,
+    child: NativeChild,
     job: OwnedHandle,
     executable: VerifiedExecutable,
     private: PrivateDirectory,
@@ -738,20 +754,7 @@ fn spawn_assets(
     {
         return Err(std::io::Error::last_os_error().into());
     }
-    let child = Command::new(&executable.path)
-        .current_dir(runtime_directory)
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        // Unstructured diagnostics may include node secrets. The private
-        // control reply returns stable error codes; runtime logs remain
-        // available through the authenticated, observable Clash API.
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|source| Error::Operation {
-            operation: "spawn verified worker",
-            source,
-        })?;
+    let child = NativeChild::spawn(&executable, runtime_directory, job.as_handle())?;
     Ok(SpawnAssets {
         child,
         job,
@@ -775,7 +778,7 @@ fn remaining(deadline: Instant) -> Result<Duration, Error> {
         .ok_or(Error::Timeout)
 }
 
-fn wait_process(child: &Child, deadline: Instant) -> Result<(), Error> {
+fn wait_process(child: &NativeChild, deadline: Instant) -> Result<(), Error> {
     match wait_until(child, deadline)? {
         WaitOutcome::Signaled => Ok(()),
         WaitOutcome::TimedOut => Err(Error::Timeout),

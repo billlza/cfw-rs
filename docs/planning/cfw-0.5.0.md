@@ -694,6 +694,16 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   无租约拒绝、其他所有者拒绝、无租约观察四项；这不等于实现持久化 Authority。
   新增四项 Windows 策略/原生边界测试，Windows 全目标/feature Clippy 已通过；新
   21 项夹具尚未原生执行，RDP、切换用户、注销重登录、锁屏及睡眠唤醒仍需独立验收。
+- `c7716ca635f2a3a53ba9d7d7617f4e66e76f6e53` 的独立验证分支
+  [Windows job](https://github.com/billlza/cfw-rs/actions/runs/39185572564/job/117847190042)
+  执行到第二服务的最后一轮交换时以管道正在关闭（232）失败。
+  [失败产物](https://github.com/billlza/cfw-rs/actions/runs/39185572564/artifacts/12157887618)
+  已下载核验源码与 SHA-256
+  `a54d404c0fa14c07ef6e9eb9cd9aa017480536d2133db764fa0fe5bda4e456b1`。
+  普通客户端报告实际通过控制台授权、无租约/其他所有者拒绝及无租约观察；没有完整
+  成功回执，不能将这些局部结果代替整组通过。原日志未区分读写，当前保留所有检查并
+  新增延迟 200 ms 读取结束回复的反例和读写阶段诊断，共 22 项；先区分回复生命周期
+  与接受连接时序，再决定修复。Mac `50a3db7` 全套回归继续运行，未改动或跳过门槛。
 
 ## 官方资料
 

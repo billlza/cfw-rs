@@ -292,8 +292,10 @@ async fn connect(name: &str) -> Result<LocalServicePipe> {
 fn ping(pipe: &mut LocalServicePipe) -> Result<()> {
     let deadline = Instant::now() + LIMIT;
     pipe.write_message(b"ping", deadline)
-        .map_err(|e| e.to_string())?;
-    let reply = pipe.read_message(deadline).map_err(|e| e.to_string())?;
+        .map_err(|e| format!("fixture ping write: {e}"))?;
+    let reply = pipe
+        .read_message(deadline)
+        .map_err(|e| format!("fixture ping read: {e}"))?;
     if reply.as_bytes() != b"pong" {
         return Err("fixture response mismatch".into());
     }
@@ -301,10 +303,17 @@ fn ping(pipe: &mut LocalServicePipe) -> Result<()> {
 }
 
 fn finish(pipe: &mut LocalServicePipe) -> Result<()> {
+    finish_with_read_delay(pipe, Duration::ZERO)
+}
+
+fn finish_with_read_delay(pipe: &mut LocalServicePipe, delay: Duration) -> Result<()> {
     let deadline = Instant::now() + LIMIT;
     pipe.write_message(b"done", deadline)
-        .map_err(|e| e.to_string())?;
-    let reply = pipe.read_message(deadline).map_err(|e| e.to_string())?;
+        .map_err(|e| format!("fixture finish write: {e}"))?;
+    thread::sleep(delay);
+    let reply = pipe
+        .read_message(deadline)
+        .map_err(|e| format!("fixture finish read: {e}"))?;
     if reply.as_bytes() != b"end!" {
         return Err("fixture completion mismatch".into());
     }
@@ -636,7 +645,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             return Err("fixture service deletion was not observed".into());
         }
     }
-    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","temporary_services_removed"],"service_fixture_only":true,"full_service_backend_proven":false,"release_accepted":false});
+    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","delayed_terminal_reply_preserved","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","temporary_services_removed"],"service_fixture_only":true,"full_service_backend_proven":false,"release_accepted":false});
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -681,7 +690,8 @@ fn exercise_services(
         assert!(peer.process_creation_time() > 0);
         ping(&mut pipe)?;
         peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
-        finish(&mut pipe)?;
+        println!("service fixture stage: delayed_terminal_reply_preserved");
+        finish_with_read_delay(&mut pipe, Duration::from_millis(200))?;
         drop((peer, pipe));
 
         println!("service fixture stage: different_system_service_rejected");
@@ -768,6 +778,7 @@ fn exercise_services(
     })?;
     println!("service fixture stage: stopped_service_is_not_authority");
     first.normal_stop()?;
+    println!("service fixture stage: first_service_stopped");
     runtime()?.block_on(async {
         let mut pipe = connect(&second.name).await?;
         assert!(matches!(
@@ -778,6 +789,7 @@ fn exercise_services(
             })
         ));
         ping(&mut pipe)?;
+        println!("service fixture stage: second_service_post_stop_ping_received");
         finish(&mut pipe)
     })?;
     second.normal_stop()?;

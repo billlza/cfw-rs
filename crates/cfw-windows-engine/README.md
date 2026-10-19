@@ -216,9 +216,12 @@ change, process loss and heartbeat supervision remain required runtime work.
 The native fixture now exercises this authorization before responses, with
 fixture ownership established by an admitted desktop. It adds real no-lease
 and foreign-owner rejection plus the narrow unleased observation case. This
-fixture owner is not a durable product lease. The new 21-case fixture has not
-yet run on Windows. RDP/session switching, lock/unlock and sleep/wake behavior
-remain separate qualification gates.
+fixture owner is not a durable product lease. The initial 21-case run reached
+the final service exchange, then failed with a closing pipe. Its ordinary-client
+authorization checks passed, but the complete native gate did not. A delayed
+terminal-read case and exact read/write diagnostics are now included (22 cases)
+to distinguish reply lifetime from connection timing. RDP/session switching,
+lock/unlock and sleep/wake behavior remain separate qualification gates.
 
 `WindowsEngineGenerationStore` implements the shared generation-store contract
 using a canonical generic Credential Manager record for the current process

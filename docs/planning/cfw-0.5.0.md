@@ -1265,7 +1265,20 @@ Ready、HTTP 代理流量及控制器认证后，测试协调器只对本次临�
 Agent 和 Desktop 必须保留真实的控制通道丢失错误，不能伪造 Stopped 确认或产品
 成功。验收另外持有 Agent/引擎进程句柄，核对退出、端口重新绑定、原 WinINet
 设置恢复及 Agent 日志移除。失败诊断和重启前后快照随产物保留。此场景仍不提供
-生产全局清理证据、旧登录会话恢复或完整安装服务入口；原生 CI 尚未运行。
+生产全局清理证据、旧登录会话恢复或完整安装服务入口。
+
+初次 [CI 39298269875](https://github.com/billlza/cfw-rs/actions/runs/39298269875)（`c5f5d17`）
+的 10 项原生引擎和正常两模式生命周期通过，但重启场景失败。服务已正确返回新
+运行分配的 Recovering 拒绝；夹具回复后只允许 Ticket/Stale/Identity，把该预期
+拒绝误判为致命错误，关闭了服务，后续 OwnedLease 因管道关闭失败。Agent 的实际
+控制丢失及本地代理恢复报告保留，完整重启验收未通过。
+
+失败产物 `12210915791` 的 SHA-256 为
+`520360bcbb8a1065a8148782633c326b93ea1d7bced0bec5786ad3289796908f`。
+当时的失败上传规则遗漏重启快照 JSON，不能事后补造。修正只允许恢复场景中该
+明确分配请求的 Recovering 拒绝继续连接，并补齐失败快照上传。临时服务清理遇到
+1061/1062 时必须重新观察到 StopPending/Stopped，再等待真正停止及原进程退出；
+其他错误仍失败。修正路径等待新的原生 CI，不降低产品拒绝规则或退出断言。
 
 参考 [进程终止与退出观察](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)
 及 [SCM 启动与状态观察](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicew)。

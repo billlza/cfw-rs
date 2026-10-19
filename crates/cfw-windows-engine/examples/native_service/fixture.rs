@@ -559,13 +559,28 @@ impl Installed {
         }
     }
     fn stop(&self) -> Result<()> {
-        if self.query()?.dwCurrentState != SERVICE_STOPPED {
+        let state = self.query()?.dwCurrentState;
+        if state != SERVICE_STOPPED && state != SERVICE_STOP_PENDING {
             let mut status = SERVICE_STATUS::default();
             if unsafe { ControlService(self.handle.0, SERVICE_CONTROL_STOP, &mut status) } == 0 {
-                return Err(error("stop disposable service"));
+                let source = io::Error::last_os_error();
+                // The service may begin stopping after the first observation.
+                // Accept only a fresh SCM proof of that transition, then still
+                // wait for both SERVICE_STOPPED and the retained process exit.
+                let transitional = matches!(source.raw_os_error(),
+                    Some(code) if code == ERROR_SERVICE_CANNOT_ACCEPT_CTRL as i32
+                        || code == ERROR_SERVICE_NOT_ACTIVE as i32);
+                if !transitional
+                    || !matches!(
+                        self.query()?.dwCurrentState,
+                        SERVICE_STOP_PENDING | SERVICE_STOPPED
+                    )
+                {
+                    return Err(format!("stop disposable service: {source}"));
+                }
             }
-            self.wait(SERVICE_STOPPED)?;
         }
+        self.wait(SERVICE_STOPPED)?;
         if let Some(process) = &self.process
             && cfw_windows_storage::wait_until(process, Instant::now() + LIMIT)
                 .map_err(|e| e.to_string())?

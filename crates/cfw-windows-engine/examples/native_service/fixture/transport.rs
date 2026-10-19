@@ -24,10 +24,14 @@ impl Validation {
         &mut self,
         connection: &mut cfw_windows_engine::LocalServiceConnection,
         request: cfw_windows_engine::AuthenticatedServiceRequest,
-    ) -> Result<cfw_windows_engine::authority::AuthorizedReply> {
+    ) -> Result<(cfw_windows_engine::authority::AuthorizedReply, bool)> {
         match self {
-            Self::Wire(value) => value.handle(connection, request),
-            Self::Runtime(value) => value.handle(connection, request),
+            Self::Wire(value) => value
+                .handle(connection, request)
+                .map(|reply| (reply, false)),
+            Self::Runtime(value) => value
+                .handle(connection, request)
+                .map(|reply| (reply, false)),
             Self::Restart(value) => value.handle(connection, request),
         }
     }
@@ -500,7 +504,8 @@ fn serve_connection(
             let mut authority = authority
                 .lock()
                 .map_err(|_| "native wire lifecycle guard poisoned")?;
-            let reply = authority.handle(&mut connection, request)?;
+            let (reply, expected_recovery_rejection) =
+                authority.handle(&mut connection, request)?;
             match reply
                 .send(&mut connection, Instant::now() + LIMIT)
                 .map_err(|e| e.to_string())?
@@ -511,6 +516,8 @@ fn serve_connection(
                     | cfw_windows_engine::authority::AuthorityError::Stale
                     | cfw_windows_engine::authority::AuthorityError::Identity,
                 ) => {}
+                Some(cfw_windows_engine::authority::AuthorityError::Recovering)
+                    if expected_recovery_rejection => {}
                 Some(error) => {
                     return Err(format!(
                         "unexpected wire fixture rejection after publication: {error}"

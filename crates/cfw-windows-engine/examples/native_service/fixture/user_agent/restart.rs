@@ -97,13 +97,12 @@ impl Service {
         &mut self,
         connection: &mut LocalServiceConnection,
         request: AuthenticatedServiceRequest,
-    ) -> Result<AuthorizedReply> {
-        let ready = matches!(
-            Request::decode(request.body())
-                .map_err(|e| e.to_string())?
-                .command(),
-            Command::Ready(_)
-        );
+    ) -> Result<(AuthorizedReply, bool)> {
+        let command = Request::decode(request.body()).map_err(|e| e.to_string())?;
+        let ready = matches!(command.command(), Command::Ready(_));
+        let expected_recovery_rejection =
+            self.recovered && matches!(command.command(), Command::ReserveGeneration(_));
+        drop(command);
         let authority = self
             .authority
             .as_mut()
@@ -124,7 +123,12 @@ impl Service {
                 }),
             )?;
         }
-        Ok(reply)
+        if expected_recovery_rejection
+            && !matches!(reply.rejection(), Some(AuthorityError::Recovering))
+        {
+            return Err("restarted service did not reject allocation as Recovering".into());
+        }
+        Ok((reply, expected_recovery_rejection))
     }
     pub(crate) fn finish(&mut self) -> Result<()> {
         if !self.recovered {

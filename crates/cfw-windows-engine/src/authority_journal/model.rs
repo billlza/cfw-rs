@@ -86,6 +86,7 @@ pub struct JournalOperation {
     operation_id: Uuid,
     mode: AuthorityMode,
     config_sha256: [u8; 32],
+    identity_sha256: [u8; 32],
     lease_id: Uuid,
     owner: RecordedOwner,
 }
@@ -94,17 +95,20 @@ impl JournalOperation {
         operation_id: Uuid,
         mode: AuthorityMode,
         config_sha256: [u8; 32],
+        identity_sha256: [u8; 32],
         lease_id: Uuid,
         owner: RecordedOwner,
     ) -> Result<Self> {
-        owner.validate()?;
-        Ok(Self {
+        let value = Self {
             operation_id,
             mode,
             config_sha256,
+            identity_sha256,
             lease_id,
             owner,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
     pub fn operation_id(&self) -> Uuid {
         self.operation_id
@@ -114,6 +118,16 @@ impl JournalOperation {
     }
     pub fn config_sha256(&self) -> &[u8; 32] {
         &self.config_sha256
+    }
+    pub fn identity_sha256(&self) -> &[u8; 32] {
+        &self.identity_sha256
+    }
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.owner.validate()?;
+        if self.operation_id.is_nil() || self.lease_id.is_nil() {
+            return Err(JournalValidationError::InvalidState);
+        }
+        Ok(())
     }
     pub fn lease_id(&self) -> Uuid {
         self.lease_id
@@ -137,7 +151,7 @@ pub struct AuthorityCommittedState {
 impl AuthorityCommittedState {
     pub fn enrollment(installation_id: Uuid) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             root: RootContext {
                 installation_id,
                 epoch: 0,
@@ -158,7 +172,7 @@ impl AuthorityCommittedState {
         operation: Option<JournalOperation>,
     ) -> Result<Self> {
         let value = Self {
-            schema_version: 2,
+            schema_version: 3,
             allocated_generation: root.generation,
             root,
             revision,
@@ -259,7 +273,7 @@ impl AuthorityCommittedState {
         Ok(value)
     }
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.schema_version != 2 {
+        if self.schema_version != 3 {
             return Err(JournalValidationError::UnsupportedSchema);
         }
         if self.revision == 0
@@ -269,7 +283,7 @@ impl AuthorityCommittedState {
             return Err(JournalValidationError::InvalidState);
         }
         if let Some(operation) = &self.operation {
-            operation.owner.validate()?;
+            operation.validate()?;
         }
         match self.state {
             AuthorityState::Off if self.operation.is_some() => {
@@ -328,6 +342,12 @@ impl AuthorityCommittedState {
         }
         let before = (prior.root.epoch, prior.root.generation);
         let after = (self.root.epoch, self.root.generation);
+        if self.transition != JournalTransition::Prepare
+            && self.state != AuthorityState::Off
+            && self.operation != prior.operation
+        {
+            return Err(JournalValidationError::Sequence);
+        }
         if self.transition == JournalTransition::ReserveGeneration {
             if prior.state != AuthorityState::Off
                 || self.state != AuthorityState::Off

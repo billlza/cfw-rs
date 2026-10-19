@@ -683,3 +683,47 @@ fn generation_exhaustion_preserves_the_committed_installation_and_counter() {
     ));
     assert_eq!(value.metadata().cloned(), before);
 }
+
+#[test]
+fn recorded_scope_preserves_complete_configuration_identity_without_restoring_a_lease() {
+    let (mut value, host, _, context) = active(Instant::now());
+    let scope = value.recorded_runtime_scope().unwrap();
+    assert_eq!(scope.snapshot().state, AuthorityState::Active);
+    let operation = scope.operation().unwrap();
+    assert_eq!(operation.config_sha256(), &context.operation.config_sha256);
+    assert_eq!(
+        operation.identity_sha256(),
+        &context.operation.identity_sha256
+    );
+    assert_ne!(operation.config_sha256(), operation.identity_sha256());
+    assert_eq!(operation.lease_id(), context.lease_id);
+    let checkpoint = value.metadata().unwrap().checkpoint().unwrap();
+    let restarted = recovered(Some(checkpoint));
+    let recovered_scope = restarted.recorded_runtime_scope().unwrap();
+    assert_eq!(recovered_scope.snapshot().state, AuthorityState::Recovering);
+    assert_eq!(recovered_scope.operation(), scope.operation());
+    assert!(restarted.lease_for_owner(&host).is_err());
+    assert!(restarted.lease_for_owner(&peer(Role::Desktop)).is_err());
+    value.enter_recovery(true);
+    assert!(matches!(
+        value.recorded_runtime_scope(),
+        Err(AuthorityError::Recovering)
+    ));
+}
+
+#[test]
+fn an_empty_recorded_scope_keeps_recovery_distinct_from_off() {
+    let fresh = recovered(Some(AuthorityCommittedState::enrollment(Uuid::from_u128(
+        1,
+    ))));
+    let recovering = fresh.recorded_runtime_scope().unwrap();
+    assert!(recovering.operation().is_none());
+    assert_eq!(recovering.snapshot().state, AuthorityState::Recovering);
+    let stopped = off().recorded_runtime_scope().unwrap();
+    assert!(stopped.operation().is_none());
+    assert_eq!(stopped.snapshot().state, AuthorityState::Off);
+    assert!(matches!(
+        recovered(None).recorded_runtime_scope(),
+        Err(AuthorityError::Recovering)
+    ));
+}

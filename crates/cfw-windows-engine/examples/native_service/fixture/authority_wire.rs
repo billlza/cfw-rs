@@ -98,8 +98,12 @@ impl Validation {
             (AuthorityState::Off, 2, None),
             (AuthorityState::Off, 2, Some(Rejection::Stale)),
             (AuthorityState::Preparing, 3, None),
+            (AuthorityState::Preparing, 3, None),
+            (AuthorityState::Preparing, 3, Some(Rejection::Identity)),
+            (AuthorityState::Preparing, 3, Some(Rejection::Identity)),
             (AuthorityState::Preparing, 3, Some(Rejection::Ticket)),
             (AuthorityState::Starting, 4, None),
+            (AuthorityState::Starting, 4, Some(Rejection::Identity)),
             (AuthorityState::Starting, 4, Some(Rejection::Identity)),
             (AuthorityState::Active, 5, None),
             (AuthorityState::Active, 5, None),
@@ -135,7 +139,7 @@ impl Validation {
             return Err("duplicate wire fixture finish".into());
         }
         let scoped = self.scoped.as_mut().ok_or("missing wire fixture scope")?;
-        if scoped.requests != 16 {
+        if scoped.requests != 20 {
             return Err("wire fixture command sequence incomplete".into());
         }
         let controller = scoped
@@ -231,6 +235,52 @@ pub(super) fn run(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         return Err("prepare did not return a grant".into());
     };
     let context = prepared.context().clone();
+    let mut observer =
+        AuthorityChannel::connect(name, ServiceClientRole::Desktop, Arc::clone(&service_image))
+            .map_err(|e| e.to_string())?;
+    let Response::RuntimeScope(recorded) = request(&mut observer, Command::ReadRuntimeScope)?
+    else {
+        return Err("new Desktop connection did not receive the recorded scope".into());
+    };
+    assert_eq!(recorded.snapshot().state, AuthorityState::Preparing);
+    assert_eq!(recorded.snapshot().revision, Some(3));
+    assert_eq!(
+        recorded.snapshot().root.as_ref(),
+        Some(&context.operation.root)
+    );
+    let operation = recorded
+        .operation()
+        .ok_or("prepared scope omitted its operation")?;
+    assert_eq!(operation.operation_id(), context.operation.operation_id);
+    assert_eq!(operation.lease_id(), context.lease_id);
+    assert_eq!(operation.mode(), context.operation.mode);
+    assert_eq!(operation.config_sha256(), &context.operation.config_sha256);
+    assert_eq!(
+        operation.identity_sha256(),
+        &context.operation.identity_sha256
+    );
+    assert_eq!(operation.owner(), &context.operation.owner);
+    for command in [
+        Command::OwnedLease,
+        Command::BeginStop(StopRequest {
+            context: context.clone(),
+            expected_revision: 3,
+        }),
+    ] {
+        match observer.request(
+            Request::new(command).map_err(|e| e.to_string())?,
+            Instant::now() + LIMIT,
+        ) {
+            Err(WireError::Rejected(Rejection::Identity)) => {}
+            Err(error) => {
+                return Err(format!(
+                    "recorded scope observer control rejection: {error}"
+                ));
+            }
+            Ok(_) => return Err("recorded scope observer acquired lease control".into()),
+        }
+    }
+    drop(observer);
     let handoff = Request::new(Command::BindUserAgent(prepared.into_bind()))
         .map_err(|e| e.to_string())?
         .encode()
@@ -328,6 +378,14 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         Err(error) => return Err(format!("agent lineage role rejection: {error}")),
         Ok(_) => return Err("agent acquired Desktop lineage access".into()),
     }
+    match channel.request(
+        Request::new(Command::ReadRuntimeScope).map_err(|e| e.to_string())?,
+        Instant::now() + LIMIT,
+    ) {
+        Err(WireError::Rejected(Rejection::Identity)) => {}
+        Err(error) => return Err(format!("agent recorded scope role rejection: {error}")),
+        Ok(_) => return Err("agent acquired Desktop recorded scope access".into()),
+    }
     let ready = ReadyReport {
         context: context.clone(),
         runtime_digest: context.operation.identity_sha256,
@@ -384,7 +442,7 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     Ok(())
 }
 fn report() -> serde_json::Value {
-    serde_json::json!({"success":true,"versioned_requests":16,"typed_rejections":4,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"versioned_requests":20,"typed_rejections":7,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"recorded_runtime_scope_validated":true,"recorded_scope_observer_control_rejected":true,"user_agent_recorded_scope_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
 }
 pub(super) fn require_report(root: &Path) -> Result<()> {
     let bytes =

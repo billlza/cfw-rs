@@ -13,6 +13,7 @@ fn operation() -> JournalOperation {
         Uuid::from_u128(2),
         AuthorityMode::SystemProxy,
         [9; 32],
+        [8; 32],
         Uuid::from_u128(3),
         owner(),
     )
@@ -258,6 +259,7 @@ fn invalid_sid_and_logon_claims_fail_before_a_commit_is_usable() {
                 Uuid::from_u128(2),
                 AuthorityMode::SystemProxy,
                 [9; 32],
+                [8; 32],
                 Uuid::from_u128(3),
                 claim
             )
@@ -278,6 +280,7 @@ fn invalid_sid_and_logon_claims_fail_before_a_commit_is_usable() {
                 Uuid::from_u128(2),
                 AuthorityMode::SystemProxy,
                 [9; 32],
+                [8; 32],
                 Uuid::from_u128(3),
                 claim
             )
@@ -377,7 +380,7 @@ fn allocation_schema_never_infers_a_missing_counter_or_accepts_counter_rollback(
         .reserve_next_generation()
         .unwrap();
     let original = serde_json::to_value(&state).unwrap();
-    for schema in [0, 1, 3] {
+    for schema in [0, 1, 2, 4] {
         let mut value = original.clone();
         value["schema_version"] = serde_json::json!(schema);
         let changed: AuthorityCommittedState = serde_json::from_value(value).unwrap();
@@ -408,4 +411,79 @@ fn allocation_schema_never_infers_a_missing_counter_or_accepts_counter_rollback(
         AuthorityCommittedState::decode(&serde_json::to_vec(&changed).unwrap()),
         Err(JournalValidationError::InvalidState)
     );
+}
+
+#[test]
+fn both_configuration_digests_survive_encoding_and_checkpoint_recovery() {
+    let original = prepared();
+    let decoded = AuthorityCommittedState::decode(&original.encode().unwrap()).unwrap();
+    assert_eq!(decoded.operation().unwrap().config_sha256(), &[9; 32]);
+    assert_eq!(decoded.operation().unwrap().identity_sha256(), &[8; 32]);
+    let checkpoint = decoded.checkpoint().unwrap();
+    let record = encode_record(&checkpoint, 1, [0; 32]).unwrap();
+    assert_eq!(
+        decode_journal(&record.bytes).unwrap().state().operation(),
+        original.operation()
+    );
+    let mut missing = serde_json::to_value(original).unwrap();
+    missing["operation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("identity_sha256");
+    assert!(serde_json::from_value::<AuthorityCommittedState>(missing).is_err());
+}
+
+#[test]
+fn an_operation_cannot_change_identity_between_preparation_and_cleanup() {
+    let original = prepared();
+    let operation = original.operation().unwrap();
+    let valid = original
+        .transition_to(
+            4,
+            JournalTransition::BindOwner,
+            AuthorityState::Starting,
+            Some(operation.clone()),
+        )
+        .unwrap();
+    assert_eq!(valid.operation(), Some(operation));
+    for field in ["config_sha256", "identity_sha256"] {
+        let mut changed = serde_json::to_value(operation).unwrap();
+        changed[field][0] = serde_json::json!(99);
+        let changed: JournalOperation = serde_json::from_value(changed).unwrap();
+        assert_eq!(
+            original.transition_to(
+                4,
+                JournalTransition::BindOwner,
+                AuthorityState::Starting,
+                Some(changed)
+            ),
+            Err(JournalValidationError::Sequence)
+        );
+    }
+    assert!(
+        original
+            .transition_to(
+                4,
+                JournalTransition::ReconcileOff,
+                AuthorityState::Quarantined,
+                None
+            )
+            .is_err()
+    );
+    for (operation_id, lease_id) in [
+        (Uuid::nil(), Uuid::from_u128(3)),
+        (Uuid::from_u128(2), Uuid::nil()),
+    ] {
+        assert!(
+            JournalOperation::new(
+                operation_id,
+                AuthorityMode::SystemProxy,
+                [9; 32],
+                [8; 32],
+                lease_id,
+                owner()
+            )
+            .is_err()
+        );
+    }
 }

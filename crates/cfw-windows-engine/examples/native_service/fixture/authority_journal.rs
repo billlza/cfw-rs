@@ -110,6 +110,7 @@ fn prepare(
         uuid::Uuid::new_v4(),
         AuthorityMode::SystemProxy,
         [7; 32],
+        [8; 32],
         uuid::Uuid::new_v4(),
         claim,
     )
@@ -280,6 +281,8 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
             assert_eq!(state.state(), AuthorityState::Active);
             assert_eq!(state.revision(), 5);
             assert!(state.operation().unwrap().owner().matches_native(owner));
+            assert_eq!(state.operation().unwrap().config_sha256(), &[7; 32]);
+            assert_eq!(state.operation().unwrap().identity_sha256(), &[8; 32]);
             write_report("b", &second_report())
         }
         _ => Err("unexpected journal fixture command".into()),
@@ -579,7 +582,7 @@ fn first_report() -> serde_json::Value {
     serde_json::json!({"success":true,"fault_runs":19,"allocation_fault_cases":4,"allocation_checkpoint_cases":1,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
 }
 fn second_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"writer_process_exited":true,"revision":5,"allocated_generation":1,"state":"active","recovery_action":"reattest_owner","owner_matches_native_console":true,"executable_lease_restored":false})
+    serde_json::json!({"success":true,"writer_process_exited":true,"revision":5,"allocated_generation":1,"state":"active","recovery_action":"reattest_owner","owner_matches_native_console":true,"configuration_identity_preserved":true,"executable_lease_restored":false})
 }
 fn write_report(role: &str, value: &serde_json::Value) -> Result<()> {
     let path = root()?.join(format!("authority-{role}.journal-validation.json"));

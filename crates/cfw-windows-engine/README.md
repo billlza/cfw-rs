@@ -318,10 +318,23 @@ requires the current allocation to be newer than the last consumed generation.
 Stale requests, exhaustion and uncertain publication return errors; no lost
 reply is retried. Installation identity and allocations share the same existing
 file/registry transaction and rollback checks, rather than independent stores.
-The Windows development journal payload is schema 2: schema 1 is rejected
+The Windows development journal payload is schema 3: earlier schemas are rejected
 explicitly, without resetting or silently migrating prior records. The former
 per-user Credential Manager lineage is not imported or deleted. Global cleanup,
 installed entrypoints and the application backend remain separate integration.
+
+The journal retains both the configuration content hash and full configuration
+identity hash, unchanged from preparation through recovery and cleanup. A
+Desktop client may use `ReadRuntimeScope` to read the committed operation and
+controller policy phase for its account, including a previous logon's recovery
+record. The reply includes the full original owner, operation, lease and root;
+it is metadata, performs no fresh OS liveness observation and grants no lease
+control to the new connection. UserAgent clients cannot use this command.
+Unknown publication fails explicitly; missing fields cannot become an empty
+scope, and Recovering with no operation is distinct from Off. Credential
+lifecycle integration must still correlate persisted bindings under a lifecycle
+guard; this query alone does not implement credential collection or prove global
+cleanup. Existing mutation admission still requires the exact owner and channel.
 
 The shared coordinator pins a backend's declared runtime platform when its actor
 starts. Windows user-agent/tunnel-service owners have distinct wire names from

@@ -72,6 +72,7 @@ impl LeaseContext {
             self.operation.operation_id,
             self.operation.mode,
             self.operation.config_sha256,
+            self.operation.identity_sha256,
             self.lease_id,
             self.operation.owner.clone(),
         )?)
@@ -166,6 +167,23 @@ pub struct AuthoritySnapshot {
     /// None means a publication outcome is uncertain, not revision zero/Off.
     pub revision: Option<u64>,
     pub root: Option<RootContext>,
+}
+
+/// Committed configuration identity and the controller's policy phase. This
+/// has no connection/ticket authority and performs no fresh OS observation.
+/// Retain recovery bindings; do not convert it into Ready or global Off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecordedRuntimeScope {
+    pub(super) snapshot: AuthoritySnapshot,
+    pub(super) operation: Option<JournalOperation>,
+}
+impl RecordedRuntimeScope {
+    pub fn snapshot(&self) -> &AuthoritySnapshot {
+        &self.snapshot
+    }
+    pub fn operation(&self) -> Option<&JournalOperation> {
+        self.operation.as_ref()
+    }
 }
 
 /// Independent cleanup observations, not a wire DTO. Construction belongs to

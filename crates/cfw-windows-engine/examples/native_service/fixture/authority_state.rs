@@ -164,6 +164,12 @@ pub(super) fn begin(peer: &ServicePeerAuthorization) -> Result<Validation> {
     let retained = reopened.lineage(peer).map_err(|e| e.to_string())?;
     assert_eq!(retained.installation_id, installation);
     assert_eq!(retained.generation, 2);
+    let scope = reopened
+        .recorded_runtime_scope(peer)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(scope.snapshot().state, AuthorityState::Recovering);
+    assert_eq!(scope.operation().unwrap().config_sha256(), &[3; 32]);
+    assert_eq!(scope.operation().unwrap().identity_sha256(), &[4; 32]);
     assert!(reopened.owned_lease(peer).is_err());
     assert!(matches!(
         reopened.prepare(peer, input(installation, 7, 3)),
@@ -290,7 +296,7 @@ impl Drop for Validation {
     }
 }
 fn expected() -> serde_json::Value {
-    serde_json::json!({"success":true,"preparation_api_returns":3,"system_rng_used":true,"ticket_material_absent_from_journal":true,"wrong_runtime_role_rejected":true,"stale_request_did_not_publish":true,"client_installation_claim_rejected":true,"lineage_survives_reopen":true,"allocated_generations":5,"uncertain_allocation_did_not_return_generation":true,"foreign_operation_abort_rejected":true,"unbound_begin_stop_releases_without_runtime":true,"reopen_does_not_restore_ticket":true,"post_commit_failure_returns_no_ticket":true,"uncertain_revision_not_reported_as_current":true,"replied_request_cannot_issue_another_ticket":true,"cleanup_observations_injected_for_policy_test":true,"native_runtime_owner_bound":false,"actual_runtime_started":false,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"preparation_api_returns":3,"system_rng_used":true,"ticket_material_absent_from_journal":true,"wrong_runtime_role_rejected":true,"stale_request_did_not_publish":true,"client_installation_claim_rejected":true,"lineage_survives_reopen":true,"recovered_configuration_identity_preserved":true,"allocated_generations":5,"uncertain_allocation_did_not_return_generation":true,"foreign_operation_abort_rejected":true,"unbound_begin_stop_releases_without_runtime":true,"reopen_does_not_restore_ticket":true,"post_commit_failure_returns_no_ticket":true,"uncertain_revision_not_reported_as_current":true,"replied_request_cannot_issue_another_ticket":true,"cleanup_observations_injected_for_policy_test":true,"native_runtime_owner_bound":false,"actual_runtime_started":false,"full_service_backend_proven":false})
 }
 fn write_report() -> Result<()> {
     let mut file = std::fs::OpenOptions::new()

@@ -1,4 +1,5 @@
 use super::*;
+use cfw_windows_engine::authority::{AuthorityChannel, wire::Response};
 use cfw_windows_engine::user_agent::{
     desktop::DesktopUserAgent,
     launcher::{UserAgentInvocation, ValidationAgent},
@@ -147,15 +148,15 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         thread::scope(|scope| -> Result<()> {
             let worker_stop = Arc::clone(&stop);
-            let service_image = Arc::clone(&service_image);
+            let worker_image = Arc::clone(&service_image);
             let image = &image;
             let worker = scope.spawn(move || -> Result<_> {
                 // Construct the native connection on the owning lifecycle
                 // thread; no thread-affine channel is transferred from the UI.
                 let mut operation = DesktopUserAgent::prepare(
                     name.into(),
-                    Arc::clone(&service_image),
-                    service_image,
+                    Arc::clone(&worker_image),
+                    worker_image,
                     start_request,
                     Instant::now() + LIMIT,
                 )
@@ -222,6 +223,39 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                 if ready.authority().state != AuthorityState::Active {
                     return Err("Desktop Ready is not Active".into());
                 }
+                let mut observer = AuthorityChannel::connect(
+                    name,
+                    ServiceClientRole::Desktop,
+                    Arc::clone(&service_image),
+                )
+                .map_err(|e| e.to_string())?;
+                let Response::RuntimeScope(recorded) = observer
+                    .request(
+                        Request::new(Command::ReadRuntimeScope).map_err(|e| e.to_string())?,
+                        Instant::now() + LIMIT,
+                    )
+                    .map_err(|e| e.to_string())?
+                else {
+                    return Err("runtime observer did not receive recorded scope".into());
+                };
+                let context = ready.context();
+                let operation = recorded
+                    .operation()
+                    .ok_or("Active recorded scope omitted its operation")?;
+                if recorded.snapshot().state != AuthorityState::Active
+                    || recorded.snapshot().root.as_ref() != Some(&context.operation.root)
+                    || operation.operation_id() != context.operation.operation_id
+                    || operation.lease_id() != context.lease_id
+                    || operation.mode() != context.operation.mode
+                    || operation.config_sha256() != &context.operation.config_sha256
+                    || operation.identity_sha256() != &context.operation.identity_sha256
+                    || operation.owner() != &context.operation.owner
+                {
+                    return Err(
+                        "recorded scope does not match the actual running configuration".into(),
+                    );
+                }
+                drop(observer);
                 let raw = unsafe {
                     OpenProcess(
                         PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,

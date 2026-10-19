@@ -70,6 +70,7 @@ impl WindowsAuthority {
                 command.command,
                 Command::Observe
                     | Command::LoadLineage
+                    | Command::ReadRuntimeScope
                     | Command::ReserveGeneration(_)
                     | Command::Prepare(_)
                     | Command::BeginStop(_)
@@ -109,6 +110,9 @@ impl WindowsAuthority {
         Ok(match command {
             Command::Observe => Response::Observed(self.poll()?),
             Command::LoadLineage => Response::Lineage(self.lineage(authorization)?),
+            Command::ReadRuntimeScope => {
+                Response::RuntimeScope(self.recorded_runtime_scope(authorization)?)
+            }
             Command::ReserveGeneration(expected) => {
                 Response::Lineage(self.reserve_generation(authorization, &expected)?)
             }

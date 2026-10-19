@@ -185,6 +185,26 @@ impl WindowsAuthority {
         self.after_publication(authorization, deadline)?;
         Ok(allocated)
     }
+    /// Read committed configuration identity for this account, including a
+    /// former logon's recovery record. This does not observe OS liveness or
+    /// admit commands from a new connection into the original lease.
+    pub fn recorded_runtime_scope(
+        &self,
+        authorization: &ServicePeerAuthorization,
+    ) -> Result<RecordedRuntimeScope> {
+        let peer = self.admit(authorization, Instant::now() + ADMISSION)?;
+        if peer.role != Role::Desktop {
+            return Err(AuthorityError::Identity);
+        }
+        let scope = self.machine.recorded_runtime_scope()?;
+        if scope
+            .operation()
+            .is_some_and(|operation| operation.owner().sid_bytes() != peer.owner.sid_bytes())
+        {
+            return Err(AuthorityError::Identity);
+        }
+        Ok(scope)
+    }
     pub fn prepare(
         &mut self,
         authorization: &ServicePeerAuthorization,

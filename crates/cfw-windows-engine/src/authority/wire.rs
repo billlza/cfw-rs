@@ -130,6 +130,7 @@ impl<'de> Deserialize<'de> for TicketMaterial {
 pub(super) enum CommandTag {
     Observe,
     LoadLineage,
+    ReadRuntimeScope,
     ReserveGeneration,
     Prepare,
     BindUserAgent,
@@ -158,6 +159,7 @@ struct Empty {}
 pub enum Command {
     Observe,
     LoadLineage,
+    ReadRuntimeScope,
     ReserveGeneration(super::AuthorityLineage),
     Prepare(PrepareRequest),
     BindUserAgent(BindRequest),
@@ -173,6 +175,7 @@ impl Command {
         match self {
             Self::Observe => CommandTag::Observe,
             Self::LoadLineage => CommandTag::LoadLineage,
+            Self::ReadRuntimeScope => CommandTag::ReadRuntimeScope,
             Self::ReserveGeneration(_) => CommandTag::ReserveGeneration,
             Self::Prepare(_) => CommandTag::Prepare,
             Self::BindUserAgent(_) => CommandTag::BindUserAgent,
@@ -186,7 +189,7 @@ impl Command {
     }
     fn validate(&self) -> Result<()> {
         match self {
-            Self::Observe | Self::OwnedLease | Self::LoadLineage => Ok(()),
+            Self::Observe | Self::OwnedLease | Self::LoadLineage | Self::ReadRuntimeScope => Ok(()),
             Self::ReserveGeneration(expected) => {
                 expected.validate().map_err(|_| WireError::Malformed)
             }
@@ -279,9 +282,10 @@ impl Request {
         self.command.validate()?;
         let tag = self.command.tag();
         match &self.command {
-            Command::Observe | Command::OwnedLease | Command::LoadLineage => {
-                envelope(self.id, tag, &Empty {})
-            }
+            Command::Observe
+            | Command::OwnedLease
+            | Command::LoadLineage
+            | Command::ReadRuntimeScope => envelope(self.id, tag, &Empty {}),
             Command::ReserveGeneration(expected) => envelope(self.id, tag, expected),
             Command::Prepare(input) => envelope(self.id, tag, input),
             Command::BindUserAgent(input) => envelope(self.id, tag, input),
@@ -305,6 +309,10 @@ impl Request {
             CommandTag::LoadLineage => {
                 let _: Empty = decode(body)?;
                 Command::LoadLineage
+            }
+            CommandTag::ReadRuntimeScope => {
+                let _: Empty = decode(body)?;
+                Command::ReadRuntimeScope
             }
             CommandTag::ReserveGeneration => Command::ReserveGeneration(decode(body)?),
             CommandTag::OwnedLease => {
@@ -377,6 +385,7 @@ impl Rejection {
 enum ResponseTag {
     Observed,
     Lineage,
+    RuntimeScope,
     Prepared,
     Bound,
     Status,
@@ -441,6 +450,7 @@ impl BoundGrant {
 pub enum Response {
     Observed(AuthoritySnapshot),
     Lineage(super::AuthorityLineage),
+    RuntimeScope(RecordedRuntimeScope),
     Prepared(PreparedGrant),
     Bound(BoundGrant),
     Status(AuthoritySnapshot),
@@ -451,6 +461,7 @@ impl Response {
         match self {
             Self::Observed(value) => envelope(id, ResponseTag::Observed, value),
             Self::Lineage(value) => envelope(id, ResponseTag::Lineage, value),
+            Self::RuntimeScope(value) => envelope(id, ResponseTag::RuntimeScope, value),
             Self::Prepared(value) => envelope(
                 id,
                 ResponseTag::Prepared,
@@ -532,6 +543,51 @@ pub(super) fn response(
         return Err(WireError::Rejected(rejected.code));
     }
     match (&request.command, wire.kind) {
+        (Command::ReadRuntimeScope, ResponseTag::RuntimeScope) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ScopePayload<'a> {
+                snapshot: AuthoritySnapshot,
+                #[serde(borrow)]
+                operation: &'a RawValue,
+            }
+            let value: ScopePayload<'_> = decode(payload)?;
+            let operation: Option<crate::authority_journal::JournalOperation> =
+                decode(value.operation.get().as_bytes())?;
+            snapshot_valid(&value.snapshot)?;
+            if value.snapshot.revision.is_none() || value.snapshot.root.is_none() {
+                return Err(WireError::Malformed);
+            }
+            match value.snapshot.state {
+                AuthorityState::Off if operation.is_some() => return Err(WireError::Malformed),
+                AuthorityState::Preparing
+                | AuthorityState::Starting
+                | AuthorityState::Active
+                | AuthorityState::Stopping
+                    if operation.is_none() =>
+                {
+                    return Err(WireError::Malformed);
+                }
+                _ => {}
+            }
+            if let Some(operation) = &operation {
+                operation.validate().map_err(|_| WireError::Malformed)?;
+                value
+                    .snapshot
+                    .root
+                    .as_ref()
+                    .ok_or(WireError::Malformed)?
+                    .validate()
+                    .map_err(|_| WireError::Malformed)?;
+                if operation.owner().sid_bytes() != owner.sid_bytes() {
+                    return Err(WireError::Correlation);
+                }
+            }
+            Ok(Response::RuntimeScope(RecordedRuntimeScope {
+                snapshot: value.snapshot,
+                operation,
+            }))
+        }
         (Command::LoadLineage | Command::ReserveGeneration(_), ResponseTag::Lineage) => {
             let value: super::AuthorityLineage = decode(payload)?;
             value.validate().map_err(|_| WireError::Malformed)?;

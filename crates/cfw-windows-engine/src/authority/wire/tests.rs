@@ -62,6 +62,7 @@ fn commands_roundtrip_without_a_generic_secret_value_or_extra_fields() {
     for command in [
         Command::Observe,
         Command::LoadLineage,
+        Command::ReadRuntimeScope,
         Command::ReserveGeneration(crate::authority::AuthorityLineage {
             installation_id: Uuid::from_u128(1),
             config_epoch: 1,
@@ -436,5 +437,137 @@ fn lineage_values_require_a_real_installation_and_an_explicit_epoch() {
     assert!(matches!(
         response(&observed, encoded.as_bytes(), &owner()),
         Err(WireError::Malformed)
+    ));
+}
+
+fn recorded_scope(state: AuthorityState) -> RecordedRuntimeScope {
+    RecordedRuntimeScope {
+        snapshot: AuthoritySnapshot {
+            state,
+            revision: Some(5),
+            root: Some(context().operation.root),
+        },
+        operation: Some(context().recorded().unwrap()),
+    }
+}
+
+#[test]
+fn recorded_scope_keeps_old_logon_metadata_readable_without_reusing_lease_authority() {
+    let request = Request::new(Command::ReadRuntimeScope).unwrap();
+    let original = recorded_scope(AuthorityState::Recovering);
+    let mut value = serde_json::to_value(original.operation.as_ref().unwrap()).unwrap();
+    value["owner"]["authentication_id"] = serde_json::json!(100);
+    value["owner"]["session_id"] = serde_json::json!(3);
+    let old: crate::authority_journal::JournalOperation = serde_json::from_value(value).unwrap();
+    let scope = RecordedRuntimeScope {
+        operation: Some(old.clone()),
+        ..original
+    };
+    let encoded = Response::RuntimeScope(scope.clone())
+        .encode(request.id)
+        .unwrap();
+    assert!(
+        matches!(response(&request, encoded.as_bytes(), &owner()).unwrap(), Response::RuntimeScope(value) if value == scope)
+    );
+    let mut lease = context();
+    lease.operation.owner = old.owner().clone();
+    let owned_request = Request::new(Command::OwnedLease).unwrap();
+    let encoded = Response::Lease(lease).encode(owned_request.id).unwrap();
+    assert!(matches!(
+        response(&owned_request, encoded.as_bytes(), &owner()),
+        Err(WireError::Correlation)
+    ));
+    let mut foreign = serde_json::to_value(&old).unwrap();
+    foreign["owner"]["sid"][8] = serde_json::json!(22);
+    let foreign = RecordedRuntimeScope {
+        operation: Some(serde_json::from_value(foreign).unwrap()),
+        ..scope
+    };
+    let encoded = Response::RuntimeScope(foreign).encode(request.id).unwrap();
+    assert!(matches!(
+        response(&request, encoded.as_bytes(), &owner()),
+        Err(WireError::Correlation)
+    ));
+}
+
+#[test]
+fn recorded_scope_requires_explicit_complete_state_and_operation_fields() {
+    let request = Request::new(Command::ReadRuntimeScope).unwrap();
+    let valid = Response::RuntimeScope(recorded_scope(AuthorityState::Active))
+        .encode(request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&request, valid.as_bytes(), &owner()).unwrap(),
+        Response::RuntimeScope(_)
+    ));
+    let original: serde_json::Value = serde_json::from_slice(valid.as_bytes()).unwrap();
+    for field in ["identity_sha256", "operation_id", "lease_id", "owner"] {
+        let mut malformed = original.clone();
+        malformed["payload"]["operation"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(response(&request, &serde_json::to_vec(&malformed).unwrap(), &owner()).is_err());
+    }
+    let mut missing = original.clone();
+    missing["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("operation");
+    assert!(response(&request, &serde_json::to_vec(&missing).unwrap(), &owner()).is_err());
+    for malformed in [
+        RecordedRuntimeScope {
+            operation: None,
+            ..recorded_scope(AuthorityState::Active)
+        },
+        recorded_scope(AuthorityState::Off),
+        RecordedRuntimeScope {
+            snapshot: AuthoritySnapshot {
+                state: AuthorityState::Recovering,
+                revision: None,
+                root: None,
+            },
+            operation: None,
+        },
+    ] {
+        let encoded = Response::RuntimeScope(malformed)
+            .encode(request.id)
+            .unwrap();
+        assert!(matches!(
+            response(&request, encoded.as_bytes(), &owner()),
+            Err(WireError::Malformed)
+        ));
+    }
+    let empty = RecordedRuntimeScope {
+        operation: None,
+        ..recorded_scope(AuthorityState::Off)
+    };
+    let encoded = Response::RuntimeScope(empty.clone())
+        .encode(request.id)
+        .unwrap();
+    assert!(
+        matches!(response(&request, encoded.as_bytes(), &owner()).unwrap(), Response::RuntimeScope(value) if value == empty)
+    );
+    let mut missing = serde_json::to_value(&empty).unwrap();
+    missing.as_object_mut().unwrap().remove("operation");
+    let encoded = envelope(request.id, ResponseTag::RuntimeScope, &missing).unwrap();
+    assert!(response(&request, encoded.as_bytes(), &owner()).is_err());
+}
+
+#[test]
+fn unknown_publication_is_an_error_and_recorded_scope_cannot_answer_an_owned_lease_request() {
+    let request = Request::new(Command::ReadRuntimeScope).unwrap();
+    let rejected = rejection(request.id, &AuthorityError::Recovering).unwrap();
+    assert!(matches!(
+        response(&request, rejected.as_bytes(), &owner()),
+        Err(WireError::Rejected(Rejection::Recovering))
+    ));
+    let lease_request = Request::new(Command::OwnedLease).unwrap();
+    let recorded = Response::RuntimeScope(recorded_scope(AuthorityState::Active))
+        .encode(lease_request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&lease_request, recorded.as_bytes(), &owner()),
+        Err(WireError::Correlation)
     ));
 }

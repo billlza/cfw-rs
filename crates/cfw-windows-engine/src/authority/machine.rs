@@ -146,6 +146,16 @@ impl Machine {
             generation: state.allocated_generation(),
         })
     }
+    pub(super) fn recorded_runtime_scope(&self) -> Result<RecordedRuntimeScope> {
+        if !self.durable_known {
+            return Err(AuthorityError::Recovering);
+        }
+        let metadata = self.metadata.as_ref().ok_or(AuthorityError::Recovering)?;
+        Ok(RecordedRuntimeScope {
+            snapshot: self.snapshot(),
+            operation: metadata.operation().cloned(),
+        })
+    }
     pub(super) fn reserve_generation(
         &mut self,
         host: &Peer,

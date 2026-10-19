@@ -18,7 +18,8 @@ pub use dispatch::{AuthorizedReply, DispatchError};
 pub use native::WindowsAuthority;
 pub use types::{
     AuthorityLineage, AuthoritySnapshot, CleanupEvidence, LeaseContext, OperationContext,
-    PrepareRequest, PreparedTicket, ReadyReport, RuntimeStartAuthorization, StoppedReport,
+    PrepareRequest, PreparedTicket, ReadyReport, RecordedRuntimeScope, RuntimeStartAuthorization,
+    StoppedReport,
 };
 
 #[derive(Debug, thiserror::Error)]

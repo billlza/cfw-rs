@@ -141,7 +141,8 @@ impl StoppedReport {
         Ok(())
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthoritySnapshot {
     pub state: AuthorityState,
     /// None means a publication outcome is uncertain, not revision zero/Off.

@@ -5,18 +5,21 @@ use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 pub(super) enum ClientCase {
     UserAgent,
     CopiedImage,
+    AuthorityRuntime,
 }
 impl ClientCase {
     fn flag(self) -> &'static str {
         match self {
             Self::UserAgent => "--client",
             Self::CopiedImage => "--rejected-client",
+            Self::AuthorityRuntime => "--authority-runtime",
         }
     }
     fn report_prefix(self, name: &str) -> String {
         match self {
             Self::UserAgent => name.to_owned(),
             Self::CopiedImage => format!("{name}-copy"),
+            Self::AuthorityRuntime => format!("{name}-authority"),
         }
     }
     fn report(self) -> serde_json::Value {
@@ -26,6 +29,9 @@ impl ClientCase {
             }
             Self::CopiedImage => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"client_image_rejected":true})
+            }
+            Self::AuthorityRuntime => {
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"native_authority_binding":true,"wrong_ticket_rejected":true,"new_connection_cannot_inherit_lease":true,"synthetic_runtime_reports":true,"actual_engine_started":false})
             }
         }
     }
@@ -220,12 +226,36 @@ pub(super) fn with_medium_impersonation(action: impl FnOnce() -> Result<()>) -> 
 }
 
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
-    run_case(image, name, expected, ClientCase::UserAgent)
+    run_case(image, name, expected, ClientCase::UserAgent, None)
 }
 pub(super) fn run_rejected_copy(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
-    run_case(image, name, expected, ClientCase::CopiedImage)
+    run_case(image, name, expected, ClientCase::CopiedImage, None)
 }
-fn run_case(image: &Path, name: &str, expected: [u8; 32], case: ClientCase) -> Result<()> {
+pub(super) fn run_authority(
+    image: &Path,
+    name: &str,
+    expected: [u8; 32],
+    handoff: &[u8],
+) -> Result<()> {
+    if handoff.is_empty() || handoff.len() > cfw_windows_engine::authority::wire::MAX_MESSAGE_BYTES
+    {
+        return Err("invalid authority handoff length".into());
+    }
+    run_case(
+        image,
+        name,
+        expected,
+        ClientCase::AuthorityRuntime,
+        Some(handoff),
+    )
+}
+fn run_case(
+    image: &Path,
+    name: &str,
+    expected: [u8; 32],
+    case: ClientCase,
+    handoff: Option<&[u8]>,
+) -> Result<()> {
     let token = token()?;
     let mut desktop = desktop::Desktop::new()?;
     let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
@@ -242,15 +272,31 @@ fn run_case(image: &Path, name: &str, expected: [u8; 32], case: ClientCase) -> R
         .create_new(true)
         .open(&output_path)
         .map_err(|e| e.to_string())?;
-    let input = std::fs::File::open("NUL").map_err(|e| e.to_string())?;
+    let (input, writer) = if let Some(handoff) = handoff {
+        let mut read = null_mut();
+        let mut write = null_mut();
+        if unsafe {
+            windows_sys::Win32::System::Pipes::CreatePipe(&mut read, &mut write, null(), 8192)
+        } == 0
+        {
+            return Err(error("create authority handoff pipe"));
+        }
+        let read = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(read) });
+        let write = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(write) });
+        let mut bytes = zeroize::Zeroizing::new(vec![0; handoff.len()]);
+        bytes.copy_from_slice(handoff);
+        (read, Some((write, bytes)))
+    } else {
+        (std::fs::File::open("NUL").map_err(|e| e.to_string())?, None)
+    };
     let handles = [input.as_raw_handle(), output.as_raw_handle()];
     for handle in handles {
         if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
             return Err(error("mark fixture diagnostic handle inheritable"));
         }
     }
-    // Inherit only the NUL input and diagnostic output, never token, service,
-    // process or pipe handles from this privileged test controller.
+    // Inherit only the explicit input and diagnostic output. The ticket's
+    // anonymous-pipe writer, token, service and process handles stay private.
     let mut attributes = Attributes::handles(&handles)?;
     let startup = STARTUPINFOEXW {
         StartupInfo: STARTUPINFOW {
@@ -285,6 +331,13 @@ fn run_case(image: &Path, name: &str, expected: [u8; 32], case: ClientCase) -> R
     }
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
+    drop(input);
+    // Anonymous pipe writes can block despite the size hint. Write on a worker
+    // while this thread supervises the bounded child lifetime. A confirmed child
+    // exit closes its only reader, and the joined writer retains any I/O error.
+    let writer = writer.map(|(mut output, bytes)| {
+        thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
+    });
     let waited = cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?;
     if waited != cfw_windows_storage::WaitOutcome::Signaled {
@@ -297,7 +350,21 @@ fn run_case(image: &Path, name: &str, expected: [u8; 32], case: ClientCase) -> R
         {
             return Err("expired fixture client cleanup was not observed".into());
         }
+        if let Some(writer) = writer {
+            let written = writer
+                .join()
+                .map_err(|_| "authority handoff writer panicked")?;
+            return Err(format!(
+                "unprivileged fixture client exceeded its deadline; handoff writer: {written:?}"
+            ));
+        }
         return Err("unprivileged fixture client exceeded its deadline".into());
+    }
+    if let Some(writer) = writer {
+        writer
+            .join()
+            .map_err(|_| "authority handoff writer panicked")?
+            .map_err(|e| format!("authority handoff write: {e}"))?;
     }
     let mut exit = 0;
     if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
@@ -394,6 +461,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
+        ClientCase::AuthorityRuntime => return authority_wire::agent(name, &image, expected),
         ClientCase::CopiedImage => {
             let mut channel = ServiceChannel::connect(
                 name,

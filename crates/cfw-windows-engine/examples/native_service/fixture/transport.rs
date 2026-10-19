@@ -244,6 +244,7 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
     // never by the bootstrap JSON. This exercises the policy input; it is not
     // the product's durable authority lease or runtime state machine.
     let lease_owner = Arc::new(Mutex::new(None));
+    let authority = Arc::new(Mutex::new(authority_wire::Validation::new()));
     for (role, listener) in [
         (ServiceClientRole::Desktop, desktop),
         (ServiceClientRole::UserAgent, agent),
@@ -251,8 +252,9 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
         let name = name.to_owned();
         let installed = installed.clone();
         let lease_owner = lease_owner.clone();
+        let authority = authority.clone();
         workers.push(thread::spawn(move || {
-            let result = serve_role(&name, role, listener, &installed, &lease_owner);
+            let result = serve_role(&name, role, listener, &installed, &lease_owner, &authority);
             if result.is_err() {
                 STOP.store(true, Ordering::SeqCst);
             }
@@ -294,8 +296,9 @@ fn serve_role(
     mut listener: LocalServiceListener,
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
+    authority: &Mutex<authority_wire::Validation>,
 ) -> Result<()> {
-    let serving = serve_connections(name, role, &mut listener, installed, lease_owner);
+    let serving = serve_connections(name, role, &mut listener, installed, lease_owner, authority);
     let closing = listener.close().map_err(|e| e.to_string());
     match (serving, closing) {
         (Ok(()), Ok(())) => Ok(()),
@@ -312,6 +315,7 @@ fn serve_connections(
     listener: &mut LocalServiceListener,
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
+    authority: &Mutex<authority_wire::Validation>,
 ) -> Result<()> {
     while !STOP.load(Ordering::SeqCst) {
         let mut connection = match listener.accept(Instant::now() + Duration::from_millis(100)) {
@@ -321,11 +325,20 @@ fn serve_connections(
             Err(ServiceTransportError::Deadline) => continue,
             Err(error) => return Err(error.to_string()),
         };
+        let mut wire_connection = false;
         loop {
             if STOP.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            let request = match connection.receive(Instant::now() + Duration::from_secs(5)) {
+            // The wire fixture keeps its desktop connection while a restricted
+            // child exchanges commands. Existing transport timeout cases retain
+            // their five-second deadline; typed fixture connections get LIMIT.
+            let receive_timeout = if wire_connection {
+                LIMIT
+            } else {
+                Duration::from_secs(5)
+            };
+            let request = match connection.receive(Instant::now() + receive_timeout) {
                 Ok(request) => request,
                 Err(error) => {
                     if STOP.load(Ordering::SeqCst) {
@@ -348,6 +361,29 @@ fn serve_connections(
                 return Err(
                     "authenticated fixture request lost native role/user/session binding".into(),
                 );
+            }
+            if request.body().starts_with(b"{") {
+                wire_connection = true;
+                let mut authority = authority
+                    .lock()
+                    .map_err(|_| "native wire lifecycle guard poisoned")?;
+                let reply = authority.handle(&mut connection, request)?;
+                match reply
+                    .send(&mut connection, Instant::now() + LIMIT)
+                    .map_err(|e| e.to_string())?
+                {
+                    None
+                    | Some(
+                        cfw_windows_engine::authority::AuthorityError::Ticket
+                        | cfw_windows_engine::authority::AuthorityError::Identity,
+                    ) => {}
+                    Some(error) => {
+                        return Err(format!(
+                            "unexpected wire fixture rejection after publication: {error}"
+                        ));
+                    }
+                }
+                continue;
             }
             let peer_session = request.identity().user_session().clone();
             let mut owner = lease_owner
@@ -443,6 +479,13 @@ fn serve_connections(
             let (reply, finished): (&[u8], bool) = match request.body() {
                 b"ping" => (b"pong", false),
                 b"done" => (b"end!", true),
+                b"authority-wire-finish" if role == ServiceClientRole::Desktop => {
+                    authority
+                        .lock()
+                        .map_err(|_| "native wire lifecycle guard poisoned")?
+                        .finish()?;
+                    (b"wire-ok", true)
+                }
                 b"authority-state" if state_validation.is_some() => (b"state-ok", true),
                 command @ (b"authority-journal" | b"authority-journal-observe")
                     if role == ServiceClientRole::Desktop =>

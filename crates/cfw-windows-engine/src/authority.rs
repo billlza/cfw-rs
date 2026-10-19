@@ -1,10 +1,19 @@
 //! Serialized Windows lifecycle policy. Only the native controller may publish
 //! grants, after committing their candidate state and revalidating the caller.
+#[cfg(windows)]
+mod client;
+#[cfg(windows)]
+mod dispatch;
 mod machine;
 #[cfg(windows)]
 mod native;
 mod secret;
 mod types;
+pub mod wire;
+#[cfg(windows)]
+pub use client::AuthorityChannel;
+#[cfg(windows)]
+pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
 pub use native::WindowsAuthority;
 pub use types::{

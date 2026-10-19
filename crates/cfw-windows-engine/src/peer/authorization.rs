@@ -163,6 +163,32 @@ impl ServicePeerAuthorization {
     pub fn owner(&self) -> &NativeUserSession {
         self.process.identity().user_session()
     }
+    pub(crate) fn revalidate(
+        &self,
+        lease_owner: Option<&NativeUserSession>,
+        requirement: UserAgentLeaseRequirement,
+        deadline: Instant,
+    ) -> Result<(), ServiceAuthorizationError> {
+        check_deadline(deadline)?;
+        if !self.request.is_pending() {
+            return Err(ServiceTransportError::RequestOrder.into());
+        }
+        self.process.revalidate()?;
+        let console = LiveConsoleSession::observe()?;
+        authorize_identity(
+            self.request.role(),
+            self.owner(),
+            console.identity(),
+            lease_owner,
+            requirement,
+        )?;
+        self.process.revalidate()?;
+        check_deadline(deadline)?;
+        if !self.request.is_pending() {
+            return Err(ServiceTransportError::RequestOrder.into());
+        }
+        Ok(())
+    }
 }
 
 /// Call under the authority's lifecycle/lease guard immediately before dispatch.

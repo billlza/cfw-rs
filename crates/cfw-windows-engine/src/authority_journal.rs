@@ -8,7 +8,7 @@ mod store;
 #[cfg(all(windows, feature = "native-service-validation"))]
 pub use store::JournalFaultPoint;
 #[cfg(windows)]
-pub use store::{JournalRecovery, JournalStoreError, WindowsAuthorityJournal};
+pub use store::{JournalStoreError, WindowsAuthorityJournal};
 
 pub use codec::{DecodedJournal, EncodedRecord, decode_journal, encode_record};
 pub use model::{
@@ -22,6 +22,14 @@ pub const MAX_JOURNAL_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_HEAD_BYTES: usize = 1024;
 pub const MAX_ANCHOR_BYTES: usize = 2048;
 pub const LIFECYCLE_FINISH_RESERVE: u64 = 7;
+
+/// Successful replay supplies reconciliation work, never restored execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalRecovery {
+    pub committed: Option<AuthorityCommittedState>,
+    pub cursor: Option<JournalCursor>,
+    pub action: RecoveryAction,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum JournalValidationError {

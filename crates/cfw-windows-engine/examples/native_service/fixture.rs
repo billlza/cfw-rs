@@ -27,6 +27,7 @@ use windows_sys::Win32::{
 
 mod attacks;
 mod authority_journal;
+mod authority_state;
 mod desktop;
 mod machine_record;
 mod restricted;
@@ -598,6 +599,7 @@ fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
             && !text.ends_with("-client-output.txt")
             && !text.ends_with(".rejection.json")
             && !text.ends_with(".journal-validation.json")
+            && !text.ends_with(".authority-validation.json")
         {
             continue;
         }
@@ -653,6 +655,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
         Err(payload) => std::panic::resume_unwind(payload),
     }
     authority_journal::require_reports(root)?;
+    authority_state::require_report(root)?;
     for suffix in ["a", "b"] {
         let check = Sc(unsafe {
             OpenServiceW(
@@ -668,7 +671,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             return Err("fixture service deletion was not observed".into());
         }
     }
-    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","delayed_terminal_reply_preserved","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","post_stop_connection_stress","system_machine_record_publication","casefolded_machine_record_mutex","malformed_machine_record_rejected","unsafe_machine_record_acl_rejected","unprivileged_machine_record_access_rejected","machine_record_survives_service_exit","machine_records_removed","authority_journal_crash_recovery","authority_journal_survives_service_exit","temporary_services_removed"],"service_fixture_only":true,"post_stop_exchange_repetitions":POST_STOP_EXCHANGES,"full_service_backend_proven":false,"release_accepted":false});
+    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","delayed_terminal_reply_preserved","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","post_stop_connection_stress","system_machine_record_publication","casefolded_machine_record_mutex","malformed_machine_record_rejected","unsafe_machine_record_acl_rejected","unprivileged_machine_record_access_rejected","machine_record_survives_service_exit","machine_records_removed","authority_journal_crash_recovery","authority_journal_survives_service_exit","authority_policy_publication_and_request_lifetime","temporary_services_removed"],"service_fixture_only":true,"post_stop_exchange_repetitions":POST_STOP_EXCHANGES,"full_service_backend_proven":false,"release_accepted":false});
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -721,6 +724,8 @@ fn exercise_services(
         machine_record::request(&first.name, image, expected, b"machine-record-seed")?;
         println!("service fixture stage: authority_journal_crash_recovery");
         authority_journal::request(&first.name, image, expected, b"authority-journal")?;
+        println!("service fixture stage: authority_policy_publication_and_request_lifetime");
+        authority_state::request(&first.name, image, expected)?;
 
         println!("service fixture stage: different_system_service_rejected");
         let mut other = connect(&second.name).await?;

@@ -34,15 +34,6 @@ pub enum JournalStoreError {
     InjectedFault,
 }
 
-/// Recovering is the only successful startup posture. A stored identity is a
-/// claim for reconciliation, never a live owner token or a restored capability.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JournalRecovery {
-    pub committed: Option<AuthorityCommittedState>,
-    pub cursor: Option<JournalCursor>,
-    pub action: RecoveryAction,
-}
-
 /// Installation-supplied dedicated SYSTEM directory and registry scope. No
 /// caller-selected path or scope may be taken from an untrusted request.
 pub struct WindowsAuthorityJournal {

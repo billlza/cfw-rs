@@ -200,11 +200,7 @@ impl NativePeerProcess {
     }
 
     pub(crate) fn retain(&self) -> Result<Self, PeerIdentityError> {
-        cfw_windows_storage::require_process_identity()?;
-        alive(&self.process)?;
-        if observe(&self.process)? != self.identity {
-            return Err(PeerIdentityError::IdentityChanged);
-        }
+        self.revalidate()?;
         let process = self
             .process
             .try_clone()
@@ -218,6 +214,15 @@ impl NativePeerProcess {
             process_id: self.process_id,
             identity: self.identity.clone(),
         })
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), PeerIdentityError> {
+        cfw_windows_storage::require_process_identity()?;
+        alive(&self.process)?;
+        if observe(&self.process)? != self.identity {
+            return Err(PeerIdentityError::IdentityChanged);
+        }
+        alive(&self.process)
     }
 
     pub(crate) fn verify_executable(

@@ -434,9 +434,16 @@ fn serve_connections(
                 }
                 continue;
             }
+            let state_validation =
+                if request.body() == b"authority-state" && role == ServiceClientRole::Desktop {
+                    Some(authority_state::begin(&admitted)?)
+                } else {
+                    None
+                };
             let (reply, finished): (&[u8], bool) = match request.body() {
                 b"ping" => (b"pong", false),
                 b"done" => (b"end!", true),
+                b"authority-state" if state_validation.is_some() => (b"state-ok", true),
                 command @ (b"authority-journal" | b"authority-journal-observe")
                     if role == ServiceClientRole::Desktop =>
                 {
@@ -461,6 +468,9 @@ fn serve_connections(
                 let kind = rejection_kind(&error).ok_or_else(|| error.to_string())?;
                 record_rejection(name, role, kind)?;
                 break;
+            }
+            if let Some(validation) = state_validation {
+                validation.finish_after_reply(&admitted)?;
             }
             if finished {
                 break;

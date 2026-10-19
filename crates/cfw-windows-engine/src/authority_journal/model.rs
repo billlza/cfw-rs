@@ -41,7 +41,7 @@ impl RecordedOwner {
     pub fn session_id(&self) -> u32 {
         self.session_id
     }
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.sid.len() < 8
             || self.sid[0] != 1
             || self.sid[1] > 15

@@ -1,6 +1,7 @@
 //! Role-scoped control transport on a dedicated native worker. It performs no
 //! read-ahead: one ReadFile consumes one whole message, then native identity is
 //! captured before another read. Runtime authorization is a separate layer.
+use crate::connection_binding::ConnectionBinding;
 use crate::service_peer::{
     SERVICE_PIPE_CLIENT_ACCESS, require_system_service_identity, service_pipe_name,
 };
@@ -85,7 +86,7 @@ pub struct AuthenticatedServiceRequest {
     body: ServicePayload,
     identity: NativePeerIdentity,
     role: ServiceClientRole,
-    connection: Arc<()>,
+    connection: ConnectionBinding,
     sequence: u64,
 }
 impl AuthenticatedServiceRequest {
@@ -97,6 +98,12 @@ impl AuthenticatedServiceRequest {
     }
     pub fn role(&self) -> ServiceClientRole {
         self.role
+    }
+    pub(crate) fn binding(&self) -> ConnectionBinding {
+        self.connection.clone()
+    }
+    pub(crate) fn is_pending(&self) -> bool {
+        self.connection.has_pending(self.sequence)
     }
 }
 
@@ -183,7 +190,7 @@ impl LocalServiceListener {
                     expected_client: self.expected_client.clone(),
                     peer: None,
                     slot: Some(slot),
-                    identity: Arc::new(()),
+                    identity: ConnectionBinding::new(),
                     next_sequence: 1,
                     pending: None,
                 })
@@ -270,12 +277,13 @@ pub struct LocalServiceConnection {
     expected_client: Arc<VerifiedExecutable>,
     peer: Option<NativePeerProcess>,
     slot: Option<Slot>,
-    identity: Arc<()>,
+    identity: ConnectionBinding,
     next_sequence: u64,
     pending: Option<u64>,
 }
 impl LocalServiceConnection {
     pub(crate) fn close(&mut self) {
+        self.identity.close();
         self.pipe = None;
         self.slot = None;
         self.peer = None;
@@ -287,9 +295,7 @@ impl LocalServiceConnection {
         request: &AuthenticatedServiceRequest,
         pipe: &OwnedHandle,
     ) -> Result<&NativePeerProcess, ServiceTransportError> {
-        if !Arc::ptr_eq(&request.connection, &self.identity)
-            || self.pending != Some(request.sequence)
-        {
+        if request.connection != self.identity || self.pending != Some(request.sequence) {
             return Err(ServiceTransportError::RequestOrder);
         }
         let peer = self.peer.as_ref().ok_or(ServiceTransportError::Closed)?;
@@ -363,14 +369,14 @@ impl LocalServiceConnection {
             };
             self.next_sequence = next;
             self.pending = Some(sequence);
+            self.identity.received(sequence);
             Ok(request)
         })();
         if result.is_ok() {
             self.pipe = Some(pipe);
             self.slot = Some(slot);
         } else {
-            self.peer = None;
-            self.pending = None;
+            self.close();
         }
         result
     }
@@ -388,16 +394,22 @@ impl LocalServiceConnection {
             self.request_peer(request, &pipe)?;
             native_io::write(&pipe, body, deadline)?;
             self.pending = None;
+            self.identity.replied();
             Ok(())
         })();
         if result.is_ok() {
             self.pipe = Some(pipe);
             self.slot = Some(slot);
         } else {
-            self.peer = None;
-            self.pending = None;
+            self.close();
         }
         result
+    }
+}
+
+impl Drop for LocalServiceConnection {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

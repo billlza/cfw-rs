@@ -19,7 +19,7 @@ pub(super) fn request(name: &str, image: &Path, digest: [u8; 32], command: &[u8]
     }
     Ok(())
 }
-fn root() -> Result<PathBuf> {
+pub(super) fn root() -> Result<PathBuf> {
     std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
@@ -36,7 +36,7 @@ fn shared(name: &str) -> Result<(PathBuf, String)> {
         format!("{prefix}-journal"),
     ))
 }
-fn cleanup(path: &Path, scope: &str) -> Result<()> {
+pub(super) fn cleanup(path: &Path, scope: &str) -> Result<()> {
     let record = PrivateMachineRecord::new(scope).map_err(|e| e.to_string())?;
     let guard = record.lock(LIMIT).map_err(|e| e.to_string())?;
     if let Some(bytes) = guard.read().map_err(|e| e.to_string())? {

@@ -295,11 +295,29 @@ fn serve_role(
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
 ) -> Result<()> {
+    let serving = serve_connections(name, role, &mut listener, installed, lease_owner);
+    let closing = listener.close().map_err(|e| e.to_string());
+    match (serving, closing) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(operation), Err(cleanup)) => {
+            Err(format!("{operation}; listener cleanup failed: {cleanup}"))
+        }
+    }
+}
+
+fn serve_connections(
+    name: &str,
+    role: ServiceClientRole,
+    listener: &mut LocalServiceListener,
+    installed: &Installation,
+    lease_owner: &Mutex<Option<NativeUserSession>>,
+) -> Result<()> {
     while !STOP.load(Ordering::SeqCst) {
         let mut connection = match listener.accept(Instant::now() + Duration::from_millis(100)) {
             Ok(connection) => connection,
-            // Idle listening is not a failed or replayed client command. The
-            // adapter reaps the exact wait and retains a fresh name owner.
+            // An idle poll does not cancel the pending native connection or
+            // replay a command. Explicit shutdown reaps its native operation.
             Err(ServiceTransportError::Deadline) => continue,
             Err(error) => return Err(error.to_string()),
         };

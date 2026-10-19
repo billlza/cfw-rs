@@ -149,7 +149,10 @@ The listener rejects remote clients and gives ordinary clients only individual
 data/attribute/query rights, excluding
 [creation of further pipe instances](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights).
 It reserves at most 15 connections and retains a fresh listening instance;
-cancelled instances are not recycled. Messages are bounded by the shared 1 MiB
+listener poll deadlines retain the exact pending/completed connection for the
+next poll. Explicit listener close cancels and drains pending native I/O before
+releasing its stable `OVERLAPPED` storage. Accepted/failed instances are replaced
+without recycling them for another client. Messages are bounded by the shared 1 MiB
 envelope limit, with at most one pending request per connection. Requests and
 replies must match the exact connection and sequence. Buffers are zeroized.
 
@@ -223,7 +226,11 @@ terminal-read case and exact read/write diagnostics are now included (22 cases)
 to distinguish reply lifetime from connection timing. That 22-case run passed
 at `8d1bd4e`, including the delayed read; it did not explain the earlier failure.
 A bounded 256-exchange post-stop connection test is now added (23 cases); its
-first error fails the test without retrying a request. RDP/session switching,
+first error fails the test without retrying a request. It reproduced a closing
+pipe on exchange 33's first write. Listener polling now preserves in-flight
+accepts across wait deadlines; native completion/worker-transfer regressions
+and the full stress case must pass before this repair is considered validated.
+RDP/session switching,
 lock/unlock and sleep/wake behavior remain separate qualification gates.
 
 `WindowsEngineGenerationStore` implements the shared generation-store contract

@@ -124,7 +124,7 @@ pub struct LocalServiceListener {
     name: String,
     role: ServiceClientRole,
     expected_client: Arc<VerifiedExecutable>,
-    waiting: Option<OwnedHandle>,
+    waiting: Option<native_io::PendingAccept>,
     slots: Arc<AtomicUsize>,
 }
 impl LocalServiceListener {
@@ -135,7 +135,7 @@ impl LocalServiceListener {
     ) -> Result<Self, ServiceTransportError> {
         let name = service_pipe_name(service_name, role)?;
         require_system_service_identity()?;
-        let waiting = create_server(&name, true)?;
+        let waiting = native_io::PendingAccept::new(create_server(&name, true)?)?;
         Ok(Self {
             name,
             role,
@@ -152,16 +152,33 @@ impl LocalServiceListener {
         check_deadline(deadline)?;
         require_system_service_identity()?;
         let slot = Slot::reserve(&self.slots)?;
-        let waiting = self.waiting.take().ok_or(ServiceTransportError::Closed)?;
-        let connected = native_io::connect(&waiting, deadline);
-        // Keep the old instance until the replacement owns the name. A timed-
-        // out/cancelled ConnectNamedPipe is never recycled for another client.
-        let replacement = create_server(&self.name, false);
+        let connected = self
+            .waiting
+            .as_mut()
+            .ok_or(ServiceTransportError::Closed)?
+            .wait(deadline);
+        if matches!(connected, Err(ServiceTransportError::Deadline)) {
+            return Err(ServiceTransportError::Deadline);
+        }
+        let mut waiting = self.waiting.take().ok_or(ServiceTransportError::Closed)?;
+        let retired = waiting.retire();
+        let connected = match (connected, retired) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(operation), Err(cleanup)) => Err(ServiceTransportError::Cleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup),
+            }),
+        };
+        // Keep the previous name owner until a fresh listening instance exists.
+        // Only an accepted or failed instance is replaced; a wait timeout keeps
+        // the exact pending/completed native connect operation alive.
+        let replacement = create_server(&self.name, false).and_then(native_io::PendingAccept::new);
         match (connected, replacement) {
             (Ok(()), Ok(next)) => {
                 self.waiting = Some(next);
                 Ok(LocalServiceConnection {
-                    pipe: Some(waiting),
+                    pipe: Some(waiting.into_pipe()?),
                     role: self.role,
                     expected_client: self.expected_client.clone(),
                     peer: None,
@@ -180,6 +197,15 @@ impl LocalServiceListener {
                 operation: Box::new(operation),
                 cleanup: Box::new(cleanup),
             }),
+        }
+    }
+
+    /// Cancels and drains the listener's pending connect before closing it.
+    /// As with other native cancellation, teardown may exceed a poll deadline.
+    pub fn close(&mut self) -> Result<(), ServiceTransportError> {
+        match self.waiting.take() {
+            Some(mut waiting) => waiting.retire(),
+            None => Ok(()),
         }
     }
 }

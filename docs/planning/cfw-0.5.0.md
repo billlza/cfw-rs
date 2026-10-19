@@ -940,6 +940,13 @@ Stale 拒绝允许重新观察后再试，总计最多三次；传输结果不�
 新的监督流程尚待对应源 Windows CI；它不包含安装入口、全应用恢复、全局 Off 观察器
 或 Windows EngineBackend。返回 Stopping/Recovering/Quarantined 必须保留该实际状态。
 
+`5d02f17` 的首次 Windows 运行通过了九项底层引擎测试，但新 Desktop 夹具在首次
+Ready 后观察 Agent PID 时失败：重新打开的句柄仅包含 SYNCHRONIZE，缺少
+[GetProcessId 所需的查询权限](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessid)。
+修复只增加 QUERY_LIMITED_INFORMATION，并将原生查询失败与“当前进程不是独立 Agent”
+区分记录。原始失败产物已按源提交和哈希保存；其中首个 LocalProxy Agent 的
+Stopped/本地清理报告成功，但完整 Desktop 运行仍未通过，修正后的原生结果待 CI。
+
 改为允许服务 peer/channel 共享已验证镜像对象的 Arc。原文件及祖先目录句柄持续
 持有，保持禁止写入/替换的原契约；每次连接的 SCM 安全描述符、配置、进程和管道
 身份仍重新读取。压力测试在原预算内固定镜像一次，256 轮都检查已停止服务；新增

@@ -188,7 +188,13 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                 if ready.authority().state != AuthorityState::Active {
                     return Err("Desktop Ready is not Active".into());
                 }
-                let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, ready.agent_process_id()) };
+                let raw = unsafe {
+                    OpenProcess(
+                        PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        0,
+                        ready.agent_process_id(),
+                    )
+                };
                 if raw.is_null() {
                     return Err(error("retain supervised UserAgent process"));
                 }

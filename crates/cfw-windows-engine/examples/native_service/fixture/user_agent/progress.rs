@@ -51,7 +51,10 @@ pub(super) fn wait(
 ) -> Result<OwnedHandle> {
     let target = path(root, name, context);
     let agent_pid = unsafe { GetProcessId(child.as_raw_handle()) };
-    if agent_pid == 0 || agent_pid == std::process::id() {
+    if agent_pid == 0 {
+        return Err(error("query retained runtime agent process identity"));
+    }
+    if agent_pid == std::process::id() {
         return Err("runtime fixture did not retain a distinct agent process".into());
     }
     loop {

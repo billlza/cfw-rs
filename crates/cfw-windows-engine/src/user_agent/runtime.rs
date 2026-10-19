@@ -146,16 +146,9 @@ impl UserAgentSession {
         }
         self.attempted = true;
         let operation = self.operate(stop, ready);
-        let operation = match operation {
-            Err(UserAgentError::Cancelled | UserAgentError::Engine(crate::Error::Cancelled))
-                if self.cancel.load(Ordering::Acquire) =>
-            {
-                self.control()
-                    .and_then(ControlSession::failure)
-                    .map(|()| StopReason::AuthorityRevoked)
-            }
-            other => other,
-        };
+        let operation = classify_revocation(operation, self.cancel.load(Ordering::Acquire), || {
+            self.control().and_then(ControlSession::failure)
+        });
         let cleanup = self.stop();
         // A failed restoration retains the child and recovery journal, but it
         // must not keep renewing permission as if the operation were healthy.
@@ -392,6 +385,65 @@ impl UserAgentSession {
         match self.control.as_mut() {
             Some(control) => control.close(),
             None => Ok(()),
+        }
+    }
+}
+
+fn classify_revocation(
+    operation: Result<StopReason>,
+    cancelled: bool,
+    control_health: impl FnOnce() -> Result<()>,
+) -> Result<StopReason> {
+    match operation {
+        // Proxy ownership verification observes the engine under its journal
+        // lock and wraps this same cancellation one boundary deeper. Only that
+        // exact no-completion error is eligible, with a live control receipt.
+        // Uncertain writes, cleanup failures and unrelated errors stay errors.
+        Err(
+            UserAgentError::Cancelled
+            | UserAgentError::Engine(crate::Error::Cancelled)
+            | UserAgentError::Proxy(crate::ProxyError::Engine(crate::Error::Cancelled)),
+        ) if cancelled => control_health().map(|()| StopReason::AuthorityRevoked),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revocation_admits_only_exact_cancelled_work_with_healthy_authority() {
+        let proxy_cancel =
+            || UserAgentError::Proxy(crate::ProxyError::Engine(crate::Error::Cancelled));
+        assert_eq!(
+            classify_revocation(Err(proxy_cancel()), true, || Ok(())).unwrap(),
+            StopReason::AuthorityRevoked
+        );
+        assert!(matches!(
+            classify_revocation(Err(proxy_cancel()), false, || Ok(())),
+            Err(UserAgentError::Proxy(crate::ProxyError::Engine(
+                crate::Error::Cancelled
+            )))
+        ));
+        assert!(matches!(
+            classify_revocation(Err(proxy_cancel()), true, || Err(
+                UserAgentError::WorkerEnded
+            )),
+            Err(UserAgentError::WorkerEnded)
+        ));
+        for error in [
+            UserAgentError::Engine(crate::Error::Rejected("start_failed")),
+            UserAgentError::Proxy(crate::ProxyError::SettingsChanged),
+            UserAgentError::Proxy(crate::ProxyError::OutcomeUnknown(Box::new(
+                crate::ProxyError::Engine(crate::Error::Cancelled),
+            ))),
+            UserAgentError::Engine(crate::Error::CleanupFailed {
+                operation: Box::new(crate::Error::Cancelled),
+                cleanup: Box::new(crate::Error::Cleanup),
+            }),
+        ] {
+            assert!(classify_revocation(Err(error), true, || Ok(())).is_err());
         }
     }
 }

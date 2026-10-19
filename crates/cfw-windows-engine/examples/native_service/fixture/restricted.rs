@@ -22,7 +22,7 @@ impl ClientCase {
     fn report(self) -> serde_json::Value {
         match self {
             Self::UserAgent => {
-                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true})
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true,"machine_record_access_denied":true})
             }
             Self::CopiedImage => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"client_image_rejected":true})
@@ -405,6 +405,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
             return Ok(());
         }
         ClientCase::UserAgent => {
+            machine_record::require_user_denied(name)?;
             verify_pipe_instance_denied(name, &image, expected)?;
             let mut wrong_role = ServiceChannel::connect(
                 name,

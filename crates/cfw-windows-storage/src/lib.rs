@@ -8,9 +8,11 @@
 mod entries;
 mod locking;
 mod mutex;
+mod registry;
 mod security;
 mod wait;
 pub use mutex::PrivateUserMutex;
+pub use registry::{MachineRecordError, MachineRecordGuard, PrivateMachineRecord};
 pub use security::require_process_identity;
 pub use wait::{WaitOutcome, wait_until};
 

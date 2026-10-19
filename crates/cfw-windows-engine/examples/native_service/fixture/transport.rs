@@ -437,6 +437,12 @@ fn serve_connections(
             let (reply, finished): (&[u8], bool) = match request.body() {
                 b"ping" => (b"pong", false),
                 b"done" => (b"end!", true),
+                command @ (b"machine-record-seed" | b"machine-record-observe")
+                    if role == ServiceClientRole::Desktop =>
+                {
+                    machine_record::exercise(name, command)?;
+                    (b"record-ok", true)
+                }
                 b"agent-observe-without-lease" if role == ServiceClientRole::UserAgent => {
                     (b"seen", true)
                 }

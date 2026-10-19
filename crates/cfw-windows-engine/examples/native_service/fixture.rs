@@ -27,6 +27,7 @@ use windows_sys::Win32::{
 
 mod attacks;
 mod desktop;
+mod machine_record;
 mod restricted;
 mod transport;
 type Result<T> = std::result::Result<T, String>;
@@ -231,6 +232,18 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<ServiceCompleti
         return Err(error("register fixture service control"));
     }
     let result = transport::serve(&name, handle);
+    // The second fixture owns cleanup of their shared, uniquely named record.
+    // The first leaves it for observation after its process has exited.
+    let cleanup = if name.ends_with("-b") {
+        machine_record::cleanup(&name)
+    } else {
+        Ok(())
+    };
+    let result = match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(operation), Err(cleanup)) => Err(format!("{operation}; record cleanup: {cleanup}")),
+    };
     drop(identity);
     let completion = match result {
         Ok(()) => ServiceCompletion::Clean,
@@ -646,7 +659,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             return Err("fixture service deletion was not observed".into());
         }
     }
-    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","delayed_terminal_reply_preserved","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","post_stop_connection_stress","temporary_services_removed"],"service_fixture_only":true,"post_stop_exchange_repetitions":POST_STOP_EXCHANGES,"full_service_backend_proven":false,"release_accepted":false});
+    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","delayed_terminal_reply_preserved","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","post_stop_connection_stress","system_machine_record_publication","casefolded_machine_record_mutex","malformed_machine_record_rejected","unsafe_machine_record_acl_rejected","unprivileged_machine_record_access_rejected","machine_record_survives_service_exit","machine_records_removed","temporary_services_removed"],"service_fixture_only":true,"post_stop_exchange_repetitions":POST_STOP_EXCHANGES,"full_service_backend_proven":false,"release_accepted":false});
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -694,6 +707,9 @@ fn exercise_services(
         println!("service fixture stage: delayed_terminal_reply_preserved");
         finish_with_read_delay(&mut pipe, Duration::from_millis(200))?;
         drop((peer, pipe));
+
+        println!("service fixture stage: system_machine_record_publication");
+        machine_record::request(&first.name, image, expected, b"machine-record-seed")?;
 
         println!("service fixture stage: different_system_service_rejected");
         let mut other = connect(&second.name).await?;
@@ -780,6 +796,8 @@ fn exercise_services(
     println!("service fixture stage: stopped_service_is_not_authority");
     first.normal_stop()?;
     println!("service fixture stage: first_service_stopped");
+    println!("service fixture stage: machine_record_survives_service_exit");
+    machine_record::request(&second.name, image, expected, b"machine-record-observe")?;
     println!("service fixture stage: post_stop_connection_stress");
     runtime()?.block_on(async {
         let stress_deadline = Instant::now() + Duration::from_secs(45);

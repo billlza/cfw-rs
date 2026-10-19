@@ -12,7 +12,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
+    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE, SE_REGISTRY_KEY,
 };
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -178,22 +178,39 @@ pub(crate) struct Security {
     descriptor: Vec<u32>,
 }
 
+enum ObjectKind {
+    File,
+    Mutex,
+    Registry,
+}
+
+pub(crate) fn is_system_process() -> Result<bool, Error> {
+    require_process_identity()?;
+    let current = Sid::current()?;
+    let system = Sid::system()?;
+    Ok(unsafe { EqualSid(current.as_ptr(), system.as_ptr()) } != 0)
+}
+
 impl Security {
     pub(crate) fn current() -> Result<Self, Error> {
-        Self::for_object(false)
+        Self::for_object(ObjectKind::File)
     }
 
     pub(crate) fn for_mutex() -> Result<Self, Error> {
-        Self::for_object(true)
+        Self::for_object(ObjectKind::Mutex)
     }
 
-    fn for_object(mutex: bool) -> Result<Self, Error> {
+    pub(crate) fn for_registry() -> Result<Self, Error> {
+        Self::for_object(ObjectKind::Registry)
+    }
+
+    fn for_object(kind: ObjectKind) -> Result<Self, Error> {
         let owner = Sid::current()?;
         let sid = owner.text()?;
-        let acl = if mutex {
-            format!("(A;;GA;;;{sid})(A;;GA;;;SY)")
-        } else {
-            format!("(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)")
+        let acl = match kind {
+            ObjectKind::Mutex => format!("(A;;GA;;;{sid})(A;;GA;;;SY)"),
+            ObjectKind::File => format!("(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)"),
+            ObjectKind::Registry => format!("(A;CI;KA;;;{sid})(A;CI;KA;;;SY)"),
         };
         let sddl: Vec<u16> = format!("O:{sid}D:P{acl}\0").encode_utf16().collect();
         let mut descriptor = null_mut();
@@ -250,6 +267,13 @@ impl Security {
             Error::UnsafeFile => Error::UnsafeMutex,
             other => other,
         })
+    }
+
+    pub(crate) fn verify_registry(
+        &self,
+        handle: windows_sys::Win32::Foundation::HANDLE,
+    ) -> Result<(), Error> {
+        self.verify_handle(handle, SE_REGISTRY_KEY, ReadPolicy::Private, true)
     }
 
     pub(crate) fn verify(

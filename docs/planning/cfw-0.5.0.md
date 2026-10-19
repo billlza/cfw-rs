@@ -727,7 +727,31 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   `UnsafeCell` 表达内核异步写入；独占对象可跨 worker 转移，不提供共享访问。
   正常退出显式取消并等待真实完成；未能确认紧急回收时不得释放仍可能使用的内存。
   新增实际 Windows 用例覆盖超期观察后继续通信及跨线程取消/回收，原 256 轮与所有
-  权限/身份断言保留。当前交叉 Clippy 通过，新实现原生验证待完成。
+  权限/身份断言保留。`4e34608` 已通过原生验证：运行 `39187827998` 的四项
+  Windows job 成功，SCM 23 项场景和全部 256 轮交换通过；共享 Rust 487 项、UI
+  311 项通过。下载回执的源身份与哈希核验保存在该工作区的验证目录中。
+
+## SYSTEM 日志锚点存储（2026-10-19，原生验证待完成）
+
+新增 `PrivateMachineRecord` 作为后续 Authority 日志的独立版本锚点原语。
+固定使用 64 位 HKLM 专用命名空间，拒绝模拟身份和非 SYSTEM 进程；检查打开的
+注册表句柄的所有者、受保护 DACL 和重定向标记。记录限 2 KiB，类型固定为二进制。
+大小写等价的作用域使用同一全局原生互斥锁。CAS 冲突、类型/长度错误、刷新或
+回读不确定性均显式失败；只有经过预期值比较的作用域叶子才可删除。
+
+这里存储非秘密的版本元数据，不使用 LSA 私密数据接口。持久发布按必要事务调用
+`RegFlushKey`，不能把此开销放在状态轮询或流量更新上。该组件尚未接入完整日志，
+不发放运行票据，也不将缺失记录、服务退出或持久化的 Off 当作实际清理完成。
+
+原生 fixture 新增 SYSTEM 写入、跨服务进程退出后的读取/CAS、大小写互斥、损坏
+值及不安全 DACL 拒绝、实际非管理员 ACL 拒绝和叶子清理；只操作托管临时 Windows
+VM 的唯一测试作用域。本机 Windows 目标 Clippy 与格式检查通过，原生结果待取得。
+
+`4e34608` 的 Mac 运行 `39188386401` 中 supply-chain 和 quality job 成功，但
+Xcode 的 `aProbeOfTheLargestProjectedProfileFitsItsReply` 在 libbox 启动时报错，
+后续 analyzer、signer 和打包未运行。错误文本按产品隐私边界被隐藏，现有日志
+无法确立根因。仅为该合成配置用例增加原始启动诊断，保持原异常、测试和断言；
+此改动不是根因修复，不把旧版 Mac 成功运行替代本次失败。
 
 ## 官方资料
 
@@ -768,3 +792,5 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 - [实际进程映像查询](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)
 - [服务终止状态之前完成清理](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-setservicestatus)
 - [受限令牌与继承的句柄权限](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
+- [注册表刷新与持久化](https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regflushkey)
+- [注册表叶子删除与访问权限](https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regdeletekeyexw)

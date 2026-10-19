@@ -1,7 +1,8 @@
-import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 import Testing
+
+@testable import CFWLibboxRuntime
 
 #if canImport(Libbox)
   /// Checks `configuration` and expects libbox to read and refuse it, rather
@@ -604,9 +605,17 @@ import Testing
     let probe = SourceBuiltLibboxProfileProbe()
     var delays: [ProfileProxyDelay] = []
     let runs = try fastestOfThree {
-      delays = try probe.test(
-        configuration: configuration, proxies: targets, timeoutMS: 100, targetURL: "",
-        expectedStatus: "")
+      do {
+        delays = try probe.test(
+          configuration: configuration, proxies: targets, timeoutMS: 100, targetURL: "",
+          expectedStatus: "")
+      } catch LibboxRuntimeError.serviceStartFailed(let diagnostic) {
+        // Only this generated test profile contains these fake credentials and
+        // TEST-NET endpoints. Preserve its actual startup error for CI diagnosis;
+        // production diagnostics remain private and the original test still fails.
+        print("synthetic largest-profile startup failed: \(diagnostic.text)")
+        throw LibboxRuntimeError.serviceStartFailed(diagnostic)
+      }
     }
     print("probe of \(targets.count) of \(profile.nodes.count) nodes took \(runs.all)")
     #expect(delays.map(\.name) == targets)

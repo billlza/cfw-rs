@@ -197,7 +197,7 @@ impl AsRawHandle for LocalServicePipe {
 /// SYSTEM primary identity before publishing its endpoint.
 pub struct WindowsServicePeer {
     service: ServiceHandle,
-    executable: VerifiedExecutable,
+    executable: Arc<VerifiedExecutable>,
     expected_command: Vec<u16>,
     process: OwnedHandle,
     process_id: u32,
@@ -209,11 +209,15 @@ impl WindowsServicePeer {
     /// No network request is sent before native identity admission. The
     /// installation uses a quoted absolute executable with no command arguments.
     /// Missing services, inaccessible objects and pending states remain errors.
+    /// The immutable, already verified image pin may be shared across clients.
+    /// Its retained file/ancestor handles prevent replacement; SCM security,
+    /// configuration, process identity and pipe identity are still read anew.
     pub fn from_pipe_server(
         service_name: &str,
-        executable: VerifiedExecutable,
+        executable: impl Into<Arc<VerifiedExecutable>>,
         pipe: &LocalServicePipe,
     ) -> Result<Self, ServicePeerError> {
+        let executable = executable.into();
         cfw_windows_storage::require_process_identity()?;
         if pipe.poisoned {
             return Err(ServicePeerError::ConnectionClosed);

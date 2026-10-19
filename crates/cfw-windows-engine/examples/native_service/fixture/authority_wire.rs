@@ -13,6 +13,7 @@ use cfw_windows_engine::authority::{
 };
 use cfw_windows_engine::{AuthenticatedServiceRequest, LocalServiceConnection};
 use std::io::{Read, Write};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 pub(super) struct Validation {
@@ -179,8 +180,9 @@ fn status(response: Response, state: AuthorityState, revision: u64) -> Result<()
     }
 }
 pub(super) fn run(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
+    let service_image = Arc::new(verified(image, digest)?);
     let mut channel =
-        AuthorityChannel::connect(name, ServiceClientRole::Desktop, verified(image, digest)?)
+        AuthorityChannel::connect(name, ServiceClientRole::Desktop, Arc::clone(&service_image))
             .map_err(|e| e.to_string())?;
     status(
         request(&mut channel, Command::Observe)?,
@@ -228,9 +230,8 @@ pub(super) fn run(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         5,
     )?;
     drop(channel);
-    let mut finish =
-        ServiceChannel::connect(name, ServiceClientRole::Desktop, verified(image, digest)?)
-            .map_err(|e| e.to_string())?;
+    let mut finish = ServiceChannel::connect(name, ServiceClientRole::Desktop, service_image)
+        .map_err(|e| e.to_string())?;
     if finish
         .request(b"authority-wire-finish", Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?
@@ -268,9 +269,13 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
             TicketMaterial::from_slice(bytes.as_ref())
         })
         .map_err(|e| e.to_string())?;
-    let mut channel =
-        AuthorityChannel::connect(name, ServiceClientRole::UserAgent, verified(image, digest)?)
-            .map_err(|e| e.to_string())?;
+    let service_image = Arc::new(verified(image, digest)?);
+    let mut channel = AuthorityChannel::connect(
+        name,
+        ServiceClientRole::UserAgent,
+        Arc::clone(&service_image),
+    )
+    .map_err(|e| e.to_string())?;
     match channel.request(
         Request::new(Command::BindUserAgent(BindRequest {
             context: context.clone(),
@@ -330,7 +335,7 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     )?;
     drop(channel);
     let mut reconnected =
-        AuthorityChannel::connect(name, ServiceClientRole::UserAgent, verified(image, digest)?)
+        AuthorityChannel::connect(name, ServiceClientRole::UserAgent, service_image)
             .map_err(|e| e.to_string())?;
     match reconnected.request(
         Request::new(Command::OwnedLease).map_err(|e| e.to_string())?,

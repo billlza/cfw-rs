@@ -455,7 +455,7 @@ impl ServiceChannel {
     pub fn connect(
         service_name: &str,
         role: ServiceClientRole,
-        expected_service: VerifiedExecutable,
+        expected_service: impl Into<Arc<VerifiedExecutable>>,
     ) -> Result<Self, ServiceTransportError> {
         let pipe = LocalServicePipe::open(service_name, role)?;
         let peer = WindowsServicePeer::from_pipe_server(service_name, expected_service, &pipe)?;

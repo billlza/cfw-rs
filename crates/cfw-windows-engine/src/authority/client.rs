@@ -3,7 +3,7 @@ use crate::{
     NativePeerProcess, ServiceChannel, ServiceClientRole, ServiceTransportError,
     VerifiedExecutable, authority_journal::RecordedOwner,
 };
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 /// One authenticated connection and its native user identity. A malformed,
 /// unrelated or timed-out reply closes it; no delivery-uncertain command is
@@ -16,7 +16,7 @@ impl AuthorityChannel {
     pub fn connect(
         service: &str,
         role: ServiceClientRole,
-        image: VerifiedExecutable,
+        image: impl Into<Arc<VerifiedExecutable>>,
     ) -> Result<Self, WireError> {
         let identity = NativePeerProcess::open(std::process::id())?;
         let channel = ServiceChannel::connect(service, role, image)?;

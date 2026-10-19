@@ -17,8 +17,8 @@ pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
 pub use native::WindowsAuthority;
 pub use types::{
-    AuthoritySnapshot, CleanupEvidence, LeaseContext, OperationContext, PrepareRequest,
-    PreparedTicket, ReadyReport, RuntimeStartAuthorization, StoppedReport,
+    AuthorityLineage, AuthoritySnapshot, CleanupEvidence, LeaseContext, OperationContext,
+    PrepareRequest, PreparedTicket, ReadyReport, RuntimeStartAuthorization, StoppedReport,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +37,8 @@ pub enum AuthorityError {
     Invalid,
     #[error("Windows authority rejected an installation or generation replay")]
     Replay,
+    #[error("Windows authority generation is exhausted")]
+    GenerationExhausted,
     #[error("Windows authority preparation ticket is invalid or already consumed")]
     Ticket,
     #[error("Windows authority preparation expired")]

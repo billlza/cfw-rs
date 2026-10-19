@@ -69,6 +69,8 @@ impl WindowsAuthority {
             ServiceClientRole::Desktop => matches!(
                 command.command,
                 Command::Observe
+                    | Command::LoadLineage
+                    | Command::ReserveGeneration(_)
                     | Command::Prepare(_)
                     | Command::BeginStop(_)
                     | Command::AbortPrepared(_)
@@ -106,6 +108,10 @@ impl WindowsAuthority {
     ) -> Result<Response, AuthorityError> {
         Ok(match command {
             Command::Observe => Response::Observed(self.poll()?),
+            Command::LoadLineage => Response::Lineage(self.lineage(authorization)?),
+            Command::ReserveGeneration(expected) => {
+                Response::Lineage(self.reserve_generation(authorization, &expected)?)
+            }
             Command::Prepare(input) => {
                 let ticket = self.prepare(authorization, input)?;
                 let material = ticket

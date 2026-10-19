@@ -88,6 +88,16 @@ fn enroll(store: &WindowsAuthorityJournal) -> Result<AuthorityCommittedState> {
     store.append(&state).map_err(|e| e.to_string())?;
     Ok(state)
 }
+fn reserve(
+    store: &WindowsAuthorityJournal,
+    previous: &AuthorityCommittedState,
+) -> Result<AuthorityCommittedState> {
+    let next = previous
+        .reserve_next_generation()
+        .map_err(|e| e.to_string())?;
+    store.append(&next).map_err(|e| e.to_string())?;
+    Ok(next)
+}
 fn prepare(
     genesis: &AuthorityCommittedState,
     owner: &NativeUserSession,
@@ -143,7 +153,8 @@ fn cycle(
     owner: &NativeUserSession,
 ) -> Result<AuthorityCommittedState> {
     let genesis = enroll(store)?;
-    let value = prepare(&genesis, owner, 1, 2)?;
+    let allocated = reserve(store, &genesis)?;
+    let value = prepare(&allocated, owner, 1, 3)?;
     store.append(&value).map_err(|e| e.to_string())?;
     let value = transition(
         store,
@@ -234,13 +245,15 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
     match command {
         b"authority-journal" if name.ends_with("-a") => {
             enrollment_faults()?;
+            allocation_faults()?;
             prepare_faults(owner)?;
             compaction_faults(owner)?;
             temporary_recovery(owner)?;
             rollback_and_missing_identity(owner)?;
             let store = WindowsAuthorityJournal::open(&path, &scope).map_err(|e| e.to_string())?;
             let genesis = enroll(&store)?;
-            let prepared = prepare(&genesis, owner, 1, 2)?;
+            let allocated = reserve(&store, &genesis)?;
+            let prepared = prepare(&allocated, owner, 1, 3)?;
             store.append(&prepared).map_err(|e| e.to_string())?;
             let starting = transition(
                 &store,
@@ -264,7 +277,7 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
                 .committed
                 .ok_or("missing cross-process journal state")?;
             assert_eq!(state.state(), AuthorityState::Active);
-            assert_eq!(state.revision(), 4);
+            assert_eq!(state.revision(), 5);
             assert!(state.operation().unwrap().owner().matches_native(owner));
             write_report("b", &second_report())
         }
@@ -302,6 +315,42 @@ fn enrollment_faults() -> Result<()> {
     }
     Ok(())
 }
+fn allocation_faults() -> Result<()> {
+    for point in [
+        JournalFaultPoint::PendingAnchorPublished,
+        JournalFaultPoint::JournalPublished,
+        JournalFaultPoint::HeadPublished,
+        JournalFaultPoint::CommittedAnchorPublished,
+    ] {
+        with_case(|store, _, _| {
+            let initial = enroll(store)?;
+            let allocated = initial
+                .reserve_next_generation()
+                .map_err(|e| e.to_string())?;
+            interrupted(store, &allocated, point)?;
+            let recovered = store.recover().map_err(|e| e.to_string())?;
+            assert_eq!(recovered.action, RecoveryAction::VerifyOff);
+            if point == JournalFaultPoint::PendingAnchorPublished {
+                assert_eq!(recovered.committed, Some(initial));
+                store.append(&allocated).map_err(|e| e.to_string())?;
+            } else {
+                assert_eq!(recovered.committed, Some(allocated.clone()));
+                assert!(store.append(&allocated).is_err());
+            }
+            assert_eq!(
+                store
+                    .recover()
+                    .map_err(|e| e.to_string())?
+                    .committed
+                    .unwrap()
+                    .allocated_generation(),
+                1
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
 fn prepare_faults(owner: &NativeUserSession) -> Result<()> {
     for point in [
         JournalFaultPoint::PendingAnchorPublished,
@@ -311,11 +360,12 @@ fn prepare_faults(owner: &NativeUserSession) -> Result<()> {
     ] {
         with_case(|store, _, _| {
             let genesis = enroll(store)?;
-            let prepared = prepare(&genesis, owner, 1, 2)?;
+            let allocated = reserve(store, &genesis)?;
+            let prepared = prepare(&allocated, owner, 1, 3)?;
             interrupted(store, &prepared, point)?;
             let recovered = store.recover().map_err(|e| e.to_string())?;
             if point == JournalFaultPoint::PendingAnchorPublished {
-                assert_eq!(recovered.committed, Some(genesis));
+                assert_eq!(recovered.committed, Some(allocated));
                 assert_eq!(recovered.action, RecoveryAction::VerifyOff);
                 store.append(&prepared).map_err(|e| e.to_string())?;
             } else {
@@ -338,16 +388,35 @@ fn compaction_faults(owner: &NativeUserSession) -> Result<()> {
     ] {
         with_case(|store, path, _| {
             let off = cycle(store, owner)?;
-            assert_eq!(off.revision(), 7);
-            let prepared = prepare(&off, owner, 2, 8)?;
-            interrupted(store, &prepared, point)?;
+            assert_eq!(off.revision(), 8);
+            let allocated = off.reserve_next_generation().map_err(|e| e.to_string())?;
+            interrupted(store, &allocated, point)?;
             let recovered = store.recover().map_err(|e| e.to_string())?;
             assert_eq!(recovered.action, RecoveryAction::VerifyOff);
-            assert_eq!(recovered.committed.unwrap().revision(), 7);
-            let cursor = store.append(&prepared).map_err(|e| e.to_string())?;
+            assert_eq!(recovered.committed.unwrap().revision(), 8);
+            let cursor = store.append(&allocated).map_err(|e| e.to_string())?;
             assert_eq!(cursor.generation(), 2);
             assert_eq!(cursor.sequence(), 2);
-            assert_eq!(cursor.state_revision(), 8);
+            assert_eq!(cursor.state_revision(), 9);
+            assert_eq!(
+                store
+                    .recover()
+                    .map_err(|e| e.to_string())?
+                    .committed
+                    .unwrap()
+                    .allocated_generation(),
+                2
+            );
+            let prepared = prepare(&allocated, owner, 2, 10)?;
+            let cursor = store.append(&prepared).map_err(|e| e.to_string())?;
+            assert_eq!(
+                (
+                    cursor.generation(),
+                    cursor.sequence(),
+                    cursor.state_revision()
+                ),
+                (2, 3, 10)
+            );
             assert!(
                 !path
                     .join("journal-1.bin")
@@ -370,7 +439,8 @@ fn temporary_recovery(owner: &NativeUserSession) -> Result<()> {
     for (head, valid) in [(false, true), (true, true), (false, false), (true, false)] {
         with_case(|store, path, scope| {
             let genesis = enroll(store)?;
-            let prepared = prepare(&genesis, owner, 1, 2)?;
+            let allocated = reserve(store, &genesis)?;
+            let prepared = prepare(&allocated, owner, 1, 3)?;
             let old_head = bytes(path, "head-1.json")?;
             interrupted(
                 store,
@@ -403,7 +473,7 @@ fn temporary_recovery(owner: &NativeUserSession) -> Result<()> {
                     .cursor(1)
                     .map_err(|e| e.to_string())?;
                 journal.extend(
-                    encode_record(&prepared, 2, *prior.record_sha256())
+                    encode_record(&prepared, prior.sequence() + 1, *prior.record_sha256())
                         .map_err(|e| e.to_string())?
                         .bytes,
                 );
@@ -435,7 +505,8 @@ fn rollback_and_missing_identity(owner: &NativeUserSession) -> Result<()> {
         let genesis = enroll(store)?;
         let old_journal = bytes(path, "journal-1.bin")?;
         let old_head = bytes(path, "head-1.json")?;
-        let prepared = prepare(&genesis, owner, 1, 2)?;
+        let allocated = reserve(store, &genesis)?;
+        let prepared = prepare(&allocated, owner, 1, 3)?;
         store.append(&prepared).map_err(|e| e.to_string())?;
         replace(path, "journal-1.bin", &old_journal)?;
         replace(path, "head-1.json", &old_head)?;
@@ -472,10 +543,10 @@ fn rollback_and_missing_identity(owner: &NativeUserSession) -> Result<()> {
     })
 }
 fn first_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"fault_runs":15,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
+    serde_json::json!({"success":true,"fault_runs":19,"allocation_fault_cases":4,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
 }
 fn second_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"writer_process_exited":true,"revision":4,"state":"active","recovery_action":"reattest_owner","owner_matches_native_console":true,"executable_lease_restored":false})
+    serde_json::json!({"success":true,"writer_process_exited":true,"revision":5,"allocated_generation":1,"state":"active","recovery_action":"reattest_owner","owner_matches_native_console":true,"executable_lease_restored":false})
 }
 fn write_report(role: &str, value: &serde_json::Value) -> Result<()> {
     let path = root()?.join(format!("authority-{role}.journal-validation.json"));

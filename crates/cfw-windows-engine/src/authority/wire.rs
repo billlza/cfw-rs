@@ -129,6 +129,8 @@ impl<'de> Deserialize<'de> for TicketMaterial {
 #[serde(rename_all = "snake_case")]
 pub(super) enum CommandTag {
     Observe,
+    LoadLineage,
+    ReserveGeneration,
     Prepare,
     BindUserAgent,
     Ready,
@@ -155,6 +157,8 @@ pub struct StopRequest {
 struct Empty {}
 pub enum Command {
     Observe,
+    LoadLineage,
+    ReserveGeneration(super::AuthorityLineage),
     Prepare(PrepareRequest),
     BindUserAgent(BindRequest),
     Ready(ReadyReport),
@@ -168,6 +172,8 @@ impl Command {
     pub(super) fn tag(&self) -> CommandTag {
         match self {
             Self::Observe => CommandTag::Observe,
+            Self::LoadLineage => CommandTag::LoadLineage,
+            Self::ReserveGeneration(_) => CommandTag::ReserveGeneration,
             Self::Prepare(_) => CommandTag::Prepare,
             Self::BindUserAgent(_) => CommandTag::BindUserAgent,
             Self::Ready(_) => CommandTag::Ready,
@@ -180,7 +186,10 @@ impl Command {
     }
     fn validate(&self) -> Result<()> {
         match self {
-            Self::Observe | Self::OwnedLease => Ok(()),
+            Self::Observe | Self::OwnedLease | Self::LoadLineage => Ok(()),
+            Self::ReserveGeneration(expected) => {
+                expected.validate().map_err(|_| WireError::Malformed)
+            }
             Self::Prepare(input) => input.validate().map_err(|_| WireError::Malformed),
             Self::BindUserAgent(input) => validate_context(&input.context),
             Self::Ready(report) => {
@@ -270,7 +279,10 @@ impl Request {
         self.command.validate()?;
         let tag = self.command.tag();
         match &self.command {
-            Command::Observe | Command::OwnedLease => envelope(self.id, tag, &Empty {}),
+            Command::Observe | Command::OwnedLease | Command::LoadLineage => {
+                envelope(self.id, tag, &Empty {})
+            }
+            Command::ReserveGeneration(expected) => envelope(self.id, tag, expected),
             Command::Prepare(input) => envelope(self.id, tag, input),
             Command::BindUserAgent(input) => envelope(self.id, tag, input),
             Command::Ready(input) => envelope(self.id, tag, input),
@@ -290,6 +302,11 @@ impl Request {
                 let _: Empty = decode(body)?;
                 Command::Observe
             }
+            CommandTag::LoadLineage => {
+                let _: Empty = decode(body)?;
+                Command::LoadLineage
+            }
+            CommandTag::ReserveGeneration => Command::ReserveGeneration(decode(body)?),
             CommandTag::OwnedLease => {
                 let _: Empty = decode(body)?;
                 Command::OwnedLease
@@ -323,6 +340,7 @@ pub enum Rejection {
     Identity,
     Invalid,
     Replay,
+    GenerationExhausted,
     Ticket,
     Expired,
     CleanupUnproven,
@@ -340,6 +358,7 @@ impl Rejection {
             AuthorityError::Identity => Self::Identity,
             AuthorityError::Invalid => Self::Invalid,
             AuthorityError::Replay => Self::Replay,
+            AuthorityError::GenerationExhausted => Self::GenerationExhausted,
             AuthorityError::Ticket => Self::Ticket,
             AuthorityError::Expired => Self::Expired,
             AuthorityError::CleanupUnproven => Self::CleanupUnproven,
@@ -357,6 +376,7 @@ impl Rejection {
 #[serde(rename_all = "snake_case")]
 enum ResponseTag {
     Observed,
+    Lineage,
     Prepared,
     Bound,
     Status,
@@ -420,6 +440,7 @@ impl BoundGrant {
 }
 pub enum Response {
     Observed(AuthoritySnapshot),
+    Lineage(super::AuthorityLineage),
     Prepared(PreparedGrant),
     Bound(BoundGrant),
     Status(AuthoritySnapshot),
@@ -429,6 +450,7 @@ impl Response {
     pub(super) fn encode(&self, id: Uuid) -> Result<Message> {
         match self {
             Self::Observed(value) => envelope(id, ResponseTag::Observed, value),
+            Self::Lineage(value) => envelope(id, ResponseTag::Lineage, value),
             Self::Prepared(value) => envelope(
                 id,
                 ResponseTag::Prepared,
@@ -466,16 +488,19 @@ fn snapshot_valid(value: &AuthoritySnapshot) -> Result<()> {
     {
         return Err(WireError::Malformed);
     }
-    let bootstrap = matches!(
+    let before_runtime = matches!(
         value.state,
         AuthorityState::Off | AuthorityState::Recovering | AuthorityState::Quarantined
-    ) && value.revision == Some(1);
-    if value.root.is_none() && value.revision.is_some() && !bootstrap {
+    );
+    if value.root.is_none()
+        && value.revision.is_some()
+        && !(before_runtime && value.revision == Some(1))
+    {
         return Err(WireError::Malformed);
     }
     if let Some(root) = &value.root
         && (root.installation_id.is_nil()
-            || (root.epoch, root.generation) == (0, 0) && !bootstrap
+            || (root.epoch, root.generation) == (0, 0) && !before_runtime
             || (root.epoch, root.generation) != (0, 0) && root.validate().is_err())
     {
         return Err(WireError::Malformed);
@@ -507,6 +532,18 @@ pub(super) fn response(
         return Err(WireError::Rejected(rejected.code));
     }
     match (&request.command, wire.kind) {
+        (Command::LoadLineage | Command::ReserveGeneration(_), ResponseTag::Lineage) => {
+            let value: super::AuthorityLineage = decode(payload)?;
+            value.validate().map_err(|_| WireError::Malformed)?;
+            if let Command::ReserveGeneration(expected) = &request.command
+                && (value.installation_id != expected.installation_id
+                    || value.config_epoch != expected.config_epoch
+                    || expected.generation.checked_add(1) != Some(value.generation))
+            {
+                return Err(WireError::Correlation);
+            }
+            Ok(Response::Lineage(value))
+        }
         (Command::Observe, ResponseTag::Observed) => {
             let value = decode(payload)?;
             snapshot_valid(&value)?;

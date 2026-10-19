@@ -9,6 +9,24 @@ use cfw_engine_api::authority_v1::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Machine-wide monotonic allocation, separate from a live runtime lease.
+/// Only the authenticated Authority publishes this value to Desktop clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityLineage {
+    pub installation_id: Uuid,
+    pub config_epoch: u64,
+    pub generation: u64,
+}
+impl AuthorityLineage {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.installation_id.is_nil() || self.config_epoch == 0 {
+            return Err(AuthorityError::Invalid);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareRequest {

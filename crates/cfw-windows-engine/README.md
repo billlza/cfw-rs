@@ -304,20 +304,24 @@ RDP/session switching,
 lock/unlock and sleep/wake behavior remain separate qualification gates.
 
 `WindowsEngineGenerationStore` implements the shared generation-store contract
-using a canonical generic Credential Manager record for the current process
-user. `CRED_PERSIST_LOCAL_MACHINE` persists across that user's logon sessions;
-it does not grant other users access. A private Global-namespace mutex uses the
-current SID and authority target to serialize cooperating processes across
-sessions, independently of the application's selected home directory.
+through the authenticated SYSTEM Authority. The service enrolls its installation
+UUID before serving preparation requests and remains Recovering until independent
+cleanup passes. Desktop clients load the identity and reserve the exact next
+generation through a compare-and-swap command; UserAgent clients have no allocator
+role. The adapter binds its first confirmed installation/epoch and never creates
+a local identity when the service is missing or an observation fails.
 
-The store rejects impersonation, malformed/noncanonical documents, stale CAS
-expectations and counter exhaustion. An instance binds its first confirmed
-installation identity; disappearance or replacement cannot silently reset that
-coordinator's lineage. A fresh instance after deliberate credential removal
-uses a fresh installation UUID. Writes require exact readback; a failed readback
-reports an uncertain outcome without promising rollback. This is user lineage,
-not privileged-service authentication, rollback resistance against another
-process with the same user's full authority, or proof of global Off.
+The existing authority journal now stores allocated generation separately from
+the most recent runtime root. Reservations are allowed only in Off, survive
+restart and checkpoint compaction, and grant no runtime capability. Prepare
+requires the current allocation to be newer than the last consumed generation.
+Stale requests, exhaustion and uncertain publication return errors; no lost
+reply is retried. Installation identity and allocations share the same existing
+file/registry transaction and rollback checks, rather than independent stores.
+The Windows development journal payload is schema 2: schema 1 is rejected
+explicitly, without resetting or silently migrating prior records. The former
+per-user Credential Manager lineage is not imported or deleted. Global cleanup,
+installed entrypoints and the application backend remain separate integration.
 
 The shared coordinator pins a backend's declared runtime platform when its actor
 starts. Windows user-agent/tunnel-service owners have distinct wire names from

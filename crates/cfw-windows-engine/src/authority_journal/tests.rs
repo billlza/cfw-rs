@@ -28,7 +28,7 @@ fn root() -> RootContext {
 fn prepared() -> AuthorityCommittedState {
     AuthorityCommittedState::new(
         root(),
-        2,
+        3,
         JournalTransition::Prepare,
         AuthorityState::Preparing,
         Some(operation()),
@@ -42,11 +42,16 @@ fn image() -> (Vec<u8>, JournalCursor, usize) {
         [0; 32],
     )
     .unwrap();
-    let second = encode_record(&prepared(), 2, first.digest).unwrap();
+    let reserved = AuthorityCommittedState::enrollment(installation())
+        .reserve_next_generation()
+        .unwrap();
+    let second = encode_record(&reserved, 2, first.digest).unwrap();
+    let third = encode_record(&prepared(), 3, second.digest).unwrap();
     let first_length = first.bytes.len();
     let mut bytes = first.bytes;
     bytes.extend(second.bytes);
-    let cursor = JournalCursor::new(1, 2, bytes.len() as u64, second.digest, 2).unwrap();
+    bytes.extend(third.bytes);
+    let cursor = JournalCursor::new(1, 3, bytes.len() as u64, third.digest, 3).unwrap();
     (bytes, cursor, first_length)
 }
 
@@ -155,15 +160,18 @@ fn a_self_consistent_old_head_still_fails_the_independent_anchor() {
 fn complete_frames_cannot_reorder_state_or_change_installations() {
     let genesis = AuthorityCommittedState::enrollment(installation());
     let first = encode_record(&genesis, 1, [0; 32]).unwrap();
+    let reserved = genesis.reserve_next_generation().unwrap();
+    let second = encode_record(&reserved, 2, first.digest).unwrap();
+    prepared().validate_successor(&reserved).unwrap();
     for (candidate_root, revision) in [
-        (root(), 1),
-        (root(), 3),
+        (root(), 2),
+        (root(), 4),
         (
             RootContext {
                 installation_id: Uuid::from_u128(99),
                 ..root()
             },
-            2,
+            3,
         ),
     ] {
         let state = AuthorityCommittedState::new(
@@ -174,9 +182,10 @@ fn complete_frames_cannot_reorder_state_or_change_installations() {
             Some(operation()),
         )
         .unwrap();
-        let second = encode_record(&state, 2, first.digest).unwrap();
+        let third = encode_record(&state, 3, second.digest).unwrap();
         let mut bytes = first.bytes.clone();
-        bytes.extend(second.bytes);
+        bytes.extend(&second.bytes);
+        bytes.extend(third.bytes);
         assert_eq!(
             decode_journal(&bytes),
             Err(JournalValidationError::Sequence)
@@ -188,7 +197,7 @@ fn complete_frames_cannot_reorder_state_or_change_installations() {
             generation: 2,
             ..root()
         },
-        3,
+        4,
         JournalTransition::BindOwner,
         AuthorityState::Starting,
         Some(operation()),
@@ -280,7 +289,7 @@ fn invalid_sid_and_logon_claims_fail_before_a_commit_is_usable() {
 #[test]
 fn pending_cursor_requires_exact_append_or_checkpoint_progress() {
     let (_, committed, _) = image();
-    let next = JournalCursor::new(1, 3, committed.committed_length() + 100, [8; 32], 3).unwrap();
+    let next = JournalCursor::new(1, 4, committed.committed_length() + 100, [8; 32], 4).unwrap();
     let anchor =
         JournalAnchor::new(installation(), Some(committed.clone()), Some(next.clone())).unwrap();
     assert_eq!(
@@ -288,18 +297,18 @@ fn pending_cursor_requires_exact_append_or_checkpoint_progress() {
         anchor
     );
     for bad in [
-        JournalCursor::new(1, 4, next.committed_length(), [8; 32], 3).unwrap(),
-        JournalCursor::new(1, 3, committed.committed_length(), [8; 32], 3).unwrap(),
-        JournalCursor::new(1, 3, next.committed_length(), [8; 32], 4).unwrap(),
-        JournalCursor::new(3, 1, 200, [8; 32], 2).unwrap(),
-        JournalCursor::new(2, 1, 200, [8; 32], 3).unwrap(),
+        JournalCursor::new(1, 5, next.committed_length(), [8; 32], 4).unwrap(),
+        JournalCursor::new(1, 4, committed.committed_length(), [8; 32], 4).unwrap(),
+        JournalCursor::new(1, 4, next.committed_length(), [8; 32], 5).unwrap(),
+        JournalCursor::new(3, 1, 200, [8; 32], 3).unwrap(),
+        JournalCursor::new(2, 1, 200, [8; 32], 4).unwrap(),
     ] {
         assert_eq!(
             JournalAnchor::new(installation(), Some(committed.clone()), Some(bad)),
             Err(JournalValidationError::Anchor)
         );
     }
-    let checkpoint = JournalCursor::new(2, 1, 200, [8; 32], 2).unwrap();
+    let checkpoint = JournalCursor::new(2, 1, 200, [8; 32], 3).unwrap();
     JournalAnchor::new(installation(), Some(committed), Some(checkpoint)).unwrap();
     assert!(JournalAnchor::new(installation(), None, Some(next)).is_err());
 }
@@ -333,4 +342,70 @@ fn state_fields_and_capacity_remain_closed_at_the_boundary() {
     let checkpoint = prepared().checkpoint().unwrap();
     let record = encode_record(&checkpoint, 1, [0; 32]).unwrap();
     assert_eq!(decode_journal(&record.bytes).unwrap().state(), &checkpoint);
+}
+
+#[test]
+fn allocation_and_checkpoint_retain_unused_generations_without_a_runtime_grant() {
+    let initial = AuthorityCommittedState::enrollment(installation());
+    let first = initial.reserve_next_generation().unwrap();
+    let second = first.reserve_next_generation().unwrap();
+    assert_eq!(second.root().generation, 0);
+    assert_eq!(second.allocated_generation(), 2);
+    assert_eq!(second.state(), AuthorityState::Off);
+    assert!(second.operation().is_none());
+    let checkpoint = second.checkpoint().unwrap();
+    let frame = encode_record(&checkpoint, 1, [0; 32]).unwrap();
+    let recovered = decode_journal(&frame.bytes).unwrap();
+    assert_eq!(recovered.state().allocated_generation(), 2);
+    assert_eq!(
+        recovered.state().restart_action().unwrap(),
+        RecoveryAction::VerifyOff
+    );
+    assert_eq!(
+        recovered
+            .state()
+            .reserve_next_generation()
+            .unwrap()
+            .allocated_generation(),
+        3
+    );
+}
+
+#[test]
+fn allocation_schema_never_infers_a_missing_counter_or_accepts_counter_rollback() {
+    let state = AuthorityCommittedState::enrollment(installation())
+        .reserve_next_generation()
+        .unwrap();
+    let original = serde_json::to_value(&state).unwrap();
+    for schema in [0, 1, 3] {
+        let mut value = original.clone();
+        value["schema_version"] = serde_json::json!(schema);
+        let changed: AuthorityCommittedState = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            AuthorityCommittedState::decode(&serde_json::to_vec(&changed).unwrap()),
+            Err(JournalValidationError::UnsupportedSchema)
+        );
+    }
+    let mut missing = original.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("allocated_generation");
+    assert!(AuthorityCommittedState::decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+    let next = state.reserve_next_generation().unwrap();
+    for generation in [0, 1, 3] {
+        let mut value = serde_json::to_value(&next).unwrap();
+        value["allocated_generation"] = serde_json::json!(generation);
+        let changed: AuthorityCommittedState = serde_json::from_value(value).unwrap();
+        assert!(changed.validate_successor(&state).is_err());
+    }
+    let prepared = prepared();
+    assert!(prepared.reserve_next_generation().is_err());
+    let mut consumed = serde_json::to_value(&prepared).unwrap();
+    consumed["allocated_generation"] = serde_json::json!(0);
+    let changed: AuthorityCommittedState = serde_json::from_value(consumed).unwrap();
+    assert_eq!(
+        AuthorityCommittedState::decode(&serde_json::to_vec(&changed).unwrap()),
+        Err(JournalValidationError::InvalidState)
+    );
 }

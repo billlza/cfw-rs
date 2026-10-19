@@ -61,6 +61,12 @@ fn commands_roundtrip_without_a_generic_secret_value_or_extra_fields() {
     };
     for command in [
         Command::Observe,
+        Command::LoadLineage,
+        Command::ReserveGeneration(crate::authority::AuthorityLineage {
+            installation_id: Uuid::from_u128(1),
+            config_epoch: 1,
+            generation: 0,
+        }),
         prepare().command,
         Command::BindUserAgent(BindRequest {
             context: value.clone(),
@@ -331,4 +337,104 @@ fn status_replies_cannot_fabricate_early_readiness_or_off_for_a_bound_lease() {
             accepted
         );
     }
+}
+
+#[test]
+fn lineage_allocation_reply_cannot_change_identity_skip_or_reuse_a_generation() {
+    let expected = crate::authority::AuthorityLineage {
+        installation_id: Uuid::from_u128(1),
+        config_epoch: 1,
+        generation: 7,
+    };
+    let request = Request::new(Command::ReserveGeneration(expected.clone())).unwrap();
+    let mut next = expected.clone();
+    next.generation += 1;
+    let encoded = Response::Lineage(next.clone()).encode(request.id).unwrap();
+    assert!(
+        matches!(response(&request, encoded.as_bytes(), &owner()).unwrap(), Response::Lineage(value) if value == next)
+    );
+    for changed in [
+        crate::authority::AuthorityLineage {
+            installation_id: Uuid::from_u128(2),
+            ..next.clone()
+        },
+        crate::authority::AuthorityLineage {
+            config_epoch: 2,
+            ..next.clone()
+        },
+        crate::authority::AuthorityLineage {
+            generation: 7,
+            ..next.clone()
+        },
+        crate::authority::AuthorityLineage {
+            generation: 9,
+            ..next.clone()
+        },
+    ] {
+        let encoded = Response::Lineage(changed).encode(request.id).unwrap();
+        assert!(matches!(
+            response(&request, encoded.as_bytes(), &owner()),
+            Err(WireError::Correlation)
+        ));
+    }
+    let load = Request::new(Command::LoadLineage).unwrap();
+    let unknown = Response::Observed(AuthoritySnapshot {
+        state: AuthorityState::Recovering,
+        revision: None,
+        root: None,
+    })
+    .encode(load.id)
+    .unwrap();
+    assert!(matches!(
+        response(&load, unknown.as_bytes(), &owner()),
+        Err(WireError::Correlation)
+    ));
+}
+
+#[test]
+fn lineage_values_require_a_real_installation_and_an_explicit_epoch() {
+    let request = Request::new(Command::LoadLineage).unwrap();
+    for (installation_id, config_epoch) in [(Uuid::nil(), 1), (Uuid::from_u128(1), 0)] {
+        let value = crate::authority::AuthorityLineage {
+            installation_id,
+            config_epoch,
+            generation: 0,
+        };
+        let encoded = Response::Lineage(value.clone()).encode(request.id).unwrap();
+        assert!(matches!(
+            response(&request, encoded.as_bytes(), &owner()),
+            Err(WireError::Malformed)
+        ));
+        assert!(matches!(
+            Request::new(Command::ReserveGeneration(value)),
+            Err(WireError::Malformed)
+        ));
+    }
+    let observed = Request::new(Command::Observe).unwrap();
+    // Reservations may advance the revision before any runtime has existed.
+    let snapshot = AuthoritySnapshot {
+        state: AuthorityState::Off,
+        revision: Some(3),
+        root: Some(RootContext {
+            installation_id: Uuid::from_u128(1),
+            epoch: 0,
+            generation: 0,
+        }),
+    };
+    let encoded = Response::Observed(snapshot.clone())
+        .encode(observed.id)
+        .unwrap();
+    assert!(
+        matches!(response(&observed, encoded.as_bytes(), &owner()).unwrap(), Response::Observed(value) if value == snapshot)
+    );
+    let encoded = Response::Observed(AuthoritySnapshot {
+        state: AuthorityState::Active,
+        ..snapshot
+    })
+    .encode(observed.id)
+    .unwrap();
+    assert!(matches!(
+        response(&observed, encoded.as_bytes(), &owner()),
+        Err(WireError::Malformed)
+    ));
 }

@@ -30,7 +30,23 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         return Err("runtime desktop and agent must use distinct installed images".into());
     }
     let service_image = Arc::new(verified(&image, expected)?);
-    let installation_id = uuid::Uuid::new_v4();
+    let generations = cfw_windows_engine::WindowsEngineGenerationStore::new(
+        name.into(),
+        Arc::clone(&service_image),
+    );
+    let independent_store = cfw_windows_engine::WindowsEngineGenerationStore::new(
+        name.into(),
+        Arc::clone(&service_image),
+    );
+    let initial_lineage = generations.load_lineage().map_err(|e| e.to_string())?;
+    if initial_lineage.generation != 0
+        || independent_store
+            .load_lineage()
+            .map_err(|e| e.to_string())?
+            != initial_lineage
+    {
+        return Err("runtime stores did not observe the same fresh SYSTEM lineage".into());
+    }
     let snapshot_directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     let proxy = WindowsSystemProxy::new(&snapshot_directory.path().join("proxy"))
         .map_err(|e| e.to_string())?;
@@ -73,11 +89,29 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
             )
             .map_err(|e| e.to_string())?;
         let controller_key = projection.clash_api();
+        let before = generations.load_lineage().map_err(|e| e.to_string())?;
+        if before.session != initial_lineage.session || before.generation != index as u64 {
+            return Err(
+                "runtime generation did not remain bound to the SYSTEM installation".into(),
+            );
+        }
+        let generation = generations
+            .reserve_generation(before.generation)
+            .map_err(|e| e.to_string())?;
+        if generation != before.generation + 1 {
+            return Err("runtime allocation skipped or reused a generation".into());
+        }
+        match independent_store.reserve_generation(before.generation) {
+            Err(cfw_windows_engine::LineageError::Conflict { expected, actual })
+                if expected == before.generation && actual == generation => {}
+            Err(error) => return Err(format!("independent store conflict mismatch: {error}")),
+            Ok(_) => return Err("independent store reused an allocated generation".into()),
+        }
         let start_request = EngineStartRequest {
             context: EngineCommandContext {
-                installation_id: installation_id.to_string(),
-                config_epoch: 1,
-                generation: index as u64 + 1,
+                installation_id: before.session.installation_id,
+                config_epoch: before.session.config_epoch,
+                generation,
             },
             mode,
             credential_audience: projection.credential_audience().clone(),

@@ -136,7 +136,11 @@ impl WindowsAuthorityJournal {
                     || cursor.committed_length().saturating_add(
                         reserve * (MAX_RECORD_PAYLOAD + codec::HEADER_BYTES) as u64,
                     ) > MAX_JOURNAL_BYTES as u64;
-                if state.transition() == JournalTransition::Prepare && needs_compaction {
+                if matches!(
+                    state.transition(),
+                    JournalTransition::Prepare | JournalTransition::ReserveGeneration
+                ) && needs_compaction
+                {
                     let generation = cursor
                         .generation()
                         .checked_add(1)

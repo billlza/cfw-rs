@@ -94,17 +94,21 @@ impl Validation {
             .map_err(|e| e.to_string())?;
         let expected = [
             (AuthorityState::Off, 1, None),
-            (AuthorityState::Preparing, 2, None),
-            (AuthorityState::Preparing, 2, Some(Rejection::Ticket)),
-            (AuthorityState::Starting, 3, None),
-            (AuthorityState::Active, 4, None),
-            (AuthorityState::Active, 4, None),
-            (AuthorityState::Active, 4, None),
-            (AuthorityState::Stopping, 5, None),
-            (AuthorityState::Stopping, 5, Some(Rejection::Identity)),
-            (AuthorityState::Stopping, 5, None),
-            (AuthorityState::Stopping, 5, None),
-            (AuthorityState::Stopping, 5, None),
+            (AuthorityState::Off, 1, None),
+            (AuthorityState::Off, 2, None),
+            (AuthorityState::Off, 2, Some(Rejection::Stale)),
+            (AuthorityState::Preparing, 3, None),
+            (AuthorityState::Preparing, 3, Some(Rejection::Ticket)),
+            (AuthorityState::Starting, 4, None),
+            (AuthorityState::Starting, 4, Some(Rejection::Identity)),
+            (AuthorityState::Active, 5, None),
+            (AuthorityState::Active, 5, None),
+            (AuthorityState::Active, 5, None),
+            (AuthorityState::Stopping, 6, None),
+            (AuthorityState::Stopping, 6, Some(Rejection::Identity)),
+            (AuthorityState::Stopping, 6, None),
+            (AuthorityState::Stopping, 6, None),
+            (AuthorityState::Stopping, 6, None),
         ];
         let (phase, revision, rejection) = expected
             .get(scoped.requests)
@@ -114,6 +118,7 @@ impl Validation {
         match (reply.rejection(), rejection) {
             (None, None)
             | (Some(AuthorityError::Ticket), Some(Rejection::Ticket))
+            | (Some(AuthorityError::Stale), Some(Rejection::Stale))
             | (Some(AuthorityError::Identity), Some(Rejection::Identity)) => {}
             (Some(error), _) => {
                 return Err(format!("unexpected native authority rejection: {error}"));
@@ -130,7 +135,7 @@ impl Validation {
             return Err("duplicate wire fixture finish".into());
         }
         let scoped = self.scoped.as_mut().ok_or("missing wire fixture scope")?;
-        if scoped.requests != 12 {
+        if scoped.requests != 16 {
             return Err("wire fixture command sequence incomplete".into());
         }
         let controller = scoped
@@ -138,16 +143,16 @@ impl Validation {
             .as_mut()
             .ok_or("missing wire fixture controller")?;
         assert_eq!(controller.snapshot().state, AuthorityState::Stopping);
-        assert_eq!(controller.snapshot().revision, Some(5));
+        assert_eq!(controller.snapshot().revision, Some(6));
         let lease = controller
             .cleanup_target()
             .ok_or("stopped report erased native ownership")?
             .lease_id;
         controller
-            .reconcile_off(CleanupEvidence::for_validation(5, Some(lease), true))
+            .reconcile_off(CleanupEvidence::for_validation(6, Some(lease), true))
             .map_err(|e| e.to_string())?;
         assert_eq!(controller.snapshot().state, AuthorityState::Off);
-        assert_eq!(controller.snapshot().revision, Some(6));
+        assert_eq!(controller.snapshot().revision, Some(7));
         scoped.cleanup()?;
         self.complete = true;
         let mut output = std::fs::OpenOptions::new()
@@ -189,19 +194,37 @@ pub(super) fn run(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         AuthorityState::Off,
         1,
     )?;
+    let Response::Lineage(initial) = request(&mut channel, Command::LoadLineage)? else {
+        return Err("authority did not publish its installation lineage".into());
+    };
+    assert_eq!(initial.generation, 0);
+    let Response::Lineage(allocated) =
+        request(&mut channel, Command::ReserveGeneration(initial.clone()))?
+    else {
+        return Err("authority did not reserve the next generation".into());
+    };
+    assert_eq!(allocated.generation, 1);
+    match channel.request(
+        Request::new(Command::ReserveGeneration(initial)).map_err(|e| e.to_string())?,
+        Instant::now() + LIMIT,
+    ) {
+        Err(WireError::Rejected(Rejection::Stale)) => {}
+        Err(error) => return Err(format!("stale allocation rejection: {error}")),
+        Ok(_) => return Err("stale generation allocation was accepted".into()),
+    }
     let Response::Prepared(prepared) = request(
         &mut channel,
         Command::Prepare(PrepareRequest {
             root: RootContext {
-                installation_id: uuid::Uuid::new_v4(),
-                epoch: 1,
-                generation: 1,
+                installation_id: allocated.installation_id,
+                epoch: allocated.config_epoch,
+                generation: allocated.generation,
             },
             operation_id: uuid::Uuid::new_v4(),
             mode: AuthorityMode::SystemProxy,
             config_sha256: [3; 32],
             identity_sha256: [4; 32],
-            expected_revision: 1,
+            expected_revision: 2,
         }),
     )?
     else {
@@ -223,11 +246,11 @@ pub(super) fn run(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
             &mut channel,
             Command::BeginStop(StopRequest {
                 context,
-                expected_revision: 5,
+                expected_revision: 6,
             }),
         )?,
         AuthorityState::Stopping,
-        5,
+        6,
     )?;
     drop(channel);
     let mut finish = ServiceChannel::connect(name, ServiceClientRole::Desktop, service_image)
@@ -295,8 +318,16 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
         return Err("agent did not receive a runtime binding".into());
     };
     assert_eq!(bound.context(), &context);
-    assert_eq!(bound.committed_revision(), 3);
+    assert_eq!(bound.committed_revision(), 4);
     drop((bound, bytes));
+    match channel.request(
+        Request::new(Command::LoadLineage).map_err(|e| e.to_string())?,
+        Instant::now() + LIMIT,
+    ) {
+        Err(WireError::Rejected(Rejection::Identity)) => {}
+        Err(error) => return Err(format!("agent lineage role rejection: {error}")),
+        Ok(_) => return Err("agent acquired Desktop lineage access".into()),
+    }
     let ready = ReadyReport {
         context: context.clone(),
         runtime_digest: context.operation.identity_sha256,
@@ -307,17 +338,17 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     status(
         request(&mut channel, Command::Ready(ready.clone()))?,
         AuthorityState::Active,
-        4,
+        5,
     )?;
     status(
         request(&mut channel, Command::Heartbeat(context.clone()))?,
         AuthorityState::Active,
-        4,
+        5,
     )?;
     status(
         request(&mut channel, Command::Ready(ready))?,
         AuthorityState::Active,
-        4,
+        5,
     )?;
     status(
         request(
@@ -331,7 +362,7 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
             }),
         )?,
         AuthorityState::Stopping,
-        5,
+        6,
     )?;
     drop(channel);
     let mut reconnected =
@@ -348,12 +379,12 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     status(
         request(&mut reconnected, Command::Observe)?,
         AuthorityState::Stopping,
-        5,
+        6,
     )?;
     Ok(())
 }
 fn report() -> serde_json::Value {
-    serde_json::json!({"success":true,"versioned_requests":12,"typed_rejections":2,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"versioned_requests":16,"typed_rejections":4,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
 }
 pub(super) fn require_report(root: &Path) -> Result<()> {
     let bytes =

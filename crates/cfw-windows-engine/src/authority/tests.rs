@@ -64,14 +64,20 @@ fn input(revision: u64, generation: u64) -> PrepareRequest {
         expected_revision: revision,
     }
 }
+fn allocate(value: &mut Machine, host: &Peer) -> u64 {
+    let expected = value.lineage().unwrap();
+    value.reserve_generation(host, &expected).unwrap();
+    value.revision()
+}
 fn prepared(now: Instant) -> (Machine, Peer, Peer, LeaseContext, Ticket) {
     let mut value = off();
     let host = peer(Role::Desktop);
     let runtime = peer(Role::UserAgent);
+    let revision = allocate(&mut value, &host);
     let ticket = Ticket::for_test([7; 32]);
     let context = value
         .prepare(
-            &input(1, 1),
+            &input(revision, 1),
             &host,
             Uuid::from_u128(8),
             ticket.digest(),
@@ -153,27 +159,28 @@ fn recovery_and_incomplete_cleanup_never_bootstrap_permission() {
 
 #[test]
 fn preparation_has_a_closed_revision_installation_and_generation_domain() {
-    let value = off();
+    let mut value = off();
     let host = peer(Role::Desktop);
+    let revision = allocate(&mut value, &host);
     let token = Ticket::for_test([1; 32]);
     let now = Instant::now();
     for request in [
         PrepareRequest {
-            expected_revision: 2,
-            ..input(1, 1)
+            expected_revision: revision + 1,
+            ..input(revision, 1)
         },
         PrepareRequest {
             root: RootContext {
                 installation_id: Uuid::from_u128(9),
-                ..input(1, 1).root
+                ..input(revision, 1).root
             },
-            ..input(1, 1)
+            ..input(revision, 1)
         },
         PrepareRequest {
             operation_id: Uuid::nil(),
-            ..input(1, 1)
+            ..input(revision, 1)
         },
-        input(1, 0),
+        input(revision, 0),
     ] {
         let mut candidate = value.clone();
         assert!(
@@ -187,7 +194,7 @@ fn preparation_has_a_closed_revision_installation_and_generation_domain() {
     let mut candidate = value.clone();
     assert!(matches!(
         candidate.prepare(
-            &input(1, 1),
+            &input(revision, 1),
             &peer(Role::UserAgent),
             Uuid::from_u128(8),
             token.digest(),
@@ -196,13 +203,19 @@ fn preparation_has_a_closed_revision_installation_and_generation_domain() {
         Err(AuthorityError::Identity)
     ));
     let context = candidate
-        .prepare(&input(1, 1), &host, Uuid::from_u128(8), token.digest(), now)
+        .prepare(
+            &input(revision, 1),
+            &host,
+            Uuid::from_u128(8),
+            token.digest(),
+            now,
+        )
         .unwrap();
     assert_eq!(context.operation.owner, host.owner);
-    assert_eq!(context.operation.prepared_revision, 2);
+    assert_eq!(context.operation.prepared_revision, revision + 1);
     assert!(matches!(
         candidate.prepare(
-            &input(2, 2),
+            &input(revision + 1, 2),
             &host,
             Uuid::from_u128(10),
             token.digest(),
@@ -268,7 +281,7 @@ fn new_connections_of_the_same_user_cannot_inherit_views_or_commands() {
     let new_runtime = peer(Role::UserAgent);
     assert!(value.lease_for_owner(&new_host).is_err());
     assert!(value.lease_for_owner(&new_runtime).is_err());
-    assert!(value.begin_stop(&new_host, &context, 4, now).is_err());
+    assert!(value.begin_stop(&new_host, &context, 5, now).is_err());
     assert!(value.heartbeat(&new_runtime, &context, now).is_err());
     assert_eq!(value.lease_for_owner(&host).unwrap(), context);
     assert_eq!(value.lease_for_owner(&runtime).unwrap(), context);
@@ -295,13 +308,13 @@ fn readiness_is_exact_and_only_identical_replay_is_idempotent() {
     bad.observed_millis = 0;
     assert!(value.ready(&runtime, &bad, now).is_err());
     value.ready(&runtime, &good, now).unwrap();
-    assert_eq!(value.revision(), 4);
+    assert_eq!(value.revision(), 5);
     value.ready(&runtime, &good, now).unwrap();
-    assert_eq!(value.revision(), 4);
+    assert_eq!(value.revision(), 5);
     bad = good.clone();
     bad.observed_millis = 2;
     assert!(value.ready(&runtime, &bad, now).is_err());
-    assert_eq!(value.revision(), 4);
+    assert_eq!(value.revision(), 5);
 }
 
 #[test]
@@ -309,13 +322,14 @@ fn tunnel_policy_needs_a_distinct_worker_and_bounded_packet_evidence() {
     let now = Instant::now();
     let mut value = off();
     let host = peer(Role::Desktop);
+    let revision = allocate(&mut value, &host);
     let worker = peer(Role::TunnelWorker);
     let token = Ticket::for_test([7; 32]);
     let context = value
         .prepare(
             &PrepareRequest {
                 mode: AuthorityMode::Tunnel,
-                ..input(1, 1)
+                ..input(revision, 1)
             },
             &host,
             Uuid::from_u128(8),
@@ -345,12 +359,12 @@ fn tunnel_policy_needs_a_distinct_worker_and_bounded_packet_evidence() {
 fn stop_replays_do_not_reactivate_or_extend_its_independent_deadline() {
     let now = Instant::now();
     let (mut value, host, runtime, context) = active(now);
-    value.begin_stop(&host, &context, 4, now).unwrap();
-    assert_eq!(value.revision(), 5);
-    value.begin_stop(&host, &context, 4, now).unwrap();
     value.begin_stop(&host, &context, 5, now).unwrap();
-    assert_eq!(value.revision(), 5);
-    assert!(value.begin_stop(&host, &context, 3, now).is_err());
+    assert_eq!(value.revision(), 6);
+    value.begin_stop(&host, &context, 5, now).unwrap();
+    value.begin_stop(&host, &context, 6, now).unwrap();
+    assert_eq!(value.revision(), 6);
+    assert!(value.begin_stop(&host, &context, 4, now).is_err());
     assert!(value.ready(&runtime, &report(&context), now).is_err());
     value
         .heartbeat(&runtime, &context, now + Duration::from_secs(4))
@@ -374,34 +388,16 @@ fn spontaneous_owner_stop_still_requires_independent_scope_bound_cleanup() {
         .stopped(&runtime, &stopped_report(&context), now)
         .unwrap();
     assert_eq!(value.phase(), AuthorityState::Stopping);
-    assert_eq!(value.revision(), 5);
+    assert_eq!(value.revision(), 6);
     value
         .stopped(&runtime, &stopped_report(&context), now)
         .unwrap();
-    assert_eq!(value.revision(), 5);
-    assert!(
-        value
-            .reconcile(&CleanupEvidence::for_validation(
-                5,
-                Some(Uuid::from_u128(999)),
-                true
-            ))
-            .is_err()
-    );
-    value
-        .reconcile(&CleanupEvidence::for_validation(
-            5,
-            Some(context.lease_id),
-            false,
-        ))
-        .unwrap();
-    assert_eq!(value.phase(), AuthorityState::Quarantined);
     assert_eq!(value.revision(), 6);
     assert!(
         value
             .reconcile(&CleanupEvidence::for_validation(
-                5,
-                Some(context.lease_id),
+                6,
+                Some(Uuid::from_u128(999)),
                 true
             ))
             .is_err()
@@ -410,18 +406,36 @@ fn spontaneous_owner_stop_still_requires_independent_scope_bound_cleanup() {
         .reconcile(&CleanupEvidence::for_validation(
             6,
             Some(context.lease_id),
+            false,
+        ))
+        .unwrap();
+    assert_eq!(value.phase(), AuthorityState::Quarantined);
+    assert_eq!(value.revision(), 7);
+    assert!(
+        value
+            .reconcile(&CleanupEvidence::for_validation(
+                6,
+                Some(context.lease_id),
+                true
+            ))
+            .is_err()
+    );
+    value
+        .reconcile(&CleanupEvidence::for_validation(
+            7,
+            Some(context.lease_id),
             true,
         ))
         .unwrap();
     assert_eq!(value.phase(), AuthorityState::Off);
-    assert_eq!(value.revision(), 7);
+    assert_eq!(value.revision(), 8);
     assert!(value.context().is_none());
     let host = peer(Role::Desktop);
     let token = Ticket::for_test([1; 32]);
     assert!(
         value
             .prepare(
-                &input(7, 1),
+                &input(8, 1),
                 &host,
                 Uuid::from_u128(18),
                 token.digest(),
@@ -429,9 +443,10 @@ fn spontaneous_owner_stop_still_requires_independent_scope_bound_cleanup() {
             )
             .is_err()
     );
+    allocate(&mut value, &host);
     value
         .prepare(
-            &input(7, 2),
+            &input(9, 2),
             &host,
             Uuid::from_u128(18),
             token.digest(),
@@ -450,7 +465,7 @@ fn unclaimed_preparation_can_finish_but_its_disk_record_restores_no_proof() {
         ticket.expose(|bytes| value.bind(&runtime, &context, bytes, expires)),
         Err(AuthorityError::Expired)
     ));
-    value.abort_prepared(None, 2, expires).unwrap();
+    value.abort_prepared(None, 3, expires).unwrap();
     let abort = value.metadata().unwrap().clone();
     assert_eq!(abort.transition(), JournalTransition::AbortPrepared);
     let mut restarted = recovered(Some(abort));
@@ -458,7 +473,7 @@ fn unclaimed_preparation_can_finish_but_its_disk_record_restores_no_proof() {
     assert!(restarted.finish_unbound_abort().is_err());
     value.finish_unbound_abort().unwrap();
     assert_eq!(value.phase(), AuthorityState::Off);
-    assert_eq!(value.revision(), 4);
+    assert_eq!(value.revision(), 5);
     assert!(value.context().is_none());
 }
 
@@ -482,7 +497,7 @@ fn uncertainty_erases_live_authorization_and_never_relabels_an_old_revision_curr
     assert_eq!(value.snapshot().revision, None);
     let restarted = recovered(Some(metadata));
     assert!(restarted.durable_known());
-    assert_eq!(restarted.snapshot().revision, Some(2));
+    assert_eq!(restarted.snapshot().revision, Some(3));
     assert_eq!(restarted.phase(), AuthorityState::Recovering);
     assert!(restarted.context().is_none());
 }
@@ -513,4 +528,158 @@ fn only_the_bound_runtime_can_renew_liveness_and_a_clock_regression_is_an_error(
             .ready(&runtime, &report(&context), now + Duration::from_secs(6))
             .is_err()
     );
+}
+
+#[test]
+fn system_lineage_enrollment_and_global_cas_do_not_bootstrap_runtime_permission() {
+    let mut value = recovered(None);
+    value.enroll(Uuid::from_u128(1)).unwrap();
+    let first = value.lineage().unwrap();
+    assert_eq!(first.generation, 0);
+    assert_eq!(first.config_epoch, 1);
+    assert_eq!(value.phase(), AuthorityState::Recovering);
+    let host = peer(Role::Desktop);
+    assert!(matches!(
+        value.reserve_generation(&host, &first),
+        Err(AuthorityError::Recovering)
+    ));
+    value
+        .reconcile(&CleanupEvidence::for_validation(1, None, true))
+        .unwrap();
+    let next = value.reserve_generation(&host, &first).unwrap();
+    assert_eq!(next.generation, 1);
+    assert_eq!(value.phase(), AuthorityState::Off);
+    assert!(value.context().is_none());
+    let before = value.snapshot();
+    assert!(matches!(
+        value.reserve_generation(&host, &first),
+        Err(AuthorityError::Stale)
+    ));
+    assert!(matches!(
+        value.reserve_generation(&peer(Role::UserAgent), &next),
+        Err(AuthorityError::Identity)
+    ));
+    assert_eq!(value.snapshot(), before);
+    // Different recorded accounts share the allocator. Native admission still
+    // separately decides which actual console principal may call this policy.
+    let mut another = peer(Role::Desktop);
+    let mut claim = serde_json::to_value(&another.owner).unwrap();
+    claim["sid"][8] = serde_json::json!(22);
+    claim["authentication_id"] = serde_json::json!(100);
+    another.owner = serde_json::from_value(claim).unwrap();
+    let second = value.reserve_generation(&another, &next).unwrap();
+    assert_eq!(second.installation_id, first.installation_id);
+    assert_eq!(second.generation, 2);
+    assert!(value.context().is_none());
+}
+
+#[test]
+fn unallocated_consumed_or_superseded_generations_cannot_prepare() {
+    let mut value = off();
+    let host = peer(Role::Desktop);
+    let token = Ticket::for_test([7; 32]);
+    let now = Instant::now();
+    assert!(matches!(
+        value.prepare(&input(1, 1), &host, Uuid::from_u128(8), token.digest(), now),
+        Err(AuthorityError::Replay)
+    ));
+    allocate(&mut value, &host);
+    let revision = allocate(&mut value, &host);
+    for generation in [1, 3] {
+        assert!(matches!(
+            value.prepare(
+                &input(revision, generation),
+                &host,
+                Uuid::from_u128(8),
+                token.digest(),
+                now
+            ),
+            Err(AuthorityError::Replay)
+        ));
+    }
+    let context = value
+        .prepare(
+            &input(revision, 2),
+            &host,
+            Uuid::from_u128(8),
+            token.digest(),
+            now,
+        )
+        .unwrap();
+    value
+        .abort_prepared(Some(&host), context.operation.prepared_revision, now)
+        .unwrap();
+    value.finish_unbound_abort().unwrap();
+    assert!(matches!(
+        value.prepare(
+            &input(value.revision(), 2),
+            &host,
+            Uuid::from_u128(9),
+            token.digest(),
+            now
+        ),
+        Err(AuthorityError::Replay)
+    ));
+    allocate(&mut value, &host);
+    let checkpoint = value.metadata().unwrap().checkpoint().unwrap();
+    let mut restarted = recovered(Some(checkpoint));
+    assert_eq!(restarted.lineage().unwrap().generation, 3);
+    let revision = restarted.revision();
+    restarted
+        .reconcile(&CleanupEvidence::for_validation(revision, None, false))
+        .unwrap();
+    assert_eq!(restarted.phase(), AuthorityState::Quarantined);
+    assert_eq!(restarted.metadata().unwrap().allocated_generation(), 3);
+    let revision = restarted.revision();
+    restarted
+        .reconcile(&CleanupEvidence::for_validation(revision, None, true))
+        .unwrap();
+    assert_eq!(restarted.lineage().unwrap().generation, 3);
+    assert_eq!(
+        restarted
+            .reserve_generation(&host, &restarted.lineage().unwrap())
+            .unwrap()
+            .generation,
+        4
+    );
+}
+
+#[test]
+fn generation_allocation_cannot_change_an_active_lease_or_recover_unknown_publication() {
+    let (mut value, host, _, context) = active(Instant::now());
+    let before = value.snapshot();
+    let lineage = value.lineage().unwrap();
+    assert!(matches!(
+        value.reserve_generation(&host, &lineage),
+        Err(AuthorityError::LeaseConflict)
+    ));
+    assert_eq!(value.snapshot(), before);
+    assert_eq!(value.context(), Some(&context));
+    value.enter_recovery(true);
+    assert!(matches!(value.lineage(), Err(AuthorityError::Recovering)));
+    assert!(matches!(
+        value.reserve_generation(&host, &lineage),
+        Err(AuthorityError::Recovering)
+    ));
+    assert_eq!(value.snapshot().revision, None);
+}
+
+#[test]
+fn generation_exhaustion_preserves_the_committed_installation_and_counter() {
+    let mut document =
+        serde_json::to_value(AuthorityCommittedState::enrollment(Uuid::from_u128(1))).unwrap();
+    document["revision"] = serde_json::json!(2);
+    document["transition"] = serde_json::json!("reserve_generation");
+    document["allocated_generation"] = serde_json::json!(u64::MAX);
+    let state: AuthorityCommittedState = serde_json::from_value(document).unwrap();
+    let mut value = recovered(Some(state));
+    value
+        .reconcile(&CleanupEvidence::for_validation(2, None, true))
+        .unwrap();
+    let before = value.metadata().cloned();
+    assert!(matches!(
+        value.reserve_generation(&peer(Role::Desktop), &value.lineage().unwrap()),
+        Err(AuthorityError::GenerationExhausted)
+    ));
+    assert_eq!(value.metadata().cloned(), before);
 }

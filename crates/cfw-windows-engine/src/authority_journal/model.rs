@@ -67,6 +67,7 @@ impl fmt::Debug for RecordedOwner {
 pub enum JournalTransition {
     EnrollOff,
     Checkpoint,
+    ReserveGeneration,
     Prepare,
     BindOwner,
     Ready,
@@ -127,6 +128,7 @@ impl JournalOperation {
 pub struct AuthorityCommittedState {
     schema_version: u16,
     root: RootContext,
+    allocated_generation: u64,
     revision: u64,
     transition: JournalTransition,
     state: AuthorityState,
@@ -135,12 +137,13 @@ pub struct AuthorityCommittedState {
 impl AuthorityCommittedState {
     pub fn enrollment(installation_id: Uuid) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             root: RootContext {
                 installation_id,
                 epoch: 0,
                 generation: 0,
             },
+            allocated_generation: 0,
             revision: 1,
             transition: JournalTransition::EnrollOff,
             state: AuthorityState::Off,
@@ -155,7 +158,8 @@ impl AuthorityCommittedState {
         operation: Option<JournalOperation>,
     ) -> Result<Self> {
         let value = Self {
-            schema_version: 1,
+            schema_version: 2,
+            allocated_generation: root.generation,
             root,
             revision,
             transition,
@@ -167,6 +171,44 @@ impl AuthorityCommittedState {
     }
     pub fn root(&self) -> &RootContext {
         &self.root
+    }
+    /// A durable allocation is not a runtime grant. Off reservations survive
+    /// restart and compaction even when no process ever consumed them.
+    pub fn allocated_generation(&self) -> u64 {
+        self.allocated_generation
+    }
+    pub fn reserve_next_generation(&self) -> Result<Self> {
+        self.validate()?;
+        if self.state != AuthorityState::Off || self.operation.is_some() {
+            return Err(JournalValidationError::Sequence);
+        }
+        let mut next = self.clone();
+        next.allocated_generation = self
+            .allocated_generation
+            .checked_add(1)
+            .ok_or(JournalValidationError::InvalidState)?;
+        next.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(JournalValidationError::InvalidState)?;
+        next.transition = JournalTransition::ReserveGeneration;
+        next.validate_successor(self)?;
+        Ok(next)
+    }
+    pub(crate) fn transition_to(
+        &self,
+        revision: u64,
+        transition: JournalTransition,
+        state: AuthorityState,
+        operation: Option<JournalOperation>,
+    ) -> Result<Self> {
+        let mut next = self.clone();
+        next.revision = revision;
+        next.transition = transition;
+        next.state = state;
+        next.operation = operation;
+        next.validate_successor(self)?;
+        Ok(next)
     }
     pub fn revision(&self) -> u64 {
         self.revision
@@ -217,10 +259,13 @@ impl AuthorityCommittedState {
         Ok(value)
     }
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err(JournalValidationError::UnsupportedSchema);
         }
-        if self.revision == 0 {
+        if self.revision == 0
+            || self.root.installation_id.is_nil()
+            || self.allocated_generation < self.root.generation
+        {
             return Err(JournalValidationError::InvalidState);
         }
         if let Some(operation) = &self.operation {
@@ -246,10 +291,25 @@ impl AuthorityCommittedState {
                 || self.revision != 1
                 || self.state != AuthorityState::Off
                 || self.operation.is_some()
+                || self.allocated_generation != 0
             {
                 return Err(JournalValidationError::InvalidState);
             }
-        } else if self.root.epoch == 0 || self.root.generation == 0 {
+        } else if (self.root.epoch == 0 || self.root.generation == 0)
+            && (self.root.epoch != 0
+                || self.root.generation != 0
+                || self.state != AuthorityState::Off
+                || !matches!(
+                    self.transition,
+                    JournalTransition::ReserveGeneration | JournalTransition::Checkpoint
+                ))
+        {
+            return Err(JournalValidationError::InvalidState);
+        }
+        if self.operation.is_some() && self.allocated_generation != self.root.generation
+            || self.transition == JournalTransition::ReserveGeneration
+                && (self.state != AuthorityState::Off || self.allocated_generation == 0)
+        {
             return Err(JournalValidationError::InvalidState);
         }
         Ok(())
@@ -268,10 +328,22 @@ impl AuthorityCommittedState {
         }
         let before = (prior.root.epoch, prior.root.generation);
         let after = (self.root.epoch, self.root.generation);
-        if self.transition == JournalTransition::Prepare {
+        if self.transition == JournalTransition::ReserveGeneration {
+            if prior.state != AuthorityState::Off
+                || self.state != AuthorityState::Off
+                || after != before
+                || prior.allocated_generation.checked_add(1) != Some(self.allocated_generation)
+            {
+                return Err(JournalValidationError::Sequence);
+            }
+        } else if self.allocated_generation != prior.allocated_generation {
+            return Err(JournalValidationError::Sequence);
+        } else if self.transition == JournalTransition::Prepare {
             if prior.state != AuthorityState::Off
                 || self.state != AuthorityState::Preparing
                 || after <= before
+                || self.root.epoch != prior.root.epoch.max(1)
+                || self.root.generation != prior.allocated_generation
             {
                 return Err(JournalValidationError::Sequence);
             }

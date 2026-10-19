@@ -123,8 +123,9 @@ impl Machine {
         }
     }
     pub(super) fn enroll(&mut self, installation: Uuid) -> Result<()> {
-        self.require_phase_off()?;
-        if self.metadata.is_some()
+        if !matches!(self.phase, AuthorityState::Off | AuthorityState::Recovering)
+            || !self.durable_known
+            || self.metadata.is_some()
             || self.lease.is_some()
             || self.revision != 1
             || installation.is_nil()
@@ -133,6 +134,43 @@ impl Machine {
         }
         self.metadata = Some(AuthorityCommittedState::enrollment(installation));
         Ok(())
+    }
+    pub(super) fn lineage(&self) -> Result<AuthorityLineage> {
+        if !self.durable_known {
+            return Err(AuthorityError::Recovering);
+        }
+        let state = self.metadata.as_ref().ok_or(AuthorityError::Recovering)?;
+        Ok(AuthorityLineage {
+            installation_id: state.root().installation_id,
+            config_epoch: state.root().epoch.max(1),
+            generation: state.allocated_generation(),
+        })
+    }
+    pub(super) fn reserve_generation(
+        &mut self,
+        host: &Peer,
+        expected: &AuthorityLineage,
+    ) -> Result<AuthorityLineage> {
+        expected.validate()?;
+        host.live()?;
+        if host.role != Role::Desktop {
+            return Err(AuthorityError::Identity);
+        }
+        self.require_phase_off()?;
+        if &self.lineage()? != expected {
+            return Err(AuthorityError::Stale);
+        }
+        if expected.generation == u64::MAX {
+            return Err(AuthorityError::GenerationExhausted);
+        }
+        let next = self
+            .metadata
+            .as_ref()
+            .ok_or(AuthorityError::Recovering)?
+            .reserve_next_generation()?;
+        self.revision = next.revision();
+        self.metadata = Some(next);
+        self.lineage()
     }
     pub(super) fn prepare(
         &mut self,
@@ -154,6 +192,8 @@ impl Machine {
         }
         let prior = self.metadata.as_ref().ok_or(AuthorityError::Recovering)?;
         if prior.root().installation_id != input.root.installation_id
+            || input.root.epoch != prior.root().epoch.max(1)
+            || input.root.generation != prior.allocated_generation()
             || (input.root.epoch, input.root.generation)
                 <= (prior.root().epoch, prior.root().generation)
         {
@@ -235,14 +275,7 @@ impl Machine {
         } else {
             previous.operation().cloned()
         };
-        let metadata = AuthorityCommittedState::new(
-            previous.root().clone(),
-            revision,
-            kind,
-            phase,
-            operation,
-        )?;
-        metadata.validate_successor(previous)?;
+        let metadata = previous.transition_to(revision, kind, phase, operation)?;
         self.metadata = Some(metadata);
         self.revision = revision;
         self.phase = phase;

@@ -406,6 +406,9 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 
 ### 2026-10-18：协调器平台身份与 Windows 用户代次
 
+本节记录早期用户级存储及其验证。当前实现已改为下述 SYSTEM Authority 的整机代次；
+历史 Credential Manager 结果不能作为新实现的原生验收。
+
 - 共享后端显式声明 Mac 或 Windows 运行平台，协调器在 actor 启动时固定该身份。
   Windows 用户代理和 TUN 服务有独立 owner 名称；启动、恢复、持续观察按对应平台
   核对。Apple 现有 owner 的序列化名称不变。共享 UI 按封闭的运行角色呈现两平台。
@@ -937,7 +940,7 @@ SID/登录 LUID 的逐次授权检查不变，原生用例另行断言普通 Des
 Stale 拒绝允许重新观察后再试，总计最多三次；传输结果不确定、上下文错误及其他
 请求的拒绝均不重放。三项策略测试覆盖成功、次数耗尽和不可重试错误。
 原生夹具已改用该产品所有者，并要求错误服务名和过期停止请求不能消耗有效准备。
-新的监督流程尚待对应源 Windows CI；它不包含安装入口、全应用恢复、全局 Off 观察器
+监督流程由下述 `803b86d` Windows CI 核验；它不包含安装入口、全应用恢复、全局 Off 观察器
 或 Windows EngineBackend。返回 Stopping/Recovering/Quarantined 必须保留该实际状态。
 
 `5d02f17` 的首次 Windows 运行通过了九项底层引擎测试，但新 Desktop 夹具在首次
@@ -945,18 +948,42 @@ Ready 后观察 Agent PID 时失败：重新打开的句柄仅包含 SYNCHRONIZE
 [GetProcessId 所需的查询权限](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessid)。
 修复只增加 QUERY_LIMITED_INFORMATION，并将原生查询失败与“当前进程不是独立 Agent”
 区分记录。原始失败产物已按源提交和哈希保存；其中首个 LocalProxy Agent 的
-Stopped/本地清理报告成功，但完整 Desktop 运行仍未通过，修正后的原生结果待 CI。
+Stopped/本地清理报告成功，但该次完整 Desktop 运行未通过，修正后的结果见下述复验。
+
+`803b86d` 的 [Windows 复验](https://github.com/billlza/cfw-rs/actions/runs/39244731759)
+四个作业已通过，源提交、下载哈希及逐项产物回执均已回读核对。545 项 Rust、311 项 UI
+测试通过；真实 Desktop 监督路径完成两种代理模式、LAN 来源限制、原控制器认证、
+两次 Ready/Stopped、四次心跳以及代理恢复和进程退出。初始/最终全局清理仍由夹具注入。
 
 改为允许服务 peer/channel 共享已验证镜像对象的 Arc。原文件及祖先目录句柄持续
 持有，保持禁止写入/替换的原契约；每次连接的 SCM 安全描述符、配置、进程和管道
 身份仍重新读取。压力测试在原预算内固定镜像一次，256 轮都检查已停止服务；新增
-计数明确区分一次镜像固定与每轮服务观察。未放宽时限、重复次数或拒绝断言，实际
-原生性能与全部场景尚待新源 CI 验证。
+计数明确区分一次镜像固定与每轮服务观察。未放宽时限、重复次数或拒绝断言；
+`803b86d` 服务产物中已核对这 256 轮在原 45 秒预算内完成。
 
 实现核对了 [RawValue 借用解码](https://docs.rs/serde_json/latest/serde_json/value/struct.RawValue.html)
 、[CreatePipe 缓冲及阻塞语义](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createpipe)
 、[消息管道读取模式](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-type-read-and-wait-modes)
 和 [CancelIoEx 完成要求](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)。
+
+## SYSTEM Authority 整机身份与代次分配（实现中）
+
+SYSTEM 在首次打开干净日志时生成并持久化安装 UUID；服务仍处于 Recovering，直到
+独立清理证据通过。Desktop 通过已认证通道读取安装身份并原子预留下一代次，UserAgent
+没有该角色权限。普通用户各自生成 UUID 的旧代次实现已替换；旧 Credential Manager
+记录不被导入或删除。共享协调器继续要求准确的 expected generation 与 `+1` 结果。
+
+分配记录复用现有日志、独立注册表锚点和写入事务，并将 `allocated_generation` 与
+最近运行的 root 分开。只有 Off 可以分配；准备运行必须使用当前且尚未消耗的代次。
+未启动的分配同样跨重启和 checkpoint 保留。错误 CAS、溢出或写入结果不确定会显式失败，
+客户端不重放投递结果不确定的请求。Windows 开发中日志载荷升为 schema 2，旧 schema 1
+明确拒绝；没有自动重置或迁移路径，已发布的 CFM 数据协议保持原状。
+
+本地 62 项策略/协议测试及 Windows 目标全特性 Clippy 通过。原生夹具增加四个分配写入
+故障点，总故障轮次为 19；它还检查真实服务重开后的身份/代次、写入已提交但未返回成功、
+陈旧 CAS 和 UserAgent 角色拒绝。真实运行改用产品代次适配器及两个独立适配器实例。
+这些新增原生路径尚待新源 CI；并发客户端、实际会话切换、全局清理、凭据生命周期和
+Windows 后端装配仍须继续验证。
 
 ## 官方资料
 

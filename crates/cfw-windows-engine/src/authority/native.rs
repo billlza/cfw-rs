@@ -34,7 +34,7 @@ impl WindowsAuthority {
     pub fn open(root: &Path, scope: &str) -> Result<Self> {
         let journal = WindowsAuthorityJournal::open(root, scope)?;
         let machine = Machine::recovering(journal.recover()?)?;
-        Ok(Self {
+        let mut authority = Self {
             journal,
             machine,
             owner_session: None,
@@ -43,7 +43,15 @@ impl WindowsAuthority {
             cleanup_context: None,
             #[cfg(feature = "native-service-validation")]
             next_fault: None,
-        })
+        };
+        if authority.machine.metadata().is_none() {
+            let mut initial = authority.machine.clone();
+            // SYSTEM chooses the installation once, before serving any client.
+            // Enrollment preserves Recovering until independent cleanup passes.
+            initial.enroll(uuid::Uuid::new_v4())?;
+            authority.commit(initial)?;
+        }
+        Ok(authority)
     }
     pub fn snapshot(&self) -> AuthoritySnapshot {
         self.machine.snapshot()
@@ -156,6 +164,27 @@ impl WindowsAuthority {
         self.commit(candidate)?;
         Ok(self.snapshot())
     }
+    pub fn lineage(&self, authorization: &ServicePeerAuthorization) -> Result<AuthorityLineage> {
+        let peer = self.admit(authorization, Instant::now() + ADMISSION)?;
+        if peer.role != Role::Desktop {
+            return Err(AuthorityError::Identity);
+        }
+        self.machine.lineage()
+    }
+    pub fn reserve_generation(
+        &mut self,
+        authorization: &ServicePeerAuthorization,
+        expected: &AuthorityLineage,
+    ) -> Result<AuthorityLineage> {
+        let deadline = Instant::now() + ADMISSION;
+        let peer = self.admit(authorization, deadline)?;
+        self.advance_timers(Instant::now())?;
+        let mut candidate = self.machine.clone();
+        let allocated = candidate.reserve_generation(&peer, expected)?;
+        self.commit(candidate)?;
+        self.after_publication(authorization, deadline)?;
+        Ok(allocated)
+    }
     pub fn prepare(
         &mut self,
         authorization: &ServicePeerAuthorization,
@@ -170,12 +199,6 @@ impl WindowsAuthority {
         self.advance_timers(Instant::now())?;
         if input.expected_revision != self.machine.revision() {
             return Err(AuthorityError::Stale);
-        }
-        if self.machine.metadata().is_none() {
-            let mut candidate = self.machine.clone();
-            candidate.enroll(input.root.installation_id)?;
-            self.commit(candidate)?;
-            self.after_publication(authorization, deadline)?;
         }
         let ticket = Ticket::generate()?;
         let process = authorization.process().retain()?;

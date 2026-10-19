@@ -7,6 +7,8 @@ mod dispatch;
 mod machine;
 #[cfg(windows)]
 mod native;
+#[cfg(windows)]
+mod runtime_job;
 mod secret;
 mod types;
 pub mod wire;
@@ -16,6 +18,12 @@ pub use client::AuthorityChannel;
 pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
 pub use native::WindowsAuthority;
+#[cfg(windows)]
+pub use runtime_job::{RuntimeJobError, RuntimeProcessObservation, RuntimeProcessState};
+#[cfg(all(windows, feature = "native-service-validation"))]
+pub use runtime_job::{
+    runtime_job_name_for_validation, validate_runtime_job_failures_for_validation,
+};
 pub use types::{
     AuthorityLineage, AuthoritySnapshot, CleanupEvidence, LeaseContext, OperationContext,
     PrepareRequest, PreparedTicket, ReadyReport, RecordedRuntimeScope, RuntimeStartAuthorization,
@@ -57,6 +65,9 @@ pub enum AuthorityError {
     #[cfg(windows)]
     #[error("Windows authority owner observation: {0}")]
     Process(#[from] crate::PeerIdentityError),
+    #[cfg(windows)]
+    #[error("Windows authority runtime observation: {0}")]
+    RuntimeJob(#[from] RuntimeJobError),
     #[cfg(windows)]
     #[error("Windows authority system entropy failed with status {0:#x}")]
     Entropy(i32),

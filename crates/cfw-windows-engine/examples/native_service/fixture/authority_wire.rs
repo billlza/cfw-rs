@@ -5,7 +5,7 @@ use super::*;
 use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, RootContext};
 use cfw_windows_engine::authority::{
     AuthorityChannel, AuthorityError, AuthorizedReply, CleanupEvidence, PrepareRequest,
-    ReadyReport, StoppedReport, WindowsAuthority,
+    ReadyReport, RuntimeProcessObservation, RuntimeProcessState, StoppedReport, WindowsAuthority,
     wire::{
         BindRequest, Command, MAX_MESSAGE_BYTES, Rejection, Request, Response, StopRequest,
         TicketMaterial, WireError,
@@ -29,6 +29,8 @@ pub(super) struct Scoped {
 }
 impl Scoped {
     pub(super) fn new() -> Result<Self> {
+        cfw_windows_engine::authority::validate_runtime_job_failures_for_validation()
+            .map_err(|e| e.to_string())?;
         let scope = format!("CFW-authority-wire-{}", uuid::Uuid::new_v4());
         let path = authority_journal::root()?.join(&scope);
         let mut value = Self {
@@ -51,6 +53,26 @@ impl Scoped {
         self.cleaned = true;
         self.controller = None;
         authority_journal::cleanup(&self.path, &self.scope)
+    }
+    pub(super) fn verify_reopen_with_live_runtime(
+        &mut self,
+        minimum: u32,
+    ) -> Result<RuntimeProcessObservation> {
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("missing runtime controller")?;
+        controller
+            .release_runtime_job_handle_for_validation()
+            .map_err(|e| e.to_string())?;
+        // All service-owned Job handles are closed. Reopen the journal and
+        // native object without reconstructing a live lease or trusting a PID.
+        let mut recovered =
+            WindowsAuthority::open(&self.path, &self.scope).map_err(|e| e.to_string())?;
+        assert_eq!(recovered.snapshot().state, AuthorityState::Recovering);
+        let observation = require_live_runtime(&mut recovered, minimum)?;
+        assert!(recovered.lease_owner().is_none());
+        Ok(observation)
     }
 }
 impl Drop for Scoped {
@@ -132,6 +154,17 @@ impl Validation {
             }
         }
         scoped.requests += 1;
+        if scoped.requests == 10 {
+            scoped.verify_reopen_with_live_runtime(1)?;
+        } else if scoped.requests == 18 {
+            require_live_runtime(
+                scoped
+                    .controller
+                    .as_mut()
+                    .ok_or("missing stopped controller")?,
+                1,
+            )?;
+        }
         Ok(reply)
     }
     pub(super) fn finish(&mut self) -> Result<()> {
@@ -369,6 +402,7 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     };
     assert_eq!(bound.context(), &context);
     assert_eq!(bound.committed_revision(), 4);
+    require_job_access_denied(&context.operation.root)?;
     drop((bound, bytes));
     match channel.request(
         Request::new(Command::LoadLineage).map_err(|e| e.to_string())?,
@@ -441,8 +475,85 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
     )?;
     Ok(())
 }
+pub(super) fn require_live_runtime(
+    controller: &mut WindowsAuthority,
+    minimum: u32,
+) -> Result<RuntimeProcessObservation> {
+    let observed = controller
+        .observe_runtime_processes()
+        .map_err(|e| e.to_string())?;
+    let cfw_windows_engine::authority::RuntimeProcessState::Accounting { active, total } =
+        observed.state()
+    else {
+        return Err("live runtime job was not independently observed".into());
+    };
+    if active < minimum || total < minimum || observed.processes_retired() {
+        return Err(format!(
+            "runtime job missing members: active={active}, total={total}, minimum={minimum}"
+        ));
+    }
+    let snapshot = controller.snapshot();
+    let lease = controller
+        .recovery_target()
+        .and_then(|s| s.operation())
+        .map(|o| o.lease_id());
+    assert!(matches!(
+        controller.reconcile_off(CleanupEvidence::for_validation(
+            snapshot.revision.ok_or("unknown job fixture revision")?,
+            lease,
+            true
+        )),
+        Err(AuthorityError::CleanupUnproven)
+    ));
+    assert_eq!(controller.snapshot(), snapshot);
+    Ok(observed)
+}
+pub(super) fn process_report(
+    stage: &str,
+    observation: &RuntimeProcessObservation,
+) -> serde_json::Value {
+    let state = match observation.state() {
+        RuntimeProcessState::NoRuntimeRoot => serde_json::json!({"kind":"no_runtime_root"}),
+        RuntimeProcessState::JobAbsent => serde_json::json!({"kind":"job_absent"}),
+        RuntimeProcessState::Accounting { active, total } => {
+            serde_json::json!({"kind":"accounting","active":active,"total":total})
+        }
+    };
+    serde_json::json!({"stage":stage,"root":observation.root(),"state":state,"processes_retired":observation.processes_retired()})
+}
+pub(super) fn require_job_access_denied(root: &RootContext) -> Result<()> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::ERROR_ACCESS_DENIED,
+        System::{
+            JobObjects::OpenJobObjectW,
+            SystemServices::{JOB_OBJECT_ASSIGN_PROCESS, JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE},
+        },
+    };
+    let name = cfw_windows_engine::authority::runtime_job_name_for_validation(root)
+        .map_err(|e| e.to_string())?;
+    for access in [
+        JOB_OBJECT_QUERY,
+        JOB_OBJECT_ASSIGN_PROCESS,
+        JOB_OBJECT_TERMINATE,
+    ] {
+        let raw = unsafe { OpenJobObjectW(access, 0, wide(&name).as_ptr()) };
+        if !raw.is_null() {
+            drop(unsafe { OwnedHandle::from_raw_handle(raw) });
+            return Err(format!(
+                "ordinary UserAgent obtained service job rights {access:#x}"
+            ));
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+            return Err(error(
+                "ordinary UserAgent job access was not explicitly denied",
+            ));
+        }
+    }
+    Ok(())
+}
 fn report() -> serde_json::Value {
-    serde_json::json!({"success":true,"versioned_requests":20,"typed_rejections":7,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"recorded_runtime_scope_validated":true,"recorded_scope_observer_control_rejected":true,"user_agent_recorded_scope_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"versioned_requests":20,"typed_rejections":7,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"recorded_runtime_scope_validated":true,"recorded_scope_observer_control_rejected":true,"user_agent_recorded_scope_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"live_processes_block_reconcile":true,"job_reopened_after_all_service_handles_closed":true,"ordinary_agent_job_rights_denied":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
 }
 pub(super) fn require_report(root: &Path) -> Result<()> {
     let bytes =

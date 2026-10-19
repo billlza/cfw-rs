@@ -87,6 +87,7 @@ pub(super) fn run(
             if ready.authority().state != AuthorityState::Active || ready.context() != &context {
                 return Err("runtime Ready did not match Active operation".into());
             }
+            authority_wire::require_job_access_denied(&context.operation.root)?;
             progress::publish(
                 image.parent().ok_or("missing runtime fixture parent")?,
                 name,

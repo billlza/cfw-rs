@@ -1090,6 +1090,35 @@ SCM 用例、两项诊断夹具测试和九项原生引擎测试继续通过。�
 Ready/Stopped、十次心跳和一次预期的错误绑定拒绝。全局清理仍为夹具注入，完整
 应用工厂、恢复及发布验收未被这些组件结果替代。
 
+## SYSTEM 独立运行进程观察
+
+服务在提交 Bind、发出运行授权前，把已认证且仍然存活的 UserAgent 纳入按完整
+installation/epoch/generation 命名的 Job。引擎随后自动继承父 Job，并继续加入原有
+本地清理 Job；服务保留的句柄只有查询和读取安全描述符权限。服务 Job 不设置
+kill-on-close、breakaway 或 UI 限制，避免服务退出打断先恢复代理、再停止引擎的顺序。
+
+`observe_runtime_processes` 从已知的持久 root 重新打开内核对象，核对 SYSTEM 所有者、
+受保护且仅含 SYSTEM 的 DACL、Job 限制和进程计数。仅明确的对象不存在可表示
+JobAbsent；权限、对象类型、描述符、查询及未知日志状态均保留为错误。
+`reconcile_off` 增加独立进程门禁：即使夹具注入完整 CleanupEvidence，只要 Agent 或
+其子进程仍存活，也拒绝 Off。正常运行授权之前任何部分赋值失败进入恢复状态。
+
+Windows 开发协议升为 v2、日志载荷升为 schema 4。v1 服务及 schema 3 等旧日志不能
+证明运行进程已加入服务 Job，故明确拒绝，不自动迁移或重置。CFM 已发布协议不变。
+
+原生夹具增加同名对象、错误对象类型、异常 ACL、breakaway 配置和只读句柄的反例；
+真实 LocalProxy/SystemProxy 路径记录 Ready、Stopped、退出后的原生进程观察，关闭
+全部服务 Job 句柄后重新打开日志和内核对象，验证普通 UserAgent 无权查询、赋值或
+终止服务 Job。该场景模拟句柄及控制器丢失，不等同于完整 SCM 重启验收。
+本地 74 项可移植测试及 Windows 全目标、全特性 Clippy 已通过；新增原生路径仍待
+该提交的托管 Windows CI 验证。
+
+进程退出只是全局清理的一个条件。独立代理恢复、TUN/端点观察与生产 CleanupEvidence
+构造尚未完成；运行夹具仍明确注入剩余全局清理证据，不能据此称完整应用或发布可用。
+
+实现依据 [Job 生命周期](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw)
+和 [嵌套 Job 继承及计数](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。

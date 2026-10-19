@@ -1,6 +1,7 @@
 use super::{
     AuthorityError, Result,
     machine::{Machine, TimerAction},
+    runtime_job::{self, RuntimeJob},
     secret::Ticket,
     types::*,
 };
@@ -26,6 +27,7 @@ pub struct WindowsAuthority {
     owner_session: Option<NativeUserSession>,
     host_process: Option<NativePeerProcess>,
     runtime_process: Option<NativePeerProcess>,
+    runtime_job: Option<RuntimeJob>,
     cleanup_context: Option<LeaseContext>,
     #[cfg(feature = "native-service-validation")]
     next_fault: Option<crate::authority_journal::JournalFaultPoint>,
@@ -40,6 +42,7 @@ impl WindowsAuthority {
             owner_session: None,
             host_process: None,
             runtime_process: None,
+            runtime_job: None,
             cleanup_context: None,
             #[cfg(feature = "native-service-validation")]
             next_fault: None,
@@ -150,6 +153,7 @@ impl WindowsAuthority {
             self.owner_session = None;
             self.host_process = None;
             self.runtime_process = None;
+            self.runtime_job = None;
             self.cleanup_context = None;
         }
         Ok(())
@@ -159,10 +163,28 @@ impl WindowsAuthority {
         if !self.machine.durable_known() {
             return Err(AuthorityError::Recovering);
         }
+        if !self.observe_runtime_processes()?.processes_retired() {
+            return Err(AuthorityError::CleanupUnproven);
+        }
         let mut candidate = self.machine.clone();
         candidate.reconcile(&evidence)?;
         self.commit(candidate)?;
         Ok(self.snapshot())
+    }
+    /// SYSTEM independently reopens the current/last consumed runtime's job.
+    /// This proves process retirement only; proxy/TUN/endpoint cleanup still
+    /// requires separate evidence. Unknown journal state never means no runtime.
+    pub fn observe_runtime_processes(&self) -> Result<super::RuntimeProcessObservation> {
+        require_service()?;
+        if !self.machine.durable_known() {
+            return Err(AuthorityError::Recovering);
+        }
+        let root = self
+            .machine
+            .metadata()
+            .ok_or(AuthorityError::Recovering)?
+            .root();
+        Ok(runtime_job::observe(root)?)
     }
     pub fn lineage(&self, authorization: &ServicePeerAuthorization) -> Result<AuthorityLineage> {
         let peer = self.admit(authorization, Instant::now() + ADMISSION)?;
@@ -252,6 +274,17 @@ impl WindowsAuthority {
         let process = authorization.process().retain()?;
         let mut candidate = self.machine.clone();
         candidate.bind(&peer, &context, ticket, now)?;
+        self.runtime_job = Some(
+            match RuntimeJob::assign(&context.operation.root, &process) {
+                Ok(job) => job,
+                Err(error) => {
+                    // Assignment may have succeeded before a later native check
+                    // failed. No unbound-abort shortcut may erase that ownership.
+                    self.suspend(false);
+                    return Err(error.into());
+                }
+            },
+        );
         self.commit(candidate)?;
         self.runtime_process = Some(process);
         self.after_publication(authorization, deadline)?;
@@ -431,6 +464,12 @@ impl WindowsAuthority {
             return Err(error);
         }
         Ok(self.snapshot())
+    }
+    #[cfg(feature = "native-service-validation")]
+    pub fn release_runtime_job_handle_for_validation(&mut self) -> Result<()> {
+        require_service()?;
+        self.runtime_job.take().ok_or(AuthorityError::Invalid)?;
+        Ok(())
     }
     #[cfg(feature = "native-service-validation")]
     pub fn interrupt_next_publication_for_validation(

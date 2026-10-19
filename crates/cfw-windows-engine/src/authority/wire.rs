@@ -14,7 +14,9 @@ use zeroize::Zeroizing;
 
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 const PROTOCOL: &str = "cfw.windows.authority";
-const VERSION: u16 = 1;
+// v2 Bind grants require SYSTEM job assignment before runtime authorization.
+// A v1 service cannot establish that contract and must not be accepted.
+const VERSION: u16 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -374,7 +376,9 @@ impl Rejection {
             #[cfg(windows)]
             AuthorityError::Journal(_) => Self::Publication,
             #[cfg(windows)]
-            AuthorityError::Peer(_) | AuthorityError::Process(_) => Self::Observation,
+            AuthorityError::Peer(_)
+            | AuthorityError::Process(_)
+            | AuthorityError::RuntimeJob(_) => Self::Observation,
             #[cfg(windows)]
             AuthorityError::Entropy(_) => Self::Entropy,
         }

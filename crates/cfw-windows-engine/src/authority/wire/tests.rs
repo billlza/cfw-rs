@@ -111,7 +111,8 @@ fn protocol_and_header_are_closed_before_dispatch() {
     let good = Request::new(Command::Observe).unwrap().encode().unwrap();
     let text = std::str::from_utf8(good.as_bytes()).unwrap();
     for altered in [
-        text.replace("\"version\":1", "\"version\":2"),
+        text.replace("\"version\":2", "\"version\":1"),
+        text.replace("\"version\":2", "\"version\":3"),
         text.replace(PROTOCOL, "cfm.authority"),
     ] {
         assert!(matches!(
@@ -120,11 +121,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
         ));
     }
     for altered in [
-        text.replace("\"version\":1", "\"version\":1,\"version\":1"),
+        text.replace("\"version\":2", "\"version\":2,\"version\":2"),
         text.replace("\"kind\":\"observe\"", "\"kind\":\"reconcile_off\""),
         text.replace("\"payload\":{}", "\"payload\":{\"ticket\":[1]}"),
         format!("{text}{{}}"),
-        text.replace("\"version\":1", "\"unknown\":true,\"version\":1"),
+        text.replace("\"version\":2", "\"unknown\":true,\"version\":2"),
     ] {
         assert!(Request::decode(altered.as_bytes()).is_err());
     }

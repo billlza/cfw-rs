@@ -246,6 +246,7 @@ pub(super) fn exercise(name: &str, command: &[u8], owner: &NativeUserSession) ->
         b"authority-journal" if name.ends_with("-a") => {
             enrollment_faults()?;
             allocation_faults()?;
+            allocation_checkpoint()?;
             prepare_faults(owner)?;
             compaction_faults(owner)?;
             temporary_recovery(owner)?;
@@ -350,6 +351,38 @@ fn allocation_faults() -> Result<()> {
         })?;
     }
     Ok(())
+}
+fn allocation_checkpoint() -> Result<()> {
+    with_case(|store, path, scope| {
+        let mut allocated = enroll(store)?;
+        let installation = allocated.root().installation_id;
+        for generation in 1..=6 {
+            allocated = reserve(store, &allocated)?;
+            assert_eq!(allocated.allocated_generation(), generation);
+            assert_eq!(allocated.root().generation, 0);
+            assert!(allocated.operation().is_none());
+        }
+        let recovered = store.recover().map_err(|e| e.to_string())?;
+        assert!(recovered.cursor.as_ref().unwrap().generation() > 1);
+        assert_eq!(recovered.committed.as_ref(), Some(&allocated));
+        assert_eq!(recovered.action, RecoveryAction::VerifyOff);
+        // A second native store must read the same unused allocation from the
+        // compacted file/registry transaction, without inventing a runtime root.
+        let reopened = WindowsAuthorityJournal::open(path, scope).map_err(|e| e.to_string())?;
+        let state = reopened
+            .recover()
+            .map_err(|e| e.to_string())?
+            .committed
+            .ok_or("compacted allocation missing")?;
+        assert_eq!(state.root().installation_id, installation);
+        assert_eq!(state.root().generation, 0);
+        assert_eq!(state.allocated_generation(), 6);
+        let next = reserve(&reopened, &state)?;
+        assert_eq!(next.allocated_generation(), 7);
+        assert_eq!(next.state(), AuthorityState::Off);
+        assert!(next.operation().is_none());
+        Ok(())
+    })
 }
 fn prepare_faults(owner: &NativeUserSession) -> Result<()> {
     for point in [
@@ -543,7 +576,7 @@ fn rollback_and_missing_identity(owner: &NativeUserSession) -> Result<()> {
     })
 }
 fn first_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"fault_runs":19,"allocation_fault_cases":4,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
+    serde_json::json!({"success":true,"fault_runs":19,"allocation_fault_cases":4,"allocation_checkpoint_cases":1,"unused_allocations_survive_checkpoint":true,"temporary_cases":4,"identity_and_rollback_cases":4,"whole_sid_logon_session_retained":true,"off_requires_verification":true,"active_requires_reattestation":true,"checkpoint_recovery_and_cleanup":true,"full_authority_state_machine_proven":false,"power_loss_tested":false})
 }
 fn second_report() -> serde_json::Value {
     serde_json::json!({"success":true,"writer_process_exited":true,"revision":5,"allocated_generation":1,"state":"active","recovery_action":"reattest_owner","owner_matches_native_console":true,"executable_lease_restored":false})

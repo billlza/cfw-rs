@@ -431,6 +431,7 @@ fn serve_connections(
                     None
                     | Some(
                         cfw_windows_engine::authority::AuthorityError::Ticket
+                        | cfw_windows_engine::authority::AuthorityError::Stale
                         | cfw_windows_engine::authority::AuthorityError::Identity,
                     ) => {}
                     Some(error) => {

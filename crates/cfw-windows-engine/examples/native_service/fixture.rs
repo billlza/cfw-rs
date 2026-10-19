@@ -34,6 +34,7 @@ mod machine_record;
 mod restricted;
 mod stress;
 mod transport;
+mod user_agent;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: Duration = Duration::from_secs(15);
 const POST_STOP_EXCHANGES: usize = 256;
@@ -104,6 +105,12 @@ impl Drop for Descriptor {
 
 pub(super) fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--runtime-validation" {
+        return user_agent::run_validation();
+    }
+    if args.len() == 4 && args[1] == "--real-agent-runtime" {
+        return restricted::client(&args[2], &args[3], restricted::ClientCase::RealRuntime);
+    }
     if args.len() == 4 && args[1] == "--desktop-validation" {
         if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
             return Err("desktop fixture validation requires the disposable CI opt-in".into());

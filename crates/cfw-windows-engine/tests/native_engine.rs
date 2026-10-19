@@ -172,6 +172,17 @@ fn rust_owner_runs_real_projected_http_then_closes_and_releases_listeners() {
     let running = child.start(&config, TIMEOUT).unwrap();
     assert_eq!(running.configuration_digest, projection.digest());
     assert_eq!(child.observe(TIMEOUT).unwrap(), running);
+    // Invalid repeat admission is side-effect free; the existing owned runtime
+    // must remain available after both a stale start and an invalid deadline.
+    assert!(matches!(
+        child.start(&config, TIMEOUT),
+        Err(Error::Protocol(_))
+    ));
+    assert!(matches!(
+        child.start(&config, Duration::ZERO),
+        Err(Error::Protocol(_))
+    ));
+    assert_eq!(child.observe(TIMEOUT).unwrap(), running);
 
     let server = reserve();
     let destination = server.local_addr().unwrap();

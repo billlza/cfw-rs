@@ -20,15 +20,15 @@ pub(super) struct Validation {
     scoped: Option<Scoped>,
     complete: bool,
 }
-struct Scoped {
-    controller: Option<WindowsAuthority>,
+pub(super) struct Scoped {
+    pub(super) controller: Option<WindowsAuthority>,
     path: PathBuf,
     scope: String,
     requests: usize,
     cleaned: bool,
 }
 impl Scoped {
-    fn new() -> Result<Self> {
+    pub(super) fn new() -> Result<Self> {
         let scope = format!("CFW-authority-wire-{}", uuid::Uuid::new_v4());
         let path = authority_journal::root()?.join(&scope);
         let mut value = Self {
@@ -47,7 +47,7 @@ impl Scoped {
         value.controller = Some(controller);
         Ok(value)
     }
-    fn cleanup(&mut self) -> Result<()> {
+    pub(super) fn cleanup(&mut self) -> Result<()> {
         self.cleaned = true;
         self.controller = None;
         authority_journal::cleanup(&self.path, &self.scope)

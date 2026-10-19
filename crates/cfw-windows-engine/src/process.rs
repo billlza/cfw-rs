@@ -12,7 +12,11 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     ptr::null,
-    sync::mpsc::{self, SyncSender},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, SyncSender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -213,6 +217,35 @@ pub struct EngineProcess {
     assigned: bool,
     closed: bool,
     proxy_cleanup: Option<crate::system_proxy::ProxyCleanup>,
+    restored_proxy: Option<crate::system_proxy::ProxyCleanup>,
+    cancellation: Option<Arc<AtomicBool>>,
+}
+
+/// Internal launch result preserves a partially created owner so the agent can
+/// prove cleanup instead of treating an unsuccessful spawn as an absent child.
+pub(crate) struct ChildLaunchFailure {
+    pub(crate) error: Error,
+    pub(crate) owner: Option<Box<EngineProcess>>,
+}
+impl ChildLaunchFailure {
+    fn uncreated(error: Error) -> Self {
+        Self { error, owner: None }
+    }
+}
+
+/// Only a fresh observation of this held process/job/control channel constructs
+/// this value. It makes no claim about another operation or global Authority.
+pub(crate) struct ChildCleanupObservation {
+    process_id: u32,
+    configuration_digest: Option<String>,
+}
+impl ChildCleanupObservation {
+    pub(crate) fn process_id(&self) -> u32 {
+        self.process_id
+    }
+    pub(crate) fn configuration_digest(&self) -> Option<&str> {
+        self.configuration_digest.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,83 +276,80 @@ impl EngineProcess {
         runtime_directory: &Path,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        let deadline = deadline(timeout)?;
-        let parent = runtime_directory
-            .parent()
-            .ok_or(Error::ExecutableIdentity)?;
-        let mut runtime_path = hold_path(parent, true)?;
-        let private = PrivateDirectory::open_or_create(runtime_directory)?;
-        // Parent identities were retained before the private leaf opened, so
-        // the ACL-checked directory and CreateProcess working directory agree.
-        runtime_path.extend(hold_path(runtime_directory, true)?);
-        // An unnamed, non-inheritable job prevents child escape on owner loss.
-        let raw = unsafe { CreateJobObjectW(null(), null()) };
-        if raw.is_null() {
-            return Err(std::io::Error::last_os_error().into());
+        match Self::spawn_retained(executable, runtime_directory, timeout, None) {
+            Ok(owner) => Ok(owner),
+            Err(failure) => {
+                let ChildLaunchFailure { error, owner } = failure;
+                match owner {
+                    None => Err(error),
+                    Some(mut owner) => match owner.abort() {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(Error::CleanupFailed {
+                            operation: Box::new(error),
+                            cleanup: Box::new(cleanup),
+                        }),
+                    },
+                }
+            }
         }
-        let job = unsafe { OwnedHandle::from_raw_handle(raw) };
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if unsafe {
-            SetInformationJobObject(
-                job.as_raw_handle(),
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        } == 0
+    }
+    pub(crate) fn spawn_retained(
+        executable: VerifiedExecutable,
+        runtime_directory: &Path,
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, ChildLaunchFailure> {
+        let deadline = deadline(timeout).map_err(ChildLaunchFailure::uncreated)?;
+        if cancellation
+            .as_ref()
+            .is_some_and(|signal| signal.load(Ordering::Acquire))
         {
-            return Err(std::io::Error::last_os_error().into());
+            return Err(ChildLaunchFailure::uncreated(Error::Cancelled));
         }
-        let child = Command::new(&executable.path)
-            .current_dir(runtime_directory)
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // Unstructured diagnostics may include node secrets. The private
-            // control reply returns stable error codes; runtime logs remain
-            // available through the authenticated, observable Clash API.
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| Error::Operation {
-                operation: "spawn verified worker",
-                source,
-            })?;
+        let session = uuid::Uuid::new_v4().simple().to_string();
+        let assets =
+            spawn_assets(executable, runtime_directory).map_err(ChildLaunchFailure::uncreated)?;
         let mut owner = Self {
-            child,
-            job,
-            _executable: executable,
-            _runtime_directory: private,
-            _runtime_path: runtime_path,
+            child: assets.child,
+            job: assets.job,
+            _executable: assets.executable,
+            _runtime_directory: assets.private,
+            _runtime_path: assets.runtime_path,
             sender: None,
             worker: None,
-            session: uuid::Uuid::new_v4().simple().to_string(),
+            session,
             sequence: 0,
             digest: None,
             listeners: Vec::new(),
             assigned: false,
             closed: false,
             proxy_cleanup: None,
+            restored_proxy: None,
+            cancellation,
         };
-        // The worker cannot start an engine before receiving a request. No
-        // request or configuration leaves this process until job assignment.
-        if unsafe {
-            AssignProcessToJobObject(owner.job.as_raw_handle(), owner.child.as_raw_handle())
-        } == 0
-        {
-            let error = Error::Io(std::io::Error::last_os_error());
-            return match owner.finish_operation::<()>(Err(error)) {
-                Err(error) => Err(error),
-                Ok(()) => unreachable!("failed assignment cannot succeed"),
-            };
+        match owner.initialize(deadline) {
+            Ok(()) => Ok(owner),
+            Err(error) => Err(ChildLaunchFailure {
+                error,
+                owner: Some(Box::new(owner)),
+            }),
         }
-        owner.assigned = true;
-        let mut input = owner
+    }
+    fn initialize(&mut self, deadline: Instant) -> Result<(), Error> {
+        // The worker cannot start an engine before receiving a request. No
+        // configuration leaves this process until job assignment succeeds.
+        if unsafe { AssignProcessToJobObject(self.job.as_raw_handle(), self.child.as_raw_handle()) }
+            == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        self.assigned = true;
+        let mut input = self
             .child
             .stdin
             .take()
             .ok_or(Error::Protocol("missing child stdin"))?;
-        let mut output = owner
+        let mut output = self
             .child
             .stdout
             .take()
@@ -327,14 +357,10 @@ impl EngineProcess {
         let (sender, receiver) = mpsc::sync_channel::<Exchange>(1);
         let worker = thread::Builder::new()
             .name("cfw-engine-control".into())
-            .spawn(move || {
-                protocol::run_control(&mut input, &mut output, receiver);
-            })?;
-        owner.sender = Some(sender);
-        owner.worker = Some(worker);
-        let result = owner.rpc("hello", None, "idle", "", deadline);
-        owner.finish_operation(result)?;
-        Ok(owner)
+            .spawn(move || protocol::run_control(&mut input, &mut output, receiver))?;
+        self.sender = Some(sender);
+        self.worker = Some(worker);
+        self.rpc("hello", None, "idle", "", deadline)
     }
 
     pub fn process_id(&self) -> u32 {
@@ -368,25 +394,42 @@ impl EngineProcess {
         config: &PreparedConfig,
         timeout: Duration,
     ) -> Result<RunningChild, Error> {
+        // Invalid caller admission must not tear down an already running child.
+        deadline(timeout)?;
+        if self.closed || self.digest.is_some() {
+            return Err(Error::Protocol("child is not idle"));
+        }
+        let result = self.start_retained(config, timeout);
+        self.finish_operation(result)
+    }
+
+    pub(crate) fn start_retained(
+        &mut self,
+        config: &PreparedConfig,
+        timeout: Duration,
+    ) -> Result<RunningChild, Error> {
         let deadline = deadline(timeout)?;
         if self.closed || self.digest.is_some() {
             return Err(Error::Protocol("child is not idle"));
         }
-        let result = self.rpc(
+        self.rpc(
             "start",
             Some(&config.resolved),
             "running",
             config.digest(),
             deadline,
-        );
-        self.finish_operation(result)?;
+        )?;
         self.digest = Some(config.digest().to_owned());
         self.listeners = config.listeners.clone();
-        self.observe_remaining(deadline)
+        self.observe_native(deadline)
     }
 
     pub fn observe(&mut self, timeout: Duration) -> Result<RunningChild, Error> {
         self.observe_remaining(deadline(timeout)?)
+    }
+
+    pub(crate) fn observe_retained(&mut self, timeout: Duration) -> Result<RunningChild, Error> {
+        self.observe_native(deadline(timeout)?)
     }
 
     fn observe_remaining(&mut self, deadline: Instant) -> Result<RunningChild, Error> {
@@ -445,7 +488,7 @@ impl EngineProcess {
             .clone()
             .ok_or(Error::Protocol("child is not running"))?;
         let result = self
-            .rpc("stop", None, "stopped", &digest, deadline)
+            .rpc_controlled("stop", None, "stopped", &digest, deadline, false)
             .and_then(|()| self.finish_normal_exit(deadline));
         self.finish_operation(result)?;
         self.closed = true;
@@ -479,6 +522,20 @@ impl EngineProcess {
         digest: &str,
         deadline: Instant,
     ) -> Result<(), Error> {
+        self.rpc_controlled(operation, config, state, digest, deadline, true)
+    }
+    fn rpc_controlled(
+        &mut self,
+        operation: &str,
+        config: Option<&ResolvedProjection>,
+        state: &str,
+        digest: &str,
+        deadline: Instant,
+        cancellable: bool,
+    ) -> Result<(), Error> {
+        if cancellable && self.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         if self.closed || self.child.try_wait()?.is_some() {
             return Err(Error::Exited);
         }
@@ -491,13 +548,27 @@ impl EngineProcess {
             config,
             deadline,
         )?;
-        let response =
-            receiver
-                .recv_timeout(remaining(deadline)?)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Timeout => Error::Timeout,
-                    mpsc::RecvTimeoutError::Disconnected => Error::Exited,
-                })??;
+        let response = loop {
+            if cancellable && self.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let left = remaining(deadline)?;
+            let wait = if cancellable && self.cancellation.is_some() {
+                left.min(Duration::from_millis(25))
+            } else {
+                left
+            };
+            match receiver.recv_timeout(wait) {
+                Ok(response) => break response?,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Error::Exited),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    remaining(deadline)?;
+                }
+            }
+        };
+        if cancellable && self.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         response.validate(
             &self.session,
             self.sequence,
@@ -506,6 +577,11 @@ impl EngineProcess {
             state,
             digest,
         )
+    }
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|signal| signal.load(Ordering::Acquire))
     }
 
     fn finish_operation<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
@@ -544,9 +620,35 @@ impl EngineProcess {
             cleanup
                 .restore()
                 .map_err(|error| Error::ProxyRestoration(Box::new(error)))?;
-            self.proxy_cleanup = None;
+            self.restored_proxy = self.proxy_cleanup.take();
         }
         Ok(())
+    }
+
+    pub(crate) fn force_cleanup(&mut self) -> Result<ChildCleanupObservation, Error> {
+        self.abort()?;
+        self.observe_cleanup()
+    }
+    pub(crate) fn observe_cleanup(&mut self) -> Result<ChildCleanupObservation, Error> {
+        if !self.closed
+            || self.child.try_wait()?.is_none()
+            || self.sender.is_some()
+            || self.worker.is_some()
+            || self.proxy_cleanup.is_some()
+            || active_processes(&self.job)? != 0
+            || !crate::listeners::owned(self.child.id())?.is_empty()
+        {
+            return Err(Error::Cleanup);
+        }
+        if let Some(restored) = &self.restored_proxy {
+            restored
+                .verify_restored()
+                .map_err(|error| Error::ProxyRestoration(Box::new(error)))?;
+        }
+        Ok(ChildCleanupObservation {
+            process_id: self.child.id(),
+            configuration_digest: self.digest.clone(),
+        })
     }
 
     fn finish_io(&mut self, deadline: Instant) -> Result<(), Error> {
@@ -596,6 +698,67 @@ impl Drop for EngineProcess {
         // supervising authority's recovery; Drop never proves global Off.
         let _ = self.abort();
     }
+}
+
+struct SpawnAssets {
+    child: Child,
+    job: OwnedHandle,
+    executable: VerifiedExecutable,
+    private: PrivateDirectory,
+    runtime_path: Vec<File>,
+}
+fn spawn_assets(
+    executable: VerifiedExecutable,
+    runtime_directory: &Path,
+) -> Result<SpawnAssets, Error> {
+    let parent = runtime_directory
+        .parent()
+        .ok_or(Error::ExecutableIdentity)?;
+    let mut runtime_path = hold_path(parent, true)?;
+    let private = PrivateDirectory::open_or_create(runtime_directory)?;
+    // Parent identities were retained before the private leaf opened, so
+    // the ACL-checked directory and CreateProcess working directory agree.
+    runtime_path.extend(hold_path(runtime_directory, true)?);
+    // An unnamed, non-inheritable job prevents child escape on owner loss.
+    let raw = unsafe { CreateJobObjectW(null(), null()) };
+    if raw.is_null() {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let child = Command::new(&executable.path)
+        .current_dir(runtime_directory)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        // Unstructured diagnostics may include node secrets. The private
+        // control reply returns stable error codes; runtime logs remain
+        // available through the authenticated, observable Clash API.
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|source| Error::Operation {
+            operation: "spawn verified worker",
+            source,
+        })?;
+    Ok(SpawnAssets {
+        child,
+        job,
+        executable,
+        private,
+        runtime_path,
+    })
 }
 
 fn deadline(timeout: Duration) -> Result<Instant, Error> {

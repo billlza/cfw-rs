@@ -81,6 +81,11 @@ jobs:
           "Native proxy test session: $((Get-Process -Id $PID).SessionId)"
           cargo test --locked -p cfw-windows-engine --features native-engine-validation --test native_engine -- --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'rust-host-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native Rust engine ownership validation failed" }
+          $env:CFW_NATIVE_SERVICE_MUTATION_TESTS = '1'
+          $env:CFW_NATIVE_SERVICE_SOURCE = $receipt.product_source
+          $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'user-agent-runtime-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native UserAgent engine and proxy lifecycle validation failed" }
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

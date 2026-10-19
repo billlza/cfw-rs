@@ -5,9 +5,39 @@ use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+enum Validation {
+    Wire(authority_wire::Validation),
+    Runtime(user_agent::Validation),
+}
+impl Validation {
+    fn new(runtime: bool) -> Self {
+        if runtime {
+            Self::Runtime(user_agent::Validation::new())
+        } else {
+            Self::Wire(authority_wire::Validation::new())
+        }
+    }
+    fn handle(
+        &mut self,
+        connection: &mut cfw_windows_engine::LocalServiceConnection,
+        request: cfw_windows_engine::AuthenticatedServiceRequest,
+    ) -> Result<cfw_windows_engine::authority::AuthorizedReply> {
+        match self {
+            Self::Wire(value) => value.handle(connection, request),
+            Self::Runtime(value) => value.handle(connection, request),
+        }
+    }
+    fn finish(&mut self) -> Result<()> {
+        match self {
+            Self::Wire(value) => value.finish(),
+            Self::Runtime(value) => value.finish(),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Installation {
+pub(super) struct Installation {
     desktop_image: PathBuf,
     desktop_digest: [u8; 32],
     agent_image: PathBuf,
@@ -15,6 +45,7 @@ struct Installation {
     user_sid: String,
     authentication_id: u64,
     session_id: u32,
+    pub(super) runtime: Option<user_agent::EngineInstallation>,
 }
 
 pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
@@ -129,6 +160,14 @@ pub(super) fn desktop_validation(prefix: &str, hex: &str) -> Result<()> {
 // Only the disposable fixture reads this test parameter file. Product listener
 // construction receives already-verified installation images, never wire paths.
 pub(super) fn write_installation(root: &Path, agent: &Path, digest: [u8; 32]) -> Result<()> {
+    write_installation_mode(root, agent, digest, None)
+}
+pub(super) fn write_installation_mode(
+    root: &Path,
+    agent: &Path,
+    digest: [u8; 32],
+    runtime: Option<user_agent::EngineInstallation>,
+) -> Result<()> {
     let desktop_image = root.join("desktop-fixture.exe");
     std::fs::copy(
         std::env::current_exe().map_err(|e| e.to_string())?,
@@ -137,13 +176,21 @@ pub(super) fn write_installation(root: &Path, agent: &Path, digest: [u8; 32]) ->
     .map_err(|e| e.to_string())?;
     let current = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
     let installation = Installation {
-        desktop_image,
+        // Runtime-only fixture projects configuration and prepares the lease
+        // in the same medium-integrity process. Distinct desktop/agent images
+        // remain mandatory in the separate native admission fixture.
+        desktop_image: if runtime.is_some() {
+            agent.to_owned()
+        } else {
+            desktop_image
+        },
         desktop_digest: digest,
         agent_image: agent.to_owned(),
         agent_digest: digest,
         user_sid: current.identity().user_sid().to_owned(),
         authentication_id: current.identity().authentication_id(),
         session_id: current.identity().session_id(),
+        runtime,
     };
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -155,7 +202,7 @@ pub(super) fn write_installation(root: &Path, agent: &Path, digest: [u8; 32]) ->
     file.sync_all().map_err(|e| e.to_string())
 }
 
-fn installation() -> Result<Installation> {
+pub(super) fn installation() -> Result<Installation> {
     let image = std::env::current_exe().map_err(|e| e.to_string())?;
     let path = image
         .parent()
@@ -244,7 +291,7 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
     // never by the bootstrap JSON. This exercises the policy input; it is not
     // the product's durable authority lease or runtime state machine.
     let lease_owner = Arc::new(Mutex::new(None));
-    let authority = Arc::new(Mutex::new(authority_wire::Validation::new()));
+    let authority = Arc::new(Mutex::new(Validation::new(installed.runtime.is_some())));
     for (role, listener) in [
         (ServiceClientRole::Desktop, desktop),
         (ServiceClientRole::UserAgent, agent),
@@ -296,7 +343,7 @@ fn serve_role(
     mut listener: LocalServiceListener,
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
-    authority: &Mutex<authority_wire::Validation>,
+    authority: &Mutex<Validation>,
 ) -> Result<()> {
     let serving = serve_connections(name, role, &mut listener, installed, lease_owner, authority);
     let closing = listener.close().map_err(|e| e.to_string());
@@ -315,7 +362,7 @@ fn serve_connections(
     listener: &mut LocalServiceListener,
     installed: &Installation,
     lease_owner: &Mutex<Option<NativeUserSession>>,
-    authority: &Mutex<authority_wire::Validation>,
+    authority: &Mutex<Validation>,
 ) -> Result<()> {
     while !STOP.load(Ordering::SeqCst) {
         let mut connection = match listener.accept(Instant::now() + Duration::from_millis(100)) {
@@ -479,7 +526,9 @@ fn serve_connections(
             let (reply, finished): (&[u8], bool) = match request.body() {
                 b"ping" => (b"pong", false),
                 b"done" => (b"end!", true),
-                b"authority-wire-finish" if role == ServiceClientRole::Desktop => {
+                b"authority-wire-finish" | b"authority-runtime-finish"
+                    if role == ServiceClientRole::Desktop =>
+                {
                     authority
                         .lock()
                         .map_err(|_| "native wire lifecycle guard poisoned")?

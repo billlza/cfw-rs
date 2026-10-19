@@ -16,6 +16,8 @@ mod connection_binding;
 #[cfg(any(windows, test))]
 mod protocol;
 #[cfg(any(windows, test))]
+pub mod user_agent;
+#[cfg(any(windows, test))]
 pub use configuration::{PreparedConfig, ResolvedProjection};
 
 #[cfg(windows)]
@@ -84,6 +86,8 @@ pub enum Error {
     ProxyRestoration(Box<ProxyError>),
     #[error("Windows engine operation exceeded its deadline")]
     Timeout,
+    #[error("Windows engine operation was cancelled before completion")]
+    Cancelled,
     #[error("Windows engine process exited unexpectedly")]
     Exited,
     #[error("Windows engine emergency cleanup could not be verified")]

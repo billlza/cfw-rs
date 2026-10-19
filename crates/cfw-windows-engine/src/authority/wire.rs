@@ -203,7 +203,7 @@ impl Command {
         }
     }
 }
-pub(super) fn validate_context(context: &LeaseContext) -> Result<()> {
+pub(crate) fn validate_context(context: &LeaseContext) -> Result<()> {
     let op = &context.operation;
     if context.lease_id.is_nil()
         || op.root.installation_id.is_nil()

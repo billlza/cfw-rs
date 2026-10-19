@@ -91,6 +91,8 @@ impl ResolvedProjection {
 pub struct PreparedConfig {
     pub(crate) resolved: ResolvedProjection,
     pub(crate) listeners: Vec<std::net::SocketAddr>,
+    configuration_digest: String,
+    mode: ProjectionMode,
     system_proxy_endpoint: Option<std::net::SocketAddr>,
 }
 
@@ -180,12 +182,23 @@ impl PreparedConfig {
         Ok(Self {
             resolved,
             listeners,
+            configuration_digest: projection.configuration_digest().to_owned(),
+            mode: expected,
             system_proxy_endpoint,
         })
     }
 
     pub fn digest(&self) -> &str {
         self.resolved.digest()
+    }
+
+    /// Digest of the exact secret-free configuration template, distinct from
+    /// the product identity digest returned by `digest()`.
+    pub fn configuration_digest(&self) -> &str {
+        &self.configuration_digest
+    }
+    pub fn mode(&self) -> ProjectionMode {
+        self.mode
     }
 
     pub fn system_proxy_endpoint(&self) -> Option<std::net::SocketAddr> {

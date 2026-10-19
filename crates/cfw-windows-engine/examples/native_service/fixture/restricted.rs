@@ -6,6 +6,7 @@ pub(super) enum ClientCase {
     UserAgent,
     CopiedImage,
     AuthorityRuntime,
+    RealRuntime,
 }
 impl ClientCase {
     fn flag(self) -> &'static str {
@@ -13,6 +14,7 @@ impl ClientCase {
             Self::UserAgent => "--client",
             Self::CopiedImage => "--rejected-client",
             Self::AuthorityRuntime => "--authority-runtime",
+            Self::RealRuntime => "--real-agent-runtime",
         }
     }
     fn report_prefix(self, name: &str) -> String {
@@ -20,6 +22,7 @@ impl ClientCase {
             Self::UserAgent => name.to_owned(),
             Self::CopiedImage => format!("{name}-copy"),
             Self::AuthorityRuntime => format!("{name}-authority"),
+            Self::RealRuntime => format!("{name}-runtime"),
         }
     }
     fn report(self) -> serde_json::Value {
@@ -33,6 +36,7 @@ impl ClientCase {
             Self::AuthorityRuntime => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"native_authority_binding":true,"wrong_ticket_rejected":true,"new_connection_cannot_inherit_lease":true,"synthetic_runtime_reports":true,"actual_engine_started":false})
             }
+            Self::RealRuntime => user_agent::client_report(),
         }
     }
 }
@@ -228,6 +232,9 @@ pub(super) fn with_medium_impersonation(action: impl FnOnce() -> Result<()>) -> 
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     run_case(image, name, expected, ClientCase::UserAgent, None)
 }
+pub(super) fn run_runtime(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
+    run_case(image, name, expected, ClientCase::RealRuntime, None)
+}
 pub(super) fn run_rejected_copy(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     run_case(image, name, expected, ClientCase::CopiedImage, None)
 }
@@ -338,7 +345,14 @@ fn run_case(
     let writer = writer.map(|(mut output, bytes)| {
         thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
     });
-    let waited = cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
+    // The runtime case includes actual engine starts, traffic and stop for two
+    // modes. Existing authentication cases keep their original fifteen seconds.
+    let limit = if matches!(case, ClientCase::RealRuntime) {
+        Duration::from_secs(60)
+    } else {
+        LIMIT
+    };
+    let waited = cfw_windows_storage::wait_until(&process, Instant::now() + limit)
         .map_err(|e| e.to_string())?;
     if waited != cfw_windows_storage::WaitOutcome::Signaled {
         if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
@@ -461,6 +475,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
+        ClientCase::RealRuntime => return user_agent::agent(name, &image, expected),
         ClientCase::AuthorityRuntime => return authority_wire::agent(name, &image, expected),
         ClientCase::CopiedImage => {
             let mut channel = ServiceChannel::connect(

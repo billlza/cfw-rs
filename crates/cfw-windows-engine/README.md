@@ -303,6 +303,34 @@ OS I/O cannot be retired within cleanup is not reported as successfully joined.
 
 ## Validation
 
+`UserAgentSession` binds a checked `UserAgentPlan` through the native Authority
+channel before starting the child. The plan separately checks the configuration
+bytes digest and product identity digest and rejects tunnel modes. A dedicated
+control worker renews the same bound connection while native engine operations
+run. Revocation interrupts engine RPC waits; an Authority/transport failure
+remains an error. The synchronous lifecycle owner must run on a dedicated
+thread, and its caller retains it on failure for explicit cleanup/recovery.
+
+Ready requires observed child listeners, exact proxy ownership for SystemProxy
+and an authenticated Authority acknowledgement. Stop restores the exact prior
+proxy settings before stopping the child, then observes its retained process,
+empty job, drained control worker and absence of owned listeners. Only these
+observations produce the per-instance Stopped report. Failed restoration keeps
+the child owner and journal, closes the Authority control worker and returns the
+error. No result here constructs independent global `CleanupEvidence` or Off.
+
+The engine CI job also invokes `native-service-fixture --runtime-validation`
+with both service and proxy mutation opt-ins. It runs a medium-integrity,
+non-administrator UserAgent through an actual temporary SYSTEM service and the
+real engine, checks HTTP traffic in LocalProxy and SystemProxy modes, and tests
+Authority-driven SystemProxy cancellation. The fixture verifies held process
+exit, released listeners, original proxy settings, native Stopped replies and
+service deletion. Configuration projection and Desktop preparation deliberately
+share this fixture process to keep the per-process controller secret in memory;
+the separate admission fixture retains distinct Desktop/UserAgent images and
+processes. Initial/final global cleanup evidence is still test-injected, so
+these checks do not prove production global recovery or an assembled backend.
+
 The native CI job builds both the stock CLI and worker twice using independent
 Go caches. The existing HTTP/SOCKS TCP/UDP smoke test still covers the CLI. A
 mandatory Rust integration target uses the real worker and shared projection:

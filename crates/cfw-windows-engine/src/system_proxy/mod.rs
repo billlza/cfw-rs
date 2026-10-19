@@ -234,6 +234,16 @@ pub(crate) struct ProxyCleanup {
     before: ProxySettings,
 }
 impl ProxyCleanup {
+    pub(crate) fn verify_restored(&self) -> Result<(), ProxyError> {
+        self.authority.locked(|transaction| {
+            if Record::read(transaction, self.authority.identity.user_sid())?.is_some()
+                || native::observe()? != self.before
+            {
+                return Err(ProxyError::OwnershipConflict);
+            }
+            Ok(())
+        })
+    }
     pub(crate) fn same_binding(&self, other: &Self) -> bool {
         self.context == other.context
             && self.config_digest == other.config_digest
@@ -321,6 +331,29 @@ impl WindowsSystemProxy {
                     context: record.context,
                 },
             })
+        })
+    }
+
+    pub(crate) fn verify_owned(
+        &self,
+        context: &EngineCommandContext,
+        engine: &mut EngineProcess,
+    ) -> Result<(), ProxyError> {
+        self.locked(|transaction| {
+            let record = Record::read(transaction, self.identity.user_sid())?
+                .ok_or(ProxyError::OwnershipMissing)?;
+            let running = engine.observe_under_proxy_lock(Duration::from_secs(15))?;
+            let process = NativePeerProcess::open(running.process_id)?;
+            if record.context != *context
+                || record.config_digest != running.configuration_digest
+                || record.process_id != running.process_id
+                || record.process_created_at != process.identity().process_creation_time()
+                || process.identity().user_session() != self.identity.user_session()
+                || native::observe()? != record.applied
+            {
+                return Err(ProxyError::RuntimeMismatch);
+            }
+            Ok(())
         })
     }
 

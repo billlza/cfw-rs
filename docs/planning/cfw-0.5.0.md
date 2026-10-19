@@ -139,8 +139,8 @@ Windows 成品使用 Windows runner；本机可仅作为编辑与控制端。现
 | --- | --- | --- |
 | 基线 | 固定 GA；九页、命令、平台功能与已知限制清点 | 源码和发布身份已核实；已安装界面全量视觉采集待完成 |
 | 路线评估 | 两条路线范围/维护/CI 对照、明确建议 | 已记录共享前端建议 |
-| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | `ddf11a9` 的 Windows 快照通过 480 项 Rust/311 项前端；共享授权改动的 Mac 全工作区 1,160 项 Rust 回归通过；当前完整 Mac CI 与桌面产品接线未完成 |
-| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 引擎、Rust 进程所有权及 WinINet 流量/恢复已通过九项真实集成测试并核验下载产物；SCM 普通客户端验收仍失败，完整服务生命周期及桌面链路待完成 |
+| 共享边界 | UI 产品/平台表现、用例与持久化边界；Mac 行为保持回归 | `ab812fc` 的 Windows 快照通过 481 项 Rust/311 项前端；共享授权改动的 Mac 全工作区 1,160 项 Rust 回归通过；当前完整 Mac CI 与桌面产品接线未完成 |
+| Windows 纵向链路 | 真正导入、启动代理、联网、停止恢复；General 与复杂弹窗真实验证 | 引擎、Rust 进程所有权及 WinINet 流量/恢复已通过九项真实集成测试并核验下载产物；`ab812fc` 的 SCM 九项原生场景及普通客户端权限边界也已通过并核验回执；完整服务生命周期及桌面链路待完成 |
 | 全功能/视觉 | 本文全部页面和功能逐项有可执行用例与证据 | 待完成 |
 | 稳定性/交付 | 完整 CI、真实 Windows 验收、签名安装更新、性能与恢复 | 待完成；用户暂未确定 Windows 测试机，先推进代码和托管 CI；真机项目保持未验证 |
 | 正式发布 | 无阻塞缺陷、源/包身份一致、授权发布和下载验证 | 未开始 |
@@ -605,6 +605,35 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   主令牌用户不是同一概念；改为接受既有信任边界内的 SYSTEM/Administrators 所有者，
   同时继续独立要求 SYSTEM/session 0 主身份、逐项精确 ACL 与普通客户端危险权限
   拒绝。不能把非 SYSTEM 主身份当作等价服务，后续原生全流程继续验证。
+
+### 2026-10-19：Windows 服务对端原生验收
+
+- `ab812fc970a0289fee0179d8efe0ea78f202ecb5` 的
+  [SCM job](https://github.com/billlza/cfw-rs/actions/runs/39178672656/job/117826694754)
+  通过九项实际场景：SCM/映像/管道绑定、不同 SYSTEM 服务拒绝、危险 ACL、配置撤销、
+  同字节不同文件、服务缺失、普通客户端、服务停止与临时服务删除读回。无调试器或
+  IFEO 设置；正常停止同时确认 SCM 与保留的进程退出码为零。
+- [下载回执](https://github.com/billlza/cfw-rs/actions/runs/39178672656/artifacts/12155063688)
+  已核验源码与 ZIP SHA-256
+  `6a624b12a7b300dfdb344b3ee9165d7d8696ea59708e68b64cf9a01b1d1c5f44`。
+  客户端实际为中完整性、非管理员；limited-query/synchronize 成功，而内存读写、
+  终止、句柄复制、权限修改和 SYSTEM 令牌查询均要求 Access Denied。原始失败产物
+  保留；回执仍明确 `full_service_backend_proven=false`、`release_accepted=false`。
+- 同一源码的共享 job 通过 481 项 Rust、311 项前端，无失败/忽略/跳过；其中包括
+  普通用户不能调用服务进程权限设置的原生反例。Windows 目标 Clippy、本机 12 项
+  组件回归、格式与 Windows workflow lint 通过；519 个 registry 包版本/校验值不变。
+- 同一源码的 [Windows CI](https://github.com/billlza/cfw-rs/actions/runs/39178672656)
+  四项 job 全部完成且通过。引擎仍通过 476 项 Go 测试/子测试、DNS 200 轮专项
+  （800 个命名通过事件）及九项原生引擎集成；三个无测试 Go 包仅计编译，未开启 race。
+  [引擎产物](https://github.com/billlza/cfw-rs/actions/runs/39178672656/artifacts/12155463108)
+  已下载核验源码、WinINet 流量/恢复、复现构建与 77 个身份的 116 个许可证/NOTICE；
+  ZIP SHA-256 为 `f45b92f449912b8a98bd7a1376defabaccedcb3a0c2f82a15319c93566c6f247`，
+  两个 Go 可执行文件字节与此前已验证产物一致。正式发布许可证审查尚未完成。
+- [Mac 供应链 job](https://github.com/billlza/cfw-rs/actions/runs/39178672660/job/117826719356)
+  在同一源码检查 328 个可达包，零漏洞/公告警告；cargo-deny 零错误、警告、提示。
+  完整 Mac CI 的其他作业尚未完成，不由这一项代替。
+- 后续仍需实际服务运行授权、全局生命周期、凭据授权/GC、TUN 与桌面产品接线。
+  该服务对端验证不能作为全局 Off、九页视觉一致、安装更新或发布证明。
 
 ## 官方资料
 

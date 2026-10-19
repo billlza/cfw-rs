@@ -1,8 +1,10 @@
 use std::{
+    ffi::OsString,
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
     mem::size_of,
     os::windows::{
+        ffi::OsStringExt,
         fs::OpenOptionsExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
         process::CommandExt,
@@ -34,7 +36,7 @@ use windows_sys::Win32::{
             JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
             QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
         },
-        Threading::CREATE_NO_WINDOW,
+        Threading::{CREATE_NO_WINDOW, QueryFullProcessImageNameW},
     },
 };
 
@@ -50,6 +52,26 @@ pub struct VerifiedExecutable {
 impl VerifiedExecutable {
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn verify_process_image(&self, process: &OwnedHandle) -> Result<(), Error> {
+        let mut buffer = vec![0; 32768];
+        let mut length = buffer.len() as u32;
+        if unsafe {
+            QueryFullProcessImageNameW(process.as_raw_handle(), 0, buffer.as_mut_ptr(), &mut length)
+        } == 0
+        {
+            return Err(Error::Operation {
+                operation: "query live process image",
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        let length = length as usize;
+        if length == 0 || length >= buffer.len() || buffer[..length].contains(&0) {
+            return Err(Error::ExecutableIdentity);
+        }
+        let path = OsString::from_wide(&buffer[..length]);
+        self.verify_image_file(Path::new(&path))
     }
 
     /// Compare the live process image to the already hash-verified, retained

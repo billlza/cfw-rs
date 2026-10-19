@@ -1,6 +1,36 @@
 use super::*;
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 
+#[derive(Clone, Copy)]
+pub(super) enum ClientCase {
+    UserAgent,
+    CopiedImage,
+}
+impl ClientCase {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::UserAgent => "--client",
+            Self::CopiedImage => "--rejected-client",
+        }
+    }
+    fn report_prefix(self, name: &str) -> String {
+        match self {
+            Self::UserAgent => name.to_owned(),
+            Self::CopiedImage => format!("{name}-copy"),
+        }
+    }
+    fn report(self) -> serde_json::Value {
+        match self {
+            Self::UserAgent => {
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true})
+            }
+            Self::CopiedImage => {
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"client_image_rejected":true})
+            }
+        }
+    }
+}
+
 struct Sid(*mut c_void);
 impl Sid {
     fn new(text: &str) -> Result<Self> {
@@ -153,13 +183,60 @@ fn token() -> Result<OwnedHandle> {
     Ok(token)
 }
 
+pub(super) fn with_medium_impersonation(action: impl FnOnce() -> Result<()>) -> Result<()> {
+    cfw_windows_storage::require_process_identity().map_err(|e| e.to_string())?;
+    let primary = token()?;
+    let mut raw = null_mut();
+    if unsafe {
+        DuplicateTokenEx(
+            primary.as_raw_handle(),
+            TOKEN_QUERY | TOKEN_IMPERSONATE,
+            null(),
+            SecurityImpersonation,
+            TokenImpersonation,
+            &mut raw,
+        )
+    } == 0
+    {
+        return Err(error("duplicate fixture message token"));
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if unsafe { SetThreadToken(null(), token.as_raw_handle()) } == 0 {
+        return Err(error("select fixture message token"));
+    }
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if unsafe { RevertToSelf() } == 0 {
+                std::process::abort();
+            }
+        }
+    }
+    let guard = Restore;
+    let result = action();
+    drop(guard);
+    cfw_windows_storage::require_process_identity().map_err(|e| e.to_string())?;
+    result
+}
+
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
+    run_case(image, name, expected, ClientCase::UserAgent)
+}
+pub(super) fn run_rejected_copy(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
+    run_case(image, name, expected, ClientCase::CopiedImage)
+}
+fn run_case(image: &Path, name: &str, expected: [u8; 32], case: ClientCase) -> Result<()> {
     let token = token()?;
     let mut desktop = desktop::Desktop::new()?;
     let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
-    let mut command = wide(&format!("\"{}\" --client {name} {hex}", image.display()));
+    let mut command = wide(&format!(
+        "\"{}\" {} {name} {hex}",
+        image.display(),
+        case.flag()
+    ));
+    let report_prefix = case.report_prefix(name);
     let parent = image.parent().ok_or("missing fixture image parent")?;
-    let output_path = parent.join(format!("{name}-client-output.txt"));
+    let output_path = parent.join(format!("{report_prefix}-client-output.txt"));
     let output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -231,18 +308,13 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
         return Err("fixture client diagnostics exceed bound".into());
     }
     let diagnostics = String::from_utf8_lossy(&diagnostics);
-    let report = std::fs::read(parent.join(format!("{name}-client.json")))
+    let report = std::fs::read(parent.join(format!("{report_prefix}-client.json")))
         .map_err(|e| format!("unprivileged client exit={exit:#x}; report unavailable: {e}; diagnostics: {diagnostics}"))?;
     if report.len() > 8192 {
         return Err("fixture client report exceeds bound".into());
     }
     let report: serde_json::Value = serde_json::from_slice(&report).map_err(|e| e.to_string())?;
-    if exit != 0
-        || report["success"] != true
-        || report["medium_integrity"] != true
-        || report["administrator_member"] != false
-        || report["query_only_service_process"] != true
-    {
+    if exit != 0 || report != case.report() {
         return Err(format!(
             "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
         ));
@@ -251,7 +323,8 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn client(name: &str, hex: &str) -> Result<()> {
+pub(super) fn client(name: &str, hex: &str, case: ClientCase) -> Result<()> {
+    let report_prefix = case.report_prefix(name);
     let image = std::env::current_exe().map_err(|e| e.to_string())?;
     if !name.starts_with("CFW-scm-fixture-")
         || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -259,11 +332,9 @@ pub(super) fn client(name: &str, hex: &str) -> Result<()> {
     {
         return Err("invalid fixture client service name".into());
     }
-    let result = client_body(name, hex, &image);
+    let result = client_body(name, hex, case);
     let report = match &result {
-        Ok(()) => {
-            serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true})
-        }
+        Ok(()) => case.report(),
         Err(e) => serde_json::json!({"success":false,"error":e}),
     };
     let written = (|| -> Result<()> {
@@ -274,7 +345,7 @@ pub(super) fn client(name: &str, hex: &str) -> Result<()> {
                 image
                     .parent()
                     .ok_or("missing fixture image parent")?
-                    .join(format!("{name}-client.json")),
+                    .join(format!("{report_prefix}-client.json")),
             )
             .map_err(|e| e.to_string())?;
         std::io::Write::write_all(
@@ -297,7 +368,7 @@ pub(super) fn client(name: &str, hex: &str) -> Result<()> {
     result
 }
 
-fn client_body(name: &str, hex: &str, image: &Path) -> Result<()> {
+fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
     let identity = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
     if identity.identity().integrity_rid() != 0x2000 {
         return Err("fixture client does not have medium integrity".into());
@@ -318,15 +389,56 @@ fn client_body(name: &str, hex: &str, image: &Path) -> Result<()> {
         *value =
             u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|e| e.to_string())?;
     }
-    runtime()?.block_on(async {
-        let mut pipe = connect(name).await?;
-        let peer = WindowsServicePeer::from_pipe_server(name, verified(image, expected)?, &pipe)
+    let (image, installed_digest) = transport::service_image()?;
+    if expected != installed_digest {
+        return Err("fixture service digest differs from installation".into());
+    }
+    match case {
+        ClientCase::CopiedImage => {
+            let mut channel = ServiceChannel::connect(
+                name,
+                ServiceClientRole::UserAgent,
+                verified(&image, expected)?,
+            )
             .map_err(|e| e.to_string())?;
-        verify_query_only_service_access(peer.process_id())?;
-        ping(&mut pipe).await?;
-        peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
-        finish(&mut pipe).await
-    })
+            require_rejection(channel.request(b"ping", Instant::now() + LIMIT))?;
+            return Ok(());
+        }
+        ClientCase::UserAgent => {
+            verify_pipe_instance_denied(name, &image, expected)?;
+            let mut wrong_role = ServiceChannel::connect(
+                name,
+                ServiceClientRole::Desktop,
+                verified(&image, expected)?,
+            )
+            .map_err(|e| e.to_string())?;
+            require_rejection(wrong_role.request(b"ping", Instant::now() + LIMIT))?;
+        }
+    }
+    let mut channel = ServiceChannel::connect(
+        name,
+        ServiceClientRole::UserAgent,
+        verified(&image, expected)?,
+    )
+    .map_err(|e| e.to_string())?;
+    verify_query_only_service_access(channel.process_id().map_err(|e| e.to_string())?)?;
+    if channel
+        .request(b"ping", Instant::now() + LIMIT)
+        .map_err(|e| e.to_string())?
+        .as_bytes()
+        != b"pong"
+    {
+        return Err("authenticated service channel reply mismatch".into());
+    }
+    if channel
+        .request(b"done", Instant::now() + LIMIT)
+        .map_err(|e| e.to_string())?
+        .as_bytes()
+        != b"end!"
+    {
+        return Err("authenticated service channel completion mismatch".into());
+    }
+    Ok(())
 }
 
 fn verify_query_only_service_access(pid: u32) -> Result<()> {
@@ -368,4 +480,76 @@ fn verify_query_only_service_access(pid: u32) -> Result<()> {
         return Err(error("unexpected service token access rejection"));
     }
     Ok(())
+}
+
+fn verify_pipe_instance_denied(name: &str, image: &Path, expected: [u8; 32]) -> Result<()> {
+    use windows_sys::Win32::{
+        Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX},
+        System::Pipes::{
+            CreateNamedPipeW, GetNamedPipeInfo, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_TYPE_MESSAGE, PIPE_WAIT,
+        },
+    };
+    let mut pipe =
+        LocalServicePipe::open(name, ServiceClientRole::UserAgent).map_err(|e| e.to_string())?;
+    let peer = WindowsServicePeer::from_pipe_server(name, verified(image, expected)?, &pipe)
+        .map_err(|e| e.to_string())?;
+    let mut flags = 0;
+    let mut instances = 0;
+    if unsafe {
+        GetNamedPipeInfo(
+            pipe.as_raw_handle(),
+            &mut flags,
+            null_mut(),
+            null_mut(),
+            &mut instances,
+        )
+    } == 0
+    {
+        return Err(error("query fixture pipe instance contract"));
+    }
+    if flags & PIPE_TYPE_MESSAGE == 0 || instances != 16 {
+        return Err("fixture pipe instance contract differs from the expected endpoint".into());
+    }
+    let path = wide(&format!(r"\\.\pipe\{name}.user-agent"));
+    let raw = unsafe {
+        CreateNamedPipeW(
+            path.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            instances,
+            16384,
+            16384,
+            0,
+            null(),
+        )
+    };
+    if raw != INVALID_HANDLE_VALUE {
+        drop(unsafe { OwnedHandle::from_raw_handle(raw) });
+        return Err("unprivileged client created another service pipe instance".into());
+    }
+    if io::Error::last_os_error().raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+        return Err(error(
+            "pipe instance creation returned a different rejection",
+        ));
+    }
+    ping(&mut pipe)?;
+    peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
+    finish(&mut pipe)
+}
+
+fn require_rejection(
+    result: std::result::Result<cfw_windows_engine::ServicePayload, ServiceTransportError>,
+) -> Result<()> {
+    match result {
+        Err(ServiceTransportError::Io(error))
+            if matches!(error.raw_os_error(), Some(109 | 232 | 233)) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "client rejection returned an unexpected failure: {error}"
+        )),
+        Ok(_) => Err("untrusted client image/role was admitted".into()),
+    }
 }

@@ -2,26 +2,19 @@
 //! The UI never requests service mutation or SYSTEM-token access. The expected
 //! name and executable identity must come from the trusted installation, not IPC.
 use std::{
-    ffi::OsString,
     io,
     mem::{offset_of, size_of},
     os::windows::{
-        ffi::{OsStrExt, OsStringExt},
+        ffi::OsStrExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::Path,
-    pin::Pin,
     ptr::{null, null_mut},
     sync::Arc,
-    task::{Context, Poll},
-};
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::windows::named_pipe::{ClientOptions, NamedPipeClient},
 };
 
 use windows_sys::Win32::{
-    Foundation::{FILETIME, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{FILETIME, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
         Authorization::{GetSecurityInfo, SE_SERVICE},
@@ -29,15 +22,19 @@ use windows_sys::Win32::{
         INHERIT_ONLY_ACE, IsValidAcl, IsValidSid, IsWellKnownSid, MapGenericMask,
         OWNER_SECURITY_INFORMATION, PSID, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     },
-    Storage::FileSystem::{READ_CONTROL, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT},
+    Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING, READ_CONTROL,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, SYNCHRONIZE,
+    },
     System::{
-        Pipes::GetNamedPipeServerProcessId,
+        Pipes::{GetNamedPipeServerProcessId, PIPE_READMODE_MESSAGE, SetNamedPipeHandleState},
         RemoteDesktop::ProcessIdToSessionId,
         Services::*,
         SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
         Threading::{
             GetProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
+            PROCESS_SYNCHRONIZE, WaitForSingleObject,
         },
     },
 };
@@ -46,9 +43,35 @@ use crate::VerifiedExecutable;
 
 mod observation;
 pub use observation::configure_service_process_observation;
+pub(crate) use observation::require_system_service_identity;
 
 const MAX_CONFIG_BYTES: usize = 8192;
-const MAX_IMAGE_UNITS: usize = 32768;
+
+/// Assigned by a fixed service endpoint, never decoded from request fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceClientRole {
+    Desktop,
+    UserAgent,
+}
+
+pub(crate) const SERVICE_PIPE_CLIENT_ACCESS: u32 = FILE_READ_DATA
+    | FILE_WRITE_DATA
+    | FILE_READ_ATTRIBUTES
+    | FILE_WRITE_ATTRIBUTES
+    | READ_CONTROL
+    | SYNCHRONIZE;
+
+pub(crate) fn service_pipe_name(
+    service_name: &str,
+    role: ServiceClientRole,
+) -> Result<String, ServicePeerError> {
+    service_name_wide(service_name)?;
+    let suffix = match role {
+        ServiceClientRole::Desktop => "desktop",
+        ServiceClientRole::UserAgent => "user-agent",
+    };
+    Ok(format!(r"\\.\pipe\{service_name}.{suffix}"))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServicePeerError {
@@ -85,6 +108,8 @@ pub enum ServicePeerError {
     WrongProcess,
     #[error("Windows service process has exited")]
     Exited,
+    #[error("Windows service connection had an incomplete or failed message exchange")]
+    ConnectionClosed,
     #[error("Windows service process image: {0}")]
     Executable(#[from] crate::Error),
     #[error("Windows service observer identity: {0}")]
@@ -108,24 +133,50 @@ impl Drop for ServiceHandle {
 /// A connected local pipe opened with identification-only SQOS. No raw-handle
 /// import or mutable inner-client access can substitute a remote connection.
 pub struct LocalServicePipe {
-    client: NamedPipeClient,
+    pub(crate) client: OwnedHandle,
+    pub(crate) poisoned: bool,
     identity: Arc<()>,
 }
 impl LocalServicePipe {
     /// One connection attempt. The caller owns bounded retry policy for an
     /// expected service startup; native errors are returned without fallback.
-    pub fn open(service_name: &str) -> Result<Self, ServicePeerError> {
+    pub fn open(service_name: &str, role: ServiceClientRole) -> Result<Self, ServicePeerError> {
         cfw_windows_storage::require_process_identity()?;
-        service_name_wide(service_name)?;
-        let client = ClientOptions::new()
-            .security_qos_flags(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)
-            .open(format!(r"\\.\pipe\{service_name}"))
-            .map_err(|source| ServicePeerError::Native {
-                operation: "open local service pipe",
-                source,
-            })?;
+        let name: Vec<_> = service_pipe_name(service_name, role)?
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        // GENERIC_WRITE also requests FILE_CREATE_PIPE_INSTANCE. Ordinary
+        // clients only need data/attribute I/O, never another server instance.
+        let raw = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                SERVICE_PIPE_CLIENT_ACCESS,
+                0,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(native("open local service pipe"));
+        }
+        let client = unsafe { OwnedHandle::from_raw_handle(raw) };
+        if unsafe {
+            SetNamedPipeHandleState(
+                client.as_raw_handle(),
+                &PIPE_READMODE_MESSAGE,
+                null(),
+                null(),
+            )
+        } == 0
+        {
+            return Err(native("select local service message mode"));
+        }
         Ok(Self {
             client,
+            poisoned: false,
             identity: Arc::new(()),
         })
     }
@@ -133,30 +184,6 @@ impl LocalServicePipe {
 impl AsRawHandle for LocalServicePipe {
     fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
         self.client.as_raw_handle()
-    }
-}
-impl AsyncRead for LocalServicePipe {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().client).poll_read(cx, buffer)
-    }
-}
-impl AsyncWrite for LocalServicePipe {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bytes: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().client).poll_write(cx, bytes)
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().client).poll_flush(cx)
-    }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().client).poll_shutdown(cx)
     }
 }
 
@@ -188,6 +215,9 @@ impl WindowsServicePeer {
         pipe: &LocalServicePipe,
     ) -> Result<Self, ServicePeerError> {
         cfw_windows_storage::require_process_identity()?;
+        if pipe.poisoned {
+            return Err(ServicePeerError::ConnectionClosed);
+        }
         let name = service_name_wide(service_name)?;
         let expected_command = executable_command(executable.path())?;
         let manager = ServiceHandle(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) });
@@ -248,6 +278,9 @@ impl WindowsServicePeer {
     /// this same connected pipe. SCM status is not a cached readiness receipt.
     pub fn verify_pipe_server(&self, pipe: &LocalServicePipe) -> Result<(), ServicePeerError> {
         cfw_windows_storage::require_process_identity()?;
+        if pipe.poisoned {
+            return Err(ServicePeerError::ConnectionClosed);
+        }
         if !Arc::ptr_eq(&self.pipe_identity, &pipe.identity) {
             return Err(ServicePeerError::WrongProcess);
         }
@@ -440,20 +473,7 @@ fn verify_process_image(
     executable: &VerifiedExecutable,
     process: &OwnedHandle,
 ) -> Result<(), ServicePeerError> {
-    let mut buffer = vec![0; MAX_IMAGE_UNITS];
-    let mut length = MAX_IMAGE_UNITS as u32;
-    if unsafe {
-        QueryFullProcessImageNameW(process.as_raw_handle(), 0, buffer.as_mut_ptr(), &mut length)
-    } == 0
-    {
-        return Err(native("query live service image"));
-    }
-    let length = length as usize;
-    if length == 0 || length >= buffer.len() || buffer[..length].contains(&0) {
-        return Err(ServicePeerError::WrongProcess);
-    }
-    let path = OsString::from_wide(&buffer[..length]);
-    executable.verify_image_file(Path::new(&path))?;
+    executable.verify_process_image(process)?;
     Ok(())
 }
 

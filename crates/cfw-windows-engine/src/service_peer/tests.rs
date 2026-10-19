@@ -20,7 +20,7 @@ fn service_expectation_is_a_closed_name_and_quoted_absolute_executable() {
     ] {
         assert!(service_name_wide(name).is_err());
         assert!(matches!(
-            LocalServicePipe::open(name),
+            LocalServicePipe::open(name, ServiceClientRole::Desktop),
             Err(ServicePeerError::InvalidExpectation)
         ));
     }

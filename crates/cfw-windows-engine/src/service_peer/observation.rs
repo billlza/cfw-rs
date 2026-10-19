@@ -31,6 +31,12 @@ impl Drop for Descriptor {
 /// or establish service/runtime readiness. Ordinary UI processes are rejected
 /// before any mutation, and token/default/other-process ACLs are unchanged.
 pub fn configure_service_process_observation() -> Result<(), ServicePeerError> {
+    let _own = require_system_service_identity()?;
+    configure_observation_acl()
+}
+
+pub(crate) fn require_system_service_identity() -> Result<crate::NativePeerProcess, ServicePeerError>
+{
     cfw_windows_storage::require_process_identity()?;
     let own = crate::NativePeerProcess::open(std::process::id())?;
     let identity = own.identity();
@@ -42,6 +48,10 @@ pub fn configure_service_process_observation() -> Result<(), ServicePeerError> {
     {
         return Err(ServicePeerError::InvalidServiceProcessIdentity);
     }
+    Ok(own)
+}
+
+fn configure_observation_acl() -> Result<(), ServicePeerError> {
     let observer = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
     let sddl: Vec<_> = format!(
         "D:P(A;;{PROCESS_ALL_ACCESS:#x};;;SY)(A;;{PROCESS_ALL_ACCESS:#x};;;BA)(A;;{observer:#x};;;AU)"

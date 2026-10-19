@@ -1,5 +1,6 @@
 use cfw_windows_engine::{
-    LocalServicePipe, NativePeerProcess, ServicePeerError, VerifiedExecutable, WindowsServicePeer,
+    LocalServiceListener, LocalServicePipe, NativePeerProcess, ServiceChannel, ServiceClientRole,
+    ServicePeerError, ServiceTransportError, VerifiedExecutable, WindowsServicePeer,
     configure_service_process_observation,
 };
 use sha2::{Digest, Sha256};
@@ -17,18 +18,16 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::windows::named_pipe::{NamedPipeServer, ServerOptions},
-};
 use windows_sys::Win32::{
     Foundation::*,
     Security::{Authorization::*, *},
     System::{Services::*, Threading::*},
 };
 
+mod attacks;
 mod desktop;
 mod restricted;
+mod transport;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: Duration = Duration::from_secs(15);
 const SERVICE_ACL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORC;;;AU)";
@@ -50,9 +49,6 @@ fn wide(text: &str) -> Vec<u16> {
 }
 fn path_wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain([0]).collect()
-}
-fn pipe_name(name: &str) -> String {
-    format!(r"\\.\pipe\{name}")
 }
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
@@ -101,8 +97,17 @@ impl Drop for Descriptor {
 
 pub(super) fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 4 && args[1] == "--desktop-validation" {
+        if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
+            return Err("desktop fixture validation requires the disposable CI opt-in".into());
+        }
+        return transport::desktop_validation(&args[2], &args[3]);
+    }
     if args.len() == 4 && args[1] == "--client" {
-        return restricted::client(&args[2], &args[3]);
+        return restricted::client(&args[2], &args[3], restricted::ClientCase::UserAgent);
+    }
+    if args.len() == 4 && args[1] == "--rejected-client" {
+        return restricted::client(&args[2], &args[3], restricted::ClientCase::CopiedImage);
     }
     if args.len() != 1 {
         return Err("unknown fixture arguments".into());
@@ -223,61 +228,7 @@ unsafe fn service_body(argc: u32, argv: *mut *mut u16) -> Result<ServiceCompleti
     if handle.is_null() {
         return Err(error("register fixture service control"));
     }
-    let runtime = runtime()?;
-    let result = runtime.block_on(async {
-        let mut waiting = server(&name, true)?;
-        status(handle, SERVICE_RUNNING, 0)?;
-        while !STOP.load(Ordering::SeqCst) {
-            match tokio::time::timeout(Duration::from_millis(50), waiting.connect()).await {
-                Err(_) => continue,
-                Ok(Err(e)) => return Err(e.to_string()),
-                Ok(Ok(())) => {}
-            }
-            // Mio eagerly schedules another read after consuming a buffer.
-            // A disconnected instance can retain a prior read's error. Follow
-            // Tokio's accept pattern: each connection has separate I/O state.
-            let mut pipe = waiting;
-            waiting = server(&name, false)?;
-            let conversation = tokio::time::timeout(LIMIT, async {
-                let mut bytes = [0; 4];
-                pipe.read_exact(&mut bytes)
-                    .await
-                    .map_err(|e| format!("read fixture request: {e}"))?;
-                if bytes != *b"ping" {
-                    return Err("unexpected fixture request".into());
-                }
-                pipe.write_all(b"pong")
-                    .await
-                    .map_err(|e| format!("write fixture response: {e}"))?;
-                pipe.read_exact(&mut bytes)
-                    .await
-                    .map_err(|e| format!("read fixture completion: {e}"))?;
-                if bytes != *b"done" {
-                    return Err("fixture completion mismatch".into());
-                }
-                Ok(())
-            });
-            let conversation = tokio::select! {
-                result = conversation => result,
-                () = async {
-                    while !STOP.load(Ordering::SeqCst) {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                } => break,
-            };
-            match conversation {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err("fixture client conversation timed out".into()),
-            }
-            drop(pipe);
-        }
-        status(handle, SERVICE_STOP_PENDING, 0)?;
-        Ok(())
-    });
-    // SCM may terminate the process as soon as SERVICE_STOPPED is published.
-    // Finish I/O, teardown and failure recording before that terminal report.
-    drop(runtime);
+    let result = transport::serve(&name, handle);
     drop(identity);
     let completion = match result {
         Ok(()) => ServiceCompletion::Clean,
@@ -322,32 +273,10 @@ fn status(handle: SERVICE_STATUS_HANDLE, state: u32, exit: u32) -> Result<()> {
     Ok(())
 }
 
-fn server(name: &str, first: bool) -> Result<NamedPipeServer> {
-    let descriptor = Descriptor::new("O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;AU)")?;
-    let mut attributes = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor.0,
-        bInheritHandle: 0,
-    };
-    unsafe {
-        ServerOptions::new()
-            .first_pipe_instance(first)
-            // Current connection, listener and bounded retiring overlapped
-            // handles; this fixture makes fewer than 16 connections.
-            .max_instances(16)
-            .reject_remote_clients(true)
-            .create_with_security_attributes_raw(
-                pipe_name(name),
-                (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
-            )
-    }
-    .map_err(|e| e.to_string())
-}
-
 async fn connect(name: &str) -> Result<LocalServicePipe> {
     let deadline = Instant::now() + LIMIT;
     loop {
-        match LocalServicePipe::open(name) {
+        match LocalServicePipe::open(name, ServiceClientRole::Desktop) {
             Ok(pipe) => return Ok(pipe),
             Err(ServicePeerError::Native { source, .. })
                 if matches!(source.raw_os_error(), Some(2 | 231)) && Instant::now() < deadline =>
@@ -359,36 +288,71 @@ async fn connect(name: &str) -> Result<LocalServicePipe> {
     }
 }
 
-async fn ping(pipe: &mut LocalServicePipe) -> Result<()> {
-    tokio::time::timeout(LIMIT, async {
-        pipe.write_all(b"ping").await.map_err(|e| e.to_string())?;
-        let mut reply = [0; 4];
-        pipe.read_exact(&mut reply)
-            .await
-            .map_err(|e| e.to_string())?;
-        if reply != *b"pong" {
-            return Err("fixture response mismatch".into());
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|_| "fixture response deadline".to_string())?
+fn ping(pipe: &mut LocalServicePipe) -> Result<()> {
+    let deadline = Instant::now() + LIMIT;
+    pipe.write_message(b"ping", deadline)
+        .map_err(|e| e.to_string())?;
+    let reply = pipe.read_message(deadline).map_err(|e| e.to_string())?;
+    if reply.as_bytes() != b"pong" {
+        return Err("fixture response mismatch".into());
+    }
+    Ok(())
 }
 
-async fn finish(pipe: &mut LocalServicePipe) -> Result<()> {
-    tokio::time::timeout(LIMIT, pipe.write_all(b"done"))
-        .await
-        .map_err(|_| "fixture completion deadline".to_string())?
-        .map_err(|e| e.to_string())
+fn finish(pipe: &mut LocalServicePipe) -> Result<()> {
+    let deadline = Instant::now() + LIMIT;
+    pipe.write_message(b"done", deadline)
+        .map_err(|e| e.to_string())?;
+    let reply = pipe.read_message(deadline).map_err(|e| e.to_string())?;
+    if reply.as_bytes() != b"end!" {
+        return Err("fixture completion mismatch".into());
+    }
+    Ok(())
 }
 
 struct Installed {
     handle: Sc,
     name: String,
     removed: bool,
+    cleanup_on_drop: bool,
     process: Option<OwnedHandle>,
 }
 impl Installed {
+    fn open_existing(name: String) -> Result<Self> {
+        let manager = Sc(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) });
+        if manager.0.is_null() {
+            return Err(error("open fixture SCM for desktop checks"));
+        }
+        let handle =
+            Sc(unsafe { OpenServiceW(manager.0, wide(&name).as_ptr(), SERVICE_ALL_ACCESS) });
+        if handle.0.is_null() {
+            return Err(error("open existing disposable service"));
+        }
+        let mut result = Self {
+            handle,
+            name,
+            removed: false,
+            cleanup_on_drop: false,
+            process: None,
+        };
+        let status = result.query()?;
+        if status.dwCurrentState != SERVICE_RUNNING || status.dwProcessId == 0 {
+            return Err("existing disposable service is not running".into());
+        }
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                status.dwProcessId,
+            )
+        };
+        if process.is_null() {
+            return Err(error("retain existing disposable service process"));
+        }
+        result.process = Some(unsafe { OwnedHandle::from_raw_handle(process) });
+        Ok(result)
+    }
+
     fn create(manager: &Sc, name: String, path: &Path) -> Result<Self> {
         let command = wide(&format!("\"{}\"", path.display()));
         let handle = Sc(unsafe {
@@ -415,6 +379,7 @@ impl Installed {
             handle,
             name,
             removed: false,
+            cleanup_on_drop: true,
             process: None,
         };
         let owner = Descriptor::new("O:BA")?;
@@ -558,7 +523,8 @@ impl Installed {
 }
 impl Drop for Installed {
     fn drop(&mut self) {
-        if !self.removed
+        if self.cleanup_on_drop
+            && !self.removed
             && let Err(e) = self.remove()
         {
             panic!("disposable service cleanup failed: {e}");
@@ -599,6 +565,7 @@ fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
         if !text.ends_with(".failure.txt")
             && !text.ends_with("-client.json")
             && !text.ends_with("-client-output.txt")
+            && !text.ends_with(".rejection.json")
         {
             continue;
         }
@@ -627,6 +594,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
     let replacement = root.join("same-bytes-other-file.exe");
     std::fs::copy(&image, &replacement).map_err(|e| e.to_string())?;
     assert_eq!(digest(&replacement)?, expected);
+    transport::write_installation(root, &image, expected)?;
     let manager = Sc(unsafe {
         OpenSCManagerW(
             null(),
@@ -640,94 +608,8 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
     let prefix = format!("CFW-scm-fixture-{}", uuid::Uuid::new_v4());
     let mut first = Installed::create(&manager, format!("{prefix}-a"), &image)?;
     let mut second = Installed::create(&manager, format!("{prefix}-b"), &image)?;
-    let tests = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-        runtime()?.block_on(async {
-            println!("service fixture stage: scm_image_and_pipe_identity");
-            let mut pipe = connect(&first.name).await?;
-            let peer = WindowsServicePeer::from_pipe_server(
-                &first.name,
-                verified(&image, expected)?,
-                &pipe,
-            )
-            .map_err(|e| e.to_string())?;
-            assert_eq!(peer.process_id(), first.query()?.dwProcessId);
-            assert!(peer.process_creation_time() > 0);
-            ping(&mut pipe).await?;
-            peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
-            finish(&mut pipe).await?;
-            drop((peer, pipe));
-
-            println!("service fixture stage: different_system_service_rejected");
-            let mut other = connect(&second.name).await?;
-            assert!(matches!(
-                WindowsServicePeer::from_pipe_server(
-                    &first.name,
-                    verified(&image, expected)?,
-                    &other
-                ),
-                Err(ServicePeerError::WrongProcess)
-            ));
-            ping(&mut other).await?;
-            finish(&mut other).await?;
-            drop(other);
-
-            println!("service fixture stage: unsafe_service_acl_rejected");
-            let mut pipe = connect(&first.name).await?;
-            let peer = WindowsServicePeer::from_pipe_server(&first.name, verified(&image, expected)?, &pipe).map_err(|e| e.to_string())?;
-            first.acl("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORCWP;;;AU)")?;
-            assert!(matches!(peer.verify_pipe_server(&pipe), Err(ServicePeerError::UnsafeServiceSecurity)));
-            assert!(matches!(
-                WindowsServicePeer::from_pipe_server(
-                    &first.name,
-                    verified(&image, expected)?,
-                    &pipe
-                ),
-                Err(ServicePeerError::UnsafeServiceSecurity)
-            ));
-            first.acl(SERVICE_ACL)?;
-            peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
-            println!("service fixture stage: changed_configuration_revokes_peer");
-            first.binary(&replacement)?;
-            assert!(matches!(peer.verify_pipe_server(&pipe), Err(ServicePeerError::ConfigurationMismatch)));
-            // SCM now describes the next launch of an identical file copy.
-            // The running process still maps the original file, so matching
-            // a registry command and hash alone must not admit that identity.
-            match WindowsServicePeer::from_pipe_server(&first.name, verified(&replacement, expected)?, &pipe) {
-                Err(ServicePeerError::Executable(cfw_windows_engine::Error::ExecutableIdentity)) => {}
-                Err(error) => panic!("live image mismatch returned a different failure: {error:?}"),
-                Ok(_) => panic!("the next-start copy was admitted as the running image"),
-            }
-            first.binary(&image)?;
-            peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
-            assert!(matches!(WindowsServicePeer::from_pipe_server(&format!("{prefix}-missing"), verified(&image, expected)?, &pipe),
-                Err(ServicePeerError::Native { source, .. }) if source.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32)));
-            ping(&mut pipe).await?;
-            finish(&mut pipe).await?;
-            drop((peer, pipe));
-            Ok::<_, String>(())
-        })?;
-        println!("service fixture stage: unprivileged_client_admitted");
-        restricted::run(&image, &first.name, expected)?;
-        println!("service fixture stage: stopped_service_is_not_authority");
-        first.normal_stop()?;
-        runtime()?.block_on(async {
-            let mut pipe = connect(&second.name).await?;
-            assert!(matches!(
-                WindowsServicePeer::from_pipe_server(
-                    &first.name,
-                    verified(&image, expected)?,
-                    &pipe
-                ),
-                Err(ServicePeerError::NotRunning {
-                    state: SERVICE_STOPPED,
-                    ..
-                })
-            ));
-            ping(&mut pipe).await?;
-            finish(&mut pipe).await
-        })?;
-        second.normal_stop()?;
-        Ok(())
+    let tests = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        transport::run_desktop_validation(root, &prefix, expected)
     }));
     let restored_first = first.remove();
     let restored_second = second.remove();
@@ -753,7 +635,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             return Err("fixture service deletion was not observed".into());
         }
     }
-    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","stopped_service_is_not_authority","temporary_services_removed"],"service_fixture_only":true,"full_service_backend_proven":false,"release_accepted":false});
+    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","stopped_service_is_not_authority","temporary_services_removed"],"service_fixture_only":true,"full_service_backend_proven":false,"release_accepted":false});
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -771,5 +653,129 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
         "{}",
         serde_json::to_string(&receipt).map_err(|e| e.to_string())?
     );
+    Ok(())
+}
+
+fn exercise_services(
+    first: &Installed,
+    second: &Installed,
+    prefix: &str,
+    image: &Path,
+    expected: [u8; 32],
+) -> Result<()> {
+    let replacement = image
+        .parent()
+        .ok_or("missing fixture image parent")?
+        .join("same-bytes-other-file.exe");
+    runtime()?.block_on(async {
+        println!("service fixture stage: scm_image_and_pipe_identity");
+        let mut pipe = connect(&first.name).await?;
+        let peer = WindowsServicePeer::from_pipe_server(
+            &first.name,
+            verified(image, expected)?,
+            &pipe,
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(peer.process_id(), first.query()?.dwProcessId);
+        assert!(peer.process_creation_time() > 0);
+        ping(&mut pipe)?;
+        peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
+        finish(&mut pipe)?;
+        drop((peer, pipe));
+
+        println!("service fixture stage: different_system_service_rejected");
+        let mut other = connect(&second.name).await?;
+        assert!(matches!(
+            WindowsServicePeer::from_pipe_server(
+                &first.name,
+                verified(image, expected)?,
+                &other
+            ),
+            Err(ServicePeerError::WrongProcess)
+        ));
+        ping(&mut other)?;
+        finish(&mut other)?;
+        drop(other);
+
+        println!("service fixture stage: unsafe_service_acl_rejected");
+        let mut pipe = connect(&first.name).await?;
+        let peer = WindowsServicePeer::from_pipe_server(&first.name, verified(image, expected)?, &pipe).map_err(|e| e.to_string())?;
+        first.acl("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORCWP;;;AU)")?;
+        assert!(matches!(peer.verify_pipe_server(&pipe), Err(ServicePeerError::UnsafeServiceSecurity)));
+        assert!(matches!(
+            WindowsServicePeer::from_pipe_server(
+                &first.name,
+                verified(image, expected)?,
+                &pipe
+            ),
+            Err(ServicePeerError::UnsafeServiceSecurity)
+        ));
+        first.acl(SERVICE_ACL)?;
+        peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
+        println!("service fixture stage: changed_configuration_revokes_peer");
+        first.binary(&replacement)?;
+        assert!(matches!(peer.verify_pipe_server(&pipe), Err(ServicePeerError::ConfigurationMismatch)));
+        // SCM now describes the next launch of an identical file copy.
+        // The running process still maps the original file, so matching
+        // a registry command and hash alone must not admit that identity.
+        match WindowsServicePeer::from_pipe_server(&first.name, verified(&replacement, expected)?, &pipe) {
+            Err(ServicePeerError::Executable(cfw_windows_engine::Error::ExecutableIdentity)) => {}
+            Err(error) => panic!("live image mismatch returned a different failure: {error:?}"),
+            Ok(_) => panic!("the next-start copy was admitted as the running image"),
+        }
+        first.binary(image)?;
+        peer.verify_pipe_server(&pipe).map_err(|e| e.to_string())?;
+        assert!(matches!(WindowsServicePeer::from_pipe_server(&format!("{prefix}-missing"), verified(image, expected)?, &pipe),
+            Err(ServicePeerError::Native { source, .. }) if source.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32)));
+        ping(&mut pipe)?;
+        finish(&mut pipe)?;
+        drop((peer, pipe));
+        Ok::<_, String>(())
+    })?;
+    println!("service fixture stage: unprivileged_client_admitted");
+    restricted::run(image, &first.name, expected)?;
+    let root = image.parent().ok_or("missing fixture image parent")?;
+    transport::require_rejection(
+        root,
+        &first.name,
+        ServiceClientRole::Desktop,
+        "executable_mismatch",
+    )?;
+    println!("service fixture stage: identical_client_copy_rejected");
+    restricted::run_rejected_copy(&replacement, &first.name, expected)?;
+    transport::require_rejection(
+        root,
+        &first.name,
+        ServiceClientRole::UserAgent,
+        "executable_mismatch",
+    )?;
+    println!("service fixture stage: queued_message_identity_rejected");
+    attacks::queued_identity(root, &first.name, first.query()?.dwProcessId)?;
+    println!("service fixture stage: oversized_message_rejected");
+    attacks::oversized(root, &first.name, first.query()?.dwProcessId)?;
+    println!("service fixture stage: client_message_timeout_poisoned");
+    attacks::client_deadline(&first.name, image, expected)?;
+    println!("service fixture stage: server_message_timeout_released");
+    attacks::server_deadline(root, &first.name, first.query()?.dwProcessId)?;
+    runtime()?.block_on(async {
+        let mut pipe = connect(&first.name).await?;
+        ping(&mut pipe)?;
+        finish(&mut pipe)
+    })?;
+    println!("service fixture stage: stopped_service_is_not_authority");
+    first.normal_stop()?;
+    runtime()?.block_on(async {
+        let mut pipe = connect(&second.name).await?;
+        assert!(matches!(
+            WindowsServicePeer::from_pipe_server(&first.name, verified(image, expected)?, &pipe),
+            Err(ServicePeerError::NotRunning {
+                state: SERVICE_STOPPED,
+                ..
+            })
+        ));
+        ping(&mut pipe)?;
+        finish(&mut pipe)
+    })?;
+    second.normal_stop()?;
     Ok(())
 }

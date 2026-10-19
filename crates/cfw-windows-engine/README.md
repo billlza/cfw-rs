@@ -98,8 +98,9 @@ and [the proxy-change policy](https://learn.microsoft.com/en-us/windows/client-m
 ## Service peer admission
 
 `LocalServicePipe` opens a fixed local named-pipe path from a validated service
-name with identification-only SQOS. It exposes stream I/O without raw-handle
-import or mutable access to the inner client. `WindowsServicePeer` binds that
+name and closed `Desktop`/`UserAgent` role with identification-only SQOS. It owns
+a native message-mode handle without raw-handle import or mutable access to the
+inner client. `WindowsServicePeer` binds that
 exact connection to a retained SCM service object, live PID/creation time and
 the file identity of an already hash-verified installation executable. A new
 pipe cannot reuse the old admission. The expected name, path and hash must come
@@ -133,6 +134,33 @@ are errors, never global Off or a readiness proof. The full privileged backend,
 runtime authorization, service installation/signing and lifecycle supervision
 remain separate work.
 
+`LocalServiceListener` binds a fixed role to an already verified client image
+from the trusted installation. Each complete message is immediately checked
+against its native last-message token, retained primary process, file identity,
+SID, logon authentication ID, session and integrity. Request fields cannot
+choose a role or supply the native identity. Only the subsequent authority
+layer can decide whether that observed user/session has a current runtime
+lease; this transport does not grant one.
+
+The dedicated worker uses one native overlapped read per Windows message and
+does not prefetch. This follows the
+[last-message token contract](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient).
+The listener rejects remote clients and gives ordinary clients only individual
+data/attribute/query rights, excluding
+[creation of further pipe instances](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights).
+It reserves at most 15 connections and retains a fresh listening instance;
+cancelled instances are not recycled. Messages are bounded by the shared 1 MiB
+envelope limit, with at most one pending request per connection. Requests and
+replies must match the exact connection and sequence. Buffers are zeroized.
+
+`ServiceChannel` authenticates the service before sending and after receiving.
+An I/O, identity or ordering failure closes the channel; a timed-out command is
+delivery-uncertain and is never replayed automatically. Low-level pipe I/O
+poisons the handle on failure so it cannot be readmitted. Cancellation drains
+the exact native operation before releasing its buffer. Kernel completion can
+outlast the requested deadline, so callers must keep the worker alive until it
+returns. These are blocking worker APIs, not UI-thread operations.
+
 The `native-service-fixture` example installs two uniquely named disposable
 SYSTEM services only with `CFW_NATIVE_SERVICE_MUTATION_TESTS=1`. It checks actual
 SCM/pipe/image identity, another SYSTEM peer, ACL/configuration changes, a
@@ -141,8 +169,14 @@ client with Administrators disabled and `DISABLE_MAX_PRIVILEGE` applied. Only th
 new token's default DACL grants its user/SYSTEM control of its new objects; the
 runner's elevated default DACL would otherwise depend on the disabled group.
 The client also requires access denied for service memory/mutation rights and
-SYSTEM-token queries. The
-client uses a temporary user/SYSTEM-only window station and desktop at medium
+SYSTEM-token queries. Separate installed desktop and user-agent file identities
+exercise both roles. The fixture additionally rejects a wrong role, an identical
+client file copy, a medium-impersonated message queued before a primary-identity
+message, oversized messages and ordinary-client pipe-instance creation. Client
+and server read deadlines are exercised separately, followed by a fresh successful
+exchange. The fixture serves each role serially; connection saturation is not
+yet native-tested. These new transport cases require their own native CI result.
+The client uses a temporary user/SYSTEM-only window station and desktop at medium
 integrity; the controller restores its prior selections before launch. Existing
 user-object ACLs are not modified. This is not desktop UI qualification.
 The fixture stops and removes

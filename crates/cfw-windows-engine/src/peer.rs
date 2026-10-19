@@ -47,6 +47,8 @@ pub enum PeerIdentityError {
     IdentityChanged,
     #[error("Windows peer observer identity: {0}")]
     Observer(#[from] cfw_windows_storage::Error),
+    #[error("Windows peer executable identity: {0}")]
+    Executable(#[from] crate::Error),
 }
 
 fn native(operation: &'static str) -> PeerIdentityError {
@@ -154,8 +156,20 @@ impl NativePeerProcess {
         &self.identity
     }
 
-    /// Call after reading the request, before acting on it. The native pipe's
-    /// last-message token must match the observed process identity as well.
+    pub(crate) fn verify_executable(
+        &self,
+        expected: &crate::VerifiedExecutable,
+    ) -> Result<(), PeerIdentityError> {
+        cfw_windows_storage::require_process_identity()?;
+        alive(&self.process)?;
+        expected.verify_process_image(&self.process)?;
+        alive(&self.process)
+    }
+
+    /// Call immediately after one complete native message read, before another
+    /// read can occur. Stream/IOCP adapters that prefetch subsequent messages do
+    /// not preserve this contract. The service transport owns raw message pipes
+    /// so the last-message token is the request being admitted.
     pub fn from_pipe_client(pipe: &impl AsRawHandle) -> Result<Self, PeerIdentityError> {
         let peer = Self::open(pipe_pid(pipe, true)?)?;
         peer.verify_pipe_client(pipe)?;

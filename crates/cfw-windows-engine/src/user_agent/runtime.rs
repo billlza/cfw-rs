@@ -408,6 +408,23 @@ fn classify_revocation(
     }
 }
 
+fn combine(operation: Option<UserAgentError>, cleanup: UserAgentError) -> UserAgentError {
+    match operation {
+        Some(operation) => UserAgentError::Cleanup {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        },
+        None => cleanup,
+    }
+}
+impl Drop for UserAgentSession {
+    fn drop(&mut self) {
+        if self.attempted && self.cleanup.is_none() {
+            eprintln!("Windows user-agent owner dropped without a confirmed local cleanup receipt");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,22 +461,6 @@ mod tests {
             }),
         ] {
             assert!(classify_revocation(Err(error), true, || Ok(())).is_err());
-        }
-    }
-}
-fn combine(operation: Option<UserAgentError>, cleanup: UserAgentError) -> UserAgentError {
-    match operation {
-        Some(operation) => UserAgentError::Cleanup {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
-        None => cleanup,
-    }
-}
-impl Drop for UserAgentSession {
-    fn drop(&mut self) {
-        if self.attempted && self.cleanup.is_none() {
-            eprintln!("Windows user-agent owner dropped without a confirmed local cleanup receipt");
         }
     }
 }

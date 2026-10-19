@@ -89,6 +89,33 @@ impl LiveConsoleSession {
     }
 }
 
+impl NativePeerProcess {
+    /// Ordinary-process preflight only. This checks the calling process's
+    /// session number/connection state without obtaining another logon's token.
+    /// It does not construct LiveConsoleSession or grant runtime authority;
+    /// SYSTEM still observes the full console SID/LUID for every admitted effect.
+    pub(crate) fn require_current_console_session(&self) -> Result<(), ServiceAuthorizationError> {
+        if self.process_id() != std::process::id() {
+            return Err(PeerIdentityError::WrongProcess.into());
+        }
+        self.revalidate()?;
+        let session = self.identity().session_id();
+        let console = unsafe { WTSGetActiveConsoleSessionId() };
+        if session == 0 || console == 0 || console == u32::MAX {
+            return Err(ServiceAuthorizationError::NoActiveConsole);
+        }
+        if session != console {
+            return Err(ServiceAuthorizationError::NotConsoleOwner);
+        }
+        require_active(session)?;
+        self.revalidate()?;
+        if unsafe { WTSGetActiveConsoleSessionId() } != session {
+            return Err(ServiceAuthorizationError::ConsoleChanged);
+        }
+        Ok(())
+    }
+}
+
 fn query_user(session: u32) -> Result<NativeUserSession, ServiceAuthorizationError> {
     let mut raw = null_mut();
     if unsafe { WTSQueryUserToken(session, &mut raw) } == 0 {

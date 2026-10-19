@@ -525,7 +525,19 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
-        ClientCase::RuntimeDesktop => return user_agent::desktop(name, hex),
+        ClientCase::RuntimeDesktop => {
+            // The client preflight must work without weakening the privileged
+            // observer used by SYSTEM for full console-token admission.
+            if !matches!(
+                LiveConsoleSession::observe(),
+                Err(ServiceAuthorizationError::Observer(
+                    ServicePeerError::InvalidServiceProcessIdentity
+                ))
+            ) {
+                return Err("ordinary Desktop accessed the privileged console observer".into());
+            }
+            return user_agent::desktop(name, hex);
+        }
         ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime => {
             return user_agent::agent(name, &image, expected, case);
         }

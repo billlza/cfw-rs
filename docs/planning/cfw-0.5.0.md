@@ -917,6 +917,14 @@ pending read/write，再验证取消后的内核完成结果。`73d2eb5` 的
 仍未完成。实现核对了当前固定 [Rust 1.98.1 Windows 进程创建源码](https://github.com/rust-lang/rust/blob/1.98.1/library/std/src/sys/process/windows.rs)，
 不依赖默认 `Command` 行为推断句柄白名单。
 
+`3b76e8d` 的首次原生运行在创建 Agent 前失败：普通 Desktop 错误调用了仅供 SYSTEM
+使用的完整控制台观察器。九项底层引擎测试通过，但该次生命周期用例未通过，失败日志
+及产物保留。修复让客户端只检查自身会话编号仍为当前控制台且连接状态为 Active；
+它不取得控制台用户令牌、不构造 `LiveConsoleSession`。SYSTEM Authority 对完整
+SID/登录 LUID 的逐次授权检查不变，原生用例另行断言普通 Desktop 仍被特权观察器拒绝。
+这一权限区分符合 [WTSQueryUserToken 的 SYSTEM/SE_TCB 要求](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken)
+与[当前会话信息查询](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsquerysessioninformationw)的不同边界。
+
 改为允许服务 peer/channel 共享已验证镜像对象的 Arc。原文件及祖先目录句柄持续
 持有，保持禁止写入/替换的原契约；每次连接的 SCM 安全描述符、配置、进程和管道
 身份仍重新读取。压力测试在原预算内固定镜像一次，256 轮都检查已停止服务；新增

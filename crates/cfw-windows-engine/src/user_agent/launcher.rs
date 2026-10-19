@@ -6,8 +6,7 @@ use super::{
     launch_channel::{LaunchChannelError, LaunchSender},
 };
 use crate::{
-    LiveConsoleSession, NativePeerProcess, PeerIdentityError, ServiceAuthorizationError,
-    VerifiedExecutable,
+    NativePeerProcess, PeerIdentityError, ServiceAuthorizationError, VerifiedExecutable,
     authority::LeaseContext,
     process_handles::ProcessHandleList,
     service_transport::{ServiceTransportError, check_deadline},
@@ -54,9 +53,9 @@ pub enum LaunchError {
     Identity,
     #[error("Windows UserAgent invocation is invalid")]
     Invocation,
-    #[error("Windows UserAgent launch deadline expired; owner is retained")]
+    #[error("Windows UserAgent launch deadline expired")]
     Deadline,
-    #[error("Windows UserAgent launch was cancelled; owner is retained")]
+    #[error("Windows UserAgent launch was cancelled")]
     Cancelled,
     #[error("Windows UserAgent launch worker panicked")]
     WorkerPanicked,
@@ -418,9 +417,7 @@ fn medium_owner(context: &LeaseContext) -> Result<NativePeerProcess> {
     {
         return Err(LaunchError::Identity);
     }
-    if LiveConsoleSession::observe()?.identity() != identity.user_session() {
-        return Err(LaunchError::Identity);
-    }
+    current.require_current_console_session()?;
     Ok(current)
 }
 fn inherit(handle: BorrowedHandle<'_>) -> io::Result<OwnedHandle> {

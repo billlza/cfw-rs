@@ -90,8 +90,11 @@ Authority binding. The caller still owns child supervision and must resolve
 uncertain delivery through Authority.
 
 `UserAgentChild` launches the installed image through an explicit inherited
-handle list. It requires the exact medium-integrity lease owner and live console
-session, then checks the created child's actual token and installed image before
+handle list. It requires the exact medium-integrity lease owner and checks that
+the caller's own session is still attached/active at the console. This client
+preflight never obtains a console-user token or constructs `LiveConsoleSession`;
+the SYSTEM Authority retains full SID/logon admission before runtime effects.
+The launcher checks the created child's actual token and installed image before
 sending configuration. The frame never becomes a command-line argument. Failed
 creation preserves its cleanup context; any failure after process creation also
 returns the retained child. A successful launch confirms decoding only, and

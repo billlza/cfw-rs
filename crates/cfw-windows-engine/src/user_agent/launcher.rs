@@ -106,6 +106,7 @@ impl UserAgentInvocation {
             ValidationAgent::Local => "--local-agent-runtime",
             ValidationAgent::System => "--system-agent-runtime",
             ValidationAgent::RestartSystem => "--restart-system-agent-runtime",
+            ValidationAgent::RestartLocal => "--restart-local-agent-runtime",
             ValidationAgent::Rejected => "--rejected-agent-runtime",
         };
         Self::checked(flag, service, Some(digest))
@@ -116,6 +117,7 @@ pub enum ValidationAgent {
     Local,
     System,
     RestartSystem,
+    RestartLocal,
     Rejected,
 }
 

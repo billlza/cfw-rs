@@ -686,4 +686,21 @@ impl Machine {
         metadata.validate()?;
         Ok(metadata.clone())
     }
+    pub(super) fn local_recovery_target(&self) -> Result<AuthorityCommittedState> {
+        if !self.durable_known || self.phase != AuthorityState::Recovering {
+            return Err(AuthorityError::Recovering);
+        }
+        let metadata = self.metadata.as_ref().ok_or(AuthorityError::Recovering)?;
+        metadata.restart_action()?;
+        if self.lease.is_some()
+            || metadata.state() == AuthorityState::Off
+            || metadata.operation().is_none_or(|op| {
+                op.mode() != cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+            })
+            || metadata.revision() != self.revision
+        {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        Ok(metadata.clone())
+    }
 }

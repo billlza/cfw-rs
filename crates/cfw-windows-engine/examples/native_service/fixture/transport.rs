@@ -11,9 +11,9 @@ enum Validation {
     Restart(user_agent::restart::Service),
 }
 impl Validation {
-    fn new(name: &str, runtime: bool, restart: bool) -> Result<Self> {
-        Ok(if restart {
-            Self::Restart(user_agent::restart::Service::open(name)?)
+    fn new(name: &str, runtime: bool, restart: Option<user_agent::restart::Mode>) -> Result<Self> {
+        Ok(if let Some(mode) = restart {
+            Self::Restart(user_agent::restart::Service::open(name, mode)?)
         } else if runtime {
             Self::Runtime(user_agent::Validation::new())
         } else {
@@ -40,6 +40,12 @@ impl Validation {
             Self::Restart(value) => value.finish(),
         }
     }
+    fn reconcile_local_recovery(&mut self) -> Result<()> {
+        match self {
+            Self::Restart(value) => value.reconcile_local_recovery(),
+            _ => Err("local recovery trigger requires the restart fixture".into()),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -53,7 +59,7 @@ pub(super) struct Installation {
     authentication_id: u64,
     session_id: u32,
     pub(super) runtime: Option<user_agent::EngineInstallation>,
-    restart_runtime: bool,
+    pub(super) restart_runtime: Option<user_agent::restart::Mode>,
 }
 
 pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
@@ -187,14 +193,14 @@ pub(super) fn write_installation_mode(
     digest: [u8; 32],
     runtime: Option<user_agent::EngineInstallation>,
 ) -> Result<()> {
-    write_installation_runtime(root, agent, digest, runtime, false)
+    write_installation_runtime(root, agent, digest, runtime, None)
 }
 pub(super) fn write_installation_runtime(
     root: &Path,
     agent: &Path,
     digest: [u8; 32],
     runtime: Option<user_agent::EngineInstallation>,
-    restart_runtime: bool,
+    restart_runtime: Option<user_agent::restart::Mode>,
 ) -> Result<()> {
     let desktop_image = root.join("desktop-fixture.exe");
     std::fs::copy(
@@ -675,6 +681,13 @@ fn serve_connection(
         let (reply, finished): (&[u8], bool) = match request.body() {
             b"ping" => (b"pong", false),
             b"done" => (b"end!", true),
+            b"authority-local-recovery" if role == ServiceClientRole::Desktop => {
+                authority
+                    .lock()
+                    .map_err(|_| "native lifecycle guard poisoned")?
+                    .reconcile_local_recovery()?;
+                (b"local-off", true)
+            }
             b"authority-wire-finish" | b"authority-runtime-finish"
                 if role == ServiceClientRole::Desktop =>
             {

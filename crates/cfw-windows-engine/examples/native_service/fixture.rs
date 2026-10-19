@@ -116,19 +116,30 @@ pub(super) fn main() -> Result<()> {
         return user_agent::run_validation();
     }
     if args.len() == 2 && args[1] == "--runtime-restart-validation" {
-        return user_agent::run_restart_validation();
+        return user_agent::run_restart_validation(user_agent::restart::Mode::System);
+    }
+    if args.len() == 2 && args[1] == "--runtime-local-restart-validation" {
+        return user_agent::run_restart_validation(user_agent::restart::Mode::Local);
     }
     if args.len() == 4 {
         let case = match args[1].as_str() {
             "--local-agent-runtime" => Some(restricted::ClientCase::RuntimeLocal),
             "--system-agent-runtime" => Some(restricted::ClientCase::RuntimeSystem),
             "--restart-system-agent-runtime" => Some(restricted::ClientCase::RuntimeRestartSystem),
+            "--restart-local-agent-runtime" => Some(restricted::ClientCase::RuntimeRestartLocal),
             "--restart-runtime-desktop" => Some(restricted::ClientCase::RuntimeRestartDesktop),
+            "--restart-local-runtime-desktop" => {
+                Some(restricted::ClientCase::RuntimeLocalRestartDesktop)
+            }
             "--rejected-agent-runtime" => Some(restricted::ClientCase::RejectedRuntime),
             _ => None,
         };
         if let Some(case) = case {
-            if matches!(case, restricted::ClientCase::RuntimeRestartDesktop) {
+            if matches!(
+                case,
+                restricted::ClientCase::RuntimeRestartDesktop
+                    | restricted::ClientCase::RuntimeLocalRestartDesktop
+            ) {
                 for variable in [
                     "CFW_NATIVE_SERVICE_MUTATION_TESTS",
                     "CFW_NATIVE_PROXY_MUTATION_TESTS",

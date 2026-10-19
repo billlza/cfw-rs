@@ -1,4 +1,4 @@
-//! Disposable SCM crash/restart with a real SystemProxy owner. Fixture files
+//! Disposable SCM crash/restart with real LocalProxy/SystemProxy owners. Fixture files
 //! coordinate the test; only authenticated native channels authorize the runtime.
 use super::*;
 use cfw_windows_engine::{
@@ -10,8 +10,36 @@ use cfw_windows_engine::{
     },
 };
 mod desktop;
+mod local_recovery;
 mod recovery;
 pub(crate) use desktop::run as desktop;
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Mode {
+    Local,
+    System,
+}
+impl Mode {
+    pub(crate) fn projection(self) -> ProjectionMode {
+        match self {
+            Self::Local => ProjectionMode::LocalProxy,
+            Self::System => ProjectionMode::SystemProxy,
+        }
+    }
+    fn agent_label(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::System => "system",
+        }
+    }
+    fn invocation(self) -> ValidationAgent {
+        match self {
+            Self::Local => ValidationAgent::RestartLocal,
+            Self::System => ValidationAgent::RestartSystem,
+        }
+    }
+}
 
 fn publish(root: &Path, name: &str, value: &serde_json::Value) -> Result<()> {
     let target = root.join(name);
@@ -40,9 +68,10 @@ pub(crate) struct Service {
     recovered: bool,
     proxy_observations: usize,
     cleanup_publications: usize,
+    mode: Mode,
 }
 impl Service {
-    pub(crate) fn open(name: &str) -> Result<Self> {
+    pub(crate) fn open(name: &str, mode: Mode) -> Result<Self> {
         let root = authority_journal::root()?;
         let scope = format!("{name}-restart");
         let path = root.join("restart-authority");
@@ -55,6 +84,15 @@ impl Service {
             if authority.snapshot().state != AuthorityState::Recovering
                 || authority.lease_owner().is_some()
                 || target.state() != AuthorityState::Active
+                || target.operation().is_none_or(|op| {
+                    op.mode()
+                        != match mode {
+                            Mode::Local => cfw_engine_api::authority_v1::AuthorityMode::LocalProxy,
+                            Mode::System => {
+                                cfw_engine_api::authority_v1::AuthorityMode::SystemProxy
+                            }
+                        }
+                })
             {
                 return Err(
                     "restarted Authority restored execution or lost Active metadata".into(),
@@ -92,6 +130,7 @@ impl Service {
             recovered,
             proxy_observations: 0,
             cleanup_publications: 0,
+            mode,
         })
     }
     pub(crate) fn handle(
@@ -215,7 +254,10 @@ impl Service {
         Ok((reply, expected_recovery_rejection))
     }
     pub(crate) fn finish(&mut self) -> Result<()> {
-        if !self.recovered || self.proxy_observations != 1 || self.cleanup_publications != 1 {
+        if !self.recovered
+            || self.proxy_observations != usize::from(self.mode == Mode::System)
+            || self.cleanup_publications != 1
+        {
             return Err(
                 "restart fixture did not restart and admit exactly one proxy observation".into(),
             );
@@ -312,10 +354,12 @@ pub(crate) fn exercise(
     root: &Path,
     name: &str,
     digest: [u8; 32],
+    mode: Mode,
 ) -> Result<()> {
     thread::scope(|scope| {
         let image = root.join("desktop-fixture.exe");
-        let worker = scope.spawn(move || restricted::run_restart_desktop(&image, name, digest));
+        let worker =
+            scope.spawn(move || restricted::run_restart_desktop(&image, name, digest, mode));
         let crash = (|| {
             let deadline = Instant::now() + Duration::from_secs(40);
             while !root
@@ -488,33 +532,59 @@ fn require_exit(handle: &OwnedHandle) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn agent_report() -> serde_json::Value {
+pub(crate) fn agent_report(mode: Mode) -> serde_json::Value {
+    if mode == Mode::Local {
+        return serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,
+            "actual_local_proxy_runtime":true,"product_operation_succeeded":false,
+            "control_loss_preserved":true,"local_cleanup_observed":true,
+            "durable_runtime_storage":true,"system_proxy_unchanged":true,"stopped_acknowledged":false});
+    }
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,
         "actual_system_proxy_runtime":true,"product_operation_succeeded":false,
         "control_loss_preserved":true,"local_cleanup_observed":true,
         "durable_runtime_storage":true,"durable_proxy_restoration_record":true,"original_proxy_restored":true,"stopped_acknowledged":false})
 }
-pub(crate) fn desktop_report() -> serde_json::Value {
+pub(crate) fn desktop_report(mode: Mode) -> serde_json::Value {
+    if mode == Mode::Local {
+        return serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,
+            "actual_http_proxy_traffic":true,"product_operation_succeeded":false,
+            "held_agent_and_engine_exit_observed":true,"system_proxy_unchanged":true,
+            "listeners_released":true,"restart_recovering_observed":true,
+            "new_execution_rejected":true,"full_service_backend_proven":false});
+    }
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,
         "actual_http_proxy_traffic":true,"product_operation_succeeded":false,
         "held_agent_and_engine_exit_observed":true,"restoration_observed_after_agent_exit":true,"original_proxy_restored":true,
         "listeners_released":true,"restart_recovering_observed":true,
         "new_execution_rejected":true,"full_service_backend_proven":false})
 }
-pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> {
+pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str, mode: Mode) -> Result<()> {
     let before = read(root, "runtime-restart-before.json")?;
     let recovered = read(root, "runtime-restart-recovered.json")?;
     let restart = read(root, "runtime-restart-complete.json")?;
     let retired = read(root, "runtime-restart-retired.json")?;
-    let proxy_recovery = read(root, "runtime-restart-proxy-recovery.json")?;
-    let proxy_recovery_observer = read(root, "runtime-restart-proxy-recovery-observer.json")?;
-    let cleanup = read(root, "runtime-restart-cleanup.json")?;
-    let cleanup_observer = read(root, "runtime-restart-cleanup-observer.json")?;
     let owners_exited = read(root, "runtime-restart-owners-exited.json")?;
     let verified_off = read(root, "runtime-restart-verified-off.json")?;
     if before["metadata"] != recovered["metadata"] {
         return Err("restart metadata changed".into());
     }
+    if mode == Mode::Local {
+        return write_report(
+            &receipts.join("runtime-restart-receipt.json"),
+            &serde_json::json!({
+                "product_source":source,"before":before,"recovered":recovered,"restart":restart,"retired":retired,
+                "owners_exited":owners_exited,"verified_off":verified_off,
+                "local_cleanup":read(root,"runtime-restart-local-cleanup.json")?,
+                "local_cleanup_observer":read(root,"runtime-restart-local-observer.json")?,
+                "desktop":desktop_report(mode),"agent":agent_report(mode),"temporary_service_removed":true,
+                "global_cleanup_proven":true,"release_accepted":false,
+            }),
+        );
+    }
+    let proxy_recovery = read(root, "runtime-restart-proxy-recovery.json")?;
+    let proxy_recovery_observer = read(root, "runtime-restart-proxy-recovery-observer.json")?;
+    let cleanup = read(root, "runtime-restart-cleanup.json")?;
+    let cleanup_observer = read(root, "runtime-restart-cleanup-observer.json")?;
     write_report(
         &receipts.join("runtime-restart-receipt.json"),
         &serde_json::json!({
@@ -523,7 +593,7 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
             "cleanup":cleanup,"cleanup_observer":cleanup_observer,
             "owners_exited":owners_exited,
             "verified_off":verified_off,
-            "desktop":desktop_report(),"agent":agent_report(),"temporary_service_removed":true,
+            "desktop":desktop_report(mode),"agent":agent_report(mode),"temporary_service_removed":true,
             "global_cleanup_proven":true,"release_accepted":false,
         }),
     )

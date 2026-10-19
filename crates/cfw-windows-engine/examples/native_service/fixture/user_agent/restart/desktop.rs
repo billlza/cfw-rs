@@ -1,11 +1,14 @@
 use super::super::desktop_runtime::authenticate_controller;
 use super::*;
 
-pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
+pub(crate) fn run(name: &str, hex: &str, mode: Mode) -> Result<()> {
     let expected = hash(hex)?;
     let (image, digest) = transport::service_image()?;
     if expected != digest {
         return Err("restart Desktop installation digest differs".into());
+    }
+    if transport::installation()?.restart_runtime != Some(mode) {
+        return Err("restart Desktop mode differs from fixture installation".into());
     }
     let root = image.parent().ok_or("missing restart fixture root")?;
     if std::env::current_exe().map_err(|e| e.to_string())? != root.join("desktop-fixture.exe") {
@@ -38,7 +41,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
     let projection = profile
         .project(
             credentials::PROFILE,
-            ProjectionMode::SystemProxy,
+            mode.projection(),
             &EngineSettings {
                 mixed_port: mixed_address.port(),
                 controller_port: controller_address.port(),
@@ -54,7 +57,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
             config_epoch: initial.session.config_epoch,
             generation,
         },
-        mode: ProjectionMode::SystemProxy,
+        mode: mode.projection(),
         credential_audience: projection.credential_audience().clone(),
         config_json: projection.as_json().to_owned(),
         config_content_digest: projection.configuration_digest().to_owned(),
@@ -70,7 +73,10 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
     let output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(root.join(format!("{name}-restart-system-client-output.txt")))
+        .open(root.join(format!(
+            "{name}-restart-{}-client-output.txt",
+            mode.agent_label()
+        )))
         .map_err(|e| e.to_string())?;
     let stop = Arc::new(AtomicBool::new(false));
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -85,11 +91,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
                 Instant::now() + LIMIT,
             )?;
             operation.run(
-                UserAgentInvocation::for_validation(
-                    name,
-                    ValidationAgent::RestartSystem,
-                    expected,
-                )?,
+                UserAgentInvocation::for_validation(name, mode.invocation(), expected)?,
                 &output,
                 worker_stop,
                 sender,
@@ -117,8 +119,9 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
                 progress::wait(root, name, ready.context(), &agent, Instant::now() + LIMIT)?;
             traffic(mixed_address)?;
             authenticate_controller(controller_address, controller_key.expose_secret())?;
-            if proxy.snapshot().map_err(|e| e.to_string())? == original {
-                return Err("SystemProxy did not change settings before crash".into());
+            let proxy_changed = proxy.snapshot().map_err(|e| e.to_string())? != original;
+            if proxy_changed != (mode == Mode::System) {
+                return Err("proxy settings do not match the restart mode's ownership".into());
             }
             publish(
                 root,
@@ -197,8 +200,14 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
         };
         require_exit(&agent)?;
         require_exit(&engine)?;
-        observe_persisted_restoration(root, &context, &engine)?;
-        if read(root, &format!("{name}-restart-system-client.json"))? != agent_report() {
+        if mode == Mode::System {
+            observe_persisted_restoration(root, &context, &engine)?;
+        }
+        if read(
+            root,
+            &format!("{name}-restart-{}-client.json", mode.agent_label()),
+        )? != agent_report(mode)
+        {
             return Err(
                 "restart Agent did not attest local cleanup with control failure preserved".into(),
             );
@@ -259,15 +268,26 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
             Err(error) => return Err(format!("restarted lease rejection differs: {error}")),
             Ok(_) => return Err("restarted Authority restored the old execution lease".into()),
         };
-        let result = recovery::exercise(
-            name,
-            root,
-            Arc::clone(&service_image),
-            &mut observer,
-            cfw_windows_engine::authority::ProxyRecoveryTarget::from_recorded(&recorded)
-                .map_err(|e| e.to_string())?,
-            &context,
-        );
+        let result = if mode == Mode::Local {
+            local_recovery::observe(
+                name,
+                root,
+                Arc::clone(&service_image),
+                &mut observer,
+                &context,
+                &recorded,
+            )
+        } else {
+            recovery::exercise(
+                name,
+                root,
+                Arc::clone(&service_image),
+                &mut observer,
+                cfw_windows_engine::authority::ProxyRecoveryTarget::from_recorded(&recorded)
+                    .map_err(|e| e.to_string())?,
+                &context,
+            )
+        };
         drop(runtime_reference);
         result
     })?;

@@ -67,6 +67,18 @@ impl Scoped {
             WindowsAuthority::open(&self.path, &self.scope).map_err(|e| e.to_string())?;
         assert_eq!(recovered.snapshot().state, AuthorityState::Recovering);
         let observation = require_live_runtime(&mut recovered, minimum)?;
+        if recovered
+            .recovery_target()
+            .and_then(|m| m.operation())
+            .is_some_and(|op| op.mode() == AuthorityMode::LocalProxy)
+        {
+            let before = recovered.snapshot();
+            assert!(matches!(
+                recovered.reconcile_local_recovery(),
+                Err(AuthorityError::CleanupUnproven)
+            ));
+            assert_eq!(recovered.snapshot(), before);
+        }
         assert!(recovered.lease_owner().is_none());
         assert!(matches!(
             recovered.verify_recorded_off(),

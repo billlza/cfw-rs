@@ -15,6 +15,7 @@ use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, PacketPumpLimi
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+mod local_recovery;
 mod local_stop;
 mod startup;
 

@@ -24,9 +24,9 @@ pub(super) fn run(
     let launch = receive()?;
     let mode = launch.mode();
     let expected = match case {
-        restricted::ClientCase::RuntimeLocal | restricted::ClientCase::RejectedRuntime => {
-            ProjectionMode::LocalProxy
-        }
+        restricted::ClientCase::RuntimeLocal
+        | restricted::ClientCase::RuntimeRestartLocal
+        | restricted::ClientCase::RejectedRuntime => ProjectionMode::LocalProxy,
         restricted::ClientCase::RuntimeSystem | restricted::ClientCase::RuntimeRestartSystem => {
             ProjectionMode::SystemProxy
         }
@@ -50,7 +50,10 @@ pub(super) fn run(
         );
     }
     let context = launch.context().clone();
-    let restart_case = matches!(case, restricted::ClientCase::RuntimeRestartSystem);
+    let restart_case = matches!(
+        case,
+        restricted::ClientCase::RuntimeRestartSystem | restricted::ClientCase::RuntimeRestartLocal
+    );
     let storage = cfw_windows_engine::user_agent::UserRuntimeStorage::open(
         &image
             .parent()

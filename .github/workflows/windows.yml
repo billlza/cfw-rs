@@ -88,6 +88,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Native UserAgent engine and proxy lifecycle validation failed" }
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-restart-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-restart-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native SCM crash and runtime recovery validation failed" }
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-local-restart-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-local-restart-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM LocalProxy crash recovery validation failed" }
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -112,6 +114,7 @@ jobs:
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*-client.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/runtime-restart-*.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/runtime-stop-*.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/local-restart/**
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.wire-validation.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.off-admission.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.rejection.json

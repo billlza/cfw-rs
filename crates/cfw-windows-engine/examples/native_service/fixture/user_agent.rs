@@ -276,7 +276,7 @@ impl Validation {
             .cleanup()?;
         write_report(
             &authority_journal::root()?.join("user-agent.wire-validation.json"),
-            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"system_runtime_job_observed":true,"job_failure_boundaries_verified":true,"process_observations":self.process_observations,"nested_engine_membership_observed":true,"engine_keeper_survives_agent_reference_release":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"live_processes_block_reconcile":true,"ordinary_agent_job_rights_denied":true,"global_cleanup_observations_injected":false,"production_system_proxy_stop":true,"production_local_proxy_stop":true,"injected_cleanup_modes":[],"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
+            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"system_runtime_job_observed":true,"job_failure_boundaries_verified":true,"process_observations":self.process_observations,"nested_engine_membership_observed":true,"engine_keeper_survives_agent_reference_release":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"live_processes_block_reconcile":true,"ordinary_agent_job_rights_denied":true,"global_cleanup_observations_injected":false,"production_system_proxy_stop":true,"production_local_proxy_stop":true,"local_recovery_while_live_rejected":true,"injected_cleanup_modes":[],"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
         )
     }
 }
@@ -291,12 +291,12 @@ pub(super) fn client_report() -> serde_json::Value {
     report
 }
 pub(super) fn run_validation() -> Result<()> {
-    run_mode(false)
+    run_mode(None)
 }
-pub(super) fn run_restart_validation() -> Result<()> {
-    run_mode(true)
+pub(super) fn run_restart_validation(mode: restart::Mode) -> Result<()> {
+    run_mode(Some(mode))
 }
-fn run_mode(restart: bool) -> Result<()> {
+fn run_mode(restart: Option<restart::Mode>) -> Result<()> {
     for variable in [
         "CFW_NATIVE_SERVICE_MUTATION_TESTS",
         "CFW_NATIVE_PROXY_MUTATION_TESTS",
@@ -318,6 +318,13 @@ fn run_mode(restart: bool) -> Result<()> {
     if !receipts.is_absolute() || !receipts.is_dir() {
         return Err("invalid runtime receipt directory".into());
     }
+    let receipts = if restart == Some(restart::Mode::Local) {
+        let directory = receipts.join("local-restart");
+        std::fs::create_dir(&directory).map_err(|e| e.to_string())?;
+        directory
+    } else {
+        receipts
+    };
     let install = EngineInstallation {
         path: PathBuf::from(
             std::env::var_os("CFW_ENGINE_HOST_PATH").ok_or("missing runtime engine")?,
@@ -352,8 +359,8 @@ fn run_mode(restart: bool) -> Result<()> {
         }
         let name = format!("CFW-scm-fixture-{}-a", uuid::Uuid::new_v4());
         let mut service = Installed::create(&manager, name.clone(), &image)?;
-        let test = if restart {
-            restart::exercise(&mut service, root.path(), &name, expected)
+        let test = if let Some(mode) = restart {
+            restart::exercise(&mut service, root.path(), &name, expected, mode)
         } else {
             transport::run_runtime_desktop_validation(root.path(), &name, expected)
         };
@@ -379,8 +386,8 @@ fn run_mode(restart: bool) -> Result<()> {
         {
             return Err("runtime fixture service deletion was not observed".into());
         }
-        if restart {
-            return restart::receipt(root.path(), &receipts, &source);
+        if let Some(mode) = restart {
+            return restart::receipt(root.path(), &receipts, &source, mode);
         }
         let wire = std::fs::read(root.path().join("user-agent.wire-validation.json"))
             .map_err(|e| e.to_string())?;

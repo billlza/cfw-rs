@@ -1,16 +1,16 @@
-//! Normal LocalProxy cleanup. The schema-6 resource contract admits only
+//! LocalProxy normal-stop and recovery cleanup. The schema-6 contract admits only
 //! process-local sockets/pipes; no system proxy, managed interface or packet
-//! pump is created. This proof is not usable for SystemProxy/Tunnel or recovery.
+//! pump is created. This proof is not usable for SystemProxy or Tunnel.
 use super::super::{RuntimeProcessObservation, RuntimeProcessState};
 use super::*;
 use cfw_engine_api::authority_v1::AuthorityMode;
 
-pub struct VerifiedLocalStop {
+pub struct VerifiedLocalCleanup {
     prior: AuthorityCommittedState,
     processes: RuntimeProcessObservation,
     snapshot: AuthoritySnapshot,
 }
-impl VerifiedLocalStop {
+impl VerifiedLocalCleanup {
     pub fn prior(&self) -> &AuthorityCommittedState {
         &self.prior
     }
@@ -25,9 +25,32 @@ impl WindowsAuthority {
     /// Trusted supervisor entrypoint after an acknowledged LocalProxy stop.
     /// A live member or unavailable native observer fails explicitly. The
     /// acknowledgement alone never certifies termination of the entire tree.
-    pub fn reconcile_local_stop(&mut self) -> Result<VerifiedLocalStop> {
+    pub fn reconcile_local_stop(&mut self) -> Result<VerifiedLocalCleanup> {
         require_service()?;
         let target = self.machine.local_stopped_cleanup_target()?;
+        self.reconcile_local_runtime(target)
+    }
+    /// Reconcile a known LocalProxy record after losing the execution lease.
+    /// The old acknowledgement is not reconstructed. Independent whole-Job
+    /// retirement and the bounded resource contract replace it for recovery;
+    /// a missing Job, unknown journal, live member or another mode still fails.
+    pub fn reconcile_local_recovery(&mut self) -> Result<VerifiedLocalCleanup> {
+        require_service()?;
+        let target = self.machine.local_recovery_target()?;
+        if self.machine.context().is_some()
+            || self.keeper_confirmed
+            || self.desktop_reference_issued
+            || self.desktop_reference_confirmed
+            || self.proxy_recovery.is_some()
+        {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        self.reconcile_local_runtime(target)
+    }
+    fn reconcile_local_runtime(
+        &mut self,
+        target: AuthorityCommittedState,
+    ) -> Result<VerifiedLocalCleanup> {
         let operation = target.operation().ok_or(AuthorityError::CleanupUnproven)?;
         let process_local = operation.mode() == AuthorityMode::LocalProxy;
         let processes = self.observe_runtime_processes()?;
@@ -50,7 +73,7 @@ impl WindowsAuthority {
         // These process-local facts cannot substitute for per-user WinINet or
         // TUN/route/DNS restoration in another mode.
         let evidence = CleanupEvidence {
-            binding: CleanupBinding::LocalStop(target.clone()),
+            binding: CleanupBinding::LocalRuntime(target.clone()),
             revision: target.revision(),
             lease_id: Some(operation.lease_id()),
             proxy_listener_closed: retired,
@@ -63,7 +86,7 @@ impl WindowsAuthority {
         };
         evidence.validate_scope(self.machine.metadata())?;
         let snapshot = self.reconcile_off(evidence)?;
-        Ok(VerifiedLocalStop {
+        Ok(VerifiedLocalCleanup {
             prior: target,
             processes,
             snapshot,

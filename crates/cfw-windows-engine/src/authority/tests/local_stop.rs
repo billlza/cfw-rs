@@ -1,6 +1,6 @@
 use super::*;
 
-fn local(acknowledged: bool) -> (Machine, Peer, LeaseContext) {
+pub(super) fn local(acknowledged: bool) -> (Machine, Peer, LeaseContext) {
     let now = Instant::now();
     let mut machine = off();
     let host = peer(Role::Desktop);
@@ -72,12 +72,12 @@ fn local_cleanup_scope_cannot_release_a_proxy_mode_or_different_operation() {
     let target = local.local_stopped_cleanup_target().unwrap();
     let mut proof =
         CleanupEvidence::for_validation(target.revision(), Some(context.lease_id), true);
-    proof.binding = CleanupBinding::LocalStop(system.metadata().unwrap().clone());
+    proof.binding = CleanupBinding::LocalRuntime(system.metadata().unwrap().clone());
     assert!(matches!(
         proof.validate_scope(system.metadata()),
         Err(AuthorityError::Stale)
     ));
-    proof.binding = CleanupBinding::LocalStop(target.clone());
+    proof.binding = CleanupBinding::LocalRuntime(target.clone());
     proof.lease_id = Some(Uuid::from_u128(99));
     assert!(matches!(
         local.reconcile(&proof),
@@ -86,7 +86,7 @@ fn local_cleanup_scope_cannot_release_a_proxy_mode_or_different_operation() {
     proof.lease_id = Some(context.lease_id);
     let mut altered = serde_json::to_value(&target).unwrap();
     altered["operation"]["identity_sha256"][0] = serde_json::json!(99);
-    proof.binding = CleanupBinding::LocalStop(serde_json::from_value(altered).unwrap());
+    proof.binding = CleanupBinding::LocalRuntime(serde_json::from_value(altered).unwrap());
     assert!(matches!(
         local.reconcile(&proof),
         Err(AuthorityError::Stale)
@@ -100,7 +100,7 @@ fn local_global_off_commits_only_after_complete_scoped_cleanup_evidence() {
     let target = machine.local_stopped_cleanup_target().unwrap();
     let mut proof =
         CleanupEvidence::for_validation(target.revision(), Some(context.lease_id), true);
-    proof.binding = CleanupBinding::LocalStop(target.clone());
+    proof.binding = CleanupBinding::LocalRuntime(target.clone());
     machine.reconcile(&proof).unwrap();
     assert_eq!(machine.phase(), AuthorityState::Off);
     assert_eq!(machine.revision(), target.revision() + 1);

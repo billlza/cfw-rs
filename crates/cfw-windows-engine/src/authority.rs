@@ -20,7 +20,7 @@ pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
 pub use native::ProxyRecoveryObservation;
 #[cfg(windows)]
-pub use native::VerifiedLocalStop;
+pub use native::VerifiedLocalCleanup;
 #[cfg(windows)]
 pub use native::VerifiedOffAdmission;
 #[cfg(windows)]

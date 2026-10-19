@@ -15,6 +15,8 @@ pub(super) enum ClientCase {
     RuntimeSystem,
     RuntimeRestartDesktop,
     RuntimeRestartSystem,
+    RuntimeRestartLocal,
+    RuntimeLocalRestartDesktop,
     RejectedRuntime,
 }
 impl ClientCase {
@@ -28,6 +30,8 @@ impl ClientCase {
             Self::RuntimeSystem => "--system-agent-runtime",
             Self::RuntimeRestartDesktop => "--restart-runtime-desktop",
             Self::RuntimeRestartSystem => "--restart-system-agent-runtime",
+            Self::RuntimeRestartLocal => "--restart-local-agent-runtime",
+            Self::RuntimeLocalRestartDesktop => "--restart-local-runtime-desktop",
             Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
@@ -41,6 +45,8 @@ impl ClientCase {
             Self::RuntimeSystem => format!("{name}-runtime-system"),
             Self::RuntimeRestartDesktop => format!("{name}-restart-desktop"),
             Self::RuntimeRestartSystem => format!("{name}-restart-system"),
+            Self::RuntimeRestartLocal => format!("{name}-restart-local"),
+            Self::RuntimeLocalRestartDesktop => format!("{name}-restart-desktop"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
@@ -63,8 +69,18 @@ impl ClientCase {
                 user_agent::agent_report(cfw_singbox_config::ProjectionMode::SystemProxy)
             }
             Self::RejectedRuntime => user_agent::rejected_report(),
-            Self::RuntimeRestartDesktop => user_agent::restart::desktop_report(),
-            Self::RuntimeRestartSystem => user_agent::restart::agent_report(),
+            Self::RuntimeRestartDesktop => {
+                user_agent::restart::desktop_report(user_agent::restart::Mode::System)
+            }
+            Self::RuntimeLocalRestartDesktop => {
+                user_agent::restart::desktop_report(user_agent::restart::Mode::Local)
+            }
+            Self::RuntimeRestartSystem => {
+                user_agent::restart::agent_report(user_agent::restart::Mode::System)
+            }
+            Self::RuntimeRestartLocal => {
+                user_agent::restart::agent_report(user_agent::restart::Mode::Local)
+            }
         }
     }
 }
@@ -218,12 +234,20 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
 pub(super) fn run_desktop_runtime(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     run_case(image, name, expected, ClientCase::RuntimeDesktop, None)
 }
-pub(super) fn run_restart_desktop(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
+pub(super) fn run_restart_desktop(
+    image: &Path,
+    name: &str,
+    expected: [u8; 32],
+    mode: user_agent::restart::Mode,
+) -> Result<()> {
     run_case(
         image,
         name,
         expected,
-        ClientCase::RuntimeRestartDesktop,
+        match mode {
+            user_agent::restart::Mode::System => ClientCase::RuntimeRestartDesktop,
+            user_agent::restart::Mode::Local => ClientCase::RuntimeLocalRestartDesktop,
+        },
         None,
     )
 }
@@ -240,6 +264,7 @@ pub(super) fn run_runtime(
         ClientCase::RuntimeLocal => ValidationAgent::Local,
         ClientCase::RuntimeSystem => ValidationAgent::System,
         ClientCase::RuntimeRestartSystem => ValidationAgent::RestartSystem,
+        ClientCase::RuntimeRestartLocal => ValidationAgent::RestartLocal,
         ClientCase::RejectedRuntime => ValidationAgent::Rejected,
         _ => return Err("invalid product UserAgent fixture case".into()),
     };
@@ -411,7 +436,9 @@ fn run_case(
     });
     let limit = if matches!(
         case,
-        ClientCase::RuntimeDesktop | ClientCase::RuntimeRestartDesktop
+        ClientCase::RuntimeDesktop
+            | ClientCase::RuntimeRestartDesktop
+            | ClientCase::RuntimeLocalRestartDesktop
     ) {
         Duration::from_secs(60)
     } else {
@@ -551,7 +578,12 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
-        ClientCase::RuntimeRestartDesktop => return user_agent::restart::desktop(name, hex),
+        ClientCase::RuntimeRestartDesktop => {
+            return user_agent::restart::desktop(name, hex, user_agent::restart::Mode::System);
+        }
+        ClientCase::RuntimeLocalRestartDesktop => {
+            return user_agent::restart::desktop(name, hex, user_agent::restart::Mode::Local);
+        }
         ClientCase::RuntimeDesktop => {
             // The client preflight must work without weakening the privileged
             // observer used by SYSTEM for full console-token admission.
@@ -568,6 +600,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         ClientCase::RuntimeLocal
         | ClientCase::RuntimeSystem
         | ClientCase::RuntimeRestartSystem
+        | ClientCase::RuntimeRestartLocal
         | ClientCase::RejectedRuntime => {
             return user_agent::agent(name, &image, expected, case);
         }

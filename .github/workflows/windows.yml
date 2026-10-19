@@ -112,6 +112,7 @@ jobs:
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*-client.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/runtime-restart-*.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.wire-validation.json
+            ${{ runner.temp }}/cfw-windows-engine/artifacts/*.off-admission.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.rejection.json
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.txt
             ${{ runner.temp }}/cfw-windows-engine/artifacts/*.log

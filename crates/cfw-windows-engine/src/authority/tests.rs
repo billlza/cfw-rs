@@ -15,6 +15,8 @@ use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, PacketPumpLimi
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+mod startup;
+
 fn owner() -> RecordedOwner {
     serde_json::from_value(
         serde_json::json!({"sid":[1,1,0,0,0,0,0,5,21,0,0,0],"authentication_id":99,"session_id":2}),

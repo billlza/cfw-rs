@@ -43,9 +43,7 @@ impl Scoped {
         let mut controller =
             WindowsAuthority::open(&value.path, &value.scope).map_err(|e| e.to_string())?;
         assert_eq!(controller.snapshot().state, AuthorityState::Recovering);
-        controller
-            .reconcile_off(CleanupEvidence::for_validation(1, None, true))
-            .map_err(|e| e.to_string())?;
+        verify_initial_off(&mut controller, &value.scope)?;
         value.controller = Some(controller);
         Ok(value)
     }
@@ -70,6 +68,11 @@ impl Scoped {
         assert_eq!(recovered.snapshot().state, AuthorityState::Recovering);
         let observation = require_live_runtime(&mut recovered, minimum)?;
         assert!(recovered.lease_owner().is_none());
+        assert!(matches!(
+            recovered.verify_recorded_off(),
+            Err(AuthorityError::CleanupUnproven)
+        ));
+        assert_eq!(recovered.snapshot().state, AuthorityState::Recovering);
         self.controller
             .as_mut()
             .ok_or("missing original controller")?
@@ -77,6 +80,33 @@ impl Scoped {
             .map_err(|e| e.to_string())?;
         Ok(observation)
     }
+}
+pub(super) fn verify_initial_off(controller: &mut WindowsAuthority, name: &str) -> Result<()> {
+    let admission = controller
+        .verify_recorded_off()
+        .map_err(|e| e.to_string())?;
+    if admission.processes().state() != RuntimeProcessState::NoRuntimeRoot
+        || admission.snapshot().state != AuthorityState::Off
+        || admission.snapshot().revision != Some(admission.prior().revision())
+        || admission.prior().operation().is_some()
+        || controller.lease_owner().is_some()
+    {
+        return Err(
+            "initial production Off admission did not preserve an unused installation".into(),
+        );
+    }
+    let report = serde_json::json!({
+        "prior":admission.prior(),"processes":process_report("startup", admission.processes()),
+        "snapshot":admission.snapshot(),"production_admission":true,"lease_restored":false,
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(authority_journal::root()?.join(format!("{name}.off-admission.json")))
+        .map_err(|e| e.to_string())?;
+    file.write_all(&serde_json::to_vec(&report).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
 }
 impl Drop for Scoped {
     fn drop(&mut self) {

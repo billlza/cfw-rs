@@ -87,6 +87,20 @@ impl Machine {
     pub(super) fn durable_known(&self) -> bool {
         self.durable_known
     }
+    pub(super) fn recorded_off_target(&self) -> Result<AuthorityCommittedState> {
+        if !self.durable_known || self.phase != AuthorityState::Recovering {
+            return Err(AuthorityError::Recovering);
+        }
+        let metadata = self.metadata.as_ref().ok_or(AuthorityError::Recovering)?;
+        metadata.validate()?;
+        if self.lease.is_some()
+            || metadata.state() != AuthorityState::Off
+            || metadata.operation().is_some()
+        {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        Ok(metadata.clone())
+    }
     pub(super) fn context(&self) -> Option<&LeaseContext> {
         self.lease.as_ref().map(|lease| &lease.context)
     }

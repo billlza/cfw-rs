@@ -302,6 +302,18 @@ impl AuthorityCommittedState {
             }
             _ => {}
         }
+        if self.state == AuthorityState::Off
+            && !matches!(
+                self.transition,
+                JournalTransition::EnrollOff
+                    | JournalTransition::Checkpoint
+                    | JournalTransition::ReserveGeneration
+                    | JournalTransition::GlobalOff
+                    | JournalTransition::ReconcileOff
+            )
+        {
+            return Err(JournalValidationError::InvalidState);
+        }
         if self.transition == JournalTransition::EnrollOff {
             if self.root.epoch != 0
                 || self.root.generation != 0

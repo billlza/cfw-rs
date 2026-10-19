@@ -20,7 +20,9 @@ const ADMISSION: Duration = Duration::from_millis(cfw_engine_api::authority_v1::
 mod cleanup;
 mod recovery;
 mod runtime_reference;
+mod startup;
 pub use recovery::ProxyRecoveryObservation;
+pub use startup::VerifiedOffAdmission;
 
 /// The service owns one instance behind its lifecycle guard. This component
 /// binds native callers and persists policy; the runtime supervisor still owns

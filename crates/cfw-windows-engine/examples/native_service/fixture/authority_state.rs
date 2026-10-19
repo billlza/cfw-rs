@@ -97,14 +97,26 @@ pub(super) fn begin(peer: &ServicePeerAuthorization) -> Result<Validation> {
         controller.prepare(peer, input(installation, 1, 1)),
         Err(AuthorityError::Recovering)
     ));
-    isolated_off(controller)?;
+    authority_wire::verify_initial_off(controller, "lifecycle")?;
     let genesis = controller.recovery_target().cloned();
     assert!(matches!(
         controller.prepare(peer, input(client_installation, 2, 1)),
         Err(AuthorityError::Stale)
     ));
     assert_eq!(controller.recovery_target().cloned(), genesis);
+    let mut stale = WindowsAuthority::open(&case.path, &case.scope).map_err(|e| e.to_string())?;
     allocate(controller, peer)?;
+    assert!(matches!(
+        stale.verify_recorded_off(),
+        Err(AuthorityError::Stale)
+    ));
+    assert_eq!(stale.snapshot().state, AuthorityState::Recovering);
+    assert_eq!(stale.snapshot().revision, None);
+    assert!(stale.snapshot().root.is_none());
+    stale.reload_for_recovery().map_err(|e| e.to_string())?;
+    authority_wire::verify_initial_off(&mut stale, "unused-reservation")?;
+    assert_eq!(stale.recovery_target(), controller.recovery_target());
+    drop(stale);
     assert!(matches!(
         controller.prepare(peer, input(client_installation, 2, 1)),
         Err(AuthorityError::Replay)

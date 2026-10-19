@@ -262,7 +262,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
         let result = recovery::exercise(
             name,
             root,
-            service_image,
+            Arc::clone(&service_image),
             &mut observer,
             cfw_windows_engine::authority::ProxyRecoveryTarget::from_recorded(&recorded)
                 .map_err(|e| e.to_string())?,
@@ -270,7 +270,20 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
         );
         drop(runtime_reference);
         result
-    })
+    })?;
+    // All product runtime references have left scope before the supervisor
+    // reopens the durable Off record. A prior Off is distinct from Job count 0.
+    let mut finish = ServiceChannel::connect(name, ServiceClientRole::Desktop, service_image)
+        .map_err(|e| e.to_string())?;
+    if finish
+        .request(b"authority-runtime-finish", Instant::now() + LIMIT)
+        .map_err(|e| e.to_string())?
+        .as_bytes()
+        != b"wire-ok"
+    {
+        return Err("restart fixture finish mismatch".into());
+    }
+    Ok(())
 }
 
 fn desktop_control_loss(error: &DesktopError) -> bool {

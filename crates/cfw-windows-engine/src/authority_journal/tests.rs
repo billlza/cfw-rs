@@ -5,6 +5,43 @@ use uuid::Uuid;
 fn installation() -> Uuid {
     Uuid::from_u128(0x12345678_9012_3456_7890_123456789abc)
 }
+
+#[test]
+fn off_records_cannot_relabel_runtime_transitions_as_cleanup() {
+    for transition in [
+        JournalTransition::Prepare,
+        JournalTransition::BindOwner,
+        JournalTransition::Ready,
+        JournalTransition::BeginStop,
+        JournalTransition::OwnerStopped,
+        JournalTransition::AbortPrepared,
+        JournalTransition::RevokeForConsoleChange,
+        JournalTransition::RevokeForTimeout,
+    ] {
+        assert!(matches!(
+            AuthorityCommittedState::new(root(), 7, transition, AuthorityState::Off, None),
+            Err(JournalValidationError::InvalidState)
+        ));
+    }
+    for transition in [
+        JournalTransition::GlobalOff,
+        JournalTransition::ReconcileOff,
+    ] {
+        let retired =
+            AuthorityCommittedState::new(root(), 7, transition, AuthorityState::Off, None).unwrap();
+        for state in [
+            retired.clone(),
+            retired.checkpoint().unwrap(),
+            retired.reserve_next_generation().unwrap(),
+        ] {
+            assert_eq!(state.restart_action().unwrap(), RecoveryAction::VerifyOff);
+            assert_eq!(
+                AuthorityCommittedState::decode(&state.encode().unwrap()).unwrap(),
+                state
+            );
+        }
+    }
+}
 fn owner() -> RecordedOwner {
     serde_json::from_value(serde_json::json!({"sid":[1,5,0,0,0,0,0,5,21,0,0,0,123,0,0,0,200,1,0,0,21,3,0,0,233,3,0,0],"authentication_id":0x1234_5678_90ab_cdefu64,"session_id":2})).unwrap()
 }

@@ -670,6 +670,7 @@ fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
             && !text.ends_with(".authority-validation.json")
             && !text.ends_with(".wire-validation.json")
             && !text.ends_with(".stress-validation.json")
+            && !text.ends_with(".off-admission.json")
             && !(text.starts_with("runtime-restart-") && text.ends_with(".json"))
         {
             continue;

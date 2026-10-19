@@ -82,11 +82,7 @@ impl Service {
             if target.root().epoch != 0 || target.revision() != 1 || target.operation().is_some() {
                 return Err("restart fixture initial journal was not fresh enrollment".into());
             }
-            // Fresh disposable fixture enrollment only. A reopened runtime must
-            // never take this branch or receive injected global-Off evidence.
-            authority
-                .reconcile_off(CleanupEvidence::for_validation(1, None, true))
-                .map_err(|e| e.to_string())?;
+            authority_wire::verify_initial_off(&mut authority, "runtime-restart-initial")?;
         }
         Ok(Self {
             authority: Some(authority),
@@ -224,6 +220,74 @@ impl Service {
                 "restart fixture did not restart and admit exactly one proxy observation".into(),
             );
         }
+        let retired = self
+            .authority
+            .as_ref()
+            .ok_or("missing retired authority")?
+            .recovery_target()
+            .cloned()
+            .ok_or("missing retired Off record")?;
+        self.authority.take();
+        let mut reopened =
+            WindowsAuthority::open(&self.path, &self.scope).map_err(|e| e.to_string())?;
+        if reopened.snapshot().state != AuthorityState::Recovering
+            || reopened.recovery_target() != Some(&retired)
+            || reopened.lease_owner().is_some()
+        {
+            return Err("reopening retired Off restored live authority or changed metadata".into());
+        }
+        let before = reopened.snapshot();
+        use cfw_windows_engine::authority_journal::{JournalFaultPoint, JournalStoreError};
+        reopened
+            .interrupt_next_publication_for_validation(JournalFaultPoint::CommittedAnchorPublished)
+            .map_err(|e| e.to_string())?;
+        if !matches!(
+            reopened.verify_recorded_off(),
+            Err(AuthorityError::Journal(JournalStoreError::InjectedFault))
+        ) {
+            return Err("startup publication uncertainty did not remain an error".into());
+        }
+        let uncertain = reopened.snapshot();
+        if uncertain.state != AuthorityState::Recovering
+            || uncertain.revision.is_some()
+            || uncertain.root.is_some()
+            || !matches!(
+                reopened.verify_recorded_off(),
+                Err(AuthorityError::Recovering)
+            )
+        {
+            return Err("uncertain startup retained a current revision or admitted Off".into());
+        }
+        reopened.reload_for_recovery().map_err(|e| e.to_string())?;
+        let reloaded = reopened.snapshot();
+        if reloaded.state != AuthorityState::Recovering
+            || reloaded.revision != retired.revision().checked_add(1)
+            || reopened.lease_owner().is_some()
+        {
+            return Err("startup reload did not recover committed Off without a lease".into());
+        }
+        let admitted = reopened.verify_recorded_off().map_err(|e| e.to_string())?;
+        if admitted.processes().state()
+            != cfw_windows_engine::authority::RuntimeProcessState::DurablyRetired
+            || admitted.snapshot().state != AuthorityState::Off
+            || admitted.snapshot().revision != retired.revision().checked_add(2)
+            || admitted.snapshot().root.as_ref() != Some(retired.root())
+            || reopened.lease_owner().is_some()
+        {
+            return Err(
+                "retired startup did not preserve durable lineage without native observers".into(),
+            );
+        }
+        publish(
+            &self.root,
+            "runtime-restart-verified-off.json",
+            &serde_json::json!({
+                "retired":retired,"before":before,"uncertain":uncertain,"reloaded":reloaded,
+                "prior":admitted.prior(),"snapshot":admitted.snapshot(),"processes":authority_wire::process_report("startup", admitted.processes()),
+                "post_commit_failure_preserved":true,"retry_before_reload_rejected":true,"production_admission":true,"lease_restored":false,
+            }),
+        )?;
+        self.authority = Some(reopened);
         Ok(())
     }
 }
@@ -447,6 +511,7 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
     let cleanup = read(root, "runtime-restart-cleanup.json")?;
     let cleanup_observer = read(root, "runtime-restart-cleanup-observer.json")?;
     let owners_exited = read(root, "runtime-restart-owners-exited.json")?;
+    let verified_off = read(root, "runtime-restart-verified-off.json")?;
     if before["metadata"] != recovered["metadata"] {
         return Err("restart metadata changed".into());
     }
@@ -457,6 +522,7 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
             "proxy_recovery":proxy_recovery,"proxy_recovery_observer":proxy_recovery_observer,
             "cleanup":cleanup,"cleanup_observer":cleanup_observer,
             "owners_exited":owners_exited,
+            "verified_off":verified_off,
             "desktop":desktop_report(),"agent":agent_report(),"temporary_service_removed":true,
             "global_cleanup_proven":true,"release_accepted":false,
         }),

@@ -20,6 +20,8 @@ pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
 pub use native::ProxyRecoveryObservation;
 #[cfg(windows)]
+pub use native::VerifiedOffAdmission;
+#[cfg(windows)]
 pub use native::WindowsAuthority;
 pub use recovery::{ProxyRecoveryContext, ProxyRecoveryPurpose, ProxyRecoveryTarget};
 #[cfg(windows)]

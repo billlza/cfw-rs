@@ -155,6 +155,27 @@ fn malformed_ticket_lengths_elements_and_truncations_never_decode() {
 }
 
 #[test]
+fn lease_contexts_reject_a_nil_installation_before_dispatch_or_reply_admission() {
+    let mut invalid = context();
+    invalid.operation.root.installation_id = Uuid::nil();
+    assert!(matches!(
+        Request::new(Command::Heartbeat(invalid.clone())),
+        Err(WireError::Malformed)
+    ));
+    let query = Request::new(Command::OwnedLease).unwrap();
+    let incoming = envelope(query.id, CommandTag::Heartbeat, &invalid).unwrap();
+    assert!(matches!(
+        Request::decode(incoming.as_bytes()),
+        Err(WireError::Malformed)
+    ));
+    let message = Response::Lease(invalid).encode(query.id).unwrap();
+    assert!(matches!(
+        response(&query, message.as_bytes(), &owner()),
+        Err(WireError::Malformed)
+    ));
+}
+
+#[test]
 fn a_ticket_reply_is_bound_to_the_exact_request_and_native_owner() {
     let request = prepare();
     let message = grant().encode(request.id).unwrap();

@@ -819,7 +819,7 @@ Windows EngineBackend、TUN、安装及真机验收仍是独立的后续工作�
 `fb4eb306f1aaf26418430f1d9e7fec8a8657112465da2e91cf34ad59f99a75e1`。
 下载后核对源码、报告、二进制与许可文件；不把清理注入输入当作生产清理证据。
 
-## Windows Authority 命令通道（2026-10-19，原生执行待完成）
+## Windows Authority 命令通道（2026-10-19，原生协议路径已验证）
 
 新增 `cfw.windows.authority` 协议版本 1、实际请求分发和 `AuthorityChannel` 客户端。
 命令必须来自已认证管道的原始消息，分发按内核捕获的 Desktop/UserAgent 角色授权。
@@ -832,13 +832,24 @@ Windows EngineBackend、TUN、安装及真机验收仍是独立的后续工作�
 准备回复和运行绑定回复没有公开反序列化器；客户端完成关联验证后才能构造这些类型。
 运行时仍必须消费绑定结果并验证实际资源，不能把绑定回复当作引擎已运行的证据。
 
-本机组件测试 41 项通过，包括重复/未知字段、边界与票据截断、身份/版本不匹配、
+本机组件测试 42 项通过，包括重复/未知字段、边界与票据截断、身份/版本不匹配、
 伪造提前 Ready 与错误 Off 回复。原生 fixture 使用真正的中完整性、非管理员
 UserAgent 进程，经继承的匿名 stdin 管道交接内存票据，执行 12 条版本化命令。
 检查错误票据、新连接继承拒绝、绑定/Ready/心跳/停止路径，以及 Stopped 报告仍停留
 在 Stopping。匿名管道写入在单独线程执行，由父进程监督子进程期限并在结束后回收。
 Ready/Stopped 报告和最终清理观察在此仍为显式合成输入；实际引擎启动、生产清理观察、
 完整 SCM 服务与桌面 backend 接线仍待实现。
+
+提交 `5c600bd` 的运行 `39203140484` 中，SCM job `117900197294` 已成功。
+下载服务产物 `12163849125`，SHA-256 为
+`2fa1bda4893d0782a13b332bb092e91334b117c640889744600c862e9f71f932`。
+核验 34 个原生场景、256 轮交换、四个客户端报告及 11 个拒绝记录；新协议报告确认
+实际 UserAgent 绑定、12 条版本化命令和两项业务拒绝，同时显式声明运行报告与清理
+输入为合成数据。它不证明真实引擎已在该服务租约下启动。
+
+另补租约上下文空安装 UUID 的边界检查。共享 RootContext 验证 epoch/generation，
+Windows 入口需独立验证非空安装 UUID。新增回归用例先在旧实现失败，修正后命令
+构造、服务端解码和客户端租约回复均拒绝该输入；已有原生路径不变，新提交 CI 待跑。
 
 实现核对了 [RawValue 借用解码](https://docs.rs/serde_json/latest/serde_json/value/struct.RawValue.html)
 和 [CreatePipe 缓冲及阻塞语义](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createpipe)。

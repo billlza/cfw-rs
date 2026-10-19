@@ -206,6 +206,7 @@ impl Command {
 pub(super) fn validate_context(context: &LeaseContext) -> Result<()> {
     let op = &context.operation;
     if context.lease_id.is_nil()
+        || op.root.installation_id.is_nil()
         || op.operation_id.is_nil()
         || op.prepared_revision < 2
         || op.root.validate().is_err()

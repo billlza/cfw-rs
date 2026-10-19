@@ -35,6 +35,8 @@ mod security;
 #[cfg(feature = "native-service-validation")]
 mod validation;
 #[cfg(feature = "native-service-validation")]
+pub use validation::JobKeeperProbe;
+#[cfg(feature = "native-service-validation")]
 pub use validation::validate_runtime_job_failures_for_validation;
 #[cfg(test)]
 mod tests;
@@ -139,25 +141,7 @@ pub(super) struct RuntimeJob {
 impl RuntimeJob {
     pub(super) fn assign(root: &RootContext, peer: &NativePeerProcess) -> Result<Self> {
         crate::service_peer::require_system_service_identity()?;
-        let name = job_name(root)?;
-        let descriptor = security::Descriptor::system_only()?;
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.as_ptr(),
-            bInheritHandle: 0,
-        };
-        let wide: Vec<_> = name.encode_utf16().chain([0]).collect();
-        let raw = unsafe { CreateJobObjectW(&attributes, wide.as_ptr()) };
-        let code = unsafe { GetLastError() };
-        if raw.is_null() {
-            return Err(native("create runtime job"));
-        }
-        let job = unsafe { OwnedHandle::from_raw_handle(raw) };
-        if code == ERROR_ALREADY_EXISTS {
-            return Err(RuntimeJobError::AlreadyExists);
-        }
-        security::verify(&job)?;
-        inspect(&job)?;
+        let job = create(root)?;
         // Opening by PID is bounded by the retained authenticated process. A PID
         // cannot be reused while that original process is still alive here.
         peer.revalidate()?;
@@ -207,6 +191,29 @@ impl RuntimeJob {
             _observer: observer,
         })
     }
+}
+
+fn create(root: &RootContext) -> Result<OwnedHandle> {
+    let name = job_name(root)?;
+    let descriptor = security::Descriptor::system_only()?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr(),
+        bInheritHandle: 0,
+    };
+    let wide: Vec<_> = name.encode_utf16().chain([0]).collect();
+    let raw = unsafe { CreateJobObjectW(&attributes, wide.as_ptr()) };
+    let code = unsafe { GetLastError() };
+    if raw.is_null() {
+        return Err(native("create runtime job"));
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if code == ERROR_ALREADY_EXISTS {
+        return Err(RuntimeJobError::AlreadyExists);
+    }
+    security::verify(&job)?;
+    inspect(&job)?;
+    Ok(job)
 }
 
 pub(super) fn observe(root: &RootContext) -> Result<RuntimeProcessObservation> {

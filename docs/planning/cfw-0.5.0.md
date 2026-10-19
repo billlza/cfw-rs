@@ -1131,6 +1131,26 @@ UserAgent；失败日志和下载哈希保留。该反例否定“对象名称�
 实现依据 [Job 生命周期](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw)
 和 [嵌套 Job 继承及计数](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)。
 
+`defd2ea` 的 Windows 原生服务与引擎产物、共享测试日志已按源提交和下载哈希核对：
+575 项 Rust、311 项 UI、34 项 SCM 用例、两项诊断夹具测试和九项原生引擎测试通过。
+两种代理模式的服务计数分别为 Ready 时 3、Stopped 报告时 1、Agent 退出后 0；
+已有句柄保留时，第二个控制器能够重开观察并拒绝活动进程的 Off。独立空闲子进程
+复现了最后句柄关闭后名称消失但进程仍活着的反例。全局清理其余条件仍为夹具注入。
+
+### 零权限保留句柄的隔离验证（待原生执行）
+
+为解决服务句柄丢失后的可观察性，新增仅在 native-service-validation 中编译的
+JobKeeperProbe。SYSTEM 创建没有成员的独立 Job，向已认证的受限 UserAgent 复制
+零权限、不可继承的句柄；此用例不发出任何运行授权。客户端及其同权限副本必须不能
+查询、设置限制或终止 Job，也不能通过 DuplicateHandle 获得查询、赋值、终止、设置
+属性或改变安全描述符的权限。服务随后关闭创建句柄，检查零权限句柄保留名称；客户端
+释放两个副本后，服务必须观察到名称不可用。三步握手绑定原连接的实际进程与令牌。
+
+该候选机制尚未接入产品 Bind 或引擎继承链，也不证明完整 SCM 重启恢复。当前产品
+遇到丢失的活动 Job 仍返回 Unavailable。先验证原生权限和生命周期性质，再决定是否
+将其用于运行资源；不根据句柄的表面权限推断无法提权。
+参考 [DuplicateHandle 的权限语义](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。

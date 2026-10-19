@@ -438,6 +438,7 @@ fn serve_connection(
     authority: &Mutex<Validation>,
 ) -> Result<()> {
     let mut wire_connection = false;
+    let mut job_keeper: Option<cfw_windows_engine::authority::JobKeeperProbe> = None;
     loop {
         if STOP.load(Ordering::SeqCst) {
             return Ok(());
@@ -557,6 +558,44 @@ fn serve_connection(
             || admitted.process().identity() != request.identity()
         {
             return Err("authorized fixture lost its retained process identity".into());
+        }
+        if role == ServiceClientRole::UserAgent {
+            let reply = match request.body() {
+                b"job-keeper-begin" if job_keeper.is_none() => {
+                    let probe =
+                        cfw_windows_engine::authority::JobKeeperProbe::new(admitted.process())
+                            .map_err(|e| e.to_string())?;
+                    let value = probe.handle_value().to_le_bytes().to_vec();
+                    job_keeper = Some(probe);
+                    Some(value)
+                }
+                b"job-keeper-observe" => {
+                    job_keeper
+                        .as_mut()
+                        .ok_or("missing keeper fixture")?
+                        .observe_without_creator(admitted.process())
+                        .map_err(|e| e.to_string())?;
+                    Some(b"retained".to_vec())
+                }
+                b"job-keeper-release" => {
+                    job_keeper
+                        .as_mut()
+                        .ok_or("missing keeper fixture")?
+                        .observe_release(admitted.process())
+                        .map_err(|e| e.to_string())?;
+                    Some(b"released".to_vec())
+                }
+                _ => None,
+            };
+            if let Some(reply) = reply {
+                connection
+                    .reply(request, &reply, Instant::now() + LIMIT)
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+        }
+        if request.body() == b"done" && job_keeper.as_ref().is_some_and(|p| !p.released()) {
+            return Err("keeper fixture ended before handle retirement".into());
         }
         if request.body() == b"identity-probe" {
             connection

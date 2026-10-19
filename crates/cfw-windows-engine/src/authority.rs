@@ -18,12 +18,12 @@ pub use client::AuthorityChannel;
 pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
 pub use native::WindowsAuthority;
-#[cfg(windows)]
-pub use runtime_job::{RuntimeJobError, RuntimeProcessObservation, RuntimeProcessState};
 #[cfg(all(windows, feature = "native-service-validation"))]
 pub use runtime_job::{
-    runtime_job_name_for_validation, validate_runtime_job_failures_for_validation,
+    JobKeeperProbe, runtime_job_name_for_validation, validate_runtime_job_failures_for_validation,
 };
+#[cfg(windows)]
+pub use runtime_job::{RuntimeJobError, RuntimeProcessObservation, RuntimeProcessState};
 pub use types::{
     AuthorityLineage, AuthoritySnapshot, CleanupEvidence, LeaseContext, OperationContext,
     PrepareRequest, PreparedTicket, ReadyReport, RecordedRuntimeScope, RuntimeStartAuthorization,

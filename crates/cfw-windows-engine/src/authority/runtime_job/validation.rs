@@ -1,5 +1,7 @@
 //! Opt-in disposable SYSTEM fixture only. No process is assigned or terminated.
 use super::*;
+mod keeper;
+pub use keeper::JobKeeperProbe;
 use windows_sys::Win32::{
     Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE},
     System::{

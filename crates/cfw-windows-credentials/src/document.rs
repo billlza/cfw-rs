@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 // Match the GA vault's resource bounds. Ciphertext has a separate allowance
 // for DPAPI metadata; plaintext is always checked again after decryption.
 pub(crate) const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_TOTAL_SECRET_BYTES: usize = 448 * 1024;
+pub(crate) const MAX_TOTAL_SECRET_BYTES: usize = 448 * 1024;
 const SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone)]

@@ -33,12 +33,20 @@ protection against process compromise.
 The storage API does **not** implement `CredentialVaultProvisioner` itself.
 `cfw-windows-engine::credential_lifecycle::WindowsCredentialLifecycle` now wraps
 it with a cross-process lifecycle guard and persisted LocalProxy/SystemProxy
-bindings correlated with the authenticated Authority, for both GC phases. The
-application's async vault adapter and Tunnel/persisted candidate integration are
-still required. Failure to observe runtime state must fail maintenance; an empty
+bindings correlated with the authenticated Authority, for both GC phases. It
+also implements the shared async vault trait with bounded blocking workers and
+explicit cancellation/admission. Full application wiring and Tunnel/persisted
+candidate integration are still required. Failure to observe runtime state must fail maintenance; an empty
 list cannot substitute for a failed observation. Call these synchronous methods
 on a blocking worker, and authenticate the exact engine request before calling
 `resolve_for_engine`. No credential-resolution UI command is provided.
+
+`OwnedCredentialProvision` copies only a checked borrowed provisioning request
+for transfer to a blocking worker. Its aggregate secret limit reuses the vault
+budget, and its secret buffers use Zeroizing. It has no serialization, Clone or
+Debug representation. This erases only the transfer's owned copies; callers
+remain responsible for their original buffers. Owned and borrowed provisioning
+share the same immutable transaction and failure semantics.
 
 Native Windows tests exercise real DPAPI, private files, cross-process reopen,
 concurrent writers, lock contention, exact audience separation, immutable

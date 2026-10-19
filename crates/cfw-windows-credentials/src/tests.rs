@@ -588,11 +588,59 @@ fn aggregate_secret_capacity_is_enforced_before_publication() {
             CredentialProvision::new(reference, CredentialSecret::new(&material).unwrap())
         })
         .collect();
-    assert_eq!(
-        store.provision(CredentialProvisionRequest::new(OTHER_ID, &profile, entries).unwrap()),
+    let request = CredentialProvisionRequest::new(OTHER_ID, &profile, entries).unwrap();
+    assert!(matches!(
+        OwnedCredentialProvision::capture(&request),
         Err(Error::CapacityExceeded)
-    );
+    ));
+    assert_eq!(store.provision(request), Err(Error::CapacityExceeded));
     assert_eq!(before, ciphertext(&store));
+}
+
+#[test]
+fn owned_provision_outlives_its_borrowed_input_and_retains_immutable_vault_rules() {
+    let (_root, store) = fixture();
+    let profile = profile();
+    let owned = {
+        let secret = String::from(SECRET);
+        let references = profile.credential_references();
+        let request = CredentialProvisionRequest::new(
+            ID,
+            &profile,
+            vec![CredentialProvision::new(
+                &references[0],
+                CredentialSecret::new(&secret).unwrap(),
+            )],
+        )
+        .unwrap();
+        OwnedCredentialProvision::capture(&request).unwrap()
+    };
+    let receipt = store.provision_owned(owned).unwrap();
+    assert_eq!(receipt.profile_id, ID);
+    assert_eq!(receipt.profile_digest, profile.digest());
+    let references = profile.credential_references();
+    let resolved = store
+        .resolve_for_engine(&audience(ID, &profile), &references)
+        .unwrap();
+    assert_eq!(
+        resolved.expose_to_engine().collect::<Vec<_>>(),
+        vec![(&references[0], SECRET)]
+    );
+    let before = ciphertext(&store);
+    let request = CredentialProvisionRequest::new(
+        ID,
+        &profile,
+        vec![CredentialProvision::new(
+            &references[0],
+            CredentialSecret::new("different-material").unwrap(),
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        store.provision_owned(OwnedCredentialProvision::capture(&request).unwrap()),
+        Err(Error::ImmutableConflict)
+    );
+    assert_eq!(ciphertext(&store), before);
 }
 
 #[test]

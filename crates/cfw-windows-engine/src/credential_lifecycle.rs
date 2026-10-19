@@ -1,6 +1,8 @@
 //! Persisted credential bindings for the single Authority runtime. Native
 //! lifecycle admission, not a frontend-supplied list, chooses GC protection.
 #[cfg(windows)]
+mod asynchronous;
+#[cfg(windows)]
 mod native;
 mod record;
 #[cfg(windows)]
@@ -20,6 +22,8 @@ pub enum CredentialLifecycleError {
     ProtectedVaultMissing,
     #[error("Windows runtime credential operation exceeded its admission deadline")]
     Deadline,
+    #[error("Windows credential operation was cancelled before vault admission")]
+    CancelledBeforeAdmission,
     #[cfg(windows)]
     #[error("Windows runtime credential storage: {0}")]
     Storage(#[from] cfw_windows_storage::Error),

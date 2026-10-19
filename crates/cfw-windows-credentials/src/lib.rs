@@ -5,6 +5,8 @@
 
 mod document;
 mod dpapi;
+mod owned;
+pub use owned::OwnedCredentialProvision;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -52,10 +54,30 @@ impl WindowsCredentialStore {
             .iter()
             .map(|entry| (entry.reference(), entry.secret().expose_to_vault()))
             .collect();
+        self.provision_parts(request.audience(), request.required_references(), &supplied)
+    }
+
+    pub fn provision_owned(
+        &self,
+        request: OwnedCredentialProvision,
+    ) -> Result<CredentialVaultReceipt, Error> {
+        let supplied: Vec<_> = request
+            .entries
+            .iter()
+            .map(|(reference, secret)| (reference, secret.as_str()))
+            .collect();
+        self.provision_parts(&request.audience, &request.references, &supplied)
+    }
+
+    fn provision_parts(
+        &self,
+        audience: &CredentialAudience,
+        references: &[CredentialRef],
+        supplied: &[(&CredentialRef, &str)],
+    ) -> Result<CredentialVaultReceipt, Error> {
         self.mutate(false, |document| {
-            let changed =
-                document.provision(request.audience(), request.required_references(), &supplied)?;
-            Ok((changed, receipt(request.audience())))
+            let changed = document.provision(audience, references, supplied)?;
+            Ok((changed, receipt(audience)))
         })
     }
 

@@ -352,9 +352,30 @@ tickets or resolved credentials enter this record.
 The native runtime fixture uses a shared current-user DPAPI vault in distinct
 Desktop/Agent processes, exercises real GC while the engine remains active, and
 checks stale pre-start previews plus missing/corrupt bindings, missing authority
-and a missing protected vault. Global cleanup remains injected. The async
-application vault adapter, independent global recovery, Tunnel/persisted candidate
-bindings and complete application factory are still separate integration work.
+and a missing protected vault. Global cleanup remains injected. Independent
+global recovery, Tunnel/persisted candidate bindings and the complete application
+factory are still separate integration work.
+
+The same lifecycle now implements all five `CredentialVaultProvisioner` methods
+for the application. A Tokio executor with time enabled runs bounded blocking
+work; clones share four permits, reserved before copying borrowed secrets. The
+calling thread must first pass the impersonation check, so offloading cannot
+silently discard its security context. Native operations check identity again.
+The owned provisioning transfer has no serde/Clone/Debug interface, is bounded by
+the existing 448 KiB secret budget and erases its copies on drop. Provisioning
+uses the same immutable vault transaction as the borrowed synchronous API.
+
+Queued work has a 15-second admission deadline and a 30-second completion
+watchdog. Cancellation and vault admission race through one atomic decision;
+the check occurs after acquiring the native lifecycle lock and, for GC, after
+the authenticated scope observation. Expired or cancelled pending work cannot
+later enter the vault. Once admitted, abandoning a future or timing out does
+not imply rollback: the worker retains its permit, buffers and native guard
+until it retires. A timeout or wrapper cleanup failure after admission reports
+`OutcomeUnknown`; a protected missing vault maps to Corrupt, never the UI's
+empty-store MissingVault branch. No uncertain mutation is retried. This follows
+[Tokio's blocking task cancellation contract](https://docs.rs/tokio/1.53.1/tokio/task/fn.spawn_blocking.html).
+The factory still needs to install this adapter in the full Windows application.
 
 The shared coordinator pins a backend's declared runtime platform when its actor
 starts. Windows user-agent/tunnel-service owners have distinct wire names from

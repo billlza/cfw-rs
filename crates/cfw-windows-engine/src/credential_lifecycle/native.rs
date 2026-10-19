@@ -15,7 +15,7 @@ use cfw_engine_api::{
     CredentialPresenceRequest, CredentialProvisionRequest, CredentialRebindRequest,
     CredentialVaultReceipt, authority_v1::AuthorityState,
 };
-use cfw_windows_credentials::WindowsCredentialStore;
+use cfw_windows_credentials::{OwnedCredentialProvision, WindowsCredentialStore};
 use cfw_windows_storage::{PrivateDirectory, PrivateUserMutex, ReadPolicy};
 use std::{
     path::{Path, PathBuf},
@@ -36,6 +36,7 @@ pub struct WindowsCredentialLifecycle {
     service: String,
     image: Arc<VerifiedExecutable>,
     directory: PathBuf,
+    pub(super) workers: Arc<tokio::sync::Semaphore>,
 }
 impl WindowsCredentialLifecycle {
     pub fn new(
@@ -47,6 +48,9 @@ impl WindowsCredentialLifecycle {
             service,
             image,
             directory: directory.as_ref().to_owned(),
+            workers: Arc::new(tokio::sync::Semaphore::new(
+                super::asynchronous::MAX_OPERATIONS,
+            )),
         }
     }
     pub fn service(&self) -> &str {
@@ -65,10 +69,36 @@ impl WindowsCredentialLifecycle {
         })
     }
     pub fn presence(&self, request: &CredentialPresenceRequest) -> Result<Vec<CredentialPresence>> {
+        self.presence_admitted(request, || Ok(()))
+    }
+    pub(super) fn provision_owned_admitted(
+        &self,
+        request: OwnedCredentialProvision,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<CredentialVaultReceipt> {
+        self.locked(Instant::now() + LOCK_WAIT, || {
+            admit()?;
+            Ok(self.vault().provision_owned(request)?)
+        })
+    }
+    pub(super) fn presence_admitted(
+        &self,
+        request: &CredentialPresenceRequest,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<Vec<CredentialPresence>> {
+        admit()?;
         Ok(self.vault().presence(request)?)
     }
     pub fn rebind(&self, request: &CredentialRebindRequest) -> Result<CredentialVaultReceipt> {
+        self.rebind_admitted(request, || Ok(()))
+    }
+    pub(super) fn rebind_admitted(
+        &self,
+        request: &CredentialRebindRequest,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<CredentialVaultReceipt> {
         self.locked(Instant::now() + LOCK_WAIT, || {
+            admit()?;
             Ok(self.vault().rebind(request)?)
         })
     }
@@ -76,8 +106,16 @@ impl WindowsCredentialLifecycle {
         &self,
         request: &CredentialGarbageCollectionRequest,
     ) -> Result<CredentialGarbageCollectionPreview> {
+        self.preview_admitted(request, || Ok(()))
+    }
+    pub(super) fn preview_admitted(
+        &self,
+        request: &CredentialGarbageCollectionRequest,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<CredentialGarbageCollectionPreview> {
         self.locked(Instant::now() + LOCK_WAIT, || {
             let bindings = self.protected_bindings()?;
+            admit()?;
             vault_result(
                 self.vault().preview_garbage_collection(request, &bindings),
                 &bindings,
@@ -88,10 +126,18 @@ impl WindowsCredentialLifecycle {
         &self,
         request: &CredentialGarbageCollectionCommitRequest,
     ) -> Result<CredentialGarbageCollectionReceipt> {
+        self.commit_admitted(request, || Ok(()))
+    }
+    pub(super) fn commit_admitted(
+        &self,
+        request: &CredentialGarbageCollectionCommitRequest,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<CredentialGarbageCollectionReceipt> {
         self.locked(Instant::now() + LOCK_WAIT, || {
             // Re-observe inside the guard. The store checks both vault revision
             // and the exact orphan set from the user's confirmed preview.
             let bindings = self.protected_bindings()?;
+            admit()?;
             vault_result(
                 self.vault().commit_garbage_collection(request, &bindings),
                 &bindings,

@@ -10,6 +10,7 @@ use windows_sys::Win32::{
 
 pub fn validate_runtime_job_failures_for_validation() -> Result<()> {
     let own = crate::service_peer::require_system_service_identity()?;
+    verify_last_handle_loss_with_live_peer()?;
     let root = RootContext {
         installation_id: uuid::Uuid::new_v4(),
         epoch: 1,
@@ -69,7 +70,7 @@ pub fn validate_runtime_job_failures_for_validation() -> Result<()> {
         return Err(RuntimeJobError::Observation);
     }
     drop(job);
-    if observe(&root)?.state() != RuntimeProcessState::JobAbsent {
+    if !matches!(observe(&root), Err(RuntimeJobError::Unavailable)) {
         return Err(RuntimeJobError::Observation);
     }
 
@@ -99,8 +100,67 @@ pub fn validate_runtime_job_failures_for_validation() -> Result<()> {
         return Err(RuntimeJobError::Observation);
     }
     drop(job);
-    if observe(&root)?.state() != RuntimeProcessState::JobAbsent {
+    if !matches!(observe(&root), Err(RuntimeJobError::Unavailable)) {
         return Err(RuntimeJobError::Observation);
     }
     Ok(())
+}
+
+fn verify_last_handle_loss_with_live_peer() -> Result<()> {
+    use std::process::{Command, Stdio};
+    let image = std::env::current_exe().map_err(|source| RuntimeJobError::Native {
+        operation: "locate idle process fixture",
+        source,
+    })?;
+    // This copied fixture has a bounded, idle-only child mode. It never starts
+    // an engine or edits proxy state. The parent always retires the held child.
+    let mut child = Command::new(image)
+        .arg("--runtime-job-idle-probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|source| RuntimeJobError::Native {
+            operation: "spawn idle process fixture",
+            source,
+        })?;
+    let checked = (|| {
+        let peer = NativePeerProcess::open(child.id())?;
+        let root = RootContext {
+            installation_id: uuid::Uuid::new_v4(),
+            epoch: 1,
+            generation: 1,
+        };
+        let job = RuntimeJob::assign(&root, &peer)?;
+        let before = observe(&root)?;
+        if before.state()
+            != (RuntimeProcessState::Accounting {
+                active: 1,
+                total: 1,
+            })
+        {
+            return Err(RuntimeJobError::Observation);
+        }
+        drop(job);
+        // The retained process, creation time and primary token still match.
+        // A missing native name during that interval must remain an error.
+        peer.revalidate()?;
+        if !matches!(observe(&root), Err(RuntimeJobError::Unavailable)) {
+            return Err(RuntimeJobError::Observation);
+        }
+        peer.revalidate()?;
+        Ok(())
+    })();
+    let killed = child.kill();
+    let waited = child.wait();
+    match (checked, killed, waited) {
+        (Ok(()), Ok(()), Ok(_)) => Ok(()),
+        (Err(error), Ok(()), Ok(_)) => Err(error),
+        (checked, killed, waited) => Err(RuntimeJobError::Native {
+            operation: "retire idle process fixture",
+            source: io::Error::other(format!(
+                "test={checked:?}; kill={killed:?}; wait={waited:?}"
+            )),
+        }),
+    }
 }

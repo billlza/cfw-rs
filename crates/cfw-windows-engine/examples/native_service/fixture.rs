@@ -105,6 +105,12 @@ impl Drop for Descriptor {
 
 pub(super) fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--runtime-job-idle-probe" {
+        // Native Job lifetime counterexample only. The parent holds and retires
+        // this exact child; the bound also limits lifetime if the parent dies.
+        thread::sleep(Duration::from_secs(15));
+        return Ok(());
+    }
     if args.len() == 2 && args[1] == "--runtime-validation" {
         return user_agent::run_validation();
     }

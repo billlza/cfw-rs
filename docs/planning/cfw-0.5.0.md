@@ -1098,8 +1098,13 @@ installation/epoch/generation 命名的 Job。引擎随后自动继承父 Job，
 kill-on-close、breakaway 或 UI 限制，避免服务退出打断先恢复代理、再停止引擎的顺序。
 
 `observe_runtime_processes` 从已知的持久 root 重新打开内核对象，核对 SYSTEM 所有者、
-受保护且仅含 SYSTEM 的 DACL、Job 限制和进程计数。仅明确的对象不存在可表示
-JobAbsent；权限、对象类型、描述符、查询及未知日志状态均保留为错误。
+受保护且仅含 SYSTEM 的 DACL、Job 限制和进程计数。命名对象不存在不等于
+进程退出：没有可查询对象的活动或恢复中运行明确返回 Unavailable；权限、对象类型、
+描述符、查询及未知日志状态也保留为错误。仅 schema 4 的已提交 Off 记录可作为之前
+已完成的退休证明，该观察标为 DurablyRetired，不伪装成新的原生计数。
+持久状态仍为 Preparing 时，仅能证明尚未发布 Bind 授权，观察标为 NeverAuthorized；
+它不声称启动侧 Agent 已退出，也不替代其余清理证据。Starting/Active/Stopping 等
+状态缺失命名对象时不能采用此路径，仍明确失败。
 `reconcile_off` 增加独立进程门禁：即使夹具注入完整 CleanupEvidence，只要 Agent 或
 其子进程仍存活，也拒绝 Off。正常运行授权之前任何部分赋值失败进入恢复状态。
 
@@ -1107,11 +1112,18 @@ Windows 开发协议升为 v2、日志载荷升为 schema 4。v1 服务及 schem
 证明运行进程已加入服务 Job，故明确拒绝，不自动迁移或重置。CFM 已发布协议不变。
 
 原生夹具增加同名对象、错误对象类型、异常 ACL、breakaway 配置和只读句柄的反例；
-真实 LocalProxy/SystemProxy 路径记录 Ready、Stopped、退出后的原生进程观察，关闭
-全部服务 Job 句柄后重新打开日志和内核对象，验证普通 UserAgent 无权查询、赋值或
-终止服务 Job。该场景模拟句柄及控制器丢失，不等同于完整 SCM 重启验收。
+真实 LocalProxy/SystemProxy 路径记录 Ready、Stopped、退出后的原生进程观察，创建
+另一个控制器并重新打开日志和内核对象，原控制器保留查询句柄；验证普通 UserAgent
+无权查询、赋值或终止服务 Job。此场景不等同于服务句柄丢失或完整 SCM 重启验收。
 本地 74 项可移植测试及 Windows 全目标、全特性 Clippy 已通过；新增原生路径仍待
 该提交的托管 Windows CI 验证。
+
+首轮 `b484dae` 的原生 SCM 验证在关闭最后一个 Job 句柄后，无法重新观察仍存活的
+UserAgent；失败日志和下载哈希保留。该反例否定“对象名称缺失就证明全部成员已退出”
+的假设。修正后增加独立的空闲子进程用例：先观察一个成员，关闭最后句柄，分别核对
+持有的进程身份仍存活以及观察接口返回 Unavailable，再回收该子进程。该变化不放宽
+任何 Off 断言。服务失去最后句柄后的活动运行恢复仍是开放项，需要额外的可靠观察
+机制；不能仅靠持久 Job 名称宣称已经解决。
 
 进程退出只是全局清理的一个条件。独立代理恢复、TUN/端点观察与生产 CleanupEvidence
 构造尚未完成；运行夹具仍明确注入剩余全局清理证据，不能据此称完整应用或发布可用。

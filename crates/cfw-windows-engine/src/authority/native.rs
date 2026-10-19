@@ -163,7 +163,10 @@ impl WindowsAuthority {
         if !self.machine.durable_known() {
             return Err(AuthorityError::Recovering);
         }
-        if !self.observe_runtime_processes()?.processes_retired() {
+        let observation = self.observe_runtime_processes()?;
+        if !observation.processes_retired()
+            && observation.state() != super::RuntimeProcessState::NeverAuthorized
+        {
             return Err(AuthorityError::CleanupUnproven);
         }
         let mut candidate = self.machine.clone();
@@ -179,12 +182,14 @@ impl WindowsAuthority {
         if !self.machine.durable_known() {
             return Err(AuthorityError::Recovering);
         }
-        let root = self
-            .machine
-            .metadata()
-            .ok_or(AuthorityError::Recovering)?
-            .root();
-        Ok(runtime_job::observe(root)?)
+        let metadata = self.machine.metadata().ok_or(AuthorityError::Recovering)?;
+        match runtime_job::observe(metadata.root()) {
+            Ok(observation) => Ok(observation),
+            Err(super::RuntimeJobError::Unavailable) => Ok(
+                super::RuntimeProcessObservation::unexecutable_record(metadata)?,
+            ),
+            Err(error) => Err(error.into()),
+        }
     }
     pub fn lineage(&self, authorization: &ServicePeerAuthorization) -> Result<AuthorityLineage> {
         let peer = self.admit(authorization, Instant::now() + ADMISSION)?;
@@ -464,12 +469,6 @@ impl WindowsAuthority {
             return Err(error);
         }
         Ok(self.snapshot())
-    }
-    #[cfg(feature = "native-service-validation")]
-    pub fn release_runtime_job_handle_for_validation(&mut self) -> Result<()> {
-        require_service()?;
-        self.runtime_job.take().ok_or(AuthorityError::Invalid)?;
-        Ok(())
     }
     #[cfg(feature = "native-service-validation")]
     pub fn interrupt_next_publication_for_validation(

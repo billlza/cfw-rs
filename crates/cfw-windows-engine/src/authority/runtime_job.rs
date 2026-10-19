@@ -51,6 +51,8 @@ pub enum RuntimeJobError {
     InvalidRoot,
     #[error("Windows runtime job name is already occupied")]
     AlreadyExists,
+    #[error("Windows runtime job cannot be reopened; process retirement is unknown")]
+    Unavailable,
     #[error("Windows runtime job ownership or access control differs")]
     Security,
     #[error("Windows runtime job limits or accounting differ")]
@@ -74,15 +76,20 @@ fn native(operation: &'static str) -> RuntimeJobError {
 pub enum RuntimeProcessState {
     /// Enrollment has never consumed a runtime generation.
     NoRuntimeRoot,
-    /// The named object no longer exists. Access/inspection errors are errors.
-    JobAbsent,
+    /// A schema-4 Off record already committed retirement before this restart.
+    /// This is durable prior proof, not a fresh native process count.
+    DurablyRetired,
+    /// Preparing was committed but no Bind grant could have been published.
+    /// Does not assert that a launch-side Agent process has exited.
+    NeverAuthorized,
     Accounting {
         active: u32,
         total: u32,
     },
 }
 
-/// Native observation of a schema-4 root, not proof of proxy/TUN/global cleanup.
+/// Native observation or explicit durable proof for a schema-4 root. Neither
+/// proves proxy/TUN/global cleanup; durable proof never becomes a native count.
 /// No public constructor accepts process counts claimed by a client.
 #[derive(Debug)]
 pub struct RuntimeProcessObservation {
@@ -100,9 +107,27 @@ impl RuntimeProcessObservation {
         matches!(
             self.state,
             RuntimeProcessState::NoRuntimeRoot
-                | RuntimeProcessState::JobAbsent
+                | RuntimeProcessState::DurablyRetired
                 | RuntimeProcessState::Accounting { active: 0, .. }
         )
+    }
+    pub(super) fn unexecutable_record(
+        state: &crate::authority_journal::AuthorityCommittedState,
+    ) -> Result<Self> {
+        use cfw_engine_api::authority_v1::AuthorityState;
+        let proof = match state.state() {
+            AuthorityState::Off if state.operation().is_none() => {
+                RuntimeProcessState::DurablyRetired
+            }
+            AuthorityState::Preparing if state.operation().is_some() => {
+                RuntimeProcessState::NeverAuthorized
+            }
+            _ => return Err(RuntimeJobError::Unavailable),
+        };
+        Ok(Self {
+            root: state.root().clone(),
+            state: proof,
+        })
     }
 }
 
@@ -190,8 +215,9 @@ pub(super) fn observe(root: &RootContext) -> Result<RuntimeProcessObservation> {
         RuntimeProcessState::NoRuntimeRoot
     } else {
         let name: Vec<_> = job_name(root)?.encode_utf16().chain([0]).collect();
-        // Always reopen by the durable name, including when an in-memory handle
-        // exists. This is the same observation path available after restart.
+        // Reopening requires some handle to retain the name. Native CI showed
+        // that closing the last handle can remove the name while members live.
+        // Absence must never stand in for native process-retirement evidence.
         let raw = unsafe { OpenJobObjectW(OBSERVER_ACCESS, 0, name.as_ptr()) };
         if raw.is_null() {
             let error = io::Error::last_os_error();
@@ -201,7 +227,7 @@ pub(super) fn observe(root: &RootContext) -> Result<RuntimeProcessObservation> {
                     source: error,
                 });
             }
-            RuntimeProcessState::JobAbsent
+            return Err(RuntimeJobError::Unavailable);
         } else {
             let job = unsafe { OwnedHandle::from_raw_handle(raw) };
             security::verify(&job)?;

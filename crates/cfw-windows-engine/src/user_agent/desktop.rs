@@ -10,7 +10,7 @@ use crate::{
     CheckedStartConfiguration, ServiceTransportError, VerifiedExecutable,
     authority::{
         AuthorityChannel, AuthoritySnapshot, LeaseContext,
-        wire::{Command, Rejection, Request, Response, StopRequest, WireError},
+        wire::{Command, Rejection, Request, Response, RuntimeReference, StopRequest, WireError},
     },
     credential_lifecycle::{CredentialLifecycleError, WindowsCredentialLifecycle},
     service_transport::check_deadline,
@@ -65,6 +65,7 @@ pub struct DesktopReady {
     context: LeaseContext,
     agent_process_id: u32,
     authority: AuthoritySnapshot,
+    runtime_reference: Arc<RuntimeReference>,
 }
 impl DesktopReady {
     pub fn context(&self) -> &LeaseContext {
@@ -76,6 +77,11 @@ impl DesktopReady {
     pub fn authority(&self) -> &AuthoritySnapshot {
         &self.authority
     }
+    /// Keep this receipt or clone its reference until independent global
+    /// cleanup finishes, including when the operation's worker returns an error.
+    pub fn runtime_reference(&self) -> &Arc<RuntimeReference> {
+        &self.runtime_reference
+    }
 }
 /// Native process retirement plus the actual Authority observation, which may
 /// still be Stopping or Recovering. This is not a global Off constructor.
@@ -83,6 +89,7 @@ pub struct DesktopStopped {
     context: LeaseContext,
     agent_exit: Option<AgentExit>,
     authority: AuthoritySnapshot,
+    _runtime_reference: Option<Arc<RuntimeReference>>,
 }
 impl DesktopStopped {
     pub fn context(&self) -> &LeaseContext {
@@ -117,6 +124,7 @@ pub struct DesktopUserAgent {
     child: Option<UserAgentChild>,
     attempted: bool,
     last_authority: Option<AuthoritySnapshot>,
+    runtime_reference: Option<Arc<RuntimeReference>>,
 }
 impl DesktopUserAgent {
     pub fn prepare(
@@ -145,6 +153,7 @@ impl DesktopUserAgent {
             child: None,
             attempted: false,
             last_authority: None,
+            runtime_reference: None,
         })
     }
     pub fn context(&self) -> &LeaseContext {
@@ -237,6 +246,13 @@ impl DesktopUserAgent {
             let snapshot = self.observe_owned(deadline)?;
             match snapshot.state {
                 AuthorityState::Active => {
+                    let Response::RuntimeRetained(grant) =
+                        self.command(Command::RetainRuntime(self.context.clone()), deadline)?
+                    else {
+                        return Err(DesktopError::Response);
+                    };
+                    let reference = Arc::new(grant.into_reference()?);
+                    self.runtime_reference = Some(Arc::clone(&reference));
                     self.child
                         .as_ref()
                         .ok_or(DesktopError::State("missing child"))?
@@ -250,6 +266,7 @@ impl DesktopUserAgent {
                                 .ok_or(DesktopError::State("missing child"))?
                                 .process_id(),
                             authority: snapshot,
+                            runtime_reference: reference,
                         })
                         .map_err(|_| DesktopError::ReadyReceiver)?;
                     break;
@@ -364,6 +381,7 @@ impl DesktopUserAgent {
             context: self.context.clone(),
             agent_exit,
             authority,
+            _runtime_reference: self.runtime_reference.clone(),
         })
     }
     fn revoke(&mut self, deadline: Instant) -> Result<()> {

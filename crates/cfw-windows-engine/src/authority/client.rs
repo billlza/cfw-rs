@@ -46,6 +46,9 @@ impl AuthorityChannel {
             // any interpretation of a numeric value as a receiver-owned handle.
             self.confirm_keeper(&mut channel, grant, deadline)?;
         }
+        if let Ok(Response::RuntimeRetained(grant)) = &mut response {
+            self.confirm_runtime_reference(&mut channel, grant, deadline)?;
+        }
         if response.is_ok() || matches!(&response, Err(WireError::Rejected(_))) {
             self.channel = Some(channel);
         }
@@ -65,6 +68,28 @@ impl AuthorityChannel {
                     context,
                     handle,
                 }))?;
+            let message = confirmation.encode()?;
+            self.identity.revalidate()?;
+            let reply = channel.request(message.as_bytes(), deadline)?;
+            self.identity.revalidate()?;
+            match wire::response(&confirmation, reply.as_bytes(), &owner)? {
+                Response::Status(_) => Ok(()),
+                _ => Err(WireError::Correlation),
+            }
+        })
+    }
+    fn confirm_runtime_reference(
+        &self,
+        channel: &mut ServiceChannel,
+        grant: &mut wire::RuntimeReferenceGrant,
+        deadline: Instant,
+    ) -> Result<(), WireError> {
+        let owner = RecordedOwner::from_native(self.identity.identity().user_session())?;
+        let context = grant.context().clone();
+        grant.adopt(&self.identity, |handle| {
+            let confirmation = Request::new(wire::Command::ConfirmRuntimeReference(
+                wire::KeeperRequest { context, handle },
+            ))?;
             let message = confirmation.encode()?;
             self.identity.revalidate()?;
             let reply = channel.request(message.as_bytes(), deadline)?;

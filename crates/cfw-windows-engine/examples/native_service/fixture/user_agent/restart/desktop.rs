@@ -126,17 +126,50 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
                 &serde_json::json!({"context":ready.context()}),
             )?;
             let deadline = Instant::now() + LIMIT;
+            let mut retirement_published = false;
             while !root
                 .join("runtime-restart-complete.json")
                 .try_exists()
                 .map_err(|e| e.to_string())?
             {
+                let agent_state = unsafe { WaitForSingleObject(agent.as_raw_handle(), 0) };
+                let engine_state = unsafe { WaitForSingleObject(engine.as_raw_handle(), 0) };
+                if !matches!(agent_state, WAIT_OBJECT_0 | WAIT_TIMEOUT)
+                    || !matches!(engine_state, WAIT_OBJECT_0 | WAIT_TIMEOUT)
+                {
+                    return Err(error("observe retired owners before SCM restart"));
+                }
+                if !retirement_published
+                    && agent_state == WAIT_OBJECT_0
+                    && engine_state == WAIT_OBJECT_0
+                {
+                    if ready.runtime_reference().context() != ready.context() {
+                        return Err("Desktop runtime reference lost its exact scope".into());
+                    }
+                    publish(
+                        root,
+                        "runtime-restart-owners-exited.json",
+                        &serde_json::json!({
+                            "context":ready.context(), "held_agent_exit_observed":true,
+                            "held_engine_exit_observed":true,"desktop_reference_retained":true,
+                        }),
+                    )?;
+                    retirement_published = true;
+                }
                 if Instant::now() >= deadline {
                     return Err("SCM restart did not complete".into());
                 }
                 thread::sleep(Duration::from_millis(10));
             }
-            Ok((agent, engine, ready.context().clone()))
+            if !retirement_published {
+                return Err("SCM restarted before the exact old owners exited".into());
+            }
+            Ok((
+                agent,
+                engine,
+                ready.context().clone(),
+                Arc::clone(ready.runtime_reference()),
+            ))
         })();
         if exercised.is_err() {
             stop.store(true, Ordering::Release);
@@ -144,7 +177,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
         let finished = worker
             .join()
             .map_err(|_| "restart Desktop lifecycle panicked")?;
-        let (agent, engine, context) = match (exercised, finished) {
+        let (agent, engine, context, runtime_reference) = match (exercised, finished) {
             (Ok(handles), Err(error)) if desktop_control_loss(&error) => {
                 publish(
                     root,
@@ -226,7 +259,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
             Err(error) => return Err(format!("restarted lease rejection differs: {error}")),
             Ok(_) => return Err("restarted Authority restored the old execution lease".into()),
         };
-        recovery::exercise(
+        let result = recovery::exercise(
             name,
             root,
             service_image,
@@ -234,7 +267,9 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
             cfw_windows_engine::authority::ProxyRecoveryTarget::from_recorded(&recorded)
                 .map_err(|e| e.to_string())?,
             &context,
-        )
+        );
+        drop(runtime_reference);
+        result
     })
 }
 

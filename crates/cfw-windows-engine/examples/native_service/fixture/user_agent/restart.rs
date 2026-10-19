@@ -274,13 +274,37 @@ pub(crate) fn exercise(
             {
                 return Err("crash request did not match the committed Active runtime".into());
             }
-            let (old, new) = crash_restart(service)?;
+            let (old, new) = crash_restart(service, || {
+                let deadline = Instant::now() + LIMIT;
+                while !root
+                    .join("runtime-restart-owners-exited.json")
+                    .try_exists()
+                    .map_err(|e| e.to_string())?
+                {
+                    if worker.is_finished() {
+                        return Err("Desktop exited before retaining retired runtime".into());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("old runtime owners did not retire before SCM restart".into());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let retired = read(root, "runtime-restart-owners-exited.json")?;
+                if retired
+                    != serde_json::json!({"context":request["context"], "held_agent_exit_observed":true,"held_engine_exit_observed":true,"desktop_reference_retained":true})
+                {
+                    return Err("owner retirement barrier lost its runtime scope".into());
+                }
+                Ok(())
+            })?;
             let recovered = read(root, "runtime-restart-recovered.json")?;
             if before["service_pid"] != old
                 || recovered["service_pid"] != new
                 || before["metadata"] != recovered["metadata"]
                 || recovered["snapshot"]["state"] != "recovering"
                 || recovered["lease_restored"] != false
+                || recovered["processes"]["state"]["kind"] != "accounting"
+                || recovered["processes"]["state"]["active"] != 0
             {
                 return Err(
                     "SCM restart did not retain exact operation metadata without a lease".into(),
@@ -306,7 +330,10 @@ pub(crate) fn exercise(
         }
     })
 }
-fn crash_restart(service: &mut Installed) -> Result<(u32, u32)> {
+fn crash_restart(
+    service: &mut Installed,
+    after_exit: impl FnOnce() -> Result<()>,
+) -> Result<(u32, u32)> {
     if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
         return Err("service crash requires disposable CI opt-in".into());
     }
@@ -358,6 +385,10 @@ fn crash_restart(service: &mut Installed) -> Result<(u32, u32)> {
         return Err("service exit did not match the injected crash".into());
     }
     service.wait(SERVICE_STOPPED)?;
+    // Reproduce the observed failure ordering: every old owner exits before
+    // SCM starts the replacement. Only the product Desktop reference retains
+    // the Job name; the fixture coordinator holds no Job handle.
+    after_exit()?;
     if unsafe { StartServiceW(service.handle.0, 0, null()) } == 0 {
         return Err(error("restart disposable service"));
     }
@@ -415,6 +446,7 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
     let proxy_recovery_observer = read(root, "runtime-restart-proxy-recovery-observer.json")?;
     let cleanup = read(root, "runtime-restart-cleanup.json")?;
     let cleanup_observer = read(root, "runtime-restart-cleanup-observer.json")?;
+    let owners_exited = read(root, "runtime-restart-owners-exited.json")?;
     if before["metadata"] != recovered["metadata"] {
         return Err("restart metadata changed".into());
     }
@@ -424,6 +456,7 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
         "product_source":source,"before":before,"recovered":recovered,"restart":restart,"retired":retired,
             "proxy_recovery":proxy_recovery,"proxy_recovery_observer":proxy_recovery_observer,
             "cleanup":cleanup,"cleanup_observer":cleanup_observer,
+            "owners_exited":owners_exited,
             "desktop":desktop_report(),"agent":agent_report(),"temporary_service_removed":true,
             "global_cleanup_proven":true,"release_accepted":false,
         }),

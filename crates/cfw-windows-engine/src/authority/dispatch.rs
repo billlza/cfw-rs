@@ -82,6 +82,8 @@ impl WindowsAuthority {
                     | Command::ConfirmProxyRecovery(_)
                     | Command::BeginProxyCleanup(_)
                     | Command::ReconcileProxyCleanup(_)
+                    | Command::RetainRuntime(_)
+                    | Command::ConfirmRuntimeReference(_)
                     | Command::ReserveGeneration(_)
                     | Command::Prepare(_)
                     | Command::BeginStop(_)
@@ -123,6 +125,12 @@ impl WindowsAuthority {
         let response =
             match command {
                 Command::Observe => Response::Observed(self.poll()?),
+                Command::RetainRuntime(context) => {
+                    Response::RuntimeRetained(self.retain_runtime(authorization, &context)?)
+                }
+                Command::ConfirmRuntimeReference(input) => Response::Status(
+                    self.confirm_runtime_reference(authorization, &input.context, input.handle)?,
+                ),
                 Command::LoadLineage => Response::Lineage(self.lineage(authorization)?),
                 Command::ReadRuntimeScope => {
                     Response::RuntimeScope(self.recorded_runtime_scope(authorization)?)

@@ -172,11 +172,12 @@ fn protocol_and_header_are_closed_before_dispatch() {
     let good = Request::new(Command::Observe).unwrap().encode().unwrap();
     let text = std::str::from_utf8(good.as_bytes()).unwrap();
     for altered in [
-        text.replace("\"version\":5", "\"version\":1"),
-        text.replace("\"version\":5", "\"version\":2"),
-        text.replace("\"version\":5", "\"version\":3"),
-        text.replace("\"version\":5", "\"version\":4"),
-        text.replace("\"version\":5", "\"version\":6"),
+        text.replace("\"version\":6", "\"version\":1"),
+        text.replace("\"version\":6", "\"version\":2"),
+        text.replace("\"version\":6", "\"version\":3"),
+        text.replace("\"version\":6", "\"version\":4"),
+        text.replace("\"version\":6", "\"version\":5"),
+        text.replace("\"version\":6", "\"version\":7"),
         text.replace(PROTOCOL, "cfm.authority"),
     ] {
         assert!(matches!(
@@ -185,11 +186,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
         ));
     }
     for altered in [
-        text.replace("\"version\":5", "\"version\":5,\"version\":5"),
+        text.replace("\"version\":6", "\"version\":6,\"version\":6"),
         text.replace("\"kind\":\"observe\"", "\"kind\":\"reconcile_off\""),
         text.replace("\"payload\":{}", "\"payload\":{\"ticket\":[1]}"),
         format!("{text}{{}}"),
-        text.replace("\"version\":5", "\"unknown\":true,\"version\":5"),
+        text.replace("\"version\":6", "\"unknown\":true,\"version\":6"),
     ] {
         assert!(Request::decode(altered.as_bytes()).is_err());
     }
@@ -380,7 +381,7 @@ fn bound_keeper_receipts_reject_unsafe_values_and_never_adopt_from_the_codec() {
         response(&request, &serde_json::to_vec(&missing).unwrap(), &owner()),
         Err(WireError::Malformed)
     ));
-    for version in [1, 2, 3, 4, 6] {
+    for version in [1, 2, 3, 4, 5, 7] {
         let mut changed = original.clone();
         changed["version"] = serde_json::json!(version);
         assert!(matches!(
@@ -628,6 +629,96 @@ fn cleanup_commands_keep_closed_payloads_and_one_use_ticket_storage() {
             Request::decode(&serde_json::to_vec(&changed).unwrap()),
             Err(WireError::Malformed)
         ));
+    }
+}
+
+#[test]
+fn desktop_runtime_reference_is_exact_and_wire_decode_alone_cannot_adopt_it() {
+    let context = context();
+    let request = Request::new(Command::RetainRuntime(context.clone())).unwrap();
+    let grant = RuntimeReferenceGrant {
+        context: context.clone(),
+        keeper_handle: 4,
+        #[cfg(windows)]
+        keeper: None,
+    };
+    let message = Response::RuntimeRetained(grant).encode(request.id).unwrap();
+    let Response::RuntimeRetained(parsed) =
+        response(&request, message.as_bytes(), &owner()).unwrap()
+    else {
+        panic!("wrong reference response");
+    };
+    assert_eq!(parsed.context(), &context);
+    #[cfg(windows)]
+    assert!(matches!(
+        parsed.into_reference(),
+        Err(WireError::Correlation)
+    ));
+    let original: serde_json::Value = serde_json::from_slice(message.as_bytes()).unwrap();
+    for (pointer, value) in [
+        ("/payload/keeper_handle", serde_json::json!(0)),
+        ("/payload/keeper_handle", serde_json::json!(3)),
+        (
+            "/payload/context/operation/root/generation",
+            serde_json::json!(2),
+        ),
+        (
+            "/payload/context/operation/owner/authentication_id",
+            serde_json::json!(100),
+        ),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert!(response(&request, &serde_json::to_vec(&changed).unwrap(), &owner()).is_err());
+    }
+}
+
+#[test]
+fn desktop_reference_confirmation_requires_active_exact_lease_and_closed_fields() {
+    let context = context();
+    for command in [
+        Command::RetainRuntime(context.clone()),
+        Command::ConfirmRuntimeReference(KeeperRequest {
+            context: context.clone(),
+            handle: 4,
+        }),
+    ] {
+        let request = Request::new(command).unwrap();
+        let message = request.encode().unwrap();
+        assert_eq!(
+            Request::decode(message.as_bytes())
+                .unwrap()
+                .encode()
+                .unwrap()
+                .as_bytes(),
+            message.as_bytes()
+        );
+        let mut changed: serde_json::Value = serde_json::from_slice(message.as_bytes()).unwrap();
+        changed["payload"]["execution_granted"] = serde_json::json!(true);
+        assert!(Request::decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    let request = Request::new(Command::ConfirmRuntimeReference(KeeperRequest {
+        context: context.clone(),
+        handle: 4,
+    }))
+    .unwrap();
+    for (state, revision, accepted) in [
+        (AuthorityState::Active, 4, true),
+        (AuthorityState::Starting, 3, false),
+        (AuthorityState::Off, 4, false),
+        (AuthorityState::Active, 5, false),
+    ] {
+        let bytes = Response::Status(AuthoritySnapshot {
+            state,
+            revision: Some(revision),
+            root: Some(context.operation.root.clone()),
+        })
+        .encode(request.id)
+        .unwrap();
+        assert_eq!(
+            response(&request, bytes.as_bytes(), &owner()).is_ok(),
+            accepted
+        );
     }
 }
 

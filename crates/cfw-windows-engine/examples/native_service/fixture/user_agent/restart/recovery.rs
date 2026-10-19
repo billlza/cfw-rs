@@ -46,7 +46,7 @@ pub(super) fn exercise(
     // A false report has the public challenge context but no challenge bytes.
     // It is not a local observation and must fail before producing evidence.
     let forged = serde_json::json!({
-        "protocol":"cfw.windows.authority", "version":5,
+        "protocol":"cfw.windows.authority", "version":6,
         "request_id":uuid::Uuid::new_v4(), "kind":"confirm_proxy_recovery",
         "payload": {"context":grant.context(), "ticket":vec![0u8;32],
             "recorded_process_id":1, "recorded_process_creation_time":1},

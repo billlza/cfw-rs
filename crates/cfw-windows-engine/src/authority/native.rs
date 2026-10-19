@@ -19,6 +19,7 @@ use std::{
 const ADMISSION: Duration = Duration::from_millis(cfw_engine_api::authority_v1::COMMAND_TIMEOUT_MS);
 mod cleanup;
 mod recovery;
+mod runtime_reference;
 pub use recovery::ProxyRecoveryObservation;
 
 /// The service owns one instance behind its lifecycle guard. This component
@@ -32,6 +33,8 @@ pub struct WindowsAuthority {
     runtime_process: Option<NativePeerProcess>,
     runtime_job: Option<RuntimeJob>,
     keeper_confirmed: bool,
+    desktop_reference_issued: bool,
+    desktop_reference_confirmed: bool,
     cleanup_context: Option<LeaseContext>,
     proxy_recovery: Option<super::recovery::ProxyRecoveryAdmission>,
     #[cfg(feature = "native-service-validation")]
@@ -49,6 +52,8 @@ impl WindowsAuthority {
             runtime_process: None,
             runtime_job: None,
             keeper_confirmed: false,
+            desktop_reference_issued: false,
+            desktop_reference_confirmed: false,
             cleanup_context: None,
             proxy_recovery: None,
             #[cfg(feature = "native-service-validation")]
@@ -141,6 +146,8 @@ impl WindowsAuthority {
         Ok(())
     }
     fn suspend(&mut self, uncertain: bool) {
+        self.desktop_reference_issued = false;
+        self.desktop_reference_confirmed = false;
         self.proxy_recovery = None;
         self.keeper_confirmed = false;
         if let Some(context) = self.machine.context() {
@@ -172,6 +179,8 @@ impl WindowsAuthority {
             self.cleanup_context = Some(context.clone());
         }
         if self.machine.phase() == AuthorityState::Off {
+            self.desktop_reference_issued = false;
+            self.desktop_reference_confirmed = false;
             self.owner_session = None;
             self.host_process = None;
             self.runtime_process = None;

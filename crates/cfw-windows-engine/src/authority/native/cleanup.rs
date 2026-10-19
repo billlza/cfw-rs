@@ -53,7 +53,9 @@ impl WindowsAuthority {
         let no_tunnel_resources = target.operation.mode() == AuthorityMode::SystemProxy;
         let authority_cleared = self.machine.context().is_none()
             && self.proxy_recovery.is_none()
-            && !self.keeper_confirmed;
+            && !self.keeper_confirmed
+            && !self.desktop_reference_issued
+            && !self.desktop_reference_confirmed;
         // The consumed report has dropped its zeroizing ticket. Dispatch erased
         // the raw request copy. The Authority never receives profile secrets;
         // runtime-owner address spaces and their private IPC died with the Job.

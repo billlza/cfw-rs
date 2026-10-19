@@ -4,7 +4,7 @@ use windows_sys::Win32::{
     System::Threading::PROCESS_DUP_HANDLE,
 };
 
-/// Only the authenticated v3 response may adopt a transferred reference. It
+/// Only an authenticated keeper-transfer response may adopt a reference. It
 /// retains lifetime, never query/assignment/termination authority. No Clone,
 /// serializer or raw-handle constructor is exposed outside this module.
 pub(crate) struct RuntimeKeeper {
@@ -37,8 +37,9 @@ pub(super) fn transfer(job: &OwnedHandle, peer: &NativePeerProcess) -> Result<u6
         return Err(native("transfer zero-access runtime keeper"));
     }
     // Never close a remote numeric handle after uncertain delivery; the peer
-    // may already have adopted/closed/reused it. Its dedicated process bounds
-    // any unclaimed reference, and the Authority retains recovery ownership.
+    // may already have adopted/closed/reused it. One transfer is allowed per
+    // role/lease; an unclaimed reference closes when its recipient exits. The
+    // Authority retains recovery ownership and never retries uncertain delivery.
     peer.revalidate()?;
     let value = received as usize as u64;
     if value == 0 || value > isize::MAX as u64 || value & 3 != 0 {

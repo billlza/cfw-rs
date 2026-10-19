@@ -12,15 +12,19 @@ use std::fmt;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 mod recovery;
+mod runtime_reference;
 pub use recovery::{
     ProxyCleanupReceipt, ProxyRecoveryGrant, ProxyRecoveryReceipt, ProxyRecoveryReport,
 };
+#[cfg(windows)]
+pub use runtime_reference::RuntimeReference;
+pub use runtime_reference::RuntimeReferenceGrant;
 
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 const PROTOCOL: &str = "cfw.windows.authority";
-// v5 distinguishes observation from explicitly requested, independently proved
-// SystemProxy Off reconciliation. Neither purpose grants execution.
-const VERSION: u16 = 5;
+// v6 also transfers a separately verified, zero-access Desktop lifetime
+// reference. It remains distinct from the UserAgent's execution binding.
+const VERSION: u16 = 6;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -144,6 +148,8 @@ pub(super) enum CommandTag {
     ConfirmProxyRecovery,
     BeginProxyCleanup,
     ReconcileProxyCleanup,
+    RetainRuntime,
+    ConfirmRuntimeReference,
     ReserveGeneration,
     Prepare,
     BindUserAgent,
@@ -184,6 +190,8 @@ pub enum Command {
     ConfirmProxyRecovery(ProxyRecoveryReport),
     BeginProxyCleanup(super::ProxyRecoveryTarget),
     ReconcileProxyCleanup(ProxyRecoveryReport),
+    RetainRuntime(LeaseContext),
+    ConfirmRuntimeReference(KeeperRequest),
     ReserveGeneration(super::AuthorityLineage),
     Prepare(PrepareRequest),
     BindUserAgent(BindRequest),
@@ -205,6 +213,8 @@ impl Command {
             Self::ConfirmProxyRecovery(_) => CommandTag::ConfirmProxyRecovery,
             Self::BeginProxyCleanup(_) => CommandTag::BeginProxyCleanup,
             Self::ReconcileProxyCleanup(_) => CommandTag::ReconcileProxyCleanup,
+            Self::RetainRuntime(_) => CommandTag::RetainRuntime,
+            Self::ConfirmRuntimeReference(_) => CommandTag::ConfirmRuntimeReference,
             Self::ReserveGeneration(_) => CommandTag::ReserveGeneration,
             Self::Prepare(_) => CommandTag::Prepare,
             Self::BindUserAgent(_) => CommandTag::BindUserAgent,
@@ -240,7 +250,7 @@ impl Command {
             }
             Self::Prepare(input) => input.validate().map_err(|_| WireError::Malformed),
             Self::BindUserAgent(input) => validate_context(&input.context),
-            Self::ConfirmRuntimeKeeper(input) => {
+            Self::ConfirmRuntimeKeeper(input) | Self::ConfirmRuntimeReference(input) => {
                 validate_context(&input.context)?;
                 validate_handle(input.handle)
             }
@@ -248,7 +258,7 @@ impl Command {
                 validate_context(&report.context)?;
                 report.validate().map_err(|_| WireError::Malformed)
             }
-            Self::Heartbeat(context) => validate_context(context),
+            Self::Heartbeat(context) | Self::RetainRuntime(context) => validate_context(context),
             Self::BeginStop(input) | Self::AbortPrepared(input) => {
                 validate_context(&input.context)?;
                 if input.expected_revision == 0 {
@@ -344,9 +354,13 @@ impl Request {
             }
             Command::Prepare(input) => envelope(self.id, tag, input),
             Command::BindUserAgent(input) => envelope(self.id, tag, input),
-            Command::ConfirmRuntimeKeeper(input) => envelope(self.id, tag, input),
+            Command::ConfirmRuntimeKeeper(input) | Command::ConfirmRuntimeReference(input) => {
+                envelope(self.id, tag, input)
+            }
             Command::Ready(input) => envelope(self.id, tag, input),
-            Command::Heartbeat(input) => envelope(self.id, tag, input),
+            Command::Heartbeat(input) | Command::RetainRuntime(input) => {
+                envelope(self.id, tag, input)
+            }
             Command::BeginStop(input) | Command::AbortPrepared(input) => {
                 envelope(self.id, tag, input)
             }
@@ -386,6 +400,8 @@ impl Request {
             CommandTag::Prepare => Command::Prepare(decode(body)?),
             CommandTag::BindUserAgent => Command::BindUserAgent(decode(body)?),
             CommandTag::ConfirmRuntimeKeeper => Command::ConfirmRuntimeKeeper(decode(body)?),
+            CommandTag::ConfirmRuntimeReference => Command::ConfirmRuntimeReference(decode(body)?),
+            CommandTag::RetainRuntime => Command::RetainRuntime(decode(body)?),
             CommandTag::Ready => Command::Ready(decode(body)?),
             CommandTag::Heartbeat => Command::Heartbeat(decode(body)?),
             CommandTag::BeginStop => Command::BeginStop(decode(body)?),
@@ -457,6 +473,7 @@ enum ResponseTag {
     ProxyRecoveryGranted,
     ProxyRecoveryObserved,
     ProxyCleanupReconciled,
+    RuntimeRetained,
     Prepared,
     Bound,
     Status,
@@ -550,6 +567,7 @@ pub enum Response {
     ProxyRecoveryGranted(ProxyRecoveryGrant),
     ProxyRecoveryObserved(ProxyRecoveryReceipt),
     ProxyCleanupReconciled(ProxyCleanupReceipt),
+    RuntimeRetained(RuntimeReferenceGrant),
     Prepared(PreparedGrant),
     Bound(BoundGrant),
     Status(AuthoritySnapshot),
@@ -561,6 +579,7 @@ impl Response {
             Self::Observed(value) => envelope(id, ResponseTag::Observed, value),
             Self::Lineage(value) => envelope(id, ResponseTag::Lineage, value),
             Self::RuntimeScope(value) => envelope(id, ResponseTag::RuntimeScope, value),
+            Self::RuntimeRetained(value) => runtime_reference::encode_reference(id, value),
             Self::ProxyCleanupReconciled(value) => {
                 envelope(id, ResponseTag::ProxyCleanupReconciled, value)
             }
@@ -656,6 +675,11 @@ pub(super) fn response(
         return Err(WireError::Rejected(rejected.code));
     }
     match (&request.command, wire.kind) {
+        (Command::RetainRuntime(context), ResponseTag::RuntimeRetained) => {
+            Ok(Response::RuntimeRetained(
+                runtime_reference::decode_reference(payload, context, owner)?,
+            ))
+        }
         (Command::BeginProxyRecovery(target), ResponseTag::ProxyRecoveryGranted) => {
             Ok(Response::ProxyRecoveryGranted(recovery::decode_grant(
                 payload,
@@ -789,6 +813,12 @@ pub(super) fn response(
             let value: AuthoritySnapshot = decode(payload)?;
             snapshot_valid(&value)?;
             let (context, accepted) = match command {
+                Command::ConfirmRuntimeReference(input) => (
+                    &input.context,
+                    value.state == AuthorityState::Active
+                        && input.context.operation.prepared_revision.checked_add(2)
+                            == value.revision,
+                ),
                 Command::ConfirmRuntimeKeeper(input) => (
                     &input.context,
                     value.state == AuthorityState::Starting

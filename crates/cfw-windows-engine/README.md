@@ -220,7 +220,10 @@ fixture owner is not a durable product lease. The initial 21-case run reached
 the final service exchange, then failed with a closing pipe. Its ordinary-client
 authorization checks passed, but the complete native gate did not. A delayed
 terminal-read case and exact read/write diagnostics are now included (22 cases)
-to distinguish reply lifetime from connection timing. RDP/session switching,
+to distinguish reply lifetime from connection timing. That 22-case run passed
+at `8d1bd4e`, including the delayed read; it did not explain the earlier failure.
+A bounded 256-exchange post-stop connection test is now added (23 cases); its
+first error fails the test without retrying a request. RDP/session switching,
 lock/unlock and sleep/wake behavior remain separate qualification gates.
 
 `WindowsEngineGenerationStore` implements the shared generation-store contract

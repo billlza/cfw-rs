@@ -31,6 +31,7 @@ mod restricted;
 mod transport;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: Duration = Duration::from_secs(15);
+const POST_STOP_EXCHANGES: usize = 256;
 const SERVICE_ACL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWLORC;;;AU)";
 // SCM invokes process-wide ABI callbacks. Each fixture process hosts one
 // service, so these bounded callback cells live until the process exits.
@@ -645,7 +646,7 @@ fn run_in_directory(root: &Path, receipt_root: &Path, source: &str) -> Result<()
             return Err("fixture service deletion was not observed".into());
         }
     }
-    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","delayed_terminal_reply_preserved","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","temporary_services_removed"],"service_fixture_only":true,"full_service_backend_proven":false,"release_accepted":false});
+    let receipt = serde_json::json!({"product_source":source,"cases_passed":["scm_image_and_pipe_identity","delayed_terminal_reply_preserved","different_system_service_rejected","unsafe_service_acl_rejected","changed_configuration_revokes_peer","identical_copy_is_not_the_running_image","missing_service_remains_an_error","unprivileged_client_admitted","desktop_role_client_authenticated","wrong_client_role_rejected","identical_client_copy_rejected","unprivileged_pipe_instance_creation_rejected","queued_message_identity_rejected","oversized_message_rejected","client_message_timeout_poisoned","server_message_timeout_released","live_console_session_authorized","agent_without_lease_rejected","foreign_logon_lease_rejected","agent_observation_without_lease_admitted","stopped_service_is_not_authority","post_stop_connection_stress","temporary_services_removed"],"service_fixture_only":true,"post_stop_exchange_repetitions":POST_STOP_EXCHANGES,"full_service_backend_proven":false,"release_accepted":false});
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -779,19 +780,45 @@ fn exercise_services(
     println!("service fixture stage: stopped_service_is_not_authority");
     first.normal_stop()?;
     println!("service fixture stage: first_service_stopped");
+    println!("service fixture stage: post_stop_connection_stress");
     runtime()?.block_on(async {
-        let mut pipe = connect(&second.name).await?;
-        assert!(matches!(
-            WindowsServicePeer::from_pipe_server(&first.name, verified(image, expected)?, &pipe),
-            Err(ServicePeerError::NotRunning {
-                state: SERVICE_STOPPED,
-                ..
-            })
-        ));
-        ping(&mut pipe)?;
-        println!("service fixture stage: second_service_post_stop_ping_received");
-        finish(&mut pipe)
+        let stress_deadline = Instant::now() + Duration::from_secs(45);
+        for iteration in 0..POST_STOP_EXCHANGES {
+            if Instant::now() >= stress_deadline {
+                return Err(format!(
+                    "post-stop stress deadline after {iteration} exchanges"
+                ));
+            }
+            // Cross idle-listener deadlines as well as rapid reconnects. This
+            // never retries a failed request: the first failure ends the test.
+            tokio::time::sleep(Duration::from_millis(if iteration % 32 == 0 {
+                100
+            } else {
+                (iteration % 7) as u64
+            }))
+            .await;
+            let exchange = async {
+                let mut pipe = connect(&second.name).await?;
+                assert!(matches!(
+                    WindowsServicePeer::from_pipe_server(
+                        &first.name,
+                        verified(image, expected)?,
+                        &pipe
+                    ),
+                    Err(ServicePeerError::NotRunning {
+                        state: SERVICE_STOPPED,
+                        ..
+                    })
+                ));
+                ping(&mut pipe)?;
+                finish(&mut pipe)
+            }
+            .await;
+            exchange.map_err(|error| format!("post-stop exchange {iteration}: {error}"))?;
+        }
+        Ok::<_, String>(())
     })?;
+    println!("service fixture post-stop exchanges passed: {POST_STOP_EXCHANGES}");
     second.normal_stop()?;
     Ok(())
 }

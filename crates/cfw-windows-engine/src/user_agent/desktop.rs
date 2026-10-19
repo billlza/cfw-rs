@@ -45,6 +45,10 @@ pub enum DesktopError {
     Handoff(#[from] HandoffError),
     #[error("Windows Desktop launcher: {0}")]
     Launch(#[from] LaunchError),
+    #[error("Windows Desktop proxy restoration: {0}")]
+    Proxy(#[from] crate::ProxyError),
+    #[error("Windows Desktop cleanup scope: {0}")]
+    CleanupScope(#[from] crate::authority::AuthorityError),
     #[error("Windows Desktop operation state: {0}")]
     State(&'static str),
     #[error("Windows Desktop authority context changed")]
@@ -386,6 +390,40 @@ impl DesktopUserAgent {
     }
     fn revoke(&mut self, deadline: Instant) -> Result<()> {
         retry_stale_revocation(|| self.revoke_once(deadline))
+    }
+    /// Finish a normally acknowledged SystemProxy stop on its original
+    /// connection. Keep this owner/runtime reference through the final reply;
+    /// failed or uncertain commands are never replayed here.
+    pub fn reconcile_system_proxy_stop(
+        &mut self,
+        proxy: &crate::WindowsSystemProxy,
+        deadline: Instant,
+    ) -> Result<crate::authority::wire::ProxyCleanupReceipt> {
+        check_deadline(deadline)?;
+        if self.context.operation.mode != cfw_engine_api::authority_v1::AuthorityMode::SystemProxy
+            || self.agent_exit_observation().is_none()
+        {
+            return Err(DesktopError::State("SystemProxy owner has not exited"));
+        }
+        self.last_authority = None;
+        let Response::RuntimeScope(scope) = self.command(Command::ReadRuntimeScope, deadline)?
+        else {
+            return Err(DesktopError::Response);
+        };
+        let target = crate::authority::ProxyRecoveryTarget::from_stopped(&scope, &self.context)?;
+        let Response::ProxyRecoveryGranted(grant) =
+            self.command(Command::BeginProxyCleanup(target), deadline)?
+        else {
+            return Err(DesktopError::Response);
+        };
+        let report = grant.observe_restoration(proxy)?;
+        let Response::ProxyCleanupReconciled(receipt) =
+            self.command(Command::ReconcileProxyCleanup(report), deadline)?
+        else {
+            return Err(DesktopError::Response);
+        };
+        self.last_authority = Some(receipt.snapshot().clone());
+        Ok(receipt)
     }
     fn revoke_once(&mut self, deadline: Instant) -> Result<Revocation> {
         let snapshot = self.observe_owned(deadline)?;

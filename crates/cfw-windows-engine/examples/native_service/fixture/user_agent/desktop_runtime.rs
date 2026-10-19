@@ -165,7 +165,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                 // thread; no thread-affine channel is transferred from the UI.
                 let mut operation = DesktopUserAgent::prepare(
                     lifecycle,
-                    worker_image,
+                    Arc::clone(&worker_image),
                     start_request,
                     Instant::now() + LIMIT,
                 )
@@ -221,9 +221,32 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                     expected,
                 )
                 .map_err(|e| e.to_string())?;
-                operation
+                let finished = operation
                     .run(invocation, &output, worker_stop, ready_sender)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                let cleanup = if mode == ProjectionMode::SystemProxy {
+                    if finished.stopped().authority().state != AuthorityState::Stopping {
+                        return Err("SystemProxy stopped acknowledgement prematurely became Off".into());
+                    }
+                    let mut another = AuthorityChannel::connect(name, ServiceClientRole::Desktop, worker_image)
+                        .map_err(|e| e.to_string())?;
+                    let Response::RuntimeScope(recorded) = another.request(Request::new(Command::ReadRuntimeScope).map_err(|e| e.to_string())?, Instant::now()+LIMIT).map_err(|e| e.to_string())? else {
+                        return Err("stopped observer omitted runtime scope".into());
+                    };
+                    let target = cfw_windows_engine::authority::ProxyRecoveryTarget::from_stopped(&recorded, finished.stopped().context()).map_err(|e| e.to_string())?;
+                    require_cleanup_rejection(&mut another, target, Rejection::Identity)?;
+                    drop(another);
+                    let storage = cfw_windows_engine::user_agent::UserRuntimeStorage::open(&root.join("runtime-state"))
+                        .map_err(|e| e.to_string())?;
+                    let receipt = operation.reconcile_system_proxy_stop(storage.proxy(), Instant::now() + LIMIT)
+                        .map_err(|e| e.to_string())?;
+                    write_report(&root.join("runtime-stop-system-desktop.json"), &serde_json::json!({
+                        "stopped":finished.stopped().authority(),"context":finished.stopped().context(),
+                        "receipt":receipt,"production_cleanup":true,
+                    }))?;
+                    Some(receipt)
+                } else { None };
+                Ok((finished, cleanup))
             });
             let exercised = (|| {
                 let ready = ready_receiver
@@ -264,6 +287,17 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                         "recorded scope does not match the actual running configuration".into(),
                     );
                 }
+                if mode == ProjectionMode::SystemProxy {
+                    let target = cfw_windows_engine::authority::ProxyRecoveryTarget {
+                        root: context.operation.root.clone(),
+                        revision: recorded
+                            .snapshot()
+                            .revision
+                            .ok_or("unknown Active revision")?,
+                        operation: operation.clone(),
+                    };
+                    require_cleanup_rejection(&mut observer, target, Rejection::Recovering)?;
+                }
                 drop(observer);
                 credential_fixture.while_active(
                     lifecycle,
@@ -302,16 +336,32 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                     return Err(format!("{test}; Desktop lifecycle: {cleanup}"));
                 }
             };
+            let (finished, cleanup) = finished;
             let stopped = finished.stopped();
             let exit = stopped
                 .agent_exit()
                 .ok_or("Desktop stop omitted its agent exit")?;
             if finished.reason() != StopReason::Requested
                 || stopped.context() != &context
-                || stopped.authority().state != AuthorityState::Off
+                || stopped.authority().state
+                    != if mode == ProjectionMode::SystemProxy {
+                        AuthorityState::Stopping
+                    } else {
+                        AuthorityState::Off
+                    }
                 || exit.exit_code() != 0
             {
-                return Err("Desktop stop observation or fixture-injected cleanup mismatch".into());
+                return Err("Desktop stop acknowledgement differs from its mode contract".into());
+            }
+            if mode == ProjectionMode::SystemProxy
+                && cleanup.as_ref().is_none_or(|receipt| {
+                    receipt.snapshot().state != AuthorityState::Off
+                        || receipt.snapshot().root.as_ref() != Some(&context.operation.root)
+                        || receipt.snapshot().revision
+                            != stopped.authority().revision.and_then(|v| v.checked_add(1))
+                })
+            {
+                return Err("production SystemProxy stop omitted exact Off publication".into());
             }
             for process in [&agent, &engine] {
                 if unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) } != WAIT_OBJECT_0 {
@@ -346,6 +396,21 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         return Err("runtime fixture finish mismatch".into());
     }
     Ok(())
+}
+
+fn require_cleanup_rejection(
+    channel: &mut AuthorityChannel,
+    target: cfw_windows_engine::authority::ProxyRecoveryTarget,
+    expected: Rejection,
+) -> Result<()> {
+    match channel.request(
+        Request::new(Command::BeginProxyCleanup(target)).map_err(|e| e.to_string())?,
+        Instant::now() + LIMIT,
+    ) {
+        Err(WireError::Rejected(actual)) if actual == expected => Ok(()),
+        Err(error) => Err(format!("normal stop rejection differs: {error}")),
+        Ok(_) => Err("normal stop accepted an unrelated or executable caller".into()),
+    }
 }
 
 pub(super) fn authenticate_controller(address: SocketAddr, secret: &str) -> Result<()> {

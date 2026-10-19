@@ -530,7 +530,10 @@ impl WindowsAuthority {
                 .as_ref()
                 .ok_or(AuthorityError::Identity)?
                 .revalidate()?;
-            if self.machine.is_bound() {
+            // After an acknowledged stop the runtime is expected to exit.
+            // Poll still reports Stopping; independent native cleanup remains
+            // necessary and is never inferred from this acknowledgement.
+            if self.machine.runtime_liveness_required() {
                 self.runtime_process
                     .as_ref()
                     .ok_or(AuthorityError::Identity)?

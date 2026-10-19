@@ -8,6 +8,192 @@ use crate::{
 };
 use uuid::Uuid;
 
+fn stopping(
+    acknowledged: bool,
+) -> (
+    Machine,
+    Peer,
+    Peer,
+    LeaseContext,
+    ProxyRecoveryTarget,
+    Instant,
+) {
+    let now = Instant::now();
+    let (mut machine, host, runtime, context) = active(now);
+    machine
+        .begin_stop(&host, &context, machine.revision(), now)
+        .unwrap();
+    if acknowledged {
+        machine
+            .stopped(
+                &runtime,
+                &StoppedReport {
+                    context: context.clone(),
+                    engine_stopped: true,
+                    transport_closed: true,
+                    os_restored: true,
+                    observed_millis: 1,
+                },
+                now,
+            )
+            .unwrap();
+    }
+    let target =
+        ProxyRecoveryTarget::from_stopped(&machine.recorded_runtime_scope().unwrap(), &context)
+            .unwrap();
+    (machine, host, runtime, context, target, now)
+}
+
+#[test]
+fn normal_proxy_cleanup_requires_acknowledgement_and_the_original_desktop_connection() {
+    let (machine, host, _, _, target, now) = stopping(false);
+    assert!(matches!(
+        ProxyRecoveryAdmission::new(
+            &machine,
+            &host,
+            target,
+            ProxyRecoveryPurpose::ReconcileOff,
+            Ticket::for_test([9; 32]).recovery_digest(),
+            now
+        ),
+        Err(AuthorityError::CleanupUnproven)
+    ));
+    let (machine, host, runtime, _, target, now) = stopping(true);
+    let mut other = host.clone();
+    other.connection = ConnectionBinding::new();
+    for peer in [other, runtime] {
+        assert!(matches!(
+            ProxyRecoveryAdmission::new(
+                &machine,
+                &peer,
+                target.clone(),
+                ProxyRecoveryPurpose::ReconcileOff,
+                Ticket::for_test([9; 32]).recovery_digest(),
+                now
+            ),
+            Err(AuthorityError::Identity)
+        ));
+    }
+    assert!(matches!(
+        ProxyRecoveryAdmission::new(
+            &machine,
+            &host,
+            target,
+            ProxyRecoveryPurpose::Observe,
+            Ticket::for_test([9; 32]).recovery_digest(),
+            now
+        ),
+        Err(AuthorityError::Recovering)
+    ));
+}
+
+#[test]
+fn acknowledged_stop_expects_owner_exit_but_keeps_cleanup_and_lease_pending() {
+    let (live, _, _, _) = active(Instant::now());
+    assert!(live.runtime_liveness_required());
+    let (unacknowledged, _, _, _, _, _) = stopping(false);
+    assert!(unacknowledged.runtime_liveness_required());
+    let (acknowledged, host, _, context, _, _) = stopping(true);
+    assert!(!acknowledged.runtime_liveness_required());
+    assert_eq!(acknowledged.phase(), AuthorityState::Stopping);
+    assert_eq!(acknowledged.lease_for_owner(&host).unwrap(), context);
+    assert!(acknowledged.metadata().unwrap().operation().is_some());
+}
+
+#[test]
+fn normal_proxy_cleanup_keeps_the_stopped_binding_until_global_off_commits() {
+    let (mut machine, host, _, context, target, now) = stopping(true);
+    let pending = ProxyRecoveryAdmission::new(
+        &machine,
+        &host,
+        target.clone(),
+        ProxyRecoveryPurpose::ReconcileOff,
+        Ticket::for_test([9; 32]).recovery_digest(),
+        now,
+    )
+    .unwrap();
+    let challenge = pending.context().clone();
+    pending
+        .consume(&machine, &host, &challenge, &[9; 32], now)
+        .unwrap();
+    assert_eq!(machine.lease_for_owner(&host).unwrap(), context);
+    assert_eq!(machine.phase(), AuthorityState::Stopping);
+    let mut proof = CleanupEvidence::for_validation(target.revision, Some(context.lease_id), true);
+    proof.binding = CleanupBinding::Runtime(target.clone());
+    machine.reconcile(&proof).unwrap();
+    assert_eq!(machine.phase(), AuthorityState::Off);
+    assert_eq!(machine.revision(), target.revision + 1);
+    assert_eq!(
+        machine.metadata().unwrap().transition(),
+        crate::authority_journal::JournalTransition::GlobalOff
+    );
+    assert!(machine.metadata().unwrap().operation().is_none());
+    assert!(machine.context().is_none());
+    assert!(matches!(
+        machine.lease_for_owner(&host),
+        Err(AuthorityError::Identity)
+    ));
+    assert!(matches!(
+        machine.reconcile(&proof),
+        Err(AuthorityError::Stale)
+    ));
+}
+
+#[test]
+fn normal_stop_selector_cannot_substitute_an_operation_or_crash_recovery() {
+    let (machine, _, _, context, _, _) = stopping(true);
+    let scope = machine.recorded_runtime_scope().unwrap();
+    assert!(matches!(
+        ProxyRecoveryTarget::from_recorded(&scope),
+        Err(AuthorityError::Recovering)
+    ));
+    for pointer in [
+        "/lease_id",
+        "/operation/operation_id",
+        "/operation/root/installation_id",
+    ] {
+        let mut changed = serde_json::to_value(&context).unwrap();
+        *changed.pointer_mut(pointer).unwrap() = serde_json::json!(Uuid::from_u128(99));
+        assert!(matches!(
+            ProxyRecoveryTarget::from_stopped(&scope, &serde_json::from_value(changed).unwrap()),
+            Err(AuthorityError::Stale)
+        ));
+    }
+    let restarted = recovered(machine.metadata().cloned());
+    assert!(matches!(
+        ProxyRecoveryTarget::from_stopped(&restarted.recorded_runtime_scope().unwrap(), &context),
+        Err(AuthorityError::CleanupUnproven)
+    ));
+}
+
+#[test]
+fn normal_cleanup_revalidates_uncertainty_and_closed_owner_before_consumption() {
+    for unknown in [false, true] {
+        let (mut machine, host, _, _, target, now) = stopping(true);
+        let pending = ProxyRecoveryAdmission::new(
+            &machine,
+            &host,
+            target,
+            ProxyRecoveryPurpose::ReconcileOff,
+            Ticket::for_test([9; 32]).recovery_digest(),
+            now,
+        )
+        .unwrap();
+        let context = pending.context().clone();
+        if unknown {
+            machine.enter_recovery(true);
+        } else {
+            host.connection.close();
+        }
+        let result = pending.consume(&machine, &host, &context, &[9; 32], now);
+        if unknown {
+            assert!(matches!(result, Err(AuthorityError::Recovering)));
+        } else {
+            assert!(matches!(result, Err(AuthorityError::Identity)));
+        }
+    }
+}
+
 fn fixture() -> (Machine, Peer, ProxyRecoveryTarget, Instant) {
     let now = Instant::now();
     let (live, mut peer, _, _) = active(now);

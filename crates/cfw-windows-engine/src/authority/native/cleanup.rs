@@ -21,9 +21,11 @@ impl WindowsAuthority {
         {
             return Err(AuthorityError::Identity);
         }
-        if !self.machine.durable_known() || self.machine.phase() != AuthorityState::Recovering {
-            return Err(AuthorityError::Recovering);
-        }
+        observed.context.target().matches(
+            &self.machine,
+            &peer,
+            ProxyRecoveryPurpose::ReconcileOff,
+        )?;
 
         // Reopen under the lifecycle guard again immediately before composing
         // cleanup evidence. Missing names never establish retired processes.
@@ -51,11 +53,23 @@ impl WindowsAuthority {
         // a SystemProxy root cannot own a managed TUN adapter or packet pump.
         // These facts must not be reused for Tunnel or combined-mode cleanup.
         let no_tunnel_resources = target.operation.mode() == AuthorityMode::SystemProxy;
-        let authority_cleared = self.machine.context().is_none()
-            && self.proxy_recovery.is_none()
-            && !self.keeper_confirmed
-            && !self.desktop_reference_issued
-            && !self.desktop_reference_confirmed;
+        let execution_material_retired = match self.machine.phase() {
+            AuthorityState::Recovering => {
+                self.machine.context().is_none()
+                    && !self.keeper_confirmed
+                    && !self.desktop_reference_issued
+                    && !self.desktop_reference_confirmed
+            }
+            AuthorityState::Stopping => {
+                // Original binding and non-secret operation identity remain
+                // until GlobalOff commits. No ticket or accepted Ready remains.
+                self.machine
+                    .stopped_cleanup_context(&peer, target.revision)?;
+                true
+            }
+            _ => return Err(AuthorityError::CleanupUnproven),
+        };
+        let authority_cleared = execution_material_retired && self.proxy_recovery.is_none();
         // The consumed report has dropped its zeroizing ticket. Dispatch erased
         // the raw request copy. The Authority never receives profile secrets;
         // runtime-owner address spaces and their private IPC died with the Job.

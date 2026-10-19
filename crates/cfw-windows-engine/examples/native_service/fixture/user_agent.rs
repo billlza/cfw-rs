@@ -1,5 +1,6 @@
 //! Real engine/WinINet ownership through the native SYSTEM dispatcher. The
-//! global cleanup observation remains explicitly injected by this fixture.
+//! SystemProxy stop uses production cleanup; LocalProxy cleanup is still
+//! explicitly injected until its native proof constructor is connected.
 use super::*;
 use cfw_engine_api::{EngineCommandContext, EngineStartRequest, authority_v1::AuthorityState};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
@@ -66,6 +67,7 @@ pub(super) struct Validation {
     heartbeats: usize,
     reconciled: usize,
     rejected_bindings: usize,
+    cleanup_rejections: Vec<&'static str>,
     process_observations: Vec<serde_json::Value>,
 }
 impl Validation {
@@ -77,6 +79,7 @@ impl Validation {
             heartbeats: 0,
             reconciled: 0,
             rejected_bindings: 0,
+            cleanup_rejections: Vec::new(),
             process_observations: Vec::new(),
         }
     }
@@ -111,21 +114,31 @@ impl Validation {
             }
             self.process_observations
                 .push(authority_wire::process_report("retired", &observation));
-            // No claim of production/global cleanup: the service fixture has no
-            // TUN/global observer. Actual per-user cleanup comes from the agent.
-            controller
-                .reconcile_off(CleanupEvidence::for_validation(
-                    snapshot.revision.ok_or("unknown runtime revision")?,
-                    Some(lease),
-                    true,
-                ))
-                .map_err(|e| e.to_string())?;
-            self.reconciled += 1;
+            if controller
+                .cleanup_target()
+                .ok_or("missing stop context")?
+                .operation
+                .mode
+                == cfw_engine_api::authority_v1::AuthorityMode::LocalProxy
+            {
+                // LocalProxy still needs its own production proof constructor.
+                // SystemProxy completes through the product Desktop/API path.
+                controller
+                    .reconcile_off(CleanupEvidence::for_validation(
+                        snapshot.revision.ok_or("unknown runtime revision")?,
+                        Some(lease),
+                        true,
+                    ))
+                    .map_err(|e| e.to_string())?;
+                self.reconciled += 1;
+            }
         }
         let ready = matches!(command.command(), Command::Ready(_));
         let stopped = matches!(command.command(), Command::Stopped(_));
         let heartbeat = matches!(command.command(), Command::Heartbeat(_));
         let binding = matches!(command.command(), Command::BindUserAgent(_));
+        let cleanup = matches!(command.command(), Command::ReconcileProxyCleanup(_));
+        let begin_cleanup = matches!(command.command(), Command::BeginProxyCleanup(_));
         drop(command);
         let reply = controller
             .handle(connection, request, Instant::now() + LIMIT)
@@ -139,7 +152,57 @@ impl Validation {
                 self.rejected_bindings += 1;
                 return Ok(reply);
             }
+            if begin_cleanup && self.ready == 2 && self.reconciled == 1 {
+                if self.stopped == 1
+                    && self.cleanup_rejections.is_empty()
+                    && matches!(
+                        error,
+                        cfw_windows_engine::authority::AuthorityError::Recovering
+                    )
+                {
+                    self.cleanup_rejections.push("active_cleanup_rejected");
+                    return Ok(reply);
+                }
+                if self.stopped == 2
+                    && self.cleanup_rejections.len() == 1
+                    && matches!(
+                        error,
+                        cfw_windows_engine::authority::AuthorityError::Identity
+                    )
+                {
+                    self.cleanup_rejections
+                        .push("same_owner_new_connection_rejected");
+                    return Ok(reply);
+                }
+            }
             return Err(format!("real runtime command rejected: {error}"));
+        }
+        if cleanup {
+            let observed = reply
+                .proxy_recovery_observation()
+                .ok_or("missing production stop proof")?;
+            let metadata = controller
+                .recovery_target()
+                .ok_or("missing cleanup metadata")?;
+            if self.stopped != 2
+                || self.reconciled != 1
+                || controller.snapshot().state != AuthorityState::Off
+                || metadata.transition()
+                    != cfw_windows_engine::authority_journal::JournalTransition::GlobalOff
+                || metadata.operation().is_some()
+                || controller.lease_owner().is_some()
+            {
+                return Err("normal SystemProxy stop did not commit production GlobalOff".into());
+            }
+            write_report(
+                &authority_journal::root()?.join("runtime-stop-system-service.json"),
+                &serde_json::json!({
+                    "context":observed.context(),"processes":authority_wire::process_report("normal_stop", observed.processes()),
+                    "metadata":metadata,"snapshot":controller.snapshot(),"production_cleanup":true,"lease_released":true,
+                    "rejected":self.cleanup_rejections,
+                }),
+            )?;
+            self.reconciled += 1;
         }
         if stopped {
             let observation = authority_wire::require_live_runtime(controller, 1)?;
@@ -172,6 +235,11 @@ impl Validation {
             || self.reconciled != 2
             || self.heartbeats < 2
             || self.rejected_bindings != 1
+            || self.cleanup_rejections
+                != [
+                    "active_cleanup_rejected",
+                    "same_owner_new_connection_rejected",
+                ]
             || self.process_observations.len() != 6
         {
             return Err(format!(
@@ -185,7 +253,7 @@ impl Validation {
             .cleanup()?;
         write_report(
             &authority_journal::root()?.join("user-agent.wire-validation.json"),
-            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"system_runtime_job_observed":true,"job_failure_boundaries_verified":true,"process_observations":self.process_observations,"nested_engine_membership_observed":true,"engine_keeper_survives_agent_reference_release":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"live_processes_block_reconcile":true,"ordinary_agent_job_rights_denied":true,"global_cleanup_observations_injected":true,"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
+            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"system_runtime_job_observed":true,"job_failure_boundaries_verified":true,"process_observations":self.process_observations,"nested_engine_membership_observed":true,"engine_keeper_survives_agent_reference_release":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"live_processes_block_reconcile":true,"ordinary_agent_job_rights_denied":true,"global_cleanup_observations_injected":true,"production_system_proxy_stop":true,"injected_cleanup_modes":["local_proxy"],"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
         )
     }
 }
@@ -193,7 +261,10 @@ fn credential_report() -> serde_json::Value {
     serde_json::json!({"runtime_credential_bindings_persisted":true,"async_credential_vault_adapter":true,"async_credential_rebind_verified":true,"active_gc_protects_exact_audience":true,"gc_rechecks_state_at_commit":true,"runtime_gc_observation_errors_rejected":true,"protected_vault_missing_rejected":true,"retired_credentials_collected":true})
 }
 pub(super) fn client_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"durable_runtime_storage":true,"restoration_observed_after_agent_exit":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"credential_lifecycle":credential_report(),"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
+    let mut report = serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"durable_runtime_storage":true,"restoration_observed_after_agent_exit":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"credential_lifecycle":credential_report(),"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false});
+    report["production_system_proxy_stop"] = serde_json::json!(true);
+    report["injected_cleanup_modes"] = serde_json::json!(["local_proxy"]);
+    report
 }
 pub(super) fn run_validation() -> Result<()> {
     run_mode(false)

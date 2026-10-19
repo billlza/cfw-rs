@@ -109,6 +109,12 @@ impl Machine {
             .as_ref()
             .is_some_and(|lease| lease.runtime.is_some())
     }
+    pub(super) fn runtime_liveness_required(&self) -> bool {
+        self.lease.as_ref().is_some_and(|lease| {
+            lease.runtime.is_some()
+                && !(self.phase == AuthorityState::Stopping && lease.owner_stopped)
+        })
+    }
     pub(super) fn enter_recovery(&mut self, uncertain: bool) {
         // Keep the last known metadata for cleanup, but never expose its revision
         // as current after an uncertain write. Dropping the lease erases tickets.
@@ -638,5 +644,24 @@ impl Machine {
             return Err(AuthorityError::Identity);
         }
         Ok(lease.context.clone())
+    }
+    /// A normal stop keeps its original Desktop binding until cleanup commits.
+    /// The owner's report removes execution material, but native process and
+    /// operating-system observations are still required before GlobalOff.
+    pub(super) fn stopped_cleanup_context(
+        &self,
+        peer: &Peer,
+        revision: u64,
+    ) -> Result<&LeaseContext> {
+        self.expected_revision(revision)?;
+        if self.phase != AuthorityState::Stopping {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        let lease = self.lease.as_ref().ok_or(AuthorityError::Identity)?;
+        self.host_exact(peer, &lease.context)?;
+        if !lease.owner_stopped || lease.ticket.is_some() || lease.accepted_ready.is_some() {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        Ok(&lease.context)
     }
 }

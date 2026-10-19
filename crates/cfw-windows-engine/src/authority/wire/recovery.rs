@@ -94,7 +94,7 @@ pub struct ProxyRecoveryReceipt {
     pub(in crate::authority) retired_process_count: u32,
 }
 
-/// Publication of a fully observed SystemProxy recovery. A later execution
+/// Publication of a fully observed SystemProxy stop or recovery. A later execution
 /// still needs a new generation and lease; the old runtime is not restored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

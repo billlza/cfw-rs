@@ -15,7 +15,7 @@ pub enum ProxyRecoveryPurpose {
     ReconcileOff,
 }
 
-/// Exact durable operation, including the former full logon identity and both
+/// Exact durable operation, including the recorded full logon identity and both
 /// configuration hashes. This is a request selector, never execution authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +29,22 @@ impl ProxyRecoveryTarget {
         if scope.snapshot().state != AuthorityState::Recovering {
             return Err(AuthorityError::Recovering);
         }
+        Self::from_scope(scope)
+    }
+    /// Select a normal stopped operation without treating it as crash recovery.
+    /// The service separately requires the original Desktop connection and the
+    /// owner's stopped acknowledgement; this selector grants no permission.
+    pub fn from_stopped(scope: &RecordedRuntimeScope, context: &LeaseContext) -> Result<Self> {
+        if scope.snapshot().state != AuthorityState::Stopping {
+            return Err(AuthorityError::CleanupUnproven);
+        }
+        let value = Self::from_scope(scope)?;
+        if value.root != context.operation.root || value.operation != context.recorded()? {
+            return Err(AuthorityError::Stale);
+        }
+        Ok(value)
+    }
+    fn from_scope(scope: &RecordedRuntimeScope) -> Result<Self> {
         let value = Self {
             root: scope
                 .snapshot()
@@ -58,10 +74,25 @@ impl ProxyRecoveryTarget {
         }
         Ok(())
     }
-    fn matches(&self, machine: &Machine) -> Result<()> {
+    pub(super) fn matches(
+        &self,
+        machine: &Machine,
+        peer: &Peer,
+        purpose: ProxyRecoveryPurpose,
+    ) -> Result<()> {
         self.validate()?;
-        if !machine.durable_known() || machine.phase() != AuthorityState::Recovering {
+        if !machine.durable_known() {
             return Err(AuthorityError::Recovering);
+        }
+        match machine.phase() {
+            AuthorityState::Recovering => {}
+            AuthorityState::Stopping if purpose == ProxyRecoveryPurpose::ReconcileOff => {
+                let context = machine.stopped_cleanup_context(peer, self.revision)?;
+                if self.root != context.operation.root || self.operation != context.recorded()? {
+                    return Err(AuthorityError::Stale);
+                }
+            }
+            _ => return Err(AuthorityError::Recovering),
         }
         let metadata = machine.metadata().ok_or(AuthorityError::Recovering)?;
         if self.revision != machine.revision()
@@ -123,7 +154,7 @@ impl ProxyRecoveryAdmission {
         if peer.role != Role::Desktop {
             return Err(AuthorityError::Identity);
         }
-        target.matches(machine)?;
+        target.matches(machine, peer, purpose)?;
         let context = ProxyRecoveryContext {
             target,
             observer: peer.owner.clone(),
@@ -166,7 +197,9 @@ impl ProxyRecoveryAdmission {
         if self.context != *context {
             return Err(AuthorityError::Stale);
         }
-        self.context.target.matches(machine)?;
+        self.context
+            .target
+            .matches(machine, peer, self.context.purpose)?;
         if !self.ticket.accepts(ticket) {
             return Err(AuthorityError::Ticket);
         }

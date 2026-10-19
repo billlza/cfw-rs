@@ -74,12 +74,18 @@ pub struct NativePeerIdentity {
 #[derive(Clone, PartialEq, Eq)]
 pub struct NativeUserSession {
     user_sid: String,
+    binary_sid: Vec<u8>,
     authentication_id: u64,
     session_id: u32,
 }
 impl NativeUserSession {
     pub fn user_sid(&self) -> &str {
         &self.user_sid
+    }
+    /// Exact validated SID bytes, retaining every subauthority. Persisting
+    /// these bytes creates an identity claim, never a native token or grant.
+    pub fn user_sid_bytes(&self) -> &[u8] {
+        &self.binary_sid
     }
     pub fn authentication_id(&self) -> u64 {
         self.authentication_id
@@ -394,7 +400,7 @@ fn observe_user_session(
 ) -> Result<NativeUserSession, PeerIdentityError> {
     let user = TokenData::read(token, TokenUser, size_of::<TOKEN_USER>())?;
     let sid = unsafe { (&*user.pointer::<TOKEN_USER>()).User.Sid };
-    user.sid(sid)?;
+    let binary_sid = user.sid(sid)?.to_vec();
     let user_sid = sid_text(sid)?;
     let statistics_buffer = TokenData::read(token, TokenStatistics, size_of::<TOKEN_STATISTICS>())?;
     let statistics = unsafe { &*statistics_buffer.pointer::<TOKEN_STATISTICS>() };
@@ -409,6 +415,7 @@ fn observe_user_session(
     let session_id = unsafe { *session.pointer::<u32>() };
     Ok(NativeUserSession {
         user_sid,
+        binary_sid,
         authentication_id: u64::from(authentication.LowPart)
             | (u64::from(authentication.HighPart as u32) << 32),
         session_id,

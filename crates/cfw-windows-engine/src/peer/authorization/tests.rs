@@ -3,6 +3,10 @@ use super::*;
 fn session() -> NativeUserSession {
     NativeUserSession {
         user_sid: "S-1-5-21-123-456-789-1001".into(),
+        binary_sid: vec![
+            1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 123, 0, 0, 0, 200, 1, 0, 0, 21, 3, 0, 0, 233, 3,
+            0, 0,
+        ],
         authentication_id: 0x1234_5678_90ab_cdef,
         session_id: 2,
     }

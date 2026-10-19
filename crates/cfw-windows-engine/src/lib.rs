@@ -6,6 +6,8 @@
 //! `NativeEngineStatus::Off`.
 
 #[cfg(any(windows, test))]
+pub mod authority_journal;
+#[cfg(any(windows, test))]
 mod configuration;
 #[cfg(any(windows, test))]
 mod protocol;

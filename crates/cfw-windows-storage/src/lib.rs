@@ -361,6 +361,13 @@ impl ReadTransaction {
 }
 
 impl WriteTransaction {
+    /// Reads an application-owned temporary without renaming or deleting it.
+    /// Recovery must validate this content before any subsequent publication.
+    pub fn read_temporary(&self, name: &str, maximum: usize) -> Result<Option<Snapshot>, Error> {
+        temporary_name(name)?;
+        self.read.read_entry(name, maximum, ReadPolicy::Private)
+    }
+
     pub fn open_private_file(&self, name: &str) -> Result<File, Error> {
         self.read.open_private_file(name)
     }

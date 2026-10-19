@@ -437,6 +437,12 @@ fn serve_connections(
             let (reply, finished): (&[u8], bool) = match request.body() {
                 b"ping" => (b"pong", false),
                 b"done" => (b"end!", true),
+                command @ (b"authority-journal" | b"authority-journal-observe")
+                    if role == ServiceClientRole::Desktop =>
+                {
+                    authority_journal::exercise(name, command, admitted.owner())?;
+                    (b"journal-ok", true)
+                }
                 command @ (b"machine-record-seed" | b"machine-record-observe")
                     if role == ServiceClientRole::Desktop =>
                 {

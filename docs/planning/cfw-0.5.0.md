@@ -731,7 +731,7 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
   Windows job 成功，SCM 23 项场景和全部 256 轮交换通过；共享 Rust 487 项、UI
   311 项通过。下载回执的源身份与哈希核验保存在该工作区的验证目录中。
 
-## SYSTEM 日志锚点存储（2026-10-19，原生验证待完成）
+## SYSTEM 日志锚点存储（2026-10-19）
 
 新增 `PrivateMachineRecord` 作为后续 Authority 日志的独立版本锚点原语。
 固定使用 64 位 HKLM 专用命名空间，拒绝模拟身份和非 SYSTEM 进程；检查打开的
@@ -745,13 +745,43 @@ CFW_RELEASE_RUST_TOOLCHAIN=private ./scripts/run_release_ci_gate.sh rust-clippy
 
 原生 fixture 新增 SYSTEM 写入、跨服务进程退出后的读取/CAS、大小写互斥、损坏
 值及不安全 DACL 拒绝、实际非管理员 ACL 拒绝和叶子清理；只操作托管临时 Windows
-VM 的唯一测试作用域。本机 Windows 目标 Clippy 与格式检查通过，原生结果待取得。
+VM 的唯一测试作用域。`602cec2` 的运行 `39193235468` 四项 Windows job 全部成功：
+Rust 488 项、前端 311 项、SCM 30 项场景及 256 轮交换通过。服务产物
+`12161090793` 的下载 SHA-256 为
+`8f970484e0fa8e2e99c21256fb039a66ae21c0c3bf0f1351f0bdb2855a1e1e14`；
+引擎产物 `12160728949` 为
+`7ebcde28cc2cb59338d4e10d45f3015ff5fee4f6600eefdb96d322e739120070`。
+回执源身份、测试结果、二进制和许可文件均已核验。
 
 `4e34608` 的 Mac 运行 `39188386401` 中 supply-chain 和 quality job 成功，但
 Xcode 的 `aProbeOfTheLargestProjectedProfileFitsItsReply` 在 libbox 启动时报错，
 后续 analyzer、signer 和打包未运行。错误文本按产品隐私边界被隐藏，现有日志
 无法确立根因。仅为该合成配置用例增加原始启动诊断，保持原异常、测试和断言；
 此改动不是根因修复，不把旧版 Mac 成功运行替代本次失败。
+
+## Windows Authority 日志与恢复（2026-10-19，原生验证待完成）
+
+新增 Windows 独立版本的日志 schema、CRC/SHA-256 链、持久游标和 pending/committed
+锚点。保存 SID 的完整二进制表示、登录 LUID 和 session，不构造 Unix UID，也不从
+磁盘反序列化原生身份。记录不包含票据、能力、配置、凭据、端点或秘密字段。
+规范编码拒绝未知/重复字段；记录、日志、head 与 anchor 均有边界。
+
+`WindowsAuthorityJournal` 在 SYSTEM 全局互斥锁和已验证的目录事务下恢复与提交。
+在写日志之前持久化 pending 锚点，在日志和 head 刷新后提交独立锚点。只有完整且
+匹配锚点的临时记录可以继续发布；部分、冲突、回滚、缺失锚点或不明代次均保留并报错。
+未发布任何新记录的意图可以撤销。逻辑追加复用私有文件的原子替换，恢复时不调用会
+自动丢弃临时文件的通用 replace。压缩只在下一次 prepare 之前发生，保留七条收尾
+记录余量，先提交新代次 checkpoint，再验证并清理旧代次。
+
+恢复始终返回核验动作：Off 要重新证明清理；Active 要重新核验所有者；准备、启动和
+停止中的记录要求停止所有者。该存储层不发放执行授权；完整 Authority reducer、
+运行所有者和操作协议仍待接入。宿主/桌面工厂仍未切换为 Windows backend。
+
+本机新增十项日志/校验测试，连同原十二项组件测试共 22 项通过；Windows 目标严格
+Clippy 通过。原生服务 fixture 加入十五个实际持久化边界中断、四种完整/损坏临时文件、
+四种身份/回滚情形，以及跨进程退出后的 Active 元数据恢复。压缩使用仅验证特性可用
+的小容量构造器，生产默认仍为 4,096 条、32 MiB；不会把这类故障注入当作断电测试。
+原生执行与新源提交的 CI 尚待完成。
 
 ## 官方资料
 

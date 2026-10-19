@@ -8,14 +8,17 @@ use std::sync::{Arc, Mutex};
 enum Validation {
     Wire(authority_wire::Validation),
     Runtime(user_agent::Validation),
+    Restart(user_agent::restart::Service),
 }
 impl Validation {
-    fn new(runtime: bool) -> Self {
-        if runtime {
+    fn new(name: &str, runtime: bool, restart: bool) -> Result<Self> {
+        Ok(if restart {
+            Self::Restart(user_agent::restart::Service::open(name)?)
+        } else if runtime {
             Self::Runtime(user_agent::Validation::new())
         } else {
             Self::Wire(authority_wire::Validation::new())
-        }
+        })
     }
     fn handle(
         &mut self,
@@ -25,12 +28,14 @@ impl Validation {
         match self {
             Self::Wire(value) => value.handle(connection, request),
             Self::Runtime(value) => value.handle(connection, request),
+            Self::Restart(value) => value.handle(connection, request),
         }
     }
     fn finish(&mut self) -> Result<()> {
         match self {
             Self::Wire(value) => value.finish(),
             Self::Runtime(value) => value.finish(),
+            Self::Restart(value) => value.finish(),
         }
     }
 }
@@ -46,6 +51,7 @@ pub(super) struct Installation {
     authentication_id: u64,
     session_id: u32,
     pub(super) runtime: Option<user_agent::EngineInstallation>,
+    restart_runtime: bool,
 }
 
 pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
@@ -179,6 +185,15 @@ pub(super) fn write_installation_mode(
     digest: [u8; 32],
     runtime: Option<user_agent::EngineInstallation>,
 ) -> Result<()> {
+    write_installation_runtime(root, agent, digest, runtime, false)
+}
+pub(super) fn write_installation_runtime(
+    root: &Path,
+    agent: &Path,
+    digest: [u8; 32],
+    runtime: Option<user_agent::EngineInstallation>,
+    restart_runtime: bool,
+) -> Result<()> {
     let desktop_image = root.join("desktop-fixture.exe");
     std::fs::copy(
         std::env::current_exe().map_err(|e| e.to_string())?,
@@ -195,6 +210,7 @@ pub(super) fn write_installation_mode(
         authentication_id: current.identity().authentication_id(),
         session_id: current.identity().session_id(),
         runtime,
+        restart_runtime,
     };
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -300,7 +316,11 @@ pub(super) fn serve(name: &str, status_handle: SERVICE_STATUS_HANDLE) -> Result<
     // never by the bootstrap JSON. This exercises the policy input; it is not
     // the product's durable authority lease or runtime state machine.
     let lease_owner = Arc::new(Mutex::new(None));
-    let authority = Arc::new(Mutex::new(Validation::new(installed.runtime.is_some())));
+    let authority = Arc::new(Mutex::new(Validation::new(
+        name,
+        installed.runtime.is_some(),
+        installed.restart_runtime,
+    )?));
     for (role, listener) in [
         (ServiceClientRole::Desktop, desktop),
         (ServiceClientRole::UserAgent, agent),

@@ -115,14 +115,31 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 2 && args[1] == "--runtime-validation" {
         return user_agent::run_validation();
     }
+    if args.len() == 2 && args[1] == "--runtime-restart-validation" {
+        return user_agent::run_restart_validation();
+    }
     if args.len() == 4 {
         let case = match args[1].as_str() {
             "--local-agent-runtime" => Some(restricted::ClientCase::RuntimeLocal),
             "--system-agent-runtime" => Some(restricted::ClientCase::RuntimeSystem),
+            "--restart-system-agent-runtime" => Some(restricted::ClientCase::RuntimeRestartSystem),
+            "--restart-runtime-desktop" => Some(restricted::ClientCase::RuntimeRestartDesktop),
             "--rejected-agent-runtime" => Some(restricted::ClientCase::RejectedRuntime),
             _ => None,
         };
         if let Some(case) = case {
+            if matches!(case, restricted::ClientCase::RuntimeRestartDesktop) {
+                for variable in [
+                    "CFW_NATIVE_SERVICE_MUTATION_TESTS",
+                    "CFW_NATIVE_PROXY_MUTATION_TESTS",
+                ] {
+                    if std::env::var(variable).as_deref() != Ok("1") {
+                        return Err(format!(
+                            "restart Desktop requires {variable}=1 in disposable CI"
+                        ));
+                    }
+                }
+            }
             return restricted::client(&args[2], &args[3], case);
         }
     }
@@ -638,6 +655,7 @@ fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
             && !text.ends_with(".authority-validation.json")
             && !text.ends_with(".wire-validation.json")
             && !text.ends_with(".stress-validation.json")
+            && !(text.starts_with("runtime-restart-") && text.ends_with(".json"))
         {
             continue;
         }

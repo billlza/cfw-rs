@@ -13,6 +13,8 @@ pub(super) enum ClientCase {
     RuntimeDesktop,
     RuntimeLocal,
     RuntimeSystem,
+    RuntimeRestartDesktop,
+    RuntimeRestartSystem,
     RejectedRuntime,
 }
 impl ClientCase {
@@ -24,6 +26,8 @@ impl ClientCase {
             Self::RuntimeDesktop => "--runtime-desktop",
             Self::RuntimeLocal => "--local-agent-runtime",
             Self::RuntimeSystem => "--system-agent-runtime",
+            Self::RuntimeRestartDesktop => "--restart-runtime-desktop",
+            Self::RuntimeRestartSystem => "--restart-system-agent-runtime",
             Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
@@ -35,6 +39,8 @@ impl ClientCase {
             Self::RuntimeDesktop => format!("{name}-desktop"),
             Self::RuntimeLocal => format!("{name}-runtime-local"),
             Self::RuntimeSystem => format!("{name}-runtime-system"),
+            Self::RuntimeRestartDesktop => format!("{name}-restart-desktop"),
+            Self::RuntimeRestartSystem => format!("{name}-restart-system"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
@@ -57,6 +63,8 @@ impl ClientCase {
                 user_agent::agent_report(cfw_singbox_config::ProjectionMode::SystemProxy)
             }
             Self::RejectedRuntime => user_agent::rejected_report(),
+            Self::RuntimeRestartDesktop => user_agent::restart::desktop_report(),
+            Self::RuntimeRestartSystem => user_agent::restart::agent_report(),
         }
     }
 }
@@ -210,6 +218,15 @@ pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
 pub(super) fn run_desktop_runtime(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     run_case(image, name, expected, ClientCase::RuntimeDesktop, None)
 }
+pub(super) fn run_restart_desktop(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
+    run_case(
+        image,
+        name,
+        expected,
+        ClientCase::RuntimeRestartDesktop,
+        None,
+    )
+}
 type Activity<'a> = &'a mut dyn FnMut(&UserAgentChild, Instant) -> Result<()>;
 pub(super) fn run_runtime(
     image: &Path,
@@ -222,6 +239,7 @@ pub(super) fn run_runtime(
     let selector = match case {
         ClientCase::RuntimeLocal => ValidationAgent::Local,
         ClientCase::RuntimeSystem => ValidationAgent::System,
+        ClientCase::RuntimeRestartSystem => ValidationAgent::RestartSystem,
         ClientCase::RejectedRuntime => ValidationAgent::Rejected,
         _ => return Err("invalid product UserAgent fixture case".into()),
     };
@@ -391,7 +409,10 @@ fn run_case(
     let writer = writer.map(|(mut output, bytes)| {
         thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
     });
-    let limit = if matches!(case, ClientCase::RuntimeDesktop) {
+    let limit = if matches!(
+        case,
+        ClientCase::RuntimeDesktop | ClientCase::RuntimeRestartDesktop
+    ) {
         Duration::from_secs(60)
     } else {
         LIMIT
@@ -530,6 +551,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
+        ClientCase::RuntimeRestartDesktop => return user_agent::restart::desktop(name, hex),
         ClientCase::RuntimeDesktop => {
             // The client preflight must work without weakening the privileged
             // observer used by SYSTEM for full console-token admission.
@@ -543,7 +565,10 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
             }
             return user_agent::desktop(name, hex);
         }
-        ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime => {
+        ClientCase::RuntimeLocal
+        | ClientCase::RuntimeSystem
+        | ClientCase::RuntimeRestartSystem
+        | ClientCase::RejectedRuntime => {
             return user_agent::agent(name, &image, expected, case);
         }
         ClientCase::AuthorityRuntime => return authority_wire::agent(name, &image, expected),

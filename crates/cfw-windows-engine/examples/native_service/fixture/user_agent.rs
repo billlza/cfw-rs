@@ -27,6 +27,7 @@ mod credentials;
 mod desktop_runtime;
 mod lan;
 mod progress;
+pub(super) mod restart;
 mod start_request;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -195,6 +196,12 @@ pub(super) fn client_report() -> serde_json::Value {
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"machine_lineage_store":true,"recorded_runtime_scope_validated":true,"credential_lifecycle":credential_report(),"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
 }
 pub(super) fn run_validation() -> Result<()> {
+    run_mode(false)
+}
+pub(super) fn run_restart_validation() -> Result<()> {
+    run_mode(true)
+}
+fn run_mode(restart: bool) -> Result<()> {
     for variable in [
         "CFW_NATIVE_SERVICE_MUTATION_TESTS",
         "CFW_NATIVE_PROXY_MUTATION_TESTS",
@@ -231,7 +238,13 @@ pub(super) fn run_validation() -> Result<()> {
         std::fs::copy(std::env::current_exe().map_err(|e| e.to_string())?, &image)
             .map_err(|e| e.to_string())?;
         let expected = digest(&image)?;
-        transport::write_installation_mode(root.path(), &image, expected, Some(install))?;
+        transport::write_installation_runtime(
+            root.path(),
+            &image,
+            expected,
+            Some(install),
+            restart,
+        )?;
         let manager = Sc(unsafe {
             OpenSCManagerW(
                 null(),
@@ -244,7 +257,11 @@ pub(super) fn run_validation() -> Result<()> {
         }
         let name = format!("CFW-scm-fixture-{}-a", uuid::Uuid::new_v4());
         let mut service = Installed::create(&manager, name.clone(), &image)?;
-        let test = transport::run_runtime_desktop_validation(root.path(), &name, expected);
+        let test = if restart {
+            restart::exercise(&mut service, root.path(), &name, expected)
+        } else {
+            transport::run_runtime_desktop_validation(root.path(), &name, expected)
+        };
         let removal = service.remove();
         match (test, removal) {
             (Ok(()), Ok(())) => {}
@@ -266,6 +283,9 @@ pub(super) fn run_validation() -> Result<()> {
                 != Some(ERROR_SERVICE_DOES_NOT_EXIST as i32)
         {
             return Err("runtime fixture service deletion was not observed".into());
+        }
+        if restart {
+            return restart::receipt(root.path(), &receipts, &source);
         }
         let wire = std::fs::read(root.path().join("user-agent.wire-validation.json"))
             .map_err(|e| e.to_string())?;

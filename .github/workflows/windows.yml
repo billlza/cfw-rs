@@ -86,6 +86,8 @@ jobs:
           $env:CFW_NATIVE_SERVICE_RECEIPTS = $artifactRoot
           cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'user-agent-runtime-tests.txt')
           if ($LASTEXITCODE -ne 0) { throw "Native UserAgent engine and proxy lifecycle validation failed" }
+          cargo run --locked -p cfw-windows-engine --features native-service-validation --example native-service-fixture -- --runtime-restart-validation 2>&1 | Tee-Object -FilePath (Join-Path $artifactRoot 'runtime-restart-tests.txt')
+          if ($LASTEXITCODE -ne 0) { throw "Native SCM crash and runtime recovery validation failed" }
       - name: Upload the verified unsigned engine component
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

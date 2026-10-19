@@ -27,7 +27,9 @@ pub(super) fn run(
         restricted::ClientCase::RuntimeLocal | restricted::ClientCase::RejectedRuntime => {
             ProjectionMode::LocalProxy
         }
-        restricted::ClientCase::RuntimeSystem => ProjectionMode::SystemProxy,
+        restricted::ClientCase::RuntimeSystem | restricted::ClientCase::RuntimeRestartSystem => {
+            ProjectionMode::SystemProxy
+        }
         _ => return Err("invalid runtime child case".into()),
     };
     if mode != expected {
@@ -48,6 +50,7 @@ pub(super) fn run(
         );
     }
     let context = launch.context().clone();
+    let restart_case = matches!(case, restricted::ClientCase::RuntimeRestartSystem);
     let proxy =
         WindowsSystemProxy::new(&directory.path().join("proxy")).map_err(|e| e.to_string())?;
     let settings = proxy.snapshot().map_err(|e| e.to_string())?;
@@ -60,8 +63,12 @@ pub(super) fn run(
         } else {
             None
         },
-    )
-    .release_agent_keeper_after_spawn_for_validation();
+    );
+    let assets = if restart_case {
+        assets
+    } else {
+        assets.release_agent_keeper_after_spawn_for_validation()
+    };
     let mut session = UserAgentSession::new(
         launch
             .into_plan(WindowsCredentialStore::new(
@@ -100,6 +107,19 @@ pub(super) fn run(
         }
         let result = worker.join().map_err(|_| "real runtime worker panicked")?;
         match (published, result) {
+            (Ok(()), Err(error)) if restart_case && restart::agent_control_loss(&error) => {
+                write_report(
+                    &image
+                        .parent()
+                        .ok_or("missing restart Agent root")?
+                        .join("runtime-restart-agent-error.json"),
+                    &serde_json::json!({"product_operation_succeeded":false,"error":error.to_string()}),
+                )?;
+                Ok(())
+            }
+            (Ok(()), Ok(_)) if restart_case => {
+                Err("Agent falsely reported success after Authority crash".into())
+            }
             (Ok(()), Ok(StopReason::AuthorityRevoked)) => Ok(()),
             (Ok(()), Ok(reason)) => Err(format!("unexpected runtime stop: {reason:?}")),
             (Err(error), Ok(_)) => Err(error),
@@ -111,9 +131,13 @@ pub(super) fn run(
         .local_cleanup()
         .and_then(|r| r.process_id())
         .is_none()
-        || session
-            .stopped_acknowledgement()
-            .is_none_or(|s| s.state != AuthorityState::Stopping)
+        || if restart_case {
+            session.stopped_acknowledgement().is_some()
+        } else {
+            session
+                .stopped_acknowledgement()
+                .is_none_or(|s| s.state != AuthorityState::Stopping)
+        }
     {
         return Err("runtime cleanup/Stopped receipt missing".into());
     }

@@ -345,7 +345,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
     Ok(())
 }
 
-fn authenticate_controller(address: SocketAddr, secret: &str) -> Result<()> {
+pub(super) fn authenticate_controller(address: SocketAddr, secret: &str) -> Result<()> {
     for authenticated in [false, true] {
         let mut socket = TcpStream::connect_timeout(&address, Duration::from_secs(5))
             .map_err(|e| e.to_string())?;

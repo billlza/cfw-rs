@@ -1249,6 +1249,27 @@ Job 计数均为 3、1、0，合计 8 次心跳、1 次预期错误绑定拒绝�
 恢复、生产全局清理证据、完整应用工厂和发布验收仍是开放项。
 参考 [无权限要求的内核对象比较](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles)。
 
+### SCM 进程崩溃与真实代理恢复（待原生验证）
+
+新增单独的 `--runtime-restart-validation` 场景，正常两模式用例继续保留。使用
+真实 SystemProxy、独立的普通用户 Desktop/Agent 和同一 Go 引擎。Desktop 完成
+Ready、HTTP 代理流量及控制器认证后，测试协调器只对本次临时 SCM 服务注入崩溃。
+它保留旧进程句柄，核对 SYSTEM 身份和内核对象，等待实际退出并检查指定退出码；
+随后启动同一个服务条目，等待 SCM Running 并确认新进程对象。
+
+恢复路径读取同一个受保护的日志目录和系统记录，不重新创建随机运行作用域，
+不把已恢复运行当作首次安装清理。新进程必须保留原 Active 元数据、完整用户
+身份和配置摘要，同时保持 Recovering、无可执行租约；新运行分配必须被拒绝。
+若 Agent 已先完成本地清理，Job 名称缺失仍记录为 Unavailable，不能变成零计数。
+
+Agent 和 Desktop 必须保留真实的控制通道丢失错误，不能伪造 Stopped 确认或产品
+成功。验收另外持有 Agent/引擎进程句柄，核对退出、端口重新绑定、原 WinINet
+设置恢复及 Agent 日志移除。失败诊断和重启前后快照随产物保留。此场景仍不提供
+生产全局清理证据、旧登录会话恢复或完整安装服务入口；原生 CI 尚未运行。
+
+参考 [进程终止与退出观察](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)
+及 [SCM 启动与状态观察](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicew)。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。

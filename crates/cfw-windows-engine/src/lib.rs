@@ -18,7 +18,7 @@ mod protocol;
 #[cfg(any(windows, test))]
 pub mod user_agent;
 #[cfg(any(windows, test))]
-pub use configuration::{PreparedConfig, ResolvedProjection};
+pub use configuration::{CheckedStartConfiguration, PreparedConfig, ResolvedProjection};
 
 #[cfg(windows)]
 mod lineage;

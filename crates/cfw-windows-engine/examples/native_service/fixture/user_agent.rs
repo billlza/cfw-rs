@@ -1,15 +1,24 @@
 //! Real engine/WinINet ownership through the native SYSTEM dispatcher. The
 //! global cleanup observation remains explicitly injected by this fixture.
 use super::*;
-use cfw_engine_api::authority_v1::{AuthorityMode, AuthorityState, RootContext};
+use cfw_engine_api::{
+    EngineCommandContext, EngineStartRequest,
+    authority_v1::{AuthorityMode, AuthorityState, RootContext},
+};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
+use cfw_windows_credentials::WindowsCredentialStore;
 use cfw_windows_engine::{
-    AuthenticatedServiceRequest, LocalServiceConnection, PreparedConfig, WindowsSystemProxy,
+    AuthenticatedServiceRequest, LocalServiceConnection, WindowsSystemProxy,
     authority::{
         AuthorityChannel, AuthorizedReply, CleanupEvidence, PrepareRequest,
-        wire::{Command, Request, Response, StopRequest},
+        wire::{
+            BindRequest, Command, Rejection, Request, Response, StopRequest, TicketMaterial,
+            WireError,
+        },
     },
-    user_agent::{StopReason, UserAgentPlan, UserAgentRuntime, UserAgentSession},
+    user_agent::{
+        ControlError, StopReason, UserAgentError, UserAgentPlan, UserAgentRuntime, UserAgentSession,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,6 +28,7 @@ use std::{
 };
 
 mod lan;
+mod start_request;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +65,7 @@ pub(super) struct Validation {
     stopped: usize,
     heartbeats: usize,
     reconciled: usize,
+    rejected_bindings: usize,
 }
 impl Validation {
     pub(super) fn new() -> Self {
@@ -64,6 +75,7 @@ impl Validation {
             stopped: 0,
             heartbeats: 0,
             reconciled: 0,
+            rejected_bindings: 0,
         }
     }
     pub(super) fn handle(
@@ -103,11 +115,20 @@ impl Validation {
         let ready = matches!(command.command(), Command::Ready(_));
         let stopped = matches!(command.command(), Command::Stopped(_));
         let heartbeat = matches!(command.command(), Command::Heartbeat(_));
+        let binding = matches!(command.command(), Command::BindUserAgent(_));
         drop(command);
         let reply = controller
             .handle(connection, request, Instant::now() + LIMIT)
             .map_err(|e| e.to_string())?;
         if let Some(error) = reply.rejection() {
+            if binding
+                && matches!(error, cfw_windows_engine::authority::AuthorityError::Ticket)
+                && self.rejected_bindings == 0
+                && self.ready == 0
+            {
+                self.rejected_bindings += 1;
+                return Ok(reply);
+            }
             return Err(format!("real runtime command rejected: {error}"));
         }
         self.ready += usize::from(ready);
@@ -116,10 +137,15 @@ impl Validation {
         Ok(reply)
     }
     pub(super) fn finish(&mut self) -> Result<()> {
-        if self.ready != 2 || self.stopped != 2 || self.reconciled != 2 || self.heartbeats < 2 {
+        if self.ready != 2
+            || self.stopped != 2
+            || self.reconciled != 2
+            || self.heartbeats < 2
+            || self.rejected_bindings != 1
+        {
             return Err(format!(
-                "incomplete runtime sequence: ready={}, stopped={}, reconciled={}, heartbeat={}",
-                self.ready, self.stopped, self.reconciled, self.heartbeats
+                "incomplete runtime sequence: ready={}, stopped={}, reconciled={}, heartbeat={}, rejected_bindings={}",
+                self.ready, self.stopped, self.reconciled, self.heartbeats, self.rejected_bindings
             ));
         }
         self.scope
@@ -128,12 +154,12 @@ impl Validation {
             .cleanup()?;
         write_report(
             &authority_journal::root()?.join("user-agent.wire-validation.json"),
-            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"global_cleanup_observations_injected":true,"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
+            &serde_json::json!({"ready_reports":self.ready,"stopped_reports":self.stopped,"heartbeats":self.heartbeats,"rejected_bindings":self.rejected_bindings,"global_cleanup_observations_injected":true,"synthetic_runtime_reports":false,"full_service_backend_proven":false}),
         )
     }
 }
 pub(super) fn client_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","desktop_runtime_same_process_fixture":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
 }
 pub(super) fn run_validation() -> Result<()> {
     for variable in [
@@ -288,12 +314,20 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
                     },
                 )
                 .map_err(|e| e.to_string())?;
-        let config = match mode {
-            ProjectionMode::LocalProxy => PreparedConfig::local_proxy(&projection, []),
-            ProjectionMode::SystemProxy => PreparedConfig::system_proxy_data_plane(&projection, []),
-            _ => return Err("invalid runtime fixture mode".into()),
-        }
-        .map_err(|e| e.to_string())?;
+        let start_request = EngineStartRequest {
+            context: EngineCommandContext {
+                installation_id: installation_id.to_string(),
+                config_epoch: 1,
+                generation: index as u64 + 1,
+            },
+            mode,
+            credential_audience: projection.credential_audience().clone(),
+            config_json: projection.as_json().to_owned(),
+            config_content_digest: projection.configuration_digest().to_owned(),
+            config_digest: projection.digest().to_owned(),
+            credential_slots: projection.credential_slots().to_vec(),
+            tunnel_options: None,
+        };
         let Response::Prepared(grant) = request(
             &mut desktop,
             Command::Prepare(PrepareRequest {
@@ -308,15 +342,26 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
                 } else {
                     AuthorityMode::SystemProxy
                 },
-                config_sha256: hash(config.configuration_digest())?,
-                identity_sha256: hash(config.digest())?,
+                config_sha256: hash(&start_request.config_content_digest)?,
+                identity_sha256: hash(&start_request.config_digest)?,
                 expected_revision: before.revision.ok_or("unknown runtime revision")?,
             }),
         )?
         else {
             return Err("runtime preparation missing".into());
         };
+        let binding = grant.into_bind();
         let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+        if index == 0 {
+            start_request::reject_before_vault_access(
+                &binding,
+                &start_request,
+                name,
+                Arc::clone(&service_image),
+                &install,
+                directory.path(),
+            )?;
+        }
         let proxy =
             WindowsSystemProxy::new(&directory.path().join("proxy")).map_err(|e| e.to_string())?;
         let settings = proxy.snapshot().map_err(|e| e.to_string())?;
@@ -331,7 +376,12 @@ pub(super) fn agent(name: &str, image: &Path, digest: [u8; 32]) -> Result<()> {
             },
         );
         let mut session = UserAgentSession::new(
-            UserAgentPlan::new(grant.into_bind(), config).map_err(|e| e.to_string())?,
+            UserAgentPlan::from_start_request(
+                binding,
+                start_request,
+                WindowsCredentialStore::new(directory.path().join("vault")),
+            )
+            .map_err(|e| e.to_string())?,
             name.into(),
             Arc::clone(&service_image),
             assets,

@@ -26,6 +26,9 @@ pub enum UserAgentError {
     #[cfg(windows)]
     #[error("Windows user-agent proxy ownership: {0}")]
     Proxy(#[from] crate::ProxyError),
+    #[cfg(windows)]
+    #[error("Windows user-agent credential resolution: {0}")]
+    Credentials(#[from] cfw_engine_api::CredentialVaultError),
     #[error("Windows user-agent lifecycle deadline expired; completion is not established")]
     Deadline,
     #[error("Windows user-agent operation was cancelled or revoked")]

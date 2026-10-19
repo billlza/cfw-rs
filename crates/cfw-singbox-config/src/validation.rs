@@ -364,7 +364,10 @@ fn is_forbidden_profile_key(key: &str) -> bool {
     FORBIDDEN_PROFILE_KEYS.contains(&key) || key.ends_with("_path") || key.ends_with("_url")
 }
 
-pub(crate) fn canonicalize(value: Value) -> Value {
+/// Sort object keys recursively while preserving array order and scalar values.
+/// Native receivers can compare the resulting serialization to exact template
+/// bytes; sorting alone does not authenticate or validate a configuration.
+pub fn canonicalize(value: Value) -> Value {
     match value {
         Value::Object(map) => {
             let sorted = map

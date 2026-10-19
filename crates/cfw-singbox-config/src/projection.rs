@@ -25,6 +25,31 @@ const AUTHENTICATED_DNS_SECONDARY_TAG: &str = "cfw-authenticated-dns-1";
 /// new closed vocabulary.
 pub const CONFIGURATION_IDENTITY_SCHEMA_VERSION: u16 = 7;
 
+/// Compute the shared native-boundary identity without changing its schema.
+/// This is a canonical digest calculation, not request/lease authorization;
+/// callers separately validate mode, options and credential-slot semantics.
+pub fn configuration_identity_digest(
+    configuration_sha256: &str,
+    credential_audience: &CredentialAudience,
+    credential_slots: &[CredentialSlot],
+    mode: ProjectionMode,
+    network_options: &impl Serialize,
+) -> Result<String, serde_json::Error> {
+    let identity = canonicalize(json!({
+        "configuration_sha256": configuration_sha256,
+        "credential_audience": credential_audience,
+        "credential_slots": credential_slots,
+        "mode": match mode {
+            ProjectionMode::LocalProxy => "local_proxy",
+            ProjectionMode::SystemProxy => "system_proxy",
+            ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => "tunnel",
+        },
+        "network_options": serde_json::to_value(network_options)?,
+        "schema_version": CONFIGURATION_IDENTITY_SCHEMA_VERSION,
+    }));
+    Ok(sha256_hex(serde_json::to_string(&identity)?.as_bytes()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelAddressPlan {
     pub ipv4_address: &'static str,
@@ -587,19 +612,13 @@ impl ValidatedSingBoxProfile {
         if mode == ProjectionMode::TunnelSystemProxy {
             network_options["system_proxy_port"] = json!(settings.mixed_port);
         }
-        let identity = canonicalize(json!({
-            "configuration_sha256": configuration_digest,
-            "credential_audience": credential_audience,
-            "credential_slots": credential_slots,
-            "mode": match mode {
-                ProjectionMode::LocalProxy => "local_proxy",
-                ProjectionMode::SystemProxy => "system_proxy",
-                ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => "tunnel",
-            },
-            "network_options": network_options,
-            "schema_version": CONFIGURATION_IDENTITY_SCHEMA_VERSION,
-        }));
-        let digest = sha256_hex(serde_json::to_string(&identity)?.as_bytes());
+        let digest = configuration_identity_digest(
+            &configuration_digest,
+            &credential_audience,
+            &credential_slots,
+            mode,
+            &network_options,
+        )?;
         Ok(ProjectedConfig {
             mode,
             credential_audience,

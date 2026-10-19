@@ -78,7 +78,7 @@ fn runtime_plan_binds_both_configuration_and_product_identity_digests() {
         let context = binding.context.clone();
         let plan = UserAgentPlan::new(binding, config).unwrap();
         assert_eq!(plan.context(), &context);
-        assert_eq!(plan.configuration().mode(), mode);
+        assert_eq!(plan.mode(), mode);
         for change in 0..3 {
             let (mut binding, config) = inputs(mode);
             match change {
@@ -118,4 +118,54 @@ fn runtime_plan_never_promotes_local_or_system_proxy_to_tunnel_ownership() {
         UserAgentPlan::new(binding, config),
         Err(UserAgentError::Wire(_))
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn shared_request_context_cannot_substitute_another_nonzero_generation_or_installation() {
+    for change in 0..4 {
+        let (binding, _) = inputs(ProjectionMode::LocalProxy);
+        let projection =
+            ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
+                .unwrap()
+                .project(
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    ProjectionMode::LocalProxy,
+                    &EngineSettings::default(),
+                )
+                .unwrap();
+        let root = &binding.context.operation.root;
+        let mut request = cfw_engine_api::EngineStartRequest {
+            context: cfw_engine_api::EngineCommandContext {
+                installation_id: root.installation_id.to_string(),
+                config_epoch: root.epoch,
+                generation: root.generation,
+            },
+            mode: ProjectionMode::LocalProxy,
+            credential_audience: projection.credential_audience().clone(),
+            config_json: projection.as_json().into(),
+            config_content_digest: projection.configuration_digest().into(),
+            config_digest: projection.digest().into(),
+            credential_slots: projection.credential_slots().to_vec(),
+            tunnel_options: None,
+        };
+        match change {
+            0 => {}
+            1 => request.context.config_epoch += 1,
+            2 => request.context.generation += 1,
+            3 => request.context.installation_id = Uuid::from_u128(90).to_string(),
+            _ => unreachable!(),
+        }
+        // No native I/O is permitted while validating this plan. The path is
+        // intentionally not provisioned or opened by these request-only tests.
+        let vault = cfw_windows_credentials::WindowsCredentialStore::new(std::path::PathBuf::from(
+            r"Z:\cfw-plan-validation-not-opened\vault",
+        ));
+        let result = UserAgentPlan::from_start_request(binding, request, vault);
+        if change == 0 {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(UserAgentError::ConfigurationMismatch)));
+        }
+    }
 }

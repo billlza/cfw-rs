@@ -1,3 +1,4 @@
+use super::plan::PlannedConfiguration;
 use super::{Result, UserAgentError, UserAgentPlan, control::ControlSession};
 use crate::{
     EngineProcess, PreparedConfig, VerifiedExecutable, WindowsSystemProxy,
@@ -88,6 +89,7 @@ pub enum StopReason {
 pub struct UserAgentSession {
     context: LeaseContext,
     binding: Option<BindRequest>,
+    planned: Option<PlannedConfiguration>,
     configuration: Option<PreparedConfig>,
     service: String,
     service_image: Arc<VerifiedExecutable>,
@@ -117,7 +119,8 @@ impl UserAgentSession {
         Ok(Self {
             context: binding.context.clone(),
             binding: Some(binding),
-            configuration: Some(config),
+            planned: Some(config),
+            configuration: None,
             service,
             service_image,
             assets: Some(assets),
@@ -243,6 +246,13 @@ impl UserAgentSession {
         if stop.load(Ordering::Acquire) {
             return Ok(StopReason::Requested);
         }
+        self.configuration = Some(
+            self.planned
+                .take()
+                .ok_or(UserAgentError::State)?
+                .prepare_after_binding()?,
+        );
+        self.live()?;
         let assets = self.assets.take().ok_or(UserAgentError::State)?;
         self.proxy = assets.proxy;
         match EngineProcess::spawn_retained(
@@ -314,6 +324,7 @@ impl UserAgentSession {
         }
         self.configuration.take();
         self.binding.take();
+        self.planned.take();
         self.assets.take();
         let mut operation_error = None;
         let process_id = match self.child.as_mut() {

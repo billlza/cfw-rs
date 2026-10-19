@@ -17,6 +17,7 @@ zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 cfw-engine-api = { path = "../cfw-engine-api" }
+cfw-windows-credentials = { path = "../cfw-windows-credentials" }
 cfw-windows-storage = { path = "../cfw-windows-storage" }
 subtle = "=2.6.1"
 sha2.workspace = true
@@ -51,7 +52,6 @@ tempfile.workspace = true
 uuid.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
-cfw-windows-credentials = { path = "../cfw-windows-credentials" }
 tokio = { workspace = true, features = ["rt", "net", "io-util"] }
 windows-sys = { version = "=0.61.2", features = ["Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi"] }
 

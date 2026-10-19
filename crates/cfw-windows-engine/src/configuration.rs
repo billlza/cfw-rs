@@ -8,8 +8,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::Error;
 
+mod start_request;
+pub use start_request::CheckedStartConfiguration;
+
 /// Resolved material for one already validated projection. The identity is the
-/// original secret-free projection digest, never a hash of injected secrets.
+/// original projection digest, never a hash of injected vault credentials.
 pub struct ResolvedProjection {
     pub(crate) bytes: Zeroizing<Vec<u8>>,
     pub(crate) digest: String,
@@ -35,6 +38,20 @@ impl ResolvedProjection {
         projection: &ProjectedConfig,
         material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
     ) -> Result<Self, Error> {
+        Self::resolve_template(
+            projection.as_json(),
+            projection.credential_slots(),
+            projection.digest(),
+            material,
+        )
+    }
+
+    fn resolve_template<'a>(
+        template: &str,
+        slots: &[cfw_singbox_config::CredentialSlot],
+        digest: &str,
+        material: impl IntoIterator<Item = (&'a CredentialRef, &'a str)>,
+    ) -> Result<Self, Error> {
         let mut values = BTreeMap::new();
         let mut total = 0usize;
         for (reference, value) in material {
@@ -52,11 +69,11 @@ impl ResolvedProjection {
             }
         }
         let mut document = SecretDocument(
-            serde_json::from_str(projection.as_json())
+            serde_json::from_str(template)
                 .map_err(|_| Error::Configuration("invalid projected template"))?,
         );
         let mut used = std::collections::BTreeSet::new();
-        for slot in projection.credential_slots() {
+        for slot in slots {
             let value = values
                 .get(slot.reference())
                 .ok_or(Error::Configuration("missing credential material"))?;
@@ -76,7 +93,7 @@ impl ResolvedProjection {
         let bytes = serialize_bounded(&document.0, MAX_ENGINE_CONFIG_BYTES)?;
         Ok(Self {
             bytes,
-            digest: projection.digest().to_owned(),
+            digest: digest.to_owned(),
         })
     }
 
@@ -122,16 +139,32 @@ impl PreparedConfig {
             return Err(Error::Configuration("platform mode is not yet admitted"));
         }
         let resolved = ResolvedProjection::new(projection, material)?;
+        Self::from_parts(
+            resolved,
+            projection.as_json(),
+            projection.configuration_digest(),
+            expected,
+            std::net::SocketAddr::new(
+                projection.clash_api().address().into(),
+                projection.clash_api().port(),
+            ),
+        )
+    }
+
+    fn from_parts(
+        resolved: ResolvedProjection,
+        template: &str,
+        template_digest: &str,
+        expected: ProjectionMode,
+        controller: std::net::SocketAddr,
+    ) -> Result<Self, Error> {
         // Listener metadata comes from the immutable projection. Its generated
         // controller credential is also erased when this temporary DOM drops.
         let document = SecretDocument(
-            serde_json::from_str(projection.as_json())
+            serde_json::from_str(template)
                 .map_err(|_| Error::Configuration("invalid projected template"))?,
         );
-        let mut listeners = vec![std::net::SocketAddr::new(
-            projection.clash_api().address().into(),
-            projection.clash_api().port(),
-        )];
+        let mut listeners = vec![controller];
         let inbounds = document
             .0
             .get("inbounds")
@@ -190,7 +223,7 @@ impl PreparedConfig {
         Ok(Self {
             resolved,
             listeners,
-            configuration_digest: projection.configuration_digest().to_owned(),
+            configuration_digest: template_digest.to_owned(),
             mode: expected,
             system_proxy_endpoint,
         })
@@ -200,8 +233,8 @@ impl PreparedConfig {
         self.resolved.digest()
     }
 
-    /// Digest of the exact secret-free configuration template, distinct from
-    /// the product identity digest returned by `digest()`.
+    /// Digest of the exact template before vault credential injection, distinct
+    /// from `digest()`. The template still contains the private controller key.
     pub fn configuration_digest(&self) -> &str {
         &self.configuration_digest
     }

@@ -51,6 +51,26 @@ in `docs/planning/cfw-0.5.0.md`.
 
 ## Lifecycle
 
+`CheckedStartConfiguration` accepts the existing shared `EngineStartRequest`
+instead of creating a second configuration schema. It verifies canonical bytes,
+content and schema-7 identity digests, request context, mode/options and exact
+credential-slot placeholders. The digest calculation is shared with the Rust
+projection producer; existing identity fields and Mac wire schemas are unchanged.
+Proxy preparation additionally checks the app-owned loopback controller, distinct
+mixed/LAN roles and the shared LAN source policy. A checked tunnel candidate
+cannot become UserAgent proxy ownership.
+
+The template contains the original process's controller key, so a receiver keeps
+those bytes rather than reprojecting with a different key. Owned template and
+resolved buffers are erased on drop. `UserAgentPlan::from_start_request` binds
+the request to the exact lease root and both digests before any vault access;
+`UserAgentSession` resolves its exact audience/references only after native
+binding succeeds. Failure stays an error, and the original pre-resolved API
+remains a lower-level component entry point. The native fixture exercises this
+shared request path and rejects a deliberately wrong ticket before a configured
+invalid vault path or runtime directory is used. Production process launch and
+the separate Desktop-to-UserAgent transport still need assembly.
+
 `SystemProxyAuthorization` is a shared application contract. The Apple adapter
 delegates to its existing native rights request without changing restoration
 intent or error classifications. The Windows implementation runs current-user identity,

@@ -1,0 +1,185 @@
+use super::*;
+use cfw_engine_api::TunnelNetworkOptions;
+use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
+
+const PROFILE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+fn input(mode: ProjectionMode, lan: bool, credentials: bool) -> EngineStartRequest {
+    let source = if credentials {
+        r#"{"outbounds":[{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{"id":"11111111-1111-4111-8111-111111111111","kind":"trojan_password"},"tls":{"enabled":true,"server_name":"proxy.example.com"}}]}"#
+    } else {
+        r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#
+    };
+    let settings = EngineSettings {
+        lan_proxy: lan.then(|| LanProxySettings {
+            listen: Ipv4Addr::UNSPECIFIED,
+            port: 8081,
+            allowed_source_cidrs: vec!["192.168.42.0/24".into()],
+        }),
+        ..EngineSettings::default()
+    };
+    let projection = ValidatedSingBoxProfile::parse(source)
+        .unwrap()
+        .project(PROFILE, mode, &settings)
+        .unwrap();
+    EngineStartRequest {
+        context: EngineCommandContext {
+            installation_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+            config_epoch: 3,
+            generation: 7,
+        },
+        mode,
+        credential_audience: projection.credential_audience().clone(),
+        config_json: projection.as_json().into(),
+        config_content_digest: projection.configuration_digest().into(),
+        config_digest: projection.digest().into(),
+        credential_slots: projection.credential_slots().to_vec(),
+        tunnel_options: mode.has_tunnel().then_some(TunnelNetworkOptions {
+            ipv6_enabled: settings.enable_ipv6,
+            bypass_private_networks: settings.bypass_private_networks,
+            direct_ipv4_hosts: projection.direct_ipv4_hosts(),
+            mtu: settings.tunnel_mtu,
+            system_proxy_port: (mode == ProjectionMode::TunnelSystemProxy)
+                .then_some(settings.mixed_port),
+        }),
+    }
+}
+fn rehash(request: &mut EngineStartRequest) {
+    request.config_content_digest = sha256_hex(request.config_json.as_bytes());
+    request.config_digest = configuration_identity_digest(
+        &request.config_content_digest,
+        &request.credential_audience,
+        &request.credential_slots,
+        request.mode,
+        &request.tunnel_options,
+    )
+    .unwrap();
+}
+fn edit(request: &mut EngineStartRequest, action: impl FnOnce(&mut Value)) {
+    let mut document: Value = serde_json::from_str(&request.config_json).unwrap();
+    action(&mut document);
+    request.config_json =
+        serde_json::to_string(&canonicalize_configuration_value(document)).unwrap();
+    rehash(request);
+}
+
+#[test]
+fn shared_request_keeps_exact_bytes_identity_and_separate_lan_endpoint() {
+    for mode in [
+        ProjectionMode::LocalProxy,
+        ProjectionMode::SystemProxy,
+        ProjectionMode::Tunnel,
+        ProjectionMode::TunnelSystemProxy,
+    ] {
+        for lan in [false, true] {
+            let request = input(mode, lan, false);
+            let expected: Value = serde_json::from_str(&request.config_json).unwrap();
+            let identity = request.config_digest.clone();
+            let content = request.config_content_digest.clone();
+            let checked = CheckedStartConfiguration::new(request).unwrap();
+            let resolved = checked.resolve([]).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&resolved.bytes).unwrap(),
+                expected
+            );
+            assert_eq!(resolved.digest(), identity);
+            if mode.has_tunnel() {
+                assert!(checked.prepare_proxy([]).is_err());
+            } else {
+                let prepared = checked.prepare_proxy([]).unwrap();
+                assert_eq!(prepared.digest(), identity);
+                assert_eq!(prepared.configuration_digest(), content);
+                assert_eq!(prepared.listeners.len(), if lan { 3 } else { 2 });
+                assert_eq!(
+                    prepared.system_proxy_endpoint(),
+                    (mode == ProjectionMode::SystemProxy)
+                        .then(|| "127.0.0.1:7890".parse().unwrap())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn context_modes_and_both_digest_domains_are_checked_before_resolution() {
+    let base = input(ProjectionMode::SystemProxy, false, false);
+    for change in 0..7 {
+        let mut value = base.clone();
+        match change {
+            0 => value.context.installation_id = uuid::Uuid::nil().to_string(),
+            1 => value.context.config_epoch = 0,
+            2 => value.context.generation = 0,
+            3 => value.config_content_digest = "0".repeat(64),
+            4 => value.config_digest = "0".repeat(64),
+            5 => value.mode = ProjectionMode::LocalProxy,
+            6 => value.tunnel_options = input(ProjectionMode::Tunnel, false, false).tunnel_options,
+            _ => unreachable!(),
+        }
+        assert!(CheckedStartConfiguration::new(value).is_err());
+    }
+}
+
+#[test]
+fn self_consistent_hashes_cannot_authorize_foreign_listeners_or_lan_policy() {
+    for change in 0..7 {
+        let mut value = input(ProjectionMode::SystemProxy, true, false);
+        edit(&mut value, |root| match change {
+            0 => root["inbounds"][0]["type"] = "tun".into(),
+            1 => root["inbounds"][0]["set_system_proxy"] = true.into(),
+            2 => root["experimental"]["clash_api"]["external_controller"] = "0.0.0.0:9090".into(),
+            3 => root["experimental"]["clash_api"]["secret"] = "".into(),
+            4 => root["route"]["rules"][0]["rules"][1]["invert"] = false.into(),
+            5 => root["inbounds"][1]["listen_port"] = 7890.into(),
+            6 => root["inbounds"][0]["tag"] = "unowned-listener".into(),
+            _ => unreachable!(),
+        });
+        assert!(CheckedStartConfiguration::new(value).is_err());
+    }
+}
+
+#[test]
+fn duplicate_keys_and_noncanonical_templates_never_become_checked_input() {
+    let mut value = input(ProjectionMode::LocalProxy, false, false);
+    value.config_json.insert_str(1, "\"inbounds\":[],");
+    rehash(&mut value);
+    assert!(CheckedStartConfiguration::new(value).is_err());
+    let mut value = input(ProjectionMode::LocalProxy, false, false);
+    value.config_json.push(' ');
+    rehash(&mut value);
+    assert!(CheckedStartConfiguration::new(value).is_err());
+}
+
+#[test]
+fn shared_credential_slots_require_exact_placeholders_audience_and_material() {
+    let original = input(ProjectionMode::SystemProxy, true, true);
+    let reference = original.credential_slots[0].reference().clone();
+    let pointer = original.credential_slots[0].json_pointer().to_owned();
+    let checked = CheckedStartConfiguration::new(original.clone()).unwrap();
+    assert!(checked.resolve([]).is_err());
+    assert!(
+        checked
+            .resolve([
+                (&reference, "fixture-secret"),
+                (&reference, "fixture-secret")
+            ])
+            .is_err()
+    );
+    let material = checked.resolve([(&reference, "fixture-secret")]).unwrap();
+    let actual: Value = serde_json::from_slice(&material.bytes).unwrap();
+    assert_eq!(actual.pointer(&pointer).unwrap(), "fixture-secret");
+    assert_eq!(material.digest(), original.config_digest);
+    let mut duplicate = original.clone();
+    duplicate
+        .credential_slots
+        .push(duplicate.credential_slots[0].clone());
+    rehash(&mut duplicate);
+    assert!(CheckedStartConfiguration::new(duplicate).is_err());
+    let mut populated = original.clone();
+    edit(&mut populated, |root| {
+        *root.pointer_mut(&pointer).unwrap() = "already-populated".into()
+    });
+    assert!(CheckedStartConfiguration::new(populated).is_err());
+    let mut audience = original;
+    audience.credential_audience =
+        CredentialAudience::new("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "a".repeat(64)).unwrap();
+    assert!(CheckedStartConfiguration::new(audience).is_err());
+}

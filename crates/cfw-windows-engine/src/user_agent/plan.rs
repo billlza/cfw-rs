@@ -13,12 +13,80 @@ use cfw_singbox_config::ProjectionMode;
 /// can bind its ticket, and the runtime must keep that channel alive.
 pub struct UserAgentPlan {
     pub(super) binding: BindRequest,
-    pub(super) config: PreparedConfig,
+    pub(super) config: PlannedConfiguration,
+}
+pub(super) enum PlannedConfiguration {
+    Prepared(PreparedConfig),
+    #[cfg(windows)]
+    Requested {
+        request: crate::CheckedStartConfiguration,
+        vault: cfw_windows_credentials::WindowsCredentialStore,
+    },
+}
+impl PlannedConfiguration {
+    #[cfg(windows)]
+    pub(super) fn prepare_after_binding(self) -> Result<PreparedConfig> {
+        match self {
+            Self::Prepared(config) => Ok(config),
+            Self::Requested { request, vault } => {
+                let references = request.credential_references();
+                let material =
+                    vault.resolve_for_engine(request.credential_audience(), &references)?;
+                Ok(request.prepare_proxy(material.expose_to_engine())?)
+            }
+        }
+    }
 }
 impl UserAgentPlan {
     pub fn new(binding: BindRequest, config: PreparedConfig) -> Result<Self> {
+        Self::check(
+            &binding,
+            config.mode(),
+            config.configuration_digest(),
+            config.digest(),
+        )?;
+        Ok(Self {
+            binding,
+            config: PlannedConfiguration::Prepared(config),
+        })
+    }
+    /// The product path accepts the application's existing request. Its vault
+    /// is installation-owned; validation never reads credentials. Resolution
+    /// occurs only after this exact native Authority binding is acknowledged.
+    #[cfg(windows)]
+    pub fn from_start_request(
+        binding: BindRequest,
+        request: cfw_engine_api::EngineStartRequest,
+        vault: cfw_windows_credentials::WindowsCredentialStore,
+    ) -> Result<Self> {
+        let request = crate::CheckedStartConfiguration::new(request)?;
+        Self::check(
+            &binding,
+            request.mode(),
+            request.configuration_digest(),
+            request.digest(),
+        )?;
+        let root = &binding.context.operation.root;
+        let context = request.context();
+        if context.installation_id != root.installation_id.to_string()
+            || context.config_epoch != root.epoch
+            || context.generation != root.generation
+        {
+            return Err(UserAgentError::ConfigurationMismatch);
+        }
+        Ok(Self {
+            binding,
+            config: PlannedConfiguration::Requested { request, vault },
+        })
+    }
+    fn check(
+        binding: &BindRequest,
+        mode: ProjectionMode,
+        configuration_digest: &str,
+        identity_digest: &str,
+    ) -> Result<()> {
         validate_context(&binding.context)?;
-        let mode = match config.mode() {
+        let mode = match mode {
             ProjectionMode::LocalProxy => AuthorityMode::LocalProxy,
             ProjectionMode::SystemProxy => AuthorityMode::SystemProxy,
             ProjectionMode::Tunnel | ProjectionMode::TunnelSystemProxy => {
@@ -28,18 +96,22 @@ impl UserAgentPlan {
         if binding.context.operation.mode != mode {
             return Err(UserAgentError::Mode);
         }
-        if config.configuration_digest() != hex(&binding.context.operation.config_sha256)
-            || config.digest() != hex(&binding.context.operation.identity_sha256)
+        if configuration_digest != hex(&binding.context.operation.config_sha256)
+            || identity_digest != hex(&binding.context.operation.identity_sha256)
         {
             return Err(UserAgentError::ConfigurationMismatch);
         }
-        Ok(Self { binding, config })
+        Ok(())
     }
     pub fn context(&self) -> &LeaseContext {
         &self.binding.context
     }
-    pub fn configuration(&self) -> &PreparedConfig {
-        &self.config
+    pub fn mode(&self) -> ProjectionMode {
+        match &self.config {
+            PlannedConfiguration::Prepared(config) => config.mode(),
+            #[cfg(windows)]
+            PlannedConfiguration::Requested { request, .. } => request.mode(),
+        }
     }
 }
 pub(super) fn hex(bytes: &[u8; 32]) -> String {

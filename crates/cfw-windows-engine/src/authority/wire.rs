@@ -12,13 +12,15 @@ use std::fmt;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 mod recovery;
-pub use recovery::{ProxyRecoveryGrant, ProxyRecoveryReceipt, ProxyRecoveryReport};
+pub use recovery::{
+    ProxyCleanupReceipt, ProxyRecoveryGrant, ProxyRecoveryReceipt, ProxyRecoveryReport,
+};
 
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 const PROTOCOL: &str = "cfw.windows.authority";
-// v4 adds single-use, connection-bound proxy recovery observations. Earlier
-// services cannot establish this separate, non-executing authorization.
-const VERSION: u16 = 4;
+// v5 distinguishes observation from explicitly requested, independently proved
+// SystemProxy Off reconciliation. Neither purpose grants execution.
+const VERSION: u16 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -140,6 +142,8 @@ pub(super) enum CommandTag {
     ReadRuntimeScope,
     BeginProxyRecovery,
     ConfirmProxyRecovery,
+    BeginProxyCleanup,
+    ReconcileProxyCleanup,
     ReserveGeneration,
     Prepare,
     BindUserAgent,
@@ -178,6 +182,8 @@ pub enum Command {
     ReadRuntimeScope,
     BeginProxyRecovery(super::ProxyRecoveryTarget),
     ConfirmProxyRecovery(ProxyRecoveryReport),
+    BeginProxyCleanup(super::ProxyRecoveryTarget),
+    ReconcileProxyCleanup(ProxyRecoveryReport),
     ReserveGeneration(super::AuthorityLineage),
     Prepare(PrepareRequest),
     BindUserAgent(BindRequest),
@@ -197,6 +203,8 @@ impl Command {
             Self::ReadRuntimeScope => CommandTag::ReadRuntimeScope,
             Self::BeginProxyRecovery(_) => CommandTag::BeginProxyRecovery,
             Self::ConfirmProxyRecovery(_) => CommandTag::ConfirmProxyRecovery,
+            Self::BeginProxyCleanup(_) => CommandTag::BeginProxyCleanup,
+            Self::ReconcileProxyCleanup(_) => CommandTag::ReconcileProxyCleanup,
             Self::ReserveGeneration(_) => CommandTag::ReserveGeneration,
             Self::Prepare(_) => CommandTag::Prepare,
             Self::BindUserAgent(_) => CommandTag::BindUserAgent,
@@ -212,8 +220,21 @@ impl Command {
     fn validate(&self) -> Result<()> {
         match self {
             Self::Observe | Self::OwnedLease | Self::LoadLineage | Self::ReadRuntimeScope => Ok(()),
-            Self::BeginProxyRecovery(target) => target.validate().map_err(|_| WireError::Malformed),
-            Self::ConfirmProxyRecovery(report) => report.validate(),
+            Self::BeginProxyRecovery(target) | Self::BeginProxyCleanup(target) => {
+                target.validate().map_err(|_| WireError::Malformed)
+            }
+            Self::ConfirmProxyRecovery(report) | Self::ReconcileProxyCleanup(report) => {
+                report.validate()?;
+                let expected = if matches!(self, Self::ConfirmProxyRecovery(_)) {
+                    super::ProxyRecoveryPurpose::Observe
+                } else {
+                    super::ProxyRecoveryPurpose::ReconcileOff
+                };
+                if report.context.purpose != expected {
+                    return Err(WireError::Malformed);
+                }
+                Ok(())
+            }
             Self::ReserveGeneration(expected) => {
                 expected.validate().map_err(|_| WireError::Malformed)
             }
@@ -315,8 +336,12 @@ impl Request {
             | Command::LoadLineage
             | Command::ReadRuntimeScope => envelope(self.id, tag, &Empty {}),
             Command::ReserveGeneration(expected) => envelope(self.id, tag, expected),
-            Command::BeginProxyRecovery(input) => envelope(self.id, tag, input),
-            Command::ConfirmProxyRecovery(input) => envelope(self.id, tag, input),
+            Command::BeginProxyRecovery(input) | Command::BeginProxyCleanup(input) => {
+                envelope(self.id, tag, input)
+            }
+            Command::ConfirmProxyRecovery(input) | Command::ReconcileProxyCleanup(input) => {
+                envelope(self.id, tag, input)
+            }
             Command::Prepare(input) => envelope(self.id, tag, input),
             Command::BindUserAgent(input) => envelope(self.id, tag, input),
             Command::ConfirmRuntimeKeeper(input) => envelope(self.id, tag, input),
@@ -347,6 +372,10 @@ impl Request {
             }
             CommandTag::ReserveGeneration => Command::ReserveGeneration(decode(body)?),
             CommandTag::BeginProxyRecovery => Command::BeginProxyRecovery(decode(body)?),
+            CommandTag::BeginProxyCleanup => Command::BeginProxyCleanup(decode(body)?),
+            CommandTag::ReconcileProxyCleanup => {
+                Command::ReconcileProxyCleanup(ProxyRecoveryReport::decode(body)?)
+            }
             CommandTag::ConfirmProxyRecovery => {
                 Command::ConfirmProxyRecovery(ProxyRecoveryReport::decode(body)?)
             }
@@ -426,6 +455,7 @@ enum ResponseTag {
     RuntimeScope,
     ProxyRecoveryGranted,
     ProxyRecoveryObserved,
+    ProxyCleanupReconciled,
     Prepared,
     Bound,
     Status,
@@ -518,6 +548,7 @@ pub enum Response {
     RuntimeScope(RecordedRuntimeScope),
     ProxyRecoveryGranted(ProxyRecoveryGrant),
     ProxyRecoveryObserved(ProxyRecoveryReceipt),
+    ProxyCleanupReconciled(ProxyCleanupReceipt),
     Prepared(PreparedGrant),
     Bound(BoundGrant),
     Status(AuthoritySnapshot),
@@ -529,6 +560,9 @@ impl Response {
             Self::Observed(value) => envelope(id, ResponseTag::Observed, value),
             Self::Lineage(value) => envelope(id, ResponseTag::Lineage, value),
             Self::RuntimeScope(value) => envelope(id, ResponseTag::RuntimeScope, value),
+            Self::ProxyCleanupReconciled(value) => {
+                envelope(id, ResponseTag::ProxyCleanupReconciled, value)
+            }
             Self::ProxyRecoveryGranted(value) => recovery::encode_grant(id, value),
             Self::ProxyRecoveryObserved(value) => {
                 envelope(id, ResponseTag::ProxyRecoveryObserved, value)
@@ -621,8 +655,24 @@ pub(super) fn response(
         return Err(WireError::Rejected(rejected.code));
     }
     match (&request.command, wire.kind) {
-        (Command::BeginProxyRecovery(target), ResponseTag::ProxyRecoveryGranted) => Ok(
-            Response::ProxyRecoveryGranted(recovery::decode_grant(payload, target, owner)?),
+        (Command::BeginProxyRecovery(target), ResponseTag::ProxyRecoveryGranted) => {
+            Ok(Response::ProxyRecoveryGranted(recovery::decode_grant(
+                payload,
+                target,
+                owner,
+                super::ProxyRecoveryPurpose::Observe,
+            )?))
+        }
+        (Command::BeginProxyCleanup(target), ResponseTag::ProxyRecoveryGranted) => {
+            Ok(Response::ProxyRecoveryGranted(recovery::decode_grant(
+                payload,
+                target,
+                owner,
+                super::ProxyRecoveryPurpose::ReconcileOff,
+            )?))
+        }
+        (Command::ReconcileProxyCleanup(report), ResponseTag::ProxyCleanupReconciled) => Ok(
+            Response::ProxyCleanupReconciled(recovery::decode_cleanup(payload, report, owner)?),
         ),
         (Command::ConfirmProxyRecovery(report), ResponseTag::ProxyRecoveryObserved) => Ok(
             Response::ProxyRecoveryObserved(recovery::decode_receipt(payload, report, owner)?),

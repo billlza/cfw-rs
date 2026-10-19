@@ -39,6 +39,7 @@ pub(crate) struct Service {
     scope: String,
     recovered: bool,
     proxy_observations: usize,
+    cleanup_publications: usize,
 }
 impl Service {
     pub(crate) fn open(name: &str) -> Result<Self> {
@@ -94,6 +95,7 @@ impl Service {
             scope,
             recovered,
             proxy_observations: 0,
+            cleanup_publications: 0,
         })
     }
     pub(crate) fn handle(
@@ -116,25 +118,56 @@ impl Service {
             .handle(connection, request, Instant::now() + LIMIT)
             .map_err(|e| e.to_string())?;
         if let Some(observed) = reply.proxy_recovery_observation() {
-            if !self.recovered
-                || self.proxy_observations != 0
-                || authority.snapshot().state != AuthorityState::Recovering
-                || authority.lease_owner().is_some()
-            {
+            if !self.recovered || authority.lease_owner().is_some() {
                 return Err("recovery observation was repeated or granted execution".into());
             }
-            self.proxy_observations += 1;
-            publish(
-                &self.root,
-                "runtime-restart-proxy-recovery.json",
-                &serde_json::json!({
-                    "context":observed.context(),
-                    "processes":authority_wire::process_report("proxy_recovery", observed.processes()),
-                    "recorded_process_id":observed.recorded_process_id(),
-                    "recorded_process_creation_time":observed.recorded_process_creation_time(),
-                    "snapshot":authority.snapshot(), "lease_restored":false,
-                }),
-            )?;
+            match observed.context().purpose() {
+                cfw_windows_engine::authority::ProxyRecoveryPurpose::Observe => {
+                    if self.proxy_observations != 0
+                        || authority.snapshot().state != AuthorityState::Recovering
+                    {
+                        return Err("observation alone changed recovery policy".into());
+                    }
+                    self.proxy_observations += 1;
+                    publish(
+                        &self.root,
+                        "runtime-restart-proxy-recovery.json",
+                        &serde_json::json!({
+                            "context":observed.context(),
+                            "processes":authority_wire::process_report("proxy_recovery", observed.processes()),
+                            "recorded_process_id":observed.recorded_process_id(),
+                            "recorded_process_creation_time":observed.recorded_process_creation_time(),
+                            "snapshot":authority.snapshot(), "lease_restored":false,
+                        }),
+                    )?;
+                }
+                cfw_windows_engine::authority::ProxyRecoveryPurpose::ReconcileOff => {
+                    if self.proxy_observations != 1
+                        || self.cleanup_publications != 0
+                        || authority.snapshot().state != AuthorityState::Off
+                        || authority.snapshot().revision
+                            != observed.context().target().revision.checked_add(1)
+                        || authority.recovery_target().is_none_or(|state| {
+                            state.operation().is_some() || state.state() != AuthorityState::Off
+                        })
+                    {
+                        return Err(
+                            "production cleanup did not commit exact Off without a lease".into(),
+                        );
+                    }
+                    self.cleanup_publications += 1;
+                    publish(
+                        &self.root,
+                        "runtime-restart-cleanup.json",
+                        &serde_json::json!({
+                            "context":observed.context(),
+                            "processes":authority_wire::process_report("cleanup", observed.processes()),
+                            "snapshot":authority.snapshot(),"metadata":authority.recovery_target(),
+                            "production_cleanup_evidence":true,"lease_restored":false,
+                        }),
+                    )?;
+                }
+            }
         }
         if ready && reply.rejection().is_none() {
             if self.recovered {
@@ -186,7 +219,7 @@ impl Service {
         Ok((reply, expected_recovery_rejection))
     }
     pub(crate) fn finish(&mut self) -> Result<()> {
-        if !self.recovered || self.proxy_observations != 1 {
+        if !self.recovered || self.proxy_observations != 1 || self.cleanup_publications != 1 {
             return Err(
                 "restart fixture did not restart and admit exactly one proxy observation".into(),
             );
@@ -380,6 +413,8 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
     let retired = read(root, "runtime-restart-retired.json")?;
     let proxy_recovery = read(root, "runtime-restart-proxy-recovery.json")?;
     let proxy_recovery_observer = read(root, "runtime-restart-proxy-recovery-observer.json")?;
+    let cleanup = read(root, "runtime-restart-cleanup.json")?;
+    let cleanup_observer = read(root, "runtime-restart-cleanup-observer.json")?;
     if before["metadata"] != recovered["metadata"] {
         return Err("restart metadata changed".into());
     }
@@ -388,8 +423,9 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
         &serde_json::json!({
         "product_source":source,"before":before,"recovered":recovered,"restart":restart,"retired":retired,
             "proxy_recovery":proxy_recovery,"proxy_recovery_observer":proxy_recovery_observer,
+            "cleanup":cleanup,"cleanup_observer":cleanup_observer,
             "desktop":desktop_report(),"agent":agent_report(),"temporary_service_removed":true,
-            "global_cleanup_proven":false,"release_accepted":false,
+            "global_cleanup_proven":true,"release_accepted":false,
         }),
     )
 }

@@ -8,6 +8,13 @@ use std::time::{Duration, Instant};
 
 const LIFETIME: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyRecoveryPurpose {
+    Observe,
+    ReconcileOff,
+}
+
 /// Exact durable operation, including the former full logon identity and both
 /// configuration hashes. This is a request selector, never execution authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +80,7 @@ impl ProxyRecoveryTarget {
 pub struct ProxyRecoveryContext {
     pub(super) target: ProxyRecoveryTarget,
     pub(super) observer: RecordedOwner,
+    pub(super) purpose: ProxyRecoveryPurpose,
 }
 impl ProxyRecoveryContext {
     pub fn target(&self) -> &ProxyRecoveryTarget {
@@ -80,6 +88,9 @@ impl ProxyRecoveryContext {
     }
     pub fn observer(&self) -> &RecordedOwner {
         &self.observer
+    }
+    pub fn purpose(&self) -> ProxyRecoveryPurpose {
+        self.purpose
     }
     pub(super) fn validate(&self) -> Result<()> {
         self.target.validate()?;
@@ -104,6 +115,7 @@ impl ProxyRecoveryAdmission {
         machine: &Machine,
         peer: &Peer,
         target: ProxyRecoveryTarget,
+        purpose: ProxyRecoveryPurpose,
         ticket: TicketDigest,
         now: Instant,
     ) -> Result<Self> {
@@ -115,6 +127,7 @@ impl ProxyRecoveryAdmission {
         let context = ProxyRecoveryContext {
             target,
             observer: peer.owner.clone(),
+            purpose,
         };
         context.validate()?;
         Ok(Self {

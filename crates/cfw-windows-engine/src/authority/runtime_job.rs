@@ -82,7 +82,7 @@ fn native(operation: &'static str) -> RuntimeJobError {
 pub enum RuntimeProcessState {
     /// Enrollment has never consumed a runtime generation.
     NoRuntimeRoot,
-    /// A schema-5 Off record already committed retirement before this restart.
+    /// A schema-6 Off record already committed retirement before this restart.
     /// This is durable prior proof, not a fresh native process count.
     DurablyRetired,
     /// Preparing was committed but no Bind grant could have been published.
@@ -94,7 +94,7 @@ pub enum RuntimeProcessState {
     },
 }
 
-/// Native observation or explicit durable proof for a schema-5 root. Neither
+/// Native observation or explicit durable proof for a schema-6 root. Neither
 /// proves proxy/TUN/global cleanup; durable proof never becomes a native count.
 /// No public constructor accepts process counts claimed by a client.
 #[derive(Debug)]

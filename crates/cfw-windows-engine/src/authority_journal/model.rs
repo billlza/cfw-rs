@@ -151,7 +151,7 @@ pub struct AuthorityCommittedState {
 impl AuthorityCommittedState {
     pub fn enrollment(installation_id: Uuid) -> Self {
         Self {
-            schema_version: 5,
+            schema_version: 6,
             root: RootContext {
                 installation_id,
                 epoch: 0,
@@ -172,7 +172,7 @@ impl AuthorityCommittedState {
         operation: Option<JournalOperation>,
     ) -> Result<Self> {
         let value = Self {
-            schema_version: 5,
+            schema_version: 6,
             allocated_generation: root.generation,
             root,
             revision,
@@ -273,9 +273,10 @@ impl AuthorityCommittedState {
         Ok(value)
     }
     pub(crate) fn validate(&self) -> Result<()> {
-        // Earlier development journals do not establish the current Bind job
-        // and lifetime-transfer contract. No implicit migration/reset is safe.
-        if self.schema_version != 5 {
+        // Schema 6 also requires the proxy template to exclude system
+        // interfaces and extra services. Older development journals cannot
+        // prove that resource scope. No implicit migration/reset is safe.
+        if self.schema_version != 6 {
             return Err(JournalValidationError::UnsupportedSchema);
         }
         if self.revision == 0

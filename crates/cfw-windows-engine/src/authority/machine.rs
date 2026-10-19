@@ -507,6 +507,7 @@ impl Machine {
     }
     pub(super) fn reconcile(&mut self, evidence: &CleanupEvidence) -> Result<()> {
         self.expected_revision(evidence.revision)?;
+        evidence.validate_scope(self.metadata.as_ref())?;
         if !matches!(
             self.phase,
             AuthorityState::Recovering | AuthorityState::Stopping | AuthorityState::Quarantined

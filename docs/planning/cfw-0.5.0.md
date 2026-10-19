@@ -1393,6 +1393,36 @@ Recovering，Ready 和 OwnedLease 被拒绝。实际原生场景使用同一登�
 PR 仍保留 `21505a8`，其 Mac 作业 `39289426252` 尚在排队；本次 Windows 验证来自
 独立分支 `lza/cfw-0.5.0-proxy-recovery`，不代表 PR 当前头或完整双平台验收。
 
+### SystemProxy 恢复的生产 Off 提交
+
+新增 BeginProxyCleanup / ReconcileProxyCleanup，使用与只读恢复观察不同的凭据
+用途。协议升级至 v5，目标、当前观察者和用途一起绑定；观察凭据不能升级为清理
+凭据。确认必须在原连接和原有效期内完成，消费后重新打开整个运行 Job、重新
+确认调用者，并检查当前 Authority 已无执行租约、未消费凭据或已确认运行授权。
+分发器在完成类型解析和原生准入后擦除完整原始读取缓冲区，保留请求/连接序号
+用于唯一回复。类型化凭据在进入 Off 提交前已经销毁。
+
+生产 CleanupEvidence 现在绑定完整运行根、revision、操作、租约、原用户身份和
+两份摘要。进程组退出证明它拥有的监听器、私有 IPC 和运行期地址空间已结束；
+用户进程提供新鲜 WinINet 恢复观察，服务检查自己的授权与待处理材料。无 TUN
+条件仅适用于有明确资源契约的代理模式，不能套用于 Tunnel 或组合模式。通过
+全部检查后复用现有日志事务提交 ReconcileOff，再次确认调用者；提交或回复不
+确定仍返回错误，不重放请求、不恢复旧租约。
+
+为使上述资源契约成立，原始 Windows 代理请求必须拒绝系统 WireGuard 接口、
+其他 endpoint 类型、额外服务/顶层区段及额外 experimental 入口。共享 CFM
+投影的用户态 WireGuard 仍通过。旧校验的反例已实际失败（LocalProxy 接受了
+带 `system:true` 的 endpoint），收紧后包含两个代理模式的负例与合法 WireGuard
+正例通过。`system` 的含义参见 [WireGuard endpoint 文档](https://sing-box.sagernet.org/configuration/endpoint/wireguard/)。
+日志升级至 schema 6；旧开发日志不能证明这项资源边界，因此明确拒绝，没有
+自动重置或假定已清理的迁移路径。原始配置校验失败不等于曾实际创建系统接口。
+
+本地 88 项 Rust 测试和全特性 Windows 交叉 Clippy 已通过。SCM 崩溃场景保留
+原有只读观察/拒绝重放验证，随后申请独立清理凭据，重新观察并要求生产证据
+提交 Off、旧租约仍不存在、重放被拒绝且下一次查询一致。该原生场景尚待本次
+托管 CI 验证；首次安装/已退休日志的 Off 准入、正常停止接线、缺失 Job 恢复、
+TUN/组合模式、完整应用与发布验收仍未完成。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。

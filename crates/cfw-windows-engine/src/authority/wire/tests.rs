@@ -172,10 +172,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
     let good = Request::new(Command::Observe).unwrap().encode().unwrap();
     let text = std::str::from_utf8(good.as_bytes()).unwrap();
     for altered in [
-        text.replace("\"version\":4", "\"version\":1"),
-        text.replace("\"version\":4", "\"version\":2"),
-        text.replace("\"version\":4", "\"version\":3"),
-        text.replace("\"version\":4", "\"version\":5"),
+        text.replace("\"version\":5", "\"version\":1"),
+        text.replace("\"version\":5", "\"version\":2"),
+        text.replace("\"version\":5", "\"version\":3"),
+        text.replace("\"version\":5", "\"version\":4"),
+        text.replace("\"version\":5", "\"version\":6"),
         text.replace(PROTOCOL, "cfm.authority"),
     ] {
         assert!(matches!(
@@ -184,11 +185,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
         ));
     }
     for altered in [
-        text.replace("\"version\":4", "\"version\":4,\"version\":4"),
+        text.replace("\"version\":5", "\"version\":5,\"version\":5"),
         text.replace("\"kind\":\"observe\"", "\"kind\":\"reconcile_off\""),
         text.replace("\"payload\":{}", "\"payload\":{\"ticket\":[1]}"),
         format!("{text}{{}}"),
-        text.replace("\"version\":4", "\"unknown\":true,\"version\":4"),
+        text.replace("\"version\":5", "\"unknown\":true,\"version\":5"),
     ] {
         assert!(Request::decode(altered.as_bytes()).is_err());
     }
@@ -379,7 +380,7 @@ fn bound_keeper_receipts_reject_unsafe_values_and_never_adopt_from_the_codec() {
         response(&request, &serde_json::to_vec(&missing).unwrap(), &owner()),
         Err(WireError::Malformed)
     ));
-    for version in [1, 2, 3, 5] {
+    for version in [1, 2, 3, 4, 6] {
         let mut changed = original.clone();
         changed["version"] = serde_json::json!(version);
         assert!(matches!(
@@ -415,6 +416,7 @@ fn recovery_context() -> crate::authority::ProxyRecoveryContext {
             operation: context().recorded().unwrap(),
         },
         observer: owner(),
+        purpose: crate::authority::ProxyRecoveryPurpose::Observe,
     }
 }
 fn recovery_report() -> ProxyRecoveryReport {
@@ -534,6 +536,99 @@ fn recovery_grant_and_receipt_bind_current_observer_and_full_old_scope() {
         response(&confirm, false_off.as_bytes(), &owner()),
         Err(WireError::Correlation)
     ));
+}
+
+#[test]
+fn cleanup_requires_its_own_challenge_purpose_and_exact_off_publication() {
+    use crate::authority::ProxyRecoveryPurpose;
+    assert!(matches!(
+        Request::new(Command::ReconcileProxyCleanup(recovery_report())),
+        Err(WireError::Malformed)
+    ));
+    let mut report = recovery_report();
+    report.context.purpose = ProxyRecoveryPurpose::ReconcileOff;
+    let context = report.context.clone();
+    let request = Request::new(Command::ReconcileProxyCleanup(report)).unwrap();
+    let receipt = ProxyCleanupReceipt {
+        recovery: ProxyRecoveryReceipt {
+            context: context.clone(),
+            retired_process_count: 3,
+        },
+        snapshot: AuthoritySnapshot {
+            state: AuthorityState::Off,
+            revision: Some(5),
+            root: Some(context.target.root.clone()),
+        },
+    };
+    let bytes = Response::ProxyCleanupReconciled(receipt.clone())
+        .encode(request.id)
+        .unwrap();
+    assert!(matches!(
+        response(&request, bytes.as_bytes(), &owner()),
+        Ok(Response::ProxyCleanupReconciled(_))
+    ));
+    let original: serde_json::Value = serde_json::from_slice(bytes.as_bytes()).unwrap();
+    for (pointer, replacement) in [
+        ("/payload/snapshot/revision", serde_json::json!(4)),
+        ("/payload/snapshot/state", serde_json::json!("recovering")),
+        ("/payload/snapshot/root/generation", serde_json::json!(2)),
+        (
+            "/payload/recovery/context/purpose",
+            serde_json::json!("observe"),
+        ),
+        (
+            "/payload/recovery/retired_process_count",
+            serde_json::json!(0),
+        ),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        assert!(
+            matches!(
+                response(&request, &serde_json::to_vec(&changed).unwrap(), &owner()),
+                Err(WireError::Correlation)
+            ),
+            "{pointer}"
+        );
+    }
+    let request = Request::new(Command::BeginProxyCleanup(context.target.clone())).unwrap();
+    let wrong = Response::ProxyRecoveryGranted(ProxyRecoveryGrant {
+        context: recovery_context(),
+        ticket: TicketMaterial::from_slice(&[9; 32]).unwrap(),
+    })
+    .encode(request.id)
+    .unwrap();
+    assert!(matches!(
+        response(&request, wrong.as_bytes(), &owner()),
+        Err(WireError::Correlation)
+    ));
+}
+
+#[test]
+fn cleanup_commands_keep_closed_payloads_and_one_use_ticket_storage() {
+    let mut report = recovery_report();
+    report.context.purpose = crate::authority::ProxyRecoveryPurpose::ReconcileOff;
+    for command in [
+        Command::BeginProxyCleanup(report.context.target.clone()),
+        Command::ReconcileProxyCleanup(report),
+    ] {
+        let request = Request::new(command).unwrap();
+        let message = request.encode().unwrap();
+        assert_eq!(
+            Request::decode(message.as_bytes())
+                .unwrap()
+                .encode()
+                .unwrap()
+                .as_bytes(),
+            message.as_bytes()
+        );
+        let mut changed: serde_json::Value = serde_json::from_slice(message.as_bytes()).unwrap();
+        changed["payload"]["cleanup_proven"] = serde_json::json!(true);
+        assert!(matches!(
+            Request::decode(&serde_json::to_vec(&changed).unwrap()),
+            Err(WireError::Malformed)
+        ));
+    }
 }
 
 #[test]

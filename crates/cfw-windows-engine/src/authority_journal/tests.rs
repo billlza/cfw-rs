@@ -380,7 +380,7 @@ fn allocation_schema_never_infers_a_missing_counter_or_accepts_counter_rollback(
         .reserve_next_generation()
         .unwrap();
     let original = serde_json::to_value(&state).unwrap();
-    for schema in [0, 1, 2, 3, 4, 6] {
+    for schema in [0, 1, 2, 3, 4, 5, 7] {
         let mut value = original.clone();
         value["schema_version"] = serde_json::json!(schema);
         let changed: AuthorityCommittedState = serde_json::from_value(value).unwrap();

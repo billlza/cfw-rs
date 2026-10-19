@@ -63,6 +63,60 @@ fn edit(request: &mut EngineStartRequest, action: impl FnOnce(&mut Value)) {
 }
 
 #[test]
+fn proxy_resource_scope_rejects_system_interfaces_and_extra_services() {
+    for mode in [ProjectionMode::LocalProxy, ProjectionMode::SystemProxy] {
+        for change in 0..5 {
+            let mut value = input(mode, false, false);
+            edit(&mut value, |root| match change {
+                0 => {
+                    root["endpoints"] =
+                        serde_json::json!([{"type":"wireguard","tag":"foreign","system":true}])
+                }
+                1 => root["endpoints"] = serde_json::json!([{"type":"tailscale","tag":"foreign"}]),
+                2 => root["services"] = serde_json::json!([{"type":"resolved","tag":"foreign"}]),
+                3 => {
+                    root["experimental"]["v2ray_api"] =
+                        serde_json::json!({"listen":"0.0.0.0:10085"})
+                }
+                4 => {
+                    root["outbounds"] = serde_json::json!([{"type":"wireguard","tag":"foreign","system_interface":true}])
+                }
+                _ => unreachable!(),
+            });
+            assert!(
+                CheckedStartConfiguration::new(value).is_err(),
+                "{mode:?} change {change}"
+            );
+        }
+    }
+}
+
+#[test]
+fn proxy_resource_scope_preserves_projected_userspace_wireguard() {
+    let profile = ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"wireguard","tag":"wg","server":"vpn.example.com","server_port":51820,"local_addresses":["10.10.0.2/32"],"mtu":1420,"persistent_keepalive_seconds":25,"peer_public_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","private_key_credential_ref":{"id":"11111111-1111-4111-8111-111111111111","kind":"wireguard_private_key"}}]}"#).unwrap();
+    for mode in [ProjectionMode::LocalProxy, ProjectionMode::SystemProxy] {
+        let projection = profile
+            .project(PROFILE, mode, &EngineSettings::default())
+            .unwrap();
+        let mut request = input(mode, false, false);
+        request.config_json = projection.as_json().into();
+        request.credential_audience = projection.credential_audience().clone();
+        request.credential_slots = projection.credential_slots().to_vec();
+        rehash(&mut request);
+        let checked = CheckedStartConfiguration::new(request).unwrap();
+        let references = checked.credential_references();
+        let prepared = checked
+            .prepare_proxy(
+                references
+                    .iter()
+                    .map(|reference| (reference, "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=")),
+            )
+            .unwrap();
+        assert_eq!(prepared.mode(), mode);
+    }
+}
+
+#[test]
 fn shared_request_keeps_exact_bytes_identity_and_separate_lan_endpoint() {
     for mode in [
         ProjectionMode::LocalProxy,

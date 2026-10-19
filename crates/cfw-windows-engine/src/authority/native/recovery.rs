@@ -1,5 +1,6 @@
 use super::super::{
-    ProxyRecoveryContext, ProxyRecoveryTarget, RuntimeProcessObservation, RuntimeProcessState,
+    ProxyRecoveryContext, ProxyRecoveryPurpose, ProxyRecoveryTarget, RuntimeProcessObservation,
+    RuntimeProcessState,
     recovery::ProxyRecoveryAdmission,
     wire::{ProxyRecoveryGrant, ProxyRecoveryReceipt, ProxyRecoveryReport, TicketMaterial},
 };
@@ -10,11 +11,13 @@ use super::*;
 /// This scoped, time-bound fact does not attest other cleanup obligations. It
 /// cannot be deserialized or constructed from client-provided process counts.
 pub struct ProxyRecoveryObservation {
-    context: ProxyRecoveryContext,
+    pub(super) context: ProxyRecoveryContext,
     processes: RuntimeProcessObservation,
     recorded_process_id: u32,
     recorded_process_creation_time: u64,
     observed_at: Instant,
+    pub(super) expires: Instant,
+    pub(super) connection: crate::connection_binding::ConnectionBinding,
 }
 impl ProxyRecoveryObservation {
     pub fn context(&self) -> &ProxyRecoveryContext {
@@ -47,6 +50,7 @@ impl WindowsAuthority {
         &mut self,
         authorization: &ServicePeerAuthorization,
         target: ProxyRecoveryTarget,
+        purpose: ProxyRecoveryPurpose,
     ) -> Result<ProxyRecoveryGrant> {
         require_service()?;
         let deadline = Instant::now() + ADMISSION;
@@ -64,6 +68,7 @@ impl WindowsAuthority {
             &self.machine,
             &peer,
             target,
+            purpose,
             ticket.recovery_digest(),
             Instant::now(),
         )?;
@@ -89,6 +94,7 @@ impl WindowsAuthority {
         &mut self,
         authorization: &ServicePeerAuthorization,
         report: ProxyRecoveryReport,
+        purpose: ProxyRecoveryPurpose,
     ) -> Result<ProxyRecoveryObservation> {
         require_service()?;
         let deadline = Instant::now() + ADMISSION;
@@ -109,6 +115,9 @@ impl WindowsAuthority {
                 Instant::now(),
             )
         })?;
+        if context.purpose() != purpose {
+            return Err(AuthorityError::Identity);
+        }
         let processes = self.retired_proxy_processes(&context.target)?;
         authorization.revalidate(
             self.owner_session.as_ref(),
@@ -121,6 +130,8 @@ impl WindowsAuthority {
             recorded_process_id: report.recorded_process_id,
             recorded_process_creation_time: report.recorded_process_creation_time,
             observed_at: Instant::now(),
+            expires,
+            connection: authorization.request().binding(),
         })
     }
     fn retired_proxy_processes(

@@ -1,5 +1,5 @@
 use super::*;
-use crate::authority::{ProxyRecoveryContext, ProxyRecoveryTarget};
+use crate::authority::{ProxyRecoveryContext, ProxyRecoveryPurpose, ProxyRecoveryTarget};
 
 /// A bounded, single-use observation challenge from the authenticated service.
 /// It has no conversion to a preparation ticket or runtime start authorization.
@@ -93,6 +93,23 @@ pub struct ProxyRecoveryReceipt {
     pub(in crate::authority) context: ProxyRecoveryContext,
     pub(in crate::authority) retired_process_count: u32,
 }
+
+/// Publication of a fully observed SystemProxy recovery. A later execution
+/// still needs a new generation and lease; the old runtime is not restored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyCleanupReceipt {
+    pub(in crate::authority) recovery: ProxyRecoveryReceipt,
+    pub(in crate::authority) snapshot: AuthoritySnapshot,
+}
+impl ProxyCleanupReceipt {
+    pub fn recovery(&self) -> &ProxyRecoveryReceipt {
+        &self.recovery
+    }
+    pub fn snapshot(&self) -> &AuthoritySnapshot {
+        &self.snapshot
+    }
+}
 impl ProxyRecoveryReceipt {
     pub fn context(&self) -> &ProxyRecoveryContext {
         &self.context
@@ -127,16 +144,39 @@ pub(super) fn decode_grant(
     bytes: &[u8],
     target: &ProxyRecoveryTarget,
     owner: &crate::authority_journal::RecordedOwner,
+    purpose: ProxyRecoveryPurpose,
 ) -> Result<ProxyRecoveryGrant> {
     let value: GrantedPayload = decode(bytes)?;
     value.context.validate().map_err(|_| WireError::Malformed)?;
-    if value.context.target != *target || value.context.observer != *owner {
+    if value.context.target != *target
+        || value.context.observer != *owner
+        || value.context.purpose != purpose
+    {
         return Err(WireError::Correlation);
     }
     Ok(ProxyRecoveryGrant {
         context: value.context,
         ticket: value.ticket,
     })
+}
+pub(super) fn decode_cleanup(
+    bytes: &[u8],
+    report: &ProxyRecoveryReport,
+    owner: &crate::authority_journal::RecordedOwner,
+) -> Result<ProxyCleanupReceipt> {
+    let value: ProxyCleanupReceipt = decode(bytes)?;
+    let target = &report.context.target;
+    if value.recovery.context != report.context
+        || value.recovery.context.observer != *owner
+        || report.context.purpose != ProxyRecoveryPurpose::ReconcileOff
+        || value.recovery.retired_process_count == 0
+        || value.snapshot.state != AuthorityState::Off
+        || target.revision.checked_add(1) != value.snapshot.revision
+        || value.snapshot.root.as_ref() != Some(&target.root)
+    {
+        return Err(WireError::Correlation);
+    }
+    Ok(value)
 }
 pub(super) fn decode_receipt(
     bytes: &[u8],

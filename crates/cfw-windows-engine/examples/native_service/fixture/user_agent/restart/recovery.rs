@@ -46,7 +46,7 @@ pub(super) fn exercise(
     // A false report has the public challenge context but no challenge bytes.
     // It is not a local observation and must fail before producing evidence.
     let forged = serde_json::json!({
-        "protocol":"cfw.windows.authority", "version":4,
+        "protocol":"cfw.windows.authority", "version":5,
         "request_id":uuid::Uuid::new_v4(), "kind":"confirm_proxy_recovery",
         "payload": {"context":grant.context(), "ticket":vec![0u8;32],
             "recorded_process_id":1, "recorded_process_creation_time":1},
@@ -135,6 +135,79 @@ pub(super) fn exercise(
         "runtime-restart-proxy-recovery-observer.json",
         &serde_json::json!({
             "cases":cases,"receipt":receipt,"snapshot":snapshot,
+        }),
+    )?;
+    reconcile(channel, root, target)
+}
+
+fn reconcile(
+    channel: &mut AuthorityChannel,
+    root: &Path,
+    target: ProxyRecoveryTarget,
+) -> Result<()> {
+    let Response::ProxyRecoveryGranted(grant) = channel
+        .request(
+            Request::new(Command::BeginProxyCleanup(target.clone())).map_err(|e| e.to_string())?,
+            Instant::now() + LIMIT,
+        )
+        .map_err(|e| e.to_string())?
+    else {
+        return Err("cleanup did not issue its own challenge".into());
+    };
+    if grant.context().purpose()
+        != cfw_windows_engine::authority::ProxyRecoveryPurpose::ReconcileOff
+    {
+        return Err("cleanup received an observation-only challenge".into());
+    }
+    let storage =
+        cfw_windows_engine::user_agent::UserRuntimeStorage::open(&root.join("runtime-state"))
+            .map_err(|e| e.to_string())?;
+    let report = grant
+        .observe_restoration(storage.proxy())
+        .map_err(|e| e.to_string())?;
+    let request =
+        Request::new(Command::ReconcileProxyCleanup(report)).map_err(|e| e.to_string())?;
+    let replay = request.encode().map_err(|e| e.to_string())?;
+    let Response::ProxyCleanupReconciled(receipt) = channel
+        .request(request, Instant::now() + LIMIT)
+        .map_err(|e| e.to_string())?
+    else {
+        return Err("cleanup did not return an Off publication receipt".into());
+    };
+    if receipt.recovery().context().target() != &target
+        || receipt.recovery().retired_process_count() < 2
+    {
+        return Err("cleanup lost its scope or whole-Job observation".into());
+    }
+    rejected(
+        channel,
+        Request::decode(replay.as_bytes()).map_err(|e| e.to_string())?,
+        Rejection::Ticket,
+    )?;
+    drop(replay);
+    rejected(
+        channel,
+        Request::new(Command::OwnedLease).map_err(|e| e.to_string())?,
+        Rejection::Identity,
+    )?;
+    let Response::Observed(snapshot) = channel
+        .request(
+            Request::new(Command::Observe).map_err(|e| e.to_string())?,
+            Instant::now() + LIMIT,
+        )
+        .map_err(|e| e.to_string())?
+    else {
+        return Err("cleanup did not permit a fresh policy observation".into());
+    };
+    if &snapshot != receipt.snapshot() || snapshot.state != AuthorityState::Off {
+        return Err("cleanup receipt disagrees with fresh Authority state".into());
+    }
+    publish(
+        root,
+        "runtime-restart-cleanup-observer.json",
+        &serde_json::json!({
+            "receipt":receipt,"snapshot":snapshot,
+            "cases":["distinct_cleanup_purpose","fresh_native_restoration","production_off_publication","cleanup_replay_rejected","old_execution_lease_absent","fresh_off_observed"],
         }),
     )
 }

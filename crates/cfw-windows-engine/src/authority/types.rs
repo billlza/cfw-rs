@@ -196,6 +196,7 @@ impl RecordedRuntimeScope {
 /// native observation adapters; there is no serde or default constructor.
 /// Tests exercise policy through an explicit validation-only constructor.
 pub struct CleanupEvidence {
+    pub(super) binding: CleanupBinding,
     pub(super) revision: u64,
     pub(super) lease_id: Option<Uuid>,
     pub(super) proxy_listener_closed: bool,
@@ -206,7 +207,31 @@ pub struct CleanupEvidence {
     pub(super) endpoints_closed: bool,
     pub(super) secret_buffers_cleared: bool,
 }
+pub(super) enum CleanupBinding {
+    Runtime(super::ProxyRecoveryTarget),
+    #[cfg(any(test, feature = "native-service-validation"))]
+    Validation,
+}
 impl CleanupEvidence {
+    pub(super) fn validate_scope(&self, metadata: Option<&AuthorityCommittedState>) -> Result<()> {
+        match &self.binding {
+            CleanupBinding::Runtime(target) => {
+                target.validate()?;
+                let metadata = metadata.ok_or(AuthorityError::Recovering)?;
+                if target.revision != self.revision
+                    || target.revision != metadata.revision()
+                    || target.root != *metadata.root()
+                    || Some(&target.operation) != metadata.operation()
+                    || Some(target.operation.lease_id()) != self.lease_id
+                {
+                    return Err(AuthorityError::Stale);
+                }
+            }
+            #[cfg(any(test, feature = "native-service-validation"))]
+            CleanupBinding::Validation => {}
+        }
+        Ok(())
+    }
     pub(super) fn exact(&self) -> bool {
         self.proxy_listener_closed
             && self.system_proxy_restored
@@ -219,6 +244,7 @@ impl CleanupEvidence {
     #[cfg(any(test, feature = "native-service-validation"))]
     pub fn for_validation(revision: u64, lease_id: Option<Uuid>, complete: bool) -> Self {
         Self {
+            binding: CleanupBinding::Validation,
             revision,
             lease_id,
             proxy_listener_closed: complete,

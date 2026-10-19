@@ -183,6 +183,35 @@ fn exact_keys(value: &Value, keys: &[&str]) -> Result<(), Error> {
 }
 
 fn proxy_controller(root: &Value) -> Result<SocketAddr, Error> {
+    // The SystemProxy/LocalProxy cleanup contract owns a process tree and user
+    // proxy settings, never an additional managed interface or service. These
+    // are exactly the top-level sections emitted by the shared projection.
+    let object = root.as_object().ok_or_else(invalid)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "log" | "experimental" | "outbounds" | "endpoints" | "inbounds" | "dns" | "route"
+        )
+    }) {
+        return Err(invalid());
+    }
+    exact_keys(&root["experimental"], &["clash_api"])?;
+    if let Some(endpoints) = object.get("endpoints") {
+        for endpoint in endpoints.as_array().ok_or_else(invalid)? {
+            // Shared WireGuard projection always requests the userspace stack.
+            // Do not infer this from a missing flag or a recomputed digest.
+            if endpoint["type"] != "wireguard" || endpoint["system"] != false {
+                return Err(invalid());
+            }
+        }
+    }
+    for outbound in root["outbounds"].as_array().ok_or_else(invalid)? {
+        if outbound["type"] == "wireguard" {
+            // Legacy WireGuard outbounds can also request a system interface;
+            // the CFM baseline projects this protocol into endpoints instead.
+            return Err(invalid());
+        }
+    }
     let api = &root["experimental"]["clash_api"];
     exact_keys(api, &["external_controller", "secret"])?;
     let address_text = api["external_controller"].as_str().ok_or_else(invalid)?;

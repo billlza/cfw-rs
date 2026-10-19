@@ -17,6 +17,7 @@ use std::{
 };
 
 const ADMISSION: Duration = Duration::from_millis(cfw_engine_api::authority_v1::COMMAND_TIMEOUT_MS);
+mod cleanup;
 mod recovery;
 pub use recovery::ProxyRecoveryObservation;
 

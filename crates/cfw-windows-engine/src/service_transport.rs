@@ -82,6 +82,11 @@ impl ServicePayload {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.length]
     }
+    fn erase(&mut self) {
+        use zeroize::Zeroize;
+        self.bytes.as_mut_slice().zeroize();
+        self.length = 0;
+    }
 }
 
 pub struct AuthenticatedServiceRequest {
@@ -94,6 +99,11 @@ pub struct AuthenticatedServiceRequest {
 impl AuthenticatedServiceRequest {
     pub fn body(&self) -> &[u8] {
         self.body.as_bytes()
+    }
+    /// After typed decoding, preserve native request/connection identity while
+    /// erasing the raw secret-bearing copy before dispatch or journal mutation.
+    pub(crate) fn erase_body(&mut self) {
+        self.body.erase();
     }
     pub fn identity(&self) -> &NativePeerIdentity {
         &self.identity
@@ -497,5 +507,21 @@ pub(crate) fn check_deadline(deadline: Instant) -> Result<(), ServiceTransportEr
     match deadline.checked_duration_since(Instant::now()) {
         Some(left) if !left.is_zero() && left <= MAX_IO_TIME => Ok(()),
         _ => Err(ServiceTransportError::Deadline),
+    }
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+    #[test]
+    fn erasing_a_decoded_request_wipes_the_entire_initialized_read_buffer() {
+        let mut payload = ServicePayload {
+            bytes: Zeroizing::new(vec![0x5a; 8192]),
+            length: 32,
+        };
+        payload.erase();
+        assert!(payload.as_bytes().is_empty());
+        assert_eq!(payload.bytes.len(), 8192);
+        assert!(payload.bytes.iter().all(|byte| *byte == 0));
     }
 }

@@ -181,6 +181,9 @@ pub struct ServicePeerAuthorization {
     process: NativePeerProcess,
 }
 impl ServicePeerAuthorization {
+    pub(crate) fn erase_request_body(&mut self) {
+        self.request.erase_body();
+    }
     pub fn request(&self) -> &AuthenticatedServiceRequest {
         &self.request
     }

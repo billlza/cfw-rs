@@ -63,13 +63,14 @@ impl WindowsAuthority {
         } else {
             UserAgentLeaseRequirement::OwnedLease
         };
-        let authorization = authorize_service_request(
+        let mut authorization = authorize_service_request(
             connection,
             request,
             self.lease_owner(),
             requirement,
             deadline,
         )?;
+        authorization.erase_request_body();
         let admitted_role = authorization.request().role();
         let allowed = match admitted_role {
             ServiceClientRole::Desktop => matches!(
@@ -79,6 +80,8 @@ impl WindowsAuthority {
                     | Command::ReadRuntimeScope
                     | Command::BeginProxyRecovery(_)
                     | Command::ConfirmProxyRecovery(_)
+                    | Command::BeginProxyCleanup(_)
+                    | Command::ReconcileProxyCleanup(_)
                     | Command::ReserveGeneration(_)
                     | Command::Prepare(_)
                     | Command::BeginStop(_)
@@ -124,13 +127,43 @@ impl WindowsAuthority {
                 Command::ReadRuntimeScope => {
                     Response::RuntimeScope(self.recorded_runtime_scope(authorization)?)
                 }
-                Command::BeginProxyRecovery(target) => Response::ProxyRecoveryGranted(
-                    self.begin_proxy_recovery(authorization, target)?,
-                ),
+                Command::BeginProxyRecovery(target) => {
+                    Response::ProxyRecoveryGranted(self.begin_proxy_recovery(
+                        authorization,
+                        target,
+                        super::ProxyRecoveryPurpose::Observe,
+                    )?)
+                }
                 Command::ConfirmProxyRecovery(report) => {
-                    let observed = self.confirm_proxy_recovery(authorization, report)?;
+                    let observed = self.confirm_proxy_recovery(
+                        authorization,
+                        report,
+                        super::ProxyRecoveryPurpose::Observe,
+                    )?;
                     return Ok((
                         Response::ProxyRecoveryObserved(observed.receipt()?),
+                        Some(observed),
+                    ));
+                }
+                Command::BeginProxyCleanup(target) => {
+                    Response::ProxyRecoveryGranted(self.begin_proxy_recovery(
+                        authorization,
+                        target,
+                        super::ProxyRecoveryPurpose::ReconcileOff,
+                    )?)
+                }
+                Command::ReconcileProxyCleanup(report) => {
+                    let observed = self.confirm_proxy_recovery(
+                        authorization,
+                        report,
+                        super::ProxyRecoveryPurpose::ReconcileOff,
+                    )?;
+                    let snapshot = self.reconcile_proxy_cleanup(authorization, &observed)?;
+                    return Ok((
+                        Response::ProxyCleanupReconciled(wire::ProxyCleanupReceipt {
+                            recovery: observed.receipt()?,
+                            snapshot,
+                        }),
                         Some(observed),
                     ));
                 }

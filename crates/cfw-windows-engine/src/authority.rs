@@ -21,7 +21,7 @@ pub use dispatch::{AuthorizedReply, DispatchError};
 pub use native::ProxyRecoveryObservation;
 #[cfg(windows)]
 pub use native::WindowsAuthority;
-pub use recovery::{ProxyRecoveryContext, ProxyRecoveryTarget};
+pub use recovery::{ProxyRecoveryContext, ProxyRecoveryPurpose, ProxyRecoveryTarget};
 #[cfg(windows)]
 pub(crate) use runtime_job::RuntimeKeeper;
 #[cfg(all(windows, feature = "native-service-validation"))]

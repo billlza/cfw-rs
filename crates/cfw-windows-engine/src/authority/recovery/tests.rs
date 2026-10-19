@@ -32,6 +32,7 @@ fn admission(
         machine,
         peer,
         target,
+        ProxyRecoveryPurpose::Observe,
         Ticket::for_test([9; 32]).recovery_digest(),
         now,
     )
@@ -73,6 +74,7 @@ fn recovery_rejects_other_accounts_roles_and_every_changed_durable_identity() {
             &machine,
             &foreign,
             target.clone(),
+            ProxyRecoveryPurpose::Observe,
             Ticket::for_test([9; 32]).recovery_digest(),
             now
         ),
@@ -85,6 +87,7 @@ fn recovery_rejects_other_accounts_roles_and_every_changed_durable_identity() {
             &machine,
             &foreign,
             target.clone(),
+            ProxyRecoveryPurpose::Observe,
             Ticket::for_test([9; 32]).recovery_digest(),
             now
         ),
@@ -121,6 +124,7 @@ fn recovery_rejects_other_accounts_roles_and_every_changed_durable_identity() {
                     &machine,
                     &peer,
                     changed,
+                    ProxyRecoveryPurpose::Observe,
                     Ticket::for_test([9; 32]).recovery_digest(),
                     now
                 ),
@@ -178,6 +182,7 @@ fn active_or_uncertain_journal_cannot_admit_recovery_observation() {
             &active,
             &peer,
             target.clone(),
+            ProxyRecoveryPurpose::Observe,
             Ticket::for_test([9; 32]).recovery_digest(),
             now
         ),
@@ -195,9 +200,47 @@ fn active_or_uncertain_journal_cannot_admit_recovery_observation() {
             &machine,
             &peer,
             target,
+            ProxyRecoveryPurpose::Observe,
             Ticket::for_test([9; 32]).recovery_digest(),
             now
         ),
         Err(AuthorityError::Recovering)
+    ));
+}
+
+#[test]
+fn production_cleanup_scope_cannot_be_substituted_or_replayed() {
+    let (mut machine, _, target, _) = fixture();
+    let mut proof =
+        CleanupEvidence::for_validation(target.revision, Some(target.operation.lease_id()), true);
+    proof.binding = CleanupBinding::Runtime(target.clone());
+    for pointer in ["/root/installation_id", "/operation/operation_id"] {
+        let mut changed = serde_json::to_value(&target).unwrap();
+        *changed.pointer_mut(pointer).unwrap() = serde_json::json!(Uuid::from_u128(99));
+        proof.binding = CleanupBinding::Runtime(serde_json::from_value(changed).unwrap());
+        assert!(matches!(
+            machine.reconcile(&proof),
+            Err(AuthorityError::Stale)
+        ));
+        assert_eq!(machine.phase(), AuthorityState::Recovering);
+    }
+    proof.binding = CleanupBinding::Runtime(target);
+    machine.reconcile(&proof).unwrap();
+    assert_eq!(machine.phase(), AuthorityState::Off);
+    assert!(matches!(
+        machine.reconcile(&proof),
+        Err(AuthorityError::Stale)
+    ));
+}
+
+#[test]
+fn observation_challenge_cannot_be_upgraded_to_cleanup() {
+    let (machine, peer, target, now) = fixture();
+    let pending = admission(&machine, &peer, target, now);
+    let mut context = pending.context().clone();
+    context.purpose = ProxyRecoveryPurpose::ReconcileOff;
+    assert!(matches!(
+        pending.consume(&machine, &peer, &context, &[9; 32], now),
+        Err(AuthorityError::Stale)
     ));
 }

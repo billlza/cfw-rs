@@ -1,34 +1,6 @@
+use super::super::tests::launch;
 use super::*;
-use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 
-fn launch(mode: ProjectionMode) -> UserAgentLaunch {
-    let (binding, _) = super::super::tests::inputs(mode);
-    let projected =
-        ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
-            .unwrap()
-            .project(
-                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                mode,
-                &EngineSettings::default(),
-            )
-            .unwrap();
-    let root = &binding.context.operation.root;
-    let request = EngineStartRequest {
-        context: EngineCommandContext {
-            installation_id: root.installation_id.to_string(),
-            config_epoch: root.epoch,
-            generation: root.generation,
-        },
-        mode,
-        credential_audience: projected.credential_audience().clone(),
-        config_json: projected.as_json().into(),
-        config_content_digest: projected.configuration_digest().into(),
-        config_digest: projected.digest().into(),
-        credential_slots: projected.credential_slots().to_vec(),
-        tunnel_options: None,
-    };
-    UserAgentLaunch::new(binding, request).unwrap()
-}
 fn changed(frame: &[u8], from: &str, to: &str) -> Zeroizing<Vec<u8>> {
     let text = std::str::from_utf8(&frame[4..]).unwrap();
     assert_eq!(text.matches(from).count(), 1);

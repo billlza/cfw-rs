@@ -1,26 +1,18 @@
 use super::*;
-use cfw_windows_engine::user_agent::handoff::MAX_FRAME_BYTES;
+use cfw_windows_engine::user_agent::launch_channel::LaunchReceiver;
+use std::os::windows::io::AsHandle;
 
 fn receive() -> Result<UserAgentLaunch> {
-    // The parent's retained process handle bounds this fixture's lifetime and
-    // its writer owns the only write end. Product cancellable I/O is separate.
-    let mut bytes = zeroize::Zeroizing::new(vec![0; MAX_FRAME_BYTES + 1]);
-    let mut length = 0;
-    let mut input = std::io::stdin().lock();
-    loop {
-        match input.read(&mut bytes[length..]) {
-            Ok(0) => break,
-            Ok(count) => {
-                length += count;
-                if length > MAX_FRAME_BYTES {
-                    return Err("runtime launch exceeds its input bound".into());
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(format!("runtime launch read: {e}")),
-        }
-    }
-    UserAgentLaunch::decode(&bytes[..length]).map_err(|e| e.to_string())
+    let (desktop, digest) = transport::desktop_image()?;
+    let expected = Arc::new(verified(&desktop, digest)?);
+    let input = std::io::stdin()
+        .as_handle()
+        .try_clone_to_owned()
+        .map_err(|e| e.to_string())?;
+    let receiver = LaunchReceiver::from_inherited(input, expected).map_err(|e| e.to_string())?;
+    receiver
+        .receive(Instant::now() + LIMIT, &AtomicBool::new(false))
+        .map_err(|e| e.to_string())
 }
 
 pub(super) fn run(

@@ -242,6 +242,11 @@ pub(super) fn installation() -> Result<Installation> {
     Ok(value)
 }
 
+pub(super) fn desktop_image() -> Result<(PathBuf, [u8; 32])> {
+    let installed = installation()?;
+    Ok((installed.desktop_image, installed.desktop_digest))
+}
+
 pub(super) fn service_image() -> Result<(PathBuf, [u8; 32])> {
     let installed = installation()?;
     Ok((installed.agent_image, installed.agent_digest))

@@ -894,8 +894,16 @@ SystemProxy 与 LAN 共享的组合原先被 Windows 配置所有者误判为重
 重新核验请求与租约；服务、可执行文件、凭据目录仍由接收端受信任装配提供。
 启动帧通过不落盘的继承管道进入普通用户子进程，测试刻意超过 8 KiB 管道缓冲提示值。
 仅验证用的非秘密 Ready 元数据配合父进程持有的进程句柄检查生命周期；它不是生产
-授权凭据。生产进程启动器、可取消 I/O、双向生命周期通道及完整后端装配仍未完成。
-这次跨进程变更的本地测试和目标平台静态检查已通过，真实 Windows 运行仍待对应源 CI。
+授权凭据。`ce909db` 的[四个 Windows 作业](https://github.com/billlza/cfw-rs/actions/runs/39229929226)
+已通过，并回读源提交/哈希绑定的产物：532 项共享 Rust 测试、311 项 UI 测试、
+独立 Desktop 和三个 UserAgent 报告、两次 Ready/Stopped、四次心跳及一次票据拒绝。
+
+后续生产交接通道改用继承的私有消息管道，复用已有 overlapped I/O 的取消和完成等待。
+接收端检查端点类型、消息读取模式、父进程完整用户/登录/会话身份及安装映像身份。
+发送端要求与整帧 SHA-256 对应的有界解码确认；它不表示租约绑定或引擎已启动。
+任一端只尝试一次，超时/取消后的投递不确定性保持为错误。新增原生测试强制产生
+pending read/write，再验证取消后的内核完成结果；此通道变更仍待对应源 Windows CI。
+生产进程启动器、双向生命周期通道、独立全局清理及完整后端装配仍未完成。
 
 改为允许服务 peer/channel 共享已验证镜像对象的 Arc。原文件及祖先目录句柄持续
 持有，保持禁止写入/替换的原契约；每次连接的 SCM 安全描述符、配置、进程和管道
@@ -904,7 +912,9 @@ SystemProxy 与 LAN 共享的组合原先被 Windows 配置所有者误判为重
 原生性能与全部场景尚待新源 CI 验证。
 
 实现核对了 [RawValue 借用解码](https://docs.rs/serde_json/latest/serde_json/value/struct.RawValue.html)
-和 [CreatePipe 缓冲及阻塞语义](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createpipe)。
+、[CreatePipe 缓冲及阻塞语义](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createpipe)
+、[消息管道读取模式](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-type-read-and-wait-modes)
+和 [CancelIoEx 完成要求](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)。
 
 ## 官方资料
 

@@ -6,6 +6,8 @@ pub use plan::UserAgentPlan;
 mod control;
 pub mod handoff;
 #[cfg(windows)]
+pub mod launch_channel;
+#[cfg(windows)]
 mod runtime;
 #[cfg(windows)]
 pub use runtime::{

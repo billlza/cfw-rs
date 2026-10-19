@@ -244,24 +244,54 @@ pub(super) fn with_medium_impersonation(action: impl FnOnce() -> Result<()>) -> 
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     run_case(image, name, expected, ClientCase::UserAgent, None, None)
 }
+enum Handoff {
+    Authority(zeroize::Zeroizing<Vec<u8>>),
+    Runtime(cfw_windows_engine::user_agent::handoff::LaunchMessage),
+}
+enum HandoffWriter {
+    Authority(std::fs::File, zeroize::Zeroizing<Vec<u8>>),
+    Runtime(
+        cfw_windows_engine::user_agent::launch_channel::LaunchSender,
+        cfw_windows_engine::user_agent::handoff::LaunchMessage,
+    ),
+}
+impl HandoffWriter {
+    fn write(self, cancel: &AtomicBool) -> Result<()> {
+        match self {
+            Self::Authority(mut file, bytes) => {
+                std::io::Write::write_all(&mut file, bytes.as_slice()).map_err(|e| e.to_string())
+            }
+            Self::Runtime(sender, message) => sender
+                .send(message, Instant::now() + LIMIT, cancel)
+                .map_err(|e| e.to_string()),
+        }
+    }
+}
 type Activity<'a> = &'a mut dyn FnMut(&OwnedHandle, Instant) -> Result<()>;
 pub(super) fn run_runtime(
     image: &Path,
     name: &str,
     expected: [u8; 32],
     case: ClientCase,
-    handoff: &[u8],
+    handoff: cfw_windows_engine::user_agent::handoff::LaunchMessage,
     activity: Option<Activity<'_>>,
 ) -> Result<()> {
     if !matches!(
         case,
         ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime
-    ) || handoff.is_empty()
-        || handoff.len() > cfw_windows_engine::user_agent::handoff::MAX_FRAME_BYTES
+    ) || handoff.as_bytes().is_empty()
+        || handoff.as_bytes().len() > cfw_windows_engine::user_agent::handoff::MAX_FRAME_BYTES
     {
         return Err("invalid runtime handoff case or length".into());
     }
-    run_case(image, name, expected, case, Some(handoff), activity)
+    run_case(
+        image,
+        name,
+        expected,
+        case,
+        Some(Handoff::Runtime(handoff)),
+        activity,
+    )
 }
 pub(super) fn run_rejected_copy(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
     run_case(image, name, expected, ClientCase::CopiedImage, None, None)
@@ -281,7 +311,9 @@ pub(super) fn run_authority(
         name,
         expected,
         ClientCase::AuthorityRuntime,
-        Some(handoff),
+        Some(Handoff::Authority(zeroize::Zeroizing::new(
+            handoff.to_vec(),
+        ))),
         None,
     )
 }
@@ -290,7 +322,7 @@ fn run_case(
     name: &str,
     expected: [u8; 32],
     case: ClientCase,
-    handoff: Option<&[u8]>,
+    handoff: Option<Handoff>,
     activity: Option<Activity<'_>>,
 ) -> Result<()> {
     let token = token()?;
@@ -309,22 +341,30 @@ fn run_case(
         .create_new(true)
         .open(&output_path)
         .map_err(|e| e.to_string())?;
-    let (input, writer) = if let Some(handoff) = handoff {
-        let mut read = null_mut();
-        let mut write = null_mut();
-        if unsafe {
-            windows_sys::Win32::System::Pipes::CreatePipe(&mut read, &mut write, null(), 8192)
-        } == 0
-        {
-            return Err(error("create authority handoff pipe"));
+    let (input, writer) = match handoff {
+        Some(Handoff::Runtime(message)) => {
+            let (sender, input) =
+                cfw_windows_engine::user_agent::launch_channel::LaunchSender::create()
+                    .map_err(|e| e.to_string())?;
+            (
+                std::fs::File::from(input),
+                Some(HandoffWriter::Runtime(sender, message)),
+            )
         }
-        let read = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(read) });
-        let write = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(write) });
-        let mut bytes = zeroize::Zeroizing::new(vec![0; handoff.len()]);
-        bytes.copy_from_slice(handoff);
-        (read, Some((write, bytes)))
-    } else {
-        (std::fs::File::open("NUL").map_err(|e| e.to_string())?, None)
+        Some(Handoff::Authority(bytes)) => {
+            let mut read = null_mut();
+            let mut write = null_mut();
+            if unsafe {
+                windows_sys::Win32::System::Pipes::CreatePipe(&mut read, &mut write, null(), 8192)
+            } == 0
+            {
+                return Err(error("create authority handoff pipe"));
+            }
+            let read = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(read) });
+            let write = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(write) });
+            (read, Some(HandoffWriter::Authority(write, bytes)))
+        }
+        None => (std::fs::File::open("NUL").map_err(|e| e.to_string())?, None),
     };
     let handles = [input.as_raw_handle(), output.as_raw_handle()];
     for handle in handles {
@@ -333,7 +373,7 @@ fn run_case(
         }
     }
     // Inherit only the explicit input and diagnostic output. The ticket's
-    // anonymous-pipe writer, token, service and process handles stay private.
+    // input-pipe writer, token, service and process handles stay private.
     let mut attributes = Attributes::handles(&handles)?;
     let startup = STARTUPINFOEXW {
         StartupInfo: STARTUPINFOW {
@@ -369,11 +409,13 @@ fn run_case(
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
     drop(input);
-    // Anonymous pipe writes can block despite the size hint. Write on a worker
-    // while this thread supervises the bounded child lifetime. A confirmed child
-    // exit closes its only reader, and the joined writer retains any I/O error.
-    let writer = writer.map(|(mut output, bytes)| {
-        thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
+    // Runtime frames use native overlapped cancellation and a correlated
+    // decode acknowledgement. The older small Authority-policy fixture keeps
+    // its anonymous input; both writers remain owned until child completion.
+    let handoff_cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let writer = writer.map(|writer| {
+        let cancel = std::sync::Arc::clone(&handoff_cancel);
+        thread::spawn(move || writer.write(&cancel))
     });
     // Runtime includes actual engine startup, traffic and Authority stop.
     // Existing authentication cases keep their original fifteen seconds.
@@ -390,10 +432,14 @@ fn run_case(
         Some(activity) => activity(&process, deadline),
         None => Ok(()),
     };
+    if exercised.is_err() {
+        handoff_cancel.store(true, Ordering::Release);
+    }
     let completed = (|| -> Result<()> {
         let waited =
             cfw_windows_storage::wait_until(&process, deadline).map_err(|e| e.to_string())?;
         if waited != cfw_windows_storage::WaitOutcome::Signaled {
+            handoff_cancel.store(true, Ordering::Release);
             if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
                 return Err(error("terminate expired fixture client"));
             }

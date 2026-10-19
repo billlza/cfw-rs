@@ -77,7 +77,18 @@ unknown/duplicate fields and noncanonical encodings, then rechecks the existing
 request and exact binding. Frame/template owners erase their buffers on drop;
 callers still own input-buffer erasure, I/O deadlines and cancellation. The frame
 cannot select service, executable or vault paths, and never grants a start lease.
-Production process launch and its cancellable transport still need assembly.
+
+`LaunchSender` creates a private, already connected message pipe for an explicit
+inherited-handle list. `LaunchReceiver` checks the inherited endpoint type and
+read mode, the live server's full user/logon/session identity and its installed
+Desktop file identity. The shared overlapped I/O implementation now supports a
+cancellation signal without changing service RPC limits. Cancellation requests
+are followed by kernel completion before any buffer is released. Both endpoints
+are consumed after one attempt, including uncertain failures. A bounded reply
+correlates the received frame's SHA-256; it attests decoding only, before native
+Authority binding. The caller still owns child supervision and must resolve
+uncertain delivery through Authority. Production process launch and the full
+bidirectional lifecycle channel still need assembly.
 
 `SystemProxyAuthorization` is a shared application contract. The Apple adapter
 delegates to its existing native rights request without changing restoration
@@ -359,14 +370,23 @@ real engine, checks HTTP traffic in LocalProxy and SystemProxy modes, and tests
 Authority-driven cancellation of both modes. The fixture verifies held process
 exit, released listeners, original proxy settings, native Stopped replies and
 service deletion. A distinct Desktop image/process prepares the original shared
-request and sends a launch frame larger than the anonymous pipe's buffer hint
+request and sends a launch frame larger than the private pipe's buffer hint
 to each medium-integrity child. Only its input/output handles are inherited;
-the parent supervises the child and joins the writer after observed exit. The
+the receiver authenticates the installed Desktop image and acknowledges the
+decoded frame through the inherited duplex channel. The parent supervises the
+child and joins the cancellable writer after observed exit. The
 parent uses its original controller key to verify authenticated access and also
 checks unauthenticated rejection. Test-only readiness files contain process and
 operation IDs, never templates, keys or tickets; they grant no capability.
 Initial/final global cleanup evidence is still test-injected, so
 these checks do not prove production global recovery or an assembled backend.
+
+Native transport tests separately force reads and full-pipe writes into
+`ERROR_IO_PENDING`, cancel those exact operations, and observe their final
+`ERROR_OPERATION_ABORTED` result. Other tests cover frame/ack correlation,
+deadline without an acknowledgement, cancellation and a byte-identical copy of
+the wrong parent executable. These native tests require Windows execution;
+cross compilation alone does not establish their runtime result.
 
 The native CI job builds both the stock CLI and worker twice using independent
 Go caches. The existing HTTP/SOCKS TCP/UDP smoke test still covers the CLI. A

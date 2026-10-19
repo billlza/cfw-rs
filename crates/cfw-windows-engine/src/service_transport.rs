@@ -36,7 +36,7 @@ use windows_sys::Win32::{
 };
 use zeroize::Zeroizing;
 
-mod native_io;
+pub(crate) mod native_io;
 const MAX_CONNECTIONS: usize = 15;
 const MAX_MESSAGE: usize = cfw_engine_api::authority_v1::MAX_ENVELOPE_BYTES;
 const MAX_IO_TIME: Duration = Duration::from_secs(120);
@@ -57,6 +57,8 @@ pub enum ServiceTransportError {
         "Windows service transport deadline expired or exceeds the allowed interval; delivery may be uncertain"
     )]
     Deadline,
+    #[error("Windows local transport was cancelled; delivery may be uncertain")]
+    Cancelled,
     #[error("Windows service transport connection is closed")]
     Closed,
     #[error("Windows service transport connection limit reached")]

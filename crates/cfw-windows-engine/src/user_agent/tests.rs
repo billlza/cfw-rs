@@ -7,7 +7,10 @@ use crate::{
     },
     authority_journal::RecordedOwner,
 };
-use cfw_engine_api::authority_v1::{AuthorityMode, RootContext};
+use cfw_engine_api::{
+    EngineCommandContext, EngineStartRequest,
+    authority_v1::{AuthorityMode, RootContext},
+};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use uuid::Uuid;
 
@@ -70,6 +73,34 @@ pub(super) fn inputs(mode: ProjectionMode) -> (BindRequest, PreparedConfig) {
         },
         config,
     )
+}
+pub(super) fn launch(mode: ProjectionMode) -> super::handoff::UserAgentLaunch {
+    let (binding, _) = inputs(mode);
+    let projected =
+        ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
+            .unwrap()
+            .project(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                mode,
+                &EngineSettings::default(),
+            )
+            .unwrap();
+    let root = &binding.context.operation.root;
+    let request = EngineStartRequest {
+        context: EngineCommandContext {
+            installation_id: root.installation_id.to_string(),
+            config_epoch: root.epoch,
+            generation: root.generation,
+        },
+        mode,
+        credential_audience: projected.credential_audience().clone(),
+        config_json: projected.as_json().into(),
+        config_content_digest: projected.configuration_digest().into(),
+        config_digest: projected.digest().into(),
+        credential_slots: projected.credential_slots().to_vec(),
+        tunnel_options: None,
+    };
+    super::handoff::UserAgentLaunch::new(binding, request).unwrap()
 }
 #[test]
 fn runtime_plan_binds_both_configuration_and_product_identity_digests() {

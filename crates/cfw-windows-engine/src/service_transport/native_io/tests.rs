@@ -106,3 +106,101 @@ fn pending_accept_is_cancelled_and_drained_after_worker_transfer() {
         matches!(LocalServicePipe::open(&name, ServiceClientRole::Desktop), Err(ServicePeerError::Native { source, .. }) if source.raw_os_error() == Some(2))
     );
 }
+
+#[test]
+fn explicit_cancellation_drains_an_already_pending_native_read() {
+    let (name, mut pending) = pending_listener();
+    let _client = LocalServicePipe::open(&name, ServiceClientRole::Desktop).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    pending.wait(deadline).unwrap();
+    let server = pending.into_pipe().unwrap();
+    let mut bytes = Zeroizing::new(vec![0; 128]);
+    let operation = Operation::new().unwrap();
+    let started = unsafe {
+        ReadFile(
+            server.as_raw_handle(),
+            bytes.as_mut_ptr(),
+            bytes.len() as u32,
+            null_mut(),
+            operation.state.get(),
+        )
+    } != 0;
+    let error = io::Error::last_os_error();
+    assert!(!started);
+    assert_eq!(error.raw_os_error(), Some(ERROR_IO_PENDING as i32));
+    assert!(matches!(
+        operation.complete(
+            &server,
+            started,
+            error,
+            deadline,
+            Some(&AtomicBool::new(true))
+        ),
+        Err(ServiceTransportError::Cancelled)
+    ));
+    let mut transferred = 0;
+    assert_eq!(
+        unsafe {
+            GetOverlappedResult(
+                server.as_raw_handle(),
+                operation.state.get(),
+                &mut transferred,
+                0,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(ERROR_OPERATION_ABORTED as i32)
+    );
+}
+
+#[test]
+fn explicit_cancellation_drains_an_already_pending_full_pipe_write() {
+    let (name, mut pending) = pending_listener();
+    let _client = LocalServicePipe::open(&name, ServiceClientRole::Desktop).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    pending.wait(deadline).unwrap();
+    let server = pending.into_pipe().unwrap();
+    let bytes = Zeroizing::new(vec![7; MAX_MESSAGE]);
+    let operation = Operation::new().unwrap();
+    let started = unsafe {
+        WriteFile(
+            server.as_raw_handle(),
+            bytes.as_ptr(),
+            bytes.len() as u32,
+            null_mut(),
+            operation.state.get(),
+        )
+    } != 0;
+    let error = io::Error::last_os_error();
+    assert!(!started);
+    assert_eq!(error.raw_os_error(), Some(ERROR_IO_PENDING as i32));
+    assert!(matches!(
+        operation.complete(
+            &server,
+            started,
+            error,
+            deadline,
+            Some(&AtomicBool::new(true))
+        ),
+        Err(ServiceTransportError::Cancelled)
+    ));
+    let mut transferred = 0;
+    assert_eq!(
+        unsafe {
+            GetOverlappedResult(
+                server.as_raw_handle(),
+                operation.state.get(),
+                &mut transferred,
+                0,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(ERROR_OPERATION_ABORTED as i32)
+    );
+}

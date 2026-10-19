@@ -139,7 +139,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                 name,
                 expected,
                 restricted::ClientCase::RejectedRuntime,
-                rejected.as_bytes(),
+                rejected,
                 None,
             )?;
         }
@@ -196,7 +196,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
             } else {
                 restricted::ClientCase::RuntimeSystem
             },
-            message.as_bytes(),
+            message,
             Some(&mut exercise),
         )?;
         let engine_process = engine_process.ok_or("runtime engine process was never retained")?;

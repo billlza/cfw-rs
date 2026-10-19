@@ -4,7 +4,7 @@
 //! on a dedicated worker and must not report it retired before this returns.
 use super::*;
 use cfw_windows_storage::{WaitOutcome, wait_until};
-use std::{cell::UnsafeCell, ptr::null};
+use std::{cell::UnsafeCell, ptr::null, sync::atomic::AtomicBool};
 use windows_sys::Win32::{
     Foundation::{
         ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
@@ -47,6 +47,7 @@ impl Operation {
         started: bool,
         start_error: io::Error,
         deadline: Instant,
+        cancel: Option<&AtomicBool>,
     ) -> Result<u32, ServiceTransportError> {
         if !started && start_error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
             return Err(classify(start_error));
@@ -60,24 +61,23 @@ impl Operation {
                 return Err(classify(io::Error::last_os_error()));
             }
             check_deadline(deadline)?;
+            check_cancel(cancel)?;
             return Ok(transferred);
         }
-        let wait = wait_until(&self.event, deadline);
-        if matches!(wait, Ok(WaitOutcome::Signaled)) {
-            let mut transferred = 0;
-            if unsafe {
-                GetOverlappedResult(pipe.as_raw_handle(), self.state.get(), &mut transferred, 0)
-            } == 0
-            {
-                return Err(classify(io::Error::last_os_error()));
+        let failure = match self.wait(deadline, cancel) {
+            Ok(()) => {
+                let mut transferred = 0;
+                if unsafe {
+                    GetOverlappedResult(pipe.as_raw_handle(), self.state.get(), &mut transferred, 0)
+                } == 0
+                {
+                    return Err(classify(io::Error::last_os_error()));
+                }
+                check_deadline(deadline)?;
+                check_cancel(cancel)?;
+                return Ok(transferred);
             }
-            check_deadline(deadline)?;
-            return Ok(transferred);
-        }
-        let failure = match wait {
-            Ok(WaitOutcome::TimedOut) => ServiceTransportError::Deadline,
-            Err(error) => error.into(),
-            Ok(_) => io::Error::other("pipe event reported abandonment").into(),
+            Err(error) => error,
         };
         // Cancellation may race ordinary completion. ERROR_NOT_FOUND is only
         // accepted after the exact operation has also been drained below.
@@ -109,6 +109,34 @@ impl Operation {
                 }
             }))
     }
+    fn wait(
+        &self,
+        deadline: Instant,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<(), ServiceTransportError> {
+        loop {
+            check_cancel(cancel)?;
+            let poll = if cancel.is_some() {
+                deadline.min(Instant::now() + Duration::from_millis(25))
+            } else {
+                deadline
+            };
+            match wait_until(&self.event, poll)? {
+                WaitOutcome::Signaled => return Ok(()),
+                WaitOutcome::TimedOut if cancel.is_some() && Instant::now() < deadline => {}
+                WaitOutcome::TimedOut => return Err(ServiceTransportError::Deadline),
+                _ => return Err(io::Error::other("pipe event reported abandonment").into()),
+            }
+        }
+    }
+}
+
+fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), ServiceTransportError> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        Err(ServiceTransportError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 fn classify(error: io::Error) -> ServiceTransportError {
@@ -123,7 +151,7 @@ fn classify(error: io::Error) -> ServiceTransportError {
 /// remain owned until admitted, explicitly closed, or dropped. Cancelling and
 /// replacing the instance on every poll can discard a client that connected at
 /// the deadline before the server thread observed completion.
-pub(super) struct PendingAccept {
+pub(crate) struct PendingAccept {
     pipe: Option<OwnedHandle>,
     // Allocated before ConnectNamedPipe. Its OVERLAPPED address is never moved
     // while pending, including when the enclosing listener itself is moved.
@@ -139,7 +167,7 @@ pub(super) struct PendingAccept {
 // another thread. This does not grant Sync or make borrowed read/write I/O Send.
 unsafe impl Send for PendingAccept {}
 impl PendingAccept {
-    pub(super) fn new(pipe: OwnedHandle) -> Result<Self, ServiceTransportError> {
+    pub(crate) fn new(pipe: OwnedHandle) -> Result<Self, ServiceTransportError> {
         Ok(Self {
             pipe: Some(pipe),
             operation: Box::new(Operation::new()?),
@@ -149,7 +177,7 @@ impl PendingAccept {
         })
     }
 
-    pub(super) fn wait(&mut self, deadline: Instant) -> Result<(), ServiceTransportError> {
+    pub(crate) fn wait(&mut self, deadline: Instant) -> Result<(), ServiceTransportError> {
         check_deadline(deadline)?;
         let pipe = self.pipe.as_ref().ok_or(ServiceTransportError::Closed)?;
         if !self.started {
@@ -195,14 +223,14 @@ impl PendingAccept {
         check_deadline(deadline)
     }
 
-    pub(super) fn into_pipe(mut self) -> Result<OwnedHandle, ServiceTransportError> {
+    pub(crate) fn into_pipe(mut self) -> Result<OwnedHandle, ServiceTransportError> {
         if self.pending || !self.connected {
             return Err(ServiceTransportError::RequestOrder);
         }
         self.pipe.take().ok_or(ServiceTransportError::Closed)
     }
 
-    pub(super) fn retire(&mut self) -> Result<(), ServiceTransportError> {
+    pub(crate) fn retire(&mut self) -> Result<(), ServiceTransportError> {
         if !self.pending {
             return Ok(());
         }
@@ -270,20 +298,35 @@ pub(super) fn read(
     pipe: &OwnedHandle,
     deadline: Instant,
 ) -> Result<ServicePayload, ServiceTransportError> {
+    read_bounded(pipe, deadline, MAX_MESSAGE, None)
+}
+
+// Shared overlapped I/O; protocol callers retain their smaller message limits.
+// Only internal launch framing can request a larger buffer than service RPC.
+pub(crate) fn read_bounded(
+    pipe: &OwnedHandle,
+    deadline: Instant,
+    maximum: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<ServicePayload, ServiceTransportError> {
     check_deadline(deadline)?;
-    let mut bytes = Zeroizing::new(vec![0; MAX_MESSAGE]);
+    check_cancel(cancel)?;
+    if maximum == 0 || maximum > 4 * MAX_MESSAGE {
+        return Err(ServiceTransportError::MessageLength);
+    }
+    let mut bytes = Zeroizing::new(vec![0; maximum]);
     let operation = Operation::new()?;
     let started = unsafe {
         ReadFile(
             pipe.as_raw_handle(),
             bytes.as_mut_ptr(),
-            MAX_MESSAGE as u32,
+            maximum as u32,
             null_mut(),
             operation.state.get(),
         )
     } != 0;
     let error = io::Error::last_os_error();
-    let length = operation.complete(pipe, started, error, deadline)? as usize;
+    let length = operation.complete(pipe, started, error, deadline, cancel)? as usize;
     if length == 0 || length > bytes.len() {
         return Err(ServiceTransportError::MessageLength);
     }
@@ -295,8 +338,19 @@ pub(super) fn write(
     bytes: &[u8],
     deadline: Instant,
 ) -> Result<(), ServiceTransportError> {
+    write_bounded(pipe, bytes, deadline, MAX_MESSAGE, None)
+}
+
+pub(crate) fn write_bounded(
+    pipe: &OwnedHandle,
+    bytes: &[u8],
+    deadline: Instant,
+    maximum: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<(), ServiceTransportError> {
     check_deadline(deadline)?;
-    if bytes.is_empty() || bytes.len() > MAX_MESSAGE {
+    check_cancel(cancel)?;
+    if maximum == 0 || maximum > 4 * MAX_MESSAGE || bytes.is_empty() || bytes.len() > maximum {
         return Err(ServiceTransportError::MessageLength);
     }
     let operation = Operation::new()?;
@@ -310,7 +364,7 @@ pub(super) fn write(
         )
     } != 0;
     let error = io::Error::last_os_error();
-    let length = operation.complete(pipe, started, error, deadline)? as usize;
+    let length = operation.complete(pipe, started, error, deadline, cancel)? as usize;
     if length != bytes.len() {
         return Err(ServiceTransportError::MessageLength);
     }

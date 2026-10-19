@@ -972,7 +972,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # Removing a pin from both the pin file and the policy cannot pass: the
         # fixed key set still requires it (build_native_products.sh, for one,
         # skips its Xcode identity check when XCODE_VERSION is unset).
-        for key in ("XCODE_VERSION", "GOVULNCHECK_MODULE_SUM", "NPM_ARCHIVE_SHA256"):
+        for key in (
+            "XCODE_VERSION", "GOVULNCHECK_MODULE_SUM", "NPM_ARCHIVE_SHA256",
+            "GO_WINDOWS_AMD64_SHA256",
+        ):
             with self.subTest(key=key):
                 fixture = Fixture()
                 del fixture.env[key]
@@ -1012,6 +1015,16 @@ class PinnedBuildInputsTests(unittest.TestCase):
         self._assert_fails(
             fixture, "pins the policy does not declare: UNDECLARED_TOOL_VERSION"
         )
+
+    def test_windows_go_archive_digest_is_required_and_validated(self) -> None:
+        fixture = Fixture()
+        del fixture.env["GO_WINDOWS_AMD64_SHA256"]
+        self._assert_fails(fixture, "missing required pins: GO_WINDOWS_AMD64_SHA256")
+        for malformed in ("A" * 64, "0" * 63, "windows-go-archive"):
+            with self.subTest(digest=malformed):
+                fixture = Fixture()
+                fixture.env["GO_WINDOWS_AMD64_SHA256"] = malformed
+                self._assert_fails(fixture, "GO_WINDOWS_AMD64_SHA256 is not a sha256 value")
 
     def test_every_pin_format_rejects_a_malformed_value(self) -> None:
         malformed = {

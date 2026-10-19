@@ -39,6 +39,7 @@
     "NPM_ARCHIVE_SHA256": "sha256",
     "GO_VERSION": "version",
     "GO_DARWIN_ARM64_SHA256": "sha256",
+    "GO_WINDOWS_AMD64_SHA256": "sha256",
     "GOMOBILE_VERSION": "go-module-version",
     "GOMOBILE_COMMIT": "git-commit",
     "GOMOBILE_MODULE_SUM": "go-module-sum",

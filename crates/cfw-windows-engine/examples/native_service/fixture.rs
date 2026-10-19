@@ -108,8 +108,22 @@ pub(super) fn main() -> Result<()> {
     if args.len() == 2 && args[1] == "--runtime-validation" {
         return user_agent::run_validation();
     }
-    if args.len() == 4 && args[1] == "--real-agent-runtime" {
-        return restricted::client(&args[2], &args[3], restricted::ClientCase::RealRuntime);
+    if args.len() == 4 {
+        let case = match args[1].as_str() {
+            "--local-agent-runtime" => Some(restricted::ClientCase::RuntimeLocal),
+            "--system-agent-runtime" => Some(restricted::ClientCase::RuntimeSystem),
+            "--rejected-agent-runtime" => Some(restricted::ClientCase::RejectedRuntime),
+            _ => None,
+        };
+        if let Some(case) = case {
+            return restricted::client(&args[2], &args[3], case);
+        }
+    }
+    if args.len() == 4 && args[1] == "--runtime-desktop" {
+        if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
+            return Err("runtime desktop requires the disposable CI opt-in".into());
+        }
+        return user_agent::desktop(&args[2], &args[3]);
     }
     if args.len() == 4 && args[1] == "--desktop-validation" {
         if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {

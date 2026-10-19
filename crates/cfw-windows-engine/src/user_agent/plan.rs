@@ -60,8 +60,26 @@ impl UserAgentPlan {
         vault: cfw_windows_credentials::WindowsCredentialStore,
     ) -> Result<Self> {
         let request = crate::CheckedStartConfiguration::new(request)?;
+        Self::from_checked_request(binding, request, vault)
+    }
+    #[cfg(windows)]
+    pub(super) fn from_checked_request(
+        binding: BindRequest,
+        request: crate::CheckedStartConfiguration,
+        vault: cfw_windows_credentials::WindowsCredentialStore,
+    ) -> Result<Self> {
+        Self::check_request(&binding, &request)?;
+        Ok(Self {
+            binding,
+            config: PlannedConfiguration::Requested { request, vault },
+        })
+    }
+    pub(super) fn check_request(
+        binding: &BindRequest,
+        request: &crate::CheckedStartConfiguration,
+    ) -> Result<()> {
         Self::check(
-            &binding,
+            binding,
             request.mode(),
             request.configuration_digest(),
             request.digest(),
@@ -74,10 +92,7 @@ impl UserAgentPlan {
         {
             return Err(UserAgentError::ConfigurationMismatch);
         }
-        Ok(Self {
-            binding,
-            config: PlannedConfiguration::Requested { request, vault },
-        })
+        Ok(())
     }
     fn check(
         binding: &BindRequest,

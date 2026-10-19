@@ -49,6 +49,16 @@ pub(super) struct Installation {
 }
 
 pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
+    run_desktop(root, prefix, expected, false)
+}
+pub(super) fn run_runtime_desktop_validation(
+    root: &Path,
+    name: &str,
+    expected: [u8; 32],
+) -> Result<()> {
+    run_desktop(root, name, expected, true)
+}
+fn run_desktop(root: &Path, prefix: &str, expected: [u8; 32], runtime: bool) -> Result<()> {
     let image = root.join("desktop-fixture.exe");
     let _held = verified(&image, expected)?;
     let output_path = root.join(format!("{prefix}-desktop-client-output.txt"));
@@ -59,7 +69,15 @@ pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 3
         .map_err(|e| e.to_string())?;
     let hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
     let mut child = Command::new(image)
-        .args(["--desktop-validation", prefix, &hex])
+        .args([
+            if runtime {
+                "--runtime-desktop"
+            } else {
+                "--desktop-validation"
+            },
+            prefix,
+            &hex,
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(output.try_clone().map_err(|e| e.to_string())?)
@@ -97,9 +115,12 @@ pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 3
         return Err("desktop fixture report exceeded bound".into());
     }
     let report: serde_json::Value = serde_json::from_slice(&report).map_err(|e| e.to_string())?;
-    if report
-        != serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true,"live_console_authorized":true})
-    {
+    let expected_report = if runtime {
+        user_agent::desktop_report()
+    } else {
+        serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true,"live_console_authorized":true})
+    };
+    if report != expected_report {
         return Err(format!(
             "desktop fixture report did not attest its checks: {report}"
         ));
@@ -176,14 +197,7 @@ pub(super) fn write_installation_mode(
     .map_err(|e| e.to_string())?;
     let current = NativePeerProcess::open(std::process::id()).map_err(|e| e.to_string())?;
     let installation = Installation {
-        // Runtime-only fixture projects configuration and prepares the lease
-        // in the same medium-integrity process. Distinct desktop/agent images
-        // remain mandatory in the separate native admission fixture.
-        desktop_image: if runtime.is_some() {
-            agent.to_owned()
-        } else {
-            desktop_image
-        },
+        desktop_image,
         desktop_digest: digest,
         agent_image: agent.to_owned(),
         agent_digest: digest,

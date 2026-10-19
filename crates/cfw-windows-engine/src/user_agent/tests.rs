@@ -20,7 +20,7 @@ fn owner() -> RecordedOwner {
 fn bytes(hex: &str) -> [u8; 32] {
     std::array::from_fn(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
 }
-fn inputs(mode: ProjectionMode) -> (BindRequest, PreparedConfig) {
+pub(super) fn inputs(mode: ProjectionMode) -> (BindRequest, PreparedConfig) {
     let projection =
         ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
             .unwrap()

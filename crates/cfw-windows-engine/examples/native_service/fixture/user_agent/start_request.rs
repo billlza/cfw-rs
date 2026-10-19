@@ -1,8 +1,7 @@
 use super::*;
 
 pub(super) fn reject_before_vault_access(
-    binding: &BindRequest,
-    request: &EngineStartRequest,
+    launch: UserAgentLaunch,
     service: &str,
     service_image: Arc<VerifiedExecutable>,
     engine: &EngineInstallation,
@@ -13,24 +12,9 @@ pub(super) fn reject_before_vault_access(
     // of the required authenticated ticket rejection below.
     let vault_path = root.join("invalid-vault-directory");
     std::fs::write(&vault_path, b"fixture-non-directory").map_err(|e| e.to_string())?;
-    let ticket = binding
-        .ticket
-        .with_bytes(|bytes| {
-            let mut changed = zeroize::Zeroizing::new([0; 32]);
-            changed.copy_from_slice(bytes);
-            changed[0] ^= 1;
-            TicketMaterial::from_slice(changed.as_ref())
-        })
-        .map_err(|e| e.to_string())?;
-    let plan = UserAgentPlan::from_start_request(
-        BindRequest {
-            context: binding.context.clone(),
-            ticket,
-        },
-        request.clone(),
-        WindowsCredentialStore::new(&vault_path),
-    )
-    .map_err(|e| format!("native request validation accessed vault before binding: {e}"))?;
+    let plan = launch
+        .into_plan(WindowsCredentialStore::new(&vault_path))
+        .map_err(|e| format!("native request validation accessed vault before binding: {e}"))?;
     let child_directory = root.join("must-not-start");
     let assets = UserAgentRuntime::new(
         VerifiedExecutable::open(&engine.path, engine.digest, &engine.version)

@@ -4,6 +4,7 @@ mod plan;
 pub use plan::UserAgentPlan;
 #[cfg(windows)]
 mod control;
+pub mod handoff;
 #[cfg(windows)]
 mod runtime;
 #[cfg(windows)]

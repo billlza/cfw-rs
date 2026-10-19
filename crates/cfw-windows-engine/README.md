@@ -68,8 +68,16 @@ the request to the exact lease root and both digests before any vault access;
 binding succeeds. Failure stays an error, and the original pre-resolved API
 remains a lower-level component entry point. The native fixture exercises this
 shared request path and rejects a deliberately wrong ticket before a configured
-invalid vault path or runtime directory is used. Production process launch and
-the separate Desktop-to-UserAgent transport still need assembly.
+invalid vault path or runtime directory is used.
+
+`user_agent::handoff::UserAgentLaunch` carries that exact request and its binding
+in a versioned, length-prefixed frame. The two-MiB payload limit is separate from
+the small Authority command limit. Decoding rejects incomplete/trailing bytes,
+unknown/duplicate fields and noncanonical encodings, then rechecks the existing
+request and exact binding. Frame/template owners erase their buffers on drop;
+callers still own input-buffer erasure, I/O deadlines and cancellation. The frame
+cannot select service, executable or vault paths, and never grants a start lease.
+Production process launch and its cancellable transport still need assembly.
 
 `SystemProxyAuthorization` is a shared application contract. The Apple adapter
 delegates to its existing native rights request without changing restoration
@@ -348,12 +356,16 @@ The engine CI job also invokes `native-service-fixture --runtime-validation`
 with both service and proxy mutation opt-ins. It runs a medium-integrity,
 non-administrator UserAgent through an actual temporary SYSTEM service and the
 real engine, checks HTTP traffic in LocalProxy and SystemProxy modes, and tests
-Authority-driven SystemProxy cancellation. The fixture verifies held process
+Authority-driven cancellation of both modes. The fixture verifies held process
 exit, released listeners, original proxy settings, native Stopped replies and
-service deletion. Configuration projection and Desktop preparation deliberately
-share this fixture process to keep the per-process controller secret in memory;
-the separate admission fixture retains distinct Desktop/UserAgent images and
-processes. Initial/final global cleanup evidence is still test-injected, so
+service deletion. A distinct Desktop image/process prepares the original shared
+request and sends a launch frame larger than the anonymous pipe's buffer hint
+to each medium-integrity child. Only its input/output handles are inherited;
+the parent supervises the child and joins the writer after observed exit. The
+parent uses its original controller key to verify authenticated access and also
+checks unauthenticated rejection. Test-only readiness files contain process and
+operation IDs, never templates, keys or tickets; they grant no capability.
+Initial/final global cleanup evidence is still test-injected, so
 these checks do not prove production global recovery or an assembled backend.
 
 The native CI job builds both the stock CLI and worker twice using independent

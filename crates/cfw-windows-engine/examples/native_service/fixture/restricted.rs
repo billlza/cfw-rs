@@ -6,7 +6,9 @@ pub(super) enum ClientCase {
     UserAgent,
     CopiedImage,
     AuthorityRuntime,
-    RealRuntime,
+    RuntimeLocal,
+    RuntimeSystem,
+    RejectedRuntime,
 }
 impl ClientCase {
     fn flag(self) -> &'static str {
@@ -14,7 +16,9 @@ impl ClientCase {
             Self::UserAgent => "--client",
             Self::CopiedImage => "--rejected-client",
             Self::AuthorityRuntime => "--authority-runtime",
-            Self::RealRuntime => "--real-agent-runtime",
+            Self::RuntimeLocal => "--local-agent-runtime",
+            Self::RuntimeSystem => "--system-agent-runtime",
+            Self::RejectedRuntime => "--rejected-agent-runtime",
         }
     }
     fn report_prefix(self, name: &str) -> String {
@@ -22,7 +26,9 @@ impl ClientCase {
             Self::UserAgent => name.to_owned(),
             Self::CopiedImage => format!("{name}-copy"),
             Self::AuthorityRuntime => format!("{name}-authority"),
-            Self::RealRuntime => format!("{name}-runtime"),
+            Self::RuntimeLocal => format!("{name}-runtime-local"),
+            Self::RuntimeSystem => format!("{name}-runtime-system"),
+            Self::RejectedRuntime => format!("{name}-runtime-rejected"),
         }
     }
     fn report(self) -> serde_json::Value {
@@ -36,7 +42,13 @@ impl ClientCase {
             Self::AuthorityRuntime => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"native_authority_binding":true,"wrong_ticket_rejected":true,"new_connection_cannot_inherit_lease":true,"synthetic_runtime_reports":true,"actual_engine_started":false})
             }
-            Self::RealRuntime => user_agent::client_report(),
+            Self::RuntimeLocal => {
+                user_agent::agent_report(cfw_singbox_config::ProjectionMode::LocalProxy)
+            }
+            Self::RuntimeSystem => {
+                user_agent::agent_report(cfw_singbox_config::ProjectionMode::SystemProxy)
+            }
+            Self::RejectedRuntime => user_agent::rejected_report(),
         }
     }
 }
@@ -230,13 +242,29 @@ pub(super) fn with_medium_impersonation(action: impl FnOnce() -> Result<()>) -> 
 }
 
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
-    run_case(image, name, expected, ClientCase::UserAgent, None)
+    run_case(image, name, expected, ClientCase::UserAgent, None, None)
 }
-pub(super) fn run_runtime(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
-    run_case(image, name, expected, ClientCase::RealRuntime, None)
+type Activity<'a> = &'a mut dyn FnMut(&OwnedHandle, Instant) -> Result<()>;
+pub(super) fn run_runtime(
+    image: &Path,
+    name: &str,
+    expected: [u8; 32],
+    case: ClientCase,
+    handoff: &[u8],
+    activity: Option<Activity<'_>>,
+) -> Result<()> {
+    if !matches!(
+        case,
+        ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime
+    ) || handoff.is_empty()
+        || handoff.len() > cfw_windows_engine::user_agent::handoff::MAX_FRAME_BYTES
+    {
+        return Err("invalid runtime handoff case or length".into());
+    }
+    run_case(image, name, expected, case, Some(handoff), activity)
 }
 pub(super) fn run_rejected_copy(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
-    run_case(image, name, expected, ClientCase::CopiedImage, None)
+    run_case(image, name, expected, ClientCase::CopiedImage, None, None)
 }
 pub(super) fn run_authority(
     image: &Path,
@@ -254,6 +282,7 @@ pub(super) fn run_authority(
         expected,
         ClientCase::AuthorityRuntime,
         Some(handoff),
+        None,
     )
 }
 fn run_case(
@@ -262,6 +291,7 @@ fn run_case(
     expected: [u8; 32],
     case: ClientCase,
     handoff: Option<&[u8]>,
+    activity: Option<Activity<'_>>,
 ) -> Result<()> {
     let token = token()?;
     let mut desktop = desktop::Desktop::new()?;
@@ -345,63 +375,81 @@ fn run_case(
     let writer = writer.map(|(mut output, bytes)| {
         thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
     });
-    // The runtime case includes actual engine starts, traffic and stop for two
-    // modes. Existing authentication cases keep their original fifteen seconds.
-    let limit = if matches!(case, ClientCase::RealRuntime) {
+    // Runtime includes actual engine startup, traffic and Authority stop.
+    // Existing authentication cases keep their original fifteen seconds.
+    let limit = if matches!(
+        case,
+        ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime
+    ) {
         Duration::from_secs(60)
     } else {
         LIMIT
     };
-    let waited = cfw_windows_storage::wait_until(&process, Instant::now() + limit)
-        .map_err(|e| e.to_string())?;
-    if waited != cfw_windows_storage::WaitOutcome::Signaled {
-        if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
-            return Err(error("terminate expired fixture client"));
-        }
-        if cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
-            .map_err(|e| e.to_string())?
-            != cfw_windows_storage::WaitOutcome::Signaled
-        {
-            return Err("expired fixture client cleanup was not observed".into());
+    let deadline = Instant::now() + limit;
+    let exercised = match activity {
+        Some(activity) => activity(&process, deadline),
+        None => Ok(()),
+    };
+    let completed = (|| -> Result<()> {
+        let waited =
+            cfw_windows_storage::wait_until(&process, deadline).map_err(|e| e.to_string())?;
+        if waited != cfw_windows_storage::WaitOutcome::Signaled {
+            if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
+                return Err(error("terminate expired fixture client"));
+            }
+            if cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
+                .map_err(|e| e.to_string())?
+                != cfw_windows_storage::WaitOutcome::Signaled
+            {
+                return Err("expired fixture client cleanup was not observed".into());
+            }
+            if let Some(writer) = writer {
+                let written = writer
+                    .join()
+                    .map_err(|_| "authority handoff writer panicked")?;
+                return Err(format!(
+                    "unprivileged fixture client exceeded its deadline; handoff writer: {written:?}"
+                ));
+            }
+            return Err("unprivileged fixture client exceeded its deadline".into());
         }
         if let Some(writer) = writer {
-            let written = writer
+            writer
                 .join()
-                .map_err(|_| "authority handoff writer panicked")?;
+                .map_err(|_| "authority handoff writer panicked")?
+                .map_err(|e| format!("authority handoff write: {e}"))?;
+        }
+        let mut exit = 0;
+        if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
+            return Err(error("read fixture client exit"));
+        }
+        let diagnostics = std::fs::read(&output_path).map_err(|e| e.to_string())?;
+        if diagnostics.len() > 16384 {
+            return Err("fixture client diagnostics exceed bound".into());
+        }
+        let diagnostics = String::from_utf8_lossy(&diagnostics);
+        let report = std::fs::read(parent.join(format!("{report_prefix}-client.json")))
+        .map_err(|e| format!("unprivileged client exit={exit:#x}; report unavailable: {e}; diagnostics: {diagnostics}"))?;
+        if report.len() > 8192 {
+            return Err("fixture client report exceeds bound".into());
+        }
+        let report: serde_json::Value =
+            serde_json::from_slice(&report).map_err(|e| e.to_string())?;
+        if exit != 0 || report != case.report() {
             return Err(format!(
-                "unprivileged fixture client exceeded its deadline; handoff writer: {written:?}"
+                "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
             ));
         }
-        return Err("unprivileged fixture client exceeded its deadline".into());
+        desktop.close()?;
+        Ok(())
+    })();
+    match (exercised, completed) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(exercise), Err(completion)) => {
+            Err(format!("{exercise}; client completion: {completion}"))
+        }
     }
-    if let Some(writer) = writer {
-        writer
-            .join()
-            .map_err(|_| "authority handoff writer panicked")?
-            .map_err(|e| format!("authority handoff write: {e}"))?;
-    }
-    let mut exit = 0;
-    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
-        return Err(error("read fixture client exit"));
-    }
-    let diagnostics = std::fs::read(&output_path).map_err(|e| e.to_string())?;
-    if diagnostics.len() > 16384 {
-        return Err("fixture client diagnostics exceed bound".into());
-    }
-    let diagnostics = String::from_utf8_lossy(&diagnostics);
-    let report = std::fs::read(parent.join(format!("{report_prefix}-client.json")))
-        .map_err(|e| format!("unprivileged client exit={exit:#x}; report unavailable: {e}; diagnostics: {diagnostics}"))?;
-    if report.len() > 8192 {
-        return Err("fixture client report exceeds bound".into());
-    }
-    let report: serde_json::Value = serde_json::from_slice(&report).map_err(|e| e.to_string())?;
-    if exit != 0 || report != case.report() {
-        return Err(format!(
-            "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
-        ));
-    }
-    desktop.close()?;
-    Ok(())
 }
 
 pub(super) fn client(name: &str, hex: &str, case: ClientCase) -> Result<()> {
@@ -475,7 +523,9 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
-        ClientCase::RealRuntime => return user_agent::agent(name, &image, expected),
+        ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime => {
+            return user_agent::agent(name, &image, expected, case);
+        }
         ClientCase::AuthorityRuntime => return authority_wire::agent(name, &image, expected),
         ClientCase::CopiedImage => {
             let mut channel = ServiceChannel::connect(

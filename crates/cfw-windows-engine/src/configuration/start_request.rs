@@ -33,6 +33,9 @@ impl CheckedStartConfiguration {
     pub fn context(&self) -> &EngineCommandContext {
         &self.request.context
     }
+    pub(crate) fn shared_request(&self) -> &EngineStartRequest {
+        &self.request
+    }
     pub fn mode(&self) -> ProjectionMode {
         self.request.mode
     }
@@ -73,6 +76,7 @@ impl CheckedStartConfiguration {
             || request.context.generation == 0
             || request.config_json.is_empty()
             || request.config_json.len() > MAX_ENGINE_CONFIG_BYTES
+            || request.credential_slots.len() > cfw_singbox_config::MAX_CREDENTIAL_SLOTS
         {
             return Err(Error::Configuration(
                 "invalid native configuration context or size",

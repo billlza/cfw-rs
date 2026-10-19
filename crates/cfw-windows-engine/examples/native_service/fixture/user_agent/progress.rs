@@ -46,7 +46,7 @@ pub(super) fn wait(
     root: &Path,
     name: &str,
     context: &LeaseContext,
-    child: &OwnedHandle,
+    child: &impl AsRawHandle,
     deadline: Instant,
 ) -> Result<OwnedHandle> {
     let target = path(root, name, context);

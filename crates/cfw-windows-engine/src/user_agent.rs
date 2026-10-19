@@ -8,6 +8,8 @@ pub mod handoff;
 #[cfg(windows)]
 pub mod launch_channel;
 #[cfg(windows)]
+pub mod launcher;
+#[cfg(windows)]
 mod runtime;
 #[cfg(windows)]
 pub use runtime::{

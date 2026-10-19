@@ -131,8 +131,6 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                 },
                 start_request.clone(),
             )
-            .map_err(|e| e.to_string())?
-            .encode()
             .map_err(|e| e.to_string())?;
             restricted::run_runtime(
                 &image,
@@ -149,13 +147,17 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         if message.as_bytes().len() <= 8192 {
             return Err("runtime handoff did not exceed the pipe buffer hint".into());
         }
-        drop((mixed, controller, projection, launch));
+        drop(message);
+        drop((mixed, controller, projection));
         if let Some(lan) = &mut lan {
             lan.release_reservation()?;
         }
         let mut engine_process = None;
-        let mut exercise = |child: &OwnedHandle, deadline: Instant| -> Result<()> {
+        let mut exercise = |child: &cfw_windows_engine::user_agent::launcher::UserAgentChild,
+                            deadline: Instant|
+         -> Result<()> {
             let exercise = (|| {
+                child.verify_live().map_err(|e| e.to_string())?;
                 engine_process = Some(progress::wait(
                     root,
                     name,
@@ -196,7 +198,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
             } else {
                 restricted::ClientCase::RuntimeSystem
             },
-            message,
+            launch,
             Some(&mut exercise),
         )?;
         let engine_process = engine_process.ok_or("runtime engine process was never retained")?;
@@ -228,10 +230,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
     {
         return Err("runtime fixture finish mismatch".into());
     }
-    write_report(
-        &root.join(format!("{name}-desktop-client.json")),
-        &desktop_report(),
-    )
+    Ok(())
 }
 
 fn stop_operation(desktop: &mut AuthorityChannel, context: &LeaseContext) -> Result<()> {

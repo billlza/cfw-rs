@@ -87,8 +87,19 @@ are followed by kernel completion before any buffer is released. Both endpoints
 are consumed after one attempt, including uncertain failures. A bounded reply
 correlates the received frame's SHA-256; it attests decoding only, before native
 Authority binding. The caller still owns child supervision and must resolve
-uncertain delivery through Authority. Production process launch and the full
-bidirectional lifecycle channel still need assembly.
+uncertain delivery through Authority.
+
+`UserAgentChild` launches the installed image through an explicit inherited
+handle list. It requires the exact medium-integrity lease owner and live console
+session, then checks the created child's actual token and installed image before
+sending configuration. The frame never becomes a command-line argument. Failed
+creation preserves its cleanup context; any failure after process creation also
+returns the retained child. A successful launch confirms decoding only, and
+`wait_for_exit` separately observes the held process and retires its launch
+worker. Neither observation constructs global Off. Once the agent can receive
+configuration, this component never force-kills it: the Desktop supervisor must
+revoke through Authority and retain the child until cleanup/exit is established.
+That full lifecycle supervisor and the installed entrypoints still need assembly.
 
 `SystemProxyAuthorization` is a shared application contract. The Apple adapter
 delegates to its existing native rights request without changing restoration
@@ -371,7 +382,10 @@ Authority-driven cancellation of both modes. The fixture verifies held process
 exit, released listeners, original proxy settings, native Stopped replies and
 service deletion. A distinct Desktop image/process prepares the original shared
 request and sends a launch frame larger than the private pipe's buffer hint
-to each medium-integrity child. Only its input/output handles are inherited;
+to each medium-integrity child through the product `UserAgentChild` launcher.
+The runtime Desktop itself now runs at medium integrity with administrator
+membership disabled; elevated setup remains in the outer disposable fixture.
+Only its input/output handles are inherited;
 the receiver authenticates the installed Desktop image and acknowledges the
 decoded frame through the inherited duplex channel. The parent supervises the
 child and joins the cancellable writer after observed exit. The

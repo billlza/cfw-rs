@@ -51,6 +51,10 @@ pub use lineage::{LineageError, WindowsEngineGenerationStore};
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
+mod process_handles;
+#[cfg(all(windows, feature = "native-service-validation"))]
+pub use process_handles::ProcessHandleList;
+#[cfg(windows)]
 mod system_proxy;
 #[cfg(windows)]
 pub use process::{

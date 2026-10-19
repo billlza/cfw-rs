@@ -49,16 +49,18 @@ pub(super) struct Installation {
 }
 
 pub(super) fn run_desktop_validation(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
-    run_desktop(root, prefix, expected, false)
+    run_desktop(root, prefix, expected)
 }
 pub(super) fn run_runtime_desktop_validation(
     root: &Path,
     name: &str,
     expected: [u8; 32],
 ) -> Result<()> {
-    run_desktop(root, name, expected, true)
+    let image = root.join("desktop-fixture.exe");
+    let _held = verified(&image, expected)?;
+    restricted::run_desktop_runtime(&image, name, expected)
 }
-fn run_desktop(root: &Path, prefix: &str, expected: [u8; 32], runtime: bool) -> Result<()> {
+fn run_desktop(root: &Path, prefix: &str, expected: [u8; 32]) -> Result<()> {
     let image = root.join("desktop-fixture.exe");
     let _held = verified(&image, expected)?;
     let output_path = root.join(format!("{prefix}-desktop-client-output.txt"));
@@ -69,15 +71,7 @@ fn run_desktop(root: &Path, prefix: &str, expected: [u8; 32], runtime: bool) -> 
         .map_err(|e| e.to_string())?;
     let hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
     let mut child = Command::new(image)
-        .args([
-            if runtime {
-                "--runtime-desktop"
-            } else {
-                "--desktop-validation"
-            },
-            prefix,
-            &hex,
-        ])
+        .args(["--desktop-validation", prefix, &hex])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(output.try_clone().map_err(|e| e.to_string())?)
@@ -115,11 +109,7 @@ fn run_desktop(root: &Path, prefix: &str, expected: [u8; 32], runtime: bool) -> 
         return Err("desktop fixture report exceeded bound".into());
     }
     let report: serde_json::Value = serde_json::from_slice(&report).map_err(|e| e.to_string())?;
-    let expected_report = if runtime {
-        user_agent::desktop_report()
-    } else {
-        serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true,"live_console_authorized":true})
-    };
+    let expected_report = serde_json::json!({"success":true,"role":"desktop","native_identity_bound":true,"live_console_authorized":true});
     if report != expected_report {
         return Err(format!(
             "desktop fixture report did not attest its checks: {report}"

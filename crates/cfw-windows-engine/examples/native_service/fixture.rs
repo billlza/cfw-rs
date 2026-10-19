@@ -123,7 +123,10 @@ pub(super) fn main() -> Result<()> {
         if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {
             return Err("runtime desktop requires the disposable CI opt-in".into());
         }
-        return user_agent::desktop(&args[2], &args[3]);
+        if std::env::var("CFW_NATIVE_PROXY_MUTATION_TESTS").as_deref() != Ok("1") {
+            return Err("runtime desktop requires the disposable proxy opt-in".into());
+        }
+        return restricted::client(&args[2], &args[3], restricted::ClientCase::RuntimeDesktop);
     }
     if args.len() == 4 && args[1] == "--desktop-validation" {
         if std::env::var("CFW_NATIVE_SERVICE_MUTATION_TESTS").as_deref() != Ok("1") {

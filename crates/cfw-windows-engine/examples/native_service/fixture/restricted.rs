@@ -1,4 +1,8 @@
 use super::*;
+use cfw_windows_engine::user_agent::launcher::{
+    UserAgentChild, UserAgentInvocation, ValidationAgent,
+};
+use std::os::windows::io::AsHandle;
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 
 #[derive(Clone, Copy)]
@@ -6,6 +10,7 @@ pub(super) enum ClientCase {
     UserAgent,
     CopiedImage,
     AuthorityRuntime,
+    RuntimeDesktop,
     RuntimeLocal,
     RuntimeSystem,
     RejectedRuntime,
@@ -16,6 +21,7 @@ impl ClientCase {
             Self::UserAgent => "--client",
             Self::CopiedImage => "--rejected-client",
             Self::AuthorityRuntime => "--authority-runtime",
+            Self::RuntimeDesktop => "--runtime-desktop",
             Self::RuntimeLocal => "--local-agent-runtime",
             Self::RuntimeSystem => "--system-agent-runtime",
             Self::RejectedRuntime => "--rejected-agent-runtime",
@@ -26,6 +32,7 @@ impl ClientCase {
             Self::UserAgent => name.to_owned(),
             Self::CopiedImage => format!("{name}-copy"),
             Self::AuthorityRuntime => format!("{name}-authority"),
+            Self::RuntimeDesktop => format!("{name}-desktop"),
             Self::RuntimeLocal => format!("{name}-runtime-local"),
             Self::RuntimeSystem => format!("{name}-runtime-system"),
             Self::RejectedRuntime => format!("{name}-runtime-rejected"),
@@ -42,6 +49,7 @@ impl ClientCase {
             Self::AuthorityRuntime => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"native_authority_binding":true,"wrong_ticket_rejected":true,"new_connection_cannot_inherit_lease":true,"synthetic_runtime_reports":true,"actual_engine_started":false})
             }
+            Self::RuntimeDesktop => user_agent::desktop_report(),
             Self::RuntimeLocal => {
                 user_agent::agent_report(cfw_singbox_config::ProjectionMode::LocalProxy)
             }
@@ -66,51 +74,6 @@ impl Sid {
 impl Drop for Sid {
     fn drop(&mut self) {
         unsafe { LocalFree(self.0) };
-    }
-}
-
-struct Attributes(Vec<usize>);
-impl Attributes {
-    fn handles(handles: &[HANDLE]) -> Result<Self> {
-        let mut size = 0;
-        let first = unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size) };
-        if first != 0
-            || io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
-            || size == 0
-            || size > 65536
-        {
-            return Err("invalid fixture process attribute size".into());
-        }
-        let mut words = vec![0usize; size.div_ceil(size_of::<usize>())];
-        if unsafe { InitializeProcThreadAttributeList(words.as_mut_ptr().cast(), 1, 0, &mut size) }
-            == 0
-        {
-            return Err(error("initialize fixture process attributes"));
-        }
-        let mut result = Self(words);
-        if unsafe {
-            UpdateProcThreadAttribute(
-                result.pointer(),
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                handles.as_ptr().cast(),
-                std::mem::size_of_val(handles),
-                null_mut(),
-                null(),
-            )
-        } == 0
-        {
-            return Err(error("limit fixture inherited handles"));
-        }
-        Ok(result)
-    }
-    fn pointer(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
-        self.0.as_mut_ptr().cast()
-    }
-}
-impl Drop for Attributes {
-    fn drop(&mut self) {
-        unsafe { DeleteProcThreadAttributeList(self.pointer()) };
     }
 }
 
@@ -242,59 +205,83 @@ pub(super) fn with_medium_impersonation(action: impl FnOnce() -> Result<()>) -> 
 }
 
 pub(super) fn run(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
-    run_case(image, name, expected, ClientCase::UserAgent, None, None)
+    run_case(image, name, expected, ClientCase::UserAgent, None)
 }
-enum Handoff {
-    Authority(zeroize::Zeroizing<Vec<u8>>),
-    Runtime(cfw_windows_engine::user_agent::handoff::LaunchMessage),
+pub(super) fn run_desktop_runtime(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
+    run_case(image, name, expected, ClientCase::RuntimeDesktop, None)
 }
-enum HandoffWriter {
-    Authority(std::fs::File, zeroize::Zeroizing<Vec<u8>>),
-    Runtime(
-        cfw_windows_engine::user_agent::launch_channel::LaunchSender,
-        cfw_windows_engine::user_agent::handoff::LaunchMessage,
-    ),
-}
-impl HandoffWriter {
-    fn write(self, cancel: &AtomicBool) -> Result<()> {
-        match self {
-            Self::Authority(mut file, bytes) => {
-                std::io::Write::write_all(&mut file, bytes.as_slice()).map_err(|e| e.to_string())
-            }
-            Self::Runtime(sender, message) => sender
-                .send(message, Instant::now() + LIMIT, cancel)
-                .map_err(|e| e.to_string()),
-        }
-    }
-}
-type Activity<'a> = &'a mut dyn FnMut(&OwnedHandle, Instant) -> Result<()>;
+type Activity<'a> = &'a mut dyn FnMut(&UserAgentChild, Instant) -> Result<()>;
 pub(super) fn run_runtime(
     image: &Path,
     name: &str,
     expected: [u8; 32],
     case: ClientCase,
-    handoff: cfw_windows_engine::user_agent::handoff::LaunchMessage,
+    launch: cfw_windows_engine::user_agent::handoff::UserAgentLaunch,
     activity: Option<Activity<'_>>,
 ) -> Result<()> {
-    if !matches!(
-        case,
-        ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime
-    ) || handoff.as_bytes().is_empty()
-        || handoff.as_bytes().len() > cfw_windows_engine::user_agent::handoff::MAX_FRAME_BYTES
-    {
-        return Err("invalid runtime handoff case or length".into());
+    let selector = match case {
+        ClientCase::RuntimeLocal => ValidationAgent::Local,
+        ClientCase::RuntimeSystem => ValidationAgent::System,
+        ClientCase::RejectedRuntime => ValidationAgent::Rejected,
+        _ => return Err("invalid product UserAgent fixture case".into()),
+    };
+    let prefix = case.report_prefix(name);
+    let parent = image.parent().ok_or("missing agent fixture parent")?;
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(parent.join(format!("{prefix}-client-output.txt")))
+        .map_err(|e| e.to_string())?;
+    let invocation =
+        UserAgentInvocation::for_validation(name, selector, expected).map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let launched = UserAgentChild::launch(
+        verified(image, expected)?,
+        invocation,
+        launch,
+        &output,
+        Instant::now() + LIMIT,
+        std::sync::Arc::new(AtomicBool::new(false)),
+    );
+    let (mut owner, startup) = match launched {
+        Ok(owner) => (owner, Ok(())),
+        Err(failure) => match failure.owner {
+            Some(owner) => (*owner, Err(failure.error.to_string())),
+            None => return Err(failure.error.to_string()),
+        },
+    };
+    let exercised = match activity {
+        Some(activity) => activity(&owner, deadline),
+        None => Ok(()),
+    };
+    if startup.is_err() || exercised.is_err() {
+        owner.cancel_handoff();
     }
-    run_case(
-        image,
-        name,
-        expected,
-        case,
-        Some(Handoff::Runtime(handoff)),
-        activity,
-    )
+    let completed = owner
+        .wait_for_exit(deadline)
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+    let report = match owner.exit_observation() {
+        Some(exit) => check_report(parent, &prefix, case, exit.exit_code()),
+        None => Err("product UserAgent process exit was not observed".into()),
+    };
+    let errors: Vec<_> = [
+        ("launch", startup),
+        ("exercise", exercised),
+        ("completion", completed),
+        ("report", report),
+    ]
+    .into_iter()
+    .filter_map(|(stage, result)| result.err().map(|error| format!("{stage}: {error}")))
+    .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 pub(super) fn run_rejected_copy(image: &Path, name: &str, expected: [u8; 32]) -> Result<()> {
-    run_case(image, name, expected, ClientCase::CopiedImage, None, None)
+    run_case(image, name, expected, ClientCase::CopiedImage, None)
 }
 pub(super) fn run_authority(
     image: &Path,
@@ -311,10 +298,7 @@ pub(super) fn run_authority(
         name,
         expected,
         ClientCase::AuthorityRuntime,
-        Some(Handoff::Authority(zeroize::Zeroizing::new(
-            handoff.to_vec(),
-        ))),
-        None,
+        Some(zeroize::Zeroizing::new(handoff.to_vec())),
     )
 }
 fn run_case(
@@ -322,8 +306,7 @@ fn run_case(
     name: &str,
     expected: [u8; 32],
     case: ClientCase,
-    handoff: Option<Handoff>,
-    activity: Option<Activity<'_>>,
+    handoff: Option<zeroize::Zeroizing<Vec<u8>>>,
 ) -> Result<()> {
     let token = token()?;
     let mut desktop = desktop::Desktop::new()?;
@@ -342,16 +325,7 @@ fn run_case(
         .open(&output_path)
         .map_err(|e| e.to_string())?;
     let (input, writer) = match handoff {
-        Some(Handoff::Runtime(message)) => {
-            let (sender, input) =
-                cfw_windows_engine::user_agent::launch_channel::LaunchSender::create()
-                    .map_err(|e| e.to_string())?;
-            (
-                std::fs::File::from(input),
-                Some(HandoffWriter::Runtime(sender, message)),
-            )
-        }
-        Some(Handoff::Authority(bytes)) => {
+        Some(bytes) => {
             let mut read = null_mut();
             let mut write = null_mut();
             if unsafe {
@@ -362,7 +336,7 @@ fn run_case(
             }
             let read = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(read) });
             let write = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(write) });
-            (read, Some(HandoffWriter::Authority(write, bytes)))
+            (read, Some((write, bytes)))
         }
         None => (std::fs::File::open("NUL").map_err(|e| e.to_string())?, None),
     };
@@ -374,7 +348,9 @@ fn run_case(
     }
     // Inherit only the explicit input and diagnostic output. The ticket's
     // input-pipe writer, token, service and process handles stay private.
-    let mut attributes = Attributes::handles(&handles)?;
+    let mut attributes =
+        cfw_windows_engine::ProcessHandleList::new(&[input.as_handle(), output.as_handle()])
+            .map_err(|e| e.to_string())?;
     let startup = STARTUPINFOEXW {
         StartupInfo: STARTUPINFOW {
             cb: size_of::<STARTUPINFOEXW>() as u32,
@@ -408,94 +384,74 @@ fn run_case(
     }
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
+    drop(attributes);
     drop(input);
-    // Runtime frames use native overlapped cancellation and a correlated
-    // decode acknowledgement. The older small Authority-policy fixture keeps
-    // its anonymous input; both writers remain owned until child completion.
-    let handoff_cancel = std::sync::Arc::new(AtomicBool::new(false));
-    let writer = writer.map(|writer| {
-        let cancel = std::sync::Arc::clone(&handoff_cancel);
-        thread::spawn(move || writer.write(&cancel))
+    // Only the small Authority-policy fixture still uses this anonymous
+    // input. Product runtime creation and handoff run through UserAgentChild.
+    let writer = writer.map(|(mut output, bytes)| {
+        thread::spawn(move || std::io::Write::write_all(&mut output, bytes.as_slice()))
     });
-    // Runtime includes actual engine startup, traffic and Authority stop.
-    // Existing authentication cases keep their original fifteen seconds.
-    let limit = if matches!(
-        case,
-        ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime
-    ) {
+    let limit = if matches!(case, ClientCase::RuntimeDesktop) {
         Duration::from_secs(60)
     } else {
         LIMIT
     };
     let deadline = Instant::now() + limit;
-    let exercised = match activity {
-        Some(activity) => activity(&process, deadline),
-        None => Ok(()),
-    };
-    if exercised.is_err() {
-        handoff_cancel.store(true, Ordering::Release);
-    }
-    let completed = (|| -> Result<()> {
-        let waited =
-            cfw_windows_storage::wait_until(&process, deadline).map_err(|e| e.to_string())?;
-        if waited != cfw_windows_storage::WaitOutcome::Signaled {
-            handoff_cancel.store(true, Ordering::Release);
-            if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
-                return Err(error("terminate expired fixture client"));
-            }
-            if cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
-                .map_err(|e| e.to_string())?
-                != cfw_windows_storage::WaitOutcome::Signaled
-            {
-                return Err("expired fixture client cleanup was not observed".into());
-            }
-            if let Some(writer) = writer {
-                let written = writer
-                    .join()
-                    .map_err(|_| "authority handoff writer panicked")?;
-                return Err(format!(
-                    "unprivileged fixture client exceeded its deadline; handoff writer: {written:?}"
-                ));
-            }
-            return Err("unprivileged fixture client exceeded its deadline".into());
+    let waited = cfw_windows_storage::wait_until(&process, deadline).map_err(|e| e.to_string())?;
+    if waited != cfw_windows_storage::WaitOutcome::Signaled {
+        if unsafe { TerminateProcess(process.as_raw_handle(), 3) } == 0 {
+            return Err(error("terminate expired fixture client"));
+        }
+        if cfw_windows_storage::wait_until(&process, Instant::now() + LIMIT)
+            .map_err(|e| e.to_string())?
+            != cfw_windows_storage::WaitOutcome::Signaled
+        {
+            return Err("expired fixture client cleanup was not observed".into());
         }
         if let Some(writer) = writer {
-            writer
+            let written = writer
                 .join()
-                .map_err(|_| "authority handoff writer panicked")?
-                .map_err(|e| format!("authority handoff write: {e}"))?;
-        }
-        let mut exit = 0;
-        if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
-            return Err(error("read fixture client exit"));
-        }
-        let diagnostics = std::fs::read(&output_path).map_err(|e| e.to_string())?;
-        if diagnostics.len() > 16384 {
-            return Err("fixture client diagnostics exceed bound".into());
-        }
-        let diagnostics = String::from_utf8_lossy(&diagnostics);
-        let report = std::fs::read(parent.join(format!("{report_prefix}-client.json")))
-        .map_err(|e| format!("unprivileged client exit={exit:#x}; report unavailable: {e}; diagnostics: {diagnostics}"))?;
-        if report.len() > 8192 {
-            return Err("fixture client report exceeds bound".into());
-        }
-        let report: serde_json::Value =
-            serde_json::from_slice(&report).map_err(|e| e.to_string())?;
-        if exit != 0 || report != case.report() {
+                .map_err(|_| "authority handoff writer panicked")?;
             return Err(format!(
-                "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
+                "unprivileged fixture client exceeded its deadline; handoff writer: {written:?}"
             ));
         }
-        desktop.close()?;
-        Ok(())
-    })();
-    match (exercised, completed) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(exercise), Err(completion)) => {
-            Err(format!("{exercise}; client completion: {completion}"))
-        }
+        return Err("unprivileged fixture client exceeded its deadline".into());
     }
+    if let Some(writer) = writer {
+        writer
+            .join()
+            .map_err(|_| "authority handoff writer panicked")?
+            .map_err(|e| format!("authority handoff write: {e}"))?;
+    }
+    let mut exit = 0;
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0 {
+        return Err(error("read fixture client exit"));
+    }
+    check_report(parent, &report_prefix, case, exit)?;
+    desktop.close()?;
+    Ok(())
+}
+
+fn check_report(parent: &Path, report_prefix: &str, case: ClientCase, exit: u32) -> Result<()> {
+    let diagnostics = std::fs::read(parent.join(format!("{report_prefix}-client-output.txt")))
+        .map_err(|e| e.to_string())?;
+    if diagnostics.len() > 16384 {
+        return Err("fixture client diagnostics exceed bound".into());
+    }
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    let report = std::fs::read(parent.join(format!("{report_prefix}-client.json")))
+        .map_err(|e| format!("unprivileged client exit={exit:#x}; report unavailable: {e}; diagnostics: {diagnostics}"))?;
+    if report.len() > 8192 {
+        return Err("fixture client report exceeds bound".into());
+    }
+    let report: serde_json::Value = serde_json::from_slice(&report).map_err(|e| e.to_string())?;
+    if exit != 0 || report != case.report() {
+        return Err(format!(
+            "unprivileged client exit={exit:#x}, report={report}; diagnostics: {diagnostics}"
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn client(name: &str, hex: &str, case: ClientCase) -> Result<()> {
@@ -569,6 +525,7 @@ fn client_body(name: &str, hex: &str, case: ClientCase) -> Result<()> {
         return Err("fixture service digest differs from installation".into());
     }
     match case {
+        ClientCase::RuntimeDesktop => return user_agent::desktop(name, hex),
         ClientCase::RuntimeLocal | ClientCase::RuntimeSystem | ClientCase::RejectedRuntime => {
             return user_agent::agent(name, &image, expected, case);
         }

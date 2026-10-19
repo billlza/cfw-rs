@@ -32,6 +32,7 @@ mod authority_wire;
 mod desktop;
 mod machine_record;
 mod restricted;
+mod stress;
 mod transport;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: Duration = Duration::from_secs(15);
@@ -605,6 +606,7 @@ fn collect_fixture_diagnostics(root: &Path, output: &Path) -> Result<()> {
             && !text.ends_with(".journal-validation.json")
             && !text.ends_with(".authority-validation.json")
             && !text.ends_with(".wire-validation.json")
+            && !text.ends_with(".stress-validation.json")
         {
             continue;
         }
@@ -825,43 +827,7 @@ fn exercise_services(
     println!("service fixture stage: authority_journal_survives_service_exit");
     authority_journal::request(&second.name, image, expected, b"authority-journal-observe")?;
     println!("service fixture stage: post_stop_connection_stress");
-    runtime()?.block_on(async {
-        let stress_deadline = Instant::now() + Duration::from_secs(45);
-        for iteration in 0..POST_STOP_EXCHANGES {
-            if Instant::now() >= stress_deadline {
-                return Err(format!(
-                    "post-stop stress deadline after {iteration} exchanges"
-                ));
-            }
-            // Cross idle-listener deadlines as well as rapid reconnects. This
-            // never retries a failed request: the first failure ends the test.
-            tokio::time::sleep(Duration::from_millis(if iteration % 32 == 0 {
-                100
-            } else {
-                (iteration % 7) as u64
-            }))
-            .await;
-            let exchange = async {
-                let mut pipe = connect(&second.name).await?;
-                assert!(matches!(
-                    WindowsServicePeer::from_pipe_server(
-                        &first.name,
-                        verified(image, expected)?,
-                        &pipe
-                    ),
-                    Err(ServicePeerError::NotRunning {
-                        state: SERVICE_STOPPED,
-                        ..
-                    })
-                ));
-                ping(&mut pipe)?;
-                finish(&mut pipe)
-            }
-            .await;
-            exchange.map_err(|error| format!("post-stop exchange {iteration}: {error}"))?;
-        }
-        Ok::<_, String>(())
-    })?;
+    stress::run(&first.name, &second.name, image, expected)?;
     println!("service fixture post-stop exchanges passed: {POST_STOP_EXCHANGES}");
     second.normal_stop()?;
     Ok(())

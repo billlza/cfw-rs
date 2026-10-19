@@ -1,5 +1,8 @@
 use super::*;
-use cfw_windows_engine::authority::LeaseContext;
+use cfw_windows_engine::user_agent::{
+    desktop::DesktopUserAgent,
+    launcher::{UserAgentInvocation, ValidationAgent},
+};
 use std::net::SocketAddr;
 
 pub(super) fn run(name: &str, hex: &str) -> Result<()> {
@@ -27,9 +30,6 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         return Err("runtime desktop and agent must use distinct installed images".into());
     }
     let service_image = Arc::new(verified(&image, expected)?);
-    let mut desktop =
-        AuthorityChannel::connect(name, ServiceClientRole::Desktop, Arc::clone(&service_image))
-            .map_err(|e| e.to_string())?;
     let installation_id = uuid::Uuid::new_v4();
     let snapshot_directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     let proxy = WindowsSystemProxy::new(&snapshot_directory.path().join("proxy"))
@@ -38,10 +38,6 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         .into_iter()
         .enumerate()
     {
-        let before = observed(&mut desktop)?;
-        if before.state != AuthorityState::Off {
-            return Err("runtime fixture did not begin Off".into());
-        }
         let initial_proxy = proxy.snapshot().map_err(|e| e.to_string())?;
         let mixed = reserve()?;
         let controller = reserve()?;
@@ -52,7 +48,7 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         };
         let mixed_address = mixed.local_addr().map_err(|e| e.to_string())?;
         let controller_address = controller.local_addr().map_err(|e| e.to_string())?;
-        // The frame must exceed the anonymous pipe's 8 KiB buffer hint. This
+        // The frame must exceed the private pipe's 8 KiB buffer hint. This
         // exercises streaming under child supervision, not one tiny ticket.
         let mut outbounds = vec![serde_json::json!({"type":"direct","tag":"direct"})];
         for number in 0..256 {
@@ -91,120 +87,151 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
             credential_slots: projection.credential_slots().to_vec(),
             tunnel_options: None,
         };
-        let Response::Prepared(grant) = request(
-            &mut desktop,
-            Command::Prepare(PrepareRequest {
-                root: RootContext {
-                    installation_id,
-                    epoch: 1,
-                    generation: index as u64 + 1,
-                },
-                operation_id: uuid::Uuid::new_v4(),
-                mode: if index == 0 {
-                    AuthorityMode::LocalProxy
-                } else {
-                    AuthorityMode::SystemProxy
-                },
-                config_sha256: hash(&start_request.config_content_digest)?,
-                identity_sha256: hash(&start_request.config_digest)?,
-                expected_revision: before.revision.ok_or("unknown runtime revision")?,
-            }),
-        )?
-        else {
-            return Err("runtime preparation missing".into());
+        if start_request.config_json.len() <= 8192 {
+            return Err("runtime template does not exceed the pipe buffer hint".into());
+        }
+        let case = if index == 0 {
+            restricted::ClientCase::RuntimeLocal
+        } else {
+            restricted::ClientCase::RuntimeSystem
         };
-        let binding = grant.into_bind();
-        if index == 0 {
-            let ticket = binding
-                .ticket
-                .with_bytes(|bytes| {
-                    let mut changed = zeroize::Zeroizing::new([0; 32]);
-                    changed.copy_from_slice(bytes);
-                    changed[0] ^= 1;
-                    TicketMaterial::from_slice(changed.as_ref())
-                })
-                .map_err(|e| e.to_string())?;
-            let rejected = UserAgentLaunch::new(
-                BindRequest {
-                    context: binding.context.clone(),
-                    ticket,
-                },
-                start_request.clone(),
-            )
+        let prefix = if index == 0 {
+            format!("{name}-runtime-local")
+        } else {
+            format!("{name}-runtime-system")
+        };
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join(format!("{prefix}-client-output.txt")))
             .map_err(|e| e.to_string())?;
-            restricted::run_runtime(
-                &image,
-                name,
-                expected,
-                restricted::ClientCase::RejectedRuntime,
-                rejected,
-                None,
-            )?;
-        }
-        let launch = UserAgentLaunch::new(binding, start_request).map_err(|e| e.to_string())?;
-        let context = launch.context().clone();
-        let message = launch.encode().map_err(|e| e.to_string())?;
-        if message.as_bytes().len() <= 8192 {
-            return Err("runtime handoff did not exceed the pipe buffer hint".into());
-        }
-        drop(message);
         drop((mixed, controller, projection));
         if let Some(lan) = &mut lan {
             lan.release_reservation()?;
         }
-        let mut engine_process = None;
-        let mut exercise = |child: &cfw_windows_engine::user_agent::launcher::UserAgentChild,
-                            deadline: Instant|
-         -> Result<()> {
-            let exercise = (|| {
-                child.verify_live().map_err(|e| e.to_string())?;
-                engine_process = Some(progress::wait(
-                    root,
-                    name,
-                    &context,
-                    child,
-                    deadline.min(Instant::now() + LIMIT),
-                )?);
-                let snapshot = observed(&mut desktop)?;
-                if snapshot.state != AuthorityState::Active
-                    || snapshot.root.as_ref() != Some(&context.operation.root)
-                {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        thread::scope(|scope| -> Result<()> {
+            let worker_stop = Arc::clone(&stop);
+            let service_image = Arc::clone(&service_image);
+            let image = &image;
+            let worker = scope.spawn(move || -> Result<_> {
+                // Construct the native connection on the owning lifecycle
+                // thread; no thread-affine channel is transferred from the UI.
+                let mut operation = DesktopUserAgent::prepare(
+                    name.into(),
+                    Arc::clone(&service_image),
+                    service_image,
+                    start_request,
+                    Instant::now() + LIMIT,
+                )
+                .map_err(|e| e.to_string())?;
+                if index == 0 {
+                    restricted::run_runtime(
+                        image,
+                        name,
+                        expected,
+                        restricted::ClientCase::RejectedRuntime,
+                        operation
+                            .rejected_launch_for_validation()
+                            .map_err(|e| e.to_string())?,
+                        None,
+                    )?;
+                }
+                let (invalid_ready, _) = mpsc::sync_channel(1);
+                if !matches!(
+                    operation.run(
+                        UserAgentInvocation::installed("CFW-unrelated")
+                            .map_err(|e| e.to_string())?,
+                        &output,
+                        Arc::clone(&worker_stop),
+                        invalid_ready
+                    ),
+                    Err(
+                        cfw_windows_engine::user_agent::desktop::DesktopError::State(
+                            "invocation names a different service"
+                        )
+                    )
+                ) {
                     return Err(
-                        "native Authority did not observe the child Active for this root".into(),
+                        "invalid Desktop invocation did not fail before lifecycle mutation".into(),
                     );
                 }
+                if !matches!(
+                    operation.stop(Instant::now()),
+                    Err(
+                        cfw_windows_engine::user_agent::desktop::DesktopError::Transport(
+                            ServiceTransportError::Deadline
+                        )
+                    )
+                ) {
+                    return Err("expired Desktop stop was not rejected before mutation".into());
+                }
+                let invocation = UserAgentInvocation::for_validation(
+                    name,
+                    if index == 0 {
+                        ValidationAgent::Local
+                    } else {
+                        ValidationAgent::System
+                    },
+                    expected,
+                )
+                .map_err(|e| e.to_string())?;
+                operation
+                    .run(invocation, &output, worker_stop, ready_sender)
+                    .map_err(|e| e.to_string())
+            });
+            let exercised = (|| {
+                let ready = ready_receiver
+                    .recv_timeout(LIMIT)
+                    .map_err(|e| format!("Desktop supervisor did not report Ready: {e}"))?;
+                if ready.authority().state != AuthorityState::Active {
+                    return Err("Desktop Ready is not Active".into());
+                }
+                let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, ready.agent_process_id()) };
+                if raw.is_null() {
+                    return Err(error("retain supervised UserAgent process"));
+                }
+                let agent = unsafe { OwnedHandle::from_raw_handle(raw) };
+                let engine =
+                    progress::wait(root, name, ready.context(), &agent, Instant::now() + LIMIT)?;
                 traffic(mixed_address)?;
                 authenticate_controller(controller_address, controller_key.expose_secret())?;
                 if let Some(lan) = &lan {
                     lan.exercise()?;
                 }
-                // At least one genuine heartbeat must cross the native channel.
                 thread::sleep(Duration::from_millis(1250));
-                Ok(())
+                Ok((agent, engine, ready.context().clone()))
             })();
-            let stop = stop_operation(&mut desktop, &context);
-            match (exercise, stop) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-                (Err(test), Err(stop)) => Err(format!("{test}; authority stop: {stop}")),
+            stop.store(true, Ordering::Release);
+            let finished = worker
+                .join()
+                .map_err(|_| "Desktop lifecycle worker panicked")?;
+            let ((agent, engine, context), finished) = match (exercised, finished) {
+                (Ok(handles), Ok(finished)) => (handles, finished),
+                (Err(error), Ok(_)) | (Ok(_), Err(error)) => return Err(error),
+                (Err(test), Err(cleanup)) => {
+                    return Err(format!("{test}; Desktop lifecycle: {cleanup}"));
+                }
+            };
+            let stopped = finished.stopped();
+            let exit = stopped
+                .agent_exit()
+                .ok_or("Desktop stop omitted its agent exit")?;
+            if finished.reason() != StopReason::Requested
+                || stopped.context() != &context
+                || stopped.authority().state != AuthorityState::Off
+                || exit.exit_code() != 0
+            {
+                return Err("Desktop stop observation or fixture-injected cleanup mismatch".into());
             }
-        };
-        restricted::run_runtime(
-            &image,
-            name,
-            expected,
-            if index == 0 {
-                restricted::ClientCase::RuntimeLocal
-            } else {
-                restricted::ClientCase::RuntimeSystem
-            },
-            launch,
-            Some(&mut exercise),
-        )?;
-        let engine_process = engine_process.ok_or("runtime engine process was never retained")?;
-        if unsafe { WaitForSingleObject(engine_process.as_raw_handle(), 5000) } != WAIT_OBJECT_0 {
-            return Err("cross-process engine exit not observed".into());
-        }
+            for process in [&agent, &engine] {
+                if unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) } != WAIT_OBJECT_0 {
+                    return Err("supervised agent/engine exit not observed".into());
+                }
+            }
+            restricted::check_report(root, &prefix, case, exit.exit_code())
+        })?;
         if proxy.snapshot().map_err(|e| e.to_string())? != initial_proxy {
             return Err("desktop observed different proxy settings after agent exit".into());
         }
@@ -216,10 +243,6 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
             lan.require_released()?;
         }
     }
-    if observed(&mut desktop)?.state != AuthorityState::Off {
-        return Err("fixture-injected global cleanup did not complete".into());
-    }
-    drop(desktop);
     let mut finish = ServiceChannel::connect(name, ServiceClientRole::Desktop, service_image)
         .map_err(|e| e.to_string())?;
     if finish
@@ -229,30 +252,6 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
         != b"wire-ok"
     {
         return Err("runtime fixture finish mismatch".into());
-    }
-    Ok(())
-}
-
-fn stop_operation(desktop: &mut AuthorityChannel, context: &LeaseContext) -> Result<()> {
-    let snapshot = observed(desktop)?;
-    if snapshot.root.as_ref() != Some(&context.operation.root) {
-        return Err("runtime stop root changed".into());
-    }
-    let stop = StopRequest {
-        context: context.clone(),
-        expected_revision: snapshot.revision.ok_or("unknown runtime revision")?,
-    };
-    let command = match snapshot.state {
-        AuthorityState::Preparing => Command::AbortPrepared(stop),
-        AuthorityState::Starting | AuthorityState::Active => Command::BeginStop(stop),
-        AuthorityState::Stopping => return Ok(()),
-        _ => return Err("runtime stop did not have an owned operation".into()),
-    };
-    let Response::Status(stopping) = request(desktop, command)? else {
-        return Err("authority did not acknowledge stop".into());
-    };
-    if stopping.state != AuthorityState::Stopping {
-        return Err("authority stop did not revoke runtime permission".into());
     }
     Ok(())
 }

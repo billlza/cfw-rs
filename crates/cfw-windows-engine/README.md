@@ -102,7 +102,19 @@ returns the retained child. A successful launch confirms decoding only, and
 worker. Neither observation constructs global Off. Once the agent can receive
 configuration, this component never force-kills it: the Desktop supervisor must
 revoke through Authority and retain the child until cleanup/exit is established.
-That full lifecycle supervisor and the installed entrypoints still need assembly.
+
+`DesktopUserAgent` owns one LocalProxy/SystemProxy operation on a dedicated
+native thread. It validates the shared request before preparation, retains the
+original authenticated Authority connection, and only reports Ready after an
+Active observation, the exact owned lease and a live held child agree. It polls
+independently of UI refresh. Stop revokes on that same connection/context, then
+observes agent exit and launch-worker retirement. Only a typed stale-revision
+rejection of BeginStop permits another attempt, at most three in total; a new
+attempt rechecks the owned context and revision. Other failures are preserved,
+with partial process ownership retained for recovery. Returned Authority state
+may still be Stopping/Recovering/Quarantined; no local observation creates Off.
+Installed entrypoints, application-wide lifecycle integration and independent
+global cleanup remain unassembled.
 
 `SystemProxyAuthorization` is a shared application contract. The Apple adapter
 delegates to its existing native rights request without changing restoration
@@ -137,7 +149,7 @@ the engine/control pipes; a restoration failure retains the process owner for
 retry. Expired request waiters cannot independently close those pipes. Drop is
 abnormal ownership loss and only attempts restoration; kernel job closure still
 terminates the child. A durable record alone does not restore settings after a
-process crash: user-agent/service supervision and desktop lifecycle
+process crash: application-wide user-agent/service recovery and desktop lifecycle
 integration remain required. A settings restoration receipt is not global Off.
 
 Native mutation tests require `CFW_NATIVE_PROXY_MUTATION_TESTS=1`, an absolute
@@ -390,8 +402,11 @@ The runtime Desktop itself now runs at medium integrity with administrator
 membership disabled; elevated setup remains in the outer disposable fixture.
 Only its input/output handles are inherited;
 the receiver authenticates the installed Desktop image and acknowledges the
-decoded frame through the inherited duplex channel. The parent supervises the
-child and joins the cancellable writer after observed exit. The
+decoded frame through the inherited duplex channel. The product
+`DesktopUserAgent` owns preparation, readiness observation, ongoing supervision
+and revocation; the fixture checks that an unrelated invocation and expired
+stop request leave the preparation usable. The launcher joins the cancellable
+writer after observed exit. The
 parent uses its original controller key to verify authenticated access and also
 checks unauthenticated rejection. Test-only readiness files contain process and
 operation IDs, never templates, keys or tickets; they grant no capability.

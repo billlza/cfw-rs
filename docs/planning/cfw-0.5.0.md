@@ -913,7 +913,7 @@ pending read/write，再验证取消后的内核完成结果。`73d2eb5` 的
 所有者。发送解码确认与进程退出分别观察，均不能表示全局 Off；需要先由 Authority
 撤销，再保留所有者直到恢复/退出，启动器不以强杀已可能运行的 Agent 代替清理。
 原生运行用例已改为普通权限 Desktop 通过此产品启动器创建普通权限 Agent；这一变更
-仍待对应源 Windows CI。完整 Desktop 生命周期监督、安装入口、独立全局清理和后端装配
+已由下述 `eb9b89c` 原生运行核验。安装入口、全应用生命周期整合、独立全局清理和后端装配
 仍未完成。实现核对了当前固定 [Rust 1.98.1 Windows 进程创建源码](https://github.com/rust-lang/rust/blob/1.98.1/library/std/src/sys/process/windows.rs)，
 不依赖默认 `Command` 行为推断句柄白名单。
 
@@ -924,6 +924,21 @@ pending read/write，再验证取消后的内核完成结果。`73d2eb5` 的
 SID/登录 LUID 的逐次授权检查不变，原生用例另行断言普通 Desktop 仍被特权观察器拒绝。
 这一权限区分符合 [WTSQueryUserToken 的 SYSTEM/SE_TCB 要求](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken)
 与[当前会话信息查询](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsquerysessioninformationw)的不同边界。
+`eb9b89c` 的 [Windows CI](https://github.com/billlza/cfw-rs/actions/runs/39239112761)
+四个作业通过，下载的引擎与服务产物已核对源提交、哈希和逐项回执。542 项共享 Rust
+测试、311 项 UI 测试通过；真实生命周期用例包含两次 Ready/Stopped、四次心跳及
+一次错误票据拒绝，并确认普通 Desktop 仍不能调用特权控制台观察器。全局清理仍是
+夹具注入，这些结果不构成完整 Windows 后端或发布验收。
+
+进一步新增单次操作所有者 `DesktopUserAgent`：在专用原生线程上核验原始共享请求，
+持有准备该操作的 Authority 连接、待交接配置和实际 Agent 进程；只有 Active、准确
+租约上下文及持有的活进程一致后才报告 Ready。运行中每秒观察一次，独立于 UI 刷新。
+停止先通过原连接撤销，再等待 Agent 退出与交接线程结束。仅 BeginStop 的明确
+Stale 拒绝允许重新观察后再试，总计最多三次；传输结果不确定、上下文错误及其他
+请求的拒绝均不重放。三项策略测试覆盖成功、次数耗尽和不可重试错误。
+原生夹具已改用该产品所有者，并要求错误服务名和过期停止请求不能消耗有效准备。
+新的监督流程尚待对应源 Windows CI；它不包含安装入口、全应用恢复、全局 Off 观察器
+或 Windows EngineBackend。返回 Stopping/Recovering/Quarantined 必须保留该实际状态。
 
 改为允许服务 peer/channel 共享已验证镜像对象的 Arc。原文件及祖先目录句柄持续
 持有，保持禁止写入/替换的原契约；每次连接的 SCM 安全描述符、配置、进程和管道

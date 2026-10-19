@@ -68,6 +68,7 @@ pub type Result<T> = std::result::Result<T, LaunchError>;
 
 pub struct UserAgentInvocation {
     arguments: String,
+    service: String,
 }
 impl UserAgentInvocation {
     pub fn installed(service: &str) -> Result<Self> {
@@ -91,7 +92,13 @@ impl UserAgentInvocation {
                 write!(&mut arguments, "{byte:02x}").map_err(|_| LaunchError::Invocation)?;
             }
         }
-        Ok(Self { arguments })
+        Ok(Self {
+            arguments,
+            service: service.into(),
+        })
+    }
+    pub(super) fn service(&self) -> &str {
+        &self.service
     }
     #[cfg(feature = "native-service-validation")]
     pub fn for_validation(service: &str, case: ValidationAgent, digest: [u8; 32]) -> Result<Self> {
@@ -149,7 +156,7 @@ pub struct UserAgentChild {
     process: OwnedHandle,
     process_id: u32,
     context: LeaseContext,
-    _executable: VerifiedExecutable,
+    _executable: Arc<VerifiedExecutable>,
     peer: Option<NativePeerProcess>,
     worker: Option<JoinHandle<std::result::Result<(), LaunchChannelError>>>,
     cancel: Arc<AtomicBool>,
@@ -161,13 +168,14 @@ impl UserAgentChild {
     /// selected by the launch frame. The caller retains the Authority channel
     /// that prepared this lease and owns stop/recovery when launch fails.
     pub fn launch(
-        executable: VerifiedExecutable,
+        executable: impl Into<Arc<VerifiedExecutable>>,
         invocation: UserAgentInvocation,
         launch: UserAgentLaunch,
         diagnostics: &File,
         deadline: Instant,
         cancel: Arc<AtomicBool>,
     ) -> std::result::Result<Self, LaunchFailure> {
+        let executable = executable.into();
         let prepared = (|| -> Result<_> {
             check_deadline(deadline)?;
             if cancel.load(Ordering::Acquire) {
@@ -405,19 +413,25 @@ impl Drop for UserAgentChild {
     }
 }
 fn medium_owner(context: &LeaseContext) -> Result<NativePeerProcess> {
-    let current = NativePeerProcess::open(std::process::id())?;
+    let current = medium_process()?;
     let identity = current.identity();
-    if identity.integrity_rid() != 0x2000
-        || identity.is_app_container()
-        || identity.is_restricted()
-        || !context
-            .operation
-            .owner
-            .matches_native(identity.user_session())
+    if !context
+        .operation
+        .owner
+        .matches_native(identity.user_session())
     {
         return Err(LaunchError::Identity);
     }
     current.require_current_console_session()?;
+    Ok(current)
+}
+pub(super) fn medium_process() -> Result<NativePeerProcess> {
+    let current = NativePeerProcess::open(std::process::id())?;
+    let identity = current.identity();
+    if identity.integrity_rid() != 0x2000 || identity.is_app_container() || identity.is_restricted()
+    {
+        return Err(LaunchError::Identity);
+    }
     Ok(current)
 }
 fn inherit(handle: BorrowedHandle<'_>) -> io::Result<OwnedHandle> {

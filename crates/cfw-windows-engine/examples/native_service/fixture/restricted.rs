@@ -433,7 +433,12 @@ fn run_case(
     Ok(())
 }
 
-fn check_report(parent: &Path, report_prefix: &str, case: ClientCase, exit: u32) -> Result<()> {
+pub(super) fn check_report(
+    parent: &Path,
+    report_prefix: &str,
+    case: ClientCase,
+    exit: u32,
+) -> Result<()> {
     let diagnostics = std::fs::read(parent.join(format!("{report_prefix}-client-output.txt")))
         .map_err(|e| e.to_string())?;
     if diagnostics.len() > 16384 {

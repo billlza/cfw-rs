@@ -1,20 +1,14 @@
 //! Real engine/WinINet ownership through the native SYSTEM dispatcher. The
 //! global cleanup observation remains explicitly injected by this fixture.
 use super::*;
-use cfw_engine_api::{
-    EngineCommandContext, EngineStartRequest,
-    authority_v1::{AuthorityMode, AuthorityState, RootContext},
-};
+use cfw_engine_api::{EngineCommandContext, EngineStartRequest, authority_v1::AuthorityState};
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use cfw_windows_credentials::WindowsCredentialStore;
 use cfw_windows_engine::{
     AuthenticatedServiceRequest, LocalServiceConnection, WindowsSystemProxy,
     authority::{
-        AuthorityChannel, AuthorizedReply, CleanupEvidence, PrepareRequest,
-        wire::{
-            BindRequest, Command, Rejection, Request, Response, StopRequest, TicketMaterial,
-            WireError,
-        },
+        AuthorizedReply, CleanupEvidence,
+        wire::{Command, Rejection, Request, WireError},
     },
     user_agent::{
         ControlError, StopReason, UserAgentError, UserAgentRuntime, UserAgentSession,
@@ -163,7 +157,7 @@ impl Validation {
     }
 }
 pub(super) fn client_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"modes":["local_proxy","system_proxy"],"actual_engine_started":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"native_stopped_acknowledged":true,"authority_revocation_stops_system_proxy":true,"system_proxy_with_lan_sharing":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true,"lan_peer_scope":"same_host_private_interface_and_loopback","shared_start_request_validated":true,"invalid_ticket_precedes_vault_access":true,"desktop_runtime_same_process_fixture":false,"desktop_medium_integrity":true,"privileged_console_observer_rejected":true,"product_user_agent_launcher":true,"product_desktop_supervision":true,"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_desktop_agent_images":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"global_cleanup_observations_injected":true,"full_service_backend_proven":false})
 }
 pub(super) fn run_validation() -> Result<()> {
     for variable in [
@@ -257,22 +251,6 @@ pub(super) fn run_validation() -> Result<()> {
         }
     }
 }
-fn request(channel: &mut AuthorityChannel, command: Command) -> Result<Response> {
-    channel
-        .request(
-            Request::new(command).map_err(|e| e.to_string())?,
-            Instant::now() + LIMIT,
-        )
-        .map_err(|e| e.to_string())
-}
-fn observed(
-    channel: &mut AuthorityChannel,
-) -> Result<cfw_windows_engine::authority::AuthoritySnapshot> {
-    let Response::Observed(value) = request(channel, Command::Observe)? else {
-        return Err("runtime observe response mismatch".into());
-    };
-    Ok(value)
-}
 fn reserve() -> Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())
 }
@@ -289,7 +267,7 @@ pub(super) fn agent(
     child::run(name, image, digest, case)
 }
 pub(super) fn desktop_report() -> serde_json::Value {
-    serde_json::json!({"success":true,"role":"desktop","privileged_console_observer_rejected":true,"medium_integrity":true,"administrator_member":false,"product_user_agent_launcher":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_agent_process":true,"distinct_agent_image":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true})
+    serde_json::json!({"success":true,"role":"desktop","privileged_console_observer_rejected":true,"medium_integrity":true,"administrator_member":false,"product_user_agent_launcher":true,"product_desktop_supervision":true,"desktop_invalid_calls_preserve_preparation":true,"retained_agent_exit_observed":true,"explicit_handle_list":true,"distinct_agent_process":true,"distinct_agent_image":true,"private_inherited_handoff":true,"cancellable_launch_transport":true,"received_frame_acknowledged":true,"handoff_exceeds_pipe_buffer_hint":true,"original_controller_key_authenticated":true,"unauthenticated_controller_rejected":true,"actual_http_proxy_traffic":true,"held_process_exit_observed":true,"listeners_released":true,"original_proxy_restored":true,"lan_trusted_source_passed":true,"lan_untrusted_source_rejected":true,"lan_listener_released":true})
 }
 pub(super) fn agent_report(mode: ProjectionMode) -> serde_json::Value {
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"mode":mode,"inherited_start_request_validated":true,"parent_image_authenticated":true,"actual_engine_started":true,"authority_revocation_stopped_runtime":true,"native_stopped_acknowledged":true,"local_cleanup_observed":true,"original_proxy_restored":true})

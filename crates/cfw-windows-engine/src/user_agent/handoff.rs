@@ -50,7 +50,10 @@ impl UserAgentLaunch {
     pub fn new(binding: BindRequest, request: EngineStartRequest) -> Result<Self> {
         Self::checked(binding, CheckedStartConfiguration::new(request)?)
     }
-    fn checked(binding: BindRequest, request: CheckedStartConfiguration) -> Result<Self> {
+    pub(super) fn checked(
+        binding: BindRequest,
+        request: CheckedStartConfiguration,
+    ) -> Result<Self> {
         UserAgentPlan::check_request(&binding, &request)?;
         Ok(Self { binding, request })
     }
@@ -59,6 +62,26 @@ impl UserAgentLaunch {
     }
     pub fn mode(&self) -> ProjectionMode {
         self.request.mode()
+    }
+    #[cfg(all(windows, feature = "native-service-validation"))]
+    pub(super) fn rejected_copy_for_validation(&self) -> Result<Self> {
+        let ticket = self
+            .binding
+            .ticket
+            .with_bytes(|bytes| {
+                let mut changed = Zeroizing::new([0; 32]);
+                changed.copy_from_slice(bytes);
+                changed[0] ^= 1;
+                crate::authority::wire::TicketMaterial::from_slice(changed.as_ref())
+            })
+            .map_err(UserAgentError::from)?;
+        Self::new(
+            BindRequest {
+                context: self.binding.context.clone(),
+                ticket,
+            },
+            self.request.shared_request().clone(),
+        )
     }
     pub fn encode(&self) -> Result<LaunchMessage> {
         #[derive(Serialize)]

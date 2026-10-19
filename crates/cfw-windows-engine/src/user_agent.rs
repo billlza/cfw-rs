@@ -4,6 +4,8 @@ mod plan;
 pub use plan::UserAgentPlan;
 #[cfg(windows)]
 mod control;
+#[cfg(windows)]
+pub mod desktop;
 pub mod handoff;
 #[cfg(windows)]
 pub mod launch_channel;

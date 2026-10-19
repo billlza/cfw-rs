@@ -29,9 +29,7 @@ impl Validation {
             Self::Wire(value) => value
                 .handle(connection, request)
                 .map(|reply| (reply, false)),
-            Self::Runtime(value) => value
-                .handle(connection, request)
-                .map(|reply| (reply, false)),
+            Self::Runtime(value) => value.handle(connection, request),
             Self::Restart(value) => value.handle(connection, request),
         }
     }

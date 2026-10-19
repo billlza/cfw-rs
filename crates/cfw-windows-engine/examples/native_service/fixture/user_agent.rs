@@ -87,7 +87,7 @@ impl Validation {
         &mut self,
         connection: &mut LocalServiceConnection,
         request: AuthenticatedServiceRequest,
-    ) -> Result<AuthorizedReply> {
+    ) -> Result<(AuthorizedReply, bool)> {
         if self.scope.is_none() {
             self.scope = Some(authority_wire::Scoped::new()?);
         }
@@ -150,7 +150,7 @@ impl Validation {
                 && self.ready == 0
             {
                 self.rejected_bindings += 1;
-                return Ok(reply);
+                return Ok((reply, false));
             }
             if begin_cleanup && self.ready == 2 && self.reconciled == 1 {
                 if self.stopped == 1
@@ -161,7 +161,7 @@ impl Validation {
                     )
                 {
                     self.cleanup_rejections.push("active_cleanup_rejected");
-                    return Ok(reply);
+                    return Ok((reply, true));
                 }
                 if self.stopped == 2
                     && self.cleanup_rejections.len() == 1
@@ -172,7 +172,7 @@ impl Validation {
                 {
                     self.cleanup_rejections
                         .push("same_owner_new_connection_rejected");
-                    return Ok(reply);
+                    return Ok((reply, false));
                 }
             }
             return Err(format!("real runtime command rejected: {error}"));
@@ -200,6 +200,7 @@ impl Validation {
                     "context":observed.context(),"processes":authority_wire::process_report("normal_stop", observed.processes()),
                     "metadata":metadata,"snapshot":controller.snapshot(),"production_cleanup":true,"lease_released":true,
                     "rejected":self.cleanup_rejections,
+                    "recorded_process_id":observed.recorded_process_id(),"recorded_process_creation_time":observed.recorded_process_creation_time(),
                 }),
             )?;
             self.reconciled += 1;
@@ -227,7 +228,7 @@ impl Validation {
         self.ready += usize::from(ready);
         self.stopped += usize::from(stopped);
         self.heartbeats += usize::from(heartbeat);
-        Ok(reply)
+        Ok((reply, false))
     }
     pub(super) fn finish(&mut self) -> Result<()> {
         if self.ready != 2

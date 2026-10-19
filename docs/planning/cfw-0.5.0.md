@@ -1249,7 +1249,7 @@ Job 计数均为 3、1、0，合计 8 次心跳、1 次预期错误绑定拒绝�
 恢复、生产全局清理证据、完整应用工厂和发布验收仍是开放项。
 参考 [无权限要求的内核对象比较](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles)。
 
-### SCM 进程崩溃与真实代理恢复（待原生验证）
+### SCM 进程崩溃与真实代理恢复
 
 新增单独的 `--runtime-restart-validation` 场景，正常两模式用例继续保留。使用
 真实 SystemProxy、独立的普通用户 Desktop/Agent 和同一 Go 引擎。Desktop 完成
@@ -1278,7 +1278,26 @@ Agent 和 Desktop 必须保留真实的控制通道丢失错误，不能伪造 S
 当时的失败上传规则遗漏重启快照 JSON，不能事后补造。修正只允许恢复场景中该
 明确分配请求的 Recovering 拒绝继续连接，并补齐失败快照上传。临时服务清理遇到
 1061/1062 时必须重新观察到 StopPending/Stopped，再等待真正停止及原进程退出；
-其他错误仍失败。修正路径等待新的原生 CI，不降低产品拒绝规则或退出断言。
+其他错误仍失败；产品拒绝规则和退出断言保持原要求。
+
+修正代码 `161d928` 的 [Windows CI 39300114644](https://github.com/billlza/cfw-rs/actions/runs/39300114644)
+四项作业全部成功；577 项共享 Rust、311 项 UI、10 项原生引擎、35 项 SCM、1 项
+保留句柄准入和 2 项诊断测试通过。原两种代理模式仍完成正常生命周期与 8 次心跳。
+256 次连接压力检查在 20.082862 秒内完成。已下载并核对源码、ZIP 哈希及完整回执：
+
+- 服务产物 `12211761907`：`812ae6c40cd2866ee5b6814e79ea0664f971f0665390db8ef88a10bd06d53620`。
+- 引擎产物 `12210658274`：`1adb93d52583c6027726ead0fc2f89c31900e409b1bd5da6ed32aa421b8241d9`。
+
+本次实际终止并观察到旧 SYSTEM 服务进程 1040 退出，新服务为不同内核进程对象
+9252。新服务重开同一运行 Job 时仍观察到 3 个活动成员；持久化 Active 元数据
+逐字段保持一致，服务快照为 Recovering、revision 5，执行租约未恢复。之后的
+运行代数分配和 OwnedLease 分别被 Recovering、Identity 拒绝。
+
+Agent 和 Desktop 的产品操作都保留断连错误。Agent 本地恢复原 WinINet 设置、
+移除代理日志并结束引擎，但没有 Stopped 确认；Desktop 另外通过已持有句柄观察
+Agent/引擎退出，核对原代理设置并重新绑定两处监听端口。测试成功表示这些故障
+语义得到验证，不能把产品错误改称成功。本次重启场景未再次记录完整 Job 的最终
+零计数，也没有生产全局清理证据，因此仍不能发布 Off 或认定完整服务恢复完成。
 
 参考 [进程终止与退出观察](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)
 及 [SCM 启动与状态观察](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicew)。

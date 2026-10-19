@@ -32,7 +32,12 @@ impl AuthorityChannel {
         let owner = RecordedOwner::from_native(self.identity.identity().user_session())?;
         let reply = channel.request(message.as_bytes(), deadline)?;
         self.identity.revalidate()?;
-        let response = wire::response(&request, reply.as_bytes(), &owner);
+        let mut response = wire::response(&request, reply.as_bytes(), &owner);
+        if let Ok(Response::Bound(grant)) = &mut response {
+            // Wire validation and native service/request correlation precede
+            // any interpretation of a numeric value as a receiver-owned handle.
+            grant.adopt_keeper(&self.identity)?;
+        }
         if response.is_ok() || matches!(&response, Err(WireError::Rejected(_))) {
             self.channel = Some(channel);
         }

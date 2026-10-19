@@ -277,7 +277,7 @@ impl EngineProcess {
         runtime_directory: &Path,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        match Self::spawn_retained(executable, runtime_directory, timeout, None) {
+        match Self::spawn_retained(executable, runtime_directory, timeout, None, None) {
             Ok(owner) => Ok(owner),
             Err(failure) => {
                 let ChildLaunchFailure { error, owner } = failure;
@@ -299,6 +299,7 @@ impl EngineProcess {
         runtime_directory: &Path,
         timeout: Duration,
         cancellation: Option<Arc<AtomicBool>>,
+        keeper: Option<&crate::authority::RuntimeKeeper>,
     ) -> Result<Self, ChildLaunchFailure> {
         let deadline = deadline(timeout).map_err(ChildLaunchFailure::uncreated)?;
         if cancellation
@@ -308,8 +309,8 @@ impl EngineProcess {
             return Err(ChildLaunchFailure::uncreated(Error::Cancelled));
         }
         let session = uuid::Uuid::new_v4().simple().to_string();
-        let assets =
-            spawn_assets(executable, runtime_directory).map_err(ChildLaunchFailure::uncreated)?;
+        let assets = spawn_assets(executable, runtime_directory, keeper)
+            .map_err(ChildLaunchFailure::uncreated)?;
         let mut owner = Self {
             child: assets.child,
             job: assets.job,
@@ -726,6 +727,7 @@ struct SpawnAssets {
 fn spawn_assets(
     executable: VerifiedExecutable,
     runtime_directory: &Path,
+    keeper: Option<&crate::authority::RuntimeKeeper>,
 ) -> Result<SpawnAssets, Error> {
     let parent = runtime_directory
         .parent()
@@ -754,7 +756,7 @@ fn spawn_assets(
     {
         return Err(std::io::Error::last_os_error().into());
     }
-    let child = NativeChild::spawn(&executable, runtime_directory, job.as_handle())?;
+    let child = NativeChild::spawn(&executable, runtime_directory, job.as_handle(), keeper)?;
     Ok(SpawnAssets {
         child,
         job,

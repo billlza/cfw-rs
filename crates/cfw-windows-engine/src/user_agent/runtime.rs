@@ -27,6 +27,8 @@ pub struct UserAgentRuntime {
     executable: VerifiedExecutable,
     directory: PathBuf,
     proxy: Option<WindowsSystemProxy>,
+    #[cfg(feature = "native-service-validation")]
+    release_agent_keeper: bool,
 }
 impl UserAgentRuntime {
     pub fn new(
@@ -38,7 +40,14 @@ impl UserAgentRuntime {
             executable,
             directory,
             proxy,
+            #[cfg(feature = "native-service-validation")]
+            release_agent_keeper: false,
         }
+    }
+    #[cfg(feature = "native-service-validation")]
+    pub fn release_agent_keeper_after_spawn_for_validation(mut self) -> Self {
+        self.release_agent_keeper = true;
+        self
     }
 }
 
@@ -97,6 +106,7 @@ pub struct UserAgentSession {
     proxy: Option<WindowsSystemProxy>,
     control: Option<ControlSession>,
     child: Option<EngineProcess>,
+    keeper: Option<crate::authority::RuntimeKeeper>,
     cancel: Arc<AtomicBool>,
     attempted: bool,
     bound: bool,
@@ -127,6 +137,7 @@ impl UserAgentSession {
             proxy: None,
             control: None,
             child: None,
+            keeper: None,
             cancel: Arc::new(AtomicBool::new(false)),
             attempted: false,
             bound: false,
@@ -241,6 +252,11 @@ impl UserAgentSession {
         if grant.context() != &self.context {
             return Err(UserAgentError::ConfigurationMismatch);
         }
+        let keeper = grant.into_keeper()?;
+        if keeper.root() != &self.context.operation.root {
+            return Err(UserAgentError::ConfigurationMismatch);
+        }
+        self.keeper = Some(keeper);
         self.bound = true;
         self.live()?;
         if stop.load(Ordering::Acquire) {
@@ -260,12 +276,19 @@ impl UserAgentSession {
             &assets.directory,
             NATIVE_TIMEOUT,
             Some(Arc::clone(&self.cancel)),
+            self.keeper.as_ref(),
         ) {
             Ok(owner) => self.child = Some(owner),
             Err(ChildLaunchFailure { error, owner }) => {
                 self.child = owner.map(|owner| *owner);
                 return Err(error.into());
             }
+        }
+        #[cfg(feature = "native-service-validation")]
+        if assets.release_agent_keeper {
+            // Fault injection: the actual Go child must retain the only
+            // non-service reference before Ready closes all service handles.
+            self.keeper.take();
         }
         let child = self.child.as_mut().ok_or(UserAgentError::State)?;
         let config = self.configuration.as_ref().ok_or(UserAgentError::State)?;

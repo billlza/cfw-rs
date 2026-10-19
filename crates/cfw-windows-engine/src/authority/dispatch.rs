@@ -133,6 +133,8 @@ impl WindowsAuthority {
                 Response::Bound(wire::BoundGrant {
                     context: grant.context().clone(),
                     committed_revision: grant.committed_revision(),
+                    keeper_handle: grant.keeper_handle(),
+                    keeper: None,
                 })
             }
             Command::Ready(input) => Response::Status(self.ready(authorization, input)?),

@@ -98,6 +98,7 @@ impl PreparedTicket {
 pub struct RuntimeStartAuthorization {
     pub(super) context: LeaseContext,
     pub(super) committed_revision: u64,
+    pub(super) keeper_handle: u64,
 }
 impl RuntimeStartAuthorization {
     pub fn context(&self) -> &LeaseContext {
@@ -105,6 +106,11 @@ impl RuntimeStartAuthorization {
     }
     pub fn committed_revision(&self) -> u64 {
         self.committed_revision
+    }
+    /// A zero-access handle value in the authenticated recipient's process.
+    /// It is not a service-side handle and must never be closed here.
+    pub fn keeper_handle(&self) -> u64 {
+        self.keeper_handle
     }
 }
 

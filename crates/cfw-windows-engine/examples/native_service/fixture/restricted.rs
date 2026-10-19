@@ -41,7 +41,7 @@ impl ClientCase {
     fn report(self) -> serde_json::Value {
         match self {
             Self::UserAgent => {
-                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true,"machine_record_access_denied":true,"zero_access_job_keeper_isolated":true,"job_keeper_prevents_name_loss":true,"job_keeper_release_observed":true})
+                serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"query_only_service_process":true,"desktop_role_rejected":true,"pipe_instance_creation_rejected":true,"live_console_authorized":true,"missing_lease_rejected":true,"foreign_lease_rejected":true,"unleased_observation_admitted":true,"machine_record_access_denied":true,"zero_access_job_keeper_isolated":true,"job_keeper_prevents_name_loss":true,"job_keeper_release_observed":true,"keeper_object_identity_checked":true,"unrelated_keeper_handle_preserved":true})
             }
             Self::CopiedImage => {
                 serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,"client_image_rejected":true})

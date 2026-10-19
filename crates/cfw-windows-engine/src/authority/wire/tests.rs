@@ -111,8 +111,9 @@ fn protocol_and_header_are_closed_before_dispatch() {
     let good = Request::new(Command::Observe).unwrap().encode().unwrap();
     let text = std::str::from_utf8(good.as_bytes()).unwrap();
     for altered in [
-        text.replace("\"version\":2", "\"version\":1"),
-        text.replace("\"version\":2", "\"version\":3"),
+        text.replace("\"version\":3", "\"version\":1"),
+        text.replace("\"version\":3", "\"version\":2"),
+        text.replace("\"version\":3", "\"version\":4"),
         text.replace(PROTOCOL, "cfm.authority"),
     ] {
         assert!(matches!(
@@ -121,11 +122,11 @@ fn protocol_and_header_are_closed_before_dispatch() {
         ));
     }
     for altered in [
-        text.replace("\"version\":2", "\"version\":2,\"version\":2"),
+        text.replace("\"version\":3", "\"version\":3,\"version\":3"),
         text.replace("\"kind\":\"observe\"", "\"kind\":\"reconcile_off\""),
         text.replace("\"payload\":{}", "\"payload\":{\"ticket\":[1]}"),
         format!("{text}{{}}"),
-        text.replace("\"version\":2", "\"unknown\":true,\"version\":2"),
+        text.replace("\"version\":3", "\"unknown\":true,\"version\":3"),
     ] {
         assert!(Request::decode(altered.as_bytes()).is_err());
     }
@@ -239,6 +240,9 @@ fn unrelated_success_and_unexpected_revisions_do_not_create_a_runtime_grant() {
     let reply = Response::Bound(BoundGrant {
         context: context(),
         committed_revision: 3,
+        keeper_handle: 4,
+        #[cfg(windows)]
+        keeper: None,
     })
     .encode(request.id)
     .unwrap();
@@ -251,6 +255,9 @@ fn unrelated_success_and_unexpected_revisions_do_not_create_a_runtime_grant() {
         let reply = Response::Bound(BoundGrant {
             context: context(),
             committed_revision: revision,
+            keeper_handle: 4,
+            #[cfg(windows)]
+            keeper: None,
         })
         .encode(request.id)
         .unwrap();
@@ -266,6 +273,76 @@ fn unrelated_success_and_unexpected_revisions_do_not_create_a_runtime_grant() {
         response(&request, unrelated.as_bytes(), &owner()),
         Err(WireError::Correlation)
     ));
+}
+
+#[test]
+fn bound_keeper_receipts_reject_unsafe_values_and_never_adopt_from_the_codec() {
+    let request = Request::new(Command::BindUserAgent(BindRequest {
+        context: context(),
+        ticket: TicketMaterial::from_slice(&[7; 32]).unwrap(),
+    }))
+    .unwrap();
+    let message = Response::Bound(BoundGrant {
+        context: context(),
+        committed_revision: 3,
+        keeper_handle: 4,
+        #[cfg(windows)]
+        keeper: None,
+    })
+    .encode(request.id)
+    .unwrap();
+    let original: serde_json::Value = serde_json::from_slice(message.as_bytes()).unwrap();
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!(1),
+        serde_json::json!(2),
+        serde_json::json!(u64::MAX),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::Value::Null,
+    ] {
+        let mut changed = original.clone();
+        changed["payload"]["keeper_handle"] = value;
+        assert!(matches!(
+            response(&request, &serde_json::to_vec(&changed).unwrap(), &owner()),
+            Err(WireError::Malformed)
+        ));
+    }
+    let mut missing = original.clone();
+    missing["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("keeper_handle");
+    assert!(matches!(
+        response(&request, &serde_json::to_vec(&missing).unwrap(), &owner()),
+        Err(WireError::Malformed)
+    ));
+    for version in [1, 2, 4] {
+        let mut changed = original.clone();
+        changed["version"] = serde_json::json!(version);
+        assert!(matches!(
+            response(&request, &serde_json::to_vec(&changed).unwrap(), &owner()),
+            Err(WireError::Version)
+        ));
+    }
+    let duplicate = std::str::from_utf8(message.as_bytes()).unwrap().replace(
+        "\"keeper_handle\":4",
+        "\"keeper_handle\":4,\"keeper_handle\":8",
+    );
+    assert!(matches!(
+        response(&request, duplicate.as_bytes(), &owner()),
+        Err(WireError::Malformed)
+    ));
+    let parsed = response(&request, message.as_bytes(), &owner()).unwrap();
+    #[cfg(windows)]
+    {
+        let Response::Bound(bound) = parsed else {
+            panic!("expected bound metadata")
+        };
+        assert!(matches!(bound.into_keeper(), Err(WireError::Correlation)));
+    }
+    #[cfg(not(windows))]
+    assert!(matches!(parsed, Response::Bound(_)));
 }
 
 #[test]

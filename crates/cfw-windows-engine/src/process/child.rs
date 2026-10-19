@@ -61,6 +61,7 @@ impl NativeChild {
         executable: &VerifiedExecutable,
         directory: &Path,
         job: BorrowedHandle<'_>,
+        keeper: Option<&crate::authority::RuntimeKeeper>,
     ) -> Result<Self, Error> {
         let parent = NativePeerProcess::open(std::process::id()).map_err(peer_error)?;
         let (input_read, input_write) = pipe()?;
@@ -71,10 +72,18 @@ impl NativeChild {
         // existing framed protocol provides bounded, stable error codes.
         let null_output = File::options().write(true).open(r"\\.\NUL")?;
         let error = inherit(null_output.as_handle())?;
-        let mut attributes = ProcessHandleList::with_job(
-            &[input.as_handle(), output.as_handle(), error.as_handle()],
-            job,
-        )?;
+        let inherited_keeper = keeper
+            .map(|keeper| keeper.inherit_for_engine())
+            .transpose()
+            .map_err(|source| Error::Operation {
+                operation: "inherit runtime lifetime",
+                source: io::Error::other(source),
+            })?;
+        let mut selected = vec![input.as_handle(), output.as_handle(), error.as_handle()];
+        if let Some(keeper) = &inherited_keeper {
+            selected.push(keeper.as_handle());
+        }
+        let mut attributes = ProcessHandleList::with_job(&selected, job)?;
         let application = terminated_path(executable.path())?;
         let current_directory = terminated_path(directory)?;
         let mut command = Vec::with_capacity(application.len() + 2);

@@ -1,6 +1,5 @@
 //! Isolated validation of a zero-access Job handle, not a product start grant.
 use super::super::*;
-use windows_sys::Win32::System::Threading::PROCESS_DUP_HANDLE;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -33,39 +32,20 @@ impl JobKeeperProbe {
             generation: 1,
         };
         let creator = create(&root)?;
-        peer.revalidate()?;
-        let raw = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, peer.process_id()) };
-        if raw.is_null() {
-            return Err(native("open keeper fixture target"));
-        }
-        let process = unsafe { OwnedHandle::from_raw_handle(raw) };
-        peer.revalidate()?;
-        let mut received = null_mut();
-        if unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                creator.as_raw_handle(),
-                process.as_raw_handle(),
-                &mut received,
-                0,
-                0,
-                0,
-            )
-        } == 0
-        {
-            return Err(native("transfer zero-access keeper fixture"));
-        }
-        peer.revalidate()?;
+        let value = super::super::keeper::transfer(&creator, &peer)?;
         Ok(Self {
             root,
             creator: Some(creator),
             peer,
-            value: received as usize as u64,
+            value,
             phase: Phase::Sent,
         })
     }
     pub fn handle_value(&self) -> u64 {
         self.value
+    }
+    pub fn root(&self) -> &RootContext {
+        &self.root
     }
     fn check_peer(&self, peer: &NativePeerProcess) -> Result<()> {
         crate::service_peer::require_system_service_identity()?;

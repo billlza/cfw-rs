@@ -1195,6 +1195,34 @@ Job 没有因创建时赋值而失去观察。七次心跳和一次预期错误�
 零权限保留句柄尚未加入产品 Bind 回复或引擎清单，因此完整服务重启恢复继续保留。
 参考 [进程属性与 Job 列表](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)。
 
+### Bind 到引擎的运行引用（待原生验证）
+
+新增产品 RuntimeKeeper：SYSTEM 将实际 UserAgent 纳入 Job 后，先向这个已认证且
+保留身份的进程复制零权限、不可继承的引用，再提交 Bind 并回传数值。该数值只在
+接收者进程内有效，不写入日志，也不能由服务按旧数值远程关闭。任何部分失败仍保留
+恢复责任；未接管的引用最终由专用 Agent 进程退出回收，不重放不确定的传递。
+
+客户端仅在协议、请求、上下文及原生服务/自身身份校验后接管：以零权限打开期望
+Job，用 CompareObjectHandles 核对同一内核对象，再持有自己的零权限引用。错误
+对象不会被冒认或关闭。接收者的原生引用不能重新序列化成另一个进程的句柄数值。
+单独通过纯协议解码的 Bound 元数据也不能生成原生 RuntimeKeeper。
+
+UserAgent 在凭据解析前保留引用，并向实际 Go 引擎的明确句柄清单加入一个零权限
+继承副本。重新打开 Authority 时会保留已验证的查询句柄，仍处于 Recovering，
+不恢复票据或执行租约。活动 Job 缺失仍是 Unavailable，不能仅凭“可能已退出”
+构造 Off。Windows 开发协议升为 v3、日志载荷升为 schema 5；旧版本明确拒绝，
+没有自动迁移或重置路径，CFM 已发布协议保持不变。
+
+原生夹具将使用真实两种代理模式，主动丢弃 Agent 引用，然后关闭所有服务 Job
+句柄；新控制器必须靠实际引擎持有的副本重开观察，并继续拒绝活跃运行的 Off。
+随后恢复正常监督以核对退出计数。另行验证错误对象不关闭、原生对象身份、旧协议、
+缺失/重复/非法句柄字段和纯解码不能接管资源。Windows 全目标全特性 Clippy 与
+75 项可移植测试已通过，原生执行尚待该提交的 CI。
+
+这覆盖引用丢失和控制器重开，不等同于完整 SCM 进程崩溃/重启验收；旧用户代理
+恢复、生产全局清理证据、完整应用工厂和发布验收仍是开放项。
+参考 [无权限要求的内核对象比较](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles)。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。

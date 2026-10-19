@@ -54,6 +54,18 @@ impl WindowsAuthority {
             initial.enroll(uuid::Uuid::new_v4())?;
             authority.commit(initial)?;
         }
+        if let Some(metadata) = authority.machine.metadata()
+            && metadata.state() != AuthorityState::Off
+            && metadata.root().epoch != 0
+        {
+            authority.runtime_job = match RuntimeJob::reopen(metadata.root()) {
+                Ok(job) => Some(job),
+                // Recovering with an unavailable observer is explicit; missing
+                // names still cannot prove retirement or issue a live lease.
+                Err(super::RuntimeJobError::Unavailable) => None,
+                Err(error) => return Err(error.into()),
+            };
+        }
         Ok(authority)
     }
     pub fn snapshot(&self) -> AuthoritySnapshot {
@@ -290,12 +302,25 @@ impl WindowsAuthority {
                 }
             },
         );
+        let keeper_handle = match self
+            .runtime_job
+            .as_ref()
+            .ok_or(AuthorityError::Invalid)?
+            .transfer_keeper(&process)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                self.suspend(false);
+                return Err(error.into());
+            }
+        };
         self.commit(candidate)?;
         self.runtime_process = Some(process);
         self.after_publication(authorization, deadline)?;
         Ok(RuntimeStartAuthorization {
             context,
             committed_revision: self.machine.revision(),
+            keeper_handle,
         })
     }
     pub fn ready(
@@ -469,6 +494,26 @@ impl WindowsAuthority {
             return Err(error);
         }
         Ok(self.snapshot())
+    }
+    #[cfg(feature = "native-service-validation")]
+    pub fn release_runtime_job_observer_for_validation(&mut self) -> Result<()> {
+        require_service()?;
+        self.runtime_job.take().ok_or(AuthorityError::Invalid)?;
+        Ok(())
+    }
+    #[cfg(feature = "native-service-validation")]
+    pub fn restore_runtime_job_observer_for_validation(&mut self) -> Result<()> {
+        require_service()?;
+        if self.runtime_job.is_some() {
+            return Err(AuthorityError::Invalid);
+        }
+        self.runtime_job = Some(RuntimeJob::reopen(
+            self.machine
+                .metadata()
+                .ok_or(AuthorityError::Recovering)?
+                .root(),
+        )?);
+        Ok(())
     }
     #[cfg(feature = "native-service-validation")]
     pub fn interrupt_next_publication_for_validation(

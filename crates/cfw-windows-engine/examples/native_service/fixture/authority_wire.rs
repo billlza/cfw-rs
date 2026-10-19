@@ -58,14 +58,23 @@ impl Scoped {
         &mut self,
         minimum: u32,
     ) -> Result<RuntimeProcessObservation> {
-        // The original controller retains its query-only Job handle. A second
-        // controller reopens the journal/native object without restoring a lease.
-        // This is not evidence of reopening after service handle loss.
+        self.controller
+            .as_mut()
+            .ok_or("missing original controller")?
+            .release_runtime_job_observer_for_validation()
+            .map_err(|e| e.to_string())?;
+        // All service handles are gone. The production transferred reference
+        // (or the actual engine's inherited copy) must retain this exact name.
         let mut recovered =
             WindowsAuthority::open(&self.path, &self.scope).map_err(|e| e.to_string())?;
         assert_eq!(recovered.snapshot().state, AuthorityState::Recovering);
         let observation = require_live_runtime(&mut recovered, minimum)?;
         assert!(recovered.lease_owner().is_none());
+        self.controller
+            .as_mut()
+            .ok_or("missing original controller")?
+            .restore_runtime_job_observer_for_validation()
+            .map_err(|e| e.to_string())?;
         Ok(observation)
     }
 }
@@ -548,7 +557,7 @@ pub(super) fn require_job_access_denied(root: &RootContext) -> Result<()> {
     Ok(())
 }
 fn report() -> serde_json::Value {
-    serde_json::json!({"success":true,"versioned_requests":20,"typed_rejections":7,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"recorded_runtime_scope_validated":true,"recorded_scope_observer_control_rejected":true,"user_agent_recorded_scope_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"live_processes_block_reconcile":true,"job_reopened_while_service_handle_retained":true,"live_member_without_job_name_rejected":true,"ordinary_agent_job_rights_denied":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
+    serde_json::json!({"success":true,"versioned_requests":20,"typed_rejections":7,"machine_lineage_cas":true,"user_agent_lineage_role_rejected":true,"recorded_runtime_scope_validated":true,"recorded_scope_observer_control_rejected":true,"user_agent_recorded_scope_role_rejected":true,"native_runtime_owner_bound":true,"same_owner_new_connection_rejected":true,"ticket_handoff_stayed_in_memory":true,"stopped_report_did_not_publish_off":true,"live_processes_block_reconcile":true,"job_reopened_after_service_handles_closed":true,"live_member_without_job_name_rejected":true,"ordinary_agent_job_rights_denied":true,"runtime_reports_synthetic":true,"cleanup_observations_injected":true,"actual_runtime_started":false,"full_service_backend_proven":false})
 }
 pub(super) fn require_report(root: &Path) -> Result<()> {
     let bytes =

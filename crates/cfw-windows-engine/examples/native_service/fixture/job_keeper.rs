@@ -1,5 +1,11 @@
 //! Native counterexample search before granting any product process a keeper.
 use super::*;
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Transfer {
+    pub(super) handle: u64,
+    pub(super) root: cfw_engine_api::authority_v1::RootContext,
+}
 use windows_sys::Win32::{
     Storage::FileSystem::{READ_CONTROL, WRITE_DAC, WRITE_OWNER},
     System::{
@@ -15,21 +21,15 @@ pub(super) fn client(channel: &mut ServiceChannel) -> Result<()> {
     let bytes = channel
         .request(b"job-keeper-begin", Instant::now() + LIMIT)
         .map_err(|e| e.to_string())?;
-    if bytes.as_bytes().len() != 8 {
+    if bytes.as_bytes().len() > 512 {
         return Err("invalid keeper fixture handle length".into());
     }
-    let value = u64::from_le_bytes(
-        bytes
-            .as_bytes()
-            .try_into()
-            .map_err(|_| "invalid keeper fixture handle")?,
-    );
-    let value = usize::try_from(value).map_err(|_| "keeper handle overflow")?;
-    if value == 0 || value >= isize::MAX as usize {
-        return Err("invalid keeper handle value".into());
-    }
-    // The verified SYSTEM endpoint created this handle in this exact process.
-    let keeper = unsafe { OwnedHandle::from_raw_handle(value as *mut c_void) };
+    let transfer: Transfer = serde_json::from_slice(bytes.as_bytes()).map_err(|e| e.to_string())?;
+    let keeper = cfw_windows_engine::authority::validate_runtime_keeper_adoption(
+        transfer.handle,
+        &transfer.root,
+    )
+    .map_err(|e| e.to_string())?;
     let mut flags = 0;
     if unsafe { GetHandleInformation(keeper.as_raw_handle(), &mut flags) } == 0 {
         return Err(error("inspect keeper handle"));

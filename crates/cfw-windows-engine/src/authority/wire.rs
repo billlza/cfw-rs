@@ -14,9 +14,9 @@ use zeroize::Zeroizing;
 
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 const PROTOCOL: &str = "cfw.windows.authority";
-// v2 Bind grants require SYSTEM job assignment before runtime authorization.
-// A v1 service cannot establish that contract and must not be accepted.
-const VERSION: u16 = 2;
+// v3 additionally transfers a zero-access lifetime reference before Bind
+// publication. Earlier services cannot establish that contract.
+const VERSION: u16 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -38,6 +38,9 @@ pub enum WireError {
     #[cfg(windows)]
     #[error("Windows authority client identity: {0}")]
     Identity(#[from] crate::PeerIdentityError),
+    #[cfg(windows)]
+    #[error("Windows authority runtime keeper: {0}")]
+    Keeper(#[from] super::RuntimeJobError),
 }
 type Result<T> = std::result::Result<T, WireError>;
 
@@ -412,6 +415,7 @@ struct PreparedPayloadRef<'a> {
 struct BoundPayload {
     context: LeaseContext,
     committed_revision: u64,
+    keeper_handle: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -442,6 +446,9 @@ impl PreparedGrant {
 pub struct BoundGrant {
     pub(super) context: LeaseContext,
     pub(super) committed_revision: u64,
+    pub(super) keeper_handle: u64,
+    #[cfg(windows)]
+    pub(super) keeper: Option<super::RuntimeKeeper>,
 }
 impl BoundGrant {
     pub fn context(&self) -> &LeaseContext {
@@ -449,6 +456,22 @@ impl BoundGrant {
     }
     pub fn committed_revision(&self) -> u64 {
         self.committed_revision
+    }
+    #[cfg(windows)]
+    pub(super) fn adopt_keeper(&mut self, owner: &crate::NativePeerProcess) -> Result<()> {
+        if self.keeper.is_some() {
+            return Err(WireError::Correlation);
+        }
+        self.keeper = Some(super::RuntimeKeeper::adopt(
+            self.keeper_handle,
+            &self.context.operation.root,
+            owner,
+        )?);
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(crate) fn into_keeper(mut self) -> Result<super::RuntimeKeeper> {
+        self.keeper.take().ok_or(WireError::Correlation)
     }
 }
 pub enum Response {
@@ -474,14 +497,21 @@ impl Response {
                     ticket: &value.ticket,
                 },
             ),
-            Self::Bound(value) => envelope(
-                id,
-                ResponseTag::Bound,
-                &BoundPayload {
-                    context: value.context.clone(),
-                    committed_revision: value.committed_revision,
-                },
-            ),
+            Self::Bound(value) => {
+                #[cfg(windows)]
+                if value.keeper.is_some() {
+                    return Err(WireError::Correlation);
+                }
+                envelope(
+                    id,
+                    ResponseTag::Bound,
+                    &BoundPayload {
+                        context: value.context.clone(),
+                        committed_revision: value.committed_revision,
+                        keeper_handle: value.keeper_handle,
+                    },
+                )
+            }
             Self::Status(value) => envelope(id, ResponseTag::Status, value),
             Self::Lease(value) => envelope(id, ResponseTag::Lease, value),
         }
@@ -630,6 +660,12 @@ pub(super) fn response(
         }
         (Command::BindUserAgent(input), ResponseTag::Bound) => {
             let value: BoundPayload = decode(payload)?;
+            if value.keeper_handle == 0
+                || value.keeper_handle > isize::MAX as u64
+                || value.keeper_handle & 3 != 0
+            {
+                return Err(WireError::Malformed);
+            }
             if value.context != input.context
                 || value.context.operation.owner != *owner
                 || input.context.operation.prepared_revision.checked_add(1)
@@ -640,6 +676,9 @@ pub(super) fn response(
             Ok(Response::Bound(BoundGrant {
                 context: value.context,
                 committed_revision: value.committed_revision,
+                keeper_handle: value.keeper_handle,
+                #[cfg(windows)]
+                keeper: None,
             }))
         }
         (Command::OwnedLease, ResponseTag::Lease) => {

@@ -60,7 +60,8 @@ pub(super) fn run(
         } else {
             None
         },
-    );
+    )
+    .release_agent_keeper_after_spawn_for_validation();
     let mut session = UserAgentSession::new(
         launch
             .into_plan(WindowsCredentialStore::new(

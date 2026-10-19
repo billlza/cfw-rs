@@ -18,9 +18,12 @@ pub use client::AuthorityChannel;
 pub use dispatch::{AuthorizedReply, DispatchError};
 #[cfg(windows)]
 pub use native::WindowsAuthority;
+#[cfg(windows)]
+pub(crate) use runtime_job::RuntimeKeeper;
 #[cfg(all(windows, feature = "native-service-validation"))]
 pub use runtime_job::{
     JobKeeperProbe, runtime_job_name_for_validation, validate_runtime_job_failures_for_validation,
+    validate_runtime_keeper_adoption,
 };
 #[cfg(windows)]
 pub use runtime_job::{RuntimeJobError, RuntimeProcessObservation, RuntimeProcessState};

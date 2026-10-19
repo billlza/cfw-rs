@@ -31,7 +31,11 @@ use windows_sys::Win32::{
     },
 };
 
+mod keeper;
 mod security;
+pub(crate) use keeper::RuntimeKeeper;
+#[cfg(feature = "native-service-validation")]
+pub use keeper::validate_runtime_keeper_adoption;
 #[cfg(feature = "native-service-validation")]
 mod validation;
 #[cfg(feature = "native-service-validation")]
@@ -78,7 +82,7 @@ fn native(operation: &'static str) -> RuntimeJobError {
 pub enum RuntimeProcessState {
     /// Enrollment has never consumed a runtime generation.
     NoRuntimeRoot,
-    /// A schema-4 Off record already committed retirement before this restart.
+    /// A schema-5 Off record already committed retirement before this restart.
     /// This is durable prior proof, not a fresh native process count.
     DurablyRetired,
     /// Preparing was committed but no Bind grant could have been published.
@@ -90,7 +94,7 @@ pub enum RuntimeProcessState {
     },
 }
 
-/// Native observation or explicit durable proof for a schema-4 root. Neither
+/// Native observation or explicit durable proof for a schema-5 root. Neither
 /// proves proxy/TUN/global cleanup; durable proof never becomes a native count.
 /// No public constructor accepts process counts claimed by a client.
 #[derive(Debug)]
@@ -139,6 +143,30 @@ pub(super) struct RuntimeJob {
     _observer: OwnedHandle,
 }
 impl RuntimeJob {
+    pub(super) fn reopen(root: &RootContext) -> Result<Self> {
+        crate::service_peer::require_system_service_identity()?;
+        let wide: Vec<_> = job_name(root)?.encode_utf16().chain([0]).collect();
+        let raw = unsafe { OpenJobObjectW(OBSERVER_ACCESS, 0, wide.as_ptr()) };
+        if raw.is_null() {
+            let source = io::Error::last_os_error();
+            if source.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+                return Err(RuntimeJobError::Unavailable);
+            }
+            return Err(RuntimeJobError::Native {
+                operation: "reopen runtime observer",
+                source,
+            });
+        }
+        let observer = unsafe { OwnedHandle::from_raw_handle(raw) };
+        security::verify(&observer)?;
+        inspect(&observer)?;
+        Ok(Self {
+            _observer: observer,
+        })
+    }
+    pub(super) fn transfer_keeper(&self, peer: &NativePeerProcess) -> Result<u64> {
+        keeper::transfer(&self._observer, peer)
+    }
     pub(super) fn assign(root: &RootContext, peer: &NativePeerProcess) -> Result<Self> {
         crate::service_peer::require_system_service_identity()?;
         let job = create(root)?;

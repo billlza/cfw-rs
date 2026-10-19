@@ -565,7 +565,11 @@ fn serve_connection(
                     let probe =
                         cfw_windows_engine::authority::JobKeeperProbe::new(admitted.process())
                             .map_err(|e| e.to_string())?;
-                    let value = probe.handle_value().to_le_bytes().to_vec();
+                    let value = serde_json::to_vec(&job_keeper::Transfer {
+                        handle: probe.handle_value(),
+                        root: probe.root().clone(),
+                    })
+                    .map_err(|e| e.to_string())?;
                     job_keeper = Some(probe);
                     Some(value)
                 }

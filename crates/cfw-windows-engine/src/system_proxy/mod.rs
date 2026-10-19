@@ -1,6 +1,8 @@
 //! Durable ownership of this user's WinINet LAN proxy settings. This is below
 //! service/engine authority: a settings receipt is never a global-Off proof.
 mod native;
+mod restoration;
+pub use restoration::ProxyRestorationObservation;
 
 use crate::{EngineProcess, NativePeerIdentity, NativePeerProcess, PreparedConfig};
 use cfw_engine_api::{
@@ -47,6 +49,10 @@ pub enum ProxyError {
     OwnershipConflict,
     #[error("Windows proxy ownership journal is missing; restoration is unproven")]
     OwnershipMissing,
+    #[error("Windows proxy has no durable restoration record; restoration is unproven")]
+    RestorationMissing,
+    #[error("Windows proxy restoration record is invalid")]
+    InvalidRestorationRecord,
     #[error("Windows proxy request does not match the running engine")]
     RuntimeMismatch,
     #[error("Windows proxy publication may have changed settings; recovery is required: {0}")]
@@ -270,7 +276,7 @@ impl ProxyCleanup {
     }
 }
 
-fn user_identity() -> Result<NativePeerIdentity, ProxyError> {
+pub(crate) fn user_identity() -> Result<NativePeerIdentity, ProxyError> {
     let process = NativePeerProcess::open(std::process::id())?;
     let identity = process.identity();
     if identity.session_id() == 0
@@ -460,6 +466,13 @@ impl WindowsSystemProxy {
         &self,
         context: &EngineCommandContext,
     ) -> Result<ProxySettingsRestored, ProxyError> {
+        self.restore_at_cut(context, restoration::RestoreCut::None)
+    }
+    fn restore_at_cut(
+        &self,
+        context: &EngineCommandContext,
+        cut: restoration::RestoreCut,
+    ) -> Result<ProxySettingsRestored, ProxyError> {
         self.locked(|transaction| {
             let record = Record::read(transaction, self.identity.user_sid())?
                 .ok_or(ProxyError::OwnershipMissing)?;
@@ -480,7 +493,21 @@ impl WindowsSystemProxy {
                     ProxyError::SettingsChanged,
                 )));
             }
-            transaction.remove(JOURNAL, MAX_JOURNAL_BYTES, ReadPolicy::Private)?;
+            // A later process must be able to distinguish an observed restore
+            // from mere journal absence. Publish bounded, nonsecret identity
+            // before retiring the active ownership record.
+            restoration::publish(transaction, &record)
+                .map_err(|e| ProxyError::OutcomeUnknown(Box::new(e)))?;
+            let current = native::observe().map_err(|e| ProxyError::OutcomeUnknown(Box::new(e)))?;
+            if current != record.before {
+                return Err(ProxyError::OutcomeUnknown(Box::new(
+                    ProxyError::SettingsChanged,
+                )));
+            }
+            cut.check()?;
+            transaction
+                .remove(JOURNAL, MAX_JOURNAL_BYTES, ReadPolicy::Private)
+                .map_err(|e| ProxyError::OutcomeUnknown(Box::new(e.into())))?;
             Ok(ProxySettingsRestored {
                 context: record.context,
                 configuration_digest: record.config_digest,

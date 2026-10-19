@@ -100,6 +100,8 @@ impl Service {
     ) -> Result<(AuthorizedReply, bool)> {
         let command = Request::decode(request.body()).map_err(|e| e.to_string())?;
         let ready = matches!(command.command(), Command::Ready(_));
+        let observe_retired =
+            self.recovered && matches!(command.command(), Command::ReadRuntimeScope);
         let expected_recovery_rejection =
             self.recovered && matches!(command.command(), Command::ReserveGeneration(_));
         drop(command);
@@ -127,6 +129,35 @@ impl Service {
             && !matches!(reply.rejection(), Some(AuthorityError::Recovering))
         {
             return Err("restarted service did not reject allocation as Recovering".into());
+        }
+        if observe_retired && reply.rejection().is_none() {
+            // The Desktop has retained and observed the Agent and engine exits.
+            // Independently wait for every member of the exact SYSTEM Job;
+            // a missing Job remains an error, never an implicit zero count.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let observed = loop {
+                let observed = authority
+                    .observe_runtime_processes()
+                    .map_err(|e| e.to_string())?;
+                if matches!(
+                    observed.state(),
+                    cfw_windows_engine::authority::RuntimeProcessState::Accounting {
+                        active: 0,
+                        ..
+                    }
+                ) {
+                    break observed;
+                }
+                if Instant::now() >= deadline {
+                    return Err("restarted service could not prove whole-Job retirement".into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            };
+            publish(
+                &self.root,
+                "runtime-restart-retired.json",
+                &authority_wire::process_report("retired", &observed),
+            )?;
         }
         Ok((reply, expected_recovery_rejection))
     }
@@ -307,12 +338,12 @@ pub(crate) fn agent_report() -> serde_json::Value {
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,
         "actual_system_proxy_runtime":true,"product_operation_succeeded":false,
         "control_loss_preserved":true,"local_cleanup_observed":true,
-        "original_proxy_restored":true,"stopped_acknowledged":false})
+        "durable_runtime_storage":true,"durable_proxy_restoration_record":true,"original_proxy_restored":true,"stopped_acknowledged":false})
 }
 pub(crate) fn desktop_report() -> serde_json::Value {
     serde_json::json!({"success":true,"medium_integrity":true,"administrator_member":false,
         "actual_http_proxy_traffic":true,"product_operation_succeeded":false,
-        "held_agent_and_engine_exit_observed":true,"original_proxy_restored":true,
+        "held_agent_and_engine_exit_observed":true,"restoration_observed_after_agent_exit":true,"original_proxy_restored":true,
         "listeners_released":true,"restart_recovering_observed":true,
         "new_execution_rejected":true,"full_service_backend_proven":false})
 }
@@ -320,13 +351,14 @@ pub(crate) fn receipt(root: &Path, receipts: &Path, source: &str) -> Result<()> 
     let before = read(root, "runtime-restart-before.json")?;
     let recovered = read(root, "runtime-restart-recovered.json")?;
     let restart = read(root, "runtime-restart-complete.json")?;
+    let retired = read(root, "runtime-restart-retired.json")?;
     if before["metadata"] != recovered["metadata"] {
         return Err("restart metadata changed".into());
     }
     write_report(
         &receipts.join("runtime-restart-receipt.json"),
         &serde_json::json!({
-            "product_source":source,"before":before,"recovered":recovered,"restart":restart,
+        "product_source":source,"before":before,"recovered":recovered,"restart":restart,"retired":retired,
             "desktop":desktop_report(),"agent":agent_report(),"temporary_service_removed":true,
             "global_cleanup_proven":false,"release_accepted":false,
         }),

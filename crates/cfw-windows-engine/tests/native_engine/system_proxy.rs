@@ -84,7 +84,10 @@ fn system_projection(
 // Model an independent program changing just the proxy server through the
 // supported OS API. The product adapter cannot call this fixture-only path.
 fn external_server(value: &str) {
-    let mut text: Vec<u16> = value.encode_utf16().chain([0]).collect();
+    external_server_units(&value.encode_utf16().collect::<Vec<_>>());
+}
+fn external_server_units(value: &[u16]) {
+    let mut text: Vec<u16> = value.iter().copied().chain([0]).collect();
     let mut option = INTERNET_PER_CONN_OPTIONW {
         dwOption: INTERNET_PER_CONN_PROXY_SERVER,
         Value: INTERNET_PER_CONN_OPTIONW_0 {
@@ -112,6 +115,115 @@ fn external_server(value: &str) {
     for option in [INTERNET_OPTION_SETTINGS_CHANGED, INTERNET_OPTION_REFRESH] {
         assert_ne!(unsafe { InternetSetOptionW(null(), option, null(), 0) }, 0);
     }
+}
+
+#[test]
+fn durable_restoration_requires_retired_ownership_and_fresh_native_settings() {
+    require_disposable_user();
+    let root = tempfile::tempdir().unwrap();
+    let authority = WindowsSystemProxy::new(&root.path().join("proxy")).unwrap();
+    let before = authority.snapshot().unwrap();
+    assert!(!before.explicit_proxy_enabled());
+    let original_server: Vec<u16> =
+        serde_json::from_value(serde_json::to_value(&before).unwrap()["server"].clone()).unwrap();
+    let context = context();
+    let mixed = reserve();
+    let controller = reserve();
+    let projection = system_projection(
+        mixed.local_addr().unwrap().port(),
+        controller.local_addr().unwrap().port(),
+        r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#,
+    );
+    let config = PreparedConfig::system_proxy_data_plane(&projection, []).unwrap();
+    drop((mixed, controller));
+    let mut engine =
+        EngineProcess::spawn(executable(), &root.path().join("runtime"), TIMEOUT).unwrap();
+    engine.start(&config, TIMEOUT).unwrap();
+    let mut changed = None;
+    let tested = catch_unwind(AssertUnwindSafe(|| {
+        assert!(matches!(
+            authority.observe_restoration(&context, config.digest()),
+            Err(ProxyError::RestorationMissing)
+        ));
+        authority.activate(&context, &mut engine, &config).unwrap();
+        assert!(matches!(
+            authority.observe_restoration(&context, config.digest()),
+            Err(ProxyError::OwnershipConflict)
+        ));
+        assert!(
+            matches!(authority.restore_interrupted_for_validation(&context), Err(ProxyError::OutcomeUnknown(error))
+            if matches!(error.as_ref(), ProxyError::Native { source, .. } if source.kind() == std::io::ErrorKind::Interrupted))
+        );
+        assert_eq!(authority.snapshot().unwrap(), before);
+        assert_eq!(
+            authority.inspect().unwrap(),
+            ProxyOwnershipObservation::Original {
+                context: context.clone()
+            }
+        );
+        let reopened = WindowsSystemProxy::new(&root.path().join("proxy")).unwrap();
+        assert!(matches!(
+            reopened.observe_restoration(&context, config.digest()),
+            Err(ProxyError::OwnershipConflict)
+        ));
+        reopened.restore(&context).unwrap();
+        let proof = reopened
+            .observe_restoration(&context, config.digest())
+            .unwrap();
+        assert_eq!(proof.context(), &context);
+        assert_eq!(proof.configuration_digest(), config.digest());
+        assert_eq!(proof.recorded_process_id(), engine.process_id());
+        assert!(proof.recorded_process_creation_time() > 0);
+        let mut stale = context.clone();
+        stale.generation += 1;
+        assert!(matches!(
+            reopened.observe_restoration(&stale, config.digest()),
+            Err(ProxyError::OwnershipConflict)
+        ));
+        assert!(matches!(
+            reopened.observe_restoration(&context, &"f".repeat(64)),
+            Err(ProxyError::OwnershipConflict)
+        ));
+        external_server("http=127.0.0.1:9;https=127.0.0.1:9");
+        changed = Some(authority.snapshot().unwrap());
+        assert!(matches!(
+            reopened.observe_restoration(&context, config.digest()),
+            Err(ProxyError::SettingsChanged)
+        ));
+        external_server_units(&original_server);
+        changed = None;
+        reopened
+            .observe_restoration(&context, config.digest())
+            .unwrap();
+    }));
+    if let Some(expected) = changed
+        && authority.snapshot().unwrap() == expected
+    {
+        external_server_units(&original_server);
+    }
+    let restored = cleanup(&authority, &context, &before, &None);
+    let stopped = engine.stop(TIMEOUT);
+    restored.unwrap();
+    stopped.unwrap();
+    if let Err(error) = tested {
+        std::panic::resume_unwind(error);
+    }
+    let reopened = WindowsSystemProxy::new(&root.path().join("proxy")).unwrap();
+    reopened
+        .observe_restoration(&context, config.digest())
+        .unwrap();
+    write_receipt(
+        "system-proxy-restoration-receipt.json",
+        &[
+            "missing_record_is_unproven",
+            "active_ownership_blocks_restoration_proof",
+            "record_precedes_active_journal_removal",
+            "reopen_finishes_interrupted_restoration",
+            "exact_context_digest_and_recorded_process",
+            "foreign_settings_invalidate_restoration",
+            "fresh_observation_after_engine_stop",
+        ],
+    );
 }
 
 fn cleanup(

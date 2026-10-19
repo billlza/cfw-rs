@@ -27,6 +27,7 @@ pub struct UserAgentRuntime {
     executable: VerifiedExecutable,
     directory: PathBuf,
     proxy: Option<WindowsSystemProxy>,
+    pub(super) storage: Option<Arc<cfw_windows_storage::PrivateDirectory>>,
     #[cfg(feature = "native-service-validation")]
     release_agent_keeper: bool,
 }
@@ -40,6 +41,7 @@ impl UserAgentRuntime {
             executable,
             directory,
             proxy,
+            storage: None,
             #[cfg(feature = "native-service-validation")]
             release_agent_keeper: false,
         }
@@ -104,6 +106,8 @@ pub struct UserAgentSession {
     service_image: Arc<VerifiedExecutable>,
     assets: Option<UserAgentRuntime>,
     proxy: Option<WindowsSystemProxy>,
+    // Keep the installation-owned root nonreplaceable through cleanup/retry.
+    _storage_guard: Option<Arc<cfw_windows_storage::PrivateDirectory>>,
     control: Option<ControlSession>,
     child: Option<EngineProcess>,
     keeper: Option<crate::authority::RuntimeKeeper>,
@@ -135,6 +139,7 @@ impl UserAgentSession {
             service_image,
             assets: Some(assets),
             proxy: None,
+            _storage_guard: None,
             control: None,
             child: None,
             keeper: None,
@@ -270,6 +275,7 @@ impl UserAgentSession {
         );
         self.live()?;
         let assets = self.assets.take().ok_or(UserAgentError::State)?;
+        self._storage_guard = assets.storage;
         self.proxy = assets.proxy;
         match EngineProcess::spawn_retained(
             assets.executable,

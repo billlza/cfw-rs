@@ -14,9 +14,13 @@ pub mod launcher;
 #[cfg(windows)]
 mod runtime;
 #[cfg(windows)]
+mod storage;
+#[cfg(windows)]
 pub use runtime::{
     LocalCleanupObservation, ReadyObservation, StopReason, UserAgentRuntime, UserAgentSession,
 };
+#[cfg(windows)]
+pub use storage::UserRuntimeStorage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UserAgentError {

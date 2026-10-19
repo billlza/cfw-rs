@@ -318,6 +318,9 @@ pub(super) fn run(name: &str, hex: &str) -> Result<()> {
                     return Err("supervised agent/engine exit not observed".into());
                 }
             }
+            if mode == ProjectionMode::SystemProxy {
+                observe_persisted_restoration(root, &context, &engine)?;
+            }
             restricted::check_report(root, &prefix, case, exit.exit_code())
         })?;
         credential_fixture.after_stop(&lifecycle)?;

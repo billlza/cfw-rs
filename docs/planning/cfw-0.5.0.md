@@ -1302,6 +1302,33 @@ Agent/引擎退出，核对原代理设置并重新绑定两处监听端口。�
 参考 [进程终止与退出观察](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)
 及 [SCM 启动与状态观察](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicew)。
 
+### 持久化代理恢复观察与稳定运行目录（待原生验证）
+
+产品新增 `UserRuntimeStorage`，由受信安装层提供当前用户目录，固定保留 `engine-v1`
+与 `proxy-v1`，通过持有私有目录句柄防止运行/清理期间路径被替换。启动消息不携带
+存储路径；LocalProxy/SystemProxy 继续使用原引擎所有权，未支持模式仍明确失败。
+Agent 正常退出后不删除这一生产存储。普通与 SCM 崩溃场景都已改用此路径。
+
+WinINet 恢复现在先写入最多 4 KiB 的单份恢复记录，再重新读取实际设置、删除活动
+日志。记录绑定用户 SID、完整运行上下文、配置身份摘要及原引擎 PID/创建时间，只
+保存原设置的版本化 SHA-256，不保留原 PAC/server/bypass 字符串。摘要采用显式
+长度和原始 UTF-16，固定测试向量覆盖非 Unicode 的原生选项。写入/删除不确定时
+仍报错并保留清理责任，不能由日志缺失推出已恢复。
+
+新的 `observe_restoration` 每次重读私有记录与实际 WinINet 设置；活动日志仍在、
+记录缺失/损坏、上下文或摘要不匹配、外部设置改变均不能产生恢复观察。返回类型
+无公开构造器和反序列化入口；历史 PID/创建时间不是进程已退出的证据，也不代表
+全局 Off。
+
+新增原生用例在记录发布后、活动日志删除前注入中断，要求明确失败并在重新打开
+后完成恢复；另核对外部设置改变会使旧记录失效。Desktop 将在 Agent/引擎实际
+退出后重开生产存储，把恢复记录中的 PID/创建时间与保留的引擎内核句柄比较。
+SCM 重启场景还会独立观察整个 Job 的最终零计数，缺失 Job 仍是错误。
+
+默认特性与全特性 Windows 交叉 Clippy 已通过；以上新增原生行为等待 CI。
+服务侧恢复专用授权、这些观察到生产 CleanupEvidence 的接线、缺失 Job 的恢复、
+完整应用/界面和发布验收仍未完成。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。

@@ -1,6 +1,6 @@
 use super::*;
 
-fn context() -> EngineCommandContext {
+pub(super) fn context() -> EngineCommandContext {
     EngineCommandContext {
         installation_id: uuid::Uuid::new_v4().to_string(),
         config_epoch: 1,
@@ -8,7 +8,7 @@ fn context() -> EngineCommandContext {
     }
 }
 
-fn record() -> Record {
+pub(super) fn record() -> Record {
     let before = ProxySettings {
         flags: PROXY_TYPE_DIRECT | PROXY_TYPE_AUTO_DETECT,
         server: vec![],

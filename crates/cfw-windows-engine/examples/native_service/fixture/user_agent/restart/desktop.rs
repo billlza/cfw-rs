@@ -164,6 +164,7 @@ pub(crate) fn run(name: &str, hex: &str) -> Result<()> {
         };
         require_exit(&agent)?;
         require_exit(&engine)?;
+        observe_persisted_restoration(root, &context, &engine)?;
         if read(root, &format!("{name}-restart-system-client.json"))? != agent_report() {
             return Err(
                 "restart Agent did not attest local cleanup with control failure preserved".into(),

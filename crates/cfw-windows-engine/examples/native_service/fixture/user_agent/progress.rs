@@ -84,7 +84,13 @@ pub(super) fn wait(
                         "runtime Ready metadata did not match retained child/operation".into(),
                     );
                 }
-                let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, ready.engine_pid) };
+                let process = unsafe {
+                    OpenProcess(
+                        PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        0,
+                        ready.engine_pid,
+                    )
+                };
                 if process.is_null() {
                     return Err(error("retain cross-process engine"));
                 }

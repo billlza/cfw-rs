@@ -39,8 +39,8 @@ pub(super) fn run(
         .runtime
         .ok_or("runtime installation not configured")?;
     let service_image = Arc::new(verified(image, digest)?);
-    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     if matches!(case, restricted::ClientCase::RejectedRuntime) {
+        let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
         return start_request::reject_before_vault_access(
             launch,
             name,
@@ -51,19 +51,22 @@ pub(super) fn run(
     }
     let context = launch.context().clone();
     let restart_case = matches!(case, restricted::ClientCase::RuntimeRestartSystem);
-    let proxy =
-        WindowsSystemProxy::new(&directory.path().join("proxy")).map_err(|e| e.to_string())?;
+    let storage = cfw_windows_engine::user_agent::UserRuntimeStorage::open(
+        &image
+            .parent()
+            .ok_or("missing runtime installation root")?
+            .join("runtime-state"),
+    )
+    .map_err(|e| e.to_string())?;
+    let proxy = storage.proxy();
     let settings = proxy.snapshot().map_err(|e| e.to_string())?;
-    let assets = UserAgentRuntime::new(
-        VerifiedExecutable::open(&install.path, install.digest, &install.version)
-            .map_err(|e| e.to_string())?,
-        directory.path().join("engine"),
-        if mode == ProjectionMode::SystemProxy {
-            Some(proxy.clone())
-        } else {
-            None
-        },
-    );
+    let assets = storage
+        .runtime(
+            VerifiedExecutable::open(&install.path, install.digest, &install.version)
+                .map_err(|e| e.to_string())?,
+            context.operation.mode,
+        )
+        .map_err(|e| e.to_string())?;
     let assets = if restart_case {
         assets
     } else {
@@ -146,6 +149,23 @@ pub(super) fn run(
             != cfw_windows_engine::ProxyOwnershipObservation::NoJournal
     {
         return Err("runtime did not restore exact proxy settings/remove its journal".into());
+    }
+    if mode == ProjectionMode::SystemProxy {
+        let root = &context.operation.root;
+        let command = EngineCommandContext {
+            installation_id: root.installation_id.to_string(),
+            config_epoch: root.epoch,
+            generation: root.generation,
+        };
+        let digest: String = context
+            .operation
+            .identity_sha256
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        proxy
+            .observe_restoration(&command, &digest)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

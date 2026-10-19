@@ -76,6 +76,9 @@ pub enum AuthorityError {
     #[error("Windows authority runtime observation: {0}")]
     RuntimeJob(#[from] RuntimeJobError),
     #[cfg(windows)]
+    #[error("Windows authority listener observation: {0}")]
+    RuntimeEndpoints(#[source] crate::Error),
+    #[cfg(windows)]
     #[error("Windows authority system entropy failed with status {0:#x}")]
     Entropy(i32),
 }

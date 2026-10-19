@@ -441,7 +441,8 @@ impl Rejection {
             #[cfg(windows)]
             AuthorityError::Peer(_)
             | AuthorityError::Process(_)
-            | AuthorityError::RuntimeJob(_) => Self::Observation,
+            | AuthorityError::RuntimeJob(_)
+            | AuthorityError::RuntimeEndpoints(_) => Self::Observation,
             #[cfg(windows)]
             AuthorityError::Entropy(_) => Self::Entropy,
         }

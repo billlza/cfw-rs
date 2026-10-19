@@ -244,3 +244,36 @@ fn observation_challenge_cannot_be_upgraded_to_cleanup() {
         Err(AuthorityError::Stale)
     ));
 }
+
+#[test]
+fn every_cleanup_obligation_is_required_before_releasing_the_old_operation() {
+    for missing in 0..7 {
+        let (mut machine, _, target, _) = fixture();
+        let mut proof = CleanupEvidence::for_validation(
+            target.revision,
+            Some(target.operation.lease_id()),
+            true,
+        );
+        proof.binding = CleanupBinding::Runtime(target.clone());
+        match missing {
+            0 => proof.proxy_listener_closed = false,
+            1 => proof.system_proxy_restored = false,
+            2 => proof.tunnel_engine_stopped = false,
+            3 => proof.packet_pump_closed = false,
+            4 => proof.managed_tunnel_off = false,
+            5 => proof.endpoints_closed = false,
+            6 => proof.secret_buffers_cleared = false,
+            _ => unreachable!(),
+        }
+        machine.reconcile(&proof).unwrap();
+        assert_eq!(
+            machine.phase(),
+            AuthorityState::Quarantined,
+            "missing obligation {missing}"
+        );
+        assert_eq!(
+            machine.metadata().unwrap().operation(),
+            Some(&target.operation)
+        );
+    }
+}

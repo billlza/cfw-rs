@@ -37,6 +37,12 @@ impl WindowsAuthority {
                     total: 1..
                 }
             );
+        // Independently read both native TCP listener tables. A reused PID
+        // with any listener conservatively blocks cleanup; a lookup failure is
+        // not an empty result and cannot be turned into Off.
+        let listeners_closed = crate::listeners::owned(observed.recorded_process_id())
+            .map_err(AuthorityError::RuntimeEndpoints)?
+            .is_empty();
 
         // This admitted mode creates only an ordinary UserAgent/engine tree.
         // UserAgentPlan and CheckedStartConfiguration reject Tunnel activation,
@@ -56,12 +62,12 @@ impl WindowsAuthority {
             binding: CleanupBinding::Runtime(target.clone()),
             revision: target.revision,
             lease_id: Some(target.operation.lease_id()),
-            proxy_listener_closed: retired,
+            proxy_listener_closed: retired && listeners_closed,
             system_proxy_restored: observed.context.purpose() == ProxyRecoveryPurpose::ReconcileOff,
             tunnel_engine_stopped: no_tunnel_resources && retired,
             packet_pump_closed: no_tunnel_resources && retired,
             managed_tunnel_off: no_tunnel_resources,
-            endpoints_closed: authority_cleared && retired,
+            endpoints_closed: authority_cleared && retired && listeners_closed,
             secret_buffers_cleared: authority_cleared && request_erased && retired,
         };
         evidence.validate_scope(self.machine.metadata())?;

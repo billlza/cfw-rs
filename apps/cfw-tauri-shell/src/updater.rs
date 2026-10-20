@@ -364,7 +364,7 @@ async fn prepare_windows_release(
         let version = authorization.version.as_str();
         emit_progress(app, "downloading", version, 0, None)?;
         let mut last_percent = None;
-        download_verified_archive(
+        let authenticated_digest = download_verified_archive(
             &authorization,
             &staging.package(),
             &lease.cancellation,
@@ -410,6 +410,9 @@ async fn prepare_windows_release(
                 Duration::from_secs(30),
                 || cancellation.is_cancelled(),
             )?;
+            if package.sha256() != authenticated_digest {
+                return Err(UpdateError::SignatureVerification);
+            }
             let identity = BundleIdentity {
                 version: package.identity().version.clone(),
                 build: package.identity().build,

@@ -16,6 +16,7 @@ use minisign_verify::{PublicKey, Signature};
 use reqwest::Url;
 use reqwest::header::ACCEPT;
 use reqwest::redirect::Policy;
+use sha2::{Digest, Sha256};
 
 use super::contract::UpdateAuthorization;
 use super::error::{DownloadFailureStage, NetworkFailureCategory, Result, UpdateError};
@@ -35,7 +36,8 @@ const EMBEDDED_TAURI_CONFIG: &str = include_str!("../../tauri.conf.json");
 const MAX_TRUSTED_COMMENT_BYTES: usize = 1024;
 const MAX_ARCHIVE_NAME_BYTES: usize = 255;
 
-/// Downloads the authorized archive into `destination` and returns its size.
+/// Downloads the authorized archive and returns the SHA-256 of the exact
+/// Minisign-authenticated bytes, for binding subsequent native inspection.
 ///
 /// The file exists afterwards only if every byte was received within bounds
 /// and the complete stream matches the release signature for exactly this
@@ -45,7 +47,7 @@ pub(super) async fn download_verified_archive<F>(
     destination: &Path,
     cancellation: &DownloadCancellation,
     on_progress: F,
-) -> Result<u64>
+) -> Result<[u8; 32]>
 where
     F: FnMut(u64, Option<u64>) -> Result<()>,
 {
@@ -118,7 +120,7 @@ async fn receive_verified_archive<S, B, F>(
     destination: &Path,
     cancellation: &DownloadCancellation,
     mut on_progress: F,
-) -> Result<u64>
+) -> Result<[u8; 32]>
 where
     S: Stream<Item = Result<B>>,
     B: AsRef<[u8]>,
@@ -141,6 +143,7 @@ where
     }
 
     let mut partial = PartialArchive::create(destination)?;
+    let mut digest = Sha256::new();
     let mut received = 0_u64;
     tokio::pin!(chunks);
     loop {
@@ -168,6 +171,7 @@ where
             })?;
         partial.write(chunk)?;
         verifier.update(chunk);
+        digest.update(chunk);
         on_progress(received, bounds.declared_length)?;
     }
     if received == 0 {
@@ -186,7 +190,7 @@ where
         .map_err(|_| UpdateError::SignatureVerification)?;
     validate_signature_archive(&signature, &authorization.archive_name)?;
     partial.commit()?;
-    Ok(received)
+    Ok(digest.finalize().into())
 }
 
 /// The archive file while it is still unauthenticated. Dropping it without
@@ -484,7 +488,7 @@ mod tests {
         bounds: ArchiveBounds,
         parts: &[&[u8]],
         destination: &Path,
-    ) -> Result<u64> {
+    ) -> Result<[u8; 32]> {
         receive_verified_archive(
             key,
             authorization,
@@ -516,7 +520,15 @@ mod tests {
         )
         .await
         .expect("verified archive");
-        assert_eq!(received, 4);
+        // SHA-256("test"), independent of the destination and stream chunks.
+        assert_eq!(
+            received,
+            [
+                0x9f, 0x86, 0xd0, 0x81, 0x88, 0x4c, 0x7d, 0x65, 0x9a, 0x2f, 0xea, 0xa0, 0xc5, 0x5a,
+                0xd0, 0x15, 0xa3, 0xbf, 0x4f, 0x1b, 0x2b, 0x0b, 0x82, 0x2c, 0xd1, 0x5d, 0x6c, 0x15,
+                0xb0, 0xf0, 0x0a, 0x08,
+            ]
+        );
         assert_eq!(progress, [(2, Some(4)), (4, Some(4))]);
         assert_eq!(fs::read(&destination).expect("archive"), b"test");
         #[cfg(target_os = "macos")]

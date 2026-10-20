@@ -36,5 +36,8 @@ fn run() -> Result<(), String> {
     {
         return runtime_host::run_agent(installation).map_err(|e| e.to_string());
     }
-    Err("expected no arguments for SCM, --check-installation or installed --user-agent invocation".into())
+    Err(
+        "expected no arguments for SCM, --check-installation or installed --user-agent invocation"
+            .into(),
+    )
 }

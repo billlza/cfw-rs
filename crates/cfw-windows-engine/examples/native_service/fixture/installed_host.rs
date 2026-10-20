@@ -12,6 +12,7 @@ use std::{
     net::{Ipv4Addr, TcpListener},
     sync::mpsc,
 };
+mod checks;
 
 /// This fixture is installed as the admitted desktop image in disposable CI.
 /// It exercises the production service executable and authenticated commands.
@@ -72,23 +73,12 @@ pub(super) fn exercise() -> Result<()> {
             return Err("installed runtime exercise requires both disposable CI opt-ins".into());
         }
     }
-    let installed = InstalledRuntime::open().map_err(|e| e.to_string())?;
-    installed
-        .require_desktop_process()
-        .map_err(|e| e.to_string())?;
-    let paths = installed.user_paths().map_err(|e| e.to_string())?;
-    let image = Arc::new(installed.runtime().map_err(|e| e.to_string())?);
-    let credentials = cfw_windows_engine::credential_lifecycle::WindowsCredentialLifecycle::new(
-        SERVICE_NAME.into(),
-        Arc::clone(&image),
-        &paths.credentials,
-    );
-    let generations = cfw_windows_engine::WindowsEngineGenerationStore::new(
-        SERVICE_NAME.into(),
-        Arc::clone(&image),
-    );
-    let storage = cfw_windows_engine::user_agent::UserRuntimeStorage::open(&paths.runtime)
-        .map_err(|e| e.to_string())?;
+    let desktop =
+        cfw_windows_engine::runtime_host::InstalledDesktop::open().map_err(|e| e.to_string())?;
+    let paths = desktop.paths();
+    let generations = desktop.generations();
+    let storage = desktop.storage();
+    let configuration_checks = checks::exercise(&desktop)?;
     let original = storage.proxy().snapshot().map_err(|e| e.to_string())?;
     let profile = cfw_singbox_config::ValidatedSingBoxProfile::parse(
         r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#,
@@ -147,17 +137,10 @@ pub(super) fn exercise() -> Result<()> {
         let (send, receive) = mpsc::sync_channel(1);
         let (active, off) = thread::scope(|scope| -> Result<_> {
             let worker_stop = Arc::clone(&stop);
-            let image = Arc::clone(&image);
-            let credentials = &credentials;
-            let storage = &storage;
+            let desktop = &desktop;
             let worker = scope.spawn(move || -> Result<_> {
-                let mut operation =
-                    cfw_windows_engine::user_agent::desktop::DesktopUserAgent::prepare(
-                        credentials,
-                        image,
-                        request,
-                        Instant::now() + LIMIT,
-                    )
+                let mut operation = desktop
+                    .prepare_proxy(request, Instant::now() + LIMIT)
                     .map_err(|e| e.to_string())?;
                 let completed = operation
                     .run(
@@ -224,7 +207,7 @@ pub(super) fn exercise() -> Result<()> {
     }
     println!(
         "{}",
-        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"modes":modes,"release_accepted":false})
+        serde_json::json!({"source":std::env::var("CFW_NATIVE_SERVICE_SOURCE").map_err(|e|e.to_string())?,"product_service":true,"product_agent":true,"desktop_is_fixture":true,"medium_integrity":true,"configuration_checks":configuration_checks,"modes":modes,"release_accepted":false})
     );
     Ok(())
 }
@@ -249,6 +232,11 @@ pub(super) fn check_output(directory: &Path, output: &Path, exit: u32) -> Result
         || report["product_agent"] != true
         || report["medium_integrity"] != true
         || report["release_accepted"] != false
+        || report["configuration_checks"]["authority_unchanged"] != true
+        || report["configuration_checks"]["proxy_unchanged"] != true
+        || report["configuration_checks"]["checked_modes"]
+            .as_array()
+            .is_none_or(|modes| modes.len() != 4)
         || report["modes"]
             .as_array()
             .is_none_or(|modes| modes.len() != 2)

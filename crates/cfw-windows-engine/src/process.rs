@@ -391,13 +391,26 @@ impl EngineProcess {
         config: &ResolvedProjection,
         timeout: Duration,
     ) -> Result<CheckedConfiguration, Error> {
-        let deadline = deadline(timeout)?;
-        if self.closed || self.digest.is_some() {
-            return Err(Error::Protocol("child is not idle"));
-        }
-        let result = self
-            .rpc("check", Some(config), "checked", config.digest(), deadline)
-            .and_then(|()| self.finish_normal_exit(deadline));
+        let deadline = match deadline(timeout) {
+            Ok(deadline) => deadline,
+            Err(error) => return self.finish_operation(Err(error)),
+        };
+        self.check_until(config, deadline)
+    }
+
+    pub(crate) fn check_until(
+        mut self,
+        config: &ResolvedProjection,
+        deadline: Instant,
+    ) -> Result<CheckedConfiguration, Error> {
+        let result = (|| {
+            remaining(deadline)?;
+            if self.closed || self.digest.is_some() {
+                return Err(Error::Protocol("child is not idle"));
+            }
+            self.rpc("check", Some(config), "checked", config.digest(), deadline)?;
+            self.finish_normal_exit(deadline)
+        })();
         self.finish_operation(result)?;
         self.closed = true;
         Ok(CheckedConfiguration {

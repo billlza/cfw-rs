@@ -60,6 +60,23 @@ impl WindowsCredentialLifecycle {
         WindowsCredentialStore::new(self.directory.join("vault"))
     }
 
+    /// The installed Desktop has authenticated its current installation and
+    /// validated this candidate's complete audience/digest before calling.
+    /// A check consumes a private material snapshot, not a runtime binding;
+    /// it never writes a protected-runtime record or reserves a generation.
+    pub(crate) fn resolve_candidate_material(
+        &self,
+        request: &CheckedStartConfiguration,
+        deadline: Instant,
+    ) -> Result<cfw_windows_credentials::ResolvedCredentials> {
+        self.locked(deadline, || {
+            Ok(self.vault().resolve_for_engine(
+                request.credential_audience(),
+                &request.credential_references(),
+            )?)
+        })
+    }
+
     pub fn provision(
         &self,
         request: CredentialProvisionRequest<'_>,

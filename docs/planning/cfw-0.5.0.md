@@ -1656,6 +1656,25 @@ StopPending。30 秒内无法确认全局清理则显式失败，不能用停止
 已核验并保存，安装回执只完成三项包校验、没有成功的服务查询。
 `fb2cfde` job log 确认同一失败条件。修正后的完整安装运行链路仍待原生 CI。
 
+`400918c` 修正 SCM 命令，验证运行
+[39367153298](https://github.com/billlza/cfw-rs/actions/runs/39367153298)。其 shared job
+因本次新增错误消息未按 rustfmt 换行失败，已在后续源代码中修正；不能称该运行全绿。
+
+### 桌面安装上下文与原生配置预检
+
+`InstalledDesktop` 统一提供受保护安装中的凭据、generation store、运行目录和
+Desktop→Agent 准备入口，CI 中两种代理生命周期改为使用这个产品入口。
+新增同步工作线程 API `check_configuration`：核对实际 Desktop image、medium token、
+当前 Authority installation/epoch、配置摘要与精确凭据 audience，再使用独立 Go
+子进程执行 parser/constructor/Close。该路径不 Prepare、不 Bind、不申请 generation，
+不启动数据面，也不修改 WinINet；检查互斥、截止时间和失败清理均保留显式结果。
+
+安装验收新增四种模式的真实预检，检查期间保持 mixed/controller 端口被测试方占用，
+并验证前后 Authority snapshot、generation 和代理设置完全一致。另检查跨 profile
+凭据拒绝、原生非法配置拒绝、异 epoch 拒绝和过期截止时间。TUN 预检通过不等于
+Windows TUN 数据面已实现。默认及全 feature Windows cross-Clippy、格式检查通过；
+新增安装验收仍待托管 Windows 运行，完整 EngineBackend 和 Tauri 接线尚未完成。
+
 ## 官方资料
 
 以下资料于 2026-10-18 核对；它们说明平台能力，不证明本项目已经实现。

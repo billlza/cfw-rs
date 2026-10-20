@@ -53,11 +53,17 @@ impl WindowsEngineGenerationStore {
         )?)
     }
     pub fn load_lineage(&self) -> Result<EngineLineage, LineageError> {
+        self.load_lineage_until(Instant::now() + Duration::from_secs(5))
+    }
+    pub(crate) fn load_lineage_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<EngineLineage, LineageError> {
         let mut binding = self
             .bound_session
             .lock()
             .map_err(|_| LineageError::BindingPoisoned)?;
-        let value = request(&mut self.connect()?, Command::LoadLineage)?;
+        let value = request_until(&mut self.connect()?, Command::LoadLineage, deadline)?;
         let lineage = shared(&value);
         bind(&mut binding, &lineage.session)?;
         Ok(lineage)
@@ -86,9 +92,16 @@ fn request(
     channel: &mut AuthorityChannel,
     command: Command,
 ) -> Result<AuthorityLineage, LineageError> {
+    request_until(channel, command, Instant::now() + Duration::from_secs(5))
+}
+fn request_until(
+    channel: &mut AuthorityChannel,
+    command: Command,
+    deadline: Instant,
+) -> Result<AuthorityLineage, LineageError> {
     match channel.request(
         Request::new(command)?,
-        Instant::now() + Duration::from_secs(5),
+        deadline.min(Instant::now() + Duration::from_secs(5)),
     )? {
         Response::Lineage(value) => Ok(value),
         _ => Err(LineageError::Response),

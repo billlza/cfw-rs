@@ -4,12 +4,16 @@
 #[cfg(windows)]
 mod agent;
 #[cfg(windows)]
+mod desktop;
+#[cfg(windows)]
 mod installation;
 mod manifest;
 #[cfg(windows)]
 mod service;
 #[cfg(windows)]
 pub use agent::run_agent;
+#[cfg(windows)]
+pub use desktop::InstalledDesktop;
 #[cfg(windows)]
 pub use installation::{InstalledRuntime, UserPaths};
 #[cfg(windows)]
@@ -51,6 +55,15 @@ pub enum HostError {
     #[cfg(windows)]
     #[error("Windows runtime Agent: {0}")]
     Agent(#[from] crate::user_agent::UserAgentError),
+    #[cfg(windows)]
+    #[error("Windows runtime Desktop: {0}")]
+    Desktop(#[from] crate::user_agent::desktop::DesktopError),
+    #[cfg(windows)]
+    #[error("Windows runtime credentials: {0}")]
+    Credentials(#[from] crate::credential_lifecycle::CredentialLifecycleError),
+    #[cfg(windows)]
+    #[error("Windows runtime lineage: {0}")]
+    Lineage(#[from] crate::LineageError),
     #[cfg(windows)]
     #[error("Windows runtime handoff: {0}")]
     Handoff(#[from] crate::user_agent::launch_channel::LaunchChannelError),

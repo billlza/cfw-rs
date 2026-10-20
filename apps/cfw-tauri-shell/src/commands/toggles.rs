@@ -43,6 +43,7 @@ pub(crate) struct TunRuntimeState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg(target_os = "macos")]
 pub(crate) struct PlatformDesign {
     target: &'static str,
     system_proxy_strategy: &'static str,
@@ -53,16 +54,39 @@ pub(crate) struct PlatformDesign {
     minimum_macos: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg(windows)]
+pub(crate) struct PlatformDesign {
+    target: &'static str,
+    system_proxy_strategy: &'static str,
+    helper_strategy: &'static str,
+    startup_strategy: &'static str,
+    tun_strategy: &'static str,
+}
+
 #[tauri::command]
 pub(crate) fn current_platform_design() -> PlatformDesign {
-    PlatformDesign {
-        target: "macos-arm64",
-        system_proxy_strategy: "signed ProxyAgent under Global Authority; app-owned loopback listener only",
-        helper_strategy: "no privileged helper; the 0.3.x root helper is retired and tombstoned",
-        launchd_strategy: "SMAppService Login Item only; no ad-hoc launchd jobs or shell scripts",
-        tun_strategy: "NetworkExtension Packet Tunnel System Extension, ticket-only start",
-        intel_supported: false,
-        minimum_macos: "15.0",
+    #[cfg(target_os = "macos")]
+    {
+        PlatformDesign {
+            target: "macos-arm64",
+            system_proxy_strategy: "signed ProxyAgent under Global Authority; app-owned loopback listener only",
+            helper_strategy: "no privileged helper; the 0.3.x root helper is retired and tombstoned",
+            launchd_strategy: "SMAppService Login Item only; no ad-hoc launchd jobs or shell scripts",
+            tun_strategy: "NetworkExtension Packet Tunnel System Extension, ticket-only start",
+            intel_supported: false,
+            minimum_macos: "15.0",
+        }
+    }
+    #[cfg(windows)]
+    {
+        PlatformDesign {
+            target: "windows-x64",
+            system_proxy_strategy: "Current-user Windows proxy with owned restoration",
+            helper_strategy: "Windows authority service and ordinary-user Agent",
+            startup_strategy: "Current-user sign-in registration; Windows controls startup approval",
+            tun_strategy: "Not available in this development build",
+        }
     }
 }
 
@@ -380,13 +404,11 @@ pub(crate) async fn reset_settings_snapshot(
             format!("preferences were reset, but language application failed: {error}")
         })?;
     crate::startup_state::prepare_off_main(move || {
-        super::settings::with_login_item_status(
-            snapshot,
-            super::settings::live_login_item_status()?,
-        )
-        .map_err(|error| {
-            format!("preferences were reset, but their display status is unavailable: {error}")
-        })
+        super::settings::live_login_item_status()
+            .and_then(|status| super::settings::with_login_item_status(snapshot, status))
+            .map_err(|error| {
+                format!("preferences were reset, but their display status is unavailable: {error}")
+            })
     })
     .await
 }
@@ -710,6 +732,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn platform_design_describes_the_authority_mediated_architecture() {
         let design = serde_json::to_value(current_platform_design()).expect("serialize design");
@@ -726,6 +749,27 @@ mod tests {
                     .contains(retired),
                 "tunnel strategy must not describe a retired mechanism"
             );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_platform_design_does_not_claim_apple_services_or_tunnel_support() {
+        let design = serde_json::to_value(current_platform_design()).unwrap();
+        assert_eq!(design["target"], "windows-x64");
+        assert_eq!(design.as_object().unwrap().len(), 5);
+        assert_eq!(
+            design["tun_strategy"],
+            "Not available in this development build"
+        );
+        assert!(
+            design["startup_strategy"]
+                .as_str()
+                .unwrap()
+                .contains("Windows controls startup approval")
+        );
+        for name in ["minimum_macos", "intel_supported", "launchd_strategy"] {
+            assert!(design.get(name).is_none());
         }
     }
 }

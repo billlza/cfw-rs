@@ -90,14 +90,14 @@ function renderSettings() {
 
       ${renderSettingsGroup(t("General"), [
         renderToggle("startAtLogin", t("Start at Login"), launchAtLogin.hint, { reason: launchAtLogin.reason }),
-        renderToggle("silentStart", t("Silent Start"), t("Start hidden in the menu bar without a Dock icon."), { reason: settingsReason }),
+        renderToggle("silentStart", t("Silent Start"), windows ? t("Start hidden in the system tray.") : t("Start hidden in the menu bar without a Dock icon."), { reason: settingsReason }),
         renderToggle("checkForUpdates", t("Check for updates"), t("Check GitHub for a newer official release at launch."), { reason: settingsReason }),
         renderToggle("retainWindowBounds", t("Retain window bounds"), t("Restore the dashboard window position between launches."), { reason: settingsReason }),
         renderSettingAction(t("Updates"), "GitHub Releases", t("Check the official release feed now."), "check-for-updates", t("Check for Updates")),
       ])}
 
       ${renderSettingsGroup(t("Appearance"), [
-        renderSettingSelect(t("Language"), persisted.language, LANGUAGE_OPTIONS, t("Applied immediately and saved. Follow system uses your macOS language preferences."), "data-language-setting", settingsReason),
+        renderSettingSelect(t("Language"), persisted.language, LANGUAGE_OPTIONS, windows ? t("Applied immediately and saved. Follow system uses your Windows language preferences.") : t("Applied immediately and saved. Follow system uses your macOS language preferences."), "data-language-setting", settingsReason),
         renderSettingSelect(t("Theme"), persisted.theme ?? "system", THEME_OPTIONS, t("Applied immediately and persisted."), "data-theme-setting", settingsReason),
         renderSettingSelect(t("Font"), persisted.font_family ?? "", FONT_OPTIONS, t("The preference store accepts these families only."), "data-font-family", settingsReason),
       ])}
@@ -128,11 +128,11 @@ function renderSettings() {
       ])}
 
       ${renderSettingsGroup(t("Credentials"), [
-        renderSettingValue(t("Profile credentials"), t("Keychain vault"), t("A profile references secrets by immutable id only. Open a profile's context menu → Credentials to store missing values.")),
+        renderSettingValue(t("Profile credentials"), windows ? t("Windows protected storage") : t("Keychain vault"), t("A profile references secrets by immutable id only. Open a profile's context menu → Credentials to store missing values.")),
         renderSettingAction(
           t("Unused credentials"),
           t("Vault cleanup"),
-          t("Review Keychain entries that no stored profile references."),
+          windows ? t("Review protected credentials that no stored profile references.") : t("Review Keychain entries that no stored profile references."),
           "preview-credential-gc",
           t("Review"),
           engineOff ? null : REASONS.engineNotOff,
@@ -150,8 +150,8 @@ function renderSettings() {
       ]) : ""}
 
       ${renderSettingsGroup(t("Paths"), [
-        renderSettingAction(t("Home Directory"), t("Application Support"), t("Open the application home directory in Finder."), "open-home-directory", t("Open Folder")),
-        renderSettingAction(t("Logs"), "logs", t("Open the log directory in Finder."), "reveal-logs", t("Open Folder")),
+        renderSettingAction(t("Home Directory"), windows ? t("Local app data") : t("Application Support"), windows ? t("Open the application home directory in File Explorer.") : t("Open the application home directory in Finder."), "open-home-directory", t("Open Folder")),
+        renderSettingAction(t("Logs"), "logs", windows ? t("Open the log directory in File Explorer.") : t("Open the log directory in Finder."), "reveal-logs", t("Open Folder")),
       ])}
 
       ${renderSettingsGroup("DNS", [
@@ -162,7 +162,7 @@ function renderSettings() {
         renderSettingAction(t("Fake IP Cache"), t("Controller-backed"), t("Flush the engine fake-ip cache."), "flush-fake-ip-cache", t("Flush")),
       ])}
 
-      ${platform ? renderSettingsGroup("macOS", [
+      ${windows ? renderWindowsPlatform() : platform ? renderSettingsGroup("macOS", [
         renderSettingValue(t("Minimum macOS"), platform.minimum_macos ?? "15.0", t("ARM64-only app baseline.")),
         renderSettingValue(t("Intel support"), platform.intel_supported ? t("Enabled") : t("Disabled"), t("Removed to keep the Apple Silicon runtime lean.")),
         renderSettingValue(t("System proxy"), t(platform.system_proxy_strategy ?? ""), t("How the system proxy is applied.")),
@@ -176,6 +176,24 @@ function renderSettings() {
       ${renderNetworkDiagnostics()}
     </div>
   `;
+}
+
+function renderWindowsPlatform() {
+  const platform = state.platform;
+  if (!platform || platform.target !== "windows-x64"
+    || Object.keys(platform).sort().join("\0") !== ["helper_strategy", "startup_strategy", "system_proxy_strategy", "target", "tun_strategy"].join("\0")
+    || !Object.values(platform).every((value) => typeof value === "string" && value.trim())) {
+    return renderSettingsGroup("Windows", [
+      renderSettingValue(t("Platform design"), t("Unavailable"), t("The platform design could not be read.")),
+    ]);
+  }
+  return renderSettingsGroup("Windows", [
+    renderSettingValue(t("Architecture"), state.payload.product.architecture, t("Architecture of this application build.")),
+    renderSettingValue(t("System proxy"), t(platform.system_proxy_strategy), t("How the system proxy is applied.")),
+    renderSettingValue(t("Background services"), t(platform.helper_strategy), t("Windows services used by the application.")),
+    renderSettingValue(t("Start at Login"), t(platform.startup_strategy), t("Windows retains control of startup approval.")),
+    renderSettingValue(t("Tunnel"), t(platform.tun_strategy), t("Tunnel availability is reported by the running backend.")),
+  ]);
 }
 
 function renderNetworkDiagnostics() {

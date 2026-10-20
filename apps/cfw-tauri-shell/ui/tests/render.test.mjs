@@ -2931,6 +2931,36 @@ test("Windows startup shows actual registration and preserves saved intent witho
   }
 });
 
+test("Windows settings use native platform descriptions and reject a macOS design payload", async () => {
+  const product = state.payload.product;
+  const platform = state.platform;
+  try {
+    state.payload.product = { ...product, name: "Clash for Windows", operating_system: "windows", architecture: "x64" };
+    state.platform = {
+      target: "windows-x64",
+      system_proxy_strategy: "Current-user Windows proxy with owned restoration",
+      helper_strategy: "Windows authority service and ordinary-user Agent",
+      startup_strategy: "Current-user sign-in registration; Windows controls startup approval",
+      tun_strategy: "Not available in this development build",
+    };
+    const html = await renderPage("settings");
+    for (const text of ["Windows protected storage", "File Explorer", "system tray", "Not available in this development build"]) {
+      assert.ok(html.includes(text), text);
+    }
+    assert.doesNotMatch(html, /Minimum macOS|ARM64-only|Keychain vault|in Finder|Dock icon|launchd|NetworkExtension/u);
+    state.platform = platform;
+    const foreign = await renderPage("settings");
+    assert.ok(foreign.includes("The platform design could not be read."));
+    assert.doesNotMatch(foreign, /Minimum macOS|15\.0|NetworkExtension|launchd/u);
+    state.platform = { target: "windows-x64", tun_strategy: "" };
+    const incomplete = await renderPage("settings");
+    assert.ok(incomplete.includes("The platform design could not be read."));
+  } finally {
+    state.payload.product = product;
+    state.platform = platform;
+  }
+});
+
 test("invalid settings events recover from native state or disable persistence", async () => {
   const original = structuredClone(responses.read_settings_snapshot);
   const invalid = structuredClone(original);

@@ -159,9 +159,11 @@ pub(crate) fn sanitize_legacy_preferences(
     preferences: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
     let snapshot = write_preferences(store, preferences)?;
-    with_login_item_status(snapshot, live_login_item_status()?).map_err(|error| {
-        format!("preferences were saved, but their display status is unavailable: {error}")
-    })
+    live_login_item_status()
+        .and_then(|status| with_login_item_status(snapshot, status))
+        .map_err(|error| {
+            format!("preferences were saved, but their display status is unavailable: {error}")
+        })
 }
 
 #[tauri::command]
@@ -220,9 +222,11 @@ pub(crate) async fn write_settings_snapshot(
             format!("preferences were saved, but language application failed: {error}")
         })?;
     crate::startup_state::prepare_off_main(move || {
-        with_login_item_status(snapshot, live_login_item_status()?).map_err(|error| {
-            format!("preferences were saved, but their display status is unavailable: {error}")
-        })
+        live_login_item_status()
+            .and_then(|status| with_login_item_status(snapshot, status))
+            .map_err(|error| {
+                format!("preferences were saved, but their display status is unavailable: {error}")
+            })
     })
     .await
 }

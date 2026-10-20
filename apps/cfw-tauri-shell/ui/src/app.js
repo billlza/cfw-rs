@@ -3753,7 +3753,8 @@ export async function handleAction(action) {
   if (action === "open-home-directory") {
     try {
       await invoke("reveal_home_directory");
-      appendLog("info", "shell", t("Home Directory opened in Finder"));
+      appendLog("info", "shell", state.payload.product.operating_system === "windows"
+        ? t("Home Directory opened in File Explorer") : t("Home Directory opened in Finder"));
     } catch (error) {
       appendLog("error", "shell", t("Open Folder failed: {error}", { error: errorText(error) }));
     }
@@ -4023,7 +4024,8 @@ export async function handleAction(action) {
   if (action === "reveal-logs") {
     try {
       await invoke("reveal_logs_directory");
-      appendLog("info", "logs", t("Logs folder opened in Finder"));
+      appendLog("info", "logs", state.payload.product.operating_system === "windows"
+        ? t("Logs folder opened in File Explorer") : t("Logs folder opened in Finder"));
     } catch (error) {
       appendLog("error", "logs", t("Open Folder failed: {error}", { error: errorText(error) }));
     }

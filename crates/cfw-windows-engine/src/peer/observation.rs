@@ -74,22 +74,7 @@ fn current_session_process_ids(
             if row.ProcessId == 0 {
                 continue;
             }
-            // SAFETY: WTS owns every record and its SID until release.
-            if row.pUserSid.is_null() {
-                return Err(invalid_snapshot(format!(
-                    "process {} has no observable SID",
-                    row.ProcessId
-                )));
-            }
-            if unsafe { IsValidSid(row.pUserSid) } == 0 {
-                return Err(invalid_snapshot(format!(
-                    "process {} has an invalid SID",
-                    row.ProcessId
-                )));
-            }
-            if sid_text(row.pUserSid)? == observer.identity().user_sid()
-                && !pids.insert(row.ProcessId)
-            {
+            if belongs_to_caller(observer, row)? && !pids.insert(row.ProcessId) {
                 return Err(invalid_snapshot("duplicate process identity"));
             }
         }
@@ -110,6 +95,36 @@ fn current_session_process_ids(
             source: io::Error::other(format!("{error}; cleanup: {cleanup}")),
         }),
     }
+}
+
+fn belongs_to_caller(
+    observer: &NativePeerProcess,
+    row: &WTS_PROCESS_INFOW,
+) -> Result<bool, PeerIdentityError> {
+    if row.pUserSid.is_null() {
+        // WTS can return a process without its SID to a medium-integrity caller.
+        // Re-observe that PID through a retained native object once. Only a
+        // proven exit or a different observed logon can exclude the candidate;
+        // access denial and invalid native identity remain errors.
+        let Some(process) = NativePeerProcess::open_if_running(row.ProcessId).map_err(|error| {
+            PeerIdentityError::Native {
+                operation: "reobserve process without WTS SID",
+                source: io::Error::other(format!("PID {}: {error}", row.ProcessId)),
+            }
+        })?
+        else {
+            return Ok(false);
+        };
+        return Ok(process.identity().user_session() == observer.identity().user_session());
+    }
+    // SAFETY: WTS owns the record and its non-null SID until snapshot release.
+    if unsafe { IsValidSid(row.pUserSid) } == 0 {
+        return Err(invalid_snapshot(format!(
+            "process {} has an invalid SID",
+            row.ProcessId
+        )));
+    }
+    Ok(sid_text(row.pUserSid)? == observer.identity().user_sid())
 }
 
 struct ProcessSnapshot {
@@ -191,6 +206,22 @@ impl Drop for ProcessSnapshot {
 mod tests {
     use super::*;
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_GEN_FAILURE};
+
+    #[test]
+    fn a_missing_snapshot_sid_requires_a_fresh_native_process_identity() {
+        let observer = NativePeerProcess::open(std::process::id()).unwrap();
+        let mut row = WTS_PROCESS_INFOW {
+            SessionId: observer.identity().session_id(),
+            ProcessId: observer.process_id(),
+            ..Default::default()
+        };
+        assert!(row.pUserSid.is_null());
+        assert!(belongs_to_caller(&observer, &row).unwrap());
+        row.ProcessId = u32::MAX;
+        assert!(!belongs_to_caller(&observer, &row).unwrap());
+        row.ProcessId = 0;
+        assert!(belongs_to_caller(&observer, &row).is_err());
+    }
 
     #[test]
     fn process_open_access_and_io_failures_cannot_prove_absence() {

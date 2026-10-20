@@ -6,7 +6,10 @@ pub(super) const MAX_MANIFEST: usize = 4096;
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
     schema_version: u32,
-    product_version: String,
+    pub(super) product_version: String,
+    pub(super) build_number: u64,
+    pub(super) msi_product_code: String,
+    pub(super) msi_package_code: String,
     architecture: String,
     pub(super) engine_version: String,
     pub(super) runtime_sha256: String,
@@ -19,8 +22,14 @@ impl Manifest {
             return Err(HostError::Manifest);
         }
         let value: Self = serde_json::from_slice(bytes).map_err(|_| HostError::Manifest)?;
-        if value.schema_version != 1
+        if value.schema_version != 2
             || value.product_version != env!("CARGO_PKG_VERSION")
+            || value.build_number == 0
+            || !canonical_guid(&value.msi_product_code)
+            || !canonical_guid(&value.msi_package_code)
+            || value.msi_product_code == value.msi_package_code
+            || value.msi_product_code == MSI_UPGRADE_CODE
+            || value.msi_package_code == MSI_UPGRADE_CODE
             || value.architecture != "x86_64"
             || value.engine_version.is_empty()
             || value.engine_version.len() > 32
@@ -56,11 +65,19 @@ impl Manifest {
         Ok(bytes)
     }
 }
+
+fn canonical_guid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value)
+        .is_ok_and(|id| !id.is_nil() && id.braced().to_string().to_ascii_uppercase() == value)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     fn manifest() -> serde_json::Value {
-        serde_json::json!({"schema_version":1,"product_version":"0.5.0","architecture":"x86_64","engine_version":"1.14.2","runtime_sha256":"a1".repeat(32),"desktop_sha256":"b2".repeat(32),"engine_sha256":"c3".repeat(32)})
+        serde_json::json!({"schema_version":2,"product_version":"0.5.0","build_number":1,
+            "msi_product_code":"{E66ACF84-7639-4707-BC01-0A370C9B2E3E}",
+            "msi_package_code":"{E58D1FC6-A003-4849-900C-45D6861E75D9}",
+            "architecture":"x86_64","engine_version":"1.14.2","runtime_sha256":"a1".repeat(32),"desktop_sha256":"b2".repeat(32),"engine_sha256":"c3".repeat(32)})
     }
     #[test]
     fn installation_manifest_is_closed_and_cannot_select_paths_service_or_another_contract() {
@@ -69,10 +86,24 @@ mod tests {
         for (key, value) in [
             ("path", serde_json::json!("C:\\evil")),
             ("service_name", serde_json::json!("other")),
-            ("schema_version", serde_json::json!(2)),
+            ("schema_version", serde_json::json!(1)),
             ("product_version", serde_json::json!("0.4.0")),
             ("architecture", serde_json::json!("arm64")),
             ("engine_sha256", serde_json::json!("AB".repeat(32))),
+            ("build_number", serde_json::json!(0)),
+            ("build_number", serde_json::json!("1")),
+            ("msi_product_code", serde_json::json!("not-a-guid")),
+            (
+                "msi_package_code",
+                serde_json::json!("{00000000-0000-0000-0000-000000000000}"),
+            ),
+            ("msi_package_code", original["msi_product_code"].clone()),
+            ("msi_product_code", serde_json::json!(MSI_UPGRADE_CODE)),
+            ("msi_package_code", serde_json::json!(MSI_UPGRADE_CODE)),
+            (
+                "msi_package_code",
+                serde_json::json!("{e58d1fc6-a003-4849-900c-45d6861e75d9}"),
+            ),
         ] {
             let mut altered = original.clone();
             altered[key] = value;
@@ -83,9 +114,14 @@ mod tests {
         }
         let mut duplicate = serde_json::to_string(&original).unwrap();
         duplicate.pop();
-        duplicate.push_str(",\"schema_version\":1}");
+        duplicate.push_str(",\"schema_version\":2}");
         assert!(Manifest::decode(duplicate.as_bytes()).is_err());
         assert!(Manifest::decode(&vec![b' '; MAX_MANIFEST + 1]).is_err());
         assert!(Manifest::decode(b"{}").is_err());
+        for required in ["build_number", "msi_product_code", "msi_package_code"] {
+            let mut incomplete = original.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            assert!(Manifest::decode(&serde_json::to_vec(&incomplete).unwrap()).is_err());
+        }
     }
 }

@@ -15,7 +15,7 @@ pub use agent::run_agent;
 #[cfg(windows)]
 pub use desktop::InstalledDesktop;
 #[cfg(windows)]
-pub use installation::{InstalledRuntime, UserPaths};
+pub use installation::{InstalledRelease, InstalledRuntime, UserPaths};
 #[cfg(windows)]
 pub use service::run_service;
 
@@ -24,7 +24,13 @@ pub const PACKAGE_DIRECTORY: &str = "Clash for Windows";
 pub const RUNTIME_FILE: &str = "cfw-windows-runtime.exe";
 pub const DESKTOP_FILE: &str = "Clash for Windows.exe";
 pub const ENGINE_FILE: &str = "cfw-engine-host.exe";
-pub const MANIFEST_FILE: &str = "runtime-installation-v1.json";
+pub const MANIFEST_FILE: &str = "runtime-installation-v2.json";
+pub const MSI_UPGRADE_CODE: &str = "{7ECD99B2-CFE4-51EA-868B-544E2A12E25D}";
+
+#[cfg(windows)]
+pub fn run_update_inspector() -> std::result::Result<i32, crate::update_package::PackageError> {
+    crate::update_package::run_stdio()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {

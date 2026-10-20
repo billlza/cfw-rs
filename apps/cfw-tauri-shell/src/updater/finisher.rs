@@ -313,9 +313,16 @@ pub(crate) fn run(transaction: &str) -> i32 {
         eprintln!("update installer requires one canonical transaction identifier");
         return USAGE;
     };
-    if !runs_from_installed_location() {
-        eprintln!("update installer must run from the installed application");
-        return ADMISSION;
+    match runs_from_installed_location() {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("update installer must run from the installed application");
+            return ADMISSION;
+        }
+        Err(error) => {
+            eprintln!("update installer location could not be observed: {error}");
+            return ADMISSION;
+        }
     }
     let app_home = match crate::settings_store() {
         Ok(store) => store.paths().app_home.clone(),

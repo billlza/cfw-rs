@@ -81,11 +81,29 @@ WiX 编译、ICE 验证和 Windows 验签的完整测试包派生，使用三把
 现于字符串边界转换后通过。原生测试断言及产品验签要求未放宽。
 
 这些 MSI 是测试包，从未安装，不包含完整 CFW 产品，也不使用生产发布者证书。
-MSI 编排、内嵌载荷完整性、服务停止/安装/回滚、受限更新工作进程和桌面调用链
-仍待实现，不能由包校验接口通过推出整包构建或更新已经完成。
+MSI 编排、内嵌载荷完整性、服务停止/安装/回滚和完整桌面调用链仍待实现，
+不能由包校验接口通过推出整包构建或更新已经完成。
 同一源码的独立桌面作业通过 48 项存储、4 项启动、1 项产品、7 项进程检查及
 非管理员观察；整包仍有 53 个编译错误、零 warning。桌面产物 `12276792626`
 已核验，尚无 GUI EXE。
+
+后续更新校验进程已实现，原生验证尚未完成：固定安装目录中的现有 runtime 增加
+`--inspect-update` 只读入口，使用原有挂起创建、显式 stdio 句柄继承和创建时 Job
+归属；请求/响应分别限于 16 KiB/4 KiB，路径不进入命令行。父进程持有候选包、
+安装清单及发布者映像，核对实际子进程身份、请求标识、进程退出与输出；取消或
+超时终止其独立 Job，结果须等进程、后代和管道线程实际退出。该入口不启动服务，
+不提升权限，也不安装。校验能力只由受保护的 `InstalledRuntime` 构造；任意路径
+加调用方自报哈希不能构造发布者或安装授权。
+
+安装清单更新为 `runtime-installation-v2.json`，包含正构建号及不同的 ProductCode/
+PackageCode，并拒绝缺字段、旧 schema、非规范 GUID 和升级标识复用。Windows
+桌面更新准入开始从这个原生边界读取版本，不再使用 UID 或 `/Applications`。
+现有服务 fixture 同步检查这些反例；没有历史 Windows 发布，故不增加 v1 回退。
+托管包校验作业新增真实安装路径的工作进程、Unicode MSI、验签失败分类、文件
+保留、超时、取消、异常输出和后代清理测试，临时安装目录必须清理。该目录包含
+测试 Desktop/Engine，只验证工作进程边界，不是产品 MSI 安装验收。本地 Windows
+库及 runtime 交叉 Clippy、Mac 全目标 Clippy、119 项更新器回归和清单测试通过；
+原生测试须以新源码的 Windows CI 回执为准。
 
 安装编排的下一步须处理两个已定位的边界：MSI 的 `ServiceControl.Wait` 最多等
 30 秒，不能替代 `runtime_host/service.rs` 的成功退出与全局 Off 观察；当前服务
@@ -1759,7 +1777,7 @@ ServiceMain 注册正式 `CFWAuthority` 服务；`--user-agent CFWAuthority` 在
 覆盖参数。`--check-installation` 只读验证安装身份，不启动服务或网络。
 
 安装根由 Windows Known Folder API 定位为 Program Files 下的 `Clash for Windows`。
-固定文件为 `runtime-installation-v1.json`、`cfw-windows-runtime.exe`、
+固定文件为 `runtime-installation-v2.json`、`cfw-windows-runtime.exe`、
 `Clash for Windows.exe` 和 `cfw-engine-host.exe`。安装清单闭合字段、限制 4 KiB，
 绑定产品版本、x64、引擎版本和三个 SHA-256；路径及服务名不来自清单。先核对
 打开的安装目录/清单所有者及 DACL，仅允许 SYSTEM/Administrators 写入，再读取

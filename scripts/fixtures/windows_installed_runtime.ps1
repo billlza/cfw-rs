@@ -18,7 +18,7 @@ if (@([System.ServiceProcess.ServiceController]::GetServices() | Where-Object Se
 $runtimePath = Join-Path $package 'cfw-windows-runtime.exe'
 $desktopPath = Join-Path $package 'Clash for Windows.exe'
 $enginePath = Join-Path $package 'cfw-engine-host.exe'
-$manifestPath = Join-Path $package 'runtime-installation-v1.json'
+$manifestPath = Join-Path $package 'runtime-installation-v2.json'
 $created = $false
 $failure = $null
 $teardownFailure = $null
@@ -60,7 +60,10 @@ try {
     Copy-Item -LiteralPath $Engine -Destination $enginePath
     foreach ($path in @($runtimePath, $desktopPath, $enginePath)) { Protect-Package $path $false }
     $manifest = [ordered]@{
-        schema_version = 1; product_version = '0.5.0'; architecture = 'x86_64'; engine_version = $EngineVersion
+        schema_version = 2; product_version = '0.5.0'; build_number = 1
+        msi_product_code = '{E66ACF84-7639-4707-BC01-0A370C9B2E3E}'
+        msi_package_code = '{E58D1FC6-A003-4849-900C-45D6861E75D9}'
+        architecture = 'x86_64'; engine_version = $EngineVersion
         runtime_sha256 = (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash.ToLowerInvariant()
         desktop_sha256 = (Get-FileHash -LiteralPath $desktopPath -Algorithm SHA256).Hash.ToLowerInvariant()
         engine_sha256 = (Get-FileHash -LiteralPath $enginePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -70,7 +73,28 @@ try {
     $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
     $check = & $runtimePath --check-installation
     if ($LASTEXITCODE -ne 0 -or -not ($check | ConvertFrom-Json).installation_verified) { throw 'Protected package was not admitted' }
+    $release = ($check | ConvertFrom-Json).release
+    if ($release.version -cne '0.5.0' -or $release.build -ne 1 -or
+        $release.product_code -cne $manifest.msi_product_code -or $release.package_code -cne $manifest.msi_package_code) {
+        throw 'Installed release observation does not match the protected manifest'
+    }
     $cases.Add('protected_fixed_location_package_admitted')
+    $cases.Add('protected_release_build_and_msi_identities_observed')
+
+    foreach ($case in @(
+        @('old_manifest_schema_rejected', 'schema_version', 1),
+        @('missing_installed_build_rejected', 'build_number', $null),
+        @('zero_installed_build_rejected', 'build_number', 0),
+        @('invalid_installed_product_code_rejected', 'msi_product_code', 'invalid'),
+        @('reused_installed_package_code_rejected', 'msi_package_code', $manifest.msi_product_code)
+    )) {
+        $altered = [ordered]@{}
+        foreach ($key in $manifest.Keys) { $altered[$key] = $manifest[$key] }
+        if ($null -eq $case[2]) { $altered.Remove($case[1]) } else { $altered[$case[1]] = $case[2] }
+        $altered | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
+        Require-Rejected $case[0]
+        [IO.File]::WriteAllBytes($manifestPath, $manifestBytes)
+    }
 
     $altered = [ordered]@{}
     foreach ($key in $manifest.Keys) { $altered[$key] = $manifest[$key] }

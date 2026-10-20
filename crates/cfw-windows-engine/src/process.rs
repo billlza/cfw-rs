@@ -44,6 +44,7 @@ use windows_sys::Win32::{
 
 mod child;
 use child::NativeChild;
+pub(crate) mod one_shot;
 
 /// A byte identity supplied by a trusted installation descriptor. An adjacent
 /// receipt is not a trust root. Publisher-signature admission belongs to the
@@ -816,6 +817,20 @@ fn spawn_assets(
     runtime_directory: &Path,
     keeper: Option<&crate::authority::RuntimeKeeper>,
 ) -> Result<SpawnAssets, Error> {
+    spawn_assets_for(
+        executable,
+        runtime_directory,
+        keeper,
+        child::Program::Engine,
+    )
+}
+
+fn spawn_assets_for(
+    executable: VerifiedExecutable,
+    runtime_directory: &Path,
+    keeper: Option<&crate::authority::RuntimeKeeper>,
+    program: child::Program,
+) -> Result<SpawnAssets, Error> {
     let parent = runtime_directory
         .parent()
         .ok_or(Error::ExecutableIdentity)?;
@@ -843,7 +858,13 @@ fn spawn_assets(
     {
         return Err(std::io::Error::last_os_error().into());
     }
-    let child = NativeChild::spawn(&executable, runtime_directory, job.as_handle(), keeper)?;
+    let child = NativeChild::spawn(
+        &executable,
+        runtime_directory,
+        job.as_handle(),
+        keeper,
+        program,
+    )?;
     Ok(SpawnAssets {
         child,
         job,

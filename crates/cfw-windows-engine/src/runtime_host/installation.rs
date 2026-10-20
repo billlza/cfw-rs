@@ -24,6 +24,16 @@ use windows_sys::{
 };
 mod security;
 
+/// Version claims from the fixed, ACL-protected installation manifest.
+/// These are not a publisher-signature or successful MSI transaction receipt.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct InstalledRelease {
+    pub version: String,
+    pub build: u64,
+    pub product_code: String,
+    pub package_code: String,
+}
+
 pub struct InstalledRuntime {
     _package: Vec<File>,
     _manifest: Vec<File>,
@@ -31,6 +41,26 @@ pub struct InstalledRuntime {
     manifest: Manifest,
 }
 impl InstalledRuntime {
+    pub fn package_inspector(self) -> Result<crate::update_package::InstalledPackageInspector> {
+        let publisher_sha256 = Manifest::digest(&self.manifest.desktop_sha256)?;
+        crate::update_package::InstalledPackageInspector::from_installation(self, publisher_sha256)
+    }
+
+    pub fn desktop_path() -> Result<PathBuf> {
+        Ok(known_folder(&FOLDERID_ProgramFiles)?
+            .join(PACKAGE_DIRECTORY)
+            .join(DESKTOP_FILE))
+    }
+
+    pub fn release(&self) -> InstalledRelease {
+        InstalledRelease {
+            version: self.manifest.product_version.clone(),
+            build: self.manifest.build_number,
+            product_code: self.manifest.msi_product_code.clone(),
+            package_code: self.manifest.msi_package_code.clone(),
+        }
+    }
+
     /// Fixed native known-folder location, not an environment variable, cwd,
     /// incoming request or adjacent unsigned hash receipt. Installer-managed
     /// ownership/DACL is required before any manifest field is consumed.

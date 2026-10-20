@@ -51,6 +51,11 @@ pub(super) struct NativeChild {
     pub(super) stdin: Option<File>,
     pub(super) stdout: Option<File>,
 }
+#[derive(Clone, Copy)]
+pub(super) enum Program {
+    Engine,
+    PackageInspection,
+}
 impl AsRawHandle for NativeChild {
     fn as_raw_handle(&self) -> RawHandle {
         self.process.as_raw_handle()
@@ -62,6 +67,7 @@ impl NativeChild {
         directory: &Path,
         job: BorrowedHandle<'_>,
         keeper: Option<&crate::authority::RuntimeKeeper>,
+        program: Program,
     ) -> Result<Self, Error> {
         let parent = NativePeerProcess::open(std::process::id()).map_err(peer_error)?;
         let (input_read, input_write) = pipe()?;
@@ -89,7 +95,13 @@ impl NativeChild {
         let mut command = Vec::with_capacity(application.len() + 2);
         command.push(u16::from(b'"'));
         command.extend_from_slice(&application[..application.len() - 1]);
-        command.extend([u16::from(b'"'), 0]);
+        command.push(u16::from(b'"'));
+        if matches!(program, Program::PackageInspection) {
+            // This selector is fixed by native code; paths and policy never
+            // enter the command line and travel only over the selected pipe.
+            command.extend(" --inspect-update".encode_utf16());
+        }
+        command.push(0);
         if command.len() > 32767 {
             return Err(Error::ExecutableIdentity);
         }

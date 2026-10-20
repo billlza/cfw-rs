@@ -17,9 +17,12 @@ use sha2::{Digest, Sha256};
 
 mod msi;
 mod signature;
+mod worker;
+pub(crate) use worker::run_stdio;
+pub use worker::{InstalledPackageInspector, WorkerFailureCategory};
 
 pub const PRODUCT_IDENTIFIER: &str = "com.bill.clashforwindows";
-pub const UPGRADE_CODE: &str = "{7ECD99B2-CFE4-51EA-868B-544E2A12E25D}";
+pub use crate::runtime_host::MSI_UPGRADE_CODE as UPGRADE_CODE;
 pub const MAX_PACKAGE_BYTES: u64 = 192 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +35,8 @@ pub enum PackageError {
     Invalid(&'static str),
     #[error("Windows package publisher differs from the observed publisher")]
     PublisherMismatch,
+    #[error("the installed publisher image could not be authenticated: {0}")]
+    PublisherUnavailable(Box<Self>),
     #[error("Windows package does not satisfy {0}")]
     Requirement(&'static str),
     #[error("Windows package file: {0}")]
@@ -40,6 +45,13 @@ pub enum PackageError {
     Observer(#[from] cfw_windows_storage::Error),
     #[error("Windows package I/O: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Windows package verification worker rejected the candidate ({category:?}): {detail}")]
+    WorkerRejected {
+        category: WorkerFailureCategory,
+        detail: String,
+    },
+    #[error("Windows package verification worker protocol is invalid")]
+    WorkerProtocol,
     #[error("{operation}; cleanup: {cleanup}")]
     Cleanup {
         operation: Box<Self>,
@@ -84,13 +96,14 @@ impl PackageExpectation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MsiIdentity {
     pub version: String,
     pub build: u64,
     pub product_code: String,
     pub package_code: String,
-    pub architecture: &'static str,
+    pub architecture: String,
     pub minimum_windows_version: String,
 }
 

@@ -92,7 +92,7 @@ fn identity(database: &Handle, expectation: &PackageExpectation) -> Result<MsiId
             build,
             product_code,
             package_code,
-            architecture: "x64",
+            architecture: "x64".into(),
             minimum_windows_version,
         })
     })();

@@ -599,7 +599,7 @@ pub(crate) async fn resolve_update_install(
 }
 
 async fn resolve_update_install_inner(app: &AppHandle) -> Result<serde_json::Value> {
-    if runs_from_installed_location() {
+    if runs_from_installed_location()? {
         ensure_previous_attempt_reviewed(app).await?;
     }
     let security = app.state::<UpdaterSecurityState>();
@@ -744,7 +744,7 @@ mod tests {
             install_support(false),
             serde_json::json!({ "supported": false, "code": "not_in_applications" })
         );
-        assert!(!runs_from_installed_location());
+        assert!(!runs_from_installed_location().expect("current executable observed"));
     }
 
     #[test]

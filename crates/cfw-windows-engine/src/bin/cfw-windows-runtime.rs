@@ -18,13 +18,25 @@ fn run() -> Result<(), String> {
     if args.is_empty() {
         return runtime_host::run_service().map_err(|e| e.to_string());
     }
+    if args == [std::ffi::OsStr::new("--inspect-update")] {
+        let code = runtime_host::run_update_inspector().map_err(|e| e.to_string())?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     let installation = InstalledRuntime::open().map_err(|e| e.to_string())?;
     installation
         .require_runtime_process()
         .map_err(|e| e.to_string())?;
     if args == [std::ffi::OsStr::new("--check-installation")] {
         println!(
-            "{{\"product\":\"CFW\",\"version\":\"0.5.0\",\"architecture\":\"x86_64\",\"installation_verified\":true}}"
+            "{}",
+            serde_json::json!({
+                "product": "CFW", "version": env!("CARGO_PKG_VERSION"),
+                "architecture": "x86_64", "installation_verified": true,
+                "release": installation.release(),
+            })
         );
         return Ok(());
     }
@@ -37,7 +49,7 @@ fn run() -> Result<(), String> {
         return runtime_host::run_agent(installation).map_err(|e| e.to_string());
     }
     Err(
-        "expected no arguments for SCM, --check-installation or installed --user-agent invocation"
+        "expected no arguments for SCM, --check-installation, --inspect-update or installed --user-agent invocation"
             .into(),
     )
 }
